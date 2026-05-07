@@ -356,9 +356,53 @@ mod native_tree_checkboxes {
     const TV_FIRST: u32 = 0x1100;
     const TVM_SETITEMW: u32 = TV_FIRST + 63;
     const TVM_GETITEMW: u32 = TV_FIRST + 62;
+    const TVM_SETIMAGELIST: u32 = TV_FIRST + 9;
+    const TVM_HITTEST: u32 = TV_FIRST + 17;
+    const TVSIL_STATE: usize = 2;
     const TVIF_HANDLE: u32 = 0x0010;
     const TVIF_STATE: u32 = 0x0008;
     const TVIS_STATEIMAGEMASK: u32 = 0xF000;
+    pub const TVHT_ONITEMSTATEICON: u32 = 0x0040;
+
+    /// Themed checkbox state ids. See `BP_CHECKBOX` (= 3) of `BUTTON`
+    /// theme class in `<vsstyle.h>`. We use the "normal" variants because
+    /// the tree control overlays its own selection/hover effects on top.
+    const BP_CHECKBOX: i32 = 3;
+    const CBS_UNCHECKEDNORMAL: i32 = 1;
+    const CBS_CHECKEDNORMAL: i32 = 5;
+    const CBS_MIXEDNORMAL: i32 = 9;
+    const TS_TRUE: i32 = 1;
+
+    /// `DrawFrameControl` flags used as the unthemed fallback when
+    /// `OpenThemeData("BUTTON")` returns null (classic theme / no themes).
+    const DFC_BUTTON: u32 = 4;
+    const DFCS_BUTTONCHECK: u32 = 0x0000;
+    const DFCS_CHECKED: u32 = 0x0400;
+    const DFCS_BUTTON3STATE: u32 = 0x0008;
+
+    /// `ImageList_Create` flags: 32-bit color + mask channel.
+    const ILC_COLOR32: u32 = 0x0020;
+    const ILC_MASK: u32 = 0x0001;
+
+    /// State-image indices we use. `TVS_CHECKBOXES` indices are 1-based
+    /// (index 0 means "no state image"). `Mixed` is what the parent
+    /// "Packages" group shows when only some children are checked.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum TriState {
+        Unchecked,
+        Checked,
+        Mixed,
+    }
+
+    impl TriState {
+        fn state_image_index(self) -> u32 {
+            match self {
+                TriState::Unchecked => 1,
+                TriState::Checked => 2,
+                TriState::Mixed => 3,
+            }
+        }
+    }
 
     /// Layout-compatible mirror of `TVITEMW` from `<commctrl.h>`.
     #[repr(C)]
@@ -375,16 +419,79 @@ mod native_tree_checkboxes {
         l_param: isize,
     }
 
+    #[repr(C)]
+    struct RectStruct {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    #[repr(C)]
+    struct SizeStruct {
+        cx: i32,
+        cy: i32,
+    }
+
     unsafe extern "system" {
         fn GetWindowLongPtrW(h_wnd: *mut c_void, n_index: i32) -> isize;
         fn SetWindowLongPtrW(h_wnd: *mut c_void, n_index: i32, dw_new_long: isize) -> isize;
         fn SendMessageW(h_wnd: *mut c_void, msg: u32, w_param: usize, l_param: isize) -> isize;
+        fn GetDC(h_wnd: *mut c_void) -> *mut c_void;
+        fn ReleaseDC(h_wnd: *mut c_void, hdc: *mut c_void) -> i32;
+        fn DrawFrameControl(hdc: *mut c_void, lprc: *const RectStruct, type_: u32, state: u32) -> i32;
+        fn FillRect(hdc: *mut c_void, lprc: *const RectStruct, hbr: *mut c_void) -> i32;
     }
 
-    /// OR-in the `TVS_CHECKBOXES` style on an existing tree's `HWND`. The
-    /// native `SysTreeView32` lazily creates its state image list with the
-    /// standard checkbox glyphs the first time it has to draw an item with
-    /// the new style, so we don't have to provide one ourselves.
+    #[link(name = "gdi32")]
+    unsafe extern "system" {
+        fn CreateCompatibleDC(hdc: *mut c_void) -> *mut c_void;
+        fn DeleteDC(hdc: *mut c_void) -> i32;
+        fn CreateCompatibleBitmap(hdc: *mut c_void, cx: i32, cy: i32) -> *mut c_void;
+        fn DeleteObject(obj: *mut c_void) -> i32;
+        fn SelectObject(hdc: *mut c_void, obj: *mut c_void) -> *mut c_void;
+        fn CreateSolidBrush(color: u32) -> *mut c_void;
+    }
+
+    #[link(name = "uxtheme")]
+    unsafe extern "system" {
+        fn OpenThemeData(h_wnd: *mut c_void, classlist: *const u16) -> *mut c_void;
+        fn CloseThemeData(htheme: *mut c_void) -> i32;
+        fn DrawThemeBackground(
+            htheme: *mut c_void,
+            hdc: *mut c_void,
+            partid: i32,
+            stateid: i32,
+            prect: *const RectStruct,
+            pcliprect: *const RectStruct,
+        ) -> i32;
+        fn GetThemePartSize(
+            htheme: *mut c_void,
+            hdc: *mut c_void,
+            partid: i32,
+            stateid: i32,
+            prc: *const RectStruct,
+            esize: i32,
+            psz: *mut SizeStruct,
+        ) -> i32;
+    }
+
+    #[link(name = "comctl32")]
+    unsafe extern "system" {
+        fn ImageList_Create(cx: i32, cy: i32, flags: u32, initial: i32, grow: i32) -> *mut c_void;
+        fn ImageList_AddMasked(himl: *mut c_void, hbm_image: *mut c_void, cr_mask: u32) -> i32;
+        fn ImageList_Destroy(himl: *mut c_void) -> i32;
+    }
+
+    /// OR-in the `TVS_CHECKBOXES` style on an existing tree's `HWND` AND
+    /// install our own 3-image state list so the synthetic Packages group
+    /// can show an indeterminate ("half-checked") state when only some of
+    /// its children are checked. The native control by default creates a
+    /// 2-image list (unchecked, checked); we replace it with a 3-image
+    /// list (unchecked, checked, mixed). The first two come from the
+    /// `BUTTON` theme via `DrawThemeBackground` so they match the rest of
+    /// the OS's checkboxes; the third uses `CBS_MIXEDNORMAL` to draw the
+    /// system's standard mixed-state checkbox glyph.
     pub fn enable_checkboxes(hwnd: *mut c_void) {
         if hwnd.is_null() {
             return;
@@ -395,6 +502,148 @@ mod native_tree_checkboxes {
                 SetWindowLongPtrW(hwnd, GWL_STYLE, style | TVS_CHECKBOXES as isize);
             }
         }
+        install_tristate_state_image_list(hwnd);
+    }
+
+    /// Build a 3-image `HIMAGELIST` containing themed unchecked + checked +
+    /// mixed checkbox glyphs and install it as the tree's state image
+    /// list. Replaces (and frees) whatever list `TVS_CHECKBOXES` may have
+    /// auto-created.
+    fn install_tristate_state_image_list(hwnd: *mut c_void) {
+        // BGR magenta serves as the transparency key for the image list:
+        // anywhere we leave magenta is treated as transparent on draw.
+        const MAGENTA_BGR: u32 = 0x00FF00FF;
+
+        let class: Vec<u16> = "BUTTON"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let htheme = unsafe { OpenThemeData(hwnd, class.as_ptr()) };
+
+        // Determine checkbox glyph size from the theme (DPI-aware) when
+        // available; fall back to a sensible default otherwise.
+        let mut size = SizeStruct { cx: 13, cy: 13 };
+        if !htheme.is_null() {
+            unsafe {
+                let _ = GetThemePartSize(
+                    htheme,
+                    std::ptr::null_mut(),
+                    BP_CHECKBOX,
+                    CBS_UNCHECKEDNORMAL,
+                    std::ptr::null(),
+                    TS_TRUE,
+                    &mut size,
+                );
+            }
+        }
+        let cx = size.cx.max(13);
+        let cy = size.cy.max(13);
+
+        let himl = unsafe { ImageList_Create(cx, cy, ILC_COLOR32 | ILC_MASK, 3, 0) };
+        if himl.is_null() {
+            if !htheme.is_null() {
+                unsafe {
+                    CloseThemeData(htheme);
+                }
+            }
+            return;
+        }
+
+        let states = [CBS_UNCHECKEDNORMAL, CBS_CHECKEDNORMAL, CBS_MIXEDNORMAL];
+
+        unsafe {
+            let hdc_screen = GetDC(std::ptr::null_mut());
+            let hdc_mem = CreateCompatibleDC(hdc_screen);
+            let key_brush = CreateSolidBrush(MAGENTA_BGR);
+
+            for state in &states {
+                let hbm = CreateCompatibleBitmap(hdc_screen, cx, cy);
+                let prev_bm = SelectObject(hdc_mem, hbm);
+
+                // Fill with magenta — anything DrawThemeBackground (or the
+                // unthemed fallback) leaves untouched stays magenta and
+                // becomes transparent in the image list.
+                let rc = RectStruct {
+                    left: 0,
+                    top: 0,
+                    right: cx,
+                    bottom: cy,
+                };
+                let _ = FillRect(hdc_mem, &rc, key_brush);
+
+                if !htheme.is_null() {
+                    let _ = DrawThemeBackground(
+                        htheme,
+                        hdc_mem,
+                        BP_CHECKBOX,
+                        *state,
+                        &rc,
+                        std::ptr::null(),
+                    );
+                } else {
+                    let dfcs = match *state {
+                        CBS_UNCHECKEDNORMAL => DFCS_BUTTONCHECK,
+                        CBS_CHECKEDNORMAL => DFCS_BUTTONCHECK | DFCS_CHECKED,
+                        CBS_MIXEDNORMAL => DFCS_BUTTON3STATE | DFCS_CHECKED,
+                        _ => DFCS_BUTTONCHECK,
+                    };
+                    let _ = DrawFrameControl(hdc_mem, &rc, DFC_BUTTON, dfcs);
+                }
+
+                SelectObject(hdc_mem, prev_bm);
+                let _ = ImageList_AddMasked(himl, hbm, MAGENTA_BGR);
+                DeleteObject(hbm);
+            }
+
+            DeleteObject(key_brush);
+            DeleteDC(hdc_mem);
+            ReleaseDC(std::ptr::null_mut(), hdc_screen);
+
+            if !htheme.is_null() {
+                CloseThemeData(htheme);
+            }
+
+            // Hand the new image list to the tree control. The control
+            // takes ownership of the new list and returns the old one for
+            // us to destroy.
+            let old_himl = SendMessageW(hwnd, TVM_SETIMAGELIST, TVSIL_STATE, himl as isize);
+            if old_himl != 0 {
+                ImageList_Destroy(old_himl as *mut c_void);
+            }
+        }
+    }
+
+    #[repr(C)]
+    struct TvHitTestPoint {
+        x: i32,
+        y: i32,
+    }
+
+    /// Layout-compatible mirror of `TVHITTESTINFO` from `<commctrl.h>`.
+    #[repr(C)]
+    struct TvHitTestInfo {
+        pt: TvHitTestPoint,
+        flags: u32,
+        h_item: *mut c_void,
+    }
+
+    /// Send `TVM_HITTEST` to the native tree control and return the hit
+    /// item handle plus the result flags. `(x, y)` is in the tree's
+    /// client-area coordinates (which is what `wxEVT_LEFT_*` mouse-event
+    /// positions report on the bound window).
+    pub fn hit_test(hwnd: *mut c_void, x: i32, y: i32) -> (u32, *mut c_void) {
+        if hwnd.is_null() {
+            return (0, std::ptr::null_mut());
+        }
+        let mut info = TvHitTestInfo {
+            pt: TvHitTestPoint { x, y },
+            flags: 0,
+            h_item: std::ptr::null_mut(),
+        };
+        unsafe {
+            SendMessageW(hwnd, TVM_HITTEST, 0, &mut info as *mut _ as isize);
+        }
+        (info.flags, info.h_item)
     }
 
     /// Read the native `HTREEITEM` out of a wxdragon `TreeItemId`. Relies
@@ -417,6 +666,18 @@ mod native_tree_checkboxes {
     }
 
     pub fn set_check_state(hwnd: *mut c_void, item: &TreeItemId, checked: bool) {
+        let state = if checked {
+            TriState::Checked
+        } else {
+            TriState::Unchecked
+        };
+        set_check_state_tri(hwnd, item, state);
+    }
+
+    /// Set the state image index (1, 2, or 3 — see `TriState`) for the
+    /// given tree item. Used both for leaf rows (only `Checked` /
+    /// `Unchecked`) and the synthetic Packages group (any of the three).
+    pub fn set_check_state_tri(hwnd: *mut c_void, item: &TreeItemId, state: TriState) {
         if hwnd.is_null() {
             return;
         }
@@ -424,12 +685,11 @@ mod native_tree_checkboxes {
         if h_item.is_null() {
             return;
         }
-        // INDEXTOSTATEIMAGEMASK(2) = 0x2000 (checked), (1) = 0x1000 (unchecked).
-        let state = if checked { 0x2000 } else { 0x1000 };
+        let state_value = state.state_image_index() << 12;
         let mut tvi = Tvitemw {
             mask: TVIF_STATE | TVIF_HANDLE,
             h_item,
-            state,
+            state: state_value,
             state_mask: TVIS_STATEIMAGEMASK,
             text: std::ptr::null_mut(),
             text_max: 0,
@@ -1828,11 +2088,17 @@ fn populate_packages_tree(
     for row in package_rows.iter() {
         let label = format_row_label(&row.summary, row.selected);
         if let Some(item) = tree.append_item(&group, &label, None, None) {
-            #[cfg(target_os = "windows")]
             native_tree_checkboxes::set_check_state(tree.get_handle(), &item, row.selected);
             leaves.push(item);
         }
     }
+
+    // The Packages parent's tristate reflects the aggregate of its
+    // available children: all checked → Checked, none checked →
+    // Unchecked, partially checked → Mixed (the half-check glyph from
+    // the 3-image state list installed by enable_checkboxes).
+    let group_state = compute_packages_group_tristate(package_rows);
+    native_tree_checkboxes::set_check_state_tri(tree.get_handle(), &group, group_state);
 
     {
         let mut items = package_items.borrow_mut();
@@ -1850,6 +2116,40 @@ fn populate_packages_tree(
 #[cfg(target_os = "windows")]
 fn format_row_label(summary: &str, _selected: bool) -> String {
     summary.to_string()
+}
+
+/// Windows-only: aggregate the per-row `selected` flags into a tristate
+/// for the synthetic "Packages" group node. Unavailable rows don't count
+/// for either side because they can't enter the install plan and toggling
+/// them is a no-op — we only look at the rows the user can actually flip.
+#[cfg(target_os = "windows")]
+fn compute_packages_group_tristate(
+    rows: &[crate::PackageRow],
+) -> native_tree_checkboxes::TriState {
+    let mut any = false;
+    let mut all = true;
+    let mut any_checked = false;
+    for row in rows.iter().filter(|r| r.available_for_target) {
+        any = true;
+        if row.selected {
+            any_checked = true;
+        } else {
+            all = false;
+        }
+    }
+    if !any {
+        // No selectable rows at all (everything's unavailable for this
+        // target). Render the group as unchecked rather than mixed —
+        // there's nothing to toggle.
+        return native_tree_checkboxes::TriState::Unchecked;
+    }
+    if all {
+        native_tree_checkboxes::TriState::Checked
+    } else if any_checked {
+        native_tree_checkboxes::TriState::Mixed
+    } else {
+        native_tree_checkboxes::TriState::Unchecked
+    }
 }
 
 /// Spawn the deferred latest-version fetch on a background thread. Each
@@ -2045,9 +2345,9 @@ fn build_packages_page(
         });
     }
 
-    // Native checkbox toggle handling: SysTreeView32 fires
+    // Native checkbox toggle handling for LEAVES: SysTreeView32 fires
     // `wxEVT_TREE_STATE_IMAGE_CLICK` whenever the user activates the
-    // checkbox area of a tree item — both mouse click and Space go through
+    // checkbox area of a leaf item — both mouse click and Space go through
     // the same notification. The typed `TreeEvents` trait doesn't expose
     // this variant, so we bind the raw `EventType::TREE_STATE_IMAGE_CLICK`
     // ourselves.
@@ -2071,6 +2371,247 @@ fn build_packages_page(
                 &osara_checkbox,
                 &osara_note,
                 TreeEventData::new(event).get_item(),
+            );
+        });
+    }
+
+    // Parent-group toggle fallback: wxEVT_TREE_STATE_IMAGE_CLICK doesn't
+    // fire reliably for the parent group (the native control's auto-cycle
+    // on state image 3 doesn't propagate to wx in our setup), so we hit-
+    // test on every left-button release and propagate manually if the
+    // click landed on the group's state icon. Leaves are still handled
+    // by the TREE_STATE_IMAGE_CLICK binding above; this handler ignores
+    // them (see the early-return on `is_group` inside).
+    {
+        let tree_widget = tree;
+        let package_rows = Rc::clone(&package_rows);
+        let package_items = Rc::clone(&package_items);
+        let can_install = Rc::clone(&can_install);
+        let wizard_model = model.clone();
+        let details = details;
+        let osara_checkbox = osara_keymap_replace;
+        let osara_note = osara_keymap_note;
+        tree.on_mouse_left_up(move |event| {
+            if let WindowEventData::MouseButton(mb) = &event {
+                if let Some(pos) = mb.get_position() {
+                    handle_packages_left_up(
+                        &tree_widget,
+                        &package_items,
+                        &package_rows,
+                        &can_install,
+                        &wizard_model,
+                        &details,
+                        &osara_checkbox,
+                        &osara_note,
+                        pos,
+                    );
+                }
+            }
+            event.skip(true);
+        });
+    }
+
+    // Keyboard parent-toggle: Space on the parent group needs to
+    // propagate just like a mouse click on its checkbox. Native
+    // TVS_CHECKBOXES auto-cycles state on Space too, but its NM_CLICK
+    // → wxEVT_TREE_STATE_IMAGE_CLICK dispatch has the same parent-skip
+    // problem we hit with the mouse, so we intercept Space at key-down
+    // time, propagate, and consume the event so the native cycle
+    // doesn't get a chance to leave the parent in some weird half-state.
+    {
+        let tree_widget = tree;
+        let package_rows = Rc::clone(&package_rows);
+        let package_items = Rc::clone(&package_items);
+        let can_install = Rc::clone(&can_install);
+        let wizard_model = model.clone();
+        let details = details;
+        let osara_checkbox = osara_keymap_replace;
+        let osara_note = osara_keymap_note;
+        tree.on_key_down(move |event| {
+            let key_code = if let WindowEventData::Keyboard(kbd) = &event {
+                kbd.get_key_code()
+            } else {
+                None
+            };
+            if key_code != Some(WXK_SPACE) {
+                return;
+            }
+            let Some(focused) = tree_widget.get_selection() else {
+                return;
+            };
+            let focused_handle = native_tree_handle(&focused);
+            let is_group = package_items
+                .borrow()
+                .group
+                .as_ref()
+                .is_some_and(|group| native_tree_handle(group) == focused_handle);
+            if !is_group {
+                return;
+            }
+            propagate_group_toggle_to_leaves(
+                &tree_widget,
+                &package_items,
+                &package_rows,
+                &wizard_model,
+            );
+            refresh_after_packages_toggle(
+                &tree_widget,
+                &package_items,
+                &package_rows,
+                &can_install,
+                &wizard_model,
+                &details,
+                &osara_checkbox,
+                &osara_note,
+            );
+            // Consume the event so the native control doesn't *also*
+            // toggle the parent's state image after us.
+            event.skip(false);
+        });
+    }
+
+    // Keyboard leaf-toggle: wxEVT_TREE_STATE_IMAGE_CLICK fires only off
+    // NM_CLICK (mouse), not for keyboard Space — the native control's
+    // TVS_CHECKBOXES auto-cycle on Space flips the visual but doesn't
+    // route through any wx event we can hook. Without this handler, a
+    // Space toggle on a leaf updates the visual but never updates
+    // `package_rows`, leaving the row out of sync with the checkbox
+    // and (as a knock-on) the parent's tristate stuck on whatever it
+    // was before. We bind KEY_UP because by then the native auto-cycle
+    // has already run, so reading `get_check_state` gives us the new
+    // post-cycle state.
+    {
+        let tree_widget = tree;
+        let package_rows = Rc::clone(&package_rows);
+        let package_items = Rc::clone(&package_items);
+        let can_install = Rc::clone(&can_install);
+        let wizard_model = model.clone();
+        let details = details;
+        let osara_checkbox = osara_keymap_replace;
+        let osara_note = osara_keymap_note;
+        tree.on_key_up(move |event| {
+            let key_code = if let WindowEventData::Keyboard(kbd) = &event {
+                kbd.get_key_code()
+            } else {
+                None
+            };
+            if key_code != Some(WXK_SPACE) {
+                return;
+            }
+            let Some(focused) = tree_widget.get_selection() else {
+                return;
+            };
+            let focused_handle = native_tree_handle(&focused);
+            let is_group = package_items
+                .borrow()
+                .group
+                .as_ref()
+                .is_some_and(|group| native_tree_handle(group) == focused_handle);
+            if is_group {
+                // Parent Space already handled in on_key_down (which
+                // consumed the event before native processing).
+                return;
+            }
+            let items = package_items.borrow();
+            let Some(idx) = leaf_index_for(&items, &focused) else {
+                return;
+            };
+            drop(items);
+
+            let new_state = native_tree_checkboxes::get_check_state(
+                tree_widget.get_handle(),
+                &focused,
+            );
+
+            let unavailable = package_rows
+                .borrow()
+                .get(idx)
+                .is_some_and(|row| !row.available_for_target);
+            if unavailable {
+                native_tree_checkboxes::set_check_state(
+                    tree_widget.get_handle(),
+                    &focused,
+                    false,
+                );
+                return;
+            }
+
+            if let Some(row) = package_rows.borrow_mut().get_mut(idx) {
+                let _ = apply_checkbox_state_to_package_row(
+                    &wizard_model,
+                    row,
+                    new_state,
+                );
+            }
+
+            if let Some(row) = package_rows.borrow().get(idx) {
+                let label = format_row_label(&row.summary, row.selected);
+                tree_widget.set_item_text(&focused, &label);
+            }
+
+            refresh_after_packages_toggle(
+                &tree_widget,
+                &package_items,
+                &package_rows,
+                &can_install,
+                &wizard_model,
+                &details,
+                &osara_checkbox,
+                &osara_note,
+            );
+        });
+    }
+
+    // Enter / double-click handler — Enter on the parent group needs to
+    // propagate the toggle to all leaves (the native control fires
+    // wxEVT_TREE_ITEM_ACTIVATED for Enter, regardless of TVS_CHECKBOXES).
+    //
+    // We deliberately ignore the leaf case here: wxMSW also dispatches
+    // ITEM_ACTIVATED for Space on a focused leaf, and toggling the leaf
+    // here would race with the TREE_STATE_IMAGE_CLICK leaf path (the
+    // native auto-cycle has already flipped the state image, our
+    // STATE_IMAGE_CLICK handler reads + applies the new state, and a
+    // second flip from this handler would then leave the row out of
+    // sync with the visual). Space + click on leaves continue to work
+    // through the existing TREE_STATE_IMAGE_CLICK binding; Enter on a
+    // leaf is intentionally a no-op.
+    {
+        let tree_widget = tree;
+        let package_rows = Rc::clone(&package_rows);
+        let package_items = Rc::clone(&package_items);
+        let can_install = Rc::clone(&can_install);
+        let wizard_model = model.clone();
+        let details = details;
+        let osara_checkbox = osara_keymap_replace;
+        let osara_note = osara_keymap_note;
+        tree.on_item_activated(move |event| {
+            let Some(item) = event.get_item() else {
+                return;
+            };
+            let item_handle = native_tree_handle(&item);
+            let is_group = package_items
+                .borrow()
+                .group
+                .as_ref()
+                .is_some_and(|group| native_tree_handle(group) == item_handle);
+            if !is_group {
+                return;
+            }
+            propagate_group_toggle_to_leaves(
+                &tree_widget,
+                &package_items,
+                &package_rows,
+                &wizard_model,
+            );
+            refresh_after_packages_toggle(
+                &tree_widget,
+                &package_items,
+                &package_rows,
+                &can_install,
+                &wizard_model,
+                &details,
+                &osara_checkbox,
+                &osara_note,
             );
         });
     }
@@ -2127,13 +2668,19 @@ fn native_tree_handle(item: &TreeItemId) -> *mut std::ffi::c_void {
     unsafe { *(inner as *const *mut std::ffi::c_void) }
 }
 
-/// Windows-only: apply a user toggle on a leaf row. Rejects unavailable
-/// rows by reverting the native state image, mutates the row state via
-/// `apply_checkbox_state_to_package_row`, refreshes the row label,
-/// recomputes the plan's `can_install` flag, and syncs OSARA + details.
-/// `TVS_CHECKBOXES` has already flipped the state image by the time
-/// `wxEVT_TREE_STATE_IMAGE_CLICK` fires, so we read the post-toggle state
-/// from the native control rather than computing it ourselves.
+/// Windows-only: handle a `wxEVT_TREE_STATE_IMAGE_CLICK` for a leaf row.
+///
+/// Parent-group state-icon clicks are intentionally NOT handled here —
+/// they're routed through the dedicated `LEFT_UP` + hit-test fallback
+/// (`handle_packages_left_up`) because wxMSW's NM_CLICK →
+/// wxEVT_TREE_STATE_IMAGE_CLICK dispatch isn't reliable for parent items
+/// in our setup (the native auto-cycle sees state image index 3 and may
+/// not propagate the event). The mouse-up fallback is unconditional and
+/// always reaches our handler.
+///
+/// For leaves: `TVS_CHECKBOXES` has already flipped the state image by
+/// the time this event fires, so we read the post-click state from the
+/// native control rather than computing it ourselves.
 #[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)]
 fn handle_native_checkbox_toggle(
@@ -2150,6 +2697,21 @@ fn handle_native_checkbox_toggle(
     let Some(item) = item else {
         return;
     };
+
+    // If the click was on the parent group, defer to the LEFT_UP handler
+    // which catches it via TVM_HITTEST. Returning here keeps the native
+    // auto-cycle visible briefly; the LEFT_UP handler runs immediately
+    // afterwards and sets the parent state explicitly.
+    let candidate_handle = native_tree_handle(&item);
+    let is_group = package_items
+        .borrow()
+        .group
+        .as_ref()
+        .is_some_and(|group| native_tree_handle(group) == candidate_handle);
+    if is_group {
+        return;
+    }
+
     let items = package_items.borrow();
     let Some(idx) = leaf_index_for(&items, &item) else {
         return;
@@ -2180,24 +2742,162 @@ fn handle_native_checkbox_toggle(
         tree.set_item_text(&item, &label);
     }
 
-    // Plan-level can_install: a previously-Keep row that the user just
-    // ticked promotes to Install, so the Review/Install buttons need to
-    // reflect that.
+    refresh_after_packages_toggle(
+        tree,
+        package_items,
+        package_rows,
+        can_install,
+        wizard_model,
+        details,
+        osara_checkbox,
+        osara_note,
+    );
+}
+
+/// Windows-only: hit-test a `wxEVT_LEFT_UP` mouse-up against the tree.
+/// If the click landed on the parent group's state icon, propagate the
+/// toggle to all available leaves; the native control may have
+/// auto-cycled the parent's image to a state that disagrees with the
+/// row aggregate, but we always rewrite it via `compute_packages_group_tristate`
+/// + `set_check_state_tri` at the end so the visual matches the data.
+///
+/// We deliberately ignore leaf state-icon clicks here — they go through
+/// `wxEVT_TREE_STATE_IMAGE_CLICK` which is reliable for leaf items and
+/// has the post-cycle state already populated, so duplicating the work
+/// here would either double-toggle or fight the leaf path.
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+fn handle_packages_left_up(
+    tree: &TreeCtrl,
+    package_items: &PackagesStateCell,
+    package_rows: &Rc<RefCell<Vec<crate::PackageRow>>>,
+    can_install: &Rc<Cell<bool>>,
+    wizard_model: &WizardModel,
+    details: &TextCtrl,
+    osara_checkbox: &CheckBox,
+    osara_note: &TextCtrl,
+    pos: Point,
+) {
+    let hwnd = tree.get_handle();
+    let (flags, h_item) = native_tree_checkboxes::hit_test(hwnd, pos.x, pos.y);
+    if (flags & native_tree_checkboxes::TVHT_ONITEMSTATEICON) == 0 || h_item.is_null() {
+        return;
+    }
+    let is_group = package_items
+        .borrow()
+        .group
+        .as_ref()
+        .is_some_and(|group| native_tree_handle(group) == h_item);
+    if !is_group {
+        return;
+    }
+
+    propagate_group_toggle_to_leaves(tree, package_items, package_rows, wizard_model);
+    refresh_after_packages_toggle(
+        tree,
+        package_items,
+        package_rows,
+        can_install,
+        wizard_model,
+        details,
+        osara_checkbox,
+        osara_note,
+    );
+}
+
+/// Windows-only: refresh the parent's tristate visual + plan-level
+/// `can_install` flag + OSARA widgets + details pane after a leaf or
+/// group toggle has mutated `package_rows`. Shared by both
+/// `handle_native_checkbox_toggle` (leaf path) and
+/// `handle_packages_left_up` (parent path).
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+fn refresh_after_packages_toggle(
+    tree: &TreeCtrl,
+    package_items: &PackagesStateCell,
+    package_rows: &Rc<RefCell<Vec<crate::PackageRow>>>,
+    can_install: &Rc<Cell<bool>>,
+    wizard_model: &WizardModel,
+    details: &TextCtrl,
+    osara_checkbox: &CheckBox,
+    osara_note: &TextCtrl,
+) {
+    if let Some(group) = package_items.borrow().group.as_ref() {
+        let group_state = compute_packages_group_tristate(&package_rows.borrow());
+        native_tree_checkboxes::set_check_state_tri(tree.get_handle(), group, group_state);
+    }
+
     let any_install_or_update = package_rows.borrow().iter().any(|row| {
         row.available_for_target
             && matches!(row.action, PlanActionKind::Install | PlanActionKind::Update)
     });
     can_install.set(any_install_or_update);
 
-    if let Some(row) = package_rows.borrow().get(idx) {
-        details.set_value(&package_details(row));
+    if let Some(selected) = tree.get_selection() {
+        let items = package_items.borrow();
+        if let Some(idx) = leaf_index_for(&items, &selected) {
+            if let Some(row) = package_rows.borrow().get(idx) {
+                details.set_value(&package_details(row));
+            }
+        }
     }
+
     sync_osara_keymap_widgets(
         wizard_model,
         &package_rows.borrow(),
         osara_checkbox,
         osara_note,
     );
+}
+
+/// Windows-only: implement the parent-checkbox propagation.
+///
+/// Convention (matches Windows Explorer / Visual Studio Installer):
+/// - clicking a fully-checked parent → uncheck all available children;
+/// - clicking an unchecked or mixed parent → check all available children.
+///
+/// We read the pre-click row state to compute intent, then apply the new
+/// target to every available row (mutating action labels through
+/// `apply_checkbox_state_to_package_row` so summaries flip Install /
+/// Update / Keep), and finally repaint each leaf's native checkbox + row
+/// label so the visual reflects what we wrote into `package_rows`.
+/// Unavailable rows are left untouched: their checkboxes stay disabled
+/// and they don't enter the install plan regardless of what the parent
+/// is doing.
+#[cfg(target_os = "windows")]
+fn propagate_group_toggle_to_leaves(
+    tree: &TreeCtrl,
+    package_items: &PackagesStateCell,
+    package_rows: &Rc<RefCell<Vec<crate::PackageRow>>>,
+    wizard_model: &WizardModel,
+) {
+    let pre_state = compute_packages_group_tristate(&package_rows.borrow());
+    let target = !matches!(pre_state, native_tree_checkboxes::TriState::Checked);
+
+    let leaves: Vec<TreeItemId> = package_items
+        .borrow()
+        .leaves
+        .iter()
+        .map(|leaf| leaf.clone())
+        .collect();
+
+    {
+        let mut rows = package_rows.borrow_mut();
+        for row in rows.iter_mut().filter(|r| r.available_for_target) {
+            let _ = apply_checkbox_state_to_package_row(wizard_model, row, target);
+        }
+    }
+
+    let rows = package_rows.borrow();
+    let hwnd = tree.get_handle();
+    for (idx, leaf) in leaves.iter().enumerate() {
+        let Some(row) = rows.get(idx) else { continue };
+        if row.available_for_target {
+            native_tree_checkboxes::set_check_state(hwnd, leaf, row.selected);
+            let label = format_row_label(&row.summary, row.selected);
+            tree.set_item_text(leaf, &label);
+        }
+    }
 }
 
 // ===========================================================================
