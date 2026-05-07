@@ -93,6 +93,13 @@ fn dispatch_version_check_event(event: VersionCheckEvent) {
         }
     });
 }
+// `ConfigurationRow` and `recompute_configuration_row_availability` are
+// brought in for the upcoming Configuration tree-group wiring; the model
+// currently feeds the install pipeline its initial recommended-selection
+// directly via `selected_configuration_step_ids` so the import-warnings
+// suppression is a stop-gap until the tree UI lands.
+#[allow(unused_imports)]
+use crate::{ConfigurationRow, recompute_configuration_row_availability};
 use crate::{
     OsaraKeymapChoice, PackageRow, TargetRow, UiBootstrapOptions, WizardInstallOptions,
     WizardModel, WizardOutcomeReport, apply_checkbox_state_to_package_row,
@@ -102,7 +109,7 @@ use crate::{
     localizer_from_options, osara_keymap_note, osara_selected_for_rows,
     reapack_selected_for_install_or_update, refreshed_target_row, relaunch_rabbit_after_apply,
     run_wizard_self_update_apply, run_wizard_self_update_check, save_wizard_outcome_report,
-    wizard_desired_package_ids, wizard_outcome_report_from_error,
+    selected_configuration_step_ids, wizard_desired_package_ids, wizard_outcome_report_from_error,
     wizard_outcome_report_from_success, wizard_package_plan_for_target,
     wizard_package_plan_for_target_with_available,
 };
@@ -233,29 +240,42 @@ fn new_packages_state() -> PackagesStateCell {
     }
 }
 
-/// Live wxTreeItemId handles for the synthetic "Packages" group and each
-/// package row. Index `i` in `leaves` corresponds to index `i` in
-/// `package_rows`. Kept in an `Rc<RefCell>` so the closures that handle the
-/// state-image-click event, plus the post-install / version-check rebuild
-/// helpers, can all reach the same TreeItemIds the populate routine handed
-/// out. `TreeItemId` is not `Copy` (it owns a pointer with custom Drop), so
-/// we can't store it on the `Copy`-derived `WizardWidgets` directly.
+/// Live wxTreeItemId handles for both top-level groups in the Packages
+/// tree — "Packages" with its package leaves, and "Configuration" with
+/// its configuration-step leaves. Index `i` in each leaves vec
+/// corresponds to index `i` in the matching `Vec<PackageRow>` /
+/// `Vec<ConfigurationRow>`. Kept in an `Rc<RefCell>` so the closures
+/// that handle the state-image-click event, the LEFT_UP fallback, the
+/// keyboard fallbacks, and the post-install / version-check rebuild
+/// helpers can all reach the same TreeItemIds the populate routine
+/// handed out. `TreeItemId` is not `Copy` (it owns a pointer with
+/// custom Drop), so we can't store it on the `Copy`-derived
+/// `WizardWidgets` directly.
 #[cfg(target_os = "windows")]
 struct PackageItems {
-    /// The "Packages" group node under the (hidden) virtual root. Becomes
-    /// `None` between `populate_packages_tree` calls; populated immediately
-    /// after each rebuild.
-    group: Option<TreeItemId>,
-    /// One TreeItemId per package row, in the same order as `package_rows`.
-    leaves: Vec<TreeItemId>,
+    /// The "Packages" group node under the (hidden) virtual root.
+    /// Becomes `None` between `populate_packages_tree` calls; populated
+    /// immediately after each rebuild.
+    packages_group: Option<TreeItemId>,
+    /// One TreeItemId per package row, in the same order as
+    /// `package_rows`.
+    packages_leaves: Vec<TreeItemId>,
+    /// The "Configuration" group node sitting alongside the Packages
+    /// group under the virtual root.
+    configuration_group: Option<TreeItemId>,
+    /// One TreeItemId per configuration row, in the same order as
+    /// `configuration_rows`.
+    configuration_leaves: Vec<TreeItemId>,
 }
 
 #[cfg(target_os = "windows")]
 impl PackageItems {
     fn empty() -> Self {
         Self {
-            group: None,
-            leaves: Vec::new(),
+            packages_group: None,
+            packages_leaves: Vec::new(),
+            configuration_group: None,
+            configuration_leaves: Vec::new(),
         }
     }
 }
@@ -269,8 +289,14 @@ impl PackageItems {
 #[cfg(not(target_os = "windows"))]
 #[derive(Clone, Copy, Debug)]
 enum NodeKind {
-    Group,
+    /// The synthetic "Packages" parent under the invisible root.
+    PackagesGroup,
+    /// A package leaf — index into `package_rows`.
     Package(usize),
+    /// The synthetic "Configuration" parent, sibling of PackagesGroup.
+    ConfigurationGroup,
+    /// A configuration-step leaf — index into `configuration_rows`.
+    Configuration(usize),
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -281,47 +307,86 @@ struct Node {
 
 /// Userdata stored inside the non-Windows `CustomDataViewTreeModel`. Owns
 /// the heap-stable node objects we hand to wxDataView as item ids, and
-/// holds a clone of the shared `package_rows` Rc so model callbacks can
-/// read row state without going through any external lookup.
+/// holds clones of the shared `package_rows` and `configuration_rows`
+/// Rcs so model callbacks can read row state without going through any
+/// external lookup.
 #[cfg(not(target_os = "windows"))]
 struct PackageTreeData {
     rows: Rc<RefCell<Vec<crate::PackageRow>>>,
-    group_label: String,
-    group_node: Box<Node>,
+    configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
+    packages_group_label: String,
+    configuration_group_label: String,
+    packages_group_node: Box<Node>,
     package_nodes: Vec<Box<Node>>,
+    configuration_group_node: Box<Node>,
+    configuration_nodes: Vec<Box<Node>>,
 }
 
 #[cfg(not(target_os = "windows"))]
 impl PackageTreeData {
-    fn new(rows: Rc<RefCell<Vec<crate::PackageRow>>>, group_label: String) -> Self {
-        let len = rows.borrow().len();
-        let package_nodes: Vec<Box<Node>> = (0..len)
+    fn new(
+        rows: Rc<RefCell<Vec<crate::PackageRow>>>,
+        configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
+        packages_group_label: String,
+        configuration_group_label: String,
+    ) -> Self {
+        let package_len = rows.borrow().len();
+        let package_nodes: Vec<Box<Node>> = (0..package_len)
             .map(|i| {
                 Box::new(Node {
                     kind: NodeKind::Package(i),
                 })
             })
             .collect();
+        let configuration_len = configuration_rows.borrow().len();
+        let configuration_nodes: Vec<Box<Node>> = (0..configuration_len)
+            .map(|i| {
+                Box::new(Node {
+                    kind: NodeKind::Configuration(i),
+                })
+            })
+            .collect();
         Self {
             rows,
-            group_label,
-            group_node: Box::new(Node {
-                kind: NodeKind::Group,
+            configuration_rows,
+            packages_group_label,
+            configuration_group_label,
+            packages_group_node: Box::new(Node {
+                kind: NodeKind::PackagesGroup,
             }),
             package_nodes,
+            configuration_group_node: Box::new(Node {
+                kind: NodeKind::ConfigurationGroup,
+            }),
+            configuration_nodes,
         }
     }
 
-    fn group_ptr(&self) -> *const Node {
-        self.group_node.as_ref()
+    fn packages_group_ptr(&self) -> *const Node {
+        self.packages_group_node.as_ref()
+    }
+
+    fn configuration_group_ptr(&self) -> *const Node {
+        self.configuration_group_node.as_ref()
     }
 
     fn package_ptr(&self, idx: usize) -> *const Node {
         self.package_nodes[idx].as_ref()
     }
 
+    fn configuration_ptr(&self, idx: usize) -> *const Node {
+        self.configuration_nodes[idx].as_ref()
+    }
+
     fn all_package_ptrs(&self) -> Vec<*const Node> {
         self.package_nodes
+            .iter()
+            .map(|b| b.as_ref() as *const Node)
+            .collect()
+    }
+
+    fn all_configuration_ptrs(&self) -> Vec<*const Node> {
+        self.configuration_nodes
             .iter()
             .map(|b| b.as_ref() as *const Node)
             .collect()
@@ -815,6 +880,7 @@ pub fn run() {
         book.set_name("rabbit-wizard-pages");
         let package_rows = Rc::new(RefCell::new(model.package_rows.clone()));
         let package_notes = Rc::new(RefCell::new(model.notes.clone()));
+        let configuration_rows = Rc::new(RefCell::new(model.configuration_rows.clone()));
         // Per-platform shared state for the package list — see
         // `PackagesStateCell`. Populated by `build_packages_page` on the
         // first run and refreshed by `populate_packages_tree` /
@@ -875,6 +941,7 @@ pub fn run() {
             &book,
             &model,
             Rc::clone(&package_rows),
+            Rc::clone(&configuration_rows),
             Rc::clone(&package_items),
             Rc::clone(&can_install),
             self_update_status,
@@ -981,6 +1048,7 @@ pub fn run() {
             let package_rows = Rc::clone(&package_rows);
             let package_notes = Rc::clone(&package_notes);
             let package_items = Rc::clone(&package_items);
+            let configuration_rows = Rc::clone(&configuration_rows);
             let can_install = Rc::clone(&can_install);
             let review_can_install = Rc::clone(&review_can_install);
             next.on_click(move |_| {
@@ -1010,6 +1078,7 @@ pub fn run() {
                             model: Arc::clone(&model),
                             package_rows: Rc::clone(&package_rows),
                             package_notes: Rc::clone(&package_notes),
+                            configuration_rows: Rc::clone(&configuration_rows),
                             package_items: Rc::clone(&package_items),
                             can_install: Rc::clone(&can_install),
                             review_can_install: Rc::clone(&review_can_install),
@@ -1092,6 +1161,7 @@ pub fn run() {
             let package_rows = Rc::clone(&package_rows);
             let package_notes = Rc::clone(&package_notes);
             let package_items = Rc::clone(&package_items);
+            let configuration_rows = Rc::clone(&configuration_rows);
             let can_install = Rc::clone(&can_install);
             let review_can_install = Rc::clone(&review_can_install);
             let last_report = Arc::clone(&last_report);
@@ -1152,11 +1222,14 @@ pub fn run() {
                         message: model.text.review_no_target.clone(),
                     })
                     .and_then(|target| {
+                        let configuration_step_ids =
+                            selected_configuration_step_ids(&configuration_rows.borrow());
                         install_request_from_target_and_rows(
                             &model,
                             target,
                             &rows,
                             &selected_packages,
+                            configuration_step_ids,
                             WizardInstallOptions {
                                 osara_keymap_choice: osara_keymap_choice(
                                     &widgets.osara_keymap_replace,
@@ -1237,6 +1310,7 @@ pub fn run() {
                     let package_rows = Rc::clone(&package_rows);
                     let package_notes = Rc::clone(&package_notes);
                     let package_items = Rc::clone(&package_items);
+                    let configuration_rows = Rc::clone(&configuration_rows);
                     let can_install = Rc::clone(&can_install);
                     let review_can_install = Rc::clone(&review_can_install);
                     let last_reaper_app_path = Arc::clone(&last_reaper_app_path);
@@ -1253,6 +1327,18 @@ pub fn run() {
                         };
                         *package_rows.borrow_mut() = plan.package_rows;
                         *package_notes.borrow_mut() = plan.notes;
+                        // Recompute configuration row availability against
+                        // the freshly-rebuilt package plan (e.g. ReaPack
+                        // just got installed → REAPER Accessibility step
+                        // becomes available).
+                        if let Ok(localizer) = localizer_from_options(&model.bootstrap_options) {
+                            recompute_configuration_row_availability(
+                                &localizer,
+                                &package_rows.borrow(),
+                                Some(&refreshed_target.path),
+                                &mut configuration_rows.borrow_mut(),
+                            );
+                        }
                         can_install.set(plan.can_install);
                         review_can_install.set(false);
                         refresh_package_checklist(
@@ -1263,6 +1349,7 @@ pub fn run() {
                             &widgets.osara_keymap_note,
                             &model,
                             &package_rows.borrow(),
+                            &configuration_rows.borrow(),
                         );
                         refresh_target_choice(
                             &model,
@@ -1567,6 +1654,7 @@ fn add_pages(
     book: &SimpleBook,
     model: &WizardModel,
     package_rows: Rc<RefCell<Vec<crate::PackageRow>>>,
+    configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     package_items: PackagesStateCell,
     can_install: Rc<Cell<bool>>,
     self_update_status: StatusBar,
@@ -1600,6 +1688,7 @@ fn add_pages(
             &packages_page,
             model,
             package_rows,
+            configuration_rows,
             package_items,
             can_install,
         );
@@ -1873,6 +1962,7 @@ struct VersionCheckUi {
     model: Arc<WizardModel>,
     package_rows: Rc<RefCell<Vec<PackageRow>>>,
     package_notes: Rc<RefCell<Vec<String>>>,
+    configuration_rows: Rc<RefCell<Vec<ConfigurationRow>>>,
     package_items: PackagesStateCell,
     can_install: Rc<Cell<bool>>,
     review_can_install: Rc<Cell<bool>>,
@@ -1957,6 +2047,17 @@ fn start_version_check(ui: VersionCheckUi) {
                     Ok(plan) => {
                         *ui.package_rows.borrow_mut() = plan.package_rows;
                         *ui.package_notes.borrow_mut() = plan.notes;
+                        // The deferred fetch may have promoted ReaPack to
+                        // Update (or vice versa); refresh configuration
+                        // row availability against the fresh plan.
+                        if let Ok(localizer) = localizer_from_options(&ui.model.bootstrap_options) {
+                            recompute_configuration_row_availability(
+                                &localizer,
+                                &ui.package_rows.borrow(),
+                                Some(&ui.target.path),
+                                &mut ui.configuration_rows.borrow_mut(),
+                            );
+                        }
                         ui.can_install.set(plan.can_install);
                         ui.review_can_install.set(false);
                         rebuild_package_list_widgets(
@@ -1964,6 +2065,7 @@ fn start_version_check(ui: VersionCheckUi) {
                             &ui.package_items,
                             &ui.model,
                             &ui.package_rows.borrow(),
+                            &ui.configuration_rows.borrow(),
                         );
                         ui.current_step.store(PACKAGES_STEP, Ordering::SeqCst);
                         update_navigation(
@@ -2042,12 +2144,14 @@ fn rebuild_package_list_widgets(
     package_items: &PackagesStateCell,
     model: &WizardModel,
     package_rows: &[PackageRow],
+    configuration_rows: &[ConfigurationRow],
 ) {
     populate_packages_tree(
         &widgets.package_checklist,
         package_items,
         model,
         package_rows,
+        configuration_rows,
     );
     let initial = package_rows
         .first()
@@ -2056,55 +2160,87 @@ fn rebuild_package_list_widgets(
     widgets.package_details.set_value(&initial);
 }
 
-/// Windows-only: tear down the existing native tree and rebuild it from
-/// `package_rows`. Replaces the parent group + every leaf, syncing the
-/// parallel `PackageItems::leaves` vec with the new TreeItemIds. Each
-/// leaf gets its native `TVS_CHECKBOXES` state set to match `row.selected`.
+/// Windows-only: tear down the existing native tree and rebuild both
+/// top-level groups ("Packages" and "Configuration") from
+/// `package_rows` + `configuration_rows`. Each leaf gets its native
+/// `TVS_CHECKBOXES` state set to match its row's `selected`; each
+/// group gets a tristate reflecting its children's aggregate.
 #[cfg(target_os = "windows")]
 fn populate_packages_tree(
     tree: &TreeCtrl,
     package_items: &PackagesStateCell,
     model: &WizardModel,
     package_rows: &[PackageRow],
+    configuration_rows: &[ConfigurationRow],
 ) {
     tree.delete_all_items();
     {
         let mut items = package_items.borrow_mut();
-        items.group = None;
-        items.leaves.clear();
+        items.packages_group = None;
+        items.packages_leaves.clear();
+        items.configuration_group = None;
+        items.configuration_leaves.clear();
     }
 
     let Some(root) = tree.add_root("", None, None) else {
         return;
     };
-    let Some(group) = tree.append_item(&root, &model.text.packages_tree_group_label, None, None)
+
+    // Packages group + leaves.
+    let Some(packages_group) =
+        tree.append_item(&root, &model.text.packages_tree_group_label, None, None)
     else {
         return;
     };
-
-    let mut leaves = Vec::with_capacity(package_rows.len());
+    let mut packages_leaves = Vec::with_capacity(package_rows.len());
     for row in package_rows.iter() {
         let label = format_row_label(&row.summary, row.selected);
-        if let Some(item) = tree.append_item(&group, &label, None, None) {
+        if let Some(item) = tree.append_item(&packages_group, &label, None, None) {
             native_tree_checkboxes::set_check_state(tree.get_handle(), &item, row.selected);
-            leaves.push(item);
+            packages_leaves.push(item);
         }
     }
+    // Tristate reflecting available children's aggregate.
+    let packages_state = compute_packages_group_tristate(package_rows);
+    native_tree_checkboxes::set_check_state_tri(tree.get_handle(), &packages_group, packages_state);
 
-    // The Packages parent's tristate reflects the aggregate of its
-    // available children: all checked → Checked, none checked →
-    // Unchecked, partially checked → Mixed (the half-check glyph from
-    // the 3-image state list installed by enable_checkboxes).
-    let group_state = compute_packages_group_tristate(package_rows);
-    native_tree_checkboxes::set_check_state_tri(tree.get_handle(), &group, group_state);
+    // Configuration group + leaves. Always created, even if no
+    // configuration rows are recommended for this run — keeps the tree
+    // shape stable so the user can find the section if/when it
+    // populates after a target switch or post-install rescan.
+    let Some(configuration_group) = tree.append_item(
+        &root,
+        &model.text.configuration_tree_group_label,
+        None,
+        None,
+    ) else {
+        return;
+    };
+    let mut configuration_leaves = Vec::with_capacity(configuration_rows.len());
+    for row in configuration_rows.iter() {
+        let label = format_row_label(&row.summary, row.selected);
+        if let Some(item) = tree.append_item(&configuration_group, &label, None, None) {
+            native_tree_checkboxes::set_check_state(tree.get_handle(), &item, row.selected);
+            configuration_leaves.push(item);
+        }
+    }
+    let configuration_state = compute_configuration_group_tristate(configuration_rows);
+    native_tree_checkboxes::set_check_state_tri(
+        tree.get_handle(),
+        &configuration_group,
+        configuration_state,
+    );
 
     {
         let mut items = package_items.borrow_mut();
-        items.group = Some(group.clone());
-        items.leaves = leaves;
+        items.packages_group = Some(packages_group.clone());
+        items.packages_leaves = packages_leaves;
+        items.configuration_group = Some(configuration_group.clone());
+        items.configuration_leaves = configuration_leaves;
     }
 
-    tree.expand(&group);
+    tree.expand(&packages_group);
+    tree.expand(&configuration_group);
 }
 
 /// Windows-only: format a tree-row label. The native `TVS_CHECKBOXES`
@@ -2137,6 +2273,42 @@ fn compute_packages_group_tristate(rows: &[crate::PackageRow]) -> native_tree_ch
         // No selectable rows at all (everything's unavailable for this
         // target). Render the group as unchecked rather than mixed —
         // there's nothing to toggle.
+        return native_tree_checkboxes::TriState::Unchecked;
+    }
+    if all {
+        native_tree_checkboxes::TriState::Checked
+    } else if any_checked {
+        native_tree_checkboxes::TriState::Mixed
+    } else {
+        native_tree_checkboxes::TriState::Unchecked
+    }
+}
+
+/// Windows-only: aggregate the per-row `selected` flags of every
+/// actionable [`ConfigurationRow`] into a tristate for the synthetic
+/// "Configuration" group node. Same convention as
+/// `compute_packages_group_tristate` — unavailable rows AND
+/// already-applied rows are excluded (the user can't toggle either),
+/// and an empty actionable-set renders as Unchecked.
+#[cfg(target_os = "windows")]
+fn compute_configuration_group_tristate(
+    rows: &[crate::ConfigurationRow],
+) -> native_tree_checkboxes::TriState {
+    let mut any = false;
+    let mut all = true;
+    let mut any_checked = false;
+    for row in rows
+        .iter()
+        .filter(|r| r.available_for_target && !r.already_applied)
+    {
+        any = true;
+        if row.selected {
+            any_checked = true;
+        } else {
+            all = false;
+        }
+    }
+    if !any {
         return native_tree_checkboxes::TriState::Unchecked;
     }
     if all {
@@ -2210,6 +2382,7 @@ fn build_packages_page(
     page: &Panel,
     model: &WizardModel,
     package_rows: Rc<RefCell<Vec<crate::PackageRow>>>,
+    configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     package_items: PackagesStateCell,
     can_install: Rc<Cell<bool>>,
 ) -> (PackagesView, TextCtrl, CheckBox, TextCtrl) {
@@ -2250,7 +2423,13 @@ fn build_packages_page(
     // Explorer's "items to copy" tree.
     native_tree_checkboxes::enable_checkboxes(tree.get_handle());
 
-    populate_packages_tree(&tree, &package_items, model, &package_rows.borrow());
+    populate_packages_tree(
+        &tree,
+        &package_items,
+        model,
+        &package_rows.borrow(),
+        &configuration_rows.borrow(),
+    );
     sizer.add(&tree, 1, SizerFlag::All | SizerFlag::Expand, 6);
 
     add_label(
@@ -2319,6 +2498,7 @@ fn build_packages_page(
     // `package_items.leaves`.
     {
         let package_rows = Rc::clone(&package_rows);
+        let configuration_rows = Rc::clone(&configuration_rows);
         let package_items = Rc::clone(&package_items);
         let model_text = model.clone();
         let details = details;
@@ -2326,10 +2506,18 @@ fn build_packages_page(
         let osara_note = osara_keymap_note;
         tree.on_selection_changed(move |event| {
             if let Some(item) = event.get_item() {
-                if let Some(idx) = leaf_index_for(&package_items.borrow(), &item) {
-                    if let Some(value) = package_rows.borrow().get(idx).map(package_details) {
-                        details.set_value(&value);
+                match classify_leaf(&package_items.borrow(), &item) {
+                    Some(WhichLeaf::Packages(idx)) => {
+                        if let Some(value) = package_rows.borrow().get(idx).map(package_details) {
+                            details.set_value(&value);
+                        }
                     }
+                    Some(WhichLeaf::Configuration(idx)) => {
+                        if let Some(row) = configuration_rows.borrow().get(idx) {
+                            details.set_value(&row.details);
+                        }
+                    }
+                    None => {}
                 }
             }
             sync_osara_keymap_widgets(
@@ -2350,6 +2538,7 @@ fn build_packages_page(
     {
         let tree_widget = tree;
         let package_rows = Rc::clone(&package_rows);
+        let configuration_rows = Rc::clone(&configuration_rows);
         let package_items = Rc::clone(&package_items);
         let can_install = Rc::clone(&can_install);
         let wizard_model = model.clone();
@@ -2361,6 +2550,7 @@ fn build_packages_page(
                 &tree_widget,
                 &package_items,
                 &package_rows,
+                &configuration_rows,
                 &can_install,
                 &wizard_model,
                 &details,
@@ -2368,6 +2558,57 @@ fn build_packages_page(
                 &osara_note,
                 TreeEventData::new(event).get_item(),
             );
+        });
+    }
+
+    // Pre-empt mouse clicks on not-actionable leaves' state icons —
+    // unavailable packages, already-applied / unavailable configuration
+    // steps. SysTreeView32 cycles TVS_CHECKBOXES on WM_LBUTTONDOWN
+    // (which gives the click immediate visual feedback); without this
+    // pre-empt, the click flips the state image and the accessibility
+    // layer announces "checked", and we then have to revert in the
+    // TREE_STATE_IMAGE_CLICK path — the user sees a flicker plus a
+    // doubled screen-reader announcement. Eating the event before
+    // native sees it keeps the row's state stable. We deliberately
+    // do NOT pre-empt clicks on the parent group's state icon here
+    // (the LEFT_UP handler below handles those — we still want the
+    // native side effects of focus/selection to run on a parent
+    // click).
+    {
+        let tree_widget = tree;
+        let package_rows = Rc::clone(&package_rows);
+        let configuration_rows = Rc::clone(&configuration_rows);
+        let package_items = Rc::clone(&package_items);
+        tree.on_mouse_left_down(move |event| {
+            let WindowEventData::MouseButton(mb) = &event else {
+                return;
+            };
+            let Some(pos) = mb.get_position() else { return };
+            let hwnd = tree_widget.get_handle();
+            let (flags, h_item) = native_tree_checkboxes::hit_test(hwnd, pos.x, pos.y);
+            if (flags & native_tree_checkboxes::TVHT_ONITEMSTATEICON) == 0 || h_item.is_null() {
+                return;
+            }
+            let items = package_items.borrow();
+            let blocked = items
+                .packages_leaves
+                .iter()
+                .position(|leaf| native_tree_handle(leaf) == h_item)
+                .and_then(|idx| package_rows.borrow().get(idx).cloned())
+                .map(|row| !row.available_for_target)
+                .or_else(|| {
+                    items
+                        .configuration_leaves
+                        .iter()
+                        .position(|leaf| native_tree_handle(leaf) == h_item)
+                        .and_then(|idx| configuration_rows.borrow().get(idx).cloned())
+                        .map(|row| !row.available_for_target || row.already_applied)
+                })
+                .unwrap_or(false);
+            drop(items);
+            if blocked {
+                event.skip(false);
+            }
         });
     }
 
@@ -2381,6 +2622,7 @@ fn build_packages_page(
     {
         let tree_widget = tree;
         let package_rows = Rc::clone(&package_rows);
+        let configuration_rows = Rc::clone(&configuration_rows);
         let package_items = Rc::clone(&package_items);
         let can_install = Rc::clone(&can_install);
         let wizard_model = model.clone();
@@ -2394,6 +2636,7 @@ fn build_packages_page(
                         &tree_widget,
                         &package_items,
                         &package_rows,
+                        &configuration_rows,
                         &can_install,
                         &wizard_model,
                         &details,
@@ -2417,6 +2660,7 @@ fn build_packages_page(
     {
         let tree_widget = tree;
         let package_rows = Rc::clone(&package_rows);
+        let configuration_rows = Rc::clone(&configuration_rows);
         let package_items = Rc::clone(&package_items);
         let can_install = Rc::clone(&can_install);
         let wizard_model = model.clone();
@@ -2435,25 +2679,50 @@ fn build_packages_page(
             let Some(focused) = tree_widget.get_selection() else {
                 return;
             };
-            let focused_handle = native_tree_handle(&focused);
-            let is_group = package_items
-                .borrow()
-                .group
-                .as_ref()
-                .is_some_and(|group| native_tree_handle(group) == focused_handle);
-            if !is_group {
+            // Pre-empt Space on a leaf the user can't toggle —
+            // unavailable packages, or already-applied / unavailable
+            // configuration steps. If we let native TVS_CHECKBOXES
+            // see the keystroke, it cycles the state image (and the
+            // accessibility layer announces "checked"), and our key-up
+            // handler then has to revert. The user experiences that
+            // as a flicker plus a doubled screen-reader announcement.
+            // Consuming the event here keeps the row's state stable.
+            if let Some(leaf) = classify_leaf(&package_items.borrow(), &focused) {
+                let blocked = match leaf {
+                    WhichLeaf::Packages(idx) => package_rows
+                        .borrow()
+                        .get(idx)
+                        .is_some_and(|row| !row.available_for_target),
+                    WhichLeaf::Configuration(idx) => configuration_rows
+                        .borrow()
+                        .get(idx)
+                        .is_some_and(|row| !row.available_for_target || row.already_applied),
+                };
+                if blocked {
+                    event.skip(false);
+                    return;
+                }
+                // Actionable leaf: let native cycle run; on_key_up
+                // reconciles row.selected with the post-cycle state.
                 return;
             }
+            let group = classify_group(&package_items.borrow(), &focused);
+            let Some(group) = group else {
+                return;
+            };
             propagate_group_toggle_to_leaves(
                 &tree_widget,
                 &package_items,
+                group,
                 &package_rows,
+                &configuration_rows,
                 &wizard_model,
             );
             refresh_after_packages_toggle(
                 &tree_widget,
                 &package_items,
                 &package_rows,
+                &configuration_rows,
                 &can_install,
                 &wizard_model,
                 &details,
@@ -2479,6 +2748,7 @@ fn build_packages_page(
     {
         let tree_widget = tree;
         let package_rows = Rc::clone(&package_rows);
+        let configuration_rows = Rc::clone(&configuration_rows);
         let package_items = Rc::clone(&package_items);
         let can_install = Rc::clone(&can_install);
         let wizard_model = model.clone();
@@ -2497,48 +2767,61 @@ fn build_packages_page(
             let Some(focused) = tree_widget.get_selection() else {
                 return;
             };
-            let focused_handle = native_tree_handle(&focused);
-            let is_group = package_items
-                .borrow()
-                .group
-                .as_ref()
-                .is_some_and(|group| native_tree_handle(group) == focused_handle);
-            if is_group {
-                // Parent Space already handled in on_key_down (which
-                // consumed the event before native processing).
+            // Parent Space is already handled in on_key_down (which
+            // consumed the event before native processing); only
+            // leaves need post-cycle reconciliation here.
+            if classify_group(&package_items.borrow(), &focused).is_some() {
                 return;
             }
-            let items = package_items.borrow();
-            let Some(idx) = leaf_index_for(&items, &focused) else {
-                return;
-            };
-            drop(items);
-
+            let leaf = classify_leaf(&package_items.borrow(), &focused);
             let new_state =
                 native_tree_checkboxes::get_check_state(tree_widget.get_handle(), &focused);
-
-            let unavailable = package_rows
-                .borrow()
-                .get(idx)
-                .is_some_and(|row| !row.available_for_target);
-            if unavailable {
-                native_tree_checkboxes::set_check_state(tree_widget.get_handle(), &focused, false);
-                return;
+            match leaf {
+                Some(WhichLeaf::Packages(idx)) => {
+                    let unavailable = package_rows
+                        .borrow()
+                        .get(idx)
+                        .is_some_and(|row| !row.available_for_target);
+                    if unavailable {
+                        native_tree_checkboxes::set_check_state(
+                            tree_widget.get_handle(),
+                            &focused,
+                            false,
+                        );
+                        return;
+                    }
+                    if let Some(row) = package_rows.borrow_mut().get_mut(idx) {
+                        let _ = apply_checkbox_state_to_package_row(&wizard_model, row, new_state);
+                    }
+                    if let Some(row) = package_rows.borrow().get(idx) {
+                        let label = format_row_label(&row.summary, row.selected);
+                        tree_widget.set_item_text(&focused, &label);
+                    }
+                }
+                Some(WhichLeaf::Configuration(idx)) => {
+                    let not_actionable = configuration_rows
+                        .borrow()
+                        .get(idx)
+                        .is_some_and(|row| !row.available_for_target || row.already_applied);
+                    if not_actionable {
+                        native_tree_checkboxes::set_check_state(
+                            tree_widget.get_handle(),
+                            &focused,
+                            false,
+                        );
+                        return;
+                    }
+                    if let Some(row) = configuration_rows.borrow_mut().get_mut(idx) {
+                        row.selected = new_state;
+                    }
+                }
+                None => return,
             }
-
-            if let Some(row) = package_rows.borrow_mut().get_mut(idx) {
-                let _ = apply_checkbox_state_to_package_row(&wizard_model, row, new_state);
-            }
-
-            if let Some(row) = package_rows.borrow().get(idx) {
-                let label = format_row_label(&row.summary, row.selected);
-                tree_widget.set_item_text(&focused, &label);
-            }
-
             refresh_after_packages_toggle(
                 &tree_widget,
                 &package_items,
                 &package_rows,
+                &configuration_rows,
                 &can_install,
                 &wizard_model,
                 &details,
@@ -2564,6 +2847,7 @@ fn build_packages_page(
     {
         let tree_widget = tree;
         let package_rows = Rc::clone(&package_rows);
+        let configuration_rows = Rc::clone(&configuration_rows);
         let package_items = Rc::clone(&package_items);
         let can_install = Rc::clone(&can_install);
         let wizard_model = model.clone();
@@ -2574,25 +2858,22 @@ fn build_packages_page(
             let Some(item) = event.get_item() else {
                 return;
             };
-            let item_handle = native_tree_handle(&item);
-            let is_group = package_items
-                .borrow()
-                .group
-                .as_ref()
-                .is_some_and(|group| native_tree_handle(group) == item_handle);
-            if !is_group {
+            let Some(group) = classify_group(&package_items.borrow(), &item) else {
                 return;
-            }
+            };
             propagate_group_toggle_to_leaves(
                 &tree_widget,
                 &package_items,
+                group,
                 &package_rows,
+                &configuration_rows,
                 &wizard_model,
             );
             refresh_after_packages_toggle(
                 &tree_widget,
                 &package_items,
                 &package_rows,
+                &configuration_rows,
                 &can_install,
                 &wizard_model,
                 &details,
@@ -2616,23 +2897,80 @@ fn build_packages_page(
     (tree, details, osara_keymap_replace, osara_keymap_note)
 }
 
-/// Windows-only: map a `TreeItemId` (from a tree event) to the matching
-/// index in `package_items.leaves`. Returns `None` for the synthetic group
-/// node, the (hidden) virtual root, or any item that doesn't belong to the
-/// current row set. We compare via the native `HTREEITEM` since wxdragon's
-/// `TreeItemId` wraps a fresh allocation per event call — pointer-equality
-/// on the Rust wrappers wouldn't match the leaves we stored at populate
-/// time.
+/// Windows-only: which top-level group a tree item belongs to, if any.
+/// Used by the toggle handlers to dispatch on Packages-vs-Configuration
+/// without rebuilding the HTREEITEM-comparison plumbing at each call.
 #[cfg(target_os = "windows")]
-fn leaf_index_for(items: &PackageItems, candidate: &TreeItemId) -> Option<usize> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WhichGroup {
+    Packages,
+    Configuration,
+}
+
+/// Windows-only: a leaf's owning group + its row index. Mirrors the
+/// shape of the row vec the index applies to, so callers can reach into
+/// the right `Vec<PackageRow>` / `Vec<ConfigurationRow>` without an
+/// extra branch.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WhichLeaf {
+    Packages(usize),
+    Configuration(usize),
+}
+
+/// Windows-only: identify which top-level group node a tree item is.
+/// Returns `None` for leaves and for the (hidden) virtual root. Compares
+/// via the native `HTREEITEM` (`m_pItem`) because wxdragon's
+/// `TreeItemId` wraps a fresh allocation per event call — pointer
+/// equality on the Rust wrappers wouldn't match our stored handles.
+#[cfg(target_os = "windows")]
+fn classify_group(items: &PackageItems, candidate: &TreeItemId) -> Option<WhichGroup> {
     let candidate_handle = native_tree_handle(candidate);
     if candidate_handle.is_null() {
         return None;
     }
-    items
-        .leaves
+    if items
+        .packages_group
+        .as_ref()
+        .is_some_and(|group| native_tree_handle(group) == candidate_handle)
+    {
+        return Some(WhichGroup::Packages);
+    }
+    if items
+        .configuration_group
+        .as_ref()
+        .is_some_and(|group| native_tree_handle(group) == candidate_handle)
+    {
+        return Some(WhichGroup::Configuration);
+    }
+    None
+}
+
+/// Windows-only: identify which group's leaves a tree item belongs to,
+/// and at which index within that vec. Returns `None` for the group
+/// nodes themselves, the hidden root, and items that aren't part of
+/// our current row sets.
+#[cfg(target_os = "windows")]
+fn classify_leaf(items: &PackageItems, candidate: &TreeItemId) -> Option<WhichLeaf> {
+    let candidate_handle = native_tree_handle(candidate);
+    if candidate_handle.is_null() {
+        return None;
+    }
+    if let Some(idx) = items
+        .packages_leaves
         .iter()
         .position(|stored| native_tree_handle(stored) == candidate_handle)
+    {
+        return Some(WhichLeaf::Packages(idx));
+    }
+    if let Some(idx) = items
+        .configuration_leaves
+        .iter()
+        .position(|stored| native_tree_handle(stored) == candidate_handle)
+    {
+        return Some(WhichLeaf::Configuration(idx));
+    }
+    None
 }
 
 /// Windows-only: read the native `HTREEITEM` behind a wxdragon
@@ -2654,25 +2992,29 @@ fn native_tree_handle(item: &TreeItemId) -> *mut std::ffi::c_void {
     unsafe { *(inner as *const *mut std::ffi::c_void) }
 }
 
-/// Windows-only: handle a `wxEVT_TREE_STATE_IMAGE_CLICK` for a leaf row.
+/// Windows-only: handle a `wxEVT_TREE_STATE_IMAGE_CLICK` for a leaf row
+/// in either the Packages or the Configuration group.
 ///
 /// Parent-group state-icon clicks are intentionally NOT handled here —
 /// they're routed through the dedicated `LEFT_UP` + hit-test fallback
 /// (`handle_packages_left_up`) because wxMSW's NM_CLICK →
 /// wxEVT_TREE_STATE_IMAGE_CLICK dispatch isn't reliable for parent items
 /// in our setup (the native auto-cycle sees state image index 3 and may
-/// not propagate the event). The mouse-up fallback is unconditional and
-/// always reaches our handler.
+/// not propagate the event).
 ///
 /// For leaves: `TVS_CHECKBOXES` has already flipped the state image by
 /// the time this event fires, so we read the post-click state from the
-/// native control rather than computing it ourselves.
+/// native control rather than computing it ourselves. Package leaves
+/// route through `apply_checkbox_state_to_package_row` (so action labels
+/// flip Install/Update/Keep); configuration leaves just toggle
+/// `row.selected`.
 #[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)]
 fn handle_native_checkbox_toggle(
     tree: &TreeCtrl,
     package_items: &PackagesStateCell,
     package_rows: &Rc<RefCell<Vec<crate::PackageRow>>>,
+    configuration_rows: &Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     can_install: &Rc<Cell<bool>>,
     wizard_model: &WizardModel,
     details: &TextCtrl,
@@ -2684,54 +3026,55 @@ fn handle_native_checkbox_toggle(
         return;
     };
 
-    // If the click was on the parent group, defer to the LEFT_UP handler
-    // which catches it via TVM_HITTEST. Returning here keeps the native
-    // auto-cycle visible briefly; the LEFT_UP handler runs immediately
-    // afterwards and sets the parent state explicitly.
-    let candidate_handle = native_tree_handle(&item);
-    let is_group = package_items
-        .borrow()
-        .group
-        .as_ref()
-        .is_some_and(|group| native_tree_handle(group) == candidate_handle);
-    if is_group {
+    // Parent-group clicks defer to the LEFT_UP handler.
+    if classify_group(&package_items.borrow(), &item).is_some() {
         return;
     }
 
-    let items = package_items.borrow();
-    let Some(idx) = leaf_index_for(&items, &item) else {
-        return;
-    };
-    drop(items);
-
+    let leaf = classify_leaf(&package_items.borrow(), &item);
     let new_state = native_tree_checkboxes::get_check_state(tree.get_handle(), &item);
-
-    let unavailable = package_rows
-        .borrow()
-        .get(idx)
-        .is_some_and(|row| !row.available_for_target);
-    if unavailable {
-        // Native toggled the state image already — flip it back so the
-        // user sees the rejection.
-        native_tree_checkboxes::set_check_state(tree.get_handle(), &item, false);
-        return;
-    }
-
-    if let Some(row) = package_rows.borrow_mut().get_mut(idx) {
-        let _ = apply_checkbox_state_to_package_row(wizard_model, row, new_state);
-    }
-
-    // Refresh the displayed label so Install/Update/Keep flips along with
-    // the checkbox.
-    if let Some(row) = package_rows.borrow().get(idx) {
-        let label = format_row_label(&row.summary, row.selected);
-        tree.set_item_text(&item, &label);
+    match leaf {
+        Some(WhichLeaf::Packages(idx)) => {
+            let unavailable = package_rows
+                .borrow()
+                .get(idx)
+                .is_some_and(|row| !row.available_for_target);
+            if unavailable {
+                native_tree_checkboxes::set_check_state(tree.get_handle(), &item, false);
+                return;
+            }
+            if let Some(row) = package_rows.borrow_mut().get_mut(idx) {
+                let _ = apply_checkbox_state_to_package_row(wizard_model, row, new_state);
+            }
+            if let Some(row) = package_rows.borrow().get(idx) {
+                let label = format_row_label(&row.summary, row.selected);
+                tree.set_item_text(&item, &label);
+            }
+        }
+        Some(WhichLeaf::Configuration(idx)) => {
+            let not_actionable = configuration_rows
+                .borrow()
+                .get(idx)
+                .is_some_and(|row| !row.available_for_target || row.already_applied);
+            if not_actionable {
+                native_tree_checkboxes::set_check_state(tree.get_handle(), &item, false);
+                return;
+            }
+            if let Some(row) = configuration_rows.borrow_mut().get_mut(idx) {
+                row.selected = new_state;
+            }
+            // Configuration row labels don't include action text, so no
+            // re-format is needed; the row's `summary` already matches
+            // `display_name`.
+        }
+        None => return,
     }
 
     refresh_after_packages_toggle(
         tree,
         package_items,
         package_rows,
+        configuration_rows,
         can_install,
         wizard_model,
         details,
@@ -2741,11 +3084,11 @@ fn handle_native_checkbox_toggle(
 }
 
 /// Windows-only: hit-test a `wxEVT_LEFT_UP` mouse-up against the tree.
-/// If the click landed on the parent group's state icon, propagate the
-/// toggle to all available leaves; the native control may have
-/// auto-cycled the parent's image to a state that disagrees with the
-/// row aggregate, but we always rewrite it via `compute_packages_group_tristate`
-/// + `set_check_state_tri` at the end so the visual matches the data.
+/// If the click landed on either group's state icon, propagate the
+/// toggle to that group's available leaves. The native control may
+/// have auto-cycled the parent's image to a state that disagrees with
+/// the row aggregate, but we always rewrite the parent state via
+/// `set_check_state_tri` at the end so the visual matches the data.
 ///
 /// We deliberately ignore leaf state-icon clicks here — they go through
 /// `wxEVT_TREE_STATE_IMAGE_CLICK` which is reliable for leaf items and
@@ -2757,6 +3100,7 @@ fn handle_packages_left_up(
     tree: &TreeCtrl,
     package_items: &PackagesStateCell,
     package_rows: &Rc<RefCell<Vec<crate::PackageRow>>>,
+    configuration_rows: &Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     can_install: &Rc<Cell<bool>>,
     wizard_model: &WizardModel,
     details: &TextCtrl,
@@ -2769,20 +3113,46 @@ fn handle_packages_left_up(
     if (flags & native_tree_checkboxes::TVHT_ONITEMSTATEICON) == 0 || h_item.is_null() {
         return;
     }
-    let is_group = package_items
-        .borrow()
-        .group
-        .as_ref()
-        .is_some_and(|group| native_tree_handle(group) == h_item);
-    if !is_group {
+    // Identify which group's state icon was hit by comparing the raw
+    // HTREEITEM directly against each stored group's native handle.
+    // We don't go through `classify_group` here because we don't have
+    // a `TreeItemId` wrapper yet — the hit-test message returns only
+    // the native handle.
+    let group = {
+        let items = package_items.borrow();
+        if items
+            .packages_group
+            .as_ref()
+            .is_some_and(|g| native_tree_handle(g) == h_item)
+        {
+            Some(WhichGroup::Packages)
+        } else if items
+            .configuration_group
+            .as_ref()
+            .is_some_and(|g| native_tree_handle(g) == h_item)
+        {
+            Some(WhichGroup::Configuration)
+        } else {
+            None
+        }
+    };
+    let Some(group) = group else {
         return;
-    }
+    };
 
-    propagate_group_toggle_to_leaves(tree, package_items, package_rows, wizard_model);
+    propagate_group_toggle_to_leaves(
+        tree,
+        package_items,
+        group,
+        package_rows,
+        configuration_rows,
+        wizard_model,
+    );
     refresh_after_packages_toggle(
         tree,
         package_items,
         package_rows,
+        configuration_rows,
         can_install,
         wizard_model,
         details,
@@ -2791,26 +3161,69 @@ fn handle_packages_left_up(
     );
 }
 
-/// Windows-only: refresh the parent's tristate visual + plan-level
-/// `can_install` flag + OSARA widgets + details pane after a leaf or
-/// group toggle has mutated `package_rows`. Shared by both
-/// `handle_native_checkbox_toggle` (leaf path) and
-/// `handle_packages_left_up` (parent path).
+/// Windows-only: refresh both groups' tristate visuals + plan-level
+/// `can_install` flag + OSARA widgets + details pane after any toggle
+/// (leaf or group) that mutated `package_rows` or
+/// `configuration_rows`. Also re-evaluates configuration-row
+/// availability against the latest package plan so that, e.g.,
+/// unchecking ReaPack greys out the REAPER Accessibility row in real
+/// time.
 #[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)]
 fn refresh_after_packages_toggle(
     tree: &TreeCtrl,
     package_items: &PackagesStateCell,
     package_rows: &Rc<RefCell<Vec<crate::PackageRow>>>,
+    configuration_rows: &Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     can_install: &Rc<Cell<bool>>,
     wizard_model: &WizardModel,
     details: &TextCtrl,
     osara_checkbox: &CheckBox,
     osara_note: &TextCtrl,
 ) {
-    if let Some(group) = package_items.borrow().group.as_ref() {
-        let group_state = compute_packages_group_tristate(&package_rows.borrow());
-        native_tree_checkboxes::set_check_state_tri(tree.get_handle(), group, group_state);
+    // Configuration rows depend on the package plan (e.g. ReaPack must
+    // be installed/queued for the REAPER Accessibility step). Re-evaluate
+    // before refreshing the tree so the leaves' selected/state-image
+    // values match what's in `configuration_rows`.
+    if let Ok(localizer) = localizer_from_options(&wizard_model.bootstrap_options) {
+        // None for the resource-path argument: a package toggle can't
+        // change `reapack.ini`, so preserve each row's existing
+        // `already_applied` flag rather than re-reading from disk on
+        // every click.
+        recompute_configuration_row_availability(
+            &localizer,
+            &package_rows.borrow(),
+            None,
+            &mut configuration_rows.borrow_mut(),
+        );
+        // Push the recomputed leaf states into the tree visual so the
+        // user sees the live re-evaluation.
+        let items = package_items.borrow();
+        let configuration_rows_borrowed = configuration_rows.borrow();
+        for (idx, leaf) in items.configuration_leaves.iter().enumerate() {
+            let Some(row) = configuration_rows_borrowed.get(idx) else {
+                continue;
+            };
+            native_tree_checkboxes::set_check_state(
+                tree.get_handle(),
+                leaf,
+                row.selected && row.available_for_target && !row.already_applied,
+            );
+            let label = format_row_label(&row.summary, row.selected);
+            tree.set_item_text(leaf, &label);
+        }
+    }
+
+    {
+        let items = package_items.borrow();
+        if let Some(group) = items.packages_group.as_ref() {
+            let group_state = compute_packages_group_tristate(&package_rows.borrow());
+            native_tree_checkboxes::set_check_state_tri(tree.get_handle(), group, group_state);
+        }
+        if let Some(group) = items.configuration_group.as_ref() {
+            let group_state = compute_configuration_group_tristate(&configuration_rows.borrow());
+            native_tree_checkboxes::set_check_state_tri(tree.get_handle(), group, group_state);
+        }
     }
 
     let any_install_or_update = package_rows.borrow().iter().any(|row| {
@@ -2820,11 +3233,18 @@ fn refresh_after_packages_toggle(
     can_install.set(any_install_or_update);
 
     if let Some(selected) = tree.get_selection() {
-        let items = package_items.borrow();
-        if let Some(idx) = leaf_index_for(&items, &selected) {
-            if let Some(row) = package_rows.borrow().get(idx) {
-                details.set_value(&package_details(row));
+        match classify_leaf(&package_items.borrow(), &selected) {
+            Some(WhichLeaf::Packages(idx)) => {
+                if let Some(row) = package_rows.borrow().get(idx) {
+                    details.set_value(&package_details(row));
+                }
             }
+            Some(WhichLeaf::Configuration(idx)) => {
+                if let Some(row) = configuration_rows.borrow().get(idx) {
+                    details.set_value(&row.details);
+                }
+            }
+            None => {}
         }
     }
 
@@ -2836,52 +3256,81 @@ fn refresh_after_packages_toggle(
     );
 }
 
-/// Windows-only: implement the parent-checkbox propagation.
+/// Windows-only: implement the parent-checkbox propagation for the
+/// requested group.
 ///
 /// Convention (matches Windows Explorer / Visual Studio Installer):
 /// - clicking a fully-checked parent → uncheck all available children;
 /// - clicking an unchecked or mixed parent → check all available children.
 ///
-/// We read the pre-click row state to compute intent, then apply the new
-/// target to every available row (mutating action labels through
-/// `apply_checkbox_state_to_package_row` so summaries flip Install /
-/// Update / Keep), and finally repaint each leaf's native checkbox + row
-/// label so the visual reflects what we wrote into `package_rows`.
-/// Unavailable rows are left untouched: their checkboxes stay disabled
-/// and they don't enter the install plan regardless of what the parent
-/// is doing.
+/// Package leaves route mutations through `apply_checkbox_state_to_package_row`
+/// so action labels flip Install / Update / Keep; configuration leaves
+/// just flip `row.selected`. Unavailable rows in either group are left
+/// untouched.
 #[cfg(target_os = "windows")]
 fn propagate_group_toggle_to_leaves(
     tree: &TreeCtrl,
     package_items: &PackagesStateCell,
+    target_group: WhichGroup,
     package_rows: &Rc<RefCell<Vec<crate::PackageRow>>>,
+    configuration_rows: &Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     wizard_model: &WizardModel,
 ) {
-    let pre_state = compute_packages_group_tristate(&package_rows.borrow());
-    let target = !matches!(pre_state, native_tree_checkboxes::TriState::Checked);
-
-    let leaves: Vec<TreeItemId> = package_items
-        .borrow()
-        .leaves
-        .iter()
-        .map(|leaf| leaf.clone())
-        .collect();
-
-    {
-        let mut rows = package_rows.borrow_mut();
-        for row in rows.iter_mut().filter(|r| r.available_for_target) {
-            let _ = apply_checkbox_state_to_package_row(wizard_model, row, target);
+    match target_group {
+        WhichGroup::Packages => {
+            let pre_state = compute_packages_group_tristate(&package_rows.borrow());
+            let target = !matches!(pre_state, native_tree_checkboxes::TriState::Checked);
+            let leaves: Vec<TreeItemId> = package_items
+                .borrow()
+                .packages_leaves
+                .iter()
+                .map(|leaf| leaf.clone())
+                .collect();
+            {
+                let mut rows = package_rows.borrow_mut();
+                for row in rows.iter_mut().filter(|r| r.available_for_target) {
+                    let _ = apply_checkbox_state_to_package_row(wizard_model, row, target);
+                }
+            }
+            let rows = package_rows.borrow();
+            let hwnd = tree.get_handle();
+            for (idx, leaf) in leaves.iter().enumerate() {
+                let Some(row) = rows.get(idx) else { continue };
+                if row.available_for_target {
+                    native_tree_checkboxes::set_check_state(hwnd, leaf, row.selected);
+                    let label = format_row_label(&row.summary, row.selected);
+                    tree.set_item_text(leaf, &label);
+                }
+            }
         }
-    }
-
-    let rows = package_rows.borrow();
-    let hwnd = tree.get_handle();
-    for (idx, leaf) in leaves.iter().enumerate() {
-        let Some(row) = rows.get(idx) else { continue };
-        if row.available_for_target {
-            native_tree_checkboxes::set_check_state(hwnd, leaf, row.selected);
-            let label = format_row_label(&row.summary, row.selected);
-            tree.set_item_text(leaf, &label);
+        WhichGroup::Configuration => {
+            let pre_state = compute_configuration_group_tristate(&configuration_rows.borrow());
+            let target = !matches!(pre_state, native_tree_checkboxes::TriState::Checked);
+            let leaves: Vec<TreeItemId> = package_items
+                .borrow()
+                .configuration_leaves
+                .iter()
+                .map(|leaf| leaf.clone())
+                .collect();
+            {
+                let mut rows = configuration_rows.borrow_mut();
+                for row in rows
+                    .iter_mut()
+                    .filter(|r| r.available_for_target && !r.already_applied)
+                {
+                    row.selected = target;
+                }
+            }
+            let rows = configuration_rows.borrow();
+            let hwnd = tree.get_handle();
+            for (idx, leaf) in leaves.iter().enumerate() {
+                let Some(row) = rows.get(idx) else { continue };
+                if row.available_for_target && !row.already_applied {
+                    native_tree_checkboxes::set_check_state(hwnd, leaf, row.selected);
+                    let label = format_row_label(&row.summary, row.selected);
+                    tree.set_item_text(leaf, &label);
+                }
+            }
         }
     }
 }
@@ -2908,6 +3357,7 @@ fn build_packages_page(
     page: &Panel,
     model: &WizardModel,
     package_rows: Rc<RefCell<Vec<crate::PackageRow>>>,
+    configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     package_items: PackagesStateCell,
     can_install: Rc<Cell<bool>>,
 ) -> (PackagesView, TextCtrl, CheckBox, TextCtrl) {
@@ -2937,11 +3387,14 @@ fn build_packages_page(
     // can find the model the next time the user toggles a row.
     let tree_data = PackageTreeData::new(
         Rc::clone(&package_rows),
+        Rc::clone(&configuration_rows),
         model.text.packages_tree_group_label.clone(),
+        model.text.configuration_tree_group_label.clone(),
     );
     let dv_model = build_packages_tree_model(
         tree_data,
         Rc::clone(&package_rows),
+        Rc::clone(&configuration_rows),
         Rc::clone(&package_items),
         Rc::clone(&can_install),
         model.clone(),
@@ -3099,6 +3552,7 @@ fn build_packages_page(
 fn build_packages_tree_model(
     data: PackageTreeData,
     rows: Rc<RefCell<Vec<crate::PackageRow>>>,
+    configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     model_cell: PackagesStateCell,
     can_install: Rc<Cell<bool>>,
     wizard_model: WizardModel,
@@ -3108,6 +3562,11 @@ fn build_packages_tree_model(
     let rows_for_get_value = Rc::clone(&rows);
     let rows_for_set_value = Rc::clone(&rows);
     let rows_for_is_enabled = Rc::clone(&rows);
+    let configuration_rows_for_get_value = Rc::clone(&configuration_rows);
+    let configuration_rows_for_set_value = Rc::clone(&configuration_rows);
+    let configuration_rows_for_is_enabled = Rc::clone(&configuration_rows);
+    let configuration_rows_for_recompute = Rc::clone(&configuration_rows);
+    let wizard_model_for_recompute = wizard_model.clone();
     let model_cell_for_set_value = Rc::clone(&model_cell);
 
     CustomDataViewTreeModel::new(
@@ -3117,8 +3576,9 @@ fn build_packages_tree_model(
             match item {
                 None => None,
                 Some(node) => match node.kind {
-                    NodeKind::Group => None,
-                    NodeKind::Package(_) => Some(data.group_ptr() as *mut Node),
+                    NodeKind::PackagesGroup | NodeKind::ConfigurationGroup => None,
+                    NodeKind::Package(_) => Some(data.packages_group_ptr() as *mut Node),
+                    NodeKind::Configuration(_) => Some(data.configuration_group_ptr() as *mut Node),
                 },
             }
         },
@@ -3126,20 +3586,31 @@ fn build_packages_tree_model(
         |_data: &PackageTreeData, item: Option<&Node>| -> bool {
             match item {
                 None => true,
-                Some(node) => matches!(node.kind, NodeKind::Group),
+                Some(node) => matches!(
+                    node.kind,
+                    NodeKind::PackagesGroup | NodeKind::ConfigurationGroup
+                ),
             }
         },
         // get_children
         |data: &PackageTreeData, item: Option<&Node>| -> Vec<*mut Node> {
             match item {
-                None => vec![data.group_ptr() as *mut Node],
+                None => vec![
+                    data.packages_group_ptr() as *mut Node,
+                    data.configuration_group_ptr() as *mut Node,
+                ],
                 Some(node) => match node.kind {
-                    NodeKind::Group => data
+                    NodeKind::PackagesGroup => data
                         .all_package_ptrs()
                         .into_iter()
                         .map(|p| p as *mut Node)
                         .collect(),
-                    NodeKind::Package(_) => Vec::new(),
+                    NodeKind::ConfigurationGroup => data
+                        .all_configuration_ptrs()
+                        .into_iter()
+                        .map(|p| p as *mut Node)
+                        .collect(),
+                    NodeKind::Package(_) | NodeKind::Configuration(_) => Vec::new(),
                 },
             }
         },
@@ -3149,7 +3620,7 @@ fn build_packages_tree_model(
                 return Variant::from_string("");
             };
             match node.kind {
-                NodeKind::Group => {
+                NodeKind::PackagesGroup => {
                     if col == PACKAGE_COL_TOGGLE {
                         // Aggregate state: true only if every available row
                         // is selected. The standard toggle renderer can't
@@ -3164,12 +3635,37 @@ fn build_packages_tree_model(
                             .all(|r| r.selected);
                         Variant::from_bool(any_available && all_checked)
                     } else {
-                        Variant::from_string(&data.group_label)
+                        Variant::from_string(&data.packages_group_label)
                     }
                 }
                 NodeKind::Package(idx) => {
                     let rows = rows_for_get_value.borrow();
                     let Some(row) = rows.get(idx) else {
+                        return Variant::from_string("");
+                    };
+                    if col == PACKAGE_COL_TOGGLE {
+                        Variant::from_bool(row.selected)
+                    } else {
+                        Variant::from_string(&row.summary)
+                    }
+                }
+                NodeKind::ConfigurationGroup => {
+                    if col == PACKAGE_COL_TOGGLE {
+                        let cfg_rows = configuration_rows_for_get_value.borrow();
+                        let mut any_available = false;
+                        let all_checked = cfg_rows
+                            .iter()
+                            .filter(|r| r.available_for_target)
+                            .inspect(|_| any_available = true)
+                            .all(|r| r.selected);
+                        Variant::from_bool(any_available && all_checked)
+                    } else {
+                        Variant::from_string(&data.configuration_group_label)
+                    }
+                }
+                NodeKind::Configuration(idx) => {
+                    let cfg_rows = configuration_rows_for_get_value.borrow();
+                    let Some(row) = cfg_rows.get(idx) else {
                         return Variant::from_string("");
                     };
                     if col == PACKAGE_COL_TOGGLE {
@@ -3192,7 +3688,7 @@ fn build_packages_tree_model(
                 let new_state = var.get_bool().unwrap_or(false);
 
                 match node.kind {
-                    NodeKind::Group => {
+                    NodeKind::PackagesGroup => {
                         // Group toggle propagates to every available leaf;
                         // unavailable rows stay untouched so the install
                         // plan never carries something we can't honor.
@@ -3217,6 +3713,24 @@ fn build_packages_tree_model(
                         }
                         let _ = apply_checkbox_state_to_package_row(&wizard_model, row, new_state);
                     }
+                    NodeKind::ConfigurationGroup => {
+                        let mut cfg_rows = configuration_rows_for_set_value.borrow_mut();
+                        for row in cfg_rows.iter_mut() {
+                            if row.available_for_target && !row.already_applied {
+                                row.selected = new_state;
+                            }
+                        }
+                    }
+                    NodeKind::Configuration(idx) => {
+                        let mut cfg_rows = configuration_rows_for_set_value.borrow_mut();
+                        let Some(row) = cfg_rows.get_mut(idx) else {
+                            return false;
+                        };
+                        if !row.available_for_target || row.already_applied {
+                            return false;
+                        }
+                        row.selected = new_state;
+                    }
                 }
 
                 let any_install_or_update = rows_for_set_value.borrow().iter().any(|row| {
@@ -3225,6 +3739,28 @@ fn build_packages_tree_model(
                 });
                 can_install.set(any_install_or_update);
 
+                // Recompute configuration row availability whenever a
+                // package toggle could have flipped a dependency state.
+                let recomputed_configuration =
+                    matches!(node.kind, NodeKind::PackagesGroup | NodeKind::Package(_));
+                if recomputed_configuration {
+                    if let Ok(localizer) =
+                        crate::localizer_from_options(&wizard_model_for_recompute.bootstrap_options)
+                    {
+                        let package_rows_snapshot = rows_for_set_value.borrow();
+                        let mut cfg_rows = configuration_rows_for_recompute.borrow_mut();
+                        // None for the resource-path argument: a package
+                        // toggle can't change `reapack.ini`, so preserve
+                        // each row's existing `already_applied` flag.
+                        crate::recompute_configuration_row_availability(
+                            &localizer,
+                            &package_rows_snapshot,
+                            None,
+                            &mut cfg_rows,
+                        );
+                    }
+                }
+
                 // Push the cell changes back into the view. SetValue's
                 // true return only auto-refreshes the (item, col) we set;
                 // we also need to refresh the row's label cell (the action
@@ -3232,8 +3768,8 @@ fn build_packages_tree_model(
                 // aggregate cell.
                 if let Some(model) = model_cell_for_set_value.borrow().as_ref() {
                     match node.kind {
-                        NodeKind::Group => {
-                            let parent_ptr = data.group_ptr();
+                        NodeKind::PackagesGroup => {
+                            let parent_ptr = data.packages_group_ptr();
                             let leaf_ptrs = data.all_package_ptrs();
                             model.items_changed(&leaf_ptrs);
                             model.item_value_changed(parent_ptr, PACKAGE_COL_TOGGLE);
@@ -3241,8 +3777,29 @@ fn build_packages_tree_model(
                         NodeKind::Package(idx) => {
                             let leaf_ptr = data.package_ptr(idx);
                             model.item_value_changed(leaf_ptr, PACKAGE_COL_LABEL);
-                            model.item_value_changed(data.group_ptr(), PACKAGE_COL_TOGGLE);
+                            model.item_value_changed(data.packages_group_ptr(), PACKAGE_COL_TOGGLE);
                         }
+                        NodeKind::ConfigurationGroup => {
+                            let parent_ptr = data.configuration_group_ptr();
+                            let leaf_ptrs = data.all_configuration_ptrs();
+                            model.items_changed(&leaf_ptrs);
+                            model.item_value_changed(parent_ptr, PACKAGE_COL_TOGGLE);
+                        }
+                        NodeKind::Configuration(idx) => {
+                            let leaf_ptr = data.configuration_ptr(idx);
+                            model.item_value_changed(leaf_ptr, PACKAGE_COL_LABEL);
+                            model.item_value_changed(
+                                data.configuration_group_ptr(),
+                                PACKAGE_COL_TOGGLE,
+                            );
+                        }
+                    }
+
+                    if recomputed_configuration {
+                        let cfg_leaf_ptrs = data.all_configuration_ptrs();
+                        model.items_changed(&cfg_leaf_ptrs);
+                        model
+                            .item_value_changed(data.configuration_group_ptr(), PACKAGE_COL_TOGGLE);
                     }
                 }
 
@@ -3256,11 +3813,16 @@ fn build_packages_tree_model(
                     return true;
                 };
                 match node.kind {
-                    NodeKind::Group => true,
+                    NodeKind::PackagesGroup | NodeKind::ConfigurationGroup => true,
                     NodeKind::Package(idx) => rows_for_is_enabled
                         .borrow()
                         .get(idx)
                         .map(|row| row.available_for_target)
+                        .unwrap_or(true),
+                    NodeKind::Configuration(idx) => configuration_rows_for_is_enabled
+                        .borrow()
+                        .get(idx)
+                        .map(|row| row.available_for_target && !row.already_applied)
                         .unwrap_or(true),
                 }
             },
@@ -3272,21 +3834,26 @@ fn build_packages_tree_model(
     )
 }
 
-/// Non-Windows: expand the synthetic "Packages" group so the leaves are
-/// visible without an extra click. Reads the group's pointer from the
-/// model's userdata so the model owns the canonical Node addresses.
+/// Non-Windows: expand both synthetic group nodes ("Packages" and
+/// "Configuration") so all leaves are visible without an extra click.
+/// Reads the group pointers from the model's userdata so the model
+/// owns the canonical Node addresses.
 #[cfg(not(target_os = "windows"))]
 fn expand_packages_group(tree: &PackagesView, model: &CustomDataViewTreeModel) {
-    let mut group_ptr: *const Node = std::ptr::null();
+    let mut packages_group_ptr: *const Node = std::ptr::null();
+    let mut configuration_group_ptr: *const Node = std::ptr::null();
     model.with_userdata_mut::<PackageTreeData, ()>(|data| {
-        group_ptr = data.group_ptr();
+        packages_group_ptr = data.packages_group_ptr();
+        configuration_group_ptr = data.configuration_group_ptr();
     });
-    if group_ptr.is_null() {
-        return;
-    }
-    let item = wxdragon::widgets::dataview::DataViewItem::from_id_ptr(group_ptr);
-    if item.is_ok() {
-        tree.expand(&item);
+    for ptr in [packages_group_ptr, configuration_group_ptr] {
+        if ptr.is_null() {
+            continue;
+        }
+        let item = wxdragon::widgets::dataview::DataViewItem::from_id_ptr(ptr);
+        if item.is_ok() {
+            tree.expand(&item);
+        }
     }
 }
 
@@ -3303,31 +3870,45 @@ fn rebuild_packages_tree_model(
     package_items: &PackagesStateCell,
     model: &WizardModel,
     package_rows: &[PackageRow],
+    configuration_rows: &[ConfigurationRow],
 ) {
     let Some(dv_model) = package_items.borrow().as_ref().cloned() else {
         return;
     };
-    let group_label = model.text.packages_tree_group_label.clone();
+    let packages_group_label = model.text.packages_tree_group_label.clone();
+    let configuration_group_label = model.text.configuration_tree_group_label.clone();
     dv_model.with_userdata_mut::<PackageTreeData, ()>(|data| {
-        let len = package_rows.len();
-        // Sync the shared Rc<RefCell<Vec<PackageRow>>> in case the caller
-        // hasn't pre-replaced it (the post-install hook does, the version-
-        // check finish handler also does — be defensive in case a future
-        // caller forgets).
-        if data.rows.borrow().len() != len {
+        // Sync the shared Rc<RefCell<Vec<_>>>s in case the caller
+        // hasn't pre-replaced them (the post-install hook does, the
+        // version-check finish handler also does — be defensive in
+        // case a future caller forgets).
+        let pkg_len = package_rows.len();
+        if data.rows.borrow().len() != pkg_len {
             *data.rows.borrow_mut() = package_rows.to_vec();
         }
-        data.group_label = group_label;
-        data.package_nodes = (0..len)
+        let cfg_len = configuration_rows.len();
+        if data.configuration_rows.borrow().len() != cfg_len {
+            *data.configuration_rows.borrow_mut() = configuration_rows.to_vec();
+        }
+        data.packages_group_label = packages_group_label;
+        data.configuration_group_label = configuration_group_label;
+        data.package_nodes = (0..pkg_len)
             .map(|i| {
                 Box::new(Node {
                     kind: NodeKind::Package(i),
                 })
             })
             .collect();
+        data.configuration_nodes = (0..cfg_len)
+            .map(|i| {
+                Box::new(Node {
+                    kind: NodeKind::Configuration(i),
+                })
+            })
+            .collect();
     });
     dv_model.cleared();
-    // wxDataViewCtrl auto-collapses the group on Cleared; re-expand so
+    // wxDataViewCtrl auto-collapses the groups on Cleared; re-expand so
     // the user sees the leaves immediately.
     expand_packages_group(tree, &dv_model);
 }
@@ -3341,8 +3922,9 @@ fn refresh_package_checklist(
     osara_keymap_note: &TextCtrl,
     model: &WizardModel,
     rows: &[crate::PackageRow],
+    configuration_rows: &[ConfigurationRow],
 ) {
-    rebuild_packages_tree_model(tree, package_items, model, rows);
+    rebuild_packages_tree_model(tree, package_items, model, rows, configuration_rows);
     details.set_value(&rows.first().map(package_details).unwrap_or_default());
     sync_osara_keymap_widgets(model, rows, osara_keymap_replace, osara_keymap_note);
 }
@@ -3353,12 +3935,14 @@ fn rebuild_package_list_widgets(
     package_items: &PackagesStateCell,
     model: &WizardModel,
     package_rows: &[PackageRow],
+    configuration_rows: &[ConfigurationRow],
 ) {
     rebuild_packages_tree_model(
         &widgets.package_checklist,
         package_items,
         model,
         package_rows,
+        configuration_rows,
     );
     let initial = package_rows
         .first()
@@ -3824,8 +4408,9 @@ fn refresh_package_checklist(
     osara_keymap_note: &TextCtrl,
     model: &WizardModel,
     rows: &[crate::PackageRow],
+    configuration_rows: &[ConfigurationRow],
 ) {
-    populate_packages_tree(tree, package_items, model, rows);
+    populate_packages_tree(tree, package_items, model, rows, configuration_rows);
     details.set_value(&rows.first().map(package_details).unwrap_or_default());
     sync_osara_keymap_widgets(model, rows, osara_keymap_replace, osara_keymap_note);
 }
@@ -4068,6 +4653,7 @@ mod tests {
             portable: true,
             selected: true,
             writable: true,
+            architecture: rabbit_core::model::Architecture::current(),
         };
 
         assert_eq!(

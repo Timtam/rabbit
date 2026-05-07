@@ -81,6 +81,7 @@ pub struct WizardModel {
     pub target_rows: Vec<TargetRow>,
     pub selected_target_index: Option<usize>,
     pub package_rows: Vec<PackageRow>,
+    pub configuration_rows: Vec<ConfigurationRow>,
     pub available_packages: Vec<AvailablePackage>,
     pub review_lines: Vec<String>,
     pub notes: Vec<String>,
@@ -118,6 +119,7 @@ pub struct WizardText {
     pub packages_heading: String,
     pub packages_list_label: String,
     pub packages_tree_group_label: String,
+    pub configuration_tree_group_label: String,
     pub reapack_ack_heading: String,
     pub reapack_ack_body: String,
     pub reapack_ack_link_label: String,
@@ -244,6 +246,52 @@ pub struct PackageRow {
     pub unavailability_reason: Option<String>,
 }
 
+/// Wizard-side row for a single [`crate::configuration::ConfigurationStep`]
+/// (re-exported from `rabbit-core` as `rabbit_core::configuration::*`).
+/// Mirrors the `PackageRow` shape just enough that the tree UI can render
+/// it as a sibling leaf under the "Configuration" group, but configuration
+/// steps don't have versions / actions / artifacts, so most package
+/// fields don't apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigurationRow {
+    /// Stable id of the underlying `ConfigurationStep`.
+    pub step_id: String,
+    /// Localized step name (the row's primary label).
+    pub display_name: String,
+    /// Localized free-form description shown in the package-details
+    /// pane when the row is selected.
+    pub description: String,
+    /// Whether the row's checkbox is currently ticked. Initialised from
+    /// the step's `recommended` flag intersected with the row's
+    /// `available_for_target`.
+    pub selected: bool,
+    /// Row label as rendered in the tree. For configuration rows the
+    /// summary is just `display_name` today; kept as a separate field
+    /// so the wizard's tree-refresh helpers can stay symmetric with
+    /// PackageRow.
+    pub summary: String,
+    /// Free-form details shown alongside `description` (status hints,
+    /// dependency reasons). Today carries the localized
+    /// "(unavailable: …)" sentence when the dependency package isn't
+    /// queued for install.
+    pub details: String,
+    /// `true` iff the step's dependency package (if any) is either
+    /// already installed on the selected target or queued for install
+    /// in the current package plan. The wizard greys out the row's
+    /// checkbox when this is `false`.
+    pub available_for_target: bool,
+    /// `true` iff the step's effect is already in place on disk under
+    /// the selected target (e.g. the ReaPack remote URL is already
+    /// listed in `reapack.ini`). The wizard treats this like
+    /// `available_for_target == false` for interactivity (the checkbox
+    /// is disabled) but uses a different reason string so the user
+    /// understands the row isn't unsupported, just done.
+    pub already_applied: bool,
+    /// Localized reason matching `available_for_target == false` OR
+    /// `already_applied == true`. `None` when the row is interactive.
+    pub unavailability_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WizardControls {
     pub back_label: String,
@@ -302,6 +350,9 @@ pub struct WizardInstallRequest {
     /// so the install step actually runs instead of being silently
     /// skipped.
     pub force_reinstall_packages: Vec<String>,
+    /// Configuration step ids the user opted in to. Forwarded straight
+    /// through to [`SetupOptions::configuration_step_ids`].
+    pub configuration_step_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -458,6 +509,11 @@ fn model_from_plan_with_options(
         &package_specs,
         &plan.actions,
     );
+    let target_resource_path = selected_target_index
+        .and_then(|idx| target_rows.get(idx))
+        .map(|row| row.path.clone());
+    let configuration_rows =
+        configuration_rows(localizer, &package_rows, target_resource_path.as_deref());
     let review_lines = review_lines(localizer, &target_rows, &package_rows, &plan.notes);
     let can_install = package_rows
         .iter()
@@ -473,6 +529,7 @@ fn model_from_plan_with_options(
         selected_target_index,
         target_rows,
         package_rows,
+        configuration_rows,
         available_packages,
         review_lines,
         notes: plan.notes,
@@ -563,6 +620,9 @@ fn wizard_text(localizer: &Localizer) -> WizardText {
         packages_heading: localizer.text("wizard-packages-heading").value,
         packages_list_label: localizer.text("wizard-packages-list-label").value,
         packages_tree_group_label: localizer.text("wizard-packages-tree-group-label").value,
+        configuration_tree_group_label: localizer
+            .text("wizard-configuration-tree-group-label")
+            .value,
         reapack_ack_heading: localizer.text("wizard-reapack-ack-heading").value,
         reapack_ack_body: localizer.text("wizard-reapack-ack-body").value,
         reapack_ack_link_label: localizer.text("wizard-reapack-ack-link-label").value,
@@ -822,11 +882,13 @@ pub fn install_request_from_target(
     selected_package_indices: &[usize],
     options: WizardInstallOptions,
 ) -> Result<WizardInstallRequest> {
+    let configuration_step_ids = selected_configuration_step_ids(&model.configuration_rows);
     install_request_from_target_and_rows(
         model,
         target,
         &model.package_rows,
         selected_package_indices,
+        configuration_step_ids,
         options,
     )
 }
@@ -836,6 +898,7 @@ pub fn install_request_from_target_and_rows(
     target: &TargetRow,
     package_rows: &[PackageRow],
     selected_package_indices: &[usize],
+    configuration_step_ids: Vec<String>,
     options: WizardInstallOptions,
 ) -> Result<WizardInstallRequest> {
     if !target.writable {
@@ -848,9 +911,10 @@ pub fn install_request_from_target_and_rows(
     }
 
     let package_ids = package_ids_for_rows(package_rows, selected_package_indices);
-    if package_ids.is_empty() {
+    if package_ids.is_empty() && configuration_step_ids.is_empty() {
         return Err(RabbitError::PreflightFailed {
-            message: "No package was selected for installation or update.".to_string(),
+            message: "No package or configuration step was selected for installation or update."
+                .to_string(),
         });
     }
     let osara_selected = package_ids.iter().any(|id| id == PACKAGE_OSARA);
@@ -890,6 +954,7 @@ pub fn install_request_from_target_and_rows(
         },
         cache_dir: options.cache_dir.unwrap_or_else(default_cache_dir),
         force_reinstall_packages,
+        configuration_step_ids,
     })
 }
 
@@ -1467,6 +1532,7 @@ pub fn execute_wizard_install(request: WizardInstallRequest) -> Result<SetupRepo
             target_app_path: request.target_app_path.clone(),
             lock_path: None,
             force_reinstall_packages: request.force_reinstall_packages.clone(),
+            configuration_step_ids: request.configuration_step_ids.clone(),
         },
     )
 }
@@ -2298,6 +2364,281 @@ fn package_rows(
                 unavailability_reason: None,
             }
         })
+        .collect()
+}
+
+/// Build [`ConfigurationRow`]s from `rabbit-core`'s builtin step
+/// catalogue, gating each row on whether its dependency package is
+/// either already installed (action `Keep`) or queued for install /
+/// update in the current package plan. Re-checked whenever the
+/// package plan is rebuilt (target switch, post-install rescan, etc.).
+pub fn configuration_rows(
+    localizer: &Localizer,
+    package_rows: &[PackageRow],
+    target_resource_path: Option<&Path>,
+) -> Vec<ConfigurationRow> {
+    let installed_or_pending: BTreeMap<&str, bool> = package_rows
+        .iter()
+        .map(|row| {
+            (
+                row.package_id.as_str(),
+                // "is or will be on disk after this run":
+                //  - `Keep` means already current → on disk
+                //  - `Install`/`Update` count if the user keeps the
+                //    row checked, but at row-build time we honour the
+                //    plan's current decision (the wizard later flips
+                //    rows live via `apply_checkbox_state_to_package_row`,
+                //    and `recompute_configuration_row_availability`
+                //    re-evaluates after each toggle).
+                matches!(
+                    row.action,
+                    PlanActionKind::Install | PlanActionKind::Update | PlanActionKind::Keep,
+                ),
+            )
+        })
+        .collect();
+
+    rabbit_core::configuration::builtin_configuration_steps()
+        .into_iter()
+        .map(|step| {
+            let display_name = localizer.text(&step.display_name_key).value;
+            let description = {
+                let text = localizer.text(&step.display_description_key);
+                if text.missing {
+                    String::new()
+                } else {
+                    text.value
+                }
+            };
+            let dependency_satisfied = step
+                .requires_package_id
+                .as_deref()
+                .map(|pkg| installed_or_pending.get(pkg).copied().unwrap_or(false))
+                .unwrap_or(true);
+            let already_applied = target_resource_path
+                .and_then(|path| {
+                    rabbit_core::configuration::is_configuration_step_applied(path, &step).ok()
+                })
+                .unwrap_or(false);
+
+            let unavailability_reason = build_configuration_unavailability_reason(
+                localizer,
+                &step,
+                dependency_satisfied,
+                already_applied,
+            );
+
+            let summary = configuration_row_summary(
+                localizer,
+                &step,
+                &display_name,
+                dependency_satisfied,
+                already_applied,
+            );
+            let details = if description.is_empty() {
+                summary.clone()
+            } else {
+                format!("{summary}\n\n{description}")
+            };
+
+            ConfigurationRow {
+                step_id: step.id.clone(),
+                display_name,
+                description,
+                selected: dependency_satisfied && !already_applied && step.recommended,
+                summary,
+                details,
+                available_for_target: dependency_satisfied,
+                already_applied,
+                unavailability_reason,
+            }
+        })
+        .collect()
+}
+
+/// Build the tree-row label for a configuration step: the localized
+/// display name on its own when the row is actionable, otherwise the
+/// display name plus a short parenthesised status tag (`(requires
+/// ReaPack)`, `(already applied)`) so the indicator is visible without
+/// the user having to focus the row to read its details.
+fn configuration_row_summary(
+    localizer: &Localizer,
+    step: &rabbit_core::configuration::ConfigurationStep,
+    display_name: &str,
+    dependency_satisfied: bool,
+    already_applied: bool,
+) -> String {
+    let status = if !dependency_satisfied {
+        let dep_id = step.requires_package_id.clone().unwrap_or_default();
+        let dep_name = localizer.text(&format!("package-{dep_id}"));
+        let dep_label = if dep_name.missing {
+            dep_id
+        } else {
+            dep_name.value
+        };
+        Some(
+            localizer
+                .format(
+                    "wizard-configuration-row-status-requires",
+                    &[("package", dep_label.as_str())],
+                )
+                .value,
+        )
+    } else if already_applied {
+        Some(
+            localizer
+                .text("wizard-configuration-row-status-already-applied")
+                .value,
+        )
+    } else {
+        None
+    };
+    match status {
+        Some(reason) => {
+            let suffix = localizer
+                .format(
+                    "wizard-configuration-row-summary-suffix",
+                    &[("reason", reason.as_str())],
+                )
+                .value;
+            format!("{display_name} {suffix}")
+        }
+        None => display_name.to_string(),
+    }
+}
+
+/// Build the localized "(unavailable: …)" / "(already configured)"
+/// sentence shown on a configuration row that isn't actionable.
+/// `dependency_satisfied == false` takes precedence over
+/// `already_applied`: if the dep is missing and the row is also already
+/// applied, we surface the dep error so the user knows the row is
+/// gated rather than complete.
+fn build_configuration_unavailability_reason(
+    localizer: &Localizer,
+    step: &rabbit_core::configuration::ConfigurationStep,
+    dependency_satisfied: bool,
+    already_applied: bool,
+) -> Option<String> {
+    if !dependency_satisfied {
+        let dep_id = step.requires_package_id.clone().unwrap_or_default();
+        let dep_name = localizer.text(&format!("package-{dep_id}"));
+        let dep_label = if dep_name.missing {
+            dep_id
+        } else {
+            dep_name.value
+        };
+        return Some(
+            localizer
+                .format(
+                    "wizard-configuration-row-unavailable",
+                    &[("package", dep_label.as_str())],
+                )
+                .value,
+        );
+    }
+    if already_applied {
+        return Some(
+            localizer
+                .text("wizard-configuration-row-already-applied")
+                .value,
+        );
+    }
+    None
+}
+
+/// Re-evaluate each [`ConfigurationRow`]'s `available_for_target` /
+/// `selected` / `unavailability_reason` against the current package
+/// rows. Called by the wizard whenever the user toggles a package row
+/// — e.g. unticking ReaPack should immediately disable the
+/// "configure REAPER Accessibility ReaPack remote" row, and re-ticking
+/// it should re-enable + re-recommend the row.
+///
+/// Selection is preserved across the recompute *unless* the row goes
+/// from available → unavailable, in which case it's force-unticked
+/// (we never want to ship the install with a configuration step
+/// queued whose dependency isn't available).
+pub fn recompute_configuration_row_availability(
+    localizer: &Localizer,
+    package_rows: &[PackageRow],
+    target_resource_path: Option<&Path>,
+    configuration_rows: &mut [ConfigurationRow],
+) {
+    let installed_or_pending: BTreeMap<&str, bool> = package_rows
+        .iter()
+        .map(|row| {
+            (
+                row.package_id.as_str(),
+                row.available_for_target
+                    && matches!(
+                        row.action,
+                        PlanActionKind::Install | PlanActionKind::Update | PlanActionKind::Keep,
+                    ),
+            )
+        })
+        .collect();
+    let steps = rabbit_core::configuration::builtin_configuration_steps();
+    for row in configuration_rows.iter_mut() {
+        let Some(step) = steps.iter().find(|step| step.id == row.step_id) else {
+            continue;
+        };
+        let dependency_satisfied = step
+            .requires_package_id
+            .as_deref()
+            .map(|pkg| installed_or_pending.get(pkg).copied().unwrap_or(false))
+            .unwrap_or(true);
+        let already_applied = target_resource_path
+            .and_then(|path| {
+                rabbit_core::configuration::is_configuration_step_applied(path, step).ok()
+            })
+            .unwrap_or(row.already_applied);
+        let was_actionable = row.available_for_target && !row.already_applied;
+        row.available_for_target = dependency_satisfied;
+        row.already_applied = already_applied;
+        row.unavailability_reason = build_configuration_unavailability_reason(
+            localizer,
+            step,
+            dependency_satisfied,
+            already_applied,
+        );
+        // Refresh the row's tree-label so the inline status tag matches
+        // the new state (e.g. unticking ReaPack while the row is
+        // visible adds "(requires ReaPack)"; re-ticking it removes the
+        // tag).
+        row.summary = configuration_row_summary(
+            localizer,
+            step,
+            &row.display_name,
+            dependency_satisfied,
+            already_applied,
+        );
+        row.details = if row.description.is_empty() {
+            row.summary.clone()
+        } else {
+            format!("{}\n\n{}", row.summary, row.description)
+        };
+        let actionable_now = dependency_satisfied && !already_applied;
+        if !actionable_now {
+            row.selected = false;
+        } else if !was_actionable {
+            // Re-becoming actionable (dep just got satisfied, or the
+            // user reverted an external apply): restore the
+            // recommended-default tick so they don't have to manually
+            // re-check. If the row was actionable before and the user
+            // explicitly unticked it, that decision is preserved
+            // because `was_actionable` was already true.
+            row.selected = step.recommended;
+        }
+    }
+}
+
+/// Return the step ids of configuration rows that are both actionable
+/// (available + not already applied) and currently selected. Mirrors
+/// `package_ids_for_rows` but for configuration rows.
+pub fn selected_configuration_step_ids(configuration_rows: &[ConfigurationRow]) -> Vec<String> {
+    configuration_rows
+        .iter()
+        .filter(|row| row.available_for_target && !row.already_applied && row.selected)
+        .map(|row| row.step_id.clone())
         .collect()
 }
 
@@ -3256,6 +3597,7 @@ mod tests {
                     message: "This build has not implemented the planned unattended vendor installer execution path yet. RABBIT did not download or run the artifact.".to_string(),
                 }],
             },
+            configuration_steps: Vec::new(),
         };
 
         let summary = super::summarize_setup_report(&model, &report);
@@ -3379,6 +3721,7 @@ mod tests {
                     message: "Single extension binary handled by RABBIT installer.".to_string(),
                 }],
             },
+            configuration_steps: Vec::new(),
         };
 
         let summary = super::summarize_setup_report(&model, &report);
@@ -3463,6 +3806,7 @@ mod tests {
                     message: "RABBIT ran the upstream installer unattended, verified the expected target paths, and updated the RABBIT receipt.".to_string(),
                 }],
             },
+            configuration_steps: Vec::new(),
         };
 
         let summary = super::summarize_setup_report(&model, &report);
@@ -3757,6 +4101,7 @@ mod tests {
                 receipt_backup_manifest_path: None,
                 items: Vec::new(),
             },
+            configuration_steps: Vec::new(),
         }
     }
 
@@ -3774,6 +4119,7 @@ mod tests {
             osara_keymap_choice: OsaraKeymapChoice::ReplaceCurrent,
             cache_dir: PathBuf::from("C:/cache"),
             force_reinstall_packages: Vec::new(),
+            configuration_step_ids: Vec::new(),
         }
     }
 }

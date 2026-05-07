@@ -8,6 +8,212 @@ use crate::error::{IoPathContext, Result, SqlitePathContext};
 use crate::version::Version;
 
 pub const REAPACK_REGISTRY_RELATIVE_PATH: &str = "ReaPack/registry.db";
+pub const REAPACK_INI_RELATIVE_PATH: &str = "reapack.ini";
+
+/// Outcome of [`upsert_remote`]: tells callers whether the upsert was a
+/// no-op (the URL was already configured), whether we appended into an
+/// existing config, or whether we created a fresh `reapack.ini` (which
+/// happens when ReaPack hasn't run yet — the user's first REAPER launch
+/// will let ReaPack's own first-time migration add its default ReaTeam
+/// repos alongside the remote we just wrote).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteUpsertOutcome {
+    /// A remote with this URL was already configured; nothing changed.
+    AlreadyPresent,
+    /// Appended a new remote into the existing `reapack.ini`.
+    Added,
+    /// `reapack.ini` did not exist; created it with our remote as the
+    /// only entry.
+    CreatedFile,
+}
+
+/// Add a remote repository to ReaPack's `reapack.ini` config file.
+/// Idempotent on URL: re-running with the same URL is a no-op rather
+/// than appending a duplicate. Field encoding mirrors what ReaPack
+/// itself writes — `name|url|enabled|autoinstall`, where `enabled` is
+/// `0`/`1` and `autoinstall` is `0` (false), `1` (true), or `2` (use
+/// the global default; what ReaPack writes for repos that don't
+/// override the global setting).
+pub fn upsert_remote(resource_path: &Path, name: &str, url: &str) -> Result<RemoteUpsertOutcome> {
+    let ini_path = resource_path.join(REAPACK_INI_RELATIVE_PATH);
+    let original = if ini_path.is_file() {
+        fs::read_to_string(&ini_path).with_path(&ini_path)?
+    } else {
+        String::new()
+    };
+    let creating_new = original.is_empty();
+    // Preserve the file's existing line ending — Windows users typically
+    // have `\r\n` here, and overwriting to `\n` would visually scramble the
+    // file in tools that don't normalise.
+    let newline = if original.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+
+    if !creating_new && url_is_already_present(&original, url) {
+        return Ok(RemoteUpsertOutcome::AlreadyPresent);
+    }
+
+    let new_text = if creating_new {
+        format!(
+            "[remotes]{nl}size=1{nl}remote0={name}|{url}|1|2{nl}",
+            nl = newline,
+            name = name,
+            url = url,
+        )
+    } else {
+        rewrite_with_appended_remote(&original, name, url, newline)
+    };
+
+    fs::create_dir_all(resource_path).with_path(resource_path)?;
+    fs::write(&ini_path, new_text).with_path(&ini_path)?;
+
+    Ok(if creating_new {
+        RemoteUpsertOutcome::CreatedFile
+    } else {
+        RemoteUpsertOutcome::Added
+    })
+}
+
+/// `true` if `<resource_path>/reapack.ini` exists and lists `url` under
+/// its `[remotes]` section. Used by the wizard / CLI to suppress the
+/// "configure REAPER Accessibility ReaPack remote" step when the remote
+/// is already wired up — there is nothing for us to do, and re-offering
+/// it as actionable is misleading. A missing `reapack.ini` reads as
+/// "not configured".
+pub fn is_remote_configured(resource_path: &Path, url: &str) -> Result<bool> {
+    let ini_path = resource_path.join(REAPACK_INI_RELATIVE_PATH);
+    if !ini_path.is_file() {
+        return Ok(false);
+    }
+    let text = fs::read_to_string(&ini_path).with_path(&ini_path)?;
+    Ok(url_is_already_present(&text, url))
+}
+
+/// `true` when the `[remotes]` section already contains an entry whose
+/// URL field matches `url` (the second pipe-delimited field of any
+/// `remote<N>=...` line).
+fn url_is_already_present(text: &str, url: &str) -> bool {
+    let mut current_section: Option<String> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix('[') {
+            if let Some(name) = rest.strip_suffix(']') {
+                current_section = Some(name.to_string());
+                continue;
+            }
+        }
+        if current_section.as_deref() != Some("remotes") {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if !key.trim().starts_with("remote") {
+            continue;
+        }
+        let mut parts = value.trim().splitn(4, '|');
+        let _name = parts.next();
+        if let Some(existing_url) = parts.next() {
+            if existing_url == url {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Append a `remote<size>=...` entry into the existing `[remotes]`
+/// section and bump `size=`. If the section doesn't exist yet, append
+/// it at the end of the file as a fresh section with our entry as
+/// `remote0`.
+fn rewrite_with_appended_remote(original: &str, name: &str, url: &str, newline: &str) -> String {
+    let mut lines: Vec<String> = original.lines().map(|s| s.to_string()).collect();
+
+    // First pass: locate the `[remotes]` section and pull out its size +
+    // the highest existing remote index.
+    let mut current_section: Option<String> = None;
+    let mut section_start: Option<usize> = None;
+    let mut section_end: Option<usize> = None;
+    let mut size_line_idx: Option<usize> = None;
+    let mut current_size: u32 = 0;
+    let mut max_remote_idx: Option<u32> = None;
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix('[') {
+            if let Some(sec_name) = rest.strip_suffix(']') {
+                if current_section.as_deref() == Some("remotes") && section_end.is_none() {
+                    section_end = Some(i);
+                }
+                current_section = Some(sec_name.to_string());
+                if sec_name == "remotes" && section_start.is_none() {
+                    section_start = Some(i);
+                }
+                continue;
+            }
+        }
+        if current_section.as_deref() != Some("remotes") {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key == "size" {
+            current_size = value.trim().parse().unwrap_or(0);
+            size_line_idx = Some(i);
+        } else if let Some(idx_str) = key.strip_prefix("remote") {
+            if let Ok(idx) = idx_str.parse::<u32>() {
+                max_remote_idx = Some(max_remote_idx.map_or(idx, |m| m.max(idx)));
+            }
+        }
+    }
+    if current_section.as_deref() == Some("remotes") && section_end.is_none() {
+        section_end = Some(lines.len());
+    }
+
+    // Pick the next index. ReaPack treats `size` as authoritative for the
+    // count, so we honour that — but we also fall back to "max existing
+    // index + 1" if `size` is missing or out of sync.
+    let next_index = current_size.max(max_remote_idx.map_or(0, |m| m + 1));
+    let new_size = next_index + 1;
+    let new_remote_line = format!("remote{}={}|{}|1|2", next_index, name, url);
+    let new_size_line = format!("size={}", new_size);
+
+    if let (Some(start), Some(end)) = (section_start, section_end) {
+        // Insert the new remote line at the bottom of the existing
+        // `[remotes]` section. Update or insert `size=`.
+        if let Some(idx) = size_line_idx {
+            lines[idx] = new_size_line;
+            lines.insert(end, new_remote_line);
+        } else {
+            lines.insert(start + 1, new_size_line);
+            // The size insertion shifts the section_end by 1.
+            lines.insert(end + 1, new_remote_line);
+        }
+    } else {
+        // No `[remotes]` section yet — append a fresh one at the end.
+        if !lines.is_empty() {
+            let last_is_blank = lines.last().is_some_and(|line| line.trim().is_empty());
+            if !last_is_blank {
+                lines.push(String::new());
+            }
+        }
+        lines.push("[remotes]".to_string());
+        lines.push("size=1".to_string());
+        lines.push(format!("remote0={}|{}|1|2", name, url));
+    }
+
+    let mut joined = lines.join(newline);
+    if !original.ends_with(newline) || joined.is_empty() {
+        // Match the source file's trailing-newline convention.
+    }
+    if !joined.ends_with(newline) {
+        joined.push_str(newline);
+    }
+    joined
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReapackEntry {
@@ -134,7 +340,145 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::tempdir;
 
-    use super::{list_entries, package_owner_for_file};
+    use super::{
+        REAPACK_INI_RELATIVE_PATH, RemoteUpsertOutcome, is_remote_configured, list_entries,
+        package_owner_for_file, upsert_remote,
+    };
+
+    const TEST_REPO_NAME: &str = "REAPER Accessibility";
+    const TEST_REPO_URL: &str = "https://github.com/Timtam/reapack/raw/master/index.xml";
+
+    #[test]
+    fn upsert_creates_reapack_ini_when_missing() {
+        let dir = tempdir().unwrap();
+        let outcome = upsert_remote(dir.path(), TEST_REPO_NAME, TEST_REPO_URL).unwrap();
+        assert_eq!(outcome, RemoteUpsertOutcome::CreatedFile);
+
+        let ini = fs::read_to_string(dir.path().join(REAPACK_INI_RELATIVE_PATH)).unwrap();
+        assert!(ini.contains("[remotes]"));
+        assert!(ini.contains("size=1"));
+        assert!(ini.contains(&format!("remote0={}|{}|1|2", TEST_REPO_NAME, TEST_REPO_URL)));
+    }
+
+    #[test]
+    fn upsert_is_idempotent_on_url() {
+        let dir = tempdir().unwrap();
+        let first = upsert_remote(dir.path(), TEST_REPO_NAME, TEST_REPO_URL).unwrap();
+        assert_eq!(first, RemoteUpsertOutcome::CreatedFile);
+        let second = upsert_remote(dir.path(), TEST_REPO_NAME, TEST_REPO_URL).unwrap();
+        assert_eq!(second, RemoteUpsertOutcome::AlreadyPresent);
+
+        // The single entry should still be the only one.
+        let ini = fs::read_to_string(dir.path().join(REAPACK_INI_RELATIVE_PATH)).unwrap();
+        assert_eq!(ini.matches(TEST_REPO_URL).count(), 1);
+        assert!(ini.contains("size=1"));
+    }
+
+    #[test]
+    fn upsert_appends_into_existing_remotes_section() {
+        let dir = tempdir().unwrap();
+        let ini_path = dir.path().join(REAPACK_INI_RELATIVE_PATH);
+        // Mimic an existing reapack.ini with one prior entry.
+        fs::write(
+            &ini_path,
+            "[reapack]\n\
+             version=4\n\
+             \n\
+             [remotes]\n\
+             size=1\n\
+             remote0=ReaTeam Extensions|https://github.com/ReaTeam/Extensions/raw/master/index.xml|1|2\n",
+        )
+        .unwrap();
+
+        let outcome = upsert_remote(dir.path(), TEST_REPO_NAME, TEST_REPO_URL).unwrap();
+        assert_eq!(outcome, RemoteUpsertOutcome::Added);
+
+        let ini = fs::read_to_string(&ini_path).unwrap();
+        // Original remote preserved.
+        assert!(ini.contains("remote0=ReaTeam Extensions|"));
+        // Our remote appended at the next index.
+        assert!(ini.contains(&format!("remote1={}|{}|1|2", TEST_REPO_NAME, TEST_REPO_URL)));
+        // Size bumped.
+        assert!(ini.contains("size=2"));
+        // The unrelated [reapack] section is untouched.
+        assert!(ini.contains("version=4"));
+    }
+
+    #[test]
+    fn upsert_appends_at_size_when_indexes_have_gaps() {
+        // ReaPack's `size` is the authoritative count; existing entries
+        // could have gaps if a previous version removed remotes. Verify
+        // we honour `size` when picking the next index.
+        let dir = tempdir().unwrap();
+        let ini_path = dir.path().join(REAPACK_INI_RELATIVE_PATH);
+        fs::write(
+            &ini_path,
+            "[remotes]\n\
+             size=10\n\
+             remote0=ReaTeam Extensions|https://github.com/ReaTeam/Extensions/raw/master/index.xml|1|2\n\
+             remote2=Old Repo|https://example.invalid/index.xml|1|2\n",
+        )
+        .unwrap();
+
+        upsert_remote(dir.path(), TEST_REPO_NAME, TEST_REPO_URL).unwrap();
+
+        let ini = fs::read_to_string(&ini_path).unwrap();
+        assert!(ini.contains(&format!(
+            "remote10={}|{}|1|2",
+            TEST_REPO_NAME, TEST_REPO_URL
+        )));
+        assert!(ini.contains("size=11"));
+    }
+
+    #[test]
+    fn upsert_creates_remotes_section_when_only_other_sections_exist() {
+        let dir = tempdir().unwrap();
+        let ini_path = dir.path().join(REAPACK_INI_RELATIVE_PATH);
+        fs::write(&ini_path, "[reapack]\nversion=4\nlast_browse=\n").unwrap();
+
+        let outcome = upsert_remote(dir.path(), TEST_REPO_NAME, TEST_REPO_URL).unwrap();
+        assert_eq!(outcome, RemoteUpsertOutcome::Added);
+
+        let ini = fs::read_to_string(&ini_path).unwrap();
+        assert!(ini.contains("[reapack]"));
+        assert!(ini.contains("version=4"));
+        assert!(ini.contains("[remotes]"));
+        assert!(ini.contains("size=1"));
+        assert!(ini.contains(&format!("remote0={}|{}|1|2", TEST_REPO_NAME, TEST_REPO_URL)));
+    }
+
+    #[test]
+    fn is_remote_configured_reports_false_when_ini_is_missing() {
+        let dir = tempdir().unwrap();
+        assert!(!is_remote_configured(dir.path(), TEST_REPO_URL).unwrap());
+    }
+
+    #[test]
+    fn is_remote_configured_reports_true_when_url_present_in_remotes_section() {
+        let dir = tempdir().unwrap();
+        let ini_path = dir.path().join(REAPACK_INI_RELATIVE_PATH);
+        fs::write(
+            &ini_path,
+            format!(
+                "[remotes]\nsize=1\nremote10={}|{}|1|2\n",
+                TEST_REPO_NAME, TEST_REPO_URL
+            ),
+        )
+        .unwrap();
+        assert!(is_remote_configured(dir.path(), TEST_REPO_URL).unwrap());
+    }
+
+    #[test]
+    fn is_remote_configured_reports_false_when_remotes_section_lists_other_urls() {
+        let dir = tempdir().unwrap();
+        let ini_path = dir.path().join(REAPACK_INI_RELATIVE_PATH);
+        fs::write(
+            &ini_path,
+            "[remotes]\nsize=1\nremote0=ReaTeam Extensions|https://github.com/ReaTeam/Extensions/raw/master/index.xml|1|2\n",
+        )
+        .unwrap();
+        assert!(!is_remote_configured(dir.path(), TEST_REPO_URL).unwrap());
+    }
 
     #[test]
     fn reads_package_owner_for_registered_file() {

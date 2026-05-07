@@ -216,6 +216,10 @@ enum Command {
         preserve_osara_keymap: bool,
         #[arg(long)]
         accept_reapack_donation_notice: bool,
+        #[arg(long = "config-step")]
+        config_step: Vec<String>,
+        #[arg(long = "skip-config-step")]
+        skip_config_step: Vec<String>,
         #[arg(long)]
         report_path: Option<PathBuf>,
         #[arg(long)]
@@ -668,6 +672,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             stage_unsupported,
             preserve_osara_keymap,
             accept_reapack_donation_notice,
+            config_step,
+            skip_config_step,
             report_path,
             save_report,
             json,
@@ -678,6 +684,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let packages = selected_package_ids(package);
             ensure_reapack_donation_acknowledged(&packages, accept_reapack_donation_notice)?;
             let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
+            let configuration_step_ids = resolve_configuration_step_ids(
+                &resource_path,
+                platform,
+                &packages,
+                &config_step,
+                &skip_config_step,
+            );
             let report = execute_setup_operation(
                 &resource_path,
                 &packages,
@@ -693,6 +706,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     target_app_path,
                     lock_path: None,
                     force_reinstall_packages: Vec::new(),
+                    configuration_step_ids,
                 },
             )?;
             let report_path =
@@ -885,6 +899,68 @@ fn selected_package_ids(package_ids: Vec<String>) -> Vec<String> {
     } else {
         package_ids
     }
+}
+
+/// Pick the configuration steps the CLI should run.
+///
+/// CLI rules:
+/// - When `--config-step <id>` is passed (one or more times), the
+///   resolved set is exactly that allowlist — `--skip-config-step` is
+///   ignored. Steps whose dependency is not satisfied still run through
+///   the same `SkippedDependencyMissing` path the wizard takes; the
+///   resolver here only chooses which ids the setup pipeline considers.
+/// - Otherwise, the resolver defaults to "every recommended step whose
+///   dependency package is either in this run's `--package` list or
+///   already detected on disk", minus anything in `--skip-config-step`.
+///
+/// This mirrors the wizard's auto-tick-when-recommended behaviour, so
+/// CLI users get the same default outcome (ReaPack remote added when
+/// ReaPack is part of the install) without having to know the step ids.
+fn resolve_configuration_step_ids(
+    resource_path: &Path,
+    platform: rabbit_core::model::Platform,
+    package_ids: &[String],
+    explicit: &[String],
+    skip: &[String],
+) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let skip_set: BTreeSet<&str> = skip.iter().map(String::as_str).collect();
+    if !explicit.is_empty() {
+        return explicit
+            .iter()
+            .filter(|id| !skip_set.contains(id.as_str()))
+            .cloned()
+            .collect();
+    }
+
+    let mut installed_or_pending: BTreeSet<String> = package_ids.iter().cloned().collect();
+    if let Ok(detections) = rabbit_core::detection::detect_components(resource_path, platform) {
+        for detection in detections {
+            if detection.installed {
+                installed_or_pending.insert(detection.package_id);
+            }
+        }
+    }
+
+    rabbit_core::configuration::builtin_configuration_steps()
+        .into_iter()
+        .filter(|step| step.recommended && !skip_set.contains(step.id.as_str()))
+        .filter(|step| {
+            step.requires_package_id
+                .as_deref()
+                .map(|pkg| installed_or_pending.contains(pkg))
+                .unwrap_or(true)
+        })
+        .filter(|step| {
+            // Skip recommended steps that are already in place — they'd
+            // be a no-op. Users can still force a re-run via explicit
+            // `--config-step <id>` (the early `if !explicit.is_empty()`
+            // branch above bypasses this filter).
+            !rabbit_core::configuration::is_configuration_step_applied(resource_path, step)
+                .unwrap_or(false)
+        })
+        .map(|step| step.id)
+        .collect()
 }
 
 /// Refuse to proceed when ReaPack is in the user's package selection but

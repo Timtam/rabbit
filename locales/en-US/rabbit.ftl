@@ -90,6 +90,22 @@ wizard-target-details = REAPER application: { $app_path }
 wizard-packages-heading = Choose packages
 wizard-packages-list-label = Packages to install or update
 wizard-packages-tree-group-label = Packages
+wizard-configuration-tree-group-label = Configuration
+# $package is the localized package name the configuration step depends on.
+wizard-configuration-row-unavailable = Unavailable: requires { $package } to be installed.
+wizard-configuration-row-already-applied = Already applied on this REAPER target.
+# Short status tag appended in parentheses to a configuration row's tree label
+# when the row isn't actionable. Kept terse so the tree label stays readable;
+# the longer sentence in `wizard-configuration-row-unavailable` /
+# `wizard-configuration-row-already-applied` is still surfaced in the details
+# pane and as the row's accessible reason.
+# $reason is one of the "wizard-configuration-row-status-*" strings below.
+wizard-configuration-row-summary-suffix = ({ $reason })
+# $package is the localized name of the dependency package.
+wizard-configuration-row-status-requires = requires { $package }
+wizard-configuration-row-status-already-applied = already applied
+config-reapack-reaper-accessibility-name = REAPER Accessibility ReaPack repository
+config-reapack-reaper-accessibility-description = Adds Ttoni Barth's REAPER Accessibility repository (https://github.com/Timtam/reapack/raw/master/index.xml) to ReaPack so packages from it can be browsed and installed via Extensions → ReaPack → Browse packages.
 
 wizard-reapack-ack-heading = ReaPack donation notice
 wizard-reapack-ack-body = ReaPack is free software released under the LGPL. Its author Christian Fillion accepts donations to support continued development. Donations are entirely optional and never required to use ReaPack or RABBIT.
