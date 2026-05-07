@@ -1,12 +1,14 @@
 # RABBIT Design
 
-Status: revised 2026-05-01
+Status: revised 2026-05-07
 
 RABBIT means "REAPER Accessibility Bootstrap & Bundle Installation Tool". Its
-job is to install and update REAPER, OSARA, SWS, ReaPack,
-ReaKontrol, JAWS-for-REAPER scripts (Windows only), and later additional
-packages, while keeping the workflow usable with screen readers on Windows and
-macOS.
+job is to install and update REAPER, OSARA, SWS, ReaPack, ReaKontrol, FFmpeg
+(Windows only, opt-in), JAWS-for-REAPER scripts (Windows only, when JAWS is
+detected), apply small post-install configuration tweaks (e.g. adding the
+REAPER Accessibility ReaPack repository to ReaPack), and later additional
+packages, while keeping the workflow usable with screen readers on Windows
+and macOS.
 
 The audience is REAPER users — including users who are not Rust developers,
 accessibility experts, or installer engineers. RABBIT must therefore choose
@@ -34,8 +36,16 @@ questions they cannot reasonably answer.
   portable REAPER installation, or set up REAPER plus the selected packages
   from scratch.
 - Fully automate installation and update of REAPER, OSARA, SWS, ReaPack,
-  ReaKontrol, and the Windows-only JAWS-for-REAPER scripts without asking the
-  user to run vendor installers or copy files manually in the normal flow.
+  ReaKontrol, the Windows-only JAWS-for-REAPER scripts, and (Windows-only,
+  opt-in) FFmpeg's shared runtime libraries for REAPER's video decoder,
+  without asking the user to run vendor installers or copy files manually
+  in the normal flow.
+- Apply small post-install **configuration steps** alongside the package
+  install — e.g. adding RABBIT's REAPER Accessibility ReaPack repository to
+  ReaPack's `reapack.ini`. Steps surface in the same wizard tree under a
+  separate "Configuration" group, run after the package install pipeline
+  finishes, and are idempotent (re-running shows them as "already applied"
+  and skips them).
 - Update REAPER and selected packages when newer versions are available.
 - Detect installed versions where technically possible and clearly report
   "installed, version unknown" where it is not reliable.
@@ -125,6 +135,33 @@ questions they cannot reasonably answer.
   a documented public REST API: `POST /~/api/get_file_list` returns a JSON
   directory listing including each entry's name, size, and modified time, which
   RABBIT can use as the latest-version provider for the JAWS scripts.
+- REAPER's video decoder loads FFmpeg's shared runtime libraries
+  (`avformat-XX.dll`, `avcodec-XX.dll`, ...) from `<resource>/UserPlugins/`.
+  REAPER 7.66 added support for FFmpeg 8.x; RABBIT pins to the highest
+  stable major REAPER's decoder is known to support and bumps that pin as
+  new majors are added. Sources for shared Windows builds: Gyan.dev
+  publishes a fixed `ffmpeg-release-full-shared.7z` redirector that always
+  points at the current stable, with a sibling `*.ver` plain-text endpoint
+  exposing the version. tordona/ffmpeg-win-arm64 publishes per-tag GitHub
+  releases of ARM64 shared builds (`ffmpeg-<ver>-full-shared-win-arm64.7z`).
+  Sources: <https://www.gyan.dev/ffmpeg/builds/> and
+  <https://github.com/tordona/ffmpeg-win-arm64/releases>. No equivalent
+  scriptable source of shared `dylib` builds for macOS exists today —
+  OSXExperts.net and evermeet.cx ship static binaries only, so the Mac
+  side is deferred until a shared-build source materializes.
+- FFmpeg's vanilla Windows resource script (`fftools/fftoolsres.rc`)
+  attaches only a manifest, not a `VERSIONINFO` block, so probing the PE
+  resource of `ffmpeg.exe` returns nothing useful. The reliable
+  cross-vendor signal for the FFmpeg release version of an
+  externally-installed copy is parsing the first line of
+  `ffmpeg.exe -version`'s stdout (`ffmpeg version <version>
+  Copyright (c) ...`).
+- ReaPack stores its enabled remotes in `<resource>/reapack.ini` under a
+  `[remotes]` section. Each remote is a numbered key
+  (`remote<N>=<name>|<url>|<enabled>|<autoinstall>`) with `size=` declaring
+  the count. ReaPack treats `size` as authoritative and assigns indices
+  in addition order, so an idempotent "add this remote" upsert appends at
+  the next index when the URL isn't already present.
 
 ## Recommended Technical Direction
 
@@ -307,6 +344,18 @@ GitHub Actions build pipeline for every push:
 - Publish per-file SHA-256 sums alongside the artifacts so testers can
   verify what they ran.
 
+Live-upstream smoke pipeline:
+
+- A separate scheduled workflow runs each day against the real upstream
+  download URLs so vendor-side changes (relocated assets, new archive
+  layouts, expired redirectors) trip CI before they trip a user. The
+  current workflow is `macos-smoke.yml`, which exercises the OSARA / SWS /
+  ReaKontrol / REAPER macOS install paths on `macos-latest`. The
+  Windows-side smoke (FFmpeg via Gyan + tordona, plus the existing
+  Windows install paths) is on the open-questions list — adding it
+  requires a parallel `windows-smoke.yml` and `windows_upstream_smoke.rs`
+  test file.
+
 GitHub release pipeline:
 
 - Trigger on a version tag such as `vX.Y.Z`, or on an explicit release workflow
@@ -466,22 +515,41 @@ user can finish the install by pressing Next a few times.
      page surfaces the error lines and lets the user go back or quit.
 
 3. Packages
-   - Check boxes for REAPER, OSARA, SWS, ReaPack, ReaKontrol, JAWS scripts
-     (Windows only), and later packages. Each row reads as plain text:
-     "OSARA — installed 2024.3.6, latest 2026.2.16, will update".
+   - Tree view with two top-level groups: **Packages** and
+     **Configuration**. Packages contains REAPER, OSARA, SWS, ReaPack,
+     ReaKontrol, FFmpeg (Windows only), JAWS scripts (Windows only), and
+     later additions; each row reads as plain text "OSARA — installed
+     2024.3.6, latest 2026.2.16, will update". Configuration contains
+     opt-in post-install tweaks (currently: "Add the REAPER Accessibility
+     ReaPack repository to ReaPack"); rows that are already applied or
+     whose dependency package isn't in the install plan are disabled with
+     a short status tag in the row label
+     (`(already applied)`, `(requires ReaPack)`).
+   - Parent group nodes show a half-checked / tristate state when only
+     some of their children are ticked. Toggling the parent propagates to
+     every actionable leaf below it; clicks and Space keystrokes on
+     not-actionable leaves are pre-empted before native processing so
+     screen readers don't announce a phantom "checked" state that would
+     immediately revert. The checkboxes are real native controls
+     (`TVS_CHECKBOXES` on Windows with a custom three-image state list
+     for the tristate parent, `wxDataView` toggle renderer with a custom
+     `CustomDataViewTreeModel` on macOS/Linux) so screen readers
+     announce them as proper checkboxes, not as "graphic" or
+     "static text".
    - The selected row's details pane shows the package's localized
      description (one or two plain-language sentences explaining what the
      package is and why a user might want it). The same description is
-     exposed by the CLI via `rabbit packages`, so users can read about every
-     package before deciding to install it.
+     exposed by the CLI via `rabbit packages`, so users can read about
+     every package before deciding to install it.
    - Defaults: install or update missing/outdated recommended accessibility
-     packages.
+     packages, plus apply every recommended Configuration step whose
+     dependency is satisfied and which isn't already applied.
    - OSARA key map: an explicit checkbox stays on the Packages page so the
-     user sees and controls what RABBIT will do with `reaper-kb.ini`. Default
-     is replace-with-backup, matching the OSARA project's default. The
-     short note next to the checkbox explains both options in one sentence
-     each in the active locale. The CLI exposes the same opt-out via
-     `--preserve-osara-keymap`.
+     user sees and controls what RABBIT will do with `reaper-kb.ini`.
+     Default is replace-with-backup, matching the OSARA project's default.
+     The short note next to the checkbox explains both options in one
+     sentence each in the active locale. The CLI exposes the same opt-out
+     via `--preserve-osara-keymap`.
 
 4. ReaPack donation acknowledgement (only when ReaPack is being installed
    or updated this run)
@@ -596,6 +664,7 @@ should rely on. Detection must be package-specific and confidence-scored.
 | SWS | RABBIT receipt; Windows PE `ProductVersion`; ReaPack registry if installed by ReaPack | binary metadata/string scan; presence of `reaper_sws*` | Prefer ReaPack registry for ReaPack-managed SWS. |
 | ReaPack | RABBIT receipt; Windows PE `ProductVersion`; ReaPack self-entry in `ReaPack/registry.db` after first launch | presence of `reaper_reapack*` | The registry DB may not exist until ReaPack has run inside REAPER. |
 | ReaKontrol | RABBIT receipt after RABBIT-managed install | best-effort binary metadata if available; presence of `reaper_kontrol*` | No installer or registry-based detector is expected; validate binary metadata quality during implementation. |
+| FFmpeg | RABBIT receipt after RABBIT-managed install; `ffmpeg.exe -version` parsed from stdout's first line | StringFileInfo `ProductVersion` of an FFmpeg executable (only present when a vendor patches it in); libavformat-major filename heuristic (`avformat-62.dll` → FFmpeg 8.0.0, mapped via `lib_major - 54`) | Vanilla FFmpeg attaches only a manifest to its binaries; `VS_FIXEDFILEINFO` of `ffmpeg.exe` carries libavutil's version, not the FFmpeg release. Spawning `ffmpeg.exe -version` is the only reliable vendor-independent way to recover the patch level for an externally-installed copy; the libavformat-major fallback recovers only the major when no executable is present. |
 | ReaPack packages | `ReaPack/registry.db` table `entries.version` | none | This is the best source for packages ReaPack knows about. |
 
 RABBIT should keep its own receipt in each REAPER resource path:
@@ -656,6 +725,14 @@ Initial package kinds:
 
 - `reaper_app`: vendor installer, dmg/app copy, or portable creation.
 - `user_plugin_binary`: copy one or more extension binaries into `UserPlugins`.
+  Some packages ship a single extension DLL (OSARA, SWS, ReaPack, ReaKontrol);
+  others ship a runtime bundle whose entire `bin/` folder lands in
+  `UserPlugins` (FFmpeg). The install pipeline supports both shapes via the
+  artifact kinds `ExtensionBinary` (raw single-DLL download), `Archive` (zip
+  carrying a single matching binary), `DiskImage` (macOS DMG), and
+  `SevenZipArchive` (the FFmpeg `.7z` whose every `bin/<file>` is flattened
+  into `UserPlugins`). A single receipt covers all extracted files for the
+  multi-file case.
 - `keymap`: copy into `KeyMaps`, optionally replace `reaper-kb.ini` with
   backup.
 - `reapack_package`: install/update through ReaPack later, once ReaPack is
@@ -736,6 +813,109 @@ strategies:
     is detected on the host. macOS users never see the JAWS scripts row.
   - back up any existing same-named script files before overwriting; track
     the install through the standard RABBIT receipt mechanism.
+- FFmpeg (Windows only, opt-in):
+  - latest-version provider: Gyan.dev's `*.ver` plain-text endpoint at
+    `https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z.ver`,
+    a single line of UTF-8 with the current stable release version.
+  - artifact provider fans out per architecture:
+    - x64 → Gyan.dev's `ffmpeg-release-full-shared.7z` redirector. The URL
+      is fixed; the version pulled from the `*.ver` endpoint is the
+      authoritative version stamp.
+    - ARM64 / ARM64-EC → highest stable tag from
+      `tordona/ffmpeg-win-arm64`'s GitHub releases (skipping the
+      `daily-autobuild-…`/`latest` rolling tags) whose major matches the
+      supported FFmpeg major; asset
+      `ffmpeg-<ver>-full-shared-win-arm64.7z`.
+  - install unattended by extracting every file under the archive's `bin/`
+    folder into the selected REAPER resource path's `UserPlugins`
+    (skipping `include/`, `lib/`, `doc/`, …). The user's FFmpeg-aware
+    plugins (REAPER's video decoder) load from the same folder. A single
+    RABBIT receipt records every extracted file so future detection
+    rounds-trip cleanly.
+  - opt-in by default (`recommended = false`); doesn't surprise users who
+    don't need video decoding.
+  - macOS is filtered out at the manifest level until a scriptable
+    shared-`dylib` source materializes. OSXExperts.net and evermeet.cx
+    ship static binaries only, which can't satisfy REAPER's video decoder.
+  - external-install detection prefers spawning
+    `<UserPlugins>/ffmpeg.exe -version` (with the
+    `CREATE_NO_WINDOW` flag on Windows so users don't see a console
+    flash) and parsing the first stdout line; falls back to the
+    libavformat-major filename heuristic when no executable is present.
+
+## Configuration Steps
+
+Configuration steps are post-install actions that run *after* the
+package install pipeline finishes, typically to wire newly-installed
+packages into REAPER's per-target config files. They are
+manifest-driven so future steps can be added without rewriting the
+engine.
+
+```text
+ConfigurationStep {
+  id,
+  display_name_key,
+  display_description_key,
+  recommended,
+  requires_package_id,   // dependency package id, or None
+  kind                   // tagged enum of step kinds (see below)
+}
+```
+
+Initial step kinds:
+
+- `AddReapackRemote { name, url }`: append a remote into ReaPack's
+  `<resource>/reapack.ini` `[remotes]` section. Idempotent on URL —
+  re-running is a no-op when the URL is already listed; the
+  appended index honours ReaPack's `size=` field so it lands at the
+  next slot ReaPack itself would have written.
+
+The single shipped step today is the REAPER Accessibility ReaPack
+remote (`https://github.com/Timtam/reapack/raw/master/index.xml`),
+recommended when ReaPack is part of the install plan or already on
+disk.
+
+Wizard surface:
+
+- Configuration steps appear in their own "Configuration" group at
+  the top level of the Packages tree, sibling to the "Packages"
+  group. Each step's row label is its localized display name; rows
+  whose dependency package isn't installed or queued show
+  `(requires <package>)` and rows whose effect is already on disk
+  show `(already applied)`. Both states render the row as disabled
+  with the checkbox forced unchecked, and click/Space input on those
+  rows is pre-empted before native processing reaches the
+  TVS_CHECKBOXES auto-cycle so screen readers don't announce a
+  phantom toggle.
+- Toggling the dependency package live (e.g. unticking ReaPack)
+  re-evaluates the configuration row's availability and, if the row
+  becomes actionable again, restores its recommended-default tick.
+- The row's accessible description and the wizard's details pane
+  carry the longer "Unavailable: requires X to be installed."
+  / "Already applied on this REAPER target." sentence so the user
+  hears the full reason on focus.
+
+CLI surface:
+
+- `rabbit setup` accepts `--config-step <id>` (repeatable allowlist)
+  and `--skip-config-step <id>` (skip-list overlaid on the
+  recommended-default set). With no flags, every recommended step
+  whose dependency is satisfied and which isn't already applied runs
+  automatically.
+- `apply_configuration_step` returns a per-step report whose status
+  is one of `Applied`, `Skipped`, `SkippedDependencyMissing`, or
+  `DryRun`; the report stitches into the same `SetupReport` JSON
+  the package install pipeline writes.
+
+Detection:
+
+- "Already applied" detection is per-`kind`. For
+  `AddReapackRemote`, RABBIT scans the `[remotes]` section of
+  `<resource>/reapack.ini` for an entry whose URL field matches.
+  Missing `reapack.ini` reads as "not applied". The detection is
+  cheap enough to run during model build and after every target
+  reselection, so the wizard's "(already applied)" tag stays in sync
+  with whichever target the user picks.
 
 ## Install Targets
 
@@ -782,6 +962,15 @@ Extension files:
 - ReaKontrol support data:
   - preserve `reaKontrol/fxMaps/` and any user-created map files during
     install and update.
+- FFmpeg Windows (x64 and ARM64; macOS not yet supported):
+  - every file under the upstream archive's `bin/` directory is flattened
+    into `UserPlugins/`. For a current Gyan / tordona FFmpeg 8.x build
+    that's `avcodec-62.dll`, `avdevice-62.dll`, `avfilter-9.dll`,
+    `avformat-62.dll`, `avutil-60.dll`, `postproc-58.dll`,
+    `swresample-6.dll`, `swscale-9.dll`, `ffmpeg.exe`, `ffprobe.exe`,
+    `ffplay.exe`. Keeping the executables alongside the libs lets the
+    detection pass invoke `ffmpeg.exe -version` for the authoritative
+    release version on subsequent runs.
 
 ## Update Flow
 
@@ -972,3 +1161,16 @@ Install tests:
 - Verify wxDragon/wxWidgets release packaging on Windows and macOS can meet the
   one-download, no-RABBIT-installer goal without sacrificing code signing,
   notarization, or screen-reader behavior.
+- Add a Windows-side live-upstream smoke pipeline analogous to
+  `macos-smoke.yml`: download FFmpeg per arch (Gyan x64, tordona ARM64),
+  extract the `bin/` payload into a temp UserPlugins, assert the receipt
+  round-trips, and round-trip the detection back to the upstream version.
+  Until that lands, FFmpeg's per-arch resolver is exercised only by unit
+  tests against fixture release-list bodies, not against real GitHub /
+  Gyan responses.
+- Find a scriptable source of shared (`dylib`) FFmpeg builds for macOS so
+  the FFmpeg row can be enabled there too. OSXExperts.net and
+  evermeet.cx ship static binaries only, which can't satisfy REAPER's
+  video decoder. Candidate fallbacks include bridging to Homebrew
+  (detect `brew` on `$PATH` and run `brew install ffmpeg` on opt-in) or
+  hosting our own shared builds.

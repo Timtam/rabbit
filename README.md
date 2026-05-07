@@ -14,6 +14,24 @@ RABBIT installs and keeps up to date:
 - **ReaPack** — REAPER's package manager
 - **ReaKontrol** — Native Instruments Komplete Kontrol support
 - **JAWS-for-REAPER scripts** *(Windows only, when JAWS is detected)*
+- **FFmpeg** *(Windows only, opt-in)* — the shared FFmpeg runtime
+  (`avformat`, `avcodec`, …) that REAPER's video decoder loads from
+  `UserPlugins`. Pulled from
+  [Gyan.dev](https://www.gyan.dev/ffmpeg/builds/) on x64 and
+  [tordona/ffmpeg-win-arm64](https://github.com/tordona/ffmpeg-win-arm64)
+  on ARM64. Pinned to the latest stable FFmpeg major REAPER's video
+  decoder is known to support (currently 8.x). Unticked by default so
+  it doesn't surprise users who don't need video.
+
+Beyond installing packages, RABBIT can also apply small post-install
+configuration tweaks. Today there's one such step:
+
+- **Add the REAPER Accessibility ReaPack repository to ReaPack**
+  (`https://github.com/Timtam/reapack/raw/master/index.xml`). When
+  ReaPack is part of your install plan or already on disk, this step is
+  ticked by default; if the repository is already configured in your
+  `reapack.ini`, the step shows as *already applied* and is skipped.
+  Idempotent and safe to re-run.
 
 Built with screen reader users in mind: keyboard-first wizard, native
 controls, NVDA/JAWS/Narrator/VoiceOver tested, German + English UI out of the
@@ -72,8 +90,9 @@ Launch the downloaded executable. The wizard walks you through:
    automatically; pick "portable" if you want a self-contained REAPER folder.
 2. **RABBIT checks for the latest versions** of REAPER and the accessibility
    packages.
-3. **Pick the packages** you want installed or updated. Sensible defaults are
-   already checked.
+3. **Pick the packages** you want installed or updated, plus any
+   *configuration* steps (e.g. adding the REAPER Accessibility ReaPack
+   repository). Sensible defaults are already checked.
 4. **Review and install.** RABBIT downloads, verifies, and installs everything
    without further prompts.
 
@@ -128,6 +147,15 @@ RABBIT apply-packages --resource-path "%APPDATA%\REAPER" --apply
 The CLI is dry-run by default; pass `--apply` to actually make changes.
 `--save-report` writes a JSON report next to the resource path so you have a
 record of what was installed.
+
+`setup` also accepts `--config-step <id>` (repeatable) and
+`--skip-config-step <id>` for the post-install configuration tweaks.
+With no flags, all recommended steps whose dependencies are satisfied
+(and that aren't already applied) run automatically; pass an explicit
+list to opt in to a specific subset, or `--skip-config-step` to opt
+out of one. The only step today is
+`reapack-add-reaper-accessibility-remote`. Run `RABBIT --help` for the
+full set of flags.
 
 ### Maintain
 
