@@ -70,6 +70,7 @@ wizard-target-empty = No REAPER installation target is selected.
 wizard-target-portable-choice = Install or update a portable REAPER folder
 wizard-target-portable-folder-label = Portable folder
 wizard-target-portable-folder-message = Choose a portable REAPER folder, or an empty folder for a new portable setup.
+wizard-target-portable-folder-browse-label = Browse…
 wizard-target-portable-pending-details = Choose the portable target option, then choose a portable REAPER folder or an empty folder for a new portable setup.
 wizard-target-custom-portable-label = Portable REAPER folder
 wizard-target-custom-portable-app-path-label = REAPER application path

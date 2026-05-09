@@ -70,6 +70,7 @@ wizard-target-empty = Es ist kein REAPER-Installationsziel ausgewählt.
 wizard-target-portable-choice = Portablen REAPER-Ordner installieren oder aktualisieren
 wizard-target-portable-folder-label = Portabler Ordner
 wizard-target-portable-folder-message = Wählen Sie einen portablen REAPER-Ordner oder einen leeren Ordner für eine neue portable Einrichtung.
+wizard-target-portable-folder-browse-label = Durchsuchen…
 wizard-target-portable-pending-details = Wählen Sie zunächst die Option für ein portables Ziel und anschließend einen portablen REAPER-Ordner oder einen leeren Ordner für eine neue portable Einrichtung.
 wizard-target-custom-portable-label = Portabler REAPER-Ordner
 wizard-target-custom-portable-app-path-label = Pfad der REAPER-Anwendung

@@ -109,6 +109,7 @@ pub struct WizardText {
     pub target_portable_choice: String,
     pub target_portable_folder_label: String,
     pub target_portable_folder_message: String,
+    pub target_portable_folder_browse_label: String,
     pub target_portable_pending_details: String,
     pub target_custom_portable_label: String,
     pub target_custom_portable_app_path_label: String,
@@ -603,6 +604,9 @@ fn wizard_text(localizer: &Localizer) -> WizardText {
         target_portable_folder_label: localizer.text("wizard-target-portable-folder-label").value,
         target_portable_folder_message: localizer
             .text("wizard-target-portable-folder-message")
+            .value,
+        target_portable_folder_browse_label: localizer
+            .text("wizard-target-portable-folder-browse-label")
             .value,
         target_portable_pending_details: localizer
             .text("wizard-target-portable-pending-details")

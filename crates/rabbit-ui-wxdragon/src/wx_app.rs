@@ -801,7 +801,7 @@ mod native_tree_checkboxes {
 #[derive(Clone, Copy)]
 struct WizardWidgets {
     target_choice: Choice,
-    portable_folder: DirPickerCtrl,
+    portable_folder: TextCtrl,
     target_details: TextCtrl,
     version_check_status: StaticText,
     version_check_gauge: Gauge,
@@ -1755,7 +1755,7 @@ fn add_pages(
     }
 }
 
-fn build_target_page(page: &Panel, model: &WizardModel) -> (Choice, DirPickerCtrl, TextCtrl) {
+fn build_target_page(page: &Panel, model: &WizardModel) -> (Choice, TextCtrl, TextCtrl) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     add_heading(
         page,
@@ -1787,20 +1787,43 @@ fn build_target_page(page: &Panel, model: &WizardModel) -> (Choice, DirPickerCtr
         &model.text.target_portable_folder_label,
         "rabbit-target-portable-folder-label",
     );
-    let portable_folder = DirPickerCtrl::builder(page)
-        .with_message(&model.text.target_portable_folder_message)
-        .with_size(Size::new(-1, -1))
-        .build();
-    portable_folder.set_name("rabbit-target-portable-folder");
+
+    // We build the path input as a TextCtrl + Browse button instead of
+    // wxDirPickerCtrl: wxdragon doesn't expose the picker's inner wxTextCtrl,
+    // so the screen reader has no way to read a label off it. Mirroring the
+    // picker's composition by hand lets us name the editable field directly,
+    // and the user gets a real text input they can paste/type into.
+    let portable_row = BoxSizer::builder(Orientation::Horizontal).build();
+    let portable_folder = TextCtrl::builder(page).build();
+    // Same wxdragon quirk as the ReaPack-ack checkbox below: the screen
+    // reader reads the wxWindow *name*, not the preceding StaticText, so
+    // set the name to the localized label instead of an internal id.
+    portable_folder.set_name(&model.text.target_portable_folder_label);
     portable_folder.add_style(WindowStyle::TabStop);
+    portable_row.add(&portable_folder, 1, SizerFlag::Expand | SizerFlag::Right, 6);
+
+    let portable_folder_browse = Button::builder(page)
+        .with_label(&model.text.target_portable_folder_browse_label)
+        .build();
+    portable_folder_browse.set_name(&model.text.target_portable_folder_browse_label);
+    portable_folder_browse.add_style(WindowStyle::TabStop);
+    portable_row.add(
+        &portable_folder_browse,
+        0,
+        SizerFlag::AlignCenterVertical,
+        0,
+    );
+
+    sizer.add_sizer(&portable_row, 0, SizerFlag::All | SizerFlag::Expand, 6);
+
     configure_portable_folder(
         &portable_folder,
+        &portable_folder_browse,
         choice
             .get_selection()
             .map(|index| index as usize == portable_index)
             .unwrap_or(false),
     );
-    sizer.add(&portable_folder, 0, SizerFlag::All | SizerFlag::Expand, 6);
 
     add_label(
         page,
@@ -1817,28 +1840,40 @@ fn build_target_page(page: &Panel, model: &WizardModel) -> (Choice, DirPickerCtr
     details.set_name("rabbit-target-details");
     sizer.add(&details, 1, SizerFlag::All | SizerFlag::Expand, 6);
 
-    let choice_model = model.clone();
-    let choice_portable_folder = portable_folder;
-    let choice_details = details;
-    choice.on_selection_changed(move |event| {
-        if let Some(index) = event.get_selection() {
-            let index = index as usize;
-            let portable_selected = index == portable_choice_index(&choice_model);
-            configure_portable_folder(&choice_portable_folder, portable_selected);
-            let value = if portable_selected {
-                portable_target_details(&choice_model, &choice_portable_folder)
-            } else {
-                target_details_for_index(&choice_model, index)
-            };
-            choice_details.set_value(&value);
-        }
-    });
+    {
+        let choice_model = model.clone();
+        let choice_portable_folder = portable_folder;
+        let choice_portable_browse = portable_folder_browse;
+        let choice_details = details;
+        choice.on_selection_changed(move |event| {
+            if let Some(index) = event.get_selection() {
+                let index = index as usize;
+                let portable_selected = index == portable_choice_index(&choice_model);
+                configure_portable_folder(
+                    &choice_portable_folder,
+                    &choice_portable_browse,
+                    portable_selected,
+                );
+                let value = if portable_selected {
+                    portable_target_details(&choice_model, &choice_portable_folder)
+                } else {
+                    target_details_for_index(&choice_model, index)
+                };
+                choice_details.set_value(&value);
+            }
+        });
+    }
 
     {
         let model = model.clone();
         let dir_choice = choice;
         let dir_details = details;
-        portable_folder.on_dir_changed(move |_| {
+        let dir_portable_folder = portable_folder;
+        let dir_portable_browse = portable_folder_browse;
+        // Fires both for keyboard input AND for `set_value` from the Browse
+        // button below — wxTextCtrl::SetValue generates wxEVT_TEXT — so this
+        // single handler handles typing and the picker dialog uniformly.
+        portable_folder.on_text_changed(move |_| {
             let portable_index = portable_choice_index(&model);
             if dir_choice
                 .get_selection()
@@ -1846,9 +1881,31 @@ fn build_target_page(page: &Panel, model: &WizardModel) -> (Choice, DirPickerCtr
                 .unwrap_or(true)
             {
                 dir_choice.set_selection(portable_index as u32);
-                configure_portable_folder(&portable_folder, true);
+                configure_portable_folder(&dir_portable_folder, &dir_portable_browse, true);
             }
-            dir_details.set_value(&portable_target_details(&model, &portable_folder));
+            dir_details.set_value(&portable_target_details(&model, &dir_portable_folder));
+        });
+    }
+
+    {
+        let dialog_parent = *page;
+        let model_for_browse = model.clone();
+        let browse_target = portable_folder;
+        portable_folder_browse.on_click(move |_| {
+            let current = browse_target.get_value();
+            let dialog = DirDialog::builder(
+                &dialog_parent,
+                &model_for_browse.text.target_portable_folder_message,
+                &current,
+            )
+            .build();
+            if dialog.show_modal() == ID_OK {
+                if let Some(path) = dialog.get_path() {
+                    // Fires on_text_changed, which runs the same flip-to-portable
+                    // + update-details logic typing does.
+                    browse_target.set_value(&path);
+                }
+            }
         });
     }
 
@@ -4257,7 +4314,7 @@ fn add_label(page: &Panel, sizer: &BoxSizer, label: &str, name: &str) {
 fn selected_target_details(
     model: &WizardModel,
     choice: &Choice,
-    portable_folder: &DirPickerCtrl,
+    portable_folder: &TextCtrl,
 ) -> String {
     match choice.get_selection().map(|index| index as usize) {
         Some(index) if index == portable_choice_index(model) => {
@@ -4438,8 +4495,8 @@ fn portable_choice_index(model: &WizardModel) -> usize {
     model.target_rows.len()
 }
 
-fn portable_folder_path(portable_folder: &DirPickerCtrl) -> Option<PathBuf> {
-    let path = portable_folder.get_path();
+fn portable_folder_path(portable_folder: &TextCtrl) -> Option<PathBuf> {
+    let path = portable_folder.get_value();
     let path = path.trim();
     if path.is_empty() {
         None
@@ -4448,7 +4505,7 @@ fn portable_folder_path(portable_folder: &DirPickerCtrl) -> Option<PathBuf> {
     }
 }
 
-fn portable_target_details(model: &WizardModel, portable_folder: &DirPickerCtrl) -> String {
+fn portable_target_details(model: &WizardModel, portable_folder: &TextCtrl) -> String {
     portable_folder_path(portable_folder)
         .map(|path| custom_portable_target_row(model, path, true).details)
         .unwrap_or_else(|| model.text.target_portable_pending_details.clone())
@@ -4503,7 +4560,7 @@ fn bind_target_navigation_updates(
         let model = Arc::clone(model);
         let current_step = Arc::clone(current_step);
         let next = *next;
-        widgets.portable_folder.on_dir_changed(move |_| {
+        widgets.portable_folder.on_text_changed(move |_| {
             if current_step.load(Ordering::SeqCst) == TARGET_STEP {
                 next.enable(target_is_valid(&model, &widgets));
             }
@@ -4511,9 +4568,15 @@ fn bind_target_navigation_updates(
     }
 }
 
-fn configure_portable_folder(portable_folder: &DirPickerCtrl, enabled: bool) {
+fn configure_portable_folder(
+    portable_folder: &TextCtrl,
+    portable_folder_browse: &Button,
+    enabled: bool,
+) {
     portable_folder.enable(enabled);
     portable_folder.set_can_focus(enabled);
+    portable_folder_browse.enable(enabled);
+    portable_folder_browse.set_can_focus(enabled);
 }
 
 fn set_last_report(
