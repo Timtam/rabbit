@@ -720,10 +720,18 @@ fn wizard_text(localizer: &Localizer) -> WizardText {
 }
 
 fn localized_wx_mnemonic_label(localizer: &Localizer, label_id: &str, mnemonic_id: &str) -> String {
-    wx_mnemonic_label(
-        &localizer.text(label_id).value,
-        &localizer.text(mnemonic_id).value,
-    )
+    let label = localizer.text(label_id).value;
+    // wxWidgets' OSX backend binds button-label `&` mnemonics as Cmd+letter
+    // accelerators, which collides with macOS system shortcuts (Cmd+C
+    // copy, Cmd+S save, Cmd+I info, …) and would, e.g., trigger the
+    // Close button when the user just wanted to copy. Apple's HIG also
+    // doesn't use mnemonics on buttons, so dropping them on macOS is the
+    // platform-appropriate behavior in addition to fixing the collision.
+    // Other platforms keep the underlined mnemonic + Alt/Option key.
+    if cfg!(target_os = "macos") {
+        return escape_wx_label(&label);
+    }
+    wx_mnemonic_label(&label, &localizer.text(mnemonic_id).value)
 }
 
 fn wx_mnemonic_label(label: &str, mnemonic: &str) -> String {

@@ -31,6 +31,17 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Added
+
+- Stable always-latest download URLs for every platform, e.g.
+  `https://github.com/Timtam/rabbit/releases/latest/download/rabbit-windows-x86_64.exe`
+  and `…/rabbit-macos-universal.app.zip`. The release pipeline now
+  publishes version-less aliases of each artifact alongside the
+  versioned originals, so the URLs above resolve to whatever release is
+  current at the time of the click. The README's Download section has
+  been switched to direct links; the GitHub Releases page is still
+  there for users who want to pin a version or verify SHA-256 sums.
+
 ### Changed
 
 - macOS: ship a single universal Mach-O instead of separate Apple Silicon
@@ -44,6 +55,15 @@ from this file and posts it as the GitHub release body.
   check without a manual download.
 
 ### Fixed
+
+- macOS: `Cmd+C` (and `Cmd+S` in the German build) no longer closes the
+  wizard. Wizard buttons used `&Close` / `&Schließen`-style mnemonics
+  for Alt-key access on Windows and Linux, but wxWidgets' OSX backend
+  binds those `&` mnemonics as `Cmd+letter` accelerators — colliding
+  with macOS system shortcuts (Cmd+C copy, Cmd+S save, …). Mnemonics
+  on buttons aren't HIG-conformant on macOS anyway, so they're now
+  stripped from the label entirely on that platform; underlined
+  Alt-key access continues to work on Windows and Linux.
 
 - macOS first-launch helper: `Open Me First.command` no longer falsely
   reports success on macOS 15 (Sequoia) and 26 (Tahoe). Removing the

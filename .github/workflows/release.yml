@@ -332,6 +332,41 @@ jobs:
               }
             }' > release/rabbit-update-stable.json
 
+      - name: Stage version-less aliases for stable download URLs
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          # GitHub's `releases/latest/download/<filename>` URL resolves
+          # against whatever release is current, but the filename has to
+          # match exactly. Since our published assets bake the version
+          # into the name (`rabbit-0.1.0-windows-x86_64.exe`), a "latest"
+          # link tied to that name only works for the version it was
+          # picked at. So copy each artifact to a version-less alias
+          # alongside the versioned original; the alias makes
+          # `releases/latest/download/rabbit-windows-x86_64.exe` (and
+          # friends) permanently stable across releases.
+          #
+          # Per-asset `.sha256` files are intentionally NOT aliased: their
+          # content references the versioned filename, so a `sha256sum -c`
+          # against the alias would fail to find the file. Power users who
+          # want to verify a download should use the versioned filename
+          # alongside its `.sha256`. The combined `SHA256SUMS.txt` is
+          # already version-less and continues to cover the versioned
+          # entries.
+          VERSION="${TAG_NAME#v}"
+          shopt -s nullglob
+          for src in release/rabbit-"${VERSION}"-*; do
+            base="$(basename "$src")"
+            case "$base" in *.sha256) continue ;; esac
+            alias_name="${base/rabbit-${VERSION}-/rabbit-}"
+            if [ "$alias_name" = "$base" ]; then
+              continue
+            fi
+            cp "$src" "release/${alias_name}"
+            echo "aliased $base -> $alias_name"
+          done
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:

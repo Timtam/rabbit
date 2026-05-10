@@ -40,16 +40,23 @@ can run from any folder and delete when you're done.
 
 ## Download
 
-Get the latest release from the [GitHub Releases
-page](https://github.com/Timtam/rabbit/releases/latest). Each release publishes
-versioned, per-platform downloads plus their SHA-256 sums. Pick the file that
-matches your machine:
+Pick the file that matches your machine. These links always point at the
+latest release — bookmark or share them freely:
 
-- **Windows (Intel/AMD 64-bit)**: `rabbit-<version>-windows-x86_64.exe`
-- **Windows (ARM 64-bit)**: `rabbit-<version>-windows-aarch64.exe`
+- **Windows (Intel/AMD 64-bit)**:
+  [rabbit-windows-x86_64.exe](https://github.com/Timtam/rabbit/releases/latest/download/rabbit-windows-x86_64.exe)
+- **Windows (ARM 64-bit)**:
+  [rabbit-windows-aarch64.exe](https://github.com/Timtam/rabbit/releases/latest/download/rabbit-windows-aarch64.exe)
 - **macOS (universal — Apple Silicon + Intel)** — recommended:
-  `rabbit-<version>-macos-universal.app.zip`
-- **macOS bare binary** (CLI use): `rabbit-<version>-macos-universal`
+  [rabbit-macos-universal.app.zip](https://github.com/Timtam/rabbit/releases/latest/download/rabbit-macos-universal.app.zip)
+- **macOS bare binary** (CLI use):
+  [rabbit-macos-universal](https://github.com/Timtam/rabbit/releases/latest/download/rabbit-macos-universal)
+
+To pin a specific version (or download SHA-256 sums for verification),
+browse the [GitHub Releases
+page](https://github.com/Timtam/rabbit/releases) — every release also
+publishes versioned filenames (`rabbit-<version>-windows-x86_64.exe`,
+etc.) alongside per-asset `.sha256` files.
 
 On Windows, place the downloaded executable wherever you like (Desktop,
 Downloads, a USB stick) and double-click it. You can rename it to `RABBIT.exe`
