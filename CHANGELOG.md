@@ -31,6 +31,8 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-10
+
 ### Added
 
 - Stable always-latest download URLs for every platform, e.g.
