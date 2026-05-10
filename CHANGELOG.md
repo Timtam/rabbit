@@ -45,6 +45,19 @@ from this file and posts it as the GitHub release body.
 
 ### Fixed
 
+- macOS: install no longer aborts with
+  `no artifact found for sws on MacOs/Universal` (and the analogous
+  silent ReaPack-arm64 mis-install on Intel hosts) when REAPER is a
+  universal Mach-O. The artifact dispatcher now canonicalizes
+  `Architecture::Universal` to the host slice on macOS before
+  per-package resolvers run, so SWS picks the matching `Darwin-x86_64`
+  / `Darwin-arm64` `.dmg` and ReaPack picks the matching
+  `reaper_reapack-x86_64.dylib` / `reaper_reapack-arm64.dylib`. On
+  Apple Silicon Macs running RABBIT under Rosetta, the dispatcher
+  consults `sysctl.proc_translated` and forces the `arm64` slice so
+  plug-ins match the `arm64`-native REAPER process rather than the
+  `x86_64` translator's view.
+
 - macOS: VoiceOver now reads the German UI with a German voice. The
   bundle previously declared only English (`CFBundleDevelopmentRegion`
   with no `CFBundleLocalizations` and no `.lproj` directories), so

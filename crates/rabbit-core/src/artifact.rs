@@ -69,6 +69,7 @@ pub fn resolve_latest_artifacts(
 ) -> Result<Vec<ArtifactDescriptor>> {
     let client = http_client()?;
     let mut artifacts = Vec::new();
+    let architecture = canonicalize_macos_universal_arch(platform, architecture);
 
     for package_id in package_ids {
         let artifact = match package_id.as_str() {
@@ -98,6 +99,7 @@ pub fn expected_artifact_kind(
     platform: Platform,
     architecture: Architecture,
 ) -> Result<ArtifactKind> {
+    let architecture = canonicalize_macos_universal_arch(platform, architecture);
     match package_id {
         PACKAGE_REAPER => expected_reaper_artifact_kind(platform, architecture),
         PACKAGE_OSARA => expected_osara_artifact_kind(platform),
@@ -112,6 +114,34 @@ pub fn expected_artifact_kind(
             architecture,
         }),
     }
+}
+
+/// Translate `Architecture::Universal` to the host slice on macOS so per-arch
+/// resolvers (SWS's per-arch `.dmg`, ReaPack's per-arch `.dylib`) pick a slice
+/// REAPER will actually load. REAPER itself ships a universal `.dmg` and the
+/// REAPER resolver maps every macOS arch to that, so collapsing `Universal`
+/// here is a no-op for it.
+///
+/// Strategy:
+/// - When RABBIT is running under Rosetta on an Apple Silicon host, force
+///   `Arm64` regardless of `Architecture::current()`. `current()` reads
+///   `target_arch` and would report `X64` (the slice Rosetta is translating),
+///   but REAPER launched normally on the same host runs as `arm64` natively
+///   — so the plug-in slice has to match REAPER's runtime arch, not RABBIT's.
+/// - Otherwise return `Architecture::current()`. On a universal RABBIT
+///   binary, Apple Silicon hosts run the `arm64` slice and Intel hosts run
+///   `x86_64`, which already matches what REAPER will load.
+fn canonicalize_macos_universal_arch(
+    platform: Platform,
+    architecture: Architecture,
+) -> Architecture {
+    if matches!(platform, Platform::MacOs) && matches!(architecture, Architecture::Universal) {
+        if rabbit_platform::is_running_under_rosetta() {
+            return Architecture::Arm64;
+        }
+        return Architecture::current();
+    }
+    architecture
 }
 
 /// Ephemeral artifact-download cache directory. Defaults to a stable path
@@ -453,8 +483,18 @@ fn resolve_reapack_artifact(
         (Platform::MacOs, Architecture::Arm64 | Architecture::Arm64Ec) => {
             ("reaper_reapack-arm64.dylib", Architecture::Arm64)
         }
+        // Unreachable when invoked through `resolve_latest_artifacts` —
+        // `canonicalize_macos_universal_arch` rewrites `Universal` to the
+        // host slice before dispatch, which avoids the wrong-slice
+        // mis-install this arm would otherwise cause on Intel hosts. The
+        // arm is here only to keep the match exhaustive over the
+        // `Architecture` enum.
         (Platform::MacOs, Architecture::Universal) => {
-            ("reaper_reapack-arm64.dylib", Architecture::Arm64)
+            return Err(RabbitError::NoArtifactFound {
+                package_id: PACKAGE_REAPACK.to_string(),
+                platform,
+                architecture,
+            });
         }
     };
 
@@ -1057,6 +1097,28 @@ mod tests {
 
         let error = download_artifacts(&[artifact], cache_dir.path()).unwrap_err();
         assert!(error.to_string().contains("HTTPS"));
+    }
+
+    #[test]
+    fn macos_universal_arch_canonicalizes_to_disk_image_kinds_for_per_arch_packages() {
+        // Regression: a universal REAPER install on macOS used to surface
+        // `Architecture::Universal` to per-arch resolvers (SWS, ReaPack)
+        // that didn't list a Universal arm, producing
+        // "no artifact found for sws on MacOs/Universal". The dispatch
+        // canonicalizes Universal to the host slice so the per-arch arms
+        // match. Asserting `DiskImage` / `ExtensionBinary` (rather than a
+        // specific architecture) keeps the test platform-agnostic — the
+        // host slice differs between Apple Silicon and Intel, but the
+        // artifact kind doesn't.
+        assert_eq!(
+            expected_artifact_kind(PACKAGE_SWS, Platform::MacOs, Architecture::Universal).unwrap(),
+            ArtifactKind::DiskImage
+        );
+        assert_eq!(
+            expected_artifact_kind(PACKAGE_REAPACK, Platform::MacOs, Architecture::Universal)
+                .unwrap(),
+            ArtifactKind::ExtensionBinary
+        );
     }
 
     #[test]
