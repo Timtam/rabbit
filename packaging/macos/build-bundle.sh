@@ -103,9 +103,20 @@ APP_DIR="$STAGE_DIR/$WRAPPER_NAME/Rabbit.app"
 
 cat > "$STAGE_DIR/$WRAPPER_NAME/Open Me First.command" <<'HELPER'
 #!/bin/bash
-# RABBIT ships unsigned (no Apple Developer Program enrollment). Running this
-# helper once clears macOS's first-launch quarantine on Rabbit.app so it
-# launches normally from Finder. Future self-updates inherit the trust.
+# RABBIT ships unsigned (no Apple Developer Program enrollment). This helper
+# does two things:
+#
+#   1. Clears `com.apple.quarantine` from Rabbit.app and every file inside
+#      it. On older macOS that's enough — the app launches normally
+#      afterward.
+#
+#   2. On macOS 15 (Sequoia) and 26 (Tahoe), removing the xattr is no longer
+#      sufficient: Gatekeeper still blocks first-launch of unsigned/ad-hoc
+#      bundles regardless of quarantine state. The only path is the one
+#      Apple intends — let the launch attempt fail, then approve via
+#      System Settings -> Privacy & Security. To make that one-click for
+#      the user, the helper triggers the launch (so an entry appears in
+#      that settings pane) and immediately deep-links the pane.
 set -u
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -134,24 +145,40 @@ if [ ! -d "$TARGET" ]; then
 	exit 1
 fi
 
+# Step 1: clear quarantine recursively. Capture xattr's stderr instead of
+# silencing it — permission failures (Files-and-Folders gate, read-only zip,
+# iCloud sync conflicts) need to surface to the user, not get hidden behind
+# `|| true` like the previous version did.
 echo "Clearing macOS quarantine from:"
 echo "  $TARGET"
 echo
-
-# Don't silence stderr — if xattr complains we want the user (and us) to see
-# why. -dr removes com.apple.quarantine recursively from every file inside
-# the .app so the inner Mach-O and frameworks lose their download markers.
-xattr -dr com.apple.quarantine "$TARGET" || true
-
-# Verify the attribute is actually gone from the top-level bundle. The most
-# common silent failure is Terminal lacking the Files-and-Folders permission
-# needed to write extended attributes when the bundle sits on Desktop,
-# Documents, or iCloud Drive — the call returns success-ish but the attr
-# stays. Catch that here instead of telling the user "all done".
-if xattr -p com.apple.quarantine "$TARGET" >/dev/null 2>&1; then
+xattr_output="$(xattr -dr com.apple.quarantine "$TARGET" 2>&1)" || true
+if [ -n "$xattr_output" ]; then
+	echo "xattr reported:"
+	printf '  %s\n' "$xattr_output" | sed 's/^/  /'
 	echo
-	echo "ERROR: com.apple.quarantine is still attached to Rabbit.app."
-	echo "Removing it did not take effect. Common causes:"
+fi
+
+# Step 2: verify recursively, not just on the top-level bundle. The
+# previous script only checked $TARGET itself, which would miss inner
+# files (Contents/MacOS/rabbit, frameworks) that retained the xattr after
+# a partial clear. Gatekeeper looks at the executable too, so a partial
+# clear still triggers the warning — and we'd be lying when we said
+# "trusted".
+remaining="$(find "$TARGET" -exec sh -c '
+	for path in "$@"; do
+		if /usr/bin/xattr -p com.apple.quarantine "$path" >/dev/null 2>&1; then
+			printf "%s\n" "$path"
+		fi
+	done
+' _ {} +)"
+if [ -n "$remaining" ]; then
+	count="$(printf '%s\n' "$remaining" | wc -l | tr -d ' ')"
+	echo "ERROR: $count file(s) inside Rabbit.app still carry com.apple.quarantine."
+	echo "First few paths:"
+	printf '%s\n' "$remaining" | head -5 | sed 's/^/  /'
+	echo
+	echo "Common causes:"
 	echo
 	echo "  - The Rabbit folder is on Desktop, Documents, or iCloud Drive and"
 	echo "    Terminal does not have permission to modify files there."
@@ -165,16 +192,84 @@ if xattr -p com.apple.quarantine "$TARGET" >/dev/null 2>&1; then
 	echo
 	echo "Manual fallback (run in Terminal):"
 	echo "  xattr -dr com.apple.quarantine \"$TARGET\""
-	echo
-	echo "Or open Rabbit.app once, dismiss the warning dialog, then click"
-	echo "'Open Anyway' in System Settings -> Privacy & Security."
 	pause
 	exit 1
 fi
 
+echo "Quarantine cleared from Rabbit.app and every file inside it."
 echo
-echo "Rabbit.app is now trusted."
-echo "You can close this window and double-click Rabbit.app to launch RABBIT."
+
+# Step 3: route the user to Gatekeeper approval on macOS 15+ where the
+# xattr clear isn't enough, and stay out of their way on macOS 14 and
+# earlier where it usually is.
+#
+# Detection is by major version from `sw_vers`. macOS 15 is Sequoia (the
+# version that removed right-click -> Open as a bypass); macOS 26 is Tahoe
+# (the version that started flagging unsigned bundles regardless of
+# quarantine state). Treat unknown / unparseable versions as strict
+# Gatekeeper too, so future macOS releases default to the safer flow
+# without a code change.
+macos_version="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo "")"
+macos_major="${macos_version%%.*}"
+
+needs_settings_approval=0
+if [ -z "$macos_major" ] || ! [[ "$macos_major" =~ ^[0-9]+$ ]] || [ "$macos_major" -ge 15 ]; then
+	needs_settings_approval=1
+fi
+
+if [ "$needs_settings_approval" -eq 0 ]; then
+	echo "Detected macOS $macos_version. Quarantine clearance is sufficient on this version."
+	echo "You can close this window and double-click Rabbit.app to launch RABBIT."
+	echo
+	echo "If macOS still blocks the launch with a security warning, open"
+	echo "System Settings -> Privacy & Security, scroll to the Security section,"
+	echo "and click 'Open Anyway' next to the Rabbit entry."
+	pause
+	exit 0
+fi
+
+echo "Detected macOS ${macos_version:-unknown} — Gatekeeper approval is required"
+echo "even after quarantine is cleared. Setting up the approval flow now..."
+echo
+
+# Trigger the launch attempt. We don't care about `open`'s exit status —
+# it returns 0 the moment LaunchServices accepts the request, regardless
+# of whether Gatekeeper later blocks the actual execution. The point is
+# to register Rabbit.app with Gatekeeper so an "Open Anyway" entry
+# appears in the Privacy & Security pane.
+open "$TARGET" >/dev/null 2>&1 || true
+
+# Brief pause so any Gatekeeper dialog has a chance to render before we
+# steal focus by opening Settings. Sleeps shorter than ~1s race the
+# dialog on slower hardware; longer than ~3s feels laggy.
+sleep 2
+
+# Deep-link System Settings -> Privacy & Security. The `.extension` URL
+# is the modern (Ventura+) form; the legacy `com.apple.preference.security`
+# pane id keeps Monterey and earlier working. Falling through to
+# `open -b com.apple.systempreferences` is the bare-bones last resort.
+open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension" >/dev/null 2>&1 || \
+	open "x-apple.systempreferences:com.apple.preference.security" >/dev/null 2>&1 || \
+	open -b com.apple.systempreferences >/dev/null 2>&1 || true
+
+cat <<'NEXT_STEPS'
+
+macOS likely showed a security warning instead of launching Rabbit.
+That's expected for unsigned apps on macOS 15 and later. To approve:
+
+  1. Dismiss the security warning (click "Done").
+  2. In the Settings window we just opened, scroll to the "Security"
+     section near the bottom of Privacy & Security.
+  3. Click "Open Anyway" next to the Rabbit entry.
+  4. Confirm with your password or Touch ID if asked. Rabbit.app
+     will launch.
+
+This approval is per-app, not per-launch — once you've clicked
+"Open Anyway", future double-clicks on Rabbit.app work normally.
+RABBIT's self-update replaces the binary in place under the same bundle
+identity, so updates inherit the approval; only a fresh download into a
+different location triggers the dance again.
+NEXT_STEPS
 pause
 HELPER
 chmod +x "$STAGE_DIR/$WRAPPER_NAME/Open Me First.command"

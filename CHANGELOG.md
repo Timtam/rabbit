@@ -45,6 +45,18 @@ from this file and posts it as the GitHub release body.
 
 ### Fixed
 
+- macOS first-launch helper: `Open Me First.command` no longer falsely
+  reports success on macOS 15 (Sequoia) and 26 (Tahoe). Removing the
+  `com.apple.quarantine` xattr is no longer enough on those versions —
+  Gatekeeper blocks unsigned bundles on first launch regardless of
+  quarantine state. The helper now (a) verifies the xattr was actually
+  cleared *recursively* across the bundle (the previous version checked
+  only the bundle root, missing inner-file failures), (b) detects the
+  macOS version, and (c) on macOS 15+ triggers a launch attempt to
+  register Rabbit.app with Gatekeeper, then deep-links System Settings
+  → Privacy & Security so the user's "Open Anyway" approval is one
+  click away. macOS 14 and earlier keep the original quiet behavior.
+
 - macOS: install no longer aborts with
   `no artifact found for sws on MacOs/Universal` (and the analogous
   silent ReaPack-arm64 mis-install on Intel hosts) when REAPER is a
