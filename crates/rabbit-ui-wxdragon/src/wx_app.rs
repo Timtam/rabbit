@@ -17,6 +17,15 @@ use rabbit_core::self_update::SelfUpdateCheckReport;
 // body on the same thread that initialised UI_LOCALIZER (the main thread).
 thread_local! {
     static UI_LOCALIZER: RefCell<Option<Rc<Localizer>>> = const { RefCell::new(None) };
+    /// Top-level wizard frame, stashed here so transient modal dialogs
+    /// (e.g., the once-per-session "RABBIT update available" prompt) can
+    /// parent themselves on the wizard window without `Frame` having to
+    /// ride inside `Send`-requiring `call_after` closures or the
+    /// `WizardWidgets` struct (which is captured by those closures).
+    /// `Frame` doesn't impl `Send` because its underlying pointer is
+    /// `*mut`; in practice we only ever access it on the UI thread, but
+    /// the type system won't accept that as a static promise.
+    static UI_FRAME: RefCell<Option<Frame>> = const { RefCell::new(None) };
     /// Post-install rescan hook. The install click handler arms this with a
     /// closure that captures the UI-thread `Rc<RefCell>` shared state for
     /// `package_rows`/`package_notes`/`can_install`. The wizard install
@@ -38,6 +47,20 @@ fn with_ui_localizer<F: FnOnce(&Localizer)>(f: F) {
     UI_LOCALIZER.with(|cell| {
         if let Some(localizer) = cell.borrow().as_ref() {
             f(localizer);
+        }
+    });
+}
+
+fn install_ui_frame(frame: Frame) {
+    UI_FRAME.with(|cell| {
+        *cell.borrow_mut() = Some(frame);
+    });
+}
+
+fn with_ui_frame<F: FnOnce(&Frame)>(f: F) {
+    UI_FRAME.with(|cell| {
+        if let Some(frame) = cell.borrow().as_ref() {
+            f(frame);
         }
     });
 }
@@ -153,8 +176,11 @@ struct SelfUpdateUiState {
     /// Last status string written to the status bar — used to suppress
     /// screen-reader re-announcements when nothing has changed.
     last_status: String,
-    /// Last apply-button enable state — same de-dup intent.
-    last_apply_enabled: bool,
+    /// `true` once the once-per-session "RABBIT update available" prompt
+    /// dialog has been shown. Re-renders that follow the same check
+    /// result (e.g., a step change that re-invokes render) skip the
+    /// modal so the user isn't re-prompted after dismissing it.
+    prompted: bool,
 }
 
 fn render_self_update_status(
@@ -163,8 +189,13 @@ fn render_self_update_status(
     localizer: &Localizer,
     state: &Arc<Mutex<SelfUpdateUiState>>,
 ) {
-    let mut state = state.lock().unwrap();
-    let Some(check) = state.check.as_ref() else {
+    let mut state_guard = state.lock().unwrap();
+    // Clone the check result up-front so the rest of the function can
+    // freely mutate `state_guard` without fighting the borrow checker
+    // over an `as_ref()` view of `state_guard.check`. The clone is
+    // cheap (a single `Result<SelfUpdateCheckReport, String>`) and the
+    // function only runs on completion of a one-shot manifest probe.
+    let Some(check) = state_guard.check.clone() else {
         // Startup probe hasn't completed yet; leave the initial
         // "Checking for RABBIT updates…" placeholder in place.
         return;
@@ -177,22 +208,65 @@ fn render_self_update_status(
     // status line is gone. Concurrent self-update + install on the same
     // target still races at the file rename and surfaces a normal IO
     // error.)
-    let status = match check {
+    let status = match &check {
         Ok(report) => format_self_update_check_summary(localizer, report),
         Err(error) => format!("{}: {}", model.text.done_self_update_error_prefix, error),
     };
-    let apply_enabled = matches!(check, Ok(report) if report.update_available);
+    let apply_enabled = matches!(&check, Ok(report) if report.update_available);
 
-    let status_changed = status != state.last_status;
-    let enable_changed = apply_enabled != state.last_apply_enabled;
+    let status_changed = status != state_guard.last_status;
     if status_changed {
         widgets.self_update_status.set_status_text(&status, 0);
-        state.last_status = status;
+        state_guard.last_status = status;
     }
-    if enable_changed {
-        widgets.done_self_update_apply.enable(apply_enabled);
-        state.last_apply_enabled = apply_enabled;
+
+    // Once-per-session prompt: if an update is available, ask up front
+    // instead of forcing the user to navigate to the Done page to find
+    // the apply button. The Done-page button stays around as a fallback
+    // for users who pick "No" here and change their mind later.
+    if !apply_enabled || state_guard.prompted {
+        return;
     }
+    state_guard.prompted = true;
+    let Ok(report) = check else { return };
+    // Drop the lock before showing the modal — `MessageDialog::show_modal`
+    // runs a nested wxWidgets event loop, and any UI-thread callback that
+    // re-enters `render_self_update_status` while the modal is open would
+    // deadlock on a still-held mutex.
+    drop(state_guard);
+
+    let title = localizer.text("wizard-self-update-prompt-title").value;
+    let current = report.current_version.to_string();
+    let latest = report.latest_version.to_string();
+    let body = localizer
+        .format(
+            "wizard-self-update-prompt-body",
+            &[("current", current.as_str()), ("latest", latest.as_str())],
+        )
+        .value;
+
+    // Pull the frame from the UI-thread-local rather than from the
+    // captured `widgets` so we don't have to send a non-`Send` `Frame`
+    // through the `call_after` closure that wraps this function. The
+    // closure runs on the UI thread, so the thread-local was populated
+    // by `run()` before any worker fired.
+    with_ui_frame(|frame| {
+        let dialog = MessageDialog::builder(frame, &body, &title)
+            .with_style(
+                MessageDialogStyle::YesNo
+                    | MessageDialogStyle::IconQuestion
+                    | MessageDialogStyle::Centre,
+            )
+            .build();
+
+        if dialog.show_modal() == ID_YES {
+            start_self_update_apply(
+                widgets.done_status,
+                widgets.self_update_status,
+                Arc::clone(model),
+            );
+        }
+    });
 }
 
 /// `wx/defs.h`: `WXK_SPACE = 32` (just the ASCII value). Kept around as a
@@ -820,7 +894,6 @@ struct WizardWidgets {
     done_details: TextCtrl,
     done_launch_reaper: Button,
     done_open_resource: Button,
-    done_self_update_apply: Button,
     self_update_status: StatusBar,
     /// Child Panel hosting the language picker + restart-note label,
     /// rendered below the wizard buttons. Hidden on every step except
@@ -864,6 +937,7 @@ pub fn run() {
             .with_size(Size::new(820, 600))
             .build();
         frame.set_name("rabbit-main-window");
+        install_ui_frame(frame);
 
         let root_panel = Panel::builder(&frame).build();
         root_panel.set_name("rabbit-root-panel");
@@ -1598,52 +1672,11 @@ pub fn run() {
         // poll; if a same-target race happens, the install path surfaces
         // it as a `PackageInstallInProgress` error at acquire time.)
 
-        {
-            let model = Arc::clone(&model);
-            let widgets = wizard_widgets;
-            widgets.done_self_update_apply.on_click(move |_| {
-                append_done_status(
-                    &widgets.done_status,
-                    &model.text.done_self_update_apply_running,
-                );
-                let model = Arc::clone(&model);
-                std::thread::spawn(move || {
-                    let result = run_wizard_self_update_apply();
-                    wxdragon::call_after(Box::new(move || match result {
-                        Ok(report) => {
-                            with_ui_localizer(|localizer| {
-                                append_done_status(
-                                    &widgets.done_status,
-                                    &format_self_update_apply_summary(localizer, &report),
-                                );
-                            });
-                            if !report.replaced_files.is_empty() {
-                                match relaunch_rabbit_after_apply() {
-                                    Ok(pid) => append_done_status(
-                                        &widgets.done_status,
-                                        &format!(
-                                            "{}: PID {}",
-                                            model.text.done_self_update_relaunch_prefix, pid
-                                        ),
-                                    ),
-                                    Err(error) => append_done_status(
-                                        &widgets.done_status,
-                                        &format!(
-                                            "{}: {}",
-                                            model.text.done_self_update_error_prefix, error
-                                        ),
-                                    ),
-                                }
-                            }
-                        }
-                        Err(error) => append_done_status(
-                            &widgets.done_status,
-                            &format!("{}: {}", model.text.done_self_update_error_prefix, error),
-                        ),
-                    }));
-                });
-            });
-        }
+        // (The Done page used to host an "Apply RABBIT update" button as
+        // an always-reachable fallback to the once-per-session prompt. It
+        // was removed because users couldn't find it before completing an
+        // install — the modal at startup is now the only entry point, and
+        // a user who picks "No" gets re-prompted by relaunching RABBIT.)
 
         // (The "Rescan target" button used to live here so the user could
         // re-detect installed components on the Done page and jump back
@@ -1731,7 +1764,7 @@ fn add_pages(
     );
 
     let done_page = Panel::builder(book).build();
-    let (done_status, done_details, done_launch_reaper, done_open_resource, done_self_update_apply) =
+    let (done_status, done_details, done_launch_reaper, done_open_resource) =
         build_done_page(&done_page, model);
     book.add_page(&done_page, &model.steps[DONE_STEP].label, false, None);
 
@@ -1756,7 +1789,6 @@ fn add_pages(
         done_details,
         done_launch_reaper,
         done_open_resource,
-        done_self_update_apply,
         self_update_status,
         language_footer,
     }
@@ -2412,6 +2444,71 @@ fn spawn_version_check_worker(package_ids: Vec<String>) {
         }
         wxdragon::call_after(Box::new(move || {
             dispatch_version_check_event(VersionCheckEvent::Finished);
+        }));
+    });
+}
+
+/// Trigger the self-update apply pipeline on a worker thread, routing
+/// progress (start, summary, relaunch / error) to both the Done page's
+/// `done_status` text control and the always-visible `self_update_status`
+/// status bar. Two surfaces because the apply can be invoked from two
+/// places: the Done page button (where `done_status` is the natural
+/// detail surface and `self_update_status` is a redundant short-form),
+/// and the once-per-session "RABBIT update available" prompt at startup
+/// (where the user is on the Target step and only `self_update_status`
+/// is visible). The duplication keeps both call sites simple — neither
+/// has to know which surface their user can see.
+///
+/// Takes individual widget handles rather than the full `WizardWidgets`
+/// because that struct now holds a `Frame` (for parenting modal
+/// dialogs) and `Frame` isn't `Send` — capturing the whole struct
+/// into the spawned worker would break the closure's `Send` bound.
+fn start_self_update_apply(
+    done_status: TextCtrl,
+    self_update_status: StatusBar,
+    model: Arc<WizardModel>,
+) {
+    append_done_status(&done_status, &model.text.done_self_update_apply_running);
+    self_update_status.set_status_text(&model.text.done_self_update_apply_running, 0);
+    let model_for_thread = Arc::clone(&model);
+    std::thread::spawn(move || {
+        let result = run_wizard_self_update_apply();
+        wxdragon::call_after(Box::new(move || match result {
+            Ok(report) => {
+                with_ui_localizer(|localizer| {
+                    let summary = format_self_update_apply_summary(localizer, &report);
+                    append_done_status(&done_status, &summary);
+                    self_update_status.set_status_text(&summary, 0);
+                });
+                if !report.replaced_files.is_empty() {
+                    match relaunch_rabbit_after_apply() {
+                        Ok(pid) => {
+                            let msg = format!(
+                                "{}: PID {}",
+                                model_for_thread.text.done_self_update_relaunch_prefix, pid
+                            );
+                            append_done_status(&done_status, &msg);
+                            self_update_status.set_status_text(&msg, 0);
+                        }
+                        Err(error) => {
+                            let msg = format!(
+                                "{}: {}",
+                                model_for_thread.text.done_self_update_error_prefix, error
+                            );
+                            append_done_status(&done_status, &msg);
+                            self_update_status.set_status_text(&msg, 0);
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                let msg = format!(
+                    "{}: {}",
+                    model_for_thread.text.done_self_update_error_prefix, error
+                );
+                append_done_status(&done_status, &msg);
+                self_update_status.set_status_text(&msg, 0);
+            }
         }));
     });
 }
@@ -4236,7 +4333,7 @@ fn build_progress_page(page: &Panel, model: &WizardModel) -> (StaticText, Gauge,
 fn build_done_page(
     page: &Panel,
     model: &WizardModel,
-) -> (TextCtrl, TextCtrl, Button, Button, Button) {
+) -> (TextCtrl, TextCtrl, Button, Button) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     add_heading(
         page,
@@ -4316,24 +4413,9 @@ fn build_done_page(
     open_resource.enable(false);
     actions.add(&open_resource, 0, SizerFlag::All, 6);
 
-    let self_update_apply = Button::builder(page)
-        .with_label(&model.text.done_self_update_apply_label)
-        .build();
-    self_update_apply.set_name("rabbit-done-self-update-apply");
-    self_update_apply.add_style(WindowStyle::TabStop);
-    self_update_apply.set_can_focus(true);
-    self_update_apply.enable(false);
-    actions.add(&self_update_apply, 0, SizerFlag::All, 6);
-
     sizer.add_sizer(&actions, 0, SizerFlag::All | SizerFlag::Expand, 0);
     page.set_sizer(sizer, true);
-    (
-        status,
-        details,
-        launch_reaper,
-        open_resource,
-        self_update_apply,
-    )
+    (status, details, launch_reaper, open_resource)
 }
 
 fn add_heading(page: &Panel, sizer: &BoxSizer, label: &str, name: &str) {

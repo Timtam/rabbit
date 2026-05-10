@@ -31,6 +31,19 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Changed
+
+- Self-update is now a modal Yes/No prompt at startup instead of a
+  button on the wizard's Done page. The previous design was effectively
+  unreachable: users had to finish an install before they ever saw the
+  "Apply RABBIT update" button, and the always-visible status bar line
+  pointed at a button most users couldn't find. The startup self-update
+  check now raises a Yes/No dialog as soon as it completes; "Yes" runs
+  the apply inline (with progress in the status bar) and relaunches
+  RABBIT, "No" dismisses the prompt for the rest of the session. Users
+  who change their mind can relaunch RABBIT to be re-prompted; the
+  status-bar line spells that out.
+
 ## [0.1.1] - 2026-05-10
 
 ### Added

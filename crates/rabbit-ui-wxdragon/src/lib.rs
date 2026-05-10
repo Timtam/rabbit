@@ -169,7 +169,6 @@ pub struct WizardText {
     pub done_no_reaper_app: String,
     pub done_launch_reaper_error_prefix: String,
     pub done_open_resource_error_prefix: String,
-    pub done_self_update_apply_label: String,
     pub done_self_update_apply_running: String,
     pub done_self_update_error_prefix: String,
     pub done_self_update_relaunch_prefix: String,
@@ -703,11 +702,6 @@ fn wizard_text(localizer: &Localizer) -> WizardText {
         done_open_resource_error_prefix: localizer
             .text("wizard-done-open-resource-error-prefix")
             .value,
-        done_self_update_apply_label: localized_wx_mnemonic_label(
-            localizer,
-            "wizard-done-self-update-apply",
-            "wizard-done-self-update-apply-mnemonic",
-        ),
         done_self_update_apply_running: localizer
             .text("wizard-done-self-update-apply-running")
             .value,

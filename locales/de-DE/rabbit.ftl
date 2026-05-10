@@ -183,16 +183,20 @@ wizard-done-open-resource-mnemonic = O
 wizard-done-no-reaper-app = Für dieses Ziel ist keine startbare REAPER-Anwendung bekannt.
 wizard-done-launch-reaper-error-prefix = REAPER konnte nicht gestartet werden
 wizard-done-open-resource-error-prefix = Ressourcenordner konnte nicht geöffnet werden
-wizard-done-self-update-apply = RABBIT-Aktualisierung anwenden
-wizard-done-self-update-apply-mnemonic = A
 wizard-done-self-update-apply-running = RABBIT-Aktualisierung wird angewendet…
 wizard-done-self-update-error-prefix = RABBIT-Selbstaktualisierung fehlgeschlagen
 wizard-done-self-update-relaunch-prefix = RABBIT neu gestartet
 wizard-self-update-status-checking = Suche nach RABBIT-Aktualisierungen…
 
+# Modaler Dialog, der einmal pro Sitzung erscheint, wenn die Startprüfung
+# eine neuere Version findet. Titel ist kurz, der Text verwendet dieselben
+# Platzhalter wie die Statuszeile unten.
+wizard-self-update-prompt-title = RABBIT-Aktualisierung verfügbar
+wizard-self-update-prompt-body = RABBIT { $latest } ist verfügbar. Sie haben aktuell { $current }. Jetzt aktualisieren? RABBIT wird nach Abschluss der Aktualisierung neu gestartet.
+
 # $current is the running RABBIT version, $latest is the version offered by the
 # release manifest, $channel is the release channel id (e.g. "stable").
-self-update-status-update-available = RABBIT-Aktualisierung verfügbar: { $current } → { $latest } (Kanal { $channel }). Klicken Sie auf „RABBIT-Aktualisierung anwenden“ zum Installieren.
+self-update-status-update-available = RABBIT-Aktualisierung verfügbar: { $current } → { $latest } (Kanal { $channel }). Starten Sie RABBIT neu, um erneut gefragt zu werden.
 self-update-status-up-to-date = RABBIT ist auf dem neuesten Stand (aktuell { $current }, Kanal { $channel }).
 
 # $version is the version that the apply pipeline targeted but did not write.
