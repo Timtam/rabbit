@@ -486,24 +486,24 @@ fn embedded_snapshot_version_from_text(text: &str) -> Option<crate::version::Ver
 ///    custom build) patches it in, we read it for free without a
 ///    process spawn. `FileVersion` carries `LIBAVUTIL_VERSION` and
 ///    isn't useful here (libavutil 60.x.y for FFmpeg 8.x).
-/// 2. **`ffmpeg.exe -version`** — the canonical, vendor-independent
-///    signal. The first line is
-///    `ffmpeg version <version> Copyright (c) ...`, where
-///    `<version>` is `8.1.1` for Gyan stable or
-///    `n8.1.1-6-gdeadbeef-...` for tordona's git builds. We strip the
-///    `n`/`v` prefix and take the leading digit-or-dot run, giving us
-///    the upstream release version (`8.1.1`) at `High` confidence.
-///    Spawned with the no-window flag on Windows so users don't see a
-///    console flash; the file lives in the user's own UserPlugins
-///    folder so we trust it the same way we trust REAPER's existing
-///    binaries.
+/// 2. **Binary string scan of `ffmpeg.exe`** — vanilla FFmpeg's
+///    `show_banner` format string is a single contiguous literal of
+///    the shape `"%s version <FFMPEG_VERSION>, Copyright (c) %d-%d the
+///    FFmpeg developers\n"`, with `FFMPEG_VERSION` substituted at
+///    compile time. We anchor on the distinctive `the FFmpeg
+///    developers` suffix, then read backwards to pick out the version
+///    token between `version ` and `,`. This replaces the previous
+///    `ffmpeg.exe -version` subprocess spawn, which on Windows blocked
+///    the UI thread for ~30 s while AV scanned FFmpeg's dozens of
+///    DLL dependencies on every launch. The scan is two `memmem`
+///    searches over a ~100 KB read — well below 1 ms in practice.
 /// 3. **libavformat-major filename heuristic** — fallback when no
-///    executable is present or the spawn fails. Maps
-///    `avformat-XX.dll`'s libavformat major to the FFmpeg release
-///    major (lib 58→FFmpeg 4, 59→5, 60→6, 61→7, 62→8, i.e.
-///    `lib_major - 54`). Patch level isn't recoverable from the
-///    filename alone, so we synthesize as `<major>.0.0` at `Medium`
-///    confidence.
+///    executable is present or the binary scan can't find the
+///    anchor. Maps `avformat-XX.dll`'s libavformat major to the
+///    FFmpeg release major (lib 58→FFmpeg 4, 59→5, 60→6, 61→7,
+///    62→8, i.e. `lib_major - 54`). Patch level isn't recoverable
+///    from the filename alone, so we synthesize as `<major>.0.0` at
+///    `Medium` confidence.
 fn detect_ffmpeg_version(
     files: &[PathBuf],
 ) -> Option<(crate::version::Version, String, Confidence, Vec<String>)> {
@@ -551,30 +551,35 @@ fn detect_ffmpeg_version(
         }
     }
 
-    // Probe 2: `ffmpeg.exe -version`. The vanilla FFmpeg build prints
-    // its version on the first stdout line, regardless of whether the
-    // .rc file carries any StringFileInfo. We invoke at most one of
-    // the three candidates (ffmpeg, ffprobe, ffplay) — they all share
-    // the same fftools cmdutils path, so the first one that runs is
-    // authoritative.
-    if let Some(exe_path) = candidates.first() {
-        if let Some(version) = ffmpeg_version_from_executable_invocation(exe_path) {
-            let major = version.numeric_parts().first().copied().unwrap_or(0);
-            if (4..=9).contains(&major) {
-                let exe_name = exe_path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("ffmpeg.exe")
-                    .to_string();
-                return Some((
-                    version,
-                    "ffmpeg-cli-version".to_string(),
-                    Confidence::High,
-                    vec![format!(
-                        "Version came from running `{exe_name} -version` and parsing the first line."
-                    )],
-                ));
-            }
+    // Probe 2: binary string scan of `ffmpeg.exe`. The vanilla FFmpeg
+    // build's `show_banner` format string embeds `FFMPEG_VERSION`
+    // verbatim, so the literal version sits inside one contiguous
+    // string in `.rdata` we can grep out without touching the
+    // executable as a process. We invoke at most one of the three
+    // candidates (ffmpeg, ffprobe, ffplay) — they all share the same
+    // fftools cmdutils path, so the first hit is authoritative.
+    for exe_path in &candidates {
+        let Ok(bytes) = fs::read(exe_path) else {
+            continue;
+        };
+        let Some(version) = ffmpeg_version_from_binary_bytes(&bytes) else {
+            continue;
+        };
+        let major = version.numeric_parts().first().copied().unwrap_or(0);
+        if (4..=9).contains(&major) {
+            let exe_name = exe_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("ffmpeg.exe")
+                .to_string();
+            return Some((
+                version,
+                "ffmpeg-binary-version-string".to_string(),
+                Confidence::High,
+                vec![format!(
+                    "Version came from a binary scan of {exe_name} for FFmpeg's `show_banner` format string."
+                )],
+            ));
         }
     }
 
@@ -597,35 +602,35 @@ fn detect_ffmpeg_version(
     None
 }
 
-/// Run `<exe_path> -version`, capture stdout, and parse the leading
-/// version token off the first line. Vanilla FFmpeg's first stdout
-/// line is `ffmpeg version <version> Copyright (c) ...`. Returns
-/// `None` on spawn failure, non-zero exit, or unparseable output —
-/// caller falls back to the libavformat heuristic in that case.
-fn ffmpeg_version_from_executable_invocation(exe_path: &Path) -> Option<crate::version::Version> {
-    use std::process::Command;
-
-    let mut command = Command::new(exe_path);
-    command.arg("-version");
-
-    // CREATE_NO_WINDOW = 0x08000000. Suppresses the console window
-    // flash that would otherwise appear when spawning a console-mode
-    // exe from a GUI process. No-op on non-Windows.
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
-
-    let output = command.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let first_line = stdout.lines().next()?.trim();
-    let after_prefix = first_line.strip_prefix("ffmpeg version ")?;
-    let token = after_prefix.split_whitespace().next()?;
-    ffmpeg_version_from_product_version_string(token)
+/// Scan a vanilla FFmpeg binary for the `show_banner` format-string
+/// literal and pull the embedded `FFMPEG_VERSION` out of it. The
+/// banner is one contiguous string of the form:
+///
+/// ```text
+/// %s version <VERSION>, Copyright (c) <year>-<year> the FFmpeg developers
+/// ```
+///
+/// `<VERSION>` is whatever `FFMPEG_VERSION` was `#define`d to at
+/// compile time — `8.1.1` for Gyan stable, `n8.1.1` / `n8.1.1-6-…`
+/// for snapshot / git builds — which we parse with the same helper
+/// that handles `ProductVersion`. Returns `None` when the anchor
+/// can't be found (non-FFmpeg binary, stripped strings table, …).
+fn ffmpeg_version_from_binary_bytes(bytes: &[u8]) -> Option<crate::version::Version> {
+    const ANCHOR: &[u8] = b" the FFmpeg developers";
+    let anchor_pos = bytes.windows(ANCHOR.len()).position(|w| w == ANCHOR)?;
+    // The format string is one contiguous run; cap the look-back at
+    // 256 bytes so a stripped-string-table binary that happens to have
+    // the anchor in an unrelated context can't drag us through MB of
+    // bytes hunting for `version `.
+    let start_limit = anchor_pos.saturating_sub(256);
+    let prelude = &bytes[start_limit..anchor_pos];
+    let prelude_str = std::str::from_utf8(prelude).ok()?;
+    let version_marker = "version ";
+    let version_pos = prelude_str.rfind(version_marker)?;
+    let after = &prelude_str[version_pos + version_marker.len()..];
+    let comma_pos = after.find(',')?;
+    let version_str = after[..comma_pos].trim();
+    ffmpeg_version_from_product_version_string(version_str)
 }
 
 /// Pull the leading version-shaped run out of FFmpeg's
@@ -1170,6 +1175,42 @@ mod tests {
         // major-bump cadence isn't perfectly synchronized to FFmpeg's,
         // and the stubbed ffmpeg.exe has no readable VS_FIXEDFILEINFO.
         assert!(detect_ffmpeg_version(&[avcodec]).is_none());
+    }
+
+    #[test]
+    fn parses_ffmpeg_version_from_show_banner_format_string() {
+        // FFmpeg's `show_banner` literal is one contiguous string in
+        // .rdata; embed the same shape in a fake "binary" and verify
+        // the scanner extracts the version.
+        let mut bytes = vec![0u8; 1024];
+        bytes.extend_from_slice(
+            b"\0\0\0%s version 8.1.1, Copyright (c) %d-%d the FFmpeg developers\n\0",
+        );
+        bytes.extend(std::iter::repeat(0u8).take(1024));
+        let version = super::ffmpeg_version_from_binary_bytes(&bytes).unwrap();
+        assert_eq!(version.raw(), "8.1.1");
+    }
+
+    #[test]
+    fn parses_ffmpeg_snapshot_version_from_show_banner() {
+        // tordona / BtbN snapshot builds substitute `n8.1.1-6-gdeadbeef`
+        // (or similar) into FFMPEG_VERSION. The scanner strips the `n`
+        // and keeps the leading digit-or-dot run.
+        let mut bytes = vec![0u8; 256];
+        bytes.extend_from_slice(
+            b"%s version n8.1.1-6-gdeadbeef, Copyright (c) %d-%d the FFmpeg developers\n",
+        );
+        let version = super::ffmpeg_version_from_binary_bytes(&bytes).unwrap();
+        assert_eq!(version.raw(), "8.1.1");
+    }
+
+    #[test]
+    fn binary_scan_returns_none_without_anchor() {
+        // A non-FFmpeg binary won't have the distinctive
+        // `the FFmpeg developers` anchor; falling through here lets the
+        // caller drop to Probe 3 (libavformat filename heuristic).
+        let bytes = b"random binary contents with version 9.9.9 inside but no anchor";
+        assert!(super::ffmpeg_version_from_binary_bytes(bytes).is_none());
     }
 
     #[test]

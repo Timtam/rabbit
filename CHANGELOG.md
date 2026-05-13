@@ -31,6 +31,22 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Fixed
+
+- FFmpeg version detection no longer freezes the wizard for tens of
+  seconds on Windows when an FFmpeg install is present. Probe 2
+  previously called `ffmpeg.exe -version` via `std::process::Command`
+  on the UI thread, which on Windows blocks for the entire AV scan of
+  FFmpeg's dozens of DLL dependencies — easily 20-30 s per launch on
+  a default-configured machine, and the same stall ran on the
+  post-install rescan after installing FFmpeg too. Probe 2 now scans
+  the `ffmpeg.exe` binary for the contiguous `show_banner` format
+  string (`"%s version <VERSION>, Copyright (c) … the FFmpeg
+  developers"`) anchored on the unique `the FFmpeg developers`
+  literal, and pulls `<VERSION>` out without spawning any subprocess.
+  Same `High` confidence as before; the matching detector id changed
+  from `ffmpeg-cli-version` to `ffmpeg-binary-version-string`.
+
 ### Added
 
 - Live per-package progress reporting on the wizard's Installation
