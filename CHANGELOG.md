@@ -31,6 +31,8 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-15
+
 ### Added
 
 - New package: **Surge XT**, the free open-source hybrid synthesizer from
