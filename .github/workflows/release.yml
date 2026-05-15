@@ -37,8 +37,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      # Intentionally NOT caching Rust dependencies on the release workflow:
+      # release builds run once per tag and never benefit from a hot cache,
+      # while the Swatinem/rust-cache save step on Windows is racy with
+      # lingering MSVC orphan processes (vctip / mspdbsrv) holding `target/`
+      # file locks. A failed cache save fails the whole job and skips the
+      # downstream `publish` job — i.e. it has blocked a release before.
+      # ci.yml keeps the cache because its repeated PR/push builds DO benefit.
 
       - name: Install Windows GUI build prerequisites (x64)
         if: matrix.platform_id == 'windows' && runner.arch == 'X64'
