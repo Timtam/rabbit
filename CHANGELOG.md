@@ -33,6 +33,15 @@ from this file and posts it as the GitHub release body.
 
 ### Fixed
 
+- Self-update apply on macOS no longer leaves the swapped binary
+  non-executable. The staged source is the bare universal Mach-O off
+  the GitHub release, and HTTPS downloads strip Unix mode bits, so
+  `fs::copy` propagated a 0o644 mode onto `Rabbit.app/Contents/MacOS/rabbit`.
+  Finder then labelled the file "document" instead of "Unix executable"
+  and the bundle refused to launch — even though `codesign --force --deep`
+  succeeded on it. `swap_install_file` now re-asserts 0o755 on the
+  install target right after the copy, before the bundle re-sign step.
+  No-op on Windows. Reported in issue #5.
 - Self-update apply in the GUI now exits the old RABBIT process after
   spawning the relaunched copy. Previously the swap completed and the
   new version launched, but the pre-update window kept running next to

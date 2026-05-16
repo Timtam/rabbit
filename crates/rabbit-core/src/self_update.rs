@@ -482,6 +482,13 @@ fn swap_install_file(
             source: error,
         });
     }
+    // The staged source comes off a GitHub release download, which strips
+    // the Unix execute bit — `fs::copy` then propagates the resulting
+    // 0644 mode onto the install target. macOS Finder labels the file
+    // "document" (not "Unix executable") and the bundle refuses to launch,
+    // even with a valid ad-hoc signature. Re-assert 0o755 so the swapped
+    // binary stays executable. No-op on Windows.
+    ensure_install_target_executable(install_target);
     clear_macos_quarantine(install_target);
     replaced.push(ReplacedFile {
         install_path: install_target.to_path_buf(),
@@ -489,6 +496,22 @@ fn swap_install_file(
     });
     Ok(())
 }
+
+/// Restore the Unix execute bit on the freshly swapped install target.
+/// HTTPS downloads don't carry filesystem mode bits, so the staged source
+/// arrives as 0644; `fs::copy` mirrors that mode onto the destination.
+/// Without `+x`, macOS treats `Rabbit.app/Contents/MacOS/rabbit` as a
+/// non-executable "document" and the bundle becomes unlaunchable
+/// (issue #5). Best-effort — a failure here doesn't roll back the swap
+/// because the user is no worse off than before this fix existed.
+#[cfg(unix)]
+fn ensure_install_target_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
+}
+
+#[cfg(not(unix))]
+fn ensure_install_target_executable(_path: &Path) {}
 
 /// Strip the `com.apple.quarantine` extended attribute from the freshly
 /// swapped binary. Some macOS configurations re-quarantine files written by
@@ -1635,6 +1658,47 @@ mod tests {
     // self-update apply path. The lock is now per-target so the cross-
     // target check is gone — see `apply_self_update`'s comment for the
     // rationale.)
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_self_update_restores_execute_bit_on_install_target() {
+        // Regression for issue #5: the staged source has 0o644 (as it would
+        // after coming off a GitHub release download — HTTPS strips Unix
+        // mode bits), and the freshly copied install target should still
+        // end up executable so the macOS .app bundle stays launchable.
+        use std::os::unix::fs::PermissionsExt;
+
+        let staging_root = tempdir().unwrap();
+        let install_root = tempdir().unwrap();
+        let staged_binary_path = staging_root
+            .path()
+            .join("0.2.0")
+            .join("rabbit-0.2.0-macos-aarch64");
+        fs::create_dir_all(staged_binary_path.parent().unwrap()).unwrap();
+        write_test_release_binary(&staged_binary_path, b"new-mac-binary");
+        fs::set_permissions(&staged_binary_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let install_target = install_root.path().join("rabbit");
+        fs::write(&install_target, b"old-mac-binary").unwrap();
+        fs::set_permissions(&install_target, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let stage = staged_report_for_binary(&staged_binary_path, staging_root.path());
+        let report = apply_self_update(
+            &stage,
+            &ApplySelfUpdateOptions {
+                install_root: Some(install_root.path().to_path_buf()),
+                install_target_basename: Some("rabbit".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.replaced_files.len(), 1);
+        let mode = fs::metadata(&install_target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "post-swap install target should be executable, got {mode:o}"
+        );
+    }
 
     #[test]
     fn finds_enclosing_app_bundle_for_macos_install_targets() {
