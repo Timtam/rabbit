@@ -41,6 +41,20 @@ from this file and posts it as the GitHub release body.
 
 ### Fixed
 
+- Elevated NSIS installers now receive their `/D=<path>` install-directory
+  flag correctly, so packages whose vendor installer is NSIS land in the
+  REAPER folder RABBIT planned instead of NSIS's default
+  `C:\Program Files\REAPER (x64)\`. `quote_one` was doubling every
+  backslash and wrapping the flag in double quotes, but NSIS reads `/D=`
+  straight from `GetCommandLine()` and takes everything after it verbatim
+  to end-of-string — so the quoted path arrived with a trailing `"` baked
+  into the directory name (an invalid path). NSIS fell back to its default
+  location, and post-install verification at the planned path then
+  surfaced the installer's `1223` exit code as a hard error, leaving every
+  package after REAPER unprocessed. `/D=…` arguments are now passed
+  unquoted and last as NSIS requires, and backslash escaping follows the
+  Windows command-line spec (only backslashes immediately before a `"` are
+  doubled). Windows only. Fixed in PR #6 by @trypsynth.
 - Self-update apply on macOS no longer leaves the swapped binary
   non-executable. The staged source is the bare universal Mach-O off
   the GitHub release, and HTTPS downloads strip Unix mode bits, so
