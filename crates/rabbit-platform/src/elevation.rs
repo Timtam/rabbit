@@ -277,14 +277,61 @@ fn quote_arguments(arguments: &[String]) -> String {
         .join(" ")
 }
 
+/// Quote a single argument for the `lpParameters` string passed to
+/// `ShellExecuteExW`.
+///
+/// Follows the Windows command-line quoting rules: only backslashes
+/// *immediately preceding a `"`* need to be doubled; backslashes elsewhere
+/// are literal and must **not** be doubled.
+///
+/// Exception: NSIS installers parse `/D=<path>` directly from the raw
+/// `GetCommandLine()` string and require the path to be the last token,
+/// **unquoted** — quoting it causes NSIS to include the surrounding `"` in
+/// the directory name, which produces an invalid path.  `/D=…` arguments
+/// are therefore returned verbatim regardless of spaces or backslashes.
 fn quote_one(argument: &str) -> String {
-    if !argument.is_empty()
-        && !argument.contains(|ch: char| ch.is_whitespace() || ch == '"' || ch == '\\')
-    {
+    // NSIS: /D=<path> must be unquoted and last in the parameter string.
+    if argument.len() >= 3 && argument[..3].eq_ignore_ascii_case("/D=") {
         return argument.to_string();
     }
-    let escaped = argument.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+
+    // Arguments with no whitespace or embedded quotes need no quoting.
+    if !argument.is_empty() && !argument.contains(|ch: char| ch.is_whitespace() || ch == '"') {
+        return argument.to_string();
+    }
+
+    // Wrap in double-quotes.  Only double the backslashes that immediately
+    // precede a `"` (either an explicit one in the argument or the closing
+    // quote we add); backslashes elsewhere pass through unchanged.
+    let mut result = String::from('"');
+    let mut pending_backslashes: usize = 0;
+    for ch in argument.chars() {
+        match ch {
+            '\\' => pending_backslashes += 1,
+            '"' => {
+                // N backslashes before `"` → 2*N backslashes then `\"`.
+                for _ in 0..(pending_backslashes * 2) {
+                    result.push('\\');
+                }
+                pending_backslashes = 0;
+                result.push_str("\\\"");
+            }
+            _ => {
+                // Backslashes not before `"` are literal.
+                for _ in 0..pending_backslashes {
+                    result.push('\\');
+                }
+                pending_backslashes = 0;
+                result.push(ch);
+            }
+        }
+    }
+    // N trailing backslashes precede the closing `"` — double them.
+    for _ in 0..(pending_backslashes * 2) {
+        result.push('\\');
+    }
+    result.push('"');
+    result
 }
 
 #[cfg(test)]
@@ -293,11 +340,25 @@ mod tests {
 
     #[test]
     fn quotes_arguments_with_whitespace() {
+        // A regular argument with spaces is wrapped in quotes; backslashes
+        // inside it are not doubled (Windows only needs that before a `"`).
+        let line = quote_arguments(&[
+            "/S".to_string(),
+            "some arg with spaces and C:\\backslash".to_string(),
+        ]);
+        assert_eq!(line, "/S \"some arg with spaces and C:\\backslash\"");
+    }
+
+    #[test]
+    fn nsis_d_flag_is_passed_unquoted() {
+        // NSIS reads /D= from GetCommandLine() and requires the path to be
+        // unquoted and last.  Quoting it causes NSIS to include the `"` in
+        // the directory name, producing an invalid path.
         let line = quote_arguments(&[
             "/S".to_string(),
             "/D=C:\\Program Files (x86)\\Foo".to_string(),
         ]);
-        assert_eq!(line, "/S \"/D=C:\\\\Program Files (x86)\\\\Foo\"");
+        assert_eq!(line, "/S /D=C:\\Program Files (x86)\\Foo");
     }
 
     #[test]
