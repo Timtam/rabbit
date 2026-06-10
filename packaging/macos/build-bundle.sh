@@ -134,27 +134,23 @@ printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
 
 # --- Sign ---
 if [ -n "$SIGN_IDENTITY" ]; then
-	# Developer ID: sign the *bundle* in a single pass. Signing the bundle is
-	# what binds Contents/Info.plist into the main executable's seal and takes
-	# the code-signing identifier from CFBundleIdentifier — and that binding is
-	# a prerequisite for notarization.
-	#
-	# First strip any signature the binary inherited: the release pipeline
-	# Developer ID-signs the standalone bare binary (the CLI / self-update
-	# asset) before handing it here, and a pre-existing standalone signature on
-	# the inner Mach-O is NOT rebound by the subsequent bundle sign. That leaves
-	# the executable signed as a loose file (identifier "Rabbit", Info.plist
-	# unbound) rather than as a bundle member, so the bundle seal is invalid and
-	# notarization rejects it with "the signature of the binary is invalid".
-	# Removing it first makes the bundle sign re-sign the main executable from
-	# scratch, with the Info.plist bound.
+	# Developer ID: sign the bundle with --deep in a single pass. codesign
+	# treats Contents/MacOS/rabbit as nested code rather than auto-signing it as
+	# the main executable, so a plain `codesign Rabbit.app` either errors
+	# ("code object is not signed at all") when the inner binary is unsigned, or
+	# seals a pre-signed inner binary without binding the Info.plist (which
+	# notarization rejects as "the signature of the binary is invalid").
+	# --deep makes codesign (re-)sign the inner executable as part of the
+	# bundle, which both signs it and binds Contents/Info.plist into its seal.
+	# This mirrors the ad-hoc path below; it's safe here because the bundle has
+	# no nested frameworks/helpers — just the one executable — so Apple's
+	# caution against --deep for multi-component bundles doesn't apply.
 	#
 	# The hardened runtime (--options runtime) and secure timestamp
 	# (--timestamp) are both notarization prerequisites. RABBIT is statically
 	# linked and never dlopens external code into its own process, so no
-	# entitlements are required, and there's no nested code needing --deep.
-	codesign --remove-signature "$APP_DIR/Contents/MacOS/rabbit" 2>/dev/null || true
-	codesign --force --options runtime --timestamp \
+	# entitlements are required.
+	codesign --force --deep --options runtime --timestamp \
 		--sign "$SIGN_IDENTITY" "$APP_DIR"
 
 	# Diagnostics: dump the resulting signature so a notarization rejection is
