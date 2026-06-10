@@ -143,6 +143,19 @@ if [ -n "$SIGN_IDENTITY" ]; then
 		--sign "$SIGN_IDENTITY" "$APP_DIR/Contents/MacOS/rabbit"
 	codesign --force --options runtime --timestamp \
 		--sign "$SIGN_IDENTITY" "$APP_DIR"
+
+	# Diagnostics: dump the resulting signature so a notarization rejection is
+	# traceable from CI. Look for three things in this output:
+	#   * Authority chain — should be three lines: the Developer ID leaf, then
+	#     "Developer ID Certification Authority", then "Apple Root CA". A
+	#     truncated chain is the usual cause of "signature is invalid".
+	#   * "Timestamp=..." — confirms a secure timestamp was attached.
+	#   * "flags=0x10000(runtime)" — confirms the hardened runtime is enabled.
+	# The strict verify then confirms the seal is internally valid on the runner.
+	echo "--- codesign inspection: Contents/MacOS/rabbit ---"
+	codesign --display --verbose=4 "$APP_DIR/Contents/MacOS/rabbit" 2>&1 || true
+	echo "--- codesign strict verify: Rabbit.app ---"
+	codesign --verify --deep --strict --verbose=4 "$APP_DIR" 2>&1 || true
 elif [ "$ADHOC_SIGN" -eq 1 ]; then
 	# Ad-hoc signing (-s -) doesn't satisfy Gatekeeper for distribution but
 	# avoids the "damaged and can't be opened" error that hits unsigned
