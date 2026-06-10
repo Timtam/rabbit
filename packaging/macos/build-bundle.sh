@@ -134,13 +134,26 @@ printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
 
 # --- Sign ---
 if [ -n "$SIGN_IDENTITY" ]; then
-	# Developer ID: sign the inner Mach-O first, then the bundle. Each gets
-	# the hardened runtime (--options runtime) and a secure timestamp
-	# (--timestamp) — both are prerequisites for notarization. RABBIT is
-	# statically linked and never dlopens external code into its own process,
-	# so no entitlements are required.
-	codesign --force --options runtime --timestamp \
-		--sign "$SIGN_IDENTITY" "$APP_DIR/Contents/MacOS/rabbit"
+	# Developer ID: sign the *bundle* in a single pass. Signing the bundle is
+	# what binds Contents/Info.plist into the main executable's seal and takes
+	# the code-signing identifier from CFBundleIdentifier — and that binding is
+	# a prerequisite for notarization.
+	#
+	# First strip any signature the binary inherited: the release pipeline
+	# Developer ID-signs the standalone bare binary (the CLI / self-update
+	# asset) before handing it here, and a pre-existing standalone signature on
+	# the inner Mach-O is NOT rebound by the subsequent bundle sign. That leaves
+	# the executable signed as a loose file (identifier "Rabbit", Info.plist
+	# unbound) rather than as a bundle member, so the bundle seal is invalid and
+	# notarization rejects it with "the signature of the binary is invalid".
+	# Removing it first makes the bundle sign re-sign the main executable from
+	# scratch, with the Info.plist bound.
+	#
+	# The hardened runtime (--options runtime) and secure timestamp
+	# (--timestamp) are both notarization prerequisites. RABBIT is statically
+	# linked and never dlopens external code into its own process, so no
+	# entitlements are required, and there's no nested code needing --deep.
+	codesign --remove-signature "$APP_DIR/Contents/MacOS/rabbit" 2>/dev/null || true
 	codesign --force --options runtime --timestamp \
 		--sign "$SIGN_IDENTITY" "$APP_DIR"
 
