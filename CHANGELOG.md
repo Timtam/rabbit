@@ -39,6 +39,18 @@ from this file and posts it as the GitHub release body.
   discovered as a target and selected by default — so you can check for
   updates straight away without going through the Browse button.
 
+### Changed
+
+- macOS builds are now signed with an Apple Developer ID and notarized by
+  Apple (then stapled) when the release's `MACOS_*` signing secrets are
+  configured. Gatekeeper trusts a notarized bundle on first launch, so the
+  download is just "unzip and double-click `Rabbit.app`" — the
+  `Open Me First.command` quarantine helper is gone from signed builds. Forks
+  and credential-less builds still fall back to ad-hoc signing with the
+  helper. A new manual `macos-signing-smoke` workflow exercises and verifies
+  the full sign → notarize → staple path so it can be validated before a
+  release tag.
+
 ### Fixed
 
 - Elevated NSIS installers now receive their `/D=<path>` install-directory

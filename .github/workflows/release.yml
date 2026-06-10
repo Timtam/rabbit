@@ -16,6 +16,12 @@ jobs:
   build:
     name: Build release bundle (${{ matrix.platform_id }})
     runs-on: ${{ matrix.os }}
+    # Surface the macOS signing certificate secret as an env var so step-level
+    # `if:` conditions can detect whether signing is configured (the `secrets`
+    # context isn't available in `if:`). Forks without the secret fall back to
+    # ad-hoc signing.
+    env:
+      MACOS_CERT_B64: ${{ secrets.MACOS_SIGNING_CERTIFICATE_BASE64 }}
     strategy:
       fail-fast: false
       matrix:
@@ -172,6 +178,17 @@ jobs:
           $Hash = (Get-FileHash dist\${{ env.RABBIT_ARTIFACT_NAME }} -Algorithm SHA256).Hash.ToLowerInvariant()
           "{0}  {1}" -f $Hash, "${{ env.RABBIT_ARTIFACT_NAME }}" | Set-Content dist\${{ env.RABBIT_ARTIFACT_NAME }}.sha256
 
+      - name: Set up macOS code signing
+        if: matrix.platform_id == 'macos' && env.MACOS_CERT_B64 != ''
+        uses: ./.github/actions/setup-macos-signing
+        with:
+          certificate-base64: ${{ secrets.MACOS_SIGNING_CERTIFICATE_BASE64 }}
+          certificate-password: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
+          signing-identity: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          notary-key-base64: ${{ secrets.MACOS_NOTARY_KEY_P8_BASE64 }}
+          notary-key-id: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          notary-issuer-id: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+
       - name: Build & stage macOS release artifacts (universal)
         if: matrix.platform_id == 'macos'
         shell: bash
@@ -182,9 +199,6 @@ jobs:
           # and Intel Macs. The `cmake` Rust crate propagates Cargo's target
           # arch into CMAKE_OSX_ARCHITECTURES, so wxdragon's C++ wrapper
           # builds the matching slice automatically.
-          # The .app bundle is ad-hoc signed (RABBIT ships without a
-          # Developer ID) — the bundled "Open Me First.command" helper
-          # clears Gatekeeper on first launch.
           mkdir -p dist
           for TARGET in aarch64-apple-darwin x86_64-apple-darwin; do
             cargo build --release --target "$TARGET" -p rabbit --features gui
@@ -194,24 +208,48 @@ jobs:
             "target/aarch64-apple-darwin/release/rabbit" \
             "target/x86_64-apple-darwin/release/rabbit"
           chmod +x "dist/${ARTIFACT}"
-          # Ad-hoc sign the bare binary itself, separately from the .app
-          # bundle. Two reasons: (a) Apple Silicon's kernel refuses to
-          # exec unsigned Mach-Os, and `lipo -create` strips its inputs'
-          # signatures from the fused fat output — without this step the
-          # bare-binary download wouldn't run for CLI users; (b) when
-          # self-update copies this binary over the binary inside an
-          # existing `Rabbit.app`, the inner Mach-O has a valid embedded
-          # signature, which is a prerequisite for the post-swap bundle
-          # re-sign in `apply_self_update` to produce a valid bundle.
-          # Sign before sha256 so the manifest hashes the signed bytes.
-          codesign --force --sign - "dist/${ARTIFACT}"
-          shasum -a 256 "dist/${ARTIFACT}" | awk -v name="${ARTIFACT}" '{print tolower($1) "  " name}' > "dist/${ARTIFACT}.sha256"
-          bash packaging/macos/build-bundle.sh \
-            --binary "dist/${ARTIFACT}" \
-            --version "${RABBIT_VERSION}" \
-            --out "dist" \
-            --zip-name "${ARTIFACT}.app.zip" \
-            --adhoc-sign
+
+          # Sign the bare binary, then build + sign the .app bundle. When the
+          # signing secrets are configured (the "Set up macOS code signing"
+          # step exports RABBIT_MAC_SIGN_IDENTITY), Developer ID sign with the
+          # hardened runtime and notarize+staple the bundle so Gatekeeper
+          # trusts it on first launch. Forks without secrets fall back to
+          # ad-hoc signing + the "Open Me First.command" helper.
+          #
+          # The bare binary is always signed separately from the .app: (a)
+          # Apple Silicon's kernel refuses to exec an unsigned Mach-O, and
+          # `lipo -create` strips its inputs' signatures from the fused fat
+          # output; (b) self-update copies this binary over the one inside an
+          # installed Rabbit.app, and the inner Mach-O needs a valid embedded
+          # signature for the post-swap ad-hoc bundle re-sign to succeed.
+          # Sign before sha256 so the manifest hashes the signed bytes. The
+          # bare binary is Developer ID signed but not notarized (it's the
+          # CLI/self-update asset); the .app is the notarized public artifact.
+          if [ -n "${RABBIT_MAC_SIGN_IDENTITY:-}" ]; then
+            codesign --force --options runtime --timestamp \
+              --sign "$RABBIT_MAC_SIGN_IDENTITY" "dist/${ARTIFACT}"
+            shasum -a 256 "dist/${ARTIFACT}" | awk -v name="${ARTIFACT}" '{print tolower($1) "  " name}' > "dist/${ARTIFACT}.sha256"
+            bash packaging/macos/build-bundle.sh \
+              --binary "dist/${ARTIFACT}" \
+              --version "${RABBIT_VERSION}" \
+              --out "dist" \
+              --zip-name "${ARTIFACT}.app.zip" \
+              --sign "$RABBIT_MAC_SIGN_IDENTITY" \
+              --notarize \
+              --notary-key "$RABBIT_NOTARY_KEY" \
+              --notary-key-id "$RABBIT_NOTARY_KEY_ID" \
+              --notary-issuer "$RABBIT_NOTARY_ISSUER"
+          else
+            echo "macOS signing secrets not configured; ad-hoc signing instead."
+            codesign --force --sign - "dist/${ARTIFACT}"
+            shasum -a 256 "dist/${ARTIFACT}" | awk -v name="${ARTIFACT}" '{print tolower($1) "  " name}' > "dist/${ARTIFACT}.sha256"
+            bash packaging/macos/build-bundle.sh \
+              --binary "dist/${ARTIFACT}" \
+              --version "${RABBIT_VERSION}" \
+              --out "dist" \
+              --zip-name "${ARTIFACT}.app.zip" \
+              --adhoc-sign
+          fi
 
       - name: Upload Windows release artifact
         if: matrix.platform_id == 'windows'

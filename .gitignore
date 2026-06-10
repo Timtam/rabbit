@@ -5,3 +5,13 @@
 *.log
 *.tmp
 *.bak
+
+# Code-signing material — NEVER commit private keys or certs.
+/certs/
+*.p12
+*.p8
+*.pem
+*.key
+*.cer
+*.csr
+*.pfx

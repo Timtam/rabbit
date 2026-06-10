@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
 # Assembles a Rabbit.app bundle from a built rabbit binary, then wraps it in a
-# zip alongside an "Open Me First.command" helper that clears macOS's
-# first-launch quarantine. RABBIT ships unsigned, so the helper is the
-# friction-free path users take in place of right-click → Open or
-# `xattr -dr com.apple.quarantine`.
+# zip for distribution. Two output shapes depending on how the bundle is signed:
 #
-# Zip layout (one wrapper folder so both items extract together):
+#   * Developer ID + notarized (--sign + --notarize): the zip contains
+#     Rabbit.app on its own. Apple has notarized and we staple the ticket, so
+#     Gatekeeper trusts it on first launch — the user just unzips and
+#     double-clicks. No quarantine helper.
+#
+#   * unsigned / ad-hoc (--adhoc-sign or neither): the zip contains a wrapper
+#     folder with Rabbit.app plus an "Open Me First.command" helper that clears
+#     macOS's first-launch quarantine, since Gatekeeper blocks un-notarized
+#     bundles. This is the path CI snapshot builds take.
+#
+# Zip layout (ad-hoc/unsigned):
 #   Rabbit/
 #     Rabbit.app/Contents/{Info.plist,MacOS/rabbit,Resources,PkgInfo}
 #     Open Me First.command
@@ -13,12 +20,26 @@ set -euo pipefail
 
 usage() {
 	cat >&2 <<'USAGE'
-Usage: build-bundle.sh --binary <path> --version <x.y.z> --out <dir> --zip-name <name.zip>
-  --binary     Path to the built rabbit Mach-O executable.
-  --version    Version string to embed in CFBundleVersion / CFBundleShortVersionString.
-  --out        Output directory; will be created if missing. Both Rabbit.app and the zip land here.
-  --zip-name   Filename for the zipped bundle (e.g. rabbit-0.1.0-macos-aarch64.app.zip).
-  --adhoc-sign Optionally ad-hoc sign the bundle (codesign -s -). Off by default.
+Usage: build-bundle.sh --binary <path> --version <x.y.z> --out <dir> --zip-name <name.zip> [signing flags]
+  --binary         Path to the built rabbit Mach-O executable.
+  --version        Version string to embed in CFBundleVersion / CFBundleShortVersionString.
+  --out            Output directory; will be created if missing. Both Rabbit.app and the zip land here.
+  --zip-name       Filename for the zipped bundle (e.g. rabbit-0.1.0-macos-universal.app.zip).
+
+Signing (pick at most one of --sign / --adhoc-sign):
+  --sign <identity>   Developer ID sign with the given codesign identity, e.g.
+                      "Developer ID Application: Name (TEAMID)". Signs the inner
+                      binary and the bundle with the hardened runtime + a secure
+                      timestamp (both required for notarization).
+  --adhoc-sign        Ad-hoc sign (codesign -s -). Doesn't satisfy Gatekeeper for
+                      distribution; ships the "Open Me First.command" helper.
+
+Notarization (requires --sign):
+  --notarize             Submit the signed bundle to Apple's notary service and
+                         staple the resulting ticket. Ships Rabbit.app with no helper.
+  --notary-key <path>    App Store Connect API key (.p8) for notarytool.
+  --notary-key-id <id>   App Store Connect API Key ID.
+  --notary-issuer <id>   App Store Connect API Issuer ID.
 USAGE
 	exit 64
 }
@@ -28,6 +49,11 @@ VERSION=""
 OUT_DIR=""
 ZIP_NAME=""
 ADHOC_SIGN=0
+SIGN_IDENTITY=""
+NOTARIZE=0
+NOTARY_KEY=""
+NOTARY_KEY_ID=""
+NOTARY_ISSUER=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -36,6 +62,11 @@ while [ $# -gt 0 ]; do
 		--out) OUT_DIR="$2"; shift 2 ;;
 		--zip-name) ZIP_NAME="$2"; shift 2 ;;
 		--adhoc-sign) ADHOC_SIGN=1; shift ;;
+		--sign) SIGN_IDENTITY="$2"; shift 2 ;;
+		--notarize) NOTARIZE=1; shift ;;
+		--notary-key) NOTARY_KEY="$2"; shift 2 ;;
+		--notary-key-id) NOTARY_KEY_ID="$2"; shift 2 ;;
+		--notary-issuer) NOTARY_ISSUER="$2"; shift 2 ;;
 		-h|--help) usage ;;
 		*) echo "unknown argument: $1" >&2; usage ;;
 	esac
@@ -47,6 +78,24 @@ fi
 if [ ! -f "$BINARY" ]; then
 	echo "binary not found: $BINARY" >&2
 	exit 1
+fi
+if [ -n "$SIGN_IDENTITY" ] && [ "$ADHOC_SIGN" -eq 1 ]; then
+	echo "--sign and --adhoc-sign are mutually exclusive" >&2
+	exit 64
+fi
+if [ "$NOTARIZE" -eq 1 ]; then
+	if [ -z "$SIGN_IDENTITY" ]; then
+		echo "--notarize requires --sign (notarization needs a Developer ID signature)" >&2
+		exit 64
+	fi
+	if [ -z "$NOTARY_KEY" ] || [ -z "$NOTARY_KEY_ID" ] || [ -z "$NOTARY_ISSUER" ]; then
+		echo "--notarize requires --notary-key, --notary-key-id, and --notary-issuer" >&2
+		exit 64
+	fi
+	if [ ! -f "$NOTARY_KEY" ]; then
+		echo "notary key not found: $NOTARY_KEY" >&2
+		exit 1
+	fi
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -83,7 +132,18 @@ chmod +x "$APP_DIR/Contents/MacOS/rabbit"
 # matches CFBundlePackageType + CFBundleSignature in Info.plist.
 printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
 
-if [ "$ADHOC_SIGN" -eq 1 ]; then
+# --- Sign ---
+if [ -n "$SIGN_IDENTITY" ]; then
+	# Developer ID: sign the inner Mach-O first, then the bundle. Each gets
+	# the hardened runtime (--options runtime) and a secure timestamp
+	# (--timestamp) — both are prerequisites for notarization. RABBIT is
+	# statically linked and never dlopens external code into its own process,
+	# so no entitlements are required.
+	codesign --force --options runtime --timestamp \
+		--sign "$SIGN_IDENTITY" "$APP_DIR/Contents/MacOS/rabbit"
+	codesign --force --options runtime --timestamp \
+		--sign "$SIGN_IDENTITY" "$APP_DIR"
+elif [ "$ADHOC_SIGN" -eq 1 ]; then
 	# Ad-hoc signing (-s -) doesn't satisfy Gatekeeper for distribution but
 	# avoids the "damaged and can't be opened" error that hits unsigned
 	# binaries on Apple Silicon for downloads carrying the quarantine bit.
@@ -92,16 +152,57 @@ if [ "$ADHOC_SIGN" -eq 1 ]; then
 	codesign --force --deep --sign - "$APP_DIR"
 fi
 
-# Stage Rabbit.app + the unquarantine helper under a single wrapper folder so
-# both extract together when the user double-clicks the zip.
-STAGE_DIR="$OUT_DIR/.bundle-stage"
-WRAPPER_NAME="Rabbit"
-rm -rf "$STAGE_DIR"
-mkdir -p "$STAGE_DIR/$WRAPPER_NAME"
-mv "$APP_DIR" "$STAGE_DIR/$WRAPPER_NAME/Rabbit.app"
-APP_DIR="$STAGE_DIR/$WRAPPER_NAME/Rabbit.app"
+# --- Notarize + staple ---
+if [ "$NOTARIZE" -eq 1 ]; then
+	# notarytool only accepts a zip/dmg/pkg container, never a bare .app, so
+	# zip the bundle just for submission.
+	SUBMIT_ZIP="$OUT_DIR/.notarize-submit.zip"
+	rm -f "$SUBMIT_ZIP"
+	ditto -c -k --keepParent "$APP_DIR" "$SUBMIT_ZIP"
+	echo "submitting Rabbit.app for notarization (this can take several minutes)..."
+	xcrun notarytool submit "$SUBMIT_ZIP" \
+		--key "$NOTARY_KEY" \
+		--key-id "$NOTARY_KEY_ID" \
+		--issuer "$NOTARY_ISSUER" \
+		--wait
+	rm -f "$SUBMIT_ZIP"
+	# Staple the ticket into the bundle so Gatekeeper validates offline,
+	# without a network round-trip on the user's first launch.
+	echo "stapling notarization ticket..."
+	xcrun stapler staple "$APP_DIR"
+fi
 
-cat > "$STAGE_DIR/$WRAPPER_NAME/Open Me First.command" <<'HELPER'
+ZIP_PATH="$OUT_DIR/$ZIP_NAME"
+rm -f "$ZIP_PATH"
+
+if [ "$NOTARIZE" -eq 1 ]; then
+	# Notarized public artifact: ship Rabbit.app on its own. No quarantine
+	# helper is needed — a notarized, stapled bundle launches normally on
+	# first run, so the user just unzips and double-clicks.
+	# `ditto -c -k --keepParent` preserves the executable bit and resource
+	# forks (plain `zip` does not, which would produce a broken .app).
+	ditto -c -k --keepParent "$APP_DIR" "$ZIP_PATH"
+
+	# Fail the build if the shipped bundle isn't actually trusted. spctl's
+	# verdict here ("accepted, source=Notarized Developer ID") is the same
+	# one a user's Mac reaches, so this is real proof — even from CI.
+	echo "verifying signature + notarization..."
+	codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+	xcrun stapler validate "$APP_DIR"
+	spctl --assess --type exec -vvv "$APP_DIR"
+else
+	# Unsigned / ad-hoc snapshot build: stage Rabbit.app + the unquarantine
+	# helper under a single wrapper folder so both extract together when the
+	# user double-clicks the zip. These artifacts are not notarized, so
+	# Gatekeeper blocks first launch without the helper.
+	STAGE_DIR="$OUT_DIR/.bundle-stage"
+	WRAPPER_NAME="Rabbit"
+	rm -rf "$STAGE_DIR"
+	mkdir -p "$STAGE_DIR/$WRAPPER_NAME"
+	mv "$APP_DIR" "$STAGE_DIR/$WRAPPER_NAME/Rabbit.app"
+	APP_DIR="$STAGE_DIR/$WRAPPER_NAME/Rabbit.app"
+
+	cat > "$STAGE_DIR/$WRAPPER_NAME/Open Me First.command" <<'HELPER'
 #!/bin/bash
 # RABBIT ships unsigned (no Apple Developer Program enrollment). This helper
 # does two things:
@@ -272,18 +373,16 @@ different location triggers the dance again.
 NEXT_STEPS
 pause
 HELPER
-chmod +x "$STAGE_DIR/$WRAPPER_NAME/Open Me First.command"
+	chmod +x "$STAGE_DIR/$WRAPPER_NAME/Open Me First.command"
 
-ZIP_PATH="$OUT_DIR/$ZIP_NAME"
-rm -f "$ZIP_PATH"
-# `ditto -c -k --keepParent` preserves the executable bit and resource forks
-# (plain `zip` does not, which would produce a broken .app on extract). The
-# wrapper folder keeps Rabbit.app + the helper grouped after extraction.
-ditto -c -k --keepParent "$STAGE_DIR/$WRAPPER_NAME" "$ZIP_PATH"
+	# `ditto -c -k --keepParent` preserves the executable bit and resource
+	# forks (plain `zip` does not). The wrapper folder keeps Rabbit.app + the
+	# helper grouped after extraction.
+	ditto -c -k --keepParent "$STAGE_DIR/$WRAPPER_NAME" "$ZIP_PATH"
+	rm -rf "$STAGE_DIR"
+fi
 
 shasum -a 256 "$ZIP_PATH" | awk -v name="$ZIP_NAME" '{print tolower($1) "  " name}' > "$ZIP_PATH.sha256"
-
-rm -rf "$STAGE_DIR"
 
 echo "wrote zip:    $ZIP_PATH"
 echo "wrote sha256: $ZIP_PATH.sha256"

@@ -77,24 +77,10 @@ chose.
 
 ### macOS first launch
 
-RABBIT is distributed unsigned (the project doesn't pay for an Apple Developer
-ID). Unzipping `rabbit-<version>-macos-universal.app.zip` gives you a `Rabbit`
-folder containing `Rabbit.app` and an `Open Me First.command` helper. **Double-click
-`Open Me First.command` once** — Terminal opens, the helper clears macOS's
-first-launch quarantine on `Rabbit.app`, and you can close the window. From
-then on `Rabbit.app` launches normally, and self-updates keep working without
-re-triggering Gatekeeper.
-
-If you'd rather not use the helper, you can clear the quarantine yourself in
-Terminal:
-
-```sh
-xattr -dr com.apple.quarantine /path/to/Rabbit.app
-```
-
-…or use Apple's built-in path: open `Rabbit.app` once, dismiss the warning,
-then go to **System Settings → Privacy & Security** and click **Open
-Anyway** next to the entry for RABBIT.
+RABBIT for macOS is signed with an Apple Developer ID and notarized by Apple.
+Unzip `rabbit-<version>-macos-universal.app.zip` and double-click `Rabbit.app`
+— it launches normally on first run, with no quarantine workaround needed.
+Self-updates keep working under the same bundle identity.
 
 The bare `rabbit-<version>-macos-universal` download is a plain Mach-O CLI
 executable (no `.app` wrapper). After downloading, run `chmod +x` and invoke
@@ -229,9 +215,14 @@ CI lives under `.github/workflows/`:
   + SWS + ReaKontrol downloads.
 - `release.yml` — builds tagged `v*` releases (Windows `.exe`, macOS bare
   binary, macOS `.app.zip`), publishes the GitHub Release with checksums and
-  the self-update manifest. macOS bundles ship ad-hoc-signed and unsigned
-  for distribution; first-launch trust is cleared by the `Open Me First.command`
-  helper inside the bundle zip.
+  the self-update manifest. macOS bundles are Developer ID signed and
+  notarized when the `MACOS_*` signing secrets are configured, falling back to
+  ad-hoc signing + the `Open Me First.command` helper otherwise.
+- `macos-signing-smoke.yml` — manual (workflow_dispatch) smoke test of the
+  macOS signing + notarization + stapling path. Builds the universal bundle,
+  signs/notarizes/staples it, verifies the result on the runner, and uploads
+  the signed bundle without publishing. Run it to validate signing before
+  tagging a release.
 
 Issues, pull requests, and translation contributions welcome — RABBIT is for
 the REAPER accessibility community first.

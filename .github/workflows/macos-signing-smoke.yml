@@ -1,0 +1,114 @@
+name: macos-signing-smoke
+
+# Manually-triggered smoke test for the macOS Developer ID signing +
+# notarization + stapling path. Builds the universal bundle exactly the way
+# release.yml does and runs the same packaging/macos/build-bundle.sh signing
+# flow, but never publishes a release. Use this to validate the signing
+# pipeline (and that the six MACOS_* secrets are correct) before cutting a
+# real `v*` tag.
+#
+# The job verifies the result on the runner with spctl/stapler/codesign — that
+# verdict ("accepted, source=Notarized Developer ID") is the same one a user's
+# Mac reaches, so a green run here is real proof even without a Mac to test on.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    name: Sign + notarize smoke (macOS universal)
+    runs-on: macos-latest
+    env:
+      MACOS_CERT_B64: ${{ secrets.MACOS_SIGNING_CERTIFICATE_BASE64 }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Fail fast if signing secrets are missing
+        shell: bash
+        run: |
+          if [ -z "${MACOS_CERT_B64}" ]; then
+            echo "::error::macOS signing secrets are not configured for this repository." \
+                 "Add MACOS_SIGNING_CERTIFICATE_BASE64 and the related MACOS_* secrets," \
+                 "then re-run this workflow."
+            exit 1
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install macOS GUI build prerequisites
+        shell: bash
+        run: |
+          brew install llvm ninja
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Resolve version
+        shell: bash
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          # Smoke artifacts embed the workspace version + a short git sha, like
+          # ci.yml — they're never published, the version is just for filenames.
+          BASE_VERSION="$(awk -F'"' '/^version *= *"/{print $2; exit}' Cargo.toml)"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          echo "RABBIT_VERSION=${BASE_VERSION}-${SHORT_SHA}" >> "$GITHUB_ENV"
+
+      - name: Set up macOS code signing
+        uses: ./.github/actions/setup-macos-signing
+        with:
+          certificate-base64: ${{ secrets.MACOS_SIGNING_CERTIFICATE_BASE64 }}
+          certificate-password: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
+          signing-identity: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          notary-key-base64: ${{ secrets.MACOS_NOTARY_KEY_P8_BASE64 }}
+          notary-key-id: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          notary-issuer-id: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+
+      - name: Build, sign, notarize & verify (universal)
+        shell: bash
+        run: |
+          # Mirror release.yml's universal build + Developer ID signing +
+          # notarization. build-bundle.sh runs spctl/stapler/codesign
+          # verification internally and fails the job if the bundle isn't
+          # trusted, so a green run proves the release path works.
+          mkdir -p dist
+          for TARGET in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --target "$TARGET" -p rabbit --features gui
+          done
+          ARTIFACT="rabbit-${RABBIT_VERSION}-macos-universal"
+          lipo -create -output "dist/${ARTIFACT}" \
+            "target/aarch64-apple-darwin/release/rabbit" \
+            "target/x86_64-apple-darwin/release/rabbit"
+          chmod +x "dist/${ARTIFACT}"
+          codesign --force --options runtime --timestamp \
+            --sign "$RABBIT_MAC_SIGN_IDENTITY" "dist/${ARTIFACT}"
+          bash packaging/macos/build-bundle.sh \
+            --binary "dist/${ARTIFACT}" \
+            --version "${RABBIT_VERSION}" \
+            --out "dist" \
+            --zip-name "${ARTIFACT}.app.zip" \
+            --sign "$RABBIT_MAC_SIGN_IDENTITY" \
+            --notarize \
+            --notary-key "$RABBIT_NOTARY_KEY" \
+            --notary-key-id "$RABBIT_NOTARY_KEY_ID" \
+            --notary-issuer "$RABBIT_NOTARY_ISSUER"
+
+      - name: Upload signed bundle for inspection
+        uses: actions/upload-artifact@v5
+        with:
+          name: rabbit-macos-signed-smoke
+          path: |
+            dist/rabbit-*-macos-universal.app.zip
+            dist/rabbit-*-macos-universal.app.zip.sha256
+          if-no-files-found: error
