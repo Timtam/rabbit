@@ -160,12 +160,36 @@ if [ "$NOTARIZE" -eq 1 ]; then
 	rm -f "$SUBMIT_ZIP"
 	ditto -c -k --keepParent "$APP_DIR" "$SUBMIT_ZIP"
 	echo "submitting Rabbit.app for notarization (this can take several minutes)..."
-	xcrun notarytool submit "$SUBMIT_ZIP" \
+	# Capture the JSON result so we can read the final status and submission
+	# id. notarytool exits 0 as long as the submission was *processed*, even
+	# when Apple rejects it with status "Invalid", so we have to inspect the
+	# status ourselves rather than relying on the exit code.
+	NOTARY_OUTPUT="$(xcrun notarytool submit "$SUBMIT_ZIP" \
 		--key "$NOTARY_KEY" \
 		--key-id "$NOTARY_KEY_ID" \
 		--issuer "$NOTARY_ISSUER" \
-		--wait
+		--wait --output-format json)"
+	echo "$NOTARY_OUTPUT"
 	rm -f "$SUBMIT_ZIP"
+
+	NOTARY_ID="$(printf '%s' "$NOTARY_OUTPUT" | /usr/bin/python3 -c 'import sys, json; print(json.load(sys.stdin).get("id", ""))')"
+	NOTARY_STATUS="$(printf '%s' "$NOTARY_OUTPUT" | /usr/bin/python3 -c 'import sys, json; print(json.load(sys.stdin).get("status", ""))')"
+
+	if [ "$NOTARY_STATUS" != "Accepted" ]; then
+		# Apple rejected the bundle. The submit summary doesn't say why — the
+		# per-file issues live in the notary log — so fetch and print it so the
+		# specific failure (unsigned binary, missing secure timestamp, hardened
+		# runtime not enabled, bad certificate, ...) is visible in CI.
+		echo "::error::Notarization failed (status: ${NOTARY_STATUS:-unknown}). Apple's issue log follows:" >&2
+		if [ -n "$NOTARY_ID" ]; then
+			xcrun notarytool log "$NOTARY_ID" \
+				--key "$NOTARY_KEY" \
+				--key-id "$NOTARY_KEY_ID" \
+				--issuer "$NOTARY_ISSUER" || true
+		fi
+		exit 1
+	fi
+
 	# Staple the ticket into the bundle so Gatekeeper validates offline,
 	# without a network round-trip on the user's first launch.
 	echo "stapling notarization ticket..."
