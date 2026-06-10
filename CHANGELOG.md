@@ -31,6 +31,8 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-10
+
 ### Added
 
 - The wizard now auto-detects a portable REAPER sitting in RABBIT's own
