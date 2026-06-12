@@ -5,6 +5,7 @@ use crate::error::{IoPathContext, RabbitError, Result};
 use crate::model::Platform;
 use crate::package::PACKAGE_OSARA;
 use crate::reapack::extract_scr_lines;
+use crate::text_file::{read_text_file_lossless, write_text_file_lossless};
 
 use super::{
     PackageAutomationSupport, PlannedAutomationKind, PlannedExecutionKind,
@@ -226,7 +227,11 @@ pub(super) fn apply_osara_keymap_replacement(
         // REAPER's actions list until the user manually ran
         // "ReaPack: Synchronize packages" inside REAPER. Re-appending
         // the lines after writing OSARA's key map sidesteps that step.
-        let existing = std::fs::read_to_string(&current_keymap).with_path(&current_keymap)?;
+        //
+        // Encoding-tolerant read: script/action names in reaper-kb.ini can
+        // carry ANSI-code-page bytes on Windows, which a strict UTF-8 read
+        // rejects (same failure shape as issue #7's reapack.ini).
+        let existing = read_text_file_lossless(&current_keymap)?.text;
         preserved_scr_lines = extract_scr_lines(&existing);
 
         let (backup_path, backup_manifest_path) = backup_file_for_unattended_change(
@@ -249,7 +254,14 @@ pub(super) fn apply_osara_keymap_replacement(
 }
 
 fn append_lines_preserving_newline(target_path: &Path, lines: &[String]) -> Result<()> {
-    let existing = std::fs::read_to_string(target_path).with_path(target_path)?;
+    // Encoding-tolerant read/write: the target is the freshly written OSARA
+    // key map (ASCII in practice, so it decodes as UTF-8), but don't assume.
+    // Appended SCR lines are usually ASCII too; when they carry non-ASCII
+    // decoded from an ANSI-encoded old key map, they're re-encoded in the
+    // target's encoding — those bytes were code-page-ambiguous to begin with,
+    // and modern REAPER reads UTF-8, so this is the least-wrong rendering.
+    let decoded = read_text_file_lossless(target_path)?;
+    let existing = decoded.text;
     let newline = if existing.contains("\r\n") {
         "\r\n"
     } else {
@@ -263,7 +275,7 @@ fn append_lines_preserving_newline(target_path: &Path, lines: &[String]) -> Resu
         out.push_str(line);
         out.push_str(newline);
     }
-    std::fs::write(target_path, out).with_path(target_path)
+    write_text_file_lossless(target_path, &out, decoded.encoding)
 }
 
 #[cfg(test)]
@@ -347,6 +359,31 @@ mod tests {
         );
         assert!(report.backup_paths.is_empty());
         assert!(report.backup_manifest_path.is_none());
+    }
+
+    #[test]
+    fn replacement_tolerates_ansi_encoded_keymap() {
+        // Companion fix to issue #7: reaper-kb.ini script/action names can
+        // carry ANSI-code-page bytes on Windows (e.g. CP-1252 0x92 for a
+        // curly apostrophe), which a strict UTF-8 read rejects. The SCR
+        // capture must survive that and re-append the line.
+        let dir = tempdir().unwrap();
+        let resource_path = dir.path();
+        seed_osara_replacement_source(resource_path, "osara keymap\r\n");
+
+        let mut existing = b"KEY 9 65 _RSabc 0\r\nSCR 4 0 RSdeadbeef \"Script: Tom".to_vec();
+        existing.push(0x92);
+        existing.extend_from_slice(b"s tool.lua\" tool.lua\r\n");
+        fs::write(resource_path.join("reaper-kb.ini"), &existing).unwrap();
+
+        apply_osara_keymap_replacement(resource_path).unwrap();
+
+        let new_contents = fs::read(resource_path.join("reaper-kb.ini")).unwrap();
+        let lossy = String::from_utf8_lossy(&new_contents);
+        assert!(lossy.starts_with("osara keymap\r\n"));
+        assert!(lossy.contains("SCR 4 0 RSdeadbeef"));
+        assert!(lossy.contains("tool.lua"));
+        assert!(!lossy.contains("KEY 9 65"));
     }
 
     #[test]

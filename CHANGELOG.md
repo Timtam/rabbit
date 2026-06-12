@@ -31,6 +31,22 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Fixed
+
+- Setup no longer fails with "stream did not contain valid UTF-8" when
+  `reapack.ini` isn't UTF-8-encoded. ReaPack writes its config through the
+  Win32 profile-string APIs, which use the active ANSI code page (or UTF-16
+  when the file carries a BOM), so a repository name with a single non-ASCII
+  character — e.g. a CP-1252 curly apostrophe — made RABBIT's strict UTF-8
+  read error out and abort the run's post-install configuration step, right
+  after all packages had installed successfully. RABBIT now decodes such
+  files losslessly (UTF-8, UTF-16 LE/BE with BOM, or byte-preserving ANSI),
+  edits them, and writes them back in their original encoding, so existing
+  bytes survive untouched and ReaPack still parses the file. The same
+  encoding-tolerant handling now covers `reaper-kb.ini` during OSARA key-map
+  replacement, whose script names can carry ANSI bytes too. Reported in
+  issue #7.
+
 ## [0.2.1] - 2026-06-10
 
 ### Added

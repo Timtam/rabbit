@@ -5,6 +5,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{IoPathContext, Result, SqlitePathContext};
+use crate::text_file::{TextFileEncoding, read_text_file_lossless, write_text_file_lossless};
 use crate::version::Version;
 
 pub const REAPACK_REGISTRY_RELATIVE_PATH: &str = "ReaPack/registry.db";
@@ -36,10 +37,17 @@ pub enum RemoteUpsertOutcome {
 /// override the global setting).
 pub fn upsert_remote(resource_path: &Path, name: &str, url: &str) -> Result<RemoteUpsertOutcome> {
     let ini_path = resource_path.join(REAPACK_INI_RELATIVE_PATH);
-    let original = if ini_path.is_file() {
-        fs::read_to_string(&ini_path).with_path(&ini_path)?
+    // ReaPack writes this file through the Win32 profile-string APIs, which
+    // encode in the active ANSI code page (or UTF-16 when the file carries a
+    // BOM) — so it is frequently NOT valid UTF-8 (issue #7). Decode
+    // losslessly and remember the encoding so the rewrite below puts every
+    // byte we didn't change back exactly as it was; the lines we insert are
+    // pure ASCII, which encodes identically in every supported encoding.
+    let (original, encoding) = if ini_path.is_file() {
+        let decoded = read_text_file_lossless(&ini_path)?;
+        (decoded.text, decoded.encoding)
     } else {
-        String::new()
+        (String::new(), TextFileEncoding::Utf8)
     };
     let creating_new = original.is_empty();
     // Preserve the file's existing line ending — Windows users typically
@@ -67,7 +75,7 @@ pub fn upsert_remote(resource_path: &Path, name: &str, url: &str) -> Result<Remo
     };
 
     fs::create_dir_all(resource_path).with_path(resource_path)?;
-    fs::write(&ini_path, new_text).with_path(&ini_path)?;
+    write_text_file_lossless(&ini_path, &new_text, encoding)?;
 
     Ok(if creating_new {
         RemoteUpsertOutcome::CreatedFile
@@ -87,7 +95,11 @@ pub fn is_remote_configured(resource_path: &Path, url: &str) -> Result<bool> {
     if !ini_path.is_file() {
         return Ok(false);
     }
-    let text = fs::read_to_string(&ini_path).with_path(&ini_path)?;
+    // Encoding-tolerant read (see `upsert_remote`): the URL we match on is
+    // ASCII, and ASCII bytes decode identically under every encoding the
+    // lossless reader produces, so matching is reliable even when repo
+    // names around it are in some ANSI code page.
+    let text = read_text_file_lossless(&ini_path)?.text;
     Ok(url_is_already_present(&text, url))
 }
 
@@ -462,6 +474,88 @@ mod tests {
         assert!(ini.contains("[remotes]"));
         assert!(ini.contains("size=1"));
         assert!(ini.contains(&format!("remote0={}|{}|1|2", TEST_REPO_NAME, TEST_REPO_URL)));
+    }
+
+    #[test]
+    fn upsert_tolerates_ansi_encoded_ini_and_preserves_its_bytes() {
+        // Regression for issue #7: ReaPack writes reapack.ini via the Win32
+        // profile APIs in the ANSI code page, so a repo name with a CP-1252
+        // curly apostrophe (0x92) makes the file invalid UTF-8. upsert must
+        // neither error nor rewrite the user's bytes.
+        let dir = tempdir().unwrap();
+        let ini_path = dir.path().join(REAPACK_INI_RELATIVE_PATH);
+        let mut original = b"[remotes]\r\nsize=1\r\nremote0=Tom".to_vec();
+        original.push(0x92);
+        original.extend_from_slice(b"s Repo|https://example.invalid/index.xml|1|2\r\n");
+        fs::write(&ini_path, &original).unwrap();
+
+        let outcome = upsert_remote(dir.path(), TEST_REPO_NAME, TEST_REPO_URL).unwrap();
+        assert_eq!(outcome, RemoteUpsertOutcome::Added);
+
+        let written = fs::read(&ini_path).unwrap();
+        // The pre-existing ANSI line survives byte-for-byte (0x92 included).
+        let mut expected_prefix = b"remote0=Tom".to_vec();
+        expected_prefix.push(0x92);
+        expected_prefix.extend_from_slice(b"s Repo|");
+        assert!(
+            written
+                .windows(expected_prefix.len())
+                .any(|w| w == expected_prefix.as_slice()),
+            "original ANSI bytes must survive the rewrite"
+        );
+        // Our ASCII remote was appended and the size bumped.
+        let lossy = String::from_utf8_lossy(&written);
+        assert!(lossy.contains(&format!("remote1={}|{}|1|2", TEST_REPO_NAME, TEST_REPO_URL)));
+        assert!(lossy.contains("size=2"));
+
+        // And the round trip stays stable: the second run is a no-op.
+        let second = upsert_remote(dir.path(), TEST_REPO_NAME, TEST_REPO_URL).unwrap();
+        assert_eq!(second, RemoteUpsertOutcome::AlreadyPresent);
+    }
+
+    #[test]
+    fn upsert_tolerates_utf16le_ini_and_keeps_it_utf16() {
+        // A reapack.ini created with a UTF-16 LE BOM (the Win32 profile APIs
+        // keep writing UTF-16 into such files). The upsert must read it,
+        // append our remote, and keep the file UTF-16 so ReaPack still
+        // parses it afterwards.
+        let dir = tempdir().unwrap();
+        let ini_path = dir.path().join(REAPACK_INI_RELATIVE_PATH);
+        let text = "[remotes]\r\nsize=1\r\nremote0=ReaTeam Extensions|https://example.invalid/index.xml|1|2\r\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(&ini_path, &bytes).unwrap();
+
+        let outcome = upsert_remote(dir.path(), TEST_REPO_NAME, TEST_REPO_URL).unwrap();
+        assert_eq!(outcome, RemoteUpsertOutcome::Added);
+
+        let written = fs::read(&ini_path).unwrap();
+        assert_eq!(&written[..2], &[0xFF, 0xFE], "UTF-16 LE BOM preserved");
+        let units: Vec<u16> = written[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let decoded = String::from_utf16(&units).unwrap();
+        assert!(decoded.contains(&format!("remote1={}|{}|1|2", TEST_REPO_NAME, TEST_REPO_URL)));
+        assert!(decoded.contains("size=2"));
+    }
+
+    #[test]
+    fn is_remote_configured_tolerates_ansi_encoded_ini() {
+        let dir = tempdir().unwrap();
+        let ini_path = dir.path().join(REAPACK_INI_RELATIVE_PATH);
+        let mut bytes = b"[remotes]\r\nsize=2\r\nremote0=Tom".to_vec();
+        bytes.push(0x92);
+        bytes.extend_from_slice(b"s Repo|https://example.invalid/index.xml|1|2\r\n");
+        bytes.extend_from_slice(
+            format!("remote1={}|{}|1|2\r\n", TEST_REPO_NAME, TEST_REPO_URL).as_bytes(),
+        );
+        fs::write(&ini_path, &bytes).unwrap();
+
+        assert!(is_remote_configured(dir.path(), TEST_REPO_URL).unwrap());
+        assert!(!is_remote_configured(dir.path(), "https://other.invalid/index.xml").unwrap());
     }
 
     #[test]
