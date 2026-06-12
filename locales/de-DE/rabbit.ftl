@@ -31,6 +31,11 @@ package-surge-xt-description = Surge XT ist ein freier, quelloffener Hybrid-Synt
 # in the package CheckListBox.
 wizard-package-row-unavailable-suffix = (nicht verfügbar: { $reason })
 wizard-package-row-unavailable-portable = portable REAPER-Installation
+wizard-package-row-unavailable-version-check = Online-Versionsprüfung fehlgeschlagen
+
+# Review-page note carrying the full error for a package whose latest-version
+# check failed; its row is disabled with the short reason above.
+wizard-version-check-failed-note = { $package }: Die Prüfung auf die neueste Version ist fehlgeschlagen ({ $message }). Installation und Aktualisierung dieses Pakets sind in diesem Durchlauf deaktiviert.
 
 detect-installed = Installiert
 detect-not-installed = Nicht installiert

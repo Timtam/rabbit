@@ -31,6 +31,11 @@ package-surge-xt-description = Surge XT is a free, open-source hybrid synthesize
 # in the package CheckListBox.
 wizard-package-row-unavailable-suffix = (not available: { $reason })
 wizard-package-row-unavailable-portable = portable REAPER target
+wizard-package-row-unavailable-version-check = online version check failed
+
+# Review-page note carrying the full error for a package whose latest-version
+# check failed; its row is disabled with the short reason above.
+wizard-version-check-failed-note = { $package }: the latest-version check failed ({ $message }). Installing or updating this package is disabled for this run.
 
 detect-installed = Installed
 detect-not-installed = Not installed

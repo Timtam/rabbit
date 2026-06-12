@@ -372,7 +372,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&latest)?);
             } else {
-                print_latest(&latest);
+                print_latest(&latest.packages);
+                // Failed providers (e.g. the SWS homepage being down) go to
+                // stderr so scripts parsing stdout see only resolved versions.
+                for failure in &latest.failures {
+                    eprintln!(
+                        "warning: could not check the latest version of {}: {}",
+                        failure.package_id, failure.message
+                    );
+                }
             }
         }
         Command::Artifacts {
@@ -858,12 +866,22 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let desired = default_desired_package_ids();
-            let available = if online {
-                fetch_latest_versions()?
+            let (available, version_check_failures) = if online {
+                let report = fetch_latest_versions()?;
+                (report.packages, report.failures)
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             };
-            let plan = build_install_plan(target, &components, &desired, &available);
+            let mut plan = build_install_plan(target, &components, &desired, &available);
+            // Surface per-provider failures as plan notes instead of failing
+            // the whole plan: one unreachable upstream shouldn't block update
+            // guidance for everything else.
+            for failure in &version_check_failures {
+                plan.notes.push(format!(
+                    "The latest-version check for {} failed: {}. Install/update guidance for this package is incomplete in this plan.",
+                    failure.package_id, failure.message
+                ));
+            }
             let report_path = selected_report_path(
                 plan_report_resource_path.as_deref(),
                 report_path,

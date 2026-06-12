@@ -31,6 +31,22 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Changed
+
+- A single unreachable upstream no longer blocks the entire update check.
+  Previously, when one latest-version provider failed (e.g. the SWS homepage
+  being down), the wizard stopped on the version-check page and the CLI's
+  `latest` / `plan --online` commands aborted — even though every other
+  package could still be checked and updated. Now the check always completes
+  with whatever providers answered: in the wizard, each failed package's row
+  is disabled (unchecked, with a localized "online version check failed"
+  indicator) and a note with the full error appears in the review summary,
+  while all other packages keep their normal install/update flow. On the
+  CLI, `latest` prints resolved versions to stdout and per-package warnings
+  to stderr, and `plan --online` records each failure as a plan note. The
+  `latest --json` output shape changed accordingly: it is now an object with
+  `packages` and `failures` arrays instead of a bare array.
+
 ### Fixed
 
 - Setup no longer fails with "stream did not contain valid UTF-8" when

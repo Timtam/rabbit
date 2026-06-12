@@ -1,4 +1,5 @@
 use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{RabbitError, Result};
@@ -76,22 +77,60 @@ fn jaws_for_reaper_listing_url() -> String {
     )
 }
 
-pub fn fetch_latest_versions() -> Result<Vec<AvailablePackage>> {
+/// One package whose latest-version check failed, with the error rendered
+/// as a display string so callers (CLI output, wizard notes) don't need to
+/// keep the live error value around.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatestVersionFailure {
+    pub package_id: String,
+    pub message: String,
+}
+
+/// Outcome of [`fetch_latest_versions`]: the versions that could be
+/// determined plus a per-package record of every provider that failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatestVersionsReport {
+    pub packages: Vec<AvailablePackage>,
+    pub failures: Vec<LatestVersionFailure>,
+}
+
+/// Query every latest-version provider, tolerating per-provider failures.
+///
+/// A single unreachable upstream (e.g. the SWS homepage being down) must not
+/// take the whole update check with it — every other package can still be
+/// checked and updated. Each provider error therefore lands in
+/// [`LatestVersionsReport::failures`] instead of aborting the batch; callers
+/// surface those failures (CLI warning lines, wizard rows disabled with a
+/// reason) and proceed with the packages that did resolve. The only hard
+/// `Err` left is failing to construct the HTTP client itself, which is a
+/// local environment problem that would fail every provider identically.
+pub fn fetch_latest_versions() -> Result<LatestVersionsReport> {
     let client = build_http_client()?;
     let mut packages = Vec::new();
+    let mut failures = Vec::new();
     for (package_id, url, parser) in providers() {
-        let body = http_get_text(&client, url)?;
-        let version = parser(&body, url)?;
-        packages.push(AvailablePackage {
-            package_id: package_id.to_string(),
-            version: Some(version),
-        });
+        match http_get_text(&client, url).and_then(|body| parser(&body, url)) {
+            Ok(version) => packages.push(AvailablePackage {
+                package_id: package_id.to_string(),
+                version: Some(version),
+            }),
+            Err(error) => failures.push(LatestVersionFailure {
+                package_id: package_id.to_string(),
+                message: error.to_string(),
+            }),
+        }
     }
-    packages.push(AvailablePackage {
-        package_id: PACKAGE_JAWS_SCRIPTS.to_string(),
-        version: Some(fetch_jaws_for_reaper_latest(&client)?),
-    });
-    Ok(packages)
+    match fetch_jaws_for_reaper_latest(&client) {
+        Ok(version) => packages.push(AvailablePackage {
+            package_id: PACKAGE_JAWS_SCRIPTS.to_string(),
+            version: Some(version),
+        }),
+        Err(error) => failures.push(LatestVersionFailure {
+            package_id: PACKAGE_JAWS_SCRIPTS.to_string(),
+            message: error.to_string(),
+        }),
+    }
+    Ok(LatestVersionsReport { packages, failures })
 }
 
 /// Fetch the latest version for a single package. Useful when a UI wants to

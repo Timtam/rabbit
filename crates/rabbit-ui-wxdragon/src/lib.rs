@@ -448,15 +448,19 @@ pub fn load_wizard_model(options: UiBootstrapOptions) -> Result<WizardModel> {
         Some(target) => detect_components(&target.resource_path, platform)?,
         None => Vec::new(),
     };
-    let available = if options.online_versions {
-        fetch_latest_versions()?
+    // Per-provider failures don't abort the model load: the packages whose
+    // upstream answered keep their update flow, and the failed ones get
+    // their rows disabled below with the failure recorded as a note.
+    let (available, version_check_failures) = if options.online_versions {
+        let report = fetch_latest_versions()?;
+        (report.packages, report.failures)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     let desired = wizard_desired_package_ids(platform);
     let plan = build_install_plan(target, &detections, &desired, &available);
 
-    Ok(model_from_plan_with_options(
+    let mut model = model_from_plan_with_options(
         &localizer,
         options,
         platform,
@@ -465,7 +469,20 @@ pub fn load_wizard_model(options: UiBootstrapOptions) -> Result<WizardModel> {
         selected_target_index,
         available,
         plan,
-    ))
+    );
+    if !version_check_failures.is_empty() {
+        let failures: Vec<(String, String)> = version_check_failures
+            .into_iter()
+            .map(|failure| (failure.package_id, failure.message))
+            .collect();
+        model.controls.can_install = apply_version_check_failures_to_rows(
+            &localizer,
+            &mut model.package_rows,
+            &mut model.notes,
+            &failures,
+        );
+    }
+    Ok(model)
 }
 
 fn selectable_installations(
@@ -1354,6 +1371,49 @@ fn mark_row_unavailable(localizer: &Localizer, row: &mut PackageRow, reason_key:
         .value;
     row.summary = format!("{summary} {indicator}");
     row.unavailability_reason = Some(reason);
+}
+
+/// Apply per-package latest-version-check failures to a built package-row
+/// set. Each failed package's row is force-unchecked and disabled (same
+/// mechanism as the portable-target restriction) with a localized "version
+/// check failed" reason in its label, and a note carrying the package name
+/// plus the full error message is appended for the Review page. One
+/// unreachable upstream (e.g. the SWS homepage being down) therefore
+/// disables just that package instead of blocking the whole update flow.
+///
+/// Returns the recomputed "at least one actionable Install/Update row is
+/// left" flag, which the caller should store as its can-install state.
+pub fn apply_version_check_failures_to_rows(
+    localizer: &Localizer,
+    package_rows: &mut [PackageRow],
+    notes: &mut Vec<String>,
+    failures: &[(String, String)],
+) -> bool {
+    for (package_id, message) in failures {
+        if let Some(row) = package_rows
+            .iter_mut()
+            .find(|row| row.package_id == *package_id)
+        {
+            mark_row_unavailable(
+                localizer,
+                row,
+                "wizard-package-row-unavailable-version-check",
+            );
+        }
+        let display = localized_package_display_name(localizer, package_id);
+        notes.push(
+            localizer
+                .format(
+                    "wizard-version-check-failed-note",
+                    &[("package", display.as_str()), ("message", message.as_str())],
+                )
+                .value,
+        );
+    }
+    package_rows.iter().any(|row| {
+        row.available_for_target
+            && matches!(row.action, PlanActionKind::Install | PlanActionKind::Update)
+    })
 }
 
 /// Recompute a `PackageRow`'s `action`, `action_label`, `summary`, and
@@ -4023,6 +4083,72 @@ mod tests {
         assert!(
             surge.unavailability_reason.is_some(),
             "the gate should attach a localized reason so screen readers announce why"
+        );
+    }
+
+    #[test]
+    fn version_check_failure_disables_row_and_records_note() {
+        // SWS-website-down scenario: the deferred latest-version check fails
+        // for one package. Its row must be disabled (unchecked, Keep, with a
+        // localized reason) while every other row keeps its update flow, and
+        // the full error message must land in the notes for the Review page.
+        let dir = tempdir().unwrap();
+        let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let model = model_from_plan(
+            &localizer,
+            Platform::Windows,
+            Architecture::X64,
+            Vec::new(),
+            None,
+            InstallPlan {
+                target: None,
+                actions: Vec::new(),
+                notes: Vec::new(),
+            },
+        );
+        let target = custom_portable_target_row(&model, dir.path().join("PortableREAPER"), true);
+        let mut plan = super::wizard_package_plan_for_target(&model, Some(&target)).unwrap();
+
+        let failures = vec![(
+            PACKAGE_SWS.to_string(),
+            "HTTP status server error (503) for https://sws-extension.org/".to_string(),
+        )];
+        let can_install = super::apply_version_check_failures_to_rows(
+            &localizer,
+            &mut plan.package_rows,
+            &mut plan.notes,
+            &failures,
+        );
+
+        let sws = plan
+            .package_rows
+            .iter()
+            .find(|row| row.package_id == PACKAGE_SWS)
+            .expect("SWS row should be in the package list");
+        assert!(!sws.available_for_target);
+        assert!(!sws.selected);
+        assert_eq!(sws.action, PlanActionKind::Keep);
+        assert!(
+            sws.unavailability_reason.is_some(),
+            "a localized reason should be attached so screen readers announce why"
+        );
+
+        // Other packages keep their flow — the plan as a whole stays
+        // actionable (REAPER etc. are still installable on the empty target).
+        assert!(can_install);
+        assert!(
+            plan.package_rows
+                .iter()
+                .any(|row| row.package_id != PACKAGE_SWS && row.available_for_target)
+        );
+
+        // The note carries the package name and the full error text.
+        assert!(
+            plan.notes
+                .iter()
+                .any(|note| note.contains("SWS") && note.contains("503")),
+            "expected a note with the failure detail, got {:?}",
+            plan.notes
         );
     }
 

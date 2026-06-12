@@ -126,15 +126,16 @@ use crate::{ConfigurationRow, recompute_configuration_row_availability};
 use crate::{
     OsaraKeymapChoice, PackageRow, TargetRow, UiBootstrapOptions, WizardInstallOptions,
     WizardModel, WizardOutcomeReport, apply_checkbox_state_to_package_row,
-    build_review_preview_for_package_rows, custom_portable_target_row,
-    execute_wizard_install_with_progress, format_self_update_apply_summary,
-    format_self_update_check_summary, install_request_from_target_and_rows, load_wizard_model,
-    localized_package_display_name, localizer_from_options, osara_keymap_note,
-    osara_selected_for_rows, reapack_selected_for_install_or_update, refreshed_target_row,
-    relaunch_rabbit_after_apply, run_wizard_self_update_apply, run_wizard_self_update_check,
-    save_wizard_outcome_report, selected_configuration_step_ids, wizard_desired_package_ids,
-    wizard_outcome_report_from_error, wizard_outcome_report_from_success,
-    wizard_package_plan_for_target, wizard_package_plan_for_target_with_available,
+    apply_version_check_failures_to_rows, build_review_preview_for_package_rows,
+    custom_portable_target_row, execute_wizard_install_with_progress,
+    format_self_update_apply_summary, format_self_update_check_summary,
+    install_request_from_target_and_rows, load_wizard_model, localized_package_display_name,
+    localizer_from_options, osara_keymap_note, osara_selected_for_rows,
+    reapack_selected_for_install_or_update, refreshed_target_row, relaunch_rabbit_after_apply,
+    run_wizard_self_update_apply, run_wizard_self_update_check, save_wizard_outcome_report,
+    selected_configuration_step_ids, wizard_desired_package_ids, wizard_outcome_report_from_error,
+    wizard_outcome_report_from_success, wizard_package_plan_for_target,
+    wizard_package_plan_for_target_with_available,
 };
 use rabbit_core::latest::fetch_latest_for_package;
 use rabbit_core::plan::{AvailablePackage, PlanActionKind};
@@ -2487,13 +2488,31 @@ fn start_version_check(ui: VersionCheckUi) {
             }
         }
         VersionCheckEvent::Finished => {
-            if errors.is_empty() {
+            // Per-package failures (an upstream being down, a parse error)
+            // no longer block the wizard: the plan is built from whatever
+            // versions did resolve, and each failed package's row is
+            // disabled with a localized reason + a Review-page note carrying
+            // the full error. Only a failure to build the plan itself keeps
+            // the wizard on this page with the error log shown.
+            {
                 match wizard_package_plan_for_target_with_available(
                     &ui.model,
                     Some(&ui.target),
                     &accumulated,
                 ) {
-                    Ok(plan) => {
+                    Ok(mut plan) => {
+                        if !errors.is_empty() {
+                            if let Ok(localizer) =
+                                localizer_from_options(&ui.model.bootstrap_options)
+                            {
+                                plan.can_install = apply_version_check_failures_to_rows(
+                                    &localizer,
+                                    &mut plan.package_rows,
+                                    &mut plan.notes,
+                                    &errors,
+                                );
+                            }
+                        }
                         *ui.package_rows.borrow_mut() = plan.package_rows;
                         *ui.package_notes.borrow_mut() = plan.notes;
                         // The deferred fetch may have promoted ReaPack to
@@ -2536,8 +2555,6 @@ fn start_version_check(ui: VersionCheckUi) {
                         render_version_check_errors(&ui, &errors);
                     }
                 }
-            } else {
-                render_version_check_errors(&ui, &errors);
             }
         }
     };
