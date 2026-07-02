@@ -160,7 +160,11 @@ pub fn builtin_configuration_steps() -> Vec<ConfigurationStep> {
             id: CONFIG_REAPER_ACCESSIBLE_FR_REMOTE.to_string(),
             display_name_key: "config-reapack-reaper-accessible-fr-name".to_string(),
             display_description_key: "config-reapack-reaper-accessible-fr-description".to_string(),
-            recommended: true,
+            // Optional, not recommended: the repository carries
+            // French-language resources, so it isn't pre-selected for
+            // everyone — users who want it opt in on the wizard's
+            // configuration page (or via `--config-step`).
+            recommended: false,
             requires_package_id: Some(PACKAGE_REAPACK.to_string()),
             kind: ConfigurationStepKind::AddReapackRemote {
                 name: REAPER_ACCESSIBLE_FR_NAME.to_string(),
@@ -344,7 +348,9 @@ mod tests {
             .iter()
             .find(|s| s.id == CONFIG_REAPER_ACCESSIBLE_FR_REMOTE)
             .expect("REAPER Accessible (FR) ReaPack remote step is missing");
-        assert!(step.recommended);
+        // French-language resources: offered, but opt-in rather than
+        // pre-selected.
+        assert!(!step.recommended);
         assert_eq!(step.requires_package_id.as_deref(), Some(PACKAGE_REAPACK));
         match &step.kind {
             ConfigurationStepKind::AddReapackRemote { name, url } => {
