@@ -32,6 +32,24 @@ const REAPER_ACCESSIBILITY_REPACK_NAME: &str = "REAPER Accessibility";
 const REAPER_ACCESSIBILITY_REPACK_URL: &str =
     "https://github.com/Timtam/reapack/raw/master/index.xml";
 
+/// Stable id for the "configure REAPER Accessible (FR) ReaPack remote"
+/// step — the francophone resources repository from the
+/// `reaperaccessible` team.
+pub const CONFIG_REAPER_ACCESSIBLE_FR_REMOTE: &str = "reapack-add-reaper-accessible-fr-remote";
+/// Stable id for the "configure REAPER Accessible (EN) ReaPack remote"
+/// step — the anglophone resources repository from the
+/// `reaperaccessible` team.
+pub const CONFIG_REAPER_ACCESSIBLE_EN_REMOTE: &str = "reapack-add-reaper-accessible-en-remote";
+
+/// Display name / index URL for the `reaperaccessible/rap_fr` repo.
+const REAPER_ACCESSIBLE_FR_NAME: &str = "REAPER Accessible (FR)";
+const REAPER_ACCESSIBLE_FR_URL: &str =
+    "https://github.com/reaperaccessible/rap_fr/raw/main/index.xml";
+/// Display name / index URL for the `reaperaccessible/rap_en` repo.
+const REAPER_ACCESSIBLE_EN_NAME: &str = "REAPER Accessible (EN)";
+const REAPER_ACCESSIBLE_EN_URL: &str =
+    "https://github.com/reaperaccessible/rap_en/raw/main/index.xml";
+
 /// One unit of post-install configuration work the wizard / CLI can
 /// offer to the user. Steps are declarative — `kind` carries the data
 /// `apply_configuration_step` needs to actually perform the work.
@@ -126,17 +144,41 @@ pub enum ConfigurationStatus {
 /// All configuration steps RABBIT knows how to run. Hardcoded today;
 /// can move to JSON later if/when the catalogue grows.
 pub fn builtin_configuration_steps() -> Vec<ConfigurationStep> {
-    vec![ConfigurationStep {
-        id: CONFIG_REAPER_ACCESSIBILITY_REPACK_REMOTE.to_string(),
-        display_name_key: "config-reapack-reaper-accessibility-name".to_string(),
-        display_description_key: "config-reapack-reaper-accessibility-description".to_string(),
-        recommended: true,
-        requires_package_id: Some(PACKAGE_REAPACK.to_string()),
-        kind: ConfigurationStepKind::AddReapackRemote {
-            name: REAPER_ACCESSIBILITY_REPACK_NAME.to_string(),
-            url: REAPER_ACCESSIBILITY_REPACK_URL.to_string(),
+    vec![
+        ConfigurationStep {
+            id: CONFIG_REAPER_ACCESSIBILITY_REPACK_REMOTE.to_string(),
+            display_name_key: "config-reapack-reaper-accessibility-name".to_string(),
+            display_description_key: "config-reapack-reaper-accessibility-description".to_string(),
+            recommended: true,
+            requires_package_id: Some(PACKAGE_REAPACK.to_string()),
+            kind: ConfigurationStepKind::AddReapackRemote {
+                name: REAPER_ACCESSIBILITY_REPACK_NAME.to_string(),
+                url: REAPER_ACCESSIBILITY_REPACK_URL.to_string(),
+            },
         },
-    }]
+        ConfigurationStep {
+            id: CONFIG_REAPER_ACCESSIBLE_FR_REMOTE.to_string(),
+            display_name_key: "config-reapack-reaper-accessible-fr-name".to_string(),
+            display_description_key: "config-reapack-reaper-accessible-fr-description".to_string(),
+            recommended: true,
+            requires_package_id: Some(PACKAGE_REAPACK.to_string()),
+            kind: ConfigurationStepKind::AddReapackRemote {
+                name: REAPER_ACCESSIBLE_FR_NAME.to_string(),
+                url: REAPER_ACCESSIBLE_FR_URL.to_string(),
+            },
+        },
+        ConfigurationStep {
+            id: CONFIG_REAPER_ACCESSIBLE_EN_REMOTE.to_string(),
+            display_name_key: "config-reapack-reaper-accessible-en-name".to_string(),
+            display_description_key: "config-reapack-reaper-accessible-en-description".to_string(),
+            recommended: true,
+            requires_package_id: Some(PACKAGE_REAPACK.to_string()),
+            kind: ConfigurationStepKind::AddReapackRemote {
+                name: REAPER_ACCESSIBLE_EN_NAME.to_string(),
+                url: REAPER_ACCESSIBLE_EN_URL.to_string(),
+            },
+        },
+    ]
 }
 
 /// `true` when the on-disk state under `resource_path` already
@@ -290,6 +332,46 @@ mod tests {
                 assert_eq!(
                     url,
                     "https://github.com/Timtam/reapack/raw/master/index.xml"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_steps_include_reaper_accessible_fr_remote() {
+        let steps = builtin_configuration_steps();
+        let step = steps
+            .iter()
+            .find(|s| s.id == CONFIG_REAPER_ACCESSIBLE_FR_REMOTE)
+            .expect("REAPER Accessible (FR) ReaPack remote step is missing");
+        assert!(step.recommended);
+        assert_eq!(step.requires_package_id.as_deref(), Some(PACKAGE_REAPACK));
+        match &step.kind {
+            ConfigurationStepKind::AddReapackRemote { name, url } => {
+                assert_eq!(name, "REAPER Accessible (FR)");
+                assert_eq!(
+                    url,
+                    "https://github.com/reaperaccessible/rap_fr/raw/main/index.xml"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_steps_include_reaper_accessible_en_remote() {
+        let steps = builtin_configuration_steps();
+        let step = steps
+            .iter()
+            .find(|s| s.id == CONFIG_REAPER_ACCESSIBLE_EN_REMOTE)
+            .expect("REAPER Accessible (EN) ReaPack remote step is missing");
+        assert!(step.recommended);
+        assert_eq!(step.requires_package_id.as_deref(), Some(PACKAGE_REAPACK));
+        match &step.kind {
+            ConfigurationStepKind::AddReapackRemote { name, url } => {
+                assert_eq!(name, "REAPER Accessible (EN)");
+                assert_eq!(
+                    url,
+                    "https://github.com/reaperaccessible/rap_en/raw/main/index.xml"
                 );
             }
         }

@@ -121,6 +121,10 @@ wizard-configuration-row-status-requires = erfordert { $package }
 wizard-configuration-row-status-already-applied = bereits angewendet
 config-reapack-reaper-accessibility-name = REAPER Accessibility ReaPack Repository
 config-reapack-reaper-accessibility-description = Fügt das REAPER Accessibility Repository von Toni Barth (https://github.com/Timtam/reapack/raw/master/index.xml) zu ReaPack hinzu, sodass Pakete daraus direkt verfügbar sind.
+config-reapack-reaper-accessible-fr-name = REAPER Accessible (FR) ReaPack Repository hinzufügen
+config-reapack-reaper-accessible-fr-description = Fügt das französischsprachige REAPER Accessible Repository (https://github.com/reaperaccessible/rap_fr/raw/main/index.xml) zu ReaPack hinzu. Öffne nach dem Hinzufügen das Menü Erweiterungen, ReaPack, Pakete durchsuchen, um die französischsprachigen Ressourcen von REAPER Accessible zu erhalten.
+config-reapack-reaper-accessible-en-name = REAPER Accessible (EN) ReaPack Repository hinzufügen
+config-reapack-reaper-accessible-en-description = Fügt das englischsprachige REAPER Accessible Repository (https://github.com/reaperaccessible/rap_en/raw/main/index.xml) zu ReaPack hinzu. Öffne nach dem Hinzufügen das Menü Erweiterungen, ReaPack, Pakete durchsuchen, um die englischsprachigen Ressourcen von REAPER Accessible zu erhalten.
 
 wizard-reapack-ack-heading = ReaPack-Spendenhinweis
 wizard-reapack-ack-body = ReaPack ist freie Software und steht unter der LGPL. Sein Autor Christian Fillion nimmt Spenden zur Unterstützung der Weiterentwicklung an. Spenden sind vollständig freiwillig und für die Nutzung von ReaPack oder RABBIT niemals erforderlich.

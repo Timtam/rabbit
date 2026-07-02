@@ -121,6 +121,10 @@ wizard-configuration-row-status-requires = richiede { $package }
 wizard-configuration-row-status-already-applied = già applicato
 config-reapack-reaper-accessibility-name = Aggiungi il repository ReaPack «REAPER Accessibility» di Toni
 config-reapack-reaper-accessibility-description = Aggiunge il repository ReaPack «REAPER Accessibility» di Toni Barth (https://github.com/Timtam/reapack/raw/master/index.xml). Una volta aggiunto, apri il menu Estensioni, ReaPack, Sfoglia pacchetti per ottenere ulteriori script ed estensioni accessibili.
+config-reapack-reaper-accessible-fr-name = Aggiungi il repository ReaPack «REAPER Accessible (FR)»
+config-reapack-reaper-accessible-fr-description = Aggiunge il repository ReaPack in lingua francese di REAPER Accessible (https://github.com/reaperaccessible/rap_fr/raw/main/index.xml). Una volta aggiunto, apri il menu Estensioni, ReaPack, Sfoglia pacchetti per accedere alle risorse in francese di REAPER Accessible.
+config-reapack-reaper-accessible-en-name = Aggiungi il repository ReaPack «REAPER Accessible (EN)»
+config-reapack-reaper-accessible-en-description = Aggiunge il repository ReaPack in lingua inglese di REAPER Accessible (https://github.com/reaperaccessible/rap_en/raw/main/index.xml). Una volta aggiunto, apri il menu Estensioni, ReaPack, Sfoglia pacchetti per accedere alle risorse in inglese di REAPER Accessible.
 
 wizard-reapack-ack-heading = Avviso di donazione ReaPack
 wizard-reapack-ack-body = ReaPack è software libero rilasciato sotto licenza LGPL. Il suo autore, Christian Fillion, accetta donazioni facoltative per sostenere lo sviluppo continuo. Christian gestisce anche le estensioni SWS e in passato ha integrato codice specificamente pensato per migliorare la compatibilità con OSARA. Qualsiasi sostegno tu possa offrirgli è ampiamente meritato.
