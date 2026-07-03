@@ -31,6 +31,8 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-03
+
 ### Added
 
 - Two new ReaPack repository configuration steps from the **REAPER
