@@ -58,6 +58,10 @@ from this file and posts it as the GitHub release body.
 
 ### Fixed
 
+- After the online version check, the packages page now places screen-reader
+  focus on the top-most entry of the package list (the "Packages" group
+  header) instead of landing on an arbitrary row a few items down. Going
+  Back to the page still keeps your previous position.
 - Large downloads no longer fail on slow or briefly stalling servers.
   Package downloads (and RABBIT's own self-update download) previously
   inherited a 30-second network timeout, so a download whose connection

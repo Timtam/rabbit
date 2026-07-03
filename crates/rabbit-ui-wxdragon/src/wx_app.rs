@@ -2657,6 +2657,13 @@ fn start_version_check(ui: VersionCheckUi) {
                             true,
                             reapack_ack_confirmed(&ui.widgets),
                         );
+                        // The wizard just auto-advanced onto the packages
+                        // page: land the screen reader on the top of the
+                        // list (the "Packages" group header), not wherever
+                        // the native control left its caret after the
+                        // repopulation above. Mirrors the explicit gauge
+                        // focus on entering the version-check page.
+                        focus_packages_list_top(&ui.widgets, &ui.package_items);
                     }
                     Err(error) => {
                         errors.push((String::new(), error.to_string()));
@@ -2732,6 +2739,29 @@ fn rebuild_package_list_widgets(
         .map(package_details)
         .unwrap_or_default();
     widgets.package_details.set_value(&initial);
+}
+
+/// Put keyboard focus on the packages list with the screen-reader caret on
+/// its TOP-MOST entry — the "Packages" group header. After the list is
+/// repopulated (delete-all + re-append + per-item check-state writes) the
+/// native `wxTreeCtrl`'s caret ends up on an arbitrary row a few items
+/// down, so a screen-reader user entering the page starts mid-list instead
+/// of at the top. Called when the wizard auto-advances onto the packages
+/// page; deliberate Back navigation is left alone so it keeps the user's
+/// previous position.
+#[cfg(target_os = "windows")]
+fn focus_packages_list_top(widgets: &WizardWidgets, package_items: &PackagesStateCell) {
+    // Clone the item id and DROP the borrow before touching the tree:
+    // `select_item` dispatches the selection-changed handler synchronously
+    // on MSW, and that handler borrows `package_items` too.
+    let group = package_items.borrow().packages_group.clone();
+    if let Some(group) = group {
+        let tree = &widgets.package_checklist;
+        tree.ensure_visible(&group);
+        tree.select_item(&group);
+        tree.set_focused_item(&group);
+    }
+    widgets.package_checklist.set_focus();
 }
 
 /// Windows-only: tear down the existing native tree and rebuild both
@@ -4819,6 +4849,17 @@ fn rebuild_package_list_widgets(
         .map(package_details)
         .unwrap_or_default();
     widgets.package_details.set_value(&initial);
+}
+
+/// Non-Windows twin of the tree-based helper: put keyboard focus on the
+/// packages DataView with the top-most row (the "Packages" group header)
+/// selected, so a screen reader entering the page starts reading from the
+/// top instead of wherever the view left its cursor after a rebuild.
+#[cfg(not(target_os = "windows"))]
+fn focus_packages_list_top(widgets: &WizardWidgets, _package_items: &PackagesStateCell) {
+    // Row 0 of the flattened tree model is the "Packages" group header.
+    widgets.package_checklist.select_row(0);
+    widgets.package_checklist.set_focus();
 }
 
 fn build_version_check_page(
