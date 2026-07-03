@@ -31,6 +31,8 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-03
+
 ### Added
 
 - RABBIT now writes a crash report when it crashes due to an internal error:
