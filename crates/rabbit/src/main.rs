@@ -8,7 +8,14 @@
     windows_subsystem = "windows"
 )]
 
+mod crash_log;
+
 fn main() -> std::process::ExitCode {
+    // First thing, before any dispatch: the release profile aborts on any
+    // panic, so this hook is the only chance to leave a diagnosable trace
+    // behind (a crash-<ts>.log in the per-user log directory).
+    crash_log::install();
+
     // No arguments → run the GUI wizard (when the gui feature is on).
     // Anything else, including `--help`, hands off to the CLI subcommand
     // parser. `args_os().count() == 1` covers the program-name-only case

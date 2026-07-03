@@ -31,6 +31,25 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Added
+
+- RABBIT now writes a crash report when it crashes due to an internal error:
+  a small plain-text file with the RABBIT version, OS, the error and where it
+  happened, saved to `~/Library/Logs/RABBIT/` on macOS and
+  `%LOCALAPPDATA%\RABBIT\logs\` on Windows (file name `crash-<timestamp>.log`).
+  When reporting a crash, attaching that file makes diagnosing it much
+  easier.
+
+### Fixed
+
+- macOS: the app no longer crashes shortly after the first Next click, when
+  the online version check finishes and the wizard advances to the packages
+  page (a 0.3.1 regression: the screen-reader focus improvement selected the
+  package list's top row through an API that is only valid for flat lists,
+  not the tree the packages page uses, crashing the native macOS view; the
+  page now simply receives keyboard focus, which already starts reading at
+  the top).
+
 ## [0.3.1] - 2026-07-03
 
 ### Added

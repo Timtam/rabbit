@@ -4851,14 +4851,21 @@ fn rebuild_package_list_widgets(
     widgets.package_details.set_value(&initial);
 }
 
-/// Non-Windows twin of the tree-based helper: put keyboard focus on the
-/// packages DataView with the top-most row (the "Packages" group header)
-/// selected, so a screen reader entering the page starts reading from the
-/// top instead of wherever the view left its cursor after a rebuild.
+/// Non-Windows twin of the tree-based helper: give the packages DataView
+/// keyboard focus so a screen reader starts reading it from the top.
+///
+/// Deliberately focus-only, NO selection. wxdragon's
+/// `DataViewCtrl::select_row` fabricates a `wxDataViewItem` whose internal
+/// pointer IS the integer `row + 1` — the encoding only virtual LIST models
+/// use. This view is driven by a custom TREE model whose item ids are real
+/// node pointers, so `select_row(0)` hands the native macOS port a garbage
+/// `0x1` pointer to dereference and crashes the app (reported by macOS
+/// users as a crash right after the first Next, when the version check
+/// auto-advances onto this page). A freshly rebuilt DataView has no
+/// selection anyway, so reading naturally starts at the top — the
+/// caret-drift problem this helper fixes is native-Windows-tree-specific.
 #[cfg(not(target_os = "windows"))]
 fn focus_packages_list_top(widgets: &WizardWidgets, _package_items: &PackagesStateCell) {
-    // Row 0 of the flattened tree model is the "Packages" group header.
-    widgets.package_checklist.select_row(0);
     widgets.package_checklist.set_focus();
 }
 
