@@ -4,18 +4,24 @@
 //! the user with nothing but a dead process (and, on macOS, an opaque
 //! `.ips` abort report with stripped symbols). This hook runs before the
 //! abort and writes a small plain-text report — RABBIT version, OS, thread,
-//! the panic message with its `file:line`, and a best-effort backtrace — to
-//! a well-known per-user log directory, then still forwards to the default
-//! hook so the message also lands on stderr for Terminal users.
+//! the panic message with its `file:line`, and a best-effort backtrace —
+//! then still forwards to the default hook so the message also lands on
+//! stderr for Terminal users.
 //!
-//! Log locations (best effort, silently skipped when unavailable):
-//! - macOS: `~/Library/Logs/RABBIT/crash-<unix-ts>.log` (visible in
-//!   Console.app under Log Reports' file list and easy to ask users for)
-//! - Windows: `%LOCALAPPDATA%\RABBIT\logs\crash-<unix-ts>.log`
-//! - fallback: the OS temp dir under `rabbit-crash-<unix-ts>.log`
+//! RABBIT is fully portable, so the report is written RIGHT NEXT TO the
+//! RABBIT executable (`crash-<unix-ts>.log`) — on macOS next to the
+//! `RABBIT.app` bundle, not inside it (a file under `Contents/MacOS` would
+//! be invisible to users and break the bundle signature). Locations are
+//! tried in order until one accepts the write:
+//! 1. `$RABBIT_CRASH_LOG_DIR` when set (support/testing override)
+//! 2. the portable install directory (next to the exe / `.app` bundle)
+//! 3. the OS temp dir under `rabbit-crash-<unix-ts>.log` — an ephemeral
+//!    last resort for read-only installs (DMG mount, Program Files),
+//!    deliberately NOT a per-user data directory so a portable RABBIT
+//!    never leaves persistent traces outside its own folder.
 
 use std::backtrace::Backtrace;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Install the crash-log panic hook. Call once, first thing in `main`.
@@ -23,13 +29,15 @@ pub fn install() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let report = build_report(info);
-        if let Some(path) = crash_log_path() {
+        for path in crash_log_candidates() {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let _ = std::fs::write(&path, &report);
-            // Tell Terminal users where the file went, too.
-            eprintln!("crash report written to {}", path.display());
+            if std::fs::write(&path, &report).is_ok() {
+                // Tell Terminal users where the file went, too.
+                eprintln!("crash report written to {}", path.display());
+                break;
+            }
         }
         default_hook(info);
     }));
@@ -65,32 +73,40 @@ fn unix_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
-fn crash_log_path() -> Option<PathBuf> {
+/// Crash-log destinations in preference order; the hook writes to the
+/// first one that succeeds. See the module docs for the rationale.
+fn crash_log_candidates() -> Vec<PathBuf> {
     let file_name = format!("crash-{}.log", unix_timestamp());
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(home) = std::env::var_os("HOME") {
-            return Some(
-                PathBuf::from(home)
-                    .join("Library")
-                    .join("Logs")
-                    .join("RABBIT")
-                    .join(file_name),
-            );
-        }
+    let mut candidates = Vec::new();
+    if let Some(dir) = std::env::var_os("RABBIT_CRASH_LOG_DIR") {
+        candidates.push(PathBuf::from(dir).join(&file_name));
     }
-    #[cfg(windows)]
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| portable_install_dir(&exe))
     {
-        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            return Some(
-                PathBuf::from(local)
-                    .join("RABBIT")
-                    .join("logs")
-                    .join(file_name),
-            );
-        }
+        candidates.push(dir.join(&file_name));
     }
-    Some(std::env::temp_dir().join(format!("rabbit-{file_name}")))
+    candidates.push(std::env::temp_dir().join(format!("rabbit-{file_name}")));
+    candidates
+}
+
+/// The user-facing directory RABBIT runs from: the executable's parent —
+/// or, when the executable lives inside a macOS `.app` bundle
+/// (`…/RABBIT.app/Contents/MacOS/rabbit`), the directory CONTAINING the
+/// bundle. Writing inside `Contents/MacOS` would hide the report from the
+/// user and invalidate the bundle's code signature.
+fn portable_install_dir(exe: &Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    if dir.ends_with("Contents/MacOS")
+        && let Some(bundle) = dir.parent().and_then(Path::parent)
+        && bundle
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+    {
+        return bundle.parent().map(Path::to_path_buf);
+    }
+    Some(dir.to_path_buf())
 }
 
 #[cfg(test)]
@@ -106,15 +122,10 @@ mod tests {
         let scratch =
             std::env::temp_dir().join(format!("rabbit-crash-test-{}", std::process::id()));
         std::fs::create_dir_all(&scratch).unwrap();
-        // Point the per-user log location at the scratch dir for this test.
-        #[cfg(windows)]
-        unsafe {
-            std::env::set_var("LOCALAPPDATA", &scratch)
-        };
-        #[cfg(target_os = "macos")]
-        unsafe {
-            std::env::set_var("HOME", &scratch)
-        };
+        // The highest-priority candidate is the override dir — point it at
+        // the scratch dir so the test doesn't litter the test-binary's own
+        // directory (the portable-install candidate under `cargo test`).
+        unsafe { std::env::set_var("RABBIT_CRASH_LOG_DIR", &scratch) };
 
         install();
         let _ = std::panic::catch_unwind(|| panic!("rabbit crash-log self test"));
@@ -154,5 +165,31 @@ mod tests {
             }
         }
         files
+    }
+
+    #[test]
+    fn portable_install_dir_is_the_exe_parent() {
+        let exe = PathBuf::from("D:/Tools/RABBIT/rabbit.exe");
+        assert_eq!(
+            portable_install_dir(&exe),
+            Some(PathBuf::from("D:/Tools/RABBIT"))
+        );
+    }
+
+    /// Inside a macOS bundle the report must land NEXT TO the `.app`, never
+    /// inside `Contents/MacOS` (invisible to users, breaks the signature).
+    #[test]
+    fn portable_install_dir_escapes_macos_app_bundles() {
+        let exe = PathBuf::from("/Applications/RABBIT.app/Contents/MacOS/rabbit");
+        assert_eq!(
+            portable_install_dir(&exe),
+            Some(PathBuf::from("/Applications"))
+        );
+        // A plain directory that merely LOOKS bundle-ish stays untouched.
+        let plain = PathBuf::from("/opt/Contents/MacOS/rabbit");
+        assert_eq!(
+            portable_install_dir(&plain),
+            Some(PathBuf::from("/opt/Contents/MacOS"))
+        );
     }
 }

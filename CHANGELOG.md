@@ -34,11 +34,13 @@ from this file and posts it as the GitHub release body.
 ### Added
 
 - RABBIT now writes a crash report when it crashes due to an internal error:
-  a small plain-text file with the RABBIT version, OS, the error and where it
-  happened, saved to `~/Library/Logs/RABBIT/` on macOS and
-  `%LOCALAPPDATA%\RABBIT\logs\` on Windows (file name `crash-<timestamp>.log`).
-  When reporting a crash, attaching that file makes diagnosing it much
-  easier.
+  a small plain-text file (`crash-<timestamp>.log`) with the RABBIT version,
+  OS, the error and where it happened, saved right next to the RABBIT
+  executable — next to the `RABBIT.app` bundle on macOS — in keeping with
+  RABBIT being fully portable. If that location isn't writable (for example
+  RABBIT running from a read-only disk image), the report falls back to the
+  system temp folder as `rabbit-crash-<timestamp>.log`. When reporting a
+  crash, attaching that file makes diagnosing it much easier.
 
 ### Fixed
 
