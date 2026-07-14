@@ -374,6 +374,18 @@ pub fn apply_self_update(
     // other platform, and on macOS for standalone-CLI installs that don't
     // live inside an `.app`.
     resign_macos_bundle_if_applicable(&install_target);
+    // …and lift the whole bundle out of quarantine. The re-sign above is
+    // ad-hoc (users don't have the Developer ID key), and Gatekeeper
+    // refuses a quarantined app whose signature is no longer the notarized
+    // one it originally approved — "RABBIT could not be opened" on the
+    // next Finder launch, even though the in-place relaunch right after
+    // the update works (direct spawn, no Gatekeeper assessment). With the
+    // quarantine attribute gone, Gatekeeper no longer demands
+    // notarization and the valid ad-hoc signature is sufficient. The
+    // replacement bytes were verified against the manifest's sha256
+    // before the swap, so this doesn't bypass any integrity check RABBIT
+    // relies on.
+    dequarantine_macos_bundle_if_applicable(&install_target);
 
     let signed_count = signature_verdicts
         .iter()
@@ -578,6 +590,58 @@ fn resign_macos_bundle_if_applicable(install_target: &Path) {
 
 #[cfg(not(target_os = "macos"))]
 fn resign_macos_bundle_if_applicable(_install_target: &Path) {}
+
+/// macOS only: strip `com.apple.quarantine` from the ENTIRE `.app` bundle
+/// after the post-swap ad-hoc re-sign. Gatekeeper's original approval was
+/// recorded against the notarized Developer ID signature the bundle shipped
+/// with; the self-update swap + ad-hoc re-sign changes the code hash, so a
+/// still-quarantined bundle is re-assessed on the next LaunchServices
+/// launch (Finder, Dock, Spotlight) and rejected — ad-hoc isn't notarized.
+/// Removing the quarantine attribute takes the bundle out of Gatekeeper's
+/// scope entirely: launches then only require the valid (ad-hoc) code
+/// signature the re-sign just produced.
+///
+/// Quarantine lives on every file the original download carried, not just
+/// the main binary — hence `-r` over the bundle root, not the single-file
+/// strip `swap_install_file` already does. Best-effort like the re-sign:
+/// on failure the user is no worse off than before this fix.
+#[cfg(target_os = "macos")]
+fn dequarantine_macos_bundle_if_applicable(install_target: &Path) {
+    let Some(bundle) = enclosing_app_bundle(install_target) else {
+        return;
+    };
+    let output = std::process::Command::new("/usr/bin/xattr")
+        .args(["-dr", "com.apple.quarantine"])
+        .arg(&bundle)
+        .output();
+    match output {
+        // `xattr -d` also exits non-zero when the attribute simply isn't
+        // present — that's the healthy case, not a failure worth warning
+        // about, so only surface genuinely unexpected stderr chatter.
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            if !stderr.is_empty() && !stderr.contains("No such xattr") {
+                eprintln!(
+                    "warning: could not clear quarantine on {}: {}",
+                    bundle.display(),
+                    stderr
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "warning: could not run xattr to clear quarantine on {}: {}",
+                bundle.display(),
+                error
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn dequarantine_macos_bundle_if_applicable(_install_target: &Path) {}
 
 /// Walk up the path looking for an ancestor with a `.app` extension —
 /// the macOS bundle root that contains the install target. Returns

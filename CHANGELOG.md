@@ -31,6 +31,21 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Fixed
+
+- macOS: RABBIT no longer refuses to launch after a self-update. Updating
+  replaces the binary inside `RABBIT.app` and re-signs the bundle with a
+  local (ad-hoc) signature — but the bundle still carried the quarantine
+  marker from its original download, so on the next launch from Finder or
+  the Dock, Gatekeeper re-checked it, no longer found the notarized
+  signature it had originally approved, and blocked the app with "RABBIT
+  could not be opened" (the relaunch right after updating worked because it
+  bypasses that check). The self-update now clears the quarantine marker
+  from the whole bundle after re-signing, so subsequent launches work
+  normally. Anyone already affected can fix their copy by running
+  `xattr -dr com.apple.quarantine /path/to/RABBIT.app` in Terminal once (or
+  re-downloading the release).
+
 ## [0.3.2] - 2026-07-03
 
 ### Added
