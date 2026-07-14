@@ -31,6 +31,20 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Changed
+
+- macOS self-updates now replace the whole `RABBIT.app` bundle with the
+  release's notarized bundle, instead of swapping just the executable inside
+  it. The app keeps its original Apple-verified (Developer ID + notarized)
+  signature across updates, so Gatekeeper stays satisfied without any
+  workarounds and macOS permission grants (such as Full Disk Access, which
+  are tied to the app's signature) survive updates instead of needing to be
+  granted again. The previous bundle is kept next to the app as
+  `RABBIT.app.rabbit-old` for manual rollback, and a renamed app keeps its
+  name. Requires an updater that already has this change, so the first
+  bundle-swap update is the one *after* this release; installs outside an
+  `.app` bundle and Windows keep the existing binary swap.
+
 ### Fixed
 
 - macOS: RABBIT no longer refuses to launch after a self-update. Updating

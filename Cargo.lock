@@ -1360,6 +1360,7 @@ name = "rabbit-core"
 version = "0.3.2"
 dependencies = [
  "fluent-bundle",
+ "libc",
  "object",
  "rabbit-platform",
  "regex",

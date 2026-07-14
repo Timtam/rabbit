@@ -37,3 +37,8 @@ tempfile.workspace = true
 thiserror.workspace = true
 unic-langid.workspace = true
 zip.workspace = true
+
+# macOS-only: renamex_np(RENAME_SWAP) for the atomic app-bundle exchange in
+# the self-updater.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

@@ -50,6 +50,16 @@ pub struct SelfUpdateAssets {
     /// clients prefer this over the legacy fields; old clients ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platforms: Option<BTreeMap<String, SelfUpdateAsset>>,
+    /// The zipped, notarized universal `Rabbit.app` bundle. macOS clients
+    /// running from inside an `.app` prefer this over the bare binary so
+    /// the whole bundle is replaced and the Developer ID signature +
+    /// notarization survive the update. Lives OUTSIDE `platforms` on
+    /// purpose: clients up to 0.3.3 hard-validate every `platforms` key
+    /// against an `<os>-<arch>` grammar and would reject the entire
+    /// manifest over an unknown key, while unknown sibling FIELDS are
+    /// ignored by their deserializer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macos_app: Option<SelfUpdateAsset>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,11 +68,29 @@ pub struct SelfUpdateAsset {
     pub sha256: String,
 }
 
+/// What shape the selected self-update asset has, deciding how `apply`
+/// installs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfUpdateAssetKind {
+    /// A bare executable copied over the install target: Windows, macOS
+    /// installs outside an `.app` bundle, and every legacy manifest.
+    #[default]
+    Binary,
+    /// A zipped, Developer-ID-signed and notarized `.app` bundle that
+    /// replaces the installed bundle wholesale. Keeps the signature and
+    /// notarization intact across updates, so Gatekeeper stays happy and
+    /// macOS permission grants (keyed to the code signature) survive.
+    MacAppBundle,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelfUpdateAssetSelection {
     pub platform: Platform,
     pub url: String,
     pub sha256: String,
+    #[serde(default)]
+    pub kind: SelfUpdateAssetKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +171,8 @@ struct RawSelfUpdateAssets {
     macos: Option<RawSelfUpdateAsset>,
     #[serde(default)]
     platforms: Option<BTreeMap<String, RawSelfUpdateAsset>>,
+    #[serde(default)]
+    macos_app: Option<RawSelfUpdateAsset>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -246,6 +276,12 @@ pub fn parse_self_update_manifest(body: &str, manifest_url: &str) -> Result<Self
             .map(|asset| parse_asset(asset, manifest_url, "macos"))
             .transpose()?,
         platforms,
+        macos_app: raw
+            .assets
+            .macos_app
+            .as_ref()
+            .map(|asset| parse_asset(asset, manifest_url, "macos_app"))
+            .transpose()?,
     };
 
     Ok(SelfUpdateManifest {
@@ -351,41 +387,61 @@ pub fn apply_self_update(
             None => PathBuf::new(),
         });
 
-    // The release pipeline publishes the bare RABBIT executable as a
-    // single-file asset, so the staged file *is* the new binary — no zip
-    // flat-extract step. The download's filename may differ from the
-    // install target (e.g. `rabbit-0.2.0-windows-x86_64.exe` vs. `RABBIT.exe`);
-    // the swap copies bytes regardless of either name.
-    let signature_verdicts = match verify_replacement_signature(staged_asset, &install_target)? {
-        Some(record) => vec![record],
-        None => Vec::new(),
-    };
-
     let mut replaced = Vec::new();
     let mut skipped = Vec::new();
-    if let Err(error) =
-        swap_install_file(staged_asset, &install_target, &mut replaced, &mut skipped)
-    {
-        rollback_replaced_files(&replaced);
-        return Err(error);
+    let mut signature_verdicts = Vec::new();
+    match stage.check.asset.kind {
+        SelfUpdateAssetKind::Binary => {
+            // The release pipeline publishes the bare RABBIT executable as a
+            // single-file asset, so the staged file *is* the new binary — no
+            // zip flat-extract step. The download's filename may differ from
+            // the install target (e.g. `rabbit-0.2.0-windows-x86_64.exe`
+            // vs. `RABBIT.exe`); the swap copies bytes regardless of either
+            // name.
+            if let Some(record) = verify_replacement_signature(staged_asset, &install_target)? {
+                signature_verdicts.push(record);
+            }
+            if let Err(error) =
+                swap_install_file(staged_asset, &install_target, &mut replaced, &mut skipped)
+            {
+                rollback_replaced_files(&replaced);
+                return Err(error);
+            }
+            // Best-effort: re-seal the surrounding `.app` bundle on macOS so
+            // the bundle's signature matches the just-swapped binary. No-op
+            // on every other platform, and on macOS for standalone-CLI
+            // installs that don't live inside an `.app`.
+            resign_macos_bundle_if_applicable(&install_target);
+            // …and lift the whole bundle out of quarantine. The re-sign
+            // above is ad-hoc (users don't have the Developer ID key), and
+            // Gatekeeper refuses a quarantined app whose signature is no
+            // longer the notarized one it originally approved — "RABBIT
+            // could not be opened" on the next Finder launch, even though
+            // the in-place relaunch right after the update works (direct
+            // spawn, no Gatekeeper assessment). With the quarantine
+            // attribute gone, Gatekeeper no longer demands notarization and
+            // the valid ad-hoc signature is sufficient. The replacement
+            // bytes were verified against the manifest's sha256 before the
+            // swap, so this doesn't bypass any integrity check RABBIT
+            // relies on.
+            dequarantine_macos_bundle_if_applicable(&install_target);
+        }
+        SelfUpdateAssetKind::MacAppBundle => {
+            // The staged asset is the zipped, notarized `Rabbit.app`.
+            // Replacing the whole bundle keeps the Developer ID signature
+            // and stapled notarization intact, so no re-sign and no
+            // quarantine games are needed — Gatekeeper sees exactly what
+            // Apple notarized, and permission grants keyed to the code
+            // signature survive the update.
+            apply_macos_app_bundle_update(
+                staged_asset,
+                &install_target,
+                &mut replaced,
+                &mut skipped,
+                &mut signature_verdicts,
+            )?;
+        }
     }
-    // Best-effort: re-seal the surrounding `.app` bundle on macOS so the
-    // bundle's signature matches the just-swapped binary. No-op on every
-    // other platform, and on macOS for standalone-CLI installs that don't
-    // live inside an `.app`.
-    resign_macos_bundle_if_applicable(&install_target);
-    // …and lift the whole bundle out of quarantine. The re-sign above is
-    // ad-hoc (users don't have the Developer ID key), and Gatekeeper
-    // refuses a quarantined app whose signature is no longer the notarized
-    // one it originally approved — "RABBIT could not be opened" on the
-    // next Finder launch, even though the in-place relaunch right after
-    // the update works (direct spawn, no Gatekeeper assessment). With the
-    // quarantine attribute gone, Gatekeeper no longer demands
-    // notarization and the valid ad-hoc signature is sufficient. The
-    // replacement bytes were verified against the manifest's sha256
-    // before the swap, so this doesn't bypass any integrity check RABBIT
-    // relies on.
-    dequarantine_macos_bundle_if_applicable(&install_target);
 
     let signed_count = signature_verdicts
         .iter()
@@ -646,8 +702,8 @@ fn dequarantine_macos_bundle_if_applicable(_install_target: &Path) {}
 /// Walk up the path looking for an ancestor with a `.app` extension —
 /// the macOS bundle root that contains the install target. Returns
 /// `None` if the path lives outside any `.app` (e.g., a standalone CLI
-/// install in `/usr/local/bin`).
-#[cfg(any(target_os = "macos", test))]
+/// install in `/usr/local/bin`). Pure path logic, also used on other
+/// platforms by the asset selector (where it is trivially `None`).
 fn enclosing_app_bundle(path: &Path) -> Option<PathBuf> {
     let mut current = path.parent()?;
     loop {
@@ -656,6 +712,339 @@ fn enclosing_app_bundle(path: &Path) -> Option<PathBuf> {
         }
         current = current.parent()?;
     }
+}
+
+/// Apply a [`SelfUpdateAssetKind::MacAppBundle`] update.
+///
+/// Normal case — the install target lives inside an `.app` bundle: extract
+/// the staged zip next to the installed bundle (same volume, so the swap
+/// renames are atomic), sanity-check and signature-check the extracted app,
+/// then swap the installed bundle for it, keeping the old bundle as the
+/// `.rabbit-old` rollback sibling. The extracted app takes over the
+/// installed bundle's path, so a user-renamed `RABBIT.app` keeps its name.
+///
+/// Cross-install case — the target is NOT inside a bundle (a bundled RABBIT
+/// updating a bare-binary install elsewhere, e.g. `--install-root
+/// /usr/local/bin`): the bundle's inner binary is extracted and applied
+/// through the plain binary swap, preserving the pre-bundle-asset behavior.
+#[cfg(target_os = "macos")]
+fn apply_macos_app_bundle_update(
+    staged_zip: &Path,
+    install_target: &Path,
+    replaced: &mut Vec<ReplacedFile>,
+    skipped: &mut Vec<PathBuf>,
+    signature_verdicts: &mut Vec<SignatureVerdictRecord>,
+) -> Result<()> {
+    let Some(bundle) = enclosing_app_bundle(install_target) else {
+        return apply_bundle_inner_binary_to_bare_target(
+            staged_zip,
+            install_target,
+            replaced,
+            skipped,
+            signature_verdicts,
+        );
+    };
+    let parent = bundle
+        .parent()
+        .ok_or_else(|| RabbitError::InvalidPlannedExecution {
+            message: format!("bundle {} has no parent directory", bundle.display()),
+        })?;
+
+    // A crash mid-apply strands the scratch dir (its Drop guard never runs
+    // on a kill), and each one holds a full extracted app — reclaim any
+    // stale ones from previous attempts before creating this run's.
+    sweep_stale_update_scratch_dirs(parent);
+
+    // Extract into a sibling scratch directory: same volume as the bundle,
+    // so the swap renames below cannot fail with cross-device errors.
+    let extract_dir = parent.join(format!(".rabbit-update-{}", unix_millis()));
+    let _extract_guard = RemoveDirOnDrop(extract_dir.clone());
+    let extracted_app = extract_staged_app_zip(staged_zip, &extract_dir)?;
+    // Structural sanity: the bundle must carry exactly one main executable.
+    let _inner_binary = extracted_main_binary(&extracted_app)?;
+    // Verify the WHOLE extracted bundle (codesign accepts bundle paths and
+    // validates the complete seal — main binary, resources, nested code),
+    // which is stronger than checking the inner binary alone. Same policy
+    // as the binary path: an Invalid signature aborts, other verdicts are
+    // recorded in the report.
+    let verdict = verify_executable_signature(&extracted_app)?;
+    if let SignatureVerdict::Invalid { reason } = &verdict {
+        return Err(RabbitError::SelfUpdateSignatureInvalid {
+            path: extracted_app.clone(),
+            reason: reason.clone(),
+        });
+    }
+    signature_verdicts.push(SignatureVerdictRecord {
+        source_path: extracted_app.clone(),
+        verdict,
+    });
+
+    let backup_path = backup_path_for(&bundle);
+    if backup_path.exists() {
+        fs::remove_dir_all(&backup_path).with_path(&backup_path)?;
+    }
+    // Prefer macOS' atomic directory exchange (`renamex_np` + RENAME_SWAP):
+    // the install path holds a complete bundle at every instant, so even a
+    // power loss mid-swap can't leave the user without an app. Filesystems
+    // without swap support fall back to the portable two-rename dance.
+    let backup_path = match atomic_swap_directories(&bundle, &extracted_app) {
+        Ok(()) => {
+            // The scratch path now holds the OLD bundle; park it in the
+            // rollback slot before the scratch guard would delete it. If
+            // this fails the NEW app is already installed and healthy, so
+            // don't fail the apply — the rollback copy is simply lost.
+            if let Err(error) = fs::rename(&extracted_app, &backup_path) {
+                eprintln!(
+                    "warning: could not keep the previous bundle as {}: {error}",
+                    backup_path.display()
+                );
+            }
+            backup_path
+        }
+        Err(_) => swap_bundle_directories(&bundle, &extracted_app)?,
+    };
+    replaced.push(ReplacedFile {
+        install_path: bundle,
+        backup_path,
+    });
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_macos_app_bundle_update(
+    _staged_zip: &Path,
+    _install_target: &Path,
+    _replaced: &mut Vec<ReplacedFile>,
+    _skipped: &mut Vec<PathBuf>,
+    _signature_verdicts: &mut Vec<SignatureVerdictRecord>,
+) -> Result<()> {
+    Err(RabbitError::InvalidPlannedExecution {
+        message: "app-bundle self-update assets only apply on macOS".to_string(),
+    })
+}
+
+/// Cross-install fallback: the staged asset is the app-bundle zip but the
+/// install target is a bare binary outside any `.app`. Extract the bundle's
+/// inner binary (Developer-ID signed standalone by the release pipeline)
+/// and run the plain binary swap with it.
+#[cfg(target_os = "macos")]
+fn apply_bundle_inner_binary_to_bare_target(
+    staged_zip: &Path,
+    install_target: &Path,
+    replaced: &mut Vec<ReplacedFile>,
+    skipped: &mut Vec<PathBuf>,
+    signature_verdicts: &mut Vec<SignatureVerdictRecord>,
+) -> Result<()> {
+    // Extraction feeds a plain file COPY here (no directory renames), so
+    // the staging area's volume doesn't matter — use the zip's own folder.
+    let extract_dir = staged_zip
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(env::temp_dir)
+        .join(format!(".rabbit-app-extract-{}", unix_millis()));
+    let _extract_guard = RemoveDirOnDrop(extract_dir.clone());
+    let extracted_app = extract_staged_app_zip(staged_zip, &extract_dir)?;
+    let inner_binary = extracted_main_binary(&extracted_app)?;
+    let verdict = verify_executable_signature(&inner_binary)?;
+    if let SignatureVerdict::Invalid { reason } = &verdict {
+        return Err(RabbitError::SelfUpdateSignatureInvalid {
+            path: inner_binary.clone(),
+            reason: reason.clone(),
+        });
+    }
+    signature_verdicts.push(SignatureVerdictRecord {
+        source_path: inner_binary.clone(),
+        verdict,
+    });
+    if let Err(error) = swap_install_file(&inner_binary, install_target, replaced, skipped) {
+        rollback_replaced_files(replaced);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Milliseconds since the Unix epoch, for scratch-directory names.
+#[cfg(target_os = "macos")]
+fn unix_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0)
+}
+
+/// Extract the staged app zip into `extract_dir` and return the single
+/// `.app` bundle it contains. `ditto -x -k` instead of a Rust zip crate: it
+/// preserves the symlinks, permissions, and extended attributes an `.app`
+/// bundle relies on, and it is what Apple's own tooling zips bundles with.
+#[cfg(target_os = "macos")]
+fn extract_staged_app_zip(staged_zip: &Path, extract_dir: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(extract_dir).with_path(extract_dir)?;
+    let output = std::process::Command::new("/usr/bin/ditto")
+        .arg("-x")
+        .arg("-k")
+        .arg(staged_zip)
+        .arg(extract_dir)
+        .output()
+        .map_err(|source| RabbitError::Io {
+            path: PathBuf::from("/usr/bin/ditto"),
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(RabbitError::InvalidPlannedExecution {
+            message: format!(
+                "extracting the update bundle failed (ditto exit {}): {}",
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    locate_extracted_app(extract_dir)
+}
+
+/// Atomically exchange two directories via macOS' `renamex_np(RENAME_SWAP)`.
+/// Both paths exist before AND after the call — there is no instant with a
+/// missing bundle. Errors (e.g. a filesystem without swap support) make the
+/// caller fall back to sequential renames.
+#[cfg(target_os = "macos")]
+fn atomic_swap_directories(first: &Path, second: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let first = std::ffi::CString::new(first.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let second = std::ffi::CString::new(second.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let status = unsafe { libc::renamex_np(first.as_ptr(), second.as_ptr(), libc::RENAME_SWAP) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Remove leftover `.rabbit-update-*` scratch directories from previous
+/// interrupted applies (each holds a full extracted app copy). They are
+/// exclusively RABBIT's own, hidden, and reproducible, so sweeping is safe.
+/// Best-effort — a locked entry just stays for the next sweep.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn sweep_stale_update_scratch_dirs(parent: &Path) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_scratch = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".rabbit-update-"));
+        if is_scratch && path.is_dir() {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
+}
+
+/// Best-effort scratch-directory cleanup on scope exit.
+#[cfg(target_os = "macos")]
+struct RemoveDirOnDrop(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for RemoveDirOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The single `.app` directory inside the extraction scratch dir. The
+/// signed release zip contains `Rabbit.app` at its root; anything else
+/// (several apps, none, the unsigned fork layout with a wrapper folder) is
+/// rejected rather than guessed at.
+#[cfg(any(target_os = "macos", test))]
+fn locate_extracted_app(extract_dir: &Path) -> Result<PathBuf> {
+    let mut apps = Vec::new();
+    for entry in fs::read_dir(extract_dir).with_path(extract_dir)? {
+        let entry = entry.with_path(extract_dir)?;
+        let path = entry.path();
+        if path.is_dir()
+            && path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        {
+            apps.push(path);
+        }
+    }
+    match apps.len() {
+        1 => Ok(apps.remove(0)),
+        0 => Err(RabbitError::InvalidPlannedExecution {
+            message: format!(
+                "the update zip did not contain an .app bundle at its root ({})",
+                extract_dir.display()
+            ),
+        }),
+        _ => Err(RabbitError::InvalidPlannedExecution {
+            message: format!(
+                "the update zip contained more than one .app bundle ({})",
+                extract_dir.display()
+            ),
+        }),
+    }
+}
+
+/// The extracted bundle's main executable: `Contents/MacOS/<CFBundleExecutable>`
+/// is overkill to parse here — the pipeline's bundle has exactly one file in
+/// `Contents/MacOS`, and requiring exactly one keeps a malformed zip from
+/// slipping through.
+#[cfg(any(target_os = "macos", test))]
+fn extracted_main_binary(app: &Path) -> Result<PathBuf> {
+    let macos_dir = app.join("Contents").join("MacOS");
+    let mut binaries = Vec::new();
+    for entry in fs::read_dir(&macos_dir).with_path(&macos_dir)? {
+        let entry = entry.with_path(&macos_dir)?;
+        let path = entry.path();
+        if path.is_file() {
+            binaries.push(path);
+        }
+    }
+    match binaries.len() {
+        1 => Ok(binaries.remove(0)),
+        count => Err(RabbitError::InvalidPlannedExecution {
+            message: format!(
+                "expected exactly one executable in {} but found {count}",
+                macos_dir.display()
+            ),
+        }),
+    }
+}
+
+/// Swap the installed bundle directory for the freshly extracted one:
+/// installed → `<name>.rabbit-old` (replacing any previous rollback copy),
+/// extracted → the installed path. Rolls the first rename back if the
+/// second fails, so the install is never left without a bundle. Returns
+/// the rollback path. Pure directory renames — split out so the swap
+/// semantics are unit-testable on every platform.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn swap_bundle_directories(installed_bundle: &Path, extracted_app: &Path) -> Result<PathBuf> {
+    let backup_path = backup_path_for(installed_bundle);
+    if backup_path.exists() {
+        fs::remove_dir_all(&backup_path).with_path(&backup_path)?;
+    }
+    fs::rename(installed_bundle, &backup_path).with_path(installed_bundle)?;
+    if let Err(source) = fs::rename(extracted_app, installed_bundle) {
+        if fs::rename(&backup_path, installed_bundle).is_err() {
+            // Both the swap AND the restore failed: tell the user exactly
+            // where their previous app still lives instead of leaving an
+            // empty install path with a generic I/O error.
+            return Err(RabbitError::InvalidPlannedExecution {
+                message: format!(
+                    "installing the new bundle at {} failed ({source}) and restoring the previous one also failed; the previous app is preserved at {}",
+                    installed_bundle.display(),
+                    backup_path.display()
+                ),
+            });
+        }
+        return Err(RabbitError::Io {
+            path: installed_bundle.to_path_buf(),
+            source,
+        });
+    }
+    Ok(backup_path)
 }
 
 fn rollback_replaced_files(replaced: &[ReplacedFile]) {
@@ -805,6 +1194,44 @@ fn select_asset_for_platform(
     manifest: &SelfUpdateManifest,
     manifest_url: &str,
 ) -> Result<SelfUpdateAssetSelection> {
+    let in_app_bundle = env::current_exe()
+        .ok()
+        .is_some_and(|exe| enclosing_app_bundle(&exe).is_some());
+    select_asset_for_platform_with_context(
+        platform,
+        architecture,
+        manifest,
+        manifest_url,
+        in_app_bundle,
+    )
+}
+
+/// [`select_asset_for_platform`] with the "are we running inside a macOS
+/// `.app` bundle?" fact injected, so tests can pin both selections.
+fn select_asset_for_platform_with_context(
+    platform: Platform,
+    architecture: Architecture,
+    manifest: &SelfUpdateManifest,
+    manifest_url: &str,
+    in_app_bundle: bool,
+) -> Result<SelfUpdateAssetSelection> {
+    // A macOS install living inside an `.app` prefers the full bundle
+    // asset: swapping the whole bundle preserves the Developer ID
+    // signature and notarization, where a binary swap would force an
+    // ad-hoc downgrade. Installs outside a bundle (bare CLI) and old
+    // manifests without the asset keep the binary path.
+    if platform == Platform::MacOs
+        && in_app_bundle
+        && let Some(app_asset) = &manifest.assets.macos_app
+    {
+        return Ok(SelfUpdateAssetSelection {
+            platform,
+            url: app_asset.url.clone(),
+            sha256: app_asset.sha256.clone(),
+            kind: SelfUpdateAssetKind::MacAppBundle,
+        });
+    }
+
     // Prefer the per-arch `platforms` table when the manifest carries one.
     // Its presence means the publisher has explicitly enumerated which
     // (platform, arch) combinations are supported, so a missing entry is
@@ -833,6 +1260,7 @@ fn select_asset_for_platform(
             platform,
             url: asset.url.clone(),
             sha256: asset.sha256.clone(),
+            kind: SelfUpdateAssetKind::Binary,
         });
     }
 
@@ -868,6 +1296,7 @@ fn select_asset_for_platform(
         platform,
         url: asset.url.clone(),
         sha256: asset.sha256.clone(),
+        kind: SelfUpdateAssetKind::Binary,
     })
 }
 
@@ -1076,10 +1505,12 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        ApplySelfUpdateOptions, SelfUpdateAssetSelection, SelfUpdateCheckReport,
-        SelfUpdateManifest, SelfUpdateStageReport, apply_self_update, arch_token_from_asset_url,
-        current_rabbit_version, enclosing_app_bundle, evaluate_self_update_report,
-        parse_self_update_manifest, stage_self_update_from_report,
+        ApplySelfUpdateOptions, SelfUpdateAssetKind, SelfUpdateAssetSelection,
+        SelfUpdateCheckReport, SelfUpdateManifest, SelfUpdateStageReport, apply_self_update,
+        arch_token_from_asset_url, current_rabbit_version, enclosing_app_bundle,
+        evaluate_self_update_report, extracted_main_binary, locate_extracted_app,
+        parse_self_update_manifest, select_asset_for_platform_with_context,
+        stage_self_update_from_report, swap_bundle_directories, sweep_stale_update_scratch_dirs,
     };
     use crate::RabbitError;
     use crate::hash::sha256_file;
@@ -1123,6 +1554,212 @@ mod tests {
                 .raw(),
             "0.1.0"
         );
+    }
+
+    #[test]
+    fn parses_manifest_with_macos_app_bundle_asset() {
+        let manifest = parse_self_update_manifest(
+            r#"{
+              "version": "0.4.0",
+              "channel": "stable",
+              "published_at": "2026-07-14T00:00:00Z",
+              "release_notes_url": null,
+              "minimum_supported_previous_version": null,
+              "assets": {
+                "windows": {
+                  "url": "https://example.test/rabbit-0.4.0-windows-x86_64.exe",
+                  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                },
+                "macos": {
+                  "url": "https://example.test/rabbit-0.4.0-macos-universal",
+                  "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                },
+                "macos_app": {
+                  "url": "https://example.test/rabbit-0.4.0-macos-universal.app.zip",
+                  "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+                }
+              }
+            }"#,
+            MANIFEST_URL,
+        )
+        .unwrap();
+
+        let app = manifest.assets.macos_app.as_ref().unwrap();
+        assert!(app.url.ends_with(".app.zip"));
+        // Manifests without the field (every release up to 0.3.x) parse to None.
+        let legacy = parse_self_update_manifest(
+            r#"{
+              "version": "0.3.2",
+              "channel": "stable",
+              "published_at": "2026-07-03T00:00:00Z",
+              "assets": {
+                "windows": {
+                  "url": "https://example.test/rabbit-0.3.2-windows-x86_64.exe",
+                  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                },
+                "macos": {
+                  "url": "https://example.test/rabbit-0.3.2-macos-universal",
+                  "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                }
+              }
+            }"#,
+            MANIFEST_URL,
+        )
+        .unwrap();
+        assert!(legacy.assets.macos_app.is_none());
+    }
+
+    fn manifest_with_macos_app() -> SelfUpdateManifest {
+        parse_self_update_manifest(
+            r#"{
+              "version": "0.4.0",
+              "channel": "stable",
+              "published_at": "2026-07-14T00:00:00Z",
+              "assets": {
+                "windows": {
+                  "url": "https://example.test/rabbit-0.4.0-windows-x86_64.exe",
+                  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                },
+                "macos": {
+                  "url": "https://example.test/rabbit-0.4.0-macos-universal",
+                  "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                },
+                "platforms": {
+                  "windows-x86_64": {
+                    "url": "https://example.test/rabbit-0.4.0-windows-x86_64.exe",
+                    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                  },
+                  "macos-aarch64": {
+                    "url": "https://example.test/rabbit-0.4.0-macos-universal",
+                    "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                  }
+                },
+                "macos_app": {
+                  "url": "https://example.test/rabbit-0.4.0-macos-universal.app.zip",
+                  "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+                }
+              }
+            }"#,
+            MANIFEST_URL,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn selects_app_bundle_asset_only_for_macos_installs_inside_a_bundle() {
+        let manifest = manifest_with_macos_app();
+
+        // macOS + running inside an .app -> the bundle asset.
+        let selection = select_asset_for_platform_with_context(
+            Platform::MacOs,
+            Architecture::Arm64,
+            &manifest,
+            MANIFEST_URL,
+            true,
+        )
+        .unwrap();
+        assert_eq!(selection.kind, SelfUpdateAssetKind::MacAppBundle);
+        assert!(selection.url.ends_with(".app.zip"));
+
+        // macOS outside a bundle (bare CLI install) -> the bare binary.
+        let selection = select_asset_for_platform_with_context(
+            Platform::MacOs,
+            Architecture::Arm64,
+            &manifest,
+            MANIFEST_URL,
+            false,
+        )
+        .unwrap();
+        assert_eq!(selection.kind, SelfUpdateAssetKind::Binary);
+        assert!(!selection.url.ends_with(".app.zip"));
+
+        // Windows never selects the macOS bundle even when present.
+        let selection = select_asset_for_platform_with_context(
+            Platform::Windows,
+            Architecture::X64,
+            &manifest,
+            MANIFEST_URL,
+            false,
+        )
+        .unwrap();
+        assert_eq!(selection.kind, SelfUpdateAssetKind::Binary);
+        assert!(selection.url.contains("windows"));
+    }
+
+    #[test]
+    fn swap_bundle_directories_swaps_and_keeps_rollback() {
+        let dir = tempdir().unwrap();
+        let installed = dir.path().join("RABBIT.app");
+        std::fs::create_dir_all(installed.join("Contents").join("MacOS")).unwrap();
+        std::fs::write(installed.join("Contents").join("old-marker"), b"old").unwrap();
+        let extracted = dir.path().join("scratch").join("Rabbit.app");
+        std::fs::create_dir_all(extracted.join("Contents").join("MacOS")).unwrap();
+        std::fs::write(extracted.join("Contents").join("new-marker"), b"new").unwrap();
+        // A stale rollback copy from a previous update must be replaced.
+        let stale_backup = dir.path().join("RABBIT.app.rabbit-old");
+        std::fs::create_dir_all(&stale_backup).unwrap();
+        std::fs::write(stale_backup.join("stale"), b"stale").unwrap();
+
+        let backup = swap_bundle_directories(&installed, &extracted).unwrap();
+
+        assert_eq!(backup, dir.path().join("RABBIT.app.rabbit-old"));
+        // Installed path now holds the NEW bundle (renamed to keep the
+        // installed bundle name), backup holds the OLD one; stale gone.
+        assert!(installed.join("Contents").join("new-marker").is_file());
+        assert!(backup.join("Contents").join("old-marker").is_file());
+        assert!(!backup.join("stale").exists());
+        assert!(!extracted.exists());
+    }
+
+    #[test]
+    fn sweeps_only_stale_update_scratch_dirs() {
+        let dir = tempdir().unwrap();
+        let stale_a = dir.path().join(".rabbit-update-1000");
+        let stale_b = dir.path().join(".rabbit-update-2000");
+        std::fs::create_dir_all(stale_a.join("Rabbit.app")).unwrap();
+        std::fs::create_dir_all(&stale_b).unwrap();
+        let unrelated_dir = dir.path().join("RABBIT.app");
+        std::fs::create_dir_all(&unrelated_dir).unwrap();
+        let unrelated_file = dir.path().join(".rabbit-update-notes.txt");
+        std::fs::write(&unrelated_file, b"keep").unwrap();
+
+        sweep_stale_update_scratch_dirs(dir.path());
+
+        assert!(!stale_a.exists());
+        assert!(!stale_b.exists());
+        assert!(unrelated_dir.exists());
+        // Only DIRECTORIES with the scratch prefix are swept.
+        assert!(unrelated_file.exists());
+    }
+
+    #[test]
+    fn locate_extracted_app_requires_exactly_one_bundle() {
+        let dir = tempdir().unwrap();
+        // None -> error.
+        assert!(locate_extracted_app(dir.path()).is_err());
+        // Exactly one -> that bundle.
+        let app = dir.path().join("Rabbit.app");
+        std::fs::create_dir_all(&app).unwrap();
+        assert_eq!(locate_extracted_app(dir.path()).unwrap(), app);
+        // A second .app (or the unsigned-fork wrapper layout) -> error.
+        std::fs::create_dir_all(dir.path().join("Other.app")).unwrap();
+        assert!(locate_extracted_app(dir.path()).is_err());
+    }
+
+    #[test]
+    fn extracted_main_binary_requires_exactly_one_executable() {
+        let dir = tempdir().unwrap();
+        let app = dir.path().join("Rabbit.app");
+        let macos_dir = app.join("Contents").join("MacOS");
+        std::fs::create_dir_all(&macos_dir).unwrap();
+        assert!(extracted_main_binary(&app).is_err());
+        std::fs::write(macos_dir.join("rabbit"), b"binary").unwrap();
+        assert_eq!(
+            extracted_main_binary(&app).unwrap(),
+            macos_dir.join("rabbit")
+        );
+        std::fs::write(macos_dir.join("second"), b"binary").unwrap();
+        assert!(extracted_main_binary(&app).is_err());
     }
 
     #[test]
@@ -1538,6 +2175,7 @@ mod tests {
                 platform: Platform::Windows,
                 url,
                 sha256: sha256.to_string(),
+                kind: SelfUpdateAssetKind::Binary,
             },
         }
     }

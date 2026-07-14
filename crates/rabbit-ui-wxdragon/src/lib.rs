@@ -4895,6 +4895,7 @@ mod tests {
                 platform: Platform::Windows,
                 url: "https://example.test/RABBIT-windows.zip".to_string(),
                 sha256: "0".repeat(64),
+                kind: rabbit_core::self_update::SelfUpdateAssetKind::Binary,
             },
         };
         let stage = SelfUpdateStageReport {
