@@ -59,6 +59,14 @@ from this file and posts it as the GitHub release body.
   normally. Anyone already affected can fix their copy by running
   `xattr -dr com.apple.quarantine /path/to/RABBIT.app` in Terminal once (or
   re-downloading the release).
+- Pressing Enter on the wizard's final **Done** page now activates **Close**.
+  Enter already triggered each step's primary button, but the Done page left
+  the disabled **Next** button as the default, so Enter did nothing there.
+  Close is now the default button on that page, and Enter is additionally
+  re-routed from the read-only summary and details text boxes — which
+  otherwise swallow the key — so it works from the control the screen reader
+  is parked on when the page opens. Enter still does nothing while an install
+  is running.
 
 ## [0.3.2] - 2026-07-03
 
