@@ -278,6 +278,12 @@ fn render_self_update_status(
 #[allow(dead_code)]
 const WXK_SPACE: i32 = 32;
 
+/// `wx/defs.h`: `WXK_RETURN = 13` (the ASCII value) and, from the keycode
+/// enum that starts at `WXK_START = 300`, `WXK_NUMPAD_ENTER = 370`.
+/// Redeclared here for the same reason as `WXK_SPACE` above.
+const WXK_RETURN: i32 = 13;
+const WXK_NUMPAD_ENTER: i32 = 370;
+
 /// Per-platform state handle that the orchestrator (run, button click
 /// handlers, post-install hook, version-check dispatcher) holds onto and
 /// passes through to `build_packages_page` / `refresh_package_checklist` /
@@ -1436,6 +1442,7 @@ pub fn run() {
             &back,
             &next,
             &install,
+            &close,
             &language_footer,
             effective_can_install(&can_install, &review_can_install),
             target_is_valid(&model, &wizard_widgets),
@@ -1443,6 +1450,12 @@ pub fn run() {
         );
         bind_target_navigation_updates(&model, wizard_widgets, &current_step, &next);
         bind_reapack_ack_navigation_updates(wizard_widgets, &current_step, &next);
+        // The Done page parks focus on its read-only summary TextCtrl, which
+        // eats Enter before the default Close button can see it — bind both
+        // of that page's text boxes so Enter dismisses the wizard from
+        // wherever the user happens to be standing.
+        bind_done_page_enter_closes(&wizard_widgets.done_status, &frame, &current_step);
+        bind_done_page_enter_closes(&wizard_widgets.done_details, &frame, &current_step);
 
         {
             let book = book;
@@ -1450,6 +1463,7 @@ pub fn run() {
             let back = back;
             let next = next;
             let install = install;
+            let close = close;
             let current_step = Arc::clone(&current_step);
             let labels = Arc::clone(&labels);
             let model = Arc::clone(&model);
@@ -1493,6 +1507,7 @@ pub fn run() {
                     &back,
                     &next,
                     &install,
+                    &close,
                     &widgets.language_footer,
                     effective_can_install(&can_install, &review_can_install),
                     target_is_valid(&model, &widgets),
@@ -1507,6 +1522,7 @@ pub fn run() {
             let back = back;
             let next = next;
             let install = install;
+            let close = close;
             let current_step = Arc::clone(&current_step);
             let labels = Arc::clone(&labels);
             let model = Arc::clone(&model);
@@ -1555,6 +1571,7 @@ pub fn run() {
                             back: back.clone(),
                             next: next.clone(),
                             install: install.clone(),
+                            close: close.clone(),
                             current_step: Arc::clone(&current_step),
                         });
                         VERSION_CHECK_STEP
@@ -1598,6 +1615,7 @@ pub fn run() {
                     &back,
                     &next,
                     &install,
+                    &close,
                     &widgets.language_footer,
                     effective_can_install(&can_install, &review_can_install),
                     target_is_valid(&model, &widgets),
@@ -1620,6 +1638,7 @@ pub fn run() {
             let back = back;
             let next = next;
             let install = install;
+            let close = close;
             let current_step = Arc::clone(&current_step);
             let labels = Arc::clone(&labels);
             let model = Arc::clone(&model);
@@ -1643,6 +1662,7 @@ pub fn run() {
                     &back,
                     &next,
                     &install,
+                    &close,
                     &widgets.language_footer,
                     effective_can_install(&can_install, &review_can_install),
                     target_is_valid(&model, &widgets),
@@ -1733,6 +1753,7 @@ pub fn run() {
                             &back,
                             &next,
                             &install,
+                            &close,
                             &widgets.language_footer,
                             effective_can_install(&can_install, &review_can_install),
                             target_is_valid(&model, &widgets),
@@ -2032,6 +2053,7 @@ pub fn run() {
                             &back,
                             &next,
                             &install,
+                            &close,
                             &widgets.language_footer,
                             can_install,
                             target_is_valid(&ui_model, &widgets),
@@ -2531,6 +2553,7 @@ struct VersionCheckUi {
     back: Button,
     next: Button,
     install: Button,
+    close: Button,
     current_step: Arc<AtomicUsize>,
 }
 
@@ -2652,6 +2675,7 @@ fn start_version_check(ui: VersionCheckUi) {
                             &ui.back,
                             &ui.next,
                             &ui.install,
+                            &ui.close,
                             &ui.widgets.language_footer,
                             effective_can_install(&ui.can_install, &ui.review_can_install),
                             true,
@@ -5383,6 +5407,42 @@ fn bind_reapack_ack_navigation_updates(
     });
 }
 
+/// A multiline `wxTextCtrl` claims Enter for itself (it reports
+/// `DLGC_WANTALLKEYS` on MSW and the NSTextView swallows the key on macOS),
+/// so the window's default button never sees it. The Done page deliberately
+/// parks focus on the read-only summary TextCtrl so the screen reader reads
+/// the outcome out loud — which would otherwise leave Enter dead on the very
+/// last page even with Close as the default button. Re-route Enter from the
+/// Done page's two read-only TextCtrls to the Close action.
+///
+/// Guarded on `DONE_STEP`: these controls only live on the Done page, but the
+/// guard is what guarantees Enter can never tear the window down while the
+/// install worker is still running — `DONE_STEP` is stored only after the
+/// worker finished, or before it is even spawned on a preparation error.
+fn bind_done_page_enter_closes(text: &TextCtrl, frame: &Frame, current_step: &Arc<AtomicUsize>) {
+    let frame = frame.clone();
+    let current_step = Arc::clone(current_step);
+    text.on_key_down(move |event| {
+        let key_code = if let WindowEventData::Keyboard(kbd) = &event {
+            kbd.get_key_code()
+        } else {
+            None
+        };
+        if !matches!(key_code, Some(WXK_RETURN) | Some(WXK_NUMPAD_ENTER)) {
+            return;
+        }
+        if current_step.load(Ordering::SeqCst) != DONE_STEP {
+            return;
+        }
+        // Consume the key before closing so the native control never beeps
+        // or inserts a newline. `Frame::close(true)` goes through
+        // wxEVT_CLOSE_WINDOW → Destroy(), which defers via wxPendingDelete,
+        // so tearing the window down from inside a key handler is safe.
+        event.skip(false);
+        frame.close(true);
+    });
+}
+
 fn bind_target_navigation_updates(
     model: &Arc<WizardModel>,
     widgets: WizardWidgets,
@@ -5577,6 +5637,7 @@ fn update_navigation(
     back: &Button,
     next: &Button,
     install: &Button,
+    close: &Button,
     language_footer: &Panel,
     can_install: bool,
     target_valid: bool,
@@ -5600,10 +5661,13 @@ fn update_navigation(
     // dialog convention on both macOS and Windows). A disabled default
     // button is a no-op on Enter, so an invalid Target step or a Review
     // step that can't install yet won't advance — exactly what we want.
-    // Install is primary on Review; Next is primary everywhere else (it's
-    // disabled on the Done step, where Enter then does nothing).
+    // Install is primary on Review, Close on Done (the wizard is over there
+    // and Next is disabled, which used to leave Enter a dead key). Progress
+    // deliberately keeps the *disabled* Next as its default: Enter must
+    // never tear the window down while the install worker is running.
     match step {
         REVIEW_STEP => install.set_default(),
+        DONE_STEP => close.set_default(),
         _ => next.set_default(),
     }
     // Language picker only matters on the Target step — switching languages
