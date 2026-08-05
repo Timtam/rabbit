@@ -47,6 +47,12 @@ from this file and posts it as the GitHub release body.
 
 ### Fixed
 
+- macOS: Cmd+Q (and the application menu's Quit item) now quits RABBIT.
+  The wizard installed no menu bar at all, so macOS had no functional
+  Quit item to offer and Cmd+Q was a dead key. RABBIT now installs a
+  minimal menu bar on macOS whose stock Quit item lands in the
+  application menu as usual; quitting this way behaves exactly like the
+  window's close button.
 - macOS: RABBIT no longer refuses to launch after a self-update. Updating
   replaces the binary inside `RABBIT.app` and re-signs the bundle with a
   local (ad-hoc) signature — but the bundle still carried the quarantine
