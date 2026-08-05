@@ -144,6 +144,8 @@ wizard-version-check-error-heading = Controlli non riusciti
 # $package is the localized package display name; $message is the failure message.
 wizard-version-check-error-line = { $package }: { $message }
 wizard-package-details-label = Dettagli del pacchetto
+# $package is the localized package display name. Heads the release-notes block in the package details pane.
+wizard-package-whats-new-heading = Novità di { $package }:
 wizard-packages-osara-keymap-heading = Mappa dei tasti OSARA
 wizard-packages-osara-keymap-replace-label = Sostituisci la tua mappa dei tasti attuale con l'ultima mappa dei tasti OSARA
 wizard-packages-osara-keymap-unavailable-note = Seleziona OSARA per configurare il comportamento della sua mappa dei tasti.

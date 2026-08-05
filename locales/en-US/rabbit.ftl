@@ -144,6 +144,8 @@ wizard-version-check-error-heading = Failed checks
 # $package is the localized package display name; $message is the failure message.
 wizard-version-check-error-line = { $package }: { $message }
 wizard-package-details-label = Package details
+# $package is the localized package display name. Heads the release-notes block in the package details pane.
+wizard-package-whats-new-heading = What's new in { $package }:
 wizard-packages-osara-keymap-heading = OSARA key map
 wizard-packages-osara-keymap-replace-label = Replace your current key map with latest OSARA key map
 wizard-packages-osara-keymap-unavailable-note = Select OSARA to configure its key map behavior.

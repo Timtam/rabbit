@@ -83,10 +83,11 @@ fn fire_post_install_hook() {
 enum VersionCheckEvent {
     /// "Checking <package>…" — emitted before each fetch starts.
     Checking { package_id: String },
-    /// Per-package outcome: a fetched version, or an error message.
+    /// Per-package outcome: a fetched version plus the package's optional
+    /// What's-New notes, or an error message.
     Result {
         package_id: String,
-        outcome: std::result::Result<String, String>,
+        outcome: std::result::Result<(String, Option<String>), String>,
     },
     /// Worker has finished iterating all packages — the UI should rebuild the
     /// package list with the fetched data and re-enable interaction.
@@ -137,7 +138,7 @@ use crate::{
     wizard_outcome_report_from_success, wizard_package_plan_for_target,
     wizard_package_plan_for_target_with_available,
 };
-use rabbit_core::latest::fetch_latest_for_package;
+use rabbit_core::latest::fetch_latest_details_for_package;
 use rabbit_core::plan::{AvailablePackage, PlanActionKind};
 use rabbit_core::progress::{ProgressEvent, ProgressReporter};
 use std::collections::HashMap;
@@ -2602,17 +2603,20 @@ fn start_version_check(ui: VersionCheckUi) {
             completed += 1;
             ui.widgets.version_check_gauge.set_value(completed);
             match outcome {
-                Ok(version_str) => match rabbit_core::version::Version::parse(&version_str) {
-                    Ok(version) => {
-                        accumulated.push(AvailablePackage {
-                            package_id,
-                            version: Some(version),
-                        });
+                Ok((version_str, whats_new)) => {
+                    match rabbit_core::version::Version::parse(&version_str) {
+                        Ok(version) => {
+                            accumulated.push(AvailablePackage {
+                                package_id,
+                                version: Some(version),
+                                whats_new,
+                            });
+                        }
+                        Err(error) => {
+                            errors.push((package_id, error.to_string()));
+                        }
                     }
-                    Err(error) => {
-                        errors.push((package_id, error.to_string()));
-                    }
-                },
+                }
                 Err(message) => {
                     errors.push((package_id, message));
                 }
@@ -3019,8 +3023,8 @@ fn spawn_version_check_worker(package_ids: Vec<String>) {
                 });
             }));
 
-            let outcome = match fetch_latest_for_package(&package_id) {
-                Ok(version) => Ok(version.to_string()),
+            let outcome = match fetch_latest_details_for_package(&package_id) {
+                Ok(details) => Ok((details.version.to_string(), details.whats_new)),
                 Err(error) => Err(error.to_string()),
             };
 

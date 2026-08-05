@@ -144,6 +144,8 @@ wizard-version-check-error-heading = Fehlgeschlagene Prüfungen
 # $package is the localized package display name; $message is the failure message.
 wizard-version-check-error-line = { $package }: { $message }
 wizard-package-details-label = Paketdetails
+# $package is the localized package display name. Heads the release-notes block in the package details pane.
+wizard-package-whats-new-heading = Neuerungen in { $package }:
 wizard-packages-osara-keymap-heading = OSARA-Tastenzuordnung
 wizard-packages-osara-keymap-replace-label = Aktuelle Tastenzuordnung durch OSARA-Tastenzuordnung ersetzen
 wizard-packages-osara-keymap-unavailable-note = Wählen Sie OSARA aus, um das Verhalten der Tastenzuordnung zu konfigurieren.

@@ -23,6 +23,12 @@
       "format": "{1}.{2}"
     }
   },
+  "whats_new": {
+    "text_changelog": {
+      "url": "https://raw.githubusercontent.com/reaper-oss/sws/master/whatsnew.txt",
+      "section_start": "^!v"
+    }
+  },
   "detectors": [
     "rabbit_receipt",
     "user_plugin_file",

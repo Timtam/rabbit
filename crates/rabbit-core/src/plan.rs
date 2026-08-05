@@ -11,6 +11,12 @@ use crate::version::Version;
 pub struct AvailablePackage {
     pub package_id: String,
     pub version: Option<Version>,
+    /// Rendered What's-New notes for the available version, when the package
+    /// declares a `whats_new` source and the wizard's deferred check resolved
+    /// it. Carried next to the version so the package-details pane can show
+    /// them; the planner itself ignores this field.
+    #[serde(default)]
+    pub whats_new: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +185,7 @@ mod tests {
         let available = vec![AvailablePackage {
             package_id: PACKAGE_OSARA.to_string(),
             version: Some(Version::parse("2024.2").unwrap()),
+            whats_new: None,
         }];
         let desired = vec![PACKAGE_OSARA.to_string()];
 
@@ -206,6 +213,7 @@ mod tests {
         let available = vec![AvailablePackage {
             package_id: PACKAGE_REAPACK.to_string(),
             version: Some(Version::parse("1.2.6").unwrap()),
+            whats_new: None,
         }];
         let desired = vec![PACKAGE_REAPACK.to_string()];
 
@@ -231,6 +239,7 @@ mod tests {
         let available = vec![AvailablePackage {
             package_id: PACKAGE_REAPER.to_string(),
             version: Some(Version::parse("7.70").unwrap()),
+            whats_new: None,
         }];
 
         let plan = build_install_plan(Some(installation), &[], &desired, &available);
@@ -279,6 +288,7 @@ mod tests {
         let available = vec![AvailablePackage {
             package_id: PACKAGE_REAPER.to_string(),
             version: Some(Version::parse("7.70").unwrap()),
+            whats_new: None,
         }];
 
         let plan = build_install_plan(Some(installation), &[], &desired, &available);

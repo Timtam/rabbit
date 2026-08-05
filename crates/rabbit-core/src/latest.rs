@@ -1,12 +1,14 @@
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
+use std::io::Read;
 
 use crate::error::{RabbitError, Result};
 use crate::hfs::{HfsListEntry, fetch_file_list, parse_get_file_list_response};
 use crate::package::{
     GithubReleaseSelector, GithubReleaseSpec, HfsListingSpec, VersionRule, VersionSource,
-    embedded_package_manifest,
+    WhatsNewRule, embedded_package_manifest,
 };
 use crate::plan::AvailablePackage;
 use crate::version::Version;
@@ -30,6 +32,14 @@ pub const FFMPEG_GYAN_VERSION_URL: &str =
 /// [`FFMPEG_SUPPORTED_MAJOR`].
 pub const FFMPEG_TORDONA_ARM64_RELEASES_URL: &str =
     "https://api.github.com/repos/tordona/ffmpeg-win-arm64/releases?per_page=100";
+
+/// Head-fetch budget for a `TextChangelog` What's-New source. REAPER's
+/// `whatsnew.txt` is the full release history (~1.4 MB) with the newest
+/// version on top, and one release section fits comfortably in the first few
+/// tens of KB — so the fetch asks for just this many bytes via a `Range`
+/// header (which reaper.fm honors) and caps the read regardless, for servers
+/// that ignore `Range` and reply with the whole file.
+const WHATS_NEW_HEAD_BYTES: u64 = 64 * 1024;
 
 /// FFmpeg major version that REAPER's video decoder is known to support.
 /// Bump this when a new REAPER release adds support for the next FFmpeg
@@ -78,9 +88,13 @@ pub fn fetch_latest_versions() -> Result<LatestVersionsReport> {
             continue;
         };
         match result {
+            // The batch path (CLI update check, offline-tolerant model load)
+            // only needs versions; What's-New notes are fetched by the GUI's
+            // per-package deferred check via fetch_latest_details_for_package.
             Ok(version) => packages.push(AvailablePackage {
                 package_id: spec.id.clone(),
                 version: Some(version),
+                whats_new: None,
             }),
             Err(error) => failures.push(LatestVersionFailure {
                 package_id: spec.id.clone(),
@@ -143,6 +157,23 @@ pub(crate) fn hfs_listing_error_url(spec: &HfsListingSpec) -> String {
 /// stream per-package results as they arrive instead of blocking on the full
 /// batch.
 pub fn fetch_latest_for_package(package_id: &str) -> Result<Version> {
+    fetch_latest_details_for_package(package_id).map(|details| details.version)
+}
+
+/// Latest-version details for one package: the resolved version plus the
+/// package's rendered What's-New notes, when it declares a `whats_new`
+/// source and that source resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatestPackageDetails {
+    pub version: Version,
+    pub whats_new: Option<String>,
+}
+
+/// Like [`fetch_latest_for_package`], but also resolves the package's
+/// optional What's-New notes (the manifest's `whats_new` block). Notes are
+/// best-effort: any notes-side failure just yields `whats_new: None`, so
+/// release notes can never break the version check itself.
+pub fn fetch_latest_details_for_package(package_id: &str) -> Result<LatestPackageDetails> {
     let manifest = embedded_package_manifest();
     let spec = manifest
         .packages
@@ -156,12 +187,202 @@ pub fn fetch_latest_for_package(package_id: &str) -> Result<Version> {
     // Every package resolves its version data-driven: a `version` VersionRule
     // (REAPER/OSARA/SWS/FFmpeg), a `github_release` block (Surge XT, ReaKontrol,
     // ReaPack, app2clap), or an `hfs_listing` block (JAWS).
-    resolve_manifest_version(&client, spec).unwrap_or_else(|| {
+    let version = resolve_manifest_version(&client, spec).unwrap_or_else(|| {
         Err(RabbitError::RemoteData {
             url: String::new(),
             message: format!("no latest-version source configured for package {package_id}"),
         })
+    })?;
+    let whats_new = spec
+        .whats_new
+        .as_ref()
+        .and_then(|rule| resolve_whats_new_rule(&client, rule).ok());
+    Ok(LatestPackageDetails { version, whats_new })
+}
+
+/// Resolve a data-driven [`WhatsNewRule`] into the rendered notes text shown
+/// under the What's-New heading in the wizard's package-details pane.
+pub fn resolve_whats_new_rule(client: &Client, rule: &WhatsNewRule) -> Result<String> {
+    match rule {
+        WhatsNewRule::JsonCommits { url, pointer } => {
+            let body = http_get_text(client, url)?;
+            resolve_json_commits(&body, url, pointer)
+        }
+        WhatsNewRule::TextChangelog { url, section_start } => {
+            let body = http_get_text_head(client, url, WHATS_NEW_HEAD_BYTES)?;
+            resolve_changelog_head_section(&body, url, section_start)
+        }
+        WhatsNewRule::GithubReleaseBody { url } => {
+            let body = http_get_text(client, url)?;
+            resolve_github_release_body(&body, url)
+        }
+    }
+}
+
+/// Release-body side of [`resolve_whats_new_rule`], split out so it's
+/// unit-testable on a fixture body without an HTTP fetch. Reads the
+/// release's `body` string and renders Markdown list markers (`- `, `* `) as
+/// the same bullets the commit list uses, leaving other lines verbatim.
+pub(crate) fn resolve_github_release_body(body: &str, url: &str) -> Result<String> {
+    let value: Value = serde_json::from_str(body).map_err(|source| RabbitError::RemoteData {
+        url: url.to_string(),
+        message: source.to_string(),
+    })?;
+    let notes = value
+        .pointer("/body")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RabbitError::RemoteData {
+            url: url.to_string(),
+            message: "missing release body".to_string(),
+        })?;
+    let lines: Vec<String> = notes
+        .lines()
+        .map(|line| {
+            let line = line.trim_end();
+            match line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+                Some(item) => format!("• {item}"),
+                None => line.to_string(),
+            }
+        })
+        .collect();
+    let rendered = lines.join("\n");
+    let trimmed = rendered.trim();
+    if trimmed.is_empty() {
+        return Err(RabbitError::RemoteData {
+            url: url.to_string(),
+            message: "release body is empty".to_string(),
+        });
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Commit-list side of [`resolve_whats_new_rule`], split out so it's
+/// unit-testable on a fixture body without an HTTP fetch. Reads the array of
+/// `[sha, message]` pairs at `pointer` and renders one bulleted line per
+/// commit, keeping only each message's first line — full bodies can run to
+/// paragraphs, and the details pane wants a scannable list.
+///
+/// The list is lightly cleaned for end users (a screen reader reads every
+/// character out loud): trailing GitHub issue/PR references are stripped,
+/// commits using OSARA's `dev:` prefix convention for developer-facing work
+/// are skipped, and repeated chore lines ("Update translations.") keep only
+/// their first occurrence.
+pub(crate) fn resolve_json_commits(body: &str, url: &str, pointer: &str) -> Result<String> {
+    let value: Value = serde_json::from_str(body).map_err(|source| RabbitError::RemoteData {
+        url: url.to_string(),
+        message: source.to_string(),
+    })?;
+    let entries = value
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .ok_or_else(|| RabbitError::RemoteData {
+            url: url.to_string(),
+            message: format!("missing commit array at JSON pointer {pointer:?}"),
+        })?;
+    let mut seen = BTreeSet::new();
+    let mut lines: Vec<String> = Vec::new();
+    for message in entries
+        .iter()
+        .filter_map(|entry| entry.as_array()?.get(1)?.as_str())
+    {
+        let Some(first_line) = message.lines().next() else {
+            continue;
+        };
+        let cleaned = strip_trailing_issue_refs(first_line.trim());
+        if cleaned.is_empty()
+            || cleaned
+                .get(..4)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("dev:"))
+        {
+            continue;
+        }
+        if seen.insert(cleaned.to_string()) {
+            lines.push(format!("• {cleaned}"));
+        }
+    }
+    if lines.is_empty() {
+        return Err(RabbitError::RemoteData {
+            url: url.to_string(),
+            message: format!("no commit messages at JSON pointer {pointer:?}"),
+        });
+    }
+    Ok(lines.join("\n"))
+}
+
+/// Strip GitHub issue/PR references from the end of a commit's first line —
+/// `(#1431)`, `(issue #1410, PR #1416)`, `Closes #1424`, `Fixes #997.` —
+/// repeatedly, so a combination like `(#1426) Closes #1424` fully unwinds.
+/// The references are pure noise when read by a screen reader; anyone
+/// chasing a change down goes to the repository anyway. Mid-sentence
+/// references are left alone.
+fn strip_trailing_issue_refs(line: &str) -> &str {
+    let mut cleaned = line.trim_end();
+    loop {
+        let before = cleaned;
+        if let Some(found) = trailing_paren_ref_regex().find(cleaned) {
+            cleaned = cleaned[..found.start()].trim_end();
+        }
+        if let Some(found) = trailing_bare_ref_regex().find(cleaned) {
+            cleaned = cleaned[..found.start()].trim_end();
+        }
+        if cleaned == before {
+            return cleaned;
+        }
+    }
+}
+
+/// A trailing parenthesized reference group: `(#1431)`, `(issue #1401, PR
+/// #1402)` — only digits and reference keywords inside the parentheses, so a
+/// meaningful trailing parenthetical is never eaten.
+fn trailing_paren_ref_regex() -> &'static Regex {
+    static TRAILING_PAREN_REF: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    TRAILING_PAREN_REF.get_or_init(|| {
+        Regex::new(r"(?i)\s*\(\s*(?:(?:issue|pr|closes|fixes|re)?\s*#\d+\s*,?\s*)+\)\.?\s*$")
+            .expect("static trailing paren ref regex is valid")
     })
+}
+
+/// A trailing bare reference: `Closes #1424`, `Fixes #997.`, `Re #1406`.
+fn trailing_bare_ref_regex() -> &'static Regex {
+    static TRAILING_BARE_REF: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    TRAILING_BARE_REF.get_or_init(|| {
+        Regex::new(r"(?i)\s*\b(?:closes|fixes|re)\s+#\d+\.?\s*$")
+            .expect("static trailing bare ref regex is valid")
+    })
+}
+
+/// Changelog side of [`resolve_whats_new_rule`], split out so it's
+/// unit-testable on a fixture body. Cuts the newest release's section out of
+/// a newest-first plain-text changelog: from the first line matching
+/// `section_start` up to, excluding, the next matching line. When no second
+/// header follows (e.g. the head-capped fetch cut it off), the rest of the
+/// body is kept.
+pub(crate) fn resolve_changelog_head_section(
+    body: &str,
+    url: &str,
+    section_start: &str,
+) -> Result<String> {
+    // `(?m:…)` forces multi-line mode so `^` in the manifest pattern anchors
+    // to line starts without every manifest having to remember the flag.
+    let regex =
+        Regex::new(&format!("(?m:{section_start})")).map_err(|err| RabbitError::RemoteData {
+            url: url.to_string(),
+            message: format!("invalid section_start regex {section_start:?}: {err}"),
+        })?;
+    let start = regex
+        .find(body)
+        .ok_or_else(|| RabbitError::RemoteData {
+            url: url.to_string(),
+            message: format!("section pattern {section_start:?} did not match"),
+        })?
+        .start();
+    let section = &body[start..];
+    let end = regex
+        .find_iter(section)
+        .find(|next| next.start() > 0)
+        .map(|next| next.start())
+        .unwrap_or(section.len());
+    Ok(section[..end].trim_end().to_string())
 }
 
 /// Resolve a data-driven [`VersionRule`]: fetch its URL and extract a version
@@ -375,6 +596,42 @@ fn http_get_text(client: &Client, url: &str) -> Result<String> {
         url: url.to_string(),
         source,
     })
+}
+
+/// GET at most `max_bytes` of `url`. The request carries a `Range` header so
+/// a cooperating server (reaper.fm does) only sends the head; the reader is
+/// capped at `max_bytes` regardless, so a server that ignores `Range` and
+/// replies 200 with the full body still costs at most one buffer. When the
+/// cap was actually hit, the final — almost certainly truncated — line is
+/// dropped so callers only ever see whole lines.
+fn http_get_text_head(client: &Client, url: &str, max_bytes: u64) -> Result<String> {
+    let request = crate::http::maybe_apply_github_auth(client.get(url), url)
+        .header(reqwest::header::RANGE, format!("bytes=0-{}", max_bytes - 1));
+    let response = request
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map_err(|source| RabbitError::Http {
+            url: url.to_string(),
+            source,
+        })?;
+
+    let mut body = Vec::new();
+    response
+        .take(max_bytes)
+        .read_to_end(&mut body)
+        .map_err(|source| RabbitError::RemoteData {
+            url: url.to_string(),
+            message: source.to_string(),
+        })?;
+    let capped = body.len() as u64 == max_bytes;
+    let mut text = String::from_utf8_lossy(&body).into_owned();
+    if capped {
+        match text.rfind('\n') {
+            Some(last_newline) => text.truncate(last_newline),
+            None => text.clear(),
+        }
+    }
+    Ok(text)
 }
 
 /// The GitHub API URL a [`GithubReleaseSpec`] reads — `/releases/latest`
@@ -642,6 +899,110 @@ mod tests {
                 r#"{"version":"not-a-version"}"#,
                 OSARA_UPDATE_URL,
                 "/version"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn renders_osara_commits_as_a_cleaned_bulleted_list() {
+        // OSARA's update.json `commits` is an array of [sha, message] pairs.
+        // The rendering keeps each message's first line only (CRLF bodies can
+        // run to paragraphs), strips trailing GitHub issue/PR references,
+        // skips OSARA's "dev:"-prefixed internal commits, and keeps only the
+        // first occurrence of repeated chore lines.
+        let body = concat!(
+            r#"{"version":"2026.8.1.2278,857265da","commits":["#,
+            r#"["857265da","Fix the slider. (#1431)\r\n\r\nLong body paragraph."],"#,
+            r#"["342b988d","dev: Logging improvements. (#1430)"],"#,
+            r#"["64ee308c","Add vertical zoom feedback (#1426) Closes #1424"],"#,
+            r#"["11111111","Update translations."],"#,
+            r#"["22222222","Map lang pack to nb_NO translation. Fixes #997."],"#,
+            r#"["33333333","Update translations."],"#,
+            r#"["44444444","Localise send parameters. (issue #1411, PR #1412)"]"#,
+            "]}"
+        );
+        let notes = super::resolve_json_commits(body, OSARA_UPDATE_URL, "/commits").unwrap();
+        assert_eq!(
+            notes,
+            "• Fix the slider.\n\
+             • Add vertical zoom feedback\n\
+             • Update translations.\n\
+             • Map lang pack to nb_NO translation.\n\
+             • Localise send parameters."
+        );
+
+        // A mid-sentence reference is not a trailing one — left alone.
+        let body = r#"{"commits":[["aa","Fix the #5 slot (see #12) in the mixer"]]}"#;
+        let notes = super::resolve_json_commits(body, OSARA_UPDATE_URL, "/commits").unwrap();
+        assert_eq!(notes, "• Fix the #5 slot (see #12) in the mixer");
+
+        // A missing pointer and an empty list are errors (the caller treats
+        // any notes-side error as "no What's-New section"), not panics.
+        let missing = super::resolve_json_commits(r#"{"nope":1}"#, OSARA_UPDATE_URL, "/commits");
+        assert!(missing.is_err());
+        let empty = super::resolve_json_commits(r#"{"commits":[]}"#, OSARA_UPDATE_URL, "/commits");
+        assert!(empty.is_err());
+    }
+
+    #[test]
+    fn renders_reapack_release_body_with_bullets() {
+        // ReaPack's release body is a plain Markdown bullet list; markers
+        // are normalized to the same bullets the OSARA commit list uses,
+        // other lines stay verbatim.
+        let url = "https://api.github.com/repos/cfillion/reapack/releases/latest";
+        let body = concat!(
+            r#"{"tag_name":"v1.2.6","body":"#,
+            r#""- Add Crossfade Editor support\r\n- Update filter synonyms\r\nSee the manual.""#,
+            "}"
+        );
+        let notes = super::resolve_github_release_body(body, url).unwrap();
+        assert_eq!(
+            notes,
+            "• Add Crossfade Editor support\n• Update filter synonyms\nSee the manual."
+        );
+
+        // A missing or blank body is an error, not a panic — packages with
+        // boilerplate rolling-release bodies just don't declare this source.
+        let no_body = super::resolve_github_release_body(r#"{"tag_name":"v1"}"#, url);
+        assert!(no_body.is_err());
+        let blank = super::resolve_github_release_body(r#"{"body":"  \r\n "}"#, url);
+        assert!(blank.is_err());
+    }
+
+    #[test]
+    fn cuts_newest_section_from_reaper_whatsnew() {
+        // whatsnew.txt is newest-first; the notes are the first section only,
+        // header line included, trailing blank lines trimmed.
+        let body = "v7.78 - July 18\n  + Fix one\n  + Fix two\n\nv7.77 - June 2\n  + Older\n";
+        let notes = super::resolve_changelog_head_section(
+            body,
+            "https://www.reaper.fm/whatsnew.txt",
+            "^v[0-9]",
+        )
+        .unwrap();
+        assert_eq!(notes, "v7.78 - July 18\n  + Fix one\n  + Fix two");
+    }
+
+    #[test]
+    fn changelog_section_without_following_header_keeps_the_rest() {
+        // The head-capped fetch can cut the body before the next version
+        // header; everything after the first header is then the section.
+        let body = "Preamble line\nv7.78 - July 18 2026\n  + Fix one thing";
+        let notes = super::resolve_changelog_head_section(
+            body,
+            "https://www.reaper.fm/whatsnew.txt",
+            "^v[0-9]",
+        )
+        .unwrap();
+        assert_eq!(notes, "v7.78 - July 18 2026\n  + Fix one thing");
+
+        // No matching header at all is an error, not a panic.
+        assert!(
+            super::resolve_changelog_head_section(
+                "nothing here",
+                "https://www.reaper.fm/whatsnew.txt",
+                "^v[0-9]",
             )
             .is_err()
         );
