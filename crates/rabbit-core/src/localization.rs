@@ -363,6 +363,51 @@ mod tests {
         );
     }
 
+    /// Top-level Fluent message ids in an `.ftl` source: lines starting at
+    /// column 0 with `identifier =`. Terms (`-brand`), comments (`#`),
+    /// attributes (indented `.attr =`) and value continuation lines (which
+    /// Fluent requires to be indented) don't match.
+    fn message_keys(source: &str) -> std::collections::BTreeSet<String> {
+        source
+            .lines()
+            .filter_map(|line| {
+                let (key, _) = line.split_once('=')?;
+                let key = key.trim_end();
+                let mut chars = key.chars();
+                if !chars.next()?.is_ascii_alphabetic() {
+                    return None;
+                }
+                chars
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+                    .then(|| key.to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_embedded_locale_defines_the_same_message_keys() {
+        // Locale parity is otherwise maintained by hand: a key added to
+        // en-US but forgotten in another locale silently falls back — or
+        // shows the raw key id where a call site formats without checking
+        // `missing`. Compare the full key sets so any drift fails loudly
+        // and names the exact keys.
+        let reference = message_keys(embedded_locale_source(DEFAULT_LOCALE).unwrap());
+        assert!(
+            reference.len() > 100,
+            "key extraction looks broken: only {} keys found in {DEFAULT_LOCALE}",
+            reference.len()
+        );
+        for &locale in embedded_locales() {
+            let keys = message_keys(embedded_locale_source(locale).unwrap());
+            let missing: Vec<_> = reference.difference(&keys).collect();
+            let extra: Vec<_> = keys.difference(&reference).collect();
+            assert!(
+                missing.is_empty() && extra.is_empty(),
+                "locale {locale} vs {DEFAULT_LOCALE}: missing {missing:?}, extra {extra:?}"
+            );
+        }
+    }
+
     #[test]
     fn loads_embedded_german_messages() {
         let localizer = Localizer::embedded("de-DE").unwrap();
