@@ -39,6 +39,32 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets
 
+      # The gui feature gates all of wx_app.rs, so the workspace-level
+      # clippy above never lints it — the artifacts job compiles it, but
+      # only late in the workflow and without lints. The GUI build needs
+      # LLVM/ninja for wxdragon's C++ layer (same setup as the artifacts
+      # job); Swatinem/rust-cache keeps the wxWidgets build cached between
+      # runs, so only cache-miss runs pay the full C++ compile.
+      - name: Install GUI build prerequisites (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install llvm ninja --yes --no-progress
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install GUI build prerequisites (macOS)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          brew install llvm ninja
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
+      - name: Clippy (GUI feature)
+        run: cargo clippy -p rabbit-ui-wxdragon --features gui --all-targets
+
       - name: Test workspace
         run: cargo test --workspace
 
