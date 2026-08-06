@@ -2076,6 +2076,39 @@ pub fn run() {
             frame_for_close.close(true);
         });
 
+        // Handle the application-menu Quit item: the macOS menu bar
+        // installed below carries a stock wxID_EXIT item, which wxOSX
+        // relocates into the application menu as "Quit rabbit" (Cmd+Q).
+        // Selecting it emits a plain menu command with that id at the
+        // frame — route it to the same teardown as the wizard's Close
+        // button and the window close box. Bound on every platform, but
+        // only macOS installs a menu that can emit it.
+        {
+            let frame_for_quit = frame.clone();
+            frame.on_menu_selected(move |event| {
+                if event.get_id() == wxdragon::id::ID_EXIT {
+                    frame_for_quit.close(true);
+                }
+            });
+        }
+
+        // Without any menu bar, wxOSX installs no functional main menu at
+        // all: the wizard's application menu had a dead Quit item and Cmd+Q
+        // did nothing. Installing a minimal menu bar makes wxWidgets build
+        // a real application menu and wire its Quit item to the stock
+        // wxID_EXIT command handled above. `Ctrl+Q` in a wx accelerator
+        // string means Cmd+Q on macOS. macOS-only: on Windows this would
+        // add a visible File menu to a wizard that doesn't want one, and
+        // Alt+F4 already closes the window natively there.
+        #[cfg(target_os = "macos")]
+        {
+            let file_menu = Menu::builder()
+                .append_item(wxdragon::id::ID_EXIT, "E&xit\tCtrl+Q", "")
+                .build();
+            let menu_bar = MenuBar::builder().append(file_menu, "&File").build();
+            frame.set_menu_bar(menu_bar);
+        }
+
         {
             let model = Arc::clone(&model);
             let widgets = wizard_widgets;
@@ -2492,8 +2525,7 @@ fn build_language_footer(root_panel: &Panel, root: &BoxSizer, model: &WizardMode
     let current_locale = model.current_language.clone();
 
     // The popup menu dispatches its EVT_MENU to the popup's owner window
-    // (the footer Panel here), not to the button — only Panel/ScrolledWindow
-    // implement MenuEvents in wxdragon today.
+    // (the footer Panel here), not to the button that opened it.
     {
         let language_options = language_options.clone();
         let current_locale = current_locale.clone();
