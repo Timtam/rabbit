@@ -364,6 +364,28 @@ mod tests {
     }
 
     #[test]
+    fn whats_new_heading_formats_in_every_embedded_locale() {
+        // The heading is composed with .format() at row-build time without a
+        // missing-key fallback, so a locale that forgets the key would show
+        // the raw key id in the details pane. Guard all four by hand since
+        // there is no automated locale-parity check.
+        for &locale in embedded_locales() {
+            let localizer = Localizer::embedded(locale).unwrap();
+            let message =
+                localizer.format("wizard-package-whats-new-heading", &[("package", "OSARA")]);
+            assert!(
+                !message.missing,
+                "locale {locale} is missing wizard-package-whats-new-heading"
+            );
+            assert!(
+                message.value.contains("OSARA"),
+                "locale {locale} should interpolate the package name, got {:?}",
+                message.value
+            );
+        }
+    }
+
+    #[test]
     fn loads_embedded_german_messages() {
         let localizer = Localizer::embedded("de-DE").unwrap();
 

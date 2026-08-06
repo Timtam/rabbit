@@ -119,6 +119,8 @@ pub struct EmbeddedPackageSpec {
     #[serde(default)]
     pub version: Option<VersionRule>,
     #[serde(default)]
+    pub whats_new: Option<WhatsNewRule>,
+    #[serde(default)]
     pub detectors: Vec<PackageDetector>,
     #[serde(default)]
     pub install_steps: Vec<InstallStep>,
@@ -489,6 +491,38 @@ fn default_capture_format() -> String {
     "{1}".to_string()
 }
 
+/// Data-driven What's-New (release notes) discovery for the wizard's
+/// package-details pane. Like [`VersionRule`], each variant fetches a URL and
+/// extracts human-readable notes, so a package's notes side is manifest data
+/// rather than a per-package Rust parser. Notes are best-effort: a fetch or
+/// parse failure leaves the pane without a What's-New section instead of
+/// failing the version check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhatsNewRule {
+    /// Fetch `url` (JSON) and read the commit list at `pointer` (an RFC 6901
+    /// JSON pointer): an array of `[sha, message]` pairs, newest first.
+    /// Rendered as one bulleted line per commit, keeping only each message's
+    /// first line (full bodies can run to paragraphs). Covers OSARA's
+    /// `update.json` `commits` field — the same feed OSARA's own updater
+    /// shows as its list of changes.
+    JsonCommits { url: String, pointer: String },
+    /// Fetch the head of `url` — a plain-text changelog with the newest
+    /// release first — and cut the first section: from the first line
+    /// matching the `section_start` regex (compiled in multi-line mode) up
+    /// to, excluding, the next matching line. Covers REAPER's
+    /// `whatsnew.txt` (`v7.78 - July 18 2026` section headers) and SWS's
+    /// (`!v2.14.0.7 featured build …` headers).
+    TextChangelog { url: String, section_start: String },
+    /// Fetch `url` (a GitHub release API endpoint, typically the same one
+    /// the package's `github_release` block reads) and render the release's
+    /// `body` — the notes the maintainer wrote. Covers ReaPack. Only declare
+    /// this for packages whose releases carry real notes: rolling snapshot
+    /// tags (ReaKontrol, Surge XT, app2clap) have a static boilerplate body
+    /// that would be worse than showing nothing.
+    GithubReleaseBody { url: String },
+}
+
 /// A detection probe. Listed in `detectors` per package and run by the
 /// detection engine in order, so the manifest declares both *which* probes
 /// apply and their fallback order. `RabbitReceipt` (authoritative) and
@@ -724,6 +758,17 @@ pub fn validate_package_spec(spec: &EmbeddedPackageSpec) -> Result<(), String> {
         }
     }
 
+    // A broken `whats_new` regex would otherwise only surface at fetch time,
+    // where notes failures are deliberately silent — so a first-party typo
+    // would quietly disable the What's-New pane instead of failing loudly.
+    if let Some(WhatsNewRule::TextChangelog { section_start, .. }) = &spec.whats_new
+        && let Err(err) = regex::Regex::new(section_start)
+    {
+        return Err(format!(
+            "whats_new section_start regex {section_start:?} is invalid: {err}"
+        ));
+    }
+
     Ok(())
 }
 
@@ -846,9 +891,10 @@ mod tests {
         BackupPolicy, GithubArtifactKind, GithubReleaseSelector, HostCapabilities, HostCapability,
         InstallDestination, InstallStep, PACKAGE_JAWS_SCRIPTS, PACKAGE_OSARA, PACKAGE_REAKONTROL,
         PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS, PackageDetector,
-        PackageKind, SupportedPlatform, VersionRule, VersionSource, builtin_package_specs,
-        default_desired_package_ids_for_host, embedded_package_manifest,
-        embedded_package_manifest_bytes, package_specs_by_id, parse_package_manifest,
+        PackageKind, SupportedPlatform, VersionRule, VersionSource, WhatsNewRule,
+        builtin_package_specs, default_desired_package_ids_for_host, embedded_package_manifest,
+        embedded_package_manifest_bytes, package_specs_by_id, parse_embedded_package_spec,
+        parse_package_manifest, validate_package_spec,
     };
 
     #[test]
@@ -916,6 +962,11 @@ mod tests {
         // REAPER's version is a data-driven HTML rule and its artifact is a
         // data-driven `http_artifact` page scrape.
         assert!(matches!(reaper.version, Some(VersionRule::Html { .. })));
+        // REAPER's What's-New is the newest section of whatsnew.txt.
+        assert!(matches!(
+            reaper.whats_new,
+            Some(WhatsNewRule::TextChangelog { .. })
+        ));
         let reaper_http = reaper.http_artifact.as_ref().expect("reaper http_artifact");
         assert!(reaper_http.targets.iter().any(|target| matches!(
             (target.platform, target.artifact_kind),
@@ -934,6 +985,12 @@ mod tests {
             .unwrap();
         assert_eq!(osara.package_kind, PackageKind::UserPluginBinary);
         assert!(matches!(osara.version, Some(VersionRule::Json { .. })));
+        // OSARA's What's-New is the commit list in the same update.json the
+        // version rule reads.
+        assert!(matches!(
+            osara.whats_new,
+            Some(WhatsNewRule::JsonCommits { .. })
+        ));
         assert!(osara.http_artifact.is_some());
         assert_eq!(osara.backup_policy, BackupPolicy::BackupOverwrittenFiles);
         assert!(osara.detectors.contains(&PackageDetector::UserPluginFile));
@@ -942,6 +999,28 @@ mod tests {
                 .install_steps
                 .contains(&InstallStep::CopyUserPluginBinary)
         );
+        // SWS reuses the generic text-changelog What's-New engine (`!vX.Y`
+        // section headers) — pure manifest data, no SWS-specific Rust.
+        let sws = manifest
+            .packages
+            .iter()
+            .find(|package| package.id == PACKAGE_SWS)
+            .unwrap();
+        assert!(matches!(
+            sws.whats_new,
+            Some(WhatsNewRule::TextChangelog { .. })
+        ));
+        // ReaPack's What's-New is the body of the same GitHub release its
+        // version already reads.
+        let reapack = manifest
+            .packages
+            .iter()
+            .find(|package| package.id == PACKAGE_REAPACK)
+            .unwrap();
+        assert!(matches!(
+            reapack.whats_new,
+            Some(WhatsNewRule::GithubReleaseBody { .. })
+        ));
         // The per-package files were gathered at compile time and are
         // non-empty (build.rs picked them up).
         assert!(embedded_package_manifest_bytes() > 0);
@@ -1001,6 +1080,36 @@ mod tests {
         assert!(surge.detectors.contains(&PackageDetector::RabbitReceipt));
         assert!(surge.detectors.contains(&PackageDetector::SurgeVendorFiles));
         assert!(surge.user_plugin_prefixes.is_empty());
+    }
+
+    #[test]
+    fn validation_rejects_an_invalid_whats_new_regex() {
+        // Notes-side failures are deliberately silent at fetch time, so a
+        // broken first-party `section_start` regex must fail loudly at
+        // manifest load instead of quietly disabling the What's-New pane.
+        let spec = parse_embedded_package_spec(
+            r#"{
+                "id": "demo",
+                "display_name": "Demo",
+                "display_name_key": "package-demo",
+                "display_description_key": "package-demo-description",
+                "recommended": false,
+                "user_plugin_prefixes": [],
+                "user_plugin_suffixes": { "windows": [], "macos": [] },
+                "whats_new": {
+                    "text_changelog": {
+                        "url": "https://example.com/whatsnew.txt",
+                        "section_start": "(["
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let message = validate_package_spec(&spec).unwrap_err();
+        assert!(
+            message.contains("section_start"),
+            "expected the error to name the offending field, got {message:?}"
+        );
     }
 
     #[test]

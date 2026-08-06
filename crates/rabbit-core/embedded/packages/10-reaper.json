@@ -23,6 +23,12 @@
       "pattern": "Version ([0-9][0-9.]*)"
     }
   },
+  "whats_new": {
+    "text_changelog": {
+      "url": "https://www.reaper.fm/whatsnew.txt",
+      "section_start": "^v[0-9]"
+    }
+  },
   "detectors": [
     "file_version_metadata"
   ],

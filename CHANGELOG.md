@@ -31,6 +31,19 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Added
+
+- The packages page's details pane now answers "what's new?": REAPER and
+  SWS show the newest section of their official changelogs, ReaPack shows
+  its release notes, and OSARA shows the latest snapshots' list of changes
+  — the feed OSARA's own updater reads, lightly cleaned for listening
+  rather than reading: developer-facing "dev:" commits are skipped,
+  repeated chore lines are collapsed, and trailing GitHub issue/PR
+  references are stripped. The notes are fetched together with the online
+  version check under a localized heading; packages whose feeds carry no
+  real notes (rolling snapshot releases) don't declare a notes source, and
+  if notes can't be fetched the pane simply keeps its usual contents. (#4)
+
 ### Changed
 
 - macOS self-updates now replace the whole `RABBIT.app` bundle with the

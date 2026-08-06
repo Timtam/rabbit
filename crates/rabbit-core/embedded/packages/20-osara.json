@@ -23,6 +23,12 @@
       "pointer": "/version"
     }
   },
+  "whats_new": {
+    "json_commits": {
+      "url": "https://osara.reaperaccessibility.com/snapshots/update.json",
+      "pointer": "/commits"
+    }
+  },
   "detectors": [
     "rabbit_receipt",
     "user_plugin_file",

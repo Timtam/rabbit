@@ -573,6 +573,7 @@ fn model_from_plan_with_options(
         architecture,
         &package_specs,
         &plan.actions,
+        &available_packages,
         &host,
     );
     let target_resource_path = selected_target_index
@@ -1327,6 +1328,7 @@ pub fn wizard_package_plan_for_target_with_available(
         model.architecture,
         &package_specs,
         &plan.actions,
+        available_packages,
         &host,
     );
 
@@ -2680,11 +2682,21 @@ fn package_rows(
     architecture: Architecture,
     package_specs: &[PackageSpec],
     actions: &[PlanAction],
+    available_packages: &[AvailablePackage],
     host: &HostCapabilities,
 ) -> Vec<PackageRow> {
     let specs_by_id: BTreeMap<_, _> = package_specs
         .iter()
         .map(|spec| (spec.id.as_str(), spec))
+        .collect();
+    let whats_new_by_id: BTreeMap<_, _> = available_packages
+        .iter()
+        .filter_map(|available| {
+            available
+                .whats_new
+                .as_deref()
+                .map(|notes| (available.package_id.as_str(), notes))
+        })
         .collect();
     actions
         .iter()
@@ -2754,6 +2766,22 @@ fn package_rows(
                 summary.clone()
             } else {
                 format!("{summary}\n\n{description}")
+            };
+            // The available version's What's-New notes (resolved by the
+            // deferred version check for packages that declare a source)
+            // follow under a localized heading, so the pane answers "what
+            // changed upstream?" without a trip to the package's website.
+            let details = match whats_new_by_id.get(action.package_id.as_str()) {
+                Some(notes) => {
+                    let heading = localizer
+                        .format(
+                            "wizard-package-whats-new-heading",
+                            &[("package", display_name.as_str())],
+                        )
+                        .value;
+                    format!("{details}\n\n{heading}\n{notes}")
+                }
+                None => details,
             };
             PackageRow {
                 package_id: action.package_id.clone(),
@@ -3188,7 +3216,7 @@ mod tests {
         PACKAGE_FFMPEG, PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK, PACKAGE_REAPER,
         PACKAGE_SWS, builtin_package_specs,
     };
-    use rabbit_core::plan::{InstallPlan, PlanAction, PlanActionKind};
+    use rabbit_core::plan::{AvailablePackage, InstallPlan, PlanAction, PlanActionKind};
     use rabbit_core::preflight::PreflightReport;
     use rabbit_core::resource::ResourceInitReport;
     use rabbit_core::setup::SetupReport;
@@ -3723,6 +3751,7 @@ mod tests {
                 available_version: Some(Version::parse("2026.2").unwrap()),
                 reason: "Missing".to_string(),
             }],
+            &[],
             &host,
         );
         assert!(
@@ -3746,6 +3775,7 @@ mod tests {
                 available_version: Some(Version::parse("2026.2").unwrap()),
                 reason: "Missing".to_string(),
             }],
+            &[],
             &HostCapabilities::default(),
         );
         assert!(
@@ -4217,6 +4247,60 @@ mod tests {
                 .any(|note| note.contains("SWS") && note.contains("503")),
             "expected a note with the failure detail, got {:?}",
             plan.notes
+        );
+    }
+
+    #[test]
+    fn whats_new_notes_render_in_the_package_details_pane() {
+        // A package whose deferred version check resolved What's-New notes
+        // gets them appended to its details pane under a localized heading;
+        // packages without notes keep the plain summary + description.
+        let dir = tempdir().unwrap();
+        let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let model = model_from_plan(
+            &localizer,
+            Platform::Windows,
+            Architecture::X64,
+            Vec::new(),
+            None,
+            InstallPlan {
+                target: None,
+                actions: Vec::new(),
+                notes: Vec::new(),
+            },
+        );
+        let target = custom_portable_target_row(&model, dir.path().join("PortableREAPER"), true);
+        let available = vec![AvailablePackage {
+            package_id: PACKAGE_OSARA.to_string(),
+            version: Some(Version::parse("2026.8.1.2278,857265da").unwrap()),
+            whats_new: Some("• Fix the slider.\n• Logging improvements.".to_string()),
+        }];
+        let plan =
+            super::wizard_package_plan_for_target_with_available(&model, Some(&target), &available)
+                .unwrap();
+
+        let osara = plan
+            .package_rows
+            .iter()
+            .find(|row| row.package_id == PACKAGE_OSARA)
+            .expect("OSARA row should be in the package list");
+        assert!(
+            osara.details.contains("What's new in OSARA:"),
+            "expected a localized What's-New heading, got {:?}",
+            osara.details
+        );
+        assert!(osara.details.contains("• Fix the slider."));
+        // The notes follow the description, they don't replace it.
+        assert!(osara.details.contains(&osara.description));
+
+        let reaper = plan
+            .package_rows
+            .iter()
+            .find(|row| row.package_id == PACKAGE_REAPER)
+            .expect("REAPER row should be in the package list");
+        assert!(
+            !reaper.details.contains("What's new"),
+            "a package without resolved notes must keep its plain details"
         );
     }
 
