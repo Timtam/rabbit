@@ -20,7 +20,7 @@
   ],
   "whats_new": {
     "github_release_body": {
-      "url": "https://api.github.com/repos/cfillion/reapack/releases/latest"
+      "url": "https://api.github.com/repos/cfillion/reapack/releases?per_page=30"
     }
   },
   "github_release": {
