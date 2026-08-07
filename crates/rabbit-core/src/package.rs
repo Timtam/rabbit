@@ -503,20 +503,25 @@ pub enum WhatsNewRule {
     /// Fetch `url` (JSON) and read the commit list at `pointer` (an RFC 6901
     /// JSON pointer): an array of `[sha, message]` pairs, newest first.
     /// Rendered as one bulleted line per commit, keeping only each message's
-    /// first line (full bodies can run to paragraphs). Covers OSARA's
-    /// `update.json` `commits` field — the same feed OSARA's own updater
-    /// shows as its list of changes.
+    /// first line (full bodies can run to paragraphs). When the installed
+    /// version embeds the built commit's hash after a comma (OSARA's
+    /// snapshot convention), the list is trimmed to the commits above that
+    /// hash. Covers OSARA's `update.json` `commits` field — the same feed
+    /// OSARA's own updater shows as its list of changes.
     JsonCommits { url: String, pointer: String },
     /// Fetch the head of `url` — a plain-text changelog with the newest
-    /// release first — and cut the first section: from the first line
-    /// matching the `section_start` regex (compiled in multi-line mode) up
-    /// to, excluding, the next matching line. Covers REAPER's
-    /// `whatsnew.txt` (`v7.78 - July 18 2026` section headers) and SWS's
+    /// release first — and cut the newest run of sections. Sections start at
+    /// lines matching the `section_start` regex (compiled in multi-line
+    /// mode); the run reaches from the first match down to, excluding, the
+    /// installed version's section, or is the first section alone when no
+    /// installed version is known. Covers REAPER's `whatsnew.txt`
+    /// (`v7.78 - July 18 2026` section headers) and SWS's
     /// (`!v2.14.0.7 featured build …` headers).
     TextChangelog { url: String, section_start: String },
-    /// Fetch `url` (a GitHub release API endpoint, typically the same one
-    /// the package's `github_release` block reads) and render the release's
-    /// `body` — the notes the maintainer wrote. Covers ReaPack. Only declare
+    /// Fetch `url` — a GitHub `/releases` list endpoint (or a single
+    /// `/releases/latest` object) — and render each release's name plus its
+    /// `body`, the notes the maintainer wrote, walking back to the installed
+    /// version's release when one is known. Covers ReaPack. Only declare
     /// this for packages whose releases carry real notes: rolling snapshot
     /// tags (ReaKontrol, Surge XT, app2clap) have a static boilerplate body
     /// that would be worse than showing nothing.
