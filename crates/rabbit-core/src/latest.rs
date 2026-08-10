@@ -35,11 +35,18 @@ pub const FFMPEG_TORDONA_ARM64_RELEASES_URL: &str =
 
 /// Head-fetch budget for a `TextChangelog` What's-New source. REAPER's
 /// `whatsnew.txt` is the full release history (~1.4 MB) with the newest
-/// version on top, and one release section fits comfortably in the first few
-/// tens of KB — so the fetch asks for just this many bytes via a `Range`
-/// header (which reaper.fm honors) and caps the read regardless, for servers
-/// that ignore `Range` and reply with the whole file.
-const WHATS_NEW_HEAD_BYTES: u64 = 64 * 1024;
+/// version on top. The notes can span every release between the installed
+/// version and the newest one (up to [`WHATS_NEW_MAX_SECTIONS`] sections,
+/// REAPER's running several KB each), so the budget covers a healthy run of
+/// sections — requested via a `Range` header (which reaper.fm honors) and
+/// capped on the read regardless, for servers that ignore `Range` and reply
+/// with the whole file.
+const WHATS_NEW_HEAD_BYTES: u64 = 256 * 1024;
+
+/// Cap on how many release sections a since-installed What's-New renders —
+/// a years-old install must not turn the details pane into tens of screens
+/// a screen reader user has to wade through.
+const WHATS_NEW_MAX_SECTIONS: usize = 10;
 
 /// FFmpeg major version that REAPER's video decoder is known to support.
 /// Bump this when a new REAPER release adds support for the next FFmpeg
@@ -157,7 +164,7 @@ pub(crate) fn hfs_listing_error_url(spec: &HfsListingSpec) -> String {
 /// stream per-package results as they arrive instead of blocking on the full
 /// batch.
 pub fn fetch_latest_for_package(package_id: &str) -> Result<Version> {
-    fetch_latest_details_for_package(package_id).map(|details| details.version)
+    fetch_latest_details_for_package(package_id, None).map(|details| details.version)
 }
 
 /// Latest-version details for one package: the resolved version plus the
@@ -173,7 +180,14 @@ pub struct LatestPackageDetails {
 /// optional What's-New notes (the manifest's `whats_new` block). Notes are
 /// best-effort: any notes-side failure just yields `whats_new: None`, so
 /// release notes can never break the version check itself.
-pub fn fetch_latest_details_for_package(package_id: &str) -> Result<LatestPackageDetails> {
+///
+/// With `installed`, the notes are trimmed to the changes since that
+/// version (each engine documents its own cut rule); without it, they cover
+/// the newest release only.
+pub fn fetch_latest_details_for_package(
+    package_id: &str,
+    installed: Option<&Version>,
+) -> Result<LatestPackageDetails> {
     let manifest = embedded_package_manifest();
     let spec = manifest
         .packages
@@ -184,6 +198,27 @@ pub fn fetch_latest_details_for_package(package_id: &str) -> Result<LatestPackag
             message: format!("no package named {package_id}"),
         })?;
     let client = build_http_client()?;
+    // When the version rule and the What's-New rule read the same URL
+    // (OSARA's update.json carries both the version and the commit feed),
+    // fetch the body once and feed both parsers from it instead of hitting
+    // the endpoint twice.
+    if let (
+        Some(VersionRule::Json {
+            url: version_url,
+            pointer: version_pointer,
+        }),
+        Some(WhatsNewRule::JsonCommits {
+            url: notes_url,
+            pointer: notes_pointer,
+        }),
+    ) = (&spec.version, &spec.whats_new)
+        && version_url == notes_url
+    {
+        let body = http_get_text(&client, version_url)?;
+        let version = resolve_json_version(&body, version_url, version_pointer)?;
+        let whats_new = resolve_json_commits(&body, notes_url, notes_pointer, installed).ok();
+        return Ok(LatestPackageDetails { version, whats_new });
+    }
     // Every package resolves its version data-driven: a `version` VersionRule
     // (REAPER/OSARA/SWS/FFmpeg), a `github_release` block (Surge XT, ReaKontrol,
     // ReaPack, app2clap), or an `hfs_listing` block (JAWS).
@@ -196,45 +231,131 @@ pub fn fetch_latest_details_for_package(package_id: &str) -> Result<LatestPackag
     let whats_new = spec
         .whats_new
         .as_ref()
-        .and_then(|rule| resolve_whats_new_rule(&client, rule).ok());
+        .and_then(|rule| resolve_whats_new_rule(&client, rule, installed).ok());
     Ok(LatestPackageDetails { version, whats_new })
 }
 
 /// Resolve a data-driven [`WhatsNewRule`] into the rendered notes text shown
-/// under the What's-New heading in the wizard's package-details pane.
-pub fn resolve_whats_new_rule(client: &Client, rule: &WhatsNewRule) -> Result<String> {
+/// under the What's-New heading in the wizard's package-details pane. With
+/// `installed`, each engine trims the notes to the changes since that
+/// version; every trim keeps at least the newest release's notes, so an
+/// up-to-date install reads the same thing it did before trimming existed.
+pub fn resolve_whats_new_rule(
+    client: &Client,
+    rule: &WhatsNewRule,
+    installed: Option<&Version>,
+) -> Result<String> {
     match rule {
         WhatsNewRule::JsonCommits { url, pointer } => {
             let body = http_get_text(client, url)?;
-            resolve_json_commits(&body, url, pointer)
+            resolve_json_commits(&body, url, pointer, installed)
         }
         WhatsNewRule::TextChangelog { url, section_start } => {
             let body = http_get_text_head(client, url, WHATS_NEW_HEAD_BYTES)?;
-            resolve_changelog_head_section(&body, url, section_start)
+            resolve_changelog_sections(&body, url, section_start, installed)
         }
         WhatsNewRule::GithubReleaseBody { url } => {
             let body = http_get_text(client, url)?;
-            resolve_github_release_body(&body, url)
+            resolve_github_release_bodies(&body, url, installed)
         }
     }
 }
 
-/// Release-body side of [`resolve_whats_new_rule`], split out so it's
-/// unit-testable on a fixture body without an HTTP fetch. Reads the
-/// release's `body` string and renders Markdown list markers (`- `, `* `) as
-/// the same bullets the commit list uses, leaving other lines verbatim.
-pub(crate) fn resolve_github_release_body(body: &str, url: &str) -> Result<String> {
+/// Release-notes side of [`resolve_whats_new_rule`], split out so it's
+/// unit-testable on a fixture body without an HTTP fetch. Accepts either a
+/// newest-first release array (a `/releases` list endpoint) or a single
+/// release object (a `/releases/latest` endpoint). Each release renders as
+/// its name (tag fallback) on a heading line — so the notes read as a
+/// versioned changelog — followed by the body the maintainer wrote.
+///
+/// With an installed version, the walk keeps every release above it, capped
+/// at [`WHATS_NEW_MAX_SECTIONS`]; the newest release always renders, so an
+/// up-to-date install still sees the latest notes. Drafts and prereleases
+/// are skipped — `/releases/latest` never returns them, and the list walk
+/// must match it.
+pub(crate) fn resolve_github_release_bodies(
+    body: &str,
+    url: &str,
+    installed: Option<&Version>,
+) -> Result<String> {
     let value: Value = serde_json::from_str(body).map_err(|source| RabbitError::RemoteData {
         url: url.to_string(),
         message: source.to_string(),
     })?;
-    let notes = value
+    let releases: Vec<&Value> = match &value {
+        Value::Array(entries) => entries.iter().collect(),
+        single => vec![single],
+    };
+    let mut sections: Vec<String> = Vec::new();
+    for release in releases {
+        let flagged = |field: &str| {
+            release
+                .pointer(field)
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        };
+        if flagged("/draft") || flagged("/prerelease") {
+            continue;
+        }
+        if !sections.is_empty() {
+            let stop = match installed {
+                // Fresh install: no since-version to reach back to — the
+                // newest release only, as before trimming existed.
+                None => true,
+                Some(installed) => {
+                    sections.len() >= WHATS_NEW_MAX_SECTIONS
+                        || release_version(release)
+                            .is_some_and(|version| version_at_or_below(&version, installed))
+                }
+            };
+            if stop {
+                break;
+            }
+        }
+        if let Some(section) = render_release_section(release) {
+            sections.push(section);
+        }
+    }
+    let rendered = sections.join("\n\n");
+    if rendered.is_empty() {
+        return Err(RabbitError::RemoteData {
+            url: url.to_string(),
+            message: "no renderable release notes".to_string(),
+        });
+    }
+    Ok(rendered)
+}
+
+/// One release as a What's-New section: the release name (tag fallback) as
+/// a heading line, then the body with Markdown list markers (`- `, `* `)
+/// rendered as the same bullets the commit list uses and other lines left
+/// verbatim. `None` when the release carries neither a usable heading nor
+/// any body text.
+fn render_release_section(release: &Value) -> Option<String> {
+    let string_field = |field: &str| {
+        release
+            .pointer(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    };
+    let heading = string_field("/name").or_else(|| string_field("/tag_name"));
+    let notes = release
         .pointer("/body")
         .and_then(Value::as_str)
-        .ok_or_else(|| RabbitError::RemoteData {
-            url: url.to_string(),
-            message: "missing release body".to_string(),
-        })?;
+        .map(render_release_body_lines)
+        .filter(|text| !text.is_empty());
+    match (heading, notes) {
+        (Some(heading), Some(notes)) => Some(format!("{heading}\n{notes}")),
+        (Some(heading), None) => Some(heading.to_string()),
+        (None, Some(notes)) => Some(notes),
+        (None, None) => None,
+    }
+}
+
+/// The maintainer-written release body with Markdown list markers rendered
+/// as bullets, other lines verbatim, surrounding whitespace trimmed.
+fn render_release_body_lines(notes: &str) -> String {
     let lines: Vec<String> = notes
         .lines()
         .map(|line| {
@@ -245,29 +366,37 @@ pub(crate) fn resolve_github_release_body(body: &str, url: &str) -> Result<Strin
             }
         })
         .collect();
-    let rendered = lines.join("\n");
-    let trimmed = rendered.trim();
-    if trimmed.is_empty() {
-        return Err(RabbitError::RemoteData {
-            url: url.to_string(),
-            message: "release body is empty".to_string(),
-        });
-    }
-    Ok(trimmed.to_string())
+    lines.join("\n").trim().to_string()
+}
+
+/// The version a release advertises via its `tag_name` (`v1.2.6`). `None`
+/// when the tag doesn't parse as a version, which the release walk treats
+/// as "not a cut-off point".
+fn release_version(release: &Value) -> Option<Version> {
+    let tag = release.pointer("/tag_name").and_then(Value::as_str)?;
+    Version::parse(tag).ok()
 }
 
 /// Commit-list side of [`resolve_whats_new_rule`], split out so it's
 /// unit-testable on a fixture body without an HTTP fetch. Reads the array of
-/// `[sha, message]` pairs at `pointer` and renders one bulleted line per
-/// commit, keeping only each message's first line — full bodies can run to
-/// paragraphs, and the details pane wants a scannable list.
+/// `[sha, message]` pairs at `pointer` (newest first) and renders one
+/// bulleted line per commit, keeping only each message's first line — full
+/// bodies can run to paragraphs, and the details pane wants a scannable
+/// list.
 ///
-/// The list is lightly cleaned for end users (a screen reader reads every
-/// character out loud): trailing GitHub issue/PR references are stripped,
-/// commits using OSARA's `dev:` prefix convention for developer-facing work
-/// are skipped, and repeated chore lines ("Update translations.") keep only
-/// their first occurrence.
-pub(crate) fn resolve_json_commits(body: &str, url: &str, pointer: &str) -> Result<String> {
+/// OSARA-style snapshot versions embed the built commit's hash after a
+/// comma (`2026.4.16.2157,593ff26b`); when `installed` carries one and it
+/// appears in the feed, the list stops there so the user only hears commits
+/// they don't already run. A trim that would leave nothing (the install is
+/// current) falls back to the full list, matching what an up-to-date user
+/// saw before trimming existed; no hash, or a hash that never appears, also
+/// renders the full list.
+pub(crate) fn resolve_json_commits(
+    body: &str,
+    url: &str,
+    pointer: &str,
+    installed: Option<&Version>,
+) -> Result<String> {
     let value: Value = serde_json::from_str(body).map_err(|source| RabbitError::RemoteData {
         url: url.to_string(),
         message: source.to_string(),
@@ -279,6 +408,39 @@ pub(crate) fn resolve_json_commits(body: &str, url: &str, pointer: &str) -> Resu
             url: url.to_string(),
             message: format!("missing commit array at JSON pointer {pointer:?}"),
         })?;
+    let cut = installed
+        .and_then(installed_snapshot_hash)
+        .and_then(|hash| {
+            entries.iter().position(|entry| {
+                entry
+                    .as_array()
+                    .and_then(|pair| pair.first())
+                    .and_then(Value::as_str)
+                    .is_some_and(|sha| commit_sha_matches(sha, &hash))
+            })
+        });
+    let mut lines = render_commit_lines(&entries[..cut.unwrap_or(entries.len())]);
+    if lines.is_empty() && cut.is_some() {
+        lines = render_commit_lines(entries);
+    }
+    if lines.is_empty() {
+        return Err(RabbitError::RemoteData {
+            url: url.to_string(),
+            message: format!("no commit messages at JSON pointer {pointer:?}"),
+        });
+    }
+    Ok(lines.join("\n"))
+}
+
+/// Render `[sha, message]` pairs as cleaned bulleted lines — the shared body
+/// of [`resolve_json_commits`]'s trimmed and full-list passes.
+///
+/// The list is lightly cleaned for end users (a screen reader reads every
+/// character out loud): trailing GitHub issue/PR references are stripped,
+/// commits using OSARA's `dev:` prefix convention for developer-facing work
+/// are skipped, and repeated chore lines ("Update translations.") keep only
+/// their first occurrence.
+fn render_commit_lines(entries: &[Value]) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut lines: Vec<String> = Vec::new();
     for message in entries
@@ -300,13 +462,26 @@ pub(crate) fn resolve_json_commits(body: &str, url: &str, pointer: &str) -> Resu
             lines.push(format!("• {cleaned}"));
         }
     }
-    if lines.is_empty() {
-        return Err(RabbitError::RemoteData {
-            url: url.to_string(),
-            message: format!("no commit messages at JSON pointer {pointer:?}"),
-        });
-    }
-    Ok(lines.join("\n"))
+    lines
+}
+
+/// The commit hash an OSARA-style snapshot version embeds after a comma
+/// (`2026.4.16.2157,593ff26b` → `593ff26b`). `None` when the version has no
+/// comma segment or the segment doesn't look like a git hash prefix — a
+/// short or non-hex segment must not become a trim key, so those render the
+/// full list instead of a wrongly-cut one.
+fn installed_snapshot_hash(installed: &Version) -> Option<String> {
+    let (_, hash) = installed.raw().rsplit_once(',')?;
+    let hash = hash.trim();
+    (hash.len() >= 7 && hash.chars().all(|ch| ch.is_ascii_hexdigit()))
+        .then(|| hash.to_ascii_lowercase())
+}
+
+/// Whether feed sha `sha` names the same commit as the (possibly shorter)
+/// installed hash prefix.
+fn commit_sha_matches(sha: &str, installed_hash: &str) -> bool {
+    sha.get(..installed_hash.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(installed_hash))
 }
 
 /// Strip GitHub issue/PR references from the end of a commit's first line —
@@ -352,15 +527,19 @@ fn trailing_bare_ref_regex() -> &'static Regex {
 }
 
 /// Changelog side of [`resolve_whats_new_rule`], split out so it's
-/// unit-testable on a fixture body. Cuts the newest release's section out of
-/// a newest-first plain-text changelog: from the first line matching
-/// `section_start` up to, excluding, the next matching line. When no second
-/// header follows (e.g. the head-capped fetch cut it off), the rest of the
-/// body is kept.
-pub(crate) fn resolve_changelog_head_section(
+/// unit-testable on a fixture body. Cuts the newest run of release sections
+/// out of a newest-first plain-text changelog: from the first line matching
+/// `section_start` down to, excluding, the first later section whose header
+/// version is at or below `installed` — everything from there on is what
+/// the user already runs. The newest section is always kept, the run is
+/// capped at [`WHATS_NEW_MAX_SECTIONS`], and without an installed version
+/// the run is the newest section only. When no cut-off header shows up
+/// (e.g. the head-capped fetch ended first), whatever was fetched is kept.
+pub(crate) fn resolve_changelog_sections(
     body: &str,
     url: &str,
     section_start: &str,
+    installed: Option<&Version>,
 ) -> Result<String> {
     // `(?m:…)` forces multi-line mode so `^` in the manifest pattern anchors
     // to line starts without every manifest having to remember the flag.
@@ -369,20 +548,65 @@ pub(crate) fn resolve_changelog_head_section(
             url: url.to_string(),
             message: format!("invalid section_start regex {section_start:?}: {err}"),
         })?;
-    let start = regex
-        .find(body)
-        .ok_or_else(|| RabbitError::RemoteData {
+    let starts: Vec<usize> = regex.find_iter(body).map(|found| found.start()).collect();
+    let Some(&first) = starts.first() else {
+        return Err(RabbitError::RemoteData {
             url: url.to_string(),
             message: format!("section pattern {section_start:?} did not match"),
-        })?
-        .start();
-    let section = &body[start..];
-    let end = regex
-        .find_iter(section)
-        .find(|next| next.start() > 0)
-        .map(|next| next.start())
-        .unwrap_or(section.len());
-    Ok(section[..end].trim_end().to_string())
+        });
+    };
+    let mut end = body.len();
+    // `sections_kept` is the enumeration index: cutting at header N keeps
+    // the N sections before it.
+    for (sections_kept, &start) in starts.iter().enumerate().skip(1) {
+        let stop = match installed {
+            // Fresh install: no since-version to reach back to — the newest
+            // section only, as before trimming existed.
+            None => true,
+            Some(installed) => {
+                sections_kept >= WHATS_NEW_MAX_SECTIONS
+                    || section_header_version(&body[start..])
+                        .is_some_and(|version| version_at_or_below(&version, installed))
+            }
+        };
+        if stop {
+            end = start;
+            break;
+        }
+    }
+    Ok(body[first..end].trim_end().to_string())
+}
+
+/// The version a changelog section header advertises: the first
+/// whitespace-delimited token starting at the header line's first digit —
+/// `7.78` from REAPER's `v7.78 - July 18 2026`, `2.14.0.7` from SWS's
+/// `!v2.14.0.7 featured build (Dec 25, 2024)`. `None` when the line has no
+/// parsable version, which the section cut treats as "not a cut-off point".
+fn section_header_version(section: &str) -> Option<Version> {
+    let header_line = section.lines().next()?;
+    let start = header_line.find(|ch: char| ch.is_ascii_digit())?;
+    let token = header_line[start..].split_whitespace().next()?;
+    Version::parse(token).ok()
+}
+
+/// Whether `candidate` is numerically at or below `installed` — the cut-off
+/// test for since-installed What's-New trimming. Compares numeric parts
+/// only, so formatting differences between a header/tag and a detected
+/// version (`v1.2.6` vs `1.2.6`) can't skew the comparison the way
+/// [`Version::cmp_lenient`]'s raw-string tie-break would.
+fn version_at_or_below(candidate: &Version, installed: &Version) -> bool {
+    let candidate_parts = candidate.numeric_parts();
+    let installed_parts = installed.numeric_parts();
+    let length = candidate_parts.len().max(installed_parts.len());
+    for index in 0..length {
+        let candidate_part = candidate_parts.get(index).copied().unwrap_or_default();
+        let installed_part = installed_parts.get(index).copied().unwrap_or_default();
+        match candidate_part.cmp(&installed_part) {
+            std::cmp::Ordering::Equal => {}
+            ordering => return ordering.is_lt(),
+        }
+    }
+    true
 }
 
 /// Resolve a data-driven [`VersionRule`]: fetch its URL and extract a version
@@ -857,6 +1081,7 @@ mod tests {
         AssetSelector, GithubArtifactKind, GithubReleaseSelector, GithubReleaseSpec,
         InstallDestination, SupportedPlatform, VersionSource,
     };
+    use crate::version::Version;
 
     /// The app2clap manifest's `github_release` block, mirrored as a literal
     /// for the data-driven engine tests (asset-name versioning on a rolling
@@ -922,7 +1147,7 @@ mod tests {
             r#"["44444444","Localise send parameters. (issue #1411, PR #1412)"]"#,
             "]}"
         );
-        let notes = super::resolve_json_commits(body, OSARA_UPDATE_URL, "/commits").unwrap();
+        let notes = super::resolve_json_commits(body, OSARA_UPDATE_URL, "/commits", None).unwrap();
         assert_eq!(
             notes,
             "• Fix the slider.\n\
@@ -934,53 +1159,130 @@ mod tests {
 
         // A mid-sentence reference is not a trailing one — left alone.
         let body = r#"{"commits":[["aa","Fix the #5 slot (see #12) in the mixer"]]}"#;
-        let notes = super::resolve_json_commits(body, OSARA_UPDATE_URL, "/commits").unwrap();
+        let notes = super::resolve_json_commits(body, OSARA_UPDATE_URL, "/commits", None).unwrap();
         assert_eq!(notes, "• Fix the #5 slot (see #12) in the mixer");
 
         // A missing pointer and an empty list are errors (the caller treats
         // any notes-side error as "no What's-New section"), not panics.
-        let missing = super::resolve_json_commits(r#"{"nope":1}"#, OSARA_UPDATE_URL, "/commits");
+        let missing =
+            super::resolve_json_commits(r#"{"nope":1}"#, OSARA_UPDATE_URL, "/commits", None);
         assert!(missing.is_err());
-        let empty = super::resolve_json_commits(r#"{"commits":[]}"#, OSARA_UPDATE_URL, "/commits");
+        let empty =
+            super::resolve_json_commits(r#"{"commits":[]}"#, OSARA_UPDATE_URL, "/commits", None);
         assert!(empty.is_err());
     }
 
     #[test]
+    fn trims_osara_commits_to_those_after_the_installed_snapshot() {
+        // The installed snapshot version embeds its commit hash after the
+        // comma; the feed is newest-first, so the list stops right before
+        // that commit — the user already runs it and everything older.
+        let body = concat!(
+            r#"{"commits":["#,
+            r#"["857265da11112222","Fix the slider."],"#,
+            r#"["64ee308c33334444","Add vertical zoom feedback"],"#,
+            r#"["13560ef755556666","Improve track naming"],"#,
+            r#"["aabbccdd77778888","Older change"]"#,
+            "]}"
+        );
+        let installed = Version::parse("2024.3.6.1332,13560ef7").unwrap();
+        let notes =
+            super::resolve_json_commits(body, OSARA_UPDATE_URL, "/commits", Some(&installed))
+                .unwrap();
+        assert_eq!(notes, "• Fix the slider.\n• Add vertical zoom feedback");
+
+        // A trim that would leave nothing — the newest feed commit is the
+        // installed one — falls back to the full list, matching what an
+        // up-to-date user saw before trimming existed.
+        let installed = Version::parse("2026.8.1.2278,857265da").unwrap();
+        let notes =
+            super::resolve_json_commits(body, OSARA_UPDATE_URL, "/commits", Some(&installed))
+                .unwrap();
+        assert!(notes.contains("• Older change"));
+
+        // No hash segment (binary-scan detections carry none), an unknown
+        // hash, and a too-short segment all render the full list.
+        for raw in [
+            "2024.3.6.1332",
+            "2024.3.6.1332,0123456789abcdef",
+            "2024.3.6.1332,1356",
+        ] {
+            let installed = Version::parse(raw).unwrap();
+            let notes =
+                super::resolve_json_commits(body, OSARA_UPDATE_URL, "/commits", Some(&installed))
+                    .unwrap();
+            assert!(
+                notes.contains("• Older change"),
+                "raw {raw:?} should not trim"
+            );
+        }
+    }
+
+    #[test]
     fn renders_reapack_release_body_with_bullets() {
-        // ReaPack's release body is a plain Markdown bullet list; markers
-        // are normalized to the same bullets the OSARA commit list uses,
-        // other lines stay verbatim.
+        // A single release object renders as its name (tag fallback) on a
+        // heading line, then the body: markers are normalized to the same
+        // bullets the OSARA commit list uses, other lines stay verbatim.
         let url = "https://api.github.com/repos/cfillion/reapack/releases/latest";
         let body = concat!(
             r#"{"tag_name":"v1.2.6","body":"#,
             r#""- Add Crossfade Editor support\r\n- Update filter synonyms\r\nSee the manual.""#,
             "}"
         );
-        let notes = super::resolve_github_release_body(body, url).unwrap();
+        let notes = super::resolve_github_release_bodies(body, url, None).unwrap();
         assert_eq!(
             notes,
-            "• Add Crossfade Editor support\n• Update filter synonyms\nSee the manual."
+            "v1.2.6\n• Add Crossfade Editor support\n• Update filter synonyms\nSee the manual."
         );
 
-        // A missing or blank body is an error, not a panic — packages with
-        // boilerplate rolling-release bodies just don't declare this source.
-        let no_body = super::resolve_github_release_body(r#"{"tag_name":"v1"}"#, url);
-        assert!(no_body.is_err());
-        let blank = super::resolve_github_release_body(r#"{"body":"  \r\n "}"#, url);
+        // A bodyless release still renders its heading — the version line
+        // alone is worth hearing; a release with nothing at all is an error,
+        // not a panic.
+        let no_body = super::resolve_github_release_bodies(r#"{"tag_name":"v1"}"#, url, None);
+        assert_eq!(no_body.unwrap(), "v1");
+        let blank = super::resolve_github_release_bodies(r#"{"body":"  \r\n "}"#, url, None);
         assert!(blank.is_err());
     }
 
     #[test]
+    fn walks_release_array_back_to_the_installed_version() {
+        // A `/releases` list body is newest-first; with an installed version
+        // the walk keeps every release above it, skipping prereleases and
+        // drafts the way `/releases/latest` does.
+        let url = "https://api.github.com/repos/cfillion/reapack/releases?per_page=30";
+        let body = concat!(
+            r#"[{"tag_name":"v1.2.6","name":"ReaPack v1.2.6","body":"- New thing"},"#,
+            r#"{"tag_name":"v1.2.6-rc1","prerelease":true,"body":"- Candidate"},"#,
+            r#"{"tag_name":"v1.2.5","body":"- Fixed thing"},"#,
+            r#"{"tag_name":"v1.2.4","body":"- Old thing"}]"#
+        );
+        let installed = Version::parse("1.2.4").unwrap();
+        let notes = super::resolve_github_release_bodies(body, url, Some(&installed)).unwrap();
+        assert_eq!(
+            notes,
+            "ReaPack v1.2.6\n• New thing\n\nv1.2.5\n• Fixed thing"
+        );
+
+        // Up to date: the newest release still renders, alone.
+        let installed = Version::parse("1.2.6").unwrap();
+        let notes = super::resolve_github_release_bodies(body, url, Some(&installed)).unwrap();
+        assert_eq!(notes, "ReaPack v1.2.6\n• New thing");
+
+        // No installed version (fresh install): the newest release only.
+        let notes = super::resolve_github_release_bodies(body, url, None).unwrap();
+        assert_eq!(notes, "ReaPack v1.2.6\n• New thing");
+    }
+
+    const REAPER_WHATSNEW_URL: &str = "https://www.reaper.fm/whatsnew.txt";
+
+    #[test]
     fn cuts_newest_section_from_reaper_whatsnew() {
-        // whatsnew.txt is newest-first; the notes are the first section only,
-        // header line included, trailing blank lines trimmed.
+        // whatsnew.txt is newest-first; without an installed version the
+        // notes are the first section only, header line included, trailing
+        // blank lines trimmed.
         let body = "v7.78 - July 18\n  + Fix one\n  + Fix two\n\nv7.77 - June 2\n  + Older\n";
-        let notes = super::resolve_changelog_head_section(
-            body,
-            "https://www.reaper.fm/whatsnew.txt",
-            "^v[0-9]",
-        )
-        .unwrap();
+        let notes =
+            super::resolve_changelog_sections(body, REAPER_WHATSNEW_URL, "^v[0-9]", None).unwrap();
         assert_eq!(notes, "v7.78 - July 18\n  + Fix one\n  + Fix two");
     }
 
@@ -989,23 +1291,83 @@ mod tests {
         // The head-capped fetch can cut the body before the next version
         // header; everything after the first header is then the section.
         let body = "Preamble line\nv7.78 - July 18 2026\n  + Fix one thing";
-        let notes = super::resolve_changelog_head_section(
-            body,
-            "https://www.reaper.fm/whatsnew.txt",
-            "^v[0-9]",
-        )
-        .unwrap();
+        let notes =
+            super::resolve_changelog_sections(body, REAPER_WHATSNEW_URL, "^v[0-9]", None).unwrap();
         assert_eq!(notes, "v7.78 - July 18 2026\n  + Fix one thing");
 
         // No matching header at all is an error, not a panic.
-        assert!(
-            super::resolve_changelog_head_section(
-                "nothing here",
-                "https://www.reaper.fm/whatsnew.txt",
-                "^v[0-9]",
-            )
-            .is_err()
+        let no_match =
+            super::resolve_changelog_sections("nothing here", REAPER_WHATSNEW_URL, "^v[0-9]", None);
+        assert!(no_match.is_err());
+    }
+
+    #[test]
+    fn keeps_changelog_sections_back_to_the_installed_version() {
+        // With an installed version, the run reaches down to (excluding) its
+        // section: updating 7.76 → 7.78 reads the 7.78 and 7.77 notes.
+        let body = concat!(
+            "v7.78 - July 18\n  + Fix one\n\n",
+            "v7.77 - June 2\n  + Fix two\n\n",
+            "v7.76 - June 29\n  + Already installed\n\n",
+            "v7.75 - May 1\n  + Ancient\n"
         );
+        let installed = Version::parse("7.76").unwrap();
+        let notes = super::resolve_changelog_sections(
+            body,
+            REAPER_WHATSNEW_URL,
+            "^v[0-9]",
+            Some(&installed),
+        )
+        .unwrap();
+        assert_eq!(
+            notes,
+            "v7.78 - July 18\n  + Fix one\n\nv7.77 - June 2\n  + Fix two"
+        );
+
+        // Up to date: the newest section still renders, alone — same thing
+        // an up-to-date user saw before trimming existed.
+        let installed = Version::parse("7.78").unwrap();
+        let notes = super::resolve_changelog_sections(
+            body,
+            REAPER_WHATSNEW_URL,
+            "^v[0-9]",
+            Some(&installed),
+        )
+        .unwrap();
+        assert_eq!(notes, "v7.78 - July 18\n  + Fix one");
+
+        // SWS-style `!v` headers version-match the same way: the header
+        // token is read from the line's first digit onward.
+        let sws = "!v2.14.0.7 featured build\nNew stuff\n\n!v2.14.0.6 featured build\nOld stuff\n";
+        let installed = Version::parse("2.14.0.6").unwrap();
+        let notes = super::resolve_changelog_sections(
+            sws,
+            "https://raw.githubusercontent.com/reaper-oss/sws/master/whatsnew.txt",
+            "^!v",
+            Some(&installed),
+        )
+        .unwrap();
+        assert_eq!(notes, "!v2.14.0.7 featured build\nNew stuff");
+    }
+
+    #[test]
+    fn caps_changelog_sections_for_ancient_installs() {
+        // An install many versions behind must not read out the whole
+        // history: the run stops after WHATS_NEW_MAX_SECTIONS sections.
+        let body: String = (0..15)
+            .map(|index| format!("v7.{} - some day\n  + Change\n\n", 90 - index))
+            .collect();
+        let installed = Version::parse("7.10").unwrap();
+        let notes = super::resolve_changelog_sections(
+            &body,
+            REAPER_WHATSNEW_URL,
+            "^v[0-9]",
+            Some(&installed),
+        )
+        .unwrap();
+        assert_eq!(notes.matches("v7.").count(), super::WHATS_NEW_MAX_SECTIONS);
+        assert!(notes.contains("v7.81"));
+        assert!(!notes.contains("v7.80"));
     }
 
     #[test]

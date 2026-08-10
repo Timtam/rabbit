@@ -138,9 +138,13 @@ use crate::{
     wizard_outcome_report_from_success, wizard_package_plan_for_target,
     wizard_package_plan_for_target_with_available,
 };
+use rabbit_core::detection::detect_components;
 use rabbit_core::latest::fetch_latest_details_for_package;
+use rabbit_core::model::Platform;
+use rabbit_core::package::PACKAGE_REAPER;
 use rabbit_core::plan::{AvailablePackage, PlanActionKind};
 use rabbit_core::progress::{ProgressEvent, ProgressReporter};
+use rabbit_core::version::Version;
 use std::collections::HashMap;
 #[cfg(target_os = "windows")]
 use wxdragon::event::tree_events::TreeEventData;
@@ -2598,6 +2602,11 @@ struct VersionCheckUi {
 fn start_version_check(ui: VersionCheckUi) {
     let package_ids = wizard_desired_package_ids(ui.model.platform);
     let package_count = package_ids.len() as i32;
+    // Snapshot what the worker's since-installed What's-New trim needs
+    // before `ui` moves into the dispatcher closure below.
+    let target_resource_path = ui.target.path.clone();
+    let target_platform = ui.model.platform;
+    let target_reaper_version = ui.target.version.clone();
     ui.widgets
         .version_check_status
         .set_label(&ui.model.text.version_check_status_pending);
@@ -2735,7 +2744,12 @@ fn start_version_check(ui: VersionCheckUi) {
     };
 
     install_version_check_dispatcher(Box::new(dispatcher));
-    spawn_version_check_worker(package_ids);
+    spawn_version_check_worker(
+        package_ids,
+        target_resource_path,
+        target_platform,
+        target_reaper_version,
+    );
 }
 
 /// Render error lines to the version-check page's error TextCtrl and update
@@ -3045,8 +3059,33 @@ fn compute_configuration_group_tristate(
 /// Spawn the deferred latest-version fetch on a background thread. Each
 /// per-package outcome is forwarded to the UI thread via `call_after`, which
 /// invokes the dispatcher installed by the click handler.
-fn spawn_version_check_worker(package_ids: Vec<String>) {
+///
+/// Before fetching, the worker detects what's already installed at the
+/// target so each package's What's-New notes can be trimmed to the changes
+/// since the installed version. Detection here is best-effort: a failure
+/// just means untrimmed notes, never a failed check.
+fn spawn_version_check_worker(
+    package_ids: Vec<String>,
+    resource_path: PathBuf,
+    platform: Platform,
+    target_reaper_version: Option<Version>,
+) {
     std::thread::spawn(move || {
+        let mut installed_versions: HashMap<String, Version> =
+            detect_components(&resource_path, platform)
+                .map(|detections| {
+                    detections
+                        .into_iter()
+                        .filter(|detection| detection.installed)
+                        .filter_map(|detection| Some((detection.package_id, detection.version?)))
+                        .collect()
+                })
+                .unwrap_or_default();
+        // REAPER itself is versioned by the selected target row, not by the
+        // component detections that cover the extensions.
+        if let Some(version) = target_reaper_version {
+            installed_versions.insert(PACKAGE_REAPER.to_string(), version);
+        }
         for package_id in package_ids {
             let id_for_checking = package_id.clone();
             wxdragon::call_after(Box::new(move || {
@@ -3055,7 +3094,8 @@ fn spawn_version_check_worker(package_ids: Vec<String>) {
                 });
             }));
 
-            let outcome = match fetch_latest_details_for_package(&package_id) {
+            let installed = installed_versions.get(&package_id);
+            let outcome = match fetch_latest_details_for_package(&package_id, installed) {
                 Ok(details) => Ok((details.version.to_string(), details.whats_new)),
                 Err(error) => Err(error.to_string()),
             };
