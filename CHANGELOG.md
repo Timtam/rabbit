@@ -46,16 +46,6 @@ from this file and posts it as the GitHub release body.
 
 ### Changed
 
-- The details pane's What's-New notes now cover everything between the
-  installed version and the latest one instead of the latest release only:
-  REAPER and SWS changelog sections and ReaPack releases are walked back to
-  (and excluding) the installed version, each introduced by its version
-  heading, and OSARA's commit list stops at the installed snapshot's
-  commit. Up-to-date and freshly-installed packages keep showing the
-  newest release's notes, long-neglected installs are capped at ten
-  releases, and OSARA's version and notes now cost a single update.json
-  fetch instead of two.
-
 - macOS self-updates now replace the whole `RABBIT.app` bundle with the
   release's notarized bundle, instead of swapping just the executable inside
   it. The app keeps its original Apple-verified (Developer ID + notarized)
