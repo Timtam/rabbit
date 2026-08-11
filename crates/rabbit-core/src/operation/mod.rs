@@ -4,6 +4,7 @@ mod reaper;
 mod surge_xt;
 mod sws;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -69,6 +70,22 @@ pub struct PackageOperationReport {
     pub receipt_backup_path: Option<PathBuf>,
     pub receipt_backup_manifest_path: Option<PathBuf>,
     pub items: Vec<PackageOperationItem>,
+}
+
+impl PackageOperationReport {
+    /// True when any package failed to install or was skipped because a
+    /// dependency (e.g. REAPER) failed. The operation installs everything
+    /// it can and returns `Ok` even on partial failure, so callers use this
+    /// to drive a "finished with errors" outcome (a non-zero CLI exit, an
+    /// error-styled wizard result page).
+    pub fn has_failures(&self) -> bool {
+        self.items.iter().any(|item| {
+            matches!(
+                item.status,
+                PackageOperationStatus::Failed | PackageOperationStatus::SkippedDependencyFailed
+            )
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +155,20 @@ pub enum PackageOperationMessage {
     /// `reaper-kb.ini` with the OSARA key map; no backup was needed
     /// because the previous file was missing or already matched.
     OsaraUnattendedInstalledKeymapReplaced,
+    /// This package's download or install failed; the operation recorded
+    /// the error and kept going. `error` is the canonical English error
+    /// text (also surfaced to the user, localized where the UI can).
+    /// `antivirus_block` flags the specific case where Windows security
+    /// software blocked the file, so the UI can add the "how to allow it"
+    /// guidance once for the whole run rather than parsing the error text.
+    InstallFailed {
+        error: String,
+        #[serde(default)]
+        antivirus_block: bool,
+    },
+    /// This package was skipped because `dependency` (a package it installs
+    /// on top of, e.g. REAPER) failed or was skipped earlier in this run.
+    SkippedDependencyFailed { dependency: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,6 +256,13 @@ pub enum PackageOperationStatus {
     PlannedUnattended,
     DeferredUnattended,
     SkippedCurrent,
+    /// This package's download or install failed. The operation recorded
+    /// the error and continued with the remaining packages instead of
+    /// aborting the whole run.
+    Failed,
+    /// This package was not attempted because a package it depends on
+    /// (e.g. REAPER) failed or was itself skipped earlier in this run.
+    SkippedDependencyFailed,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -474,6 +512,14 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
         }
     }
 
+    // Order the unattended bucket so every package installs after the
+    // packages it depends on. The dependency gate needs a dependency's
+    // result known before its dependents are considered, and REAPER — the
+    // only dependency target — is unattended, so ordering this bucket is
+    // enough (direct-bucket packages always install afterwards). This makes
+    // the gate correct regardless of the caller's package order.
+    unattended_installable = dependency_ordered(unattended_installable);
+
     // ---- Download pipeline: queue EVERY remote fetch up front on a small
     // concurrent pool, so a huge download (FFmpeg's ~390 MB archive) streams
     // in the background while earlier packages already install. Queue order
@@ -537,6 +583,14 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
         Some(load_install_state(resource_path)?.unwrap_or_default())
     };
     let mut unattended_receipts_updated = false;
+    // Package ids whose download/install failed (or that were skipped
+    // because a dependency failed) so far in this run. A per-package
+    // failure no longer aborts the whole operation — RABBIT records it,
+    // keeps installing the packages that don't depend on it, and reports
+    // everything at the end. REAPER installs first, so by the time its
+    // extensions are considered this set already reflects whether REAPER
+    // succeeded, letting `first_failed_dependency` cascade the skip.
+    let mut failed: HashSet<String> = HashSet::new();
 
     if options.dry_run {
         items.extend(unattended_installable.into_iter().map(|planned| {
@@ -552,16 +606,34 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
         // Pipelined consumption: each package's install starts as soon as
         // ITS download handle resolves — while later downloads (FFmpeg…)
         // keep streaming on the pool. Installs remain strictly sequential
-        // and in input order. A failure no longer discards the receipts of
-        // packages that already installed: the loop records the error,
-        // falls through to the receipt save below, and returns afterwards.
-        let mut unattended_error: Option<crate::error::RabbitError> = None;
+        // and in input order. A per-package download/install failure is
+        // recorded (as a Failed item, and in `failed`) and the loop moves
+        // on to the next package instead of aborting the run; a package
+        // whose dependency already failed is skipped without being
+        // downloaded or run.
         for (planned, handle) in unattended_installable.iter().zip(unattended_handles) {
+            let package_id = planned.artifact.package_id.clone();
+            if let Some(dependency) = first_failed_dependency(&package_id, &failed) {
+                // Dropping `handle` here asks the pool to stop this
+                // package's (now pointless) download.
+                items.push(skipped_dependency_item(
+                    planned.artifact.clone(),
+                    planned.plan_action,
+                    &dependency,
+                ));
+                failed.insert(package_id);
+                continue;
+            }
             let cached = match handle.wait() {
                 Ok(cached) => cached,
                 Err(error) => {
-                    unattended_error = Some(error);
-                    break;
+                    items.push(failed_operation_item(
+                        planned.artifact.clone(),
+                        planned.plan_action,
+                        &error,
+                    ));
+                    failed.insert(package_id);
+                    continue;
                 }
             };
             // The unattended runner (vendor installer, archive extractor,
@@ -570,7 +642,7 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
             // can render a "Installing REAPER…" line distinct from the
             // earlier "Downloading REAPER…".
             progress.report(ProgressEvent::InstallStarted {
-                package_id: planned.artifact.package_id.clone(),
+                package_id: package_id.clone(),
             });
             match executed_unattended_item(
                 planned,
@@ -581,8 +653,16 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
             ) {
                 Ok(item) => items.push(item),
                 Err(error) => {
-                    unattended_error = Some(error);
-                    break;
+                    items.push(failed_operation_item(
+                        planned.artifact.clone(),
+                        planned.plan_action,
+                        &error,
+                    ));
+                    failed.insert(package_id.clone());
+                    progress.report(ProgressEvent::InstallCompleted {
+                        package_id: package_id.clone(),
+                    });
+                    continue;
                 }
             }
             if let Some(state) = &mut unattended_state {
@@ -596,19 +676,30 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
                 ) {
                     Ok(()) => unattended_receipts_updated = true,
                     Err(error) => {
-                        unattended_error = Some(error);
-                        break;
+                        // The package's files DID land (executed_unattended_item
+                        // succeeded); only its receipt bookkeeping failed. Treat
+                        // it as a failure so the user sees the problem, but the
+                        // install itself is on disk.
+                        items.push(failed_operation_item(
+                            planned.artifact.clone(),
+                            planned.plan_action,
+                            &error,
+                        ));
+                        failed.insert(package_id.clone());
+                        progress.report(ProgressEvent::InstallCompleted {
+                            package_id: package_id.clone(),
+                        });
+                        continue;
                     }
                 }
             }
             progress.report(ProgressEvent::InstallCompleted {
-                package_id: planned.artifact.package_id.clone(),
+                package_id: package_id.clone(),
             });
         }
-        // Best-effort receipt persistence: run the backup + save even when
-        // the loop above broke with an error, and never let a failure HERE
-        // mask that root cause — the vendor-installer/download error is what
-        // the user must see, not a secondary bookkeeping error.
+        // Best-effort receipt persistence: run the backup + save for the
+        // packages that DID install, and never let a failure HERE mask a
+        // package error already recorded above.
         let receipt_save_result: Result<()> = if unattended_receipts_updated {
             (|| {
                 let backup_id = operation_timestamp();
@@ -632,12 +723,11 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
         } else {
             Ok(())
         };
-        // Receipts of the packages that DID install are on disk (block
-        // above) — only now surface the failure. The pool guard's drop asks
-        // the remaining downloads to stop.
-        if let Some(error) = unattended_error {
-            return Err(error);
-        }
+        // A failure persisting the receipts is a genuine bookkeeping error
+        // (RABBIT's on-disk state would be inconsistent) that is not tied to
+        // any single package, so it still aborts. Per-package install
+        // failures were already recorded as Failed items above and do not
+        // reach here.
         receipt_save_result?;
     }
 
@@ -648,7 +738,12 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
     let staged_deferred = if deferred_needs_download {
         let mut staged = Vec::with_capacity(deferred_handles.len());
         for handle in deferred_handles {
-            staged.push(handle.wait()?);
+            // Deferred packages are only staged, never installed here, so a
+            // failed staging download must not abort the run: the package
+            // simply reports as "not staged" via `skipped_item(None)`.
+            if let Ok(cached) = handle.wait() {
+                staged.push(cached);
+            }
         }
         staged
     } else {
@@ -693,52 +788,72 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
         );
     }
 
-    // Direct extension files were downloading on the pool the whole time;
-    // collect them in input order (preserving the positional pairing with
-    // direct_installable and the install report below).
-    let cached_artifacts = {
-        let mut cached = Vec::with_capacity(direct_handles.len());
-        for handle in direct_handles {
-            cached.push(handle.wait()?);
+    // Direct extension files (single-file GitHub-release plugins — SWS,
+    // ReaPack, ReaKontrol) were downloading on the pool the whole time.
+    // Install each independently so one failure doesn't sink the rest:
+    // gate on its dependencies (all of these depend on REAPER, so a failed
+    // REAPER install cascades a dependency-skip onto every one), tolerate a
+    // failed download or install, and keep going. Each is a single file, so
+    // its report carries exactly one action.
+    let mut install_report: Option<InstallReport> = None;
+    for (planned, handle) in direct_installable.iter().zip(direct_handles) {
+        let package_id = planned.artifact.package_id.clone();
+        if let Some(dependency) = first_failed_dependency(&package_id, &failed) {
+            items.push(skipped_dependency_item(
+                planned.artifact.clone(),
+                planned.plan_action,
+                &dependency,
+            ));
+            failed.insert(package_id);
+            continue;
         }
-        cached
-    };
-
-    let install_report = if cached_artifacts.is_empty() {
-        None
-    } else {
-        Some(install_cached_artifacts_with_progress(
+        let cached = match handle.wait() {
+            Ok(cached) => cached,
+            Err(error) => {
+                items.push(failed_operation_item(
+                    planned.artifact.clone(),
+                    planned.plan_action,
+                    &error,
+                ));
+                failed.insert(package_id);
+                continue;
+            }
+        };
+        match install_cached_artifacts_with_progress(
             resource_path,
-            &cached_artifacts,
+            std::slice::from_ref(&cached),
             &InstallOptions {
                 dry_run: options.dry_run,
                 allow_reaper_running: options.allow_reaper_running,
                 target_app_path: options.target_app_path.clone(),
             },
             progress,
-        )?)
-    };
-
-    if let Some(install_report) = &install_report {
-        for ((planned, cached), action) in direct_installable
-            .iter()
-            .zip(cached_artifacts.iter())
-            .zip(&install_report.actions)
-        {
-            items.push(PackageOperationItem {
-                package_id: cached.descriptor.package_id.clone(),
-                plan_action: planned.plan_action,
-                status: PackageOperationStatus::InstalledOrChecked,
-                artifact: cached.descriptor.clone(),
-                cached_artifact: Some(cached.clone()),
-                install_action: Some(action.clone()),
-                backup_paths: Vec::new(),
-                backup_manifest_path: None,
-                planned_execution: None,
-                manual_instruction: None,
-                message: "Single extension binary handled by RABBIT installer.".to_string(),
-                message_code: PackageOperationMessage::ExtensionBinaryInstalled,
-            });
+        ) {
+            Ok(report) => {
+                items.push(PackageOperationItem {
+                    package_id: cached.descriptor.package_id.clone(),
+                    plan_action: planned.plan_action,
+                    status: PackageOperationStatus::InstalledOrChecked,
+                    artifact: cached.descriptor.clone(),
+                    cached_artifact: Some(cached.clone()),
+                    install_action: report.actions.first().cloned(),
+                    backup_paths: Vec::new(),
+                    backup_manifest_path: None,
+                    planned_execution: None,
+                    manual_instruction: None,
+                    message: "Single extension binary handled by RABBIT installer.".to_string(),
+                    message_code: PackageOperationMessage::ExtensionBinaryInstalled,
+                });
+                merge_install_report(&mut install_report, report);
+            }
+            Err(error) => {
+                items.push(failed_operation_item(
+                    planned.artifact.clone(),
+                    planned.plan_action,
+                    &error,
+                ));
+                failed.insert(package_id);
+            }
         }
     }
 
@@ -884,6 +999,138 @@ fn skipped_item(
         backup_manifest_path: None,
         planned_execution,
         manual_instruction,
+    }
+}
+
+/// Build the report item for a package whose download or install failed.
+/// The run continues after this; the error text is preserved verbatim so
+/// the saved report and the UI can show the real cause (an antivirus block,
+/// a network failure, a disk error, …).
+fn failed_operation_item(
+    artifact: ArtifactDescriptor,
+    plan_action: PlanActionKind,
+    error: &crate::error::RabbitError,
+) -> PackageOperationItem {
+    let error_text = error.to_string();
+    let antivirus_block = matches!(error, RabbitError::WindowsFileBlockedByAntivirus { .. });
+    PackageOperationItem {
+        package_id: artifact.package_id.clone(),
+        plan_action,
+        status: PackageOperationStatus::Failed,
+        message: format!("Installation failed: {error_text}"),
+        message_code: PackageOperationMessage::InstallFailed {
+            error: error_text,
+            antivirus_block,
+        },
+        artifact,
+        cached_artifact: None,
+        install_action: None,
+        backup_paths: Vec::new(),
+        backup_manifest_path: None,
+        planned_execution: None,
+        manual_instruction: None,
+    }
+}
+
+/// Build the report item for a package skipped because a dependency it
+/// installs on top of (e.g. REAPER) failed or was itself skipped in this
+/// run. Distinct from a plain failure so the UI can explain the cascade
+/// rather than implying this package itself went wrong.
+fn skipped_dependency_item(
+    artifact: ArtifactDescriptor,
+    plan_action: PlanActionKind,
+    dependency: &str,
+) -> PackageOperationItem {
+    PackageOperationItem {
+        package_id: artifact.package_id.clone(),
+        plan_action,
+        status: PackageOperationStatus::SkippedDependencyFailed,
+        message: format!(
+            "Skipped because {dependency}, which it needs, did not install successfully."
+        ),
+        message_code: PackageOperationMessage::SkippedDependencyFailed {
+            dependency: dependency.to_string(),
+        },
+        artifact,
+        cached_artifact: None,
+        install_action: None,
+        backup_paths: Vec::new(),
+        backup_manifest_path: None,
+        planned_execution: None,
+        manual_instruction: None,
+    }
+}
+
+/// The first dependency of `package_id` that has failed (or been skipped)
+/// so far in this run, if any. Dependencies that aren't part of the current
+/// run never appear in `failed`, so installing an extension into an
+/// already-present REAPER is not gated.
+fn first_failed_dependency(package_id: &str, failed: &HashSet<String>) -> Option<String> {
+    crate::package::package_dependencies(package_id)
+        .into_iter()
+        .find(|dependency| failed.contains(dependency))
+}
+
+/// Stable topological order of `planned` so every package appears after the
+/// packages (also in `planned`) it depends on. The dependency gate needs a
+/// dependency's install result known before its dependents are considered.
+/// Ties keep input order; a dependency cycle — which the manifest never
+/// contains — degrades gracefully to input order for the packages left in
+/// it. Dependencies outside `planned` are ignored (they're handled by the
+/// gate, which only looks at in-run failures).
+fn dependency_ordered(planned: Vec<PlannedArtifact>) -> Vec<PlannedArtifact> {
+    let present: HashSet<String> = planned
+        .iter()
+        .map(|item| item.artifact.package_id.clone())
+        .collect();
+    let mut emitted: HashSet<String> = HashSet::new();
+    let mut remaining = planned;
+    let mut ordered = Vec::with_capacity(remaining.len());
+    while !remaining.is_empty() {
+        let mut next_remaining = Vec::with_capacity(remaining.len());
+        let mut progressed = false;
+        for item in remaining {
+            let deps_ready = crate::package::package_dependencies(&item.artifact.package_id)
+                .into_iter()
+                .filter(|dependency| present.contains(dependency))
+                .all(|dependency| emitted.contains(&dependency));
+            if deps_ready {
+                emitted.insert(item.artifact.package_id.clone());
+                ordered.push(item);
+                progressed = true;
+            } else {
+                next_remaining.push(item);
+            }
+        }
+        if !progressed {
+            // Cycle among the remaining packages — emit them in input order.
+            ordered.extend(next_remaining);
+            break;
+        }
+        remaining = next_remaining;
+    }
+    ordered
+}
+
+/// Fold a single-package install report into the running direct-install
+/// report surfaced in the operation result. Actions accumulate; the first
+/// receipt-backup path/manifest seen is kept as representative. Each
+/// per-package call that replaces files writes its own timestamped backup
+/// set, and every set stays on disk and is listed by `RABBIT backups` for
+/// rollback — the report just needs one path to show the user.
+fn merge_install_report(target: &mut Option<InstallReport>, source: InstallReport) {
+    match target {
+        None => *target = Some(source),
+        Some(existing) => {
+            existing.actions.extend(source.actions);
+            existing.receipt_written |= source.receipt_written;
+            if existing.receipt_backup_path.is_none() {
+                existing.receipt_backup_path = source.receipt_backup_path;
+            }
+            if existing.backup_manifest_path.is_none() {
+                existing.backup_manifest_path = source.backup_manifest_path;
+            }
+        }
     }
 }
 
@@ -1707,20 +1954,24 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        PackageAutomationSupport, PackageOperationOptions, PackageOperationStatus,
-        PlannedAutomationKind, PlannedExecutionKind, execute_resolved_package_operation,
-        execute_resolved_package_operation_with_detections, plan_action_for_artifact,
+        PackageAutomationSupport, PackageOperationMessage, PackageOperationOptions,
+        PackageOperationStatus, PlannedArtifact, PlannedAutomationKind, PlannedExecutionKind,
+        dependency_ordered, execute_resolved_package_operation,
+        execute_resolved_package_operation_with_detections, first_failed_dependency,
+        plan_action_for_artifact,
     };
     use crate::artifact::{ArtifactDescriptor, ArtifactKind};
     use crate::detection::detect_components;
     use crate::error::RabbitError;
     use crate::model::{Architecture, ComponentDetection, Confidence, Platform};
     use crate::package::{
-        PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SWS,
+        PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT,
+        PACKAGE_SWS,
     };
     use crate::plan::PlanActionKind;
     use crate::receipt::{InstallState, load_install_state, save_install_state};
     use crate::version::Version;
+    use std::collections::HashSet;
 
     #[test]
     fn skips_deferred_artifacts_without_install_report() {
@@ -2579,21 +2830,23 @@ mod tests {
         assert!(resource_path.join("Data").join("Grooves").is_dir());
     }
 
-    /// Pipelined operations keep the receipts of packages that DID install
-    /// when a later package's download fails: OSARA installs fine, SWS's
-    /// artifact URL points nowhere — the operation errors, but OSARA's
-    /// receipt must be on disk (previously the in-memory state was dropped
-    /// with the error and completed installs lost their receipts).
+    /// A later package's download failure no longer aborts the run: OSARA
+    /// installs fine, SWS's artifact URL points nowhere. The operation now
+    /// returns Ok with SWS marked Failed (carrying the missing-artifact
+    /// error) while OSARA is InstalledOrChecked and its receipt is on disk.
+    /// SWS declares `depends_on: ["reaper"]`, but REAPER isn't part of this
+    /// run, so SWS is attempted (and fails on its own), not dependency-
+    /// skipped.
     #[cfg(target_os = "windows")]
     #[test]
-    fn persists_receipts_of_completed_installs_when_later_download_fails() {
+    fn continues_and_records_failure_when_a_later_download_fails() {
         let dir = tempdir().unwrap();
         let cache = tempdir().unwrap();
         let osara_source = dir.path().join("osara-installer.cmd");
         std::fs::write(&osara_source, osara_mock_installer_script()).unwrap();
         let resource_path = dir.path().join("PortableREAPER");
 
-        let error = execute_resolved_package_operation(
+        let report = execute_resolved_package_operation(
             &resource_path,
             vec![
                 artifact_with_url(
@@ -2620,14 +2873,36 @@ mod tests {
                 force_reinstall_packages: Vec::new(),
             },
         )
-        .unwrap_err();
-        // The failure names the missing artifact, not OSARA.
-        assert!(
-            error.to_string().contains("does-not-exist.cmd"),
-            "unexpected error: {error}"
+        .unwrap();
+
+        let osara_item = report
+            .items
+            .iter()
+            .find(|item| item.package_id == PACKAGE_OSARA)
+            .expect("OSARA item present");
+        assert_eq!(
+            osara_item.status,
+            PackageOperationStatus::InstalledOrChecked
         );
 
-        // OSARA really installed and its receipt survived the bail-out.
+        let sws_item = report
+            .items
+            .iter()
+            .find(|item| item.package_id == PACKAGE_SWS)
+            .expect("SWS item present");
+        assert_eq!(sws_item.status, PackageOperationStatus::Failed);
+        // The failure names the missing artifact, not OSARA.
+        assert!(
+            sws_item.message.contains("does-not-exist.cmd"),
+            "unexpected SWS message: {}",
+            sws_item.message
+        );
+        assert!(matches!(
+            sws_item.message_code,
+            PackageOperationMessage::InstallFailed { .. }
+        ));
+
+        // OSARA really installed and its receipt survived the SWS failure.
         assert!(
             resource_path
                 .join("UserPlugins")
@@ -2640,6 +2915,126 @@ mod tests {
             "OSARA's receipt must be saved even though SWS's download failed"
         );
         assert!(!state.packages.contains_key(PACKAGE_SWS));
+    }
+
+    #[test]
+    fn dependency_ordered_moves_reaper_ahead_of_its_extensions() {
+        let planned = |package_id: &str| PlannedArtifact {
+            artifact: artifact_with_url(
+                package_id,
+                ArtifactKind::Installer,
+                "x.cmd",
+                "https://example.test/x.cmd",
+            ),
+            plan_action: PlanActionKind::Install,
+        };
+        // Feed the extensions BEFORE REAPER; ordering must still install
+        // REAPER first so the dependency gate sees its result.
+        let ordered = dependency_ordered(vec![
+            planned(PACKAGE_OSARA),
+            planned(PACKAGE_SURGE_XT),
+            planned(PACKAGE_SWS),
+            planned(PACKAGE_REAPER),
+        ]);
+        let ids: Vec<&str> = ordered
+            .iter()
+            .map(|item| item.artifact.package_id.as_str())
+            .collect();
+        let pos = |id: &str| ids.iter().position(|candidate| *candidate == id).unwrap();
+        // The dependency invariant: REAPER installs before its extensions.
+        assert!(pos(PACKAGE_REAPER) < pos(PACKAGE_OSARA));
+        assert!(pos(PACKAGE_REAPER) < pos(PACKAGE_SWS));
+        // Stable within a readiness round: the two dependency-free roots
+        // (Surge XT, REAPER) keep their input order.
+        assert!(pos(PACKAGE_SURGE_XT) < pos(PACKAGE_REAPER));
+    }
+
+    #[test]
+    fn first_failed_dependency_gates_only_on_in_run_failures() {
+        // OSARA depends on REAPER (per the embedded manifest).
+        let mut failed = HashSet::new();
+        assert_eq!(first_failed_dependency(PACKAGE_OSARA, &failed), None);
+        failed.insert(PACKAGE_REAPER.to_string());
+        assert_eq!(
+            first_failed_dependency(PACKAGE_OSARA, &failed).as_deref(),
+            Some(PACKAGE_REAPER)
+        );
+        // Surge XT is standalone — a failed REAPER never gates it.
+        assert_eq!(first_failed_dependency(PACKAGE_SURGE_XT, &failed), None);
+    }
+
+    /// When REAPER itself fails, the extensions that install into it are
+    /// skipped (not attempted) with a distinct dependency-skip status, so
+    /// RABBIT never installs OSARA into a REAPER that didn't land. REAPER's
+    /// download points nowhere; OSARA has a working mock installer but must
+    /// never run.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn failed_reaper_cascades_a_dependency_skip_to_its_extensions() {
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let osara_source = dir.path().join("osara-installer.cmd");
+        std::fs::write(&osara_source, osara_mock_installer_script()).unwrap();
+        let resource_path = dir.path().join("PortableREAPER");
+
+        let report = execute_resolved_package_operation(
+            &resource_path,
+            vec![
+                artifact_with_url(
+                    PACKAGE_REAPER,
+                    ArtifactKind::Installer,
+                    "reaper-installer.cmd",
+                    &dir.path().join("no-reaper.cmd").display().to_string(),
+                ),
+                artifact_with_url(
+                    PACKAGE_OSARA,
+                    ArtifactKind::Installer,
+                    "osara-installer.cmd",
+                    &osara_source.display().to_string(),
+                ),
+            ],
+            cache.path(),
+            &PackageOperationOptions {
+                dry_run: false,
+                allow_reaper_running: false,
+                stage_unsupported: false,
+                replace_osara_keymap: false,
+                target_app_path: Some(resource_path.join("reaper.exe")),
+                lock_path: Some(dir.path().join("install.lock")),
+                force_reinstall_packages: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let reaper_item = report
+            .items
+            .iter()
+            .find(|item| item.package_id == PACKAGE_REAPER)
+            .expect("REAPER item present");
+        assert_eq!(reaper_item.status, PackageOperationStatus::Failed);
+
+        let osara_item = report
+            .items
+            .iter()
+            .find(|item| item.package_id == PACKAGE_OSARA)
+            .expect("OSARA item present");
+        assert_eq!(
+            osara_item.status,
+            PackageOperationStatus::SkippedDependencyFailed
+        );
+        assert!(matches!(
+            &osara_item.message_code,
+            PackageOperationMessage::SkippedDependencyFailed { dependency }
+                if dependency == PACKAGE_REAPER
+        ));
+
+        // OSARA's mock installer must NOT have run.
+        assert!(
+            !resource_path
+                .join("UserPlugins")
+                .join("reaper_osara64.dll")
+                .is_file()
+        );
     }
 
     #[cfg(target_os = "windows")]

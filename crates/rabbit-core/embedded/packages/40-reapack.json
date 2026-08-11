@@ -4,6 +4,9 @@
   "display_name_key": "package-reapack",
   "display_description_key": "package-reapack-description",
   "package_kind": "user_plugin_binary",
+  "depends_on": [
+    "reaper"
+  ],
   "required": false,
   "recommended": false,
   "requires_user_acknowledgement": true,

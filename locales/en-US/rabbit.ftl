@@ -208,6 +208,7 @@ wizard-done-heading = Done
 wizard-done-status-idle = No installation has been run from this window yet.
 wizard-done-status-success = RABBIT finished working its magic! Review the details below.
 wizard-done-status-error = Installation failed. Review the error below.
+wizard-done-status-completed-with-errors = Installation completed with errors. Review the details below.
 wizard-done-status-no-packages = No package was selected for installation or update.
 wizard-done-show-details = Show details
 # Mnemonic messages are single-character native access keys. Choose a character
@@ -279,6 +280,8 @@ status-installed-or-checked = Installed or checked
 status-planned-unattended = Planned unattended
 status-deferred-unattended = Deferred unattended
 status-skipped-current = Skipped (already current)
+status-failed = Failed
+status-skipped-dependency-failed = Skipped (dependency failed)
 
 # Per-package status messages surfaced on the wizard's Done page next to the
 # package name (e.g. "OSARA: <message>"). The wrapper template
@@ -287,6 +290,9 @@ status-skipped-current = Skipped (already current)
 package-status-extension-binary-installed = Single extension binary handled by RABBIT installer.
 # $installed is the on-disk version; $available is the latest upstream version.
 package-status-skipped-current = Installed version { $installed } is current or newer than available version { $available }.
+# $error is the failure text. $dependency is the package (e.g. REAPER) that failed first.
+package-status-install-failed = Installation failed: { $error }
+package-status-skipped-dependency-failed = Skipped because { $dependency }, which it needs, did not install successfully.
 # $automation is one of the "package-automation-*" labels (vendor installer / archive extraction / ...).
 package-status-dry-run-would-run-unattended = Dry run: RABBIT would download and run this { $automation } unattended.
 # $automation is one of the "package-automation-*" labels.
@@ -339,6 +345,7 @@ wizard-summary-manual-title = { $title }:
 wizard-summary-manual-step =   { $step }
 wizard-summary-manual-note =   Note: { $note }
 wizard-summary-status-finished = Finished. { $installed } package item(s) installed or checked; { $manual } require manual attention.
+wizard-summary-status-finished-with-errors = Finished with errors. { $installed } package item(s) installed or checked; { $failed } failed.
 
 wizard-planned-runner-launch-installer = Launch installer executable
 wizard-planned-runner-extract-archive = Extract archive and run contained installer

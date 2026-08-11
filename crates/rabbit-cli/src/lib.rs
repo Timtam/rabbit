@@ -675,6 +675,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 print_package_operation_report(&report);
             }
+            // Everything installable was attempted; a per-package failure
+            // still yields a non-zero exit for scripts/CI. Distinct from the
+            // hard-error path (Err) and from preflight's exit(2).
+            if report.has_failures() {
+                std::process::exit(1);
+            }
         }
         Command::Setup {
             resource_path,
@@ -732,6 +738,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 print_setup_report(&report);
+            }
+            if report.package_operation.has_failures() {
+                std::process::exit(1);
             }
         }
         Command::Locales { locales_dir, json } => {

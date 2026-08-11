@@ -5,6 +5,9 @@
   "display_name_key": "package-jaws-scripts",
   "display_description_key": "package-jaws-scripts-description",
   "package_kind": "screen_reader_scripts",
+  "depends_on": [
+    "reaper"
+  ],
   "required": false,
   "recommended": false,
   "recommended_when": "jaws_installed",

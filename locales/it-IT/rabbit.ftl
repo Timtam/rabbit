@@ -208,6 +208,7 @@ wizard-done-heading = Completato
 wizard-done-status-idle = Nessuna installazione è ancora stata avviata da questa finestra.
 wizard-done-status-success = RABBIT ha finito di fare la sua magia! Consulta i dettagli qui sotto.
 wizard-done-status-error = Installazione non riuscita. Consulta l'errore qui sotto.
+wizard-done-status-completed-with-errors = Installazione completata con errori. Consulta i dettagli qui sotto.
 wizard-done-status-no-packages = Nessun pacchetto è stato selezionato per l'installazione o l'aggiornamento.
 wizard-done-show-details = Mostra dettagli
 # Mnemonic messages are single-character native access keys. Choose a character
@@ -279,6 +280,8 @@ status-installed-or-checked = Installato o verificato
 status-planned-unattended = Previsto in modo automatico
 status-deferred-unattended = Rinviato in modo automatico
 status-skipped-current = Ignorato (già aggiornato)
+status-failed = Non riuscito
+status-skipped-dependency-failed = Saltato (dipendenza non riuscita)
 
 # Per-package status messages surfaced on the wizard's Done page next to the
 # package name (e.g. "OSARA: <message>"). The wrapper template
@@ -287,6 +290,8 @@ status-skipped-current = Ignorato (già aggiornato)
 package-status-extension-binary-installed = Singolo binario di estensione gestito dal programma di installazione di RABBIT.
 # $installed is the on-disk version; $available is the latest upstream version.
 package-status-skipped-current = La versione installata { $installed } è uguale o più recente della versione disponibile { $available }.
+package-status-install-failed = Installazione non riuscita: { $error }
+package-status-skipped-dependency-failed = Saltato perché { $dependency }, da cui dipende, non è stato installato correttamente.
 # $automation is one of the "package-automation-*" labels (vendor installer / archive extraction / ...).
 package-status-dry-run-would-run-unattended = Simulazione: RABBIT scaricherebbe ed eseguirebbe l'operazione «{ $automation }» in modo automatico.
 # $automation is one of the "package-automation-*" labels.
@@ -339,6 +344,7 @@ wizard-summary-manual-title = { $title }:
 wizard-summary-manual-step =   { $step }
 wizard-summary-manual-note =   Nota: { $note }
 wizard-summary-status-finished = Completato. { $installed } elemento/i di pacchetto installato/i o verificato/i; { $manual } richiede(ono) un intervento manuale.
+wizard-summary-status-finished-with-errors = Completato con errori. { $installed } elemento/i del pacchetto installato/i o verificato/i; { $failed } non riuscito/i.
 
 wizard-planned-runner-launch-installer = Avvia l'eseguibile di installazione
 wizard-planned-runner-extract-archive = Estrai l'archivio ed esegui il programma di installazione contenuto

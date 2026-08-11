@@ -38,6 +38,11 @@ pub struct PackageSpec {
     pub display_name_key: String,
     pub display_description_key: String,
     pub package_kind: PackageKind,
+    /// Package ids this package installs on top of; see
+    /// [`EmbeddedPackageSpec::depends_on`]. Used by the operation pipeline
+    /// to cascade a failed dependency (a broken REAPER install) into a
+    /// skip of its dependents instead of installing them anyway.
+    pub depends_on: Vec<String>,
     pub required: bool,
     pub recommended: bool,
     /// Optional host-conditional escalation of `recommended`. When the named
@@ -102,6 +107,16 @@ pub struct EmbeddedPackageSpec {
     pub display_description_key: String,
     #[serde(default)]
     pub package_kind: PackageKind,
+    /// Package ids this package installs on top of. When a dependency is
+    /// part of the same operation and its install fails (or is itself
+    /// skipped because of a failed dependency), this package is skipped
+    /// rather than installed into a broken/absent host — the REAPER
+    /// extensions (OSARA, SWS, …) all declare `["reaper"]` so a failed
+    /// REAPER install cascades to them. Dependencies not present in the
+    /// current run are ignored (installing an extension into an
+    /// already-present REAPER is fine). Defaults to empty.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
     #[serde(default)]
     pub required: bool,
     pub recommended: bool,
@@ -806,6 +821,20 @@ pub fn package_specs_by_id(platform: Platform) -> BTreeMap<String, PackageSpec> 
         .collect()
 }
 
+/// The package ids `package_id` declares as dependencies in the embedded
+/// manifest (empty if the package is unknown or standalone). The operation
+/// pipeline uses this to cascade a failed dependency into a skip of its
+/// dependents. Platform-independent: `depends_on` is a manifest-level field
+/// that doesn't vary per platform.
+pub fn package_dependencies(package_id: &str) -> Vec<String> {
+    embedded_package_manifest()
+        .packages
+        .into_iter()
+        .find(|spec| spec.id == package_id)
+        .map(|spec| spec.depends_on)
+        .unwrap_or_default()
+}
+
 impl EmbeddedPackageSpec {
     pub fn supports_platform(&self, platform: Platform) -> bool {
         self.supported_platforms
@@ -820,6 +849,7 @@ impl EmbeddedPackageSpec {
             display_name_key: self.display_name_key.clone(),
             display_description_key: self.display_description_key.clone(),
             package_kind: self.package_kind,
+            depends_on: self.depends_on.clone(),
             required: self.required,
             recommended: self.recommended,
             recommended_when: self.recommended_when,

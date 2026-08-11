@@ -1976,16 +1976,23 @@ pub fn run() {
                                 if let Err(error) = save_wizard_outcome_report(&outcome_report) {
                                     eprintln!("could not auto-save wizard outcome report: {error}");
                                 }
-                                widgets
-                                    .progress_status
-                                    .set_label(&ui_model.text.done_status_success);
-                                // Done page: show the success summary
-                                // sentence on the status TextCtrl and the
-                                // full setup-report detail block in the
-                                // collapsible TextCtrl.
+                                // The operation returns Ok even when some
+                                // packages failed (it installs everything it
+                                // can). Pick an honest heading: a plain
+                                // "success" line would contradict the
+                                // "finished with errors" summary otherwise.
+                                let heading = if report.package_operation.has_failures() {
+                                    &ui_model.text.done_status_completed_with_errors
+                                } else {
+                                    &ui_model.text.done_status_success
+                                };
+                                widgets.progress_status.set_label(heading);
+                                // Done page: show the outcome heading on the
+                                // status TextCtrl and the full setup-report
+                                // detail block in the collapsible TextCtrl.
                                 widgets.done_status.set_value(&format!(
                                     "{}\n\n{}",
-                                    ui_model.text.done_status_success, outcome_report.status_line,
+                                    heading, outcome_report.status_line,
                                 ));
                                 widgets
                                     .done_details

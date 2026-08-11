@@ -46,6 +46,18 @@ from this file and posts it as the GitHub release body.
 
 ### Changed
 
+- A single package failing no longer aborts the whole install. RABBIT now
+  records the failure, keeps installing every other selected package, and
+  reports what succeeded and what failed at the end (the wizard's result
+  page shows "Finished with errors"; the CLI still exits non-zero). The one
+  exception is dependencies: packages install *into* REAPER, so if REAPER
+  itself fails, its extensions (OSARA, SWS, ReaPack, ReaKontrol, the JAWS
+  scripts, FFmpeg) are skipped with a "REAPER didn't install" note rather
+  than being installed into a broken or absent REAPER. Standalone extras
+  (Surge XT, app2clap) are unaffected by a REAPER failure. Dependencies are
+  declared per package in the manifest (`depends_on`), and a dependency
+  that isn't part of the current run (installing an extension into an
+  already-present REAPER) never gates anything.
 - macOS self-updates now replace the whole `RABBIT.app` bundle with the
   release's notarized bundle, instead of swapping just the executable inside
   it. The app keeps its original Apple-verified (Developer ID + notarized)

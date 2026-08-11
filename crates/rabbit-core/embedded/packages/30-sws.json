@@ -4,6 +4,9 @@
   "display_name_key": "package-sws",
   "display_description_key": "package-sws-description",
   "package_kind": "user_plugin_binary",
+  "depends_on": [
+    "reaper"
+  ],
   "required": false,
   "recommended": true,
   "supported_platforms": [

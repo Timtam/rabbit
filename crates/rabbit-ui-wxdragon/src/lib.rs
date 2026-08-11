@@ -161,6 +161,7 @@ pub struct WizardText {
     pub done_heading: String,
     pub done_status: String,
     pub done_status_success: String,
+    pub done_status_completed_with_errors: String,
     pub done_status_error: String,
     pub done_status_no_packages: String,
     pub done_show_details_label: String,
@@ -750,6 +751,9 @@ fn wizard_text(localizer: &Localizer) -> WizardText {
         progress_details_starting: localizer.text("wizard-progress-details-starting").value,
         progress_details_cache_prefix: localizer.text("wizard-progress-details-cache-prefix").value,
         done_status_success: localizer.text("wizard-done-status-success").value,
+        done_status_completed_with_errors: localizer
+            .text("wizard-done-status-completed-with-errors")
+            .value,
         done_status_error: localizer.text("wizard-done-status-error").value,
         done_status_no_packages: localizer.text("wizard-done-status-no-packages").value,
         done_show_details_label: localizer.text("wizard-done-show-details").value,
@@ -2056,6 +2060,26 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
         .iter()
         .filter(|item| matches!(item.status, PackageOperationStatus::DeferredUnattended))
         .count();
+    let failed_items = report
+        .package_operation
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.status,
+                PackageOperationStatus::Failed | PackageOperationStatus::SkippedDependencyFailed
+            )
+        })
+        .count();
+    let any_antivirus_block = report.package_operation.items.iter().any(|item| {
+        matches!(
+            item.message_code,
+            rabbit_core::operation::PackageOperationMessage::InstallFailed {
+                antivirus_block: true,
+                ..
+            }
+        )
+    });
 
     let architecture_label = architecture_label_for_summary(model.architecture);
     let mut detail_lines = vec![
@@ -2389,6 +2413,39 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
         ));
     }
 
+    // When some packages failed, lead with a "completed with errors" line
+    // (and, for the antivirus false-positive case, the localized how-to-
+    // allow-it guidance) instead of the plain finished line, so the result
+    // page names the problem up front. A skipped-because-REAPER-failed
+    // package counts toward the failure total.
+    if failed_items > 0 {
+        if any_antivirus_block {
+            detail_lines.push(format_localized_message(
+                localizer.as_ref(),
+                "wizard-summary-error-antivirus",
+                &[],
+                "Windows security software blocked at least one download. Open Windows \
+                 Security > Virus & threat protection > Protection history, allow the blocked \
+                 item, and run RABBIT again."
+                    .to_string(),
+            ));
+        }
+        return WizardInstallSummary {
+            status_line: format_localized_message(
+                localizer.as_ref(),
+                "wizard-summary-status-finished-with-errors",
+                &[
+                    ("installed", installed_or_checked.to_string()),
+                    ("failed", failed_items.to_string()),
+                ],
+                format!(
+                    "Finished with errors. {installed_or_checked} package item(s) installed or checked; {failed_items} failed."
+                ),
+            ),
+            detail_lines,
+        };
+    }
+
     WizardInstallSummary {
         status_line: format_localized_message(
             localizer.as_ref(),
@@ -2490,6 +2547,11 @@ fn status_label_for_summary(
         PackageOperationStatus::SkippedCurrent => {
             ("status-skipped-current", "Skipped (already current)")
         }
+        PackageOperationStatus::Failed => ("status-failed", "Failed"),
+        PackageOperationStatus::SkippedDependencyFailed => (
+            "status-skipped-dependency-failed",
+            "Skipped (dependency failed)",
+        ),
     };
     localizer
         .map(|localizer| localizer.text(id).value)
@@ -2550,6 +2612,14 @@ fn localized_package_operation_message(
         Msg::OsaraUnattendedInstalledKeymapReplaced => {
             localizer.text("package-status-osara-unattended-keymap-replaced")
         }
+        Msg::InstallFailed { error, .. } => localizer.format(
+            "package-status-install-failed",
+            &[("error", error.as_str())],
+        ),
+        Msg::SkippedDependencyFailed { dependency } => localizer.format(
+            "package-status-skipped-dependency-failed",
+            &[("dependency", dependency.as_str())],
+        ),
     };
     if message.missing {
         fallback_english.to_string()
@@ -5094,6 +5164,68 @@ mod tests {
             confidence: Confidence::High,
             evidence: Vec::new(),
         }
+    }
+
+    /// A run with a failed package renders the "finished with errors"
+    /// status line, and an antivirus block adds the localized how-to-allow
+    /// guidance once for the whole run.
+    #[test]
+    fn setup_summary_reports_failures_and_antivirus_hint() {
+        let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let model = model_from_plan(
+            &localizer,
+            Platform::Windows,
+            Architecture::X64,
+            vec![fake_installation()],
+            Some(0),
+            InstallPlan {
+                target: None,
+                actions: Vec::new(),
+                notes: Vec::new(),
+            },
+        );
+        let mut report = empty_setup_report(PathBuf::from("C:/PortableREAPER"));
+        report.package_operation.items.push(PackageOperationItem {
+            package_id: PACKAGE_OSARA.to_string(),
+            plan_action: PlanActionKind::Install,
+            status: PackageOperationStatus::Failed,
+            artifact: ArtifactDescriptor {
+                package_id: PACKAGE_OSARA.to_string(),
+                version: Version::parse("2026.1").unwrap(),
+                platform: Platform::Windows,
+                architecture: Architecture::X64,
+                kind: ArtifactKind::Installer,
+                url: "https://example.test/osara.exe".to_string(),
+                file_name: "osara.exe".to_string(),
+            },
+            cached_artifact: None,
+            install_action: None,
+            backup_paths: Vec::new(),
+            backup_manifest_path: None,
+            planned_execution: None,
+            manual_instruction: None,
+            message: "Installation failed: Windows security software blocked …".to_string(),
+            message_code: rabbit_core::operation::PackageOperationMessage::InstallFailed {
+                error: "Windows security software blocked …".to_string(),
+                antivirus_block: true,
+            },
+        });
+
+        let summary = super::summarize_setup_report(&model, &report);
+
+        assert!(
+            summary.status_line.contains("Finished with errors"),
+            "status line: {}",
+            summary.status_line
+        );
+        assert!(
+            summary
+                .detail_lines
+                .iter()
+                .any(|line| line.contains("Protection history")),
+            "antivirus hint missing: {:?}",
+            summary.detail_lines
+        );
     }
 
     fn empty_setup_report(resource_path: PathBuf) -> SetupReport {
