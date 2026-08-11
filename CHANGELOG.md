@@ -62,11 +62,13 @@ from this file and posts it as the GitHub release body.
 
 - Windows: when antivirus software blocks a package, RABBIT now says so and
   explains how to continue, instead of failing with a raw
-  "I/O error … (os error 225)". Microsoft Defender occasionally flags an
-  unsigned third-party installer — OSARA's development snapshots are the
-  usual case — and quarantines it mid-install. The new message states that
-  this is typically a false positive, that RABBIT had already verified the
-  download against the publisher's checksum, and walks through allowing the
+  "I/O error … (os error 225)". Microsoft Defender occasionally flags a
+  legitimately code-signed third-party installer it hasn't seen widely yet —
+  OSARA's development snapshots, rebuilt on every change, are the usual case —
+  and quarantines it mid-install. The new message states that this is
+  typically a false positive, that the installer is signed and RABBIT had
+  already verified the download against the publisher's checksum, and walks
+  through allowing the
   item under Windows Security → Virus & threat protection → Protection
   history (or excluding RABBIT's download folder, or installing that one
   package by hand). The steps also appear in your own language on the

@@ -135,7 +135,7 @@ pub enum RabbitError {
     },
 
     #[error(
-        "Windows security software blocked {path} ({source}). RABBIT could not read or move the file because Microsoft Defender (or another antivirus) flagged it and usually removed it. This is typically a FALSE POSITIVE on an unsigned installer such as an OSARA development snapshot, not a sign that RABBIT or the download is unsafe — the file was verified against the publisher's checksum before this step. To continue: open Windows Security > Virus & threat protection > Protection history, find the blocked item and choose Allow (or Restore), then run RABBIT again; alternatively add RABBIT's download folder as an exclusion, or install this one package manually from the publisher's own page. RABBIT deliberately never turns your virus protection off."
+        "Windows security software blocked {path} ({source}). RABBIT could not read or move the file because Microsoft Defender (or another antivirus) flagged it and usually removed it. This is typically a FALSE POSITIVE, not a sign that RABBIT or the download is unsafe: the file is code-signed by its publisher and RABBIT verified it against the publisher's checksum before this step. Defender sometimes flags a freshly built installer it hasn't seen widely yet — OSARA's development snapshots, rebuilt on every change, are the usual case. To continue: open Windows Security > Virus & threat protection > Protection history, find the blocked item and choose Allow (or Restore), then run RABBIT again; alternatively add RABBIT's download folder as an exclusion, or install this one package manually from the publisher's own page. RABBIT deliberately never turns your virus protection off."
     )]
     WindowsFileBlockedByAntivirus {
         path: PathBuf,
@@ -244,8 +244,8 @@ mod tests {
     /// `ERROR_VIRUS_INFECTED` (225) and `ERROR_VIRUS_DELETED` (226) exist
     /// only for security-software blocks, so they must produce the
     /// actionable antivirus error instead of a raw I/O code — this is the
-    /// failure a user hit when Defender quarantined OSARA's unsigned
-    /// snapshot installer mid-install.
+    /// failure a user hit when Defender quarantined OSARA's (signed)
+    /// development-snapshot installer mid-install.
     #[cfg(windows)]
     #[test]
     fn classifies_windows_antivirus_blocks() {

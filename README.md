@@ -198,11 +198,12 @@ unattended environments and CI.
 ### If antivirus software blocks an install (Windows)
 
 An install can fail with *"Windows security software blocked …"*. Microsoft
-Defender sometimes flags an unsigned third-party installer — OSARA's
-development snapshots are the usual case — and quarantines it mid-install.
-This is a false positive: RABBIT downloads every package over HTTPS from the
-publisher's own release page and verifies it against the publisher's checksum
-before touching it.
+Defender sometimes flags a legitimately code-signed third-party installer it
+hasn't seen widely yet — OSARA's development snapshots, rebuilt on every
+change, are the usual case — and quarantines it mid-install. This is a false
+positive: the installer is signed by its publisher, and RABBIT downloads every
+package over HTTPS from the publisher's own release page and verifies it
+against the publisher's checksum before touching it.
 
 To finish the installation, do **one** of the following:
 
