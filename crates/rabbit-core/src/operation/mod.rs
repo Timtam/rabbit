@@ -512,13 +512,15 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
         }
     }
 
-    // Order the unattended bucket so every package installs after the
-    // packages it depends on. The dependency gate needs a dependency's
-    // result known before its dependents are considered, and REAPER — the
-    // only dependency target — is unattended, so ordering this bucket is
-    // enough (direct-bucket packages always install afterwards). This makes
-    // the gate correct regardless of the caller's package order.
+    // Order both install buckets so every package installs after the
+    // packages it depends on, making the dependency gate correct regardless
+    // of the caller's package order. REAPER (the only dependency target
+    // today) is unattended and the whole unattended bucket runs before the
+    // direct one, so cross-bucket dependencies are already satisfied;
+    // ordering each bucket additionally covers any future intra-bucket
+    // dependency (e.g. one direct package depending on another).
     unattended_installable = dependency_ordered(unattended_installable);
+    direct_installable = dependency_ordered(direct_installable);
 
     // ---- Download pipeline: queue EVERY remote fetch up front on a small
     // concurrent pool, so a huge download (FFmpeg's ~390 MB archive) streams
@@ -847,6 +849,16 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
                 merge_install_report(&mut install_report, report);
             }
             Err(error) => {
+                // A preflight failure is a global precondition (REAPER is
+                // running, or the resource dir isn't writable), not this
+                // package's fault. Keep it fatal — as the old single-batch
+                // install did — instead of demoting it to a per-package
+                // failure and mis-reporting "completed with errors" when the
+                // real fix is "close REAPER and re-run". Per-package
+                // download/copy failures still continue the run.
+                if matches!(error, RabbitError::PreflightFailed { .. }) {
+                    return Err(error);
+                }
                 items.push(failed_operation_item(
                     planned.artifact.clone(),
                     planned.plan_action,

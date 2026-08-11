@@ -386,6 +386,11 @@ pub struct WizardReviewPreview {
 #[serde(rename_all = "kebab-case")]
 pub enum WizardOutcomeStatus {
     Success,
+    /// The operation finished, but one or more packages failed or were
+    /// skipped because a dependency failed. Distinct from `Error` (the whole
+    /// operation aborted) so the saved report doesn't claim `success` when
+    /// the done page shows "completed with errors".
+    CompletedWithErrors,
     Error,
 }
 
@@ -1867,7 +1872,11 @@ pub fn wizard_outcome_report_from_success(
 ) -> WizardOutcomeReport {
     let summary = summarize_setup_report(model, report);
     WizardOutcomeReport {
-        status: WizardOutcomeStatus::Success,
+        status: if report.package_operation.has_failures() {
+            WizardOutcomeStatus::CompletedWithErrors
+        } else {
+            WizardOutcomeStatus::Success
+        },
         resource_path: report.resource_path.clone(),
         target_app_path: request.target_app_path.clone(),
         package_ids: request.package_ids.clone(),

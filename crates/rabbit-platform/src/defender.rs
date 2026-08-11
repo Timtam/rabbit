@@ -43,6 +43,7 @@ pub fn ensure_path_excluded(path: &Path) -> DefenderExclusionOutcome {
 /// Case-insensitive, trailing-separator-insensitive membership test used to
 /// decide whether the elevated add can be skipped. Pure so it is testable
 /// without Defender present.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn path_already_excluded(path: &Path, existing: &[String]) -> bool {
     let target = normalize_exclusion(&path.to_string_lossy());
     existing
@@ -50,24 +51,92 @@ pub(crate) fn path_already_excluded(path: &Path, existing: &[String]) -> bool {
         .any(|entry| normalize_exclusion(entry) == target)
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn normalize_exclusion(value: &str) -> String {
     value.trim().trim_end_matches(['\\', '/']).to_lowercase()
 }
 
+/// True when `path` contains a character that must never be interpolated
+/// into the elevated PowerShell command. The ASCII apostrophe is NOT here —
+/// it's safely doubled inside the single-quoted string, so a legitimate
+/// `C:\Users\O'Brien\…\rabbit-cache` still works. But PowerShell's lexer
+/// treats the Unicode single-quote family as string delimiters too, so those
+/// could close the single-quoted string and inject code that then runs as
+/// Administrator; control characters are rejected for the same defense.
+/// Such characters never appear in a real cache path, so rejecting the whole
+/// exclusion for them is safe. Pure, so it is testable without Defender.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn has_unsafe_exclusion_chars(path: &str) -> bool {
+    path.chars().any(|ch| {
+        matches!(ch, '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') || ch.is_control()
+    })
+}
+
 #[cfg(windows)]
 fn platform_ensure_path_excluded(path: &Path) -> DefenderExclusionOutcome {
-    // 1) Unelevated read of the current exclusions so the common case
-    //    (already added on a previous run) never raises a UAC prompt.
-    if let Some(existing) = query_exclusion_paths()
-        && path_already_excluded(path, &existing)
-    {
-        return DefenderExclusionOutcome::AlreadyPresent;
+    // Decide whether the exclusion is already in place without raising a UAC
+    // prompt. Prefer an unelevated read of Defender's list (authoritative);
+    // if that can't be read — e.g. a managed machine hides exclusions from
+    // local users via policy — fall back to a marker RABBIT wrote when it
+    // last added the exclusion, so "added once" survives a blind read
+    // instead of re-prompting on every install.
+    match query_exclusion_paths() {
+        Some(existing) => {
+            if path_already_excluded(path, &existing) {
+                return DefenderExclusionOutcome::AlreadyPresent;
+            }
+            // The read succeeded and says the path is absent — trust it over
+            // any (possibly stale) marker and re-add.
+        }
+        None => {
+            if marker_matches(path) {
+                return DefenderExclusionOutcome::AlreadyPresent;
+            }
+        }
     }
-    // 2) Add it under a single administrator prompt. Idempotent if a racing
-    //    run or an unreadable query left it already present.
+    // Add it under a single administrator prompt. Idempotent if a racing run
+    // or an unreadable query left it already present; record a marker on
+    // success so a future blind read still skips the prompt.
     match add_exclusion_elevated(&path.to_string_lossy()) {
-        Ok(()) => DefenderExclusionOutcome::Added,
+        Ok(()) => {
+            write_marker(path);
+            DefenderExclusionOutcome::Added
+        }
         Err(reason) => DefenderExclusionOutcome::Unavailable(reason),
+    }
+}
+
+/// Path of the sentinel RABBIT writes after successfully adding the
+/// exclusion, under `%LOCALAPPDATA%\RABBIT\`. Holds the excluded path so a
+/// later run for a *different* cache dir doesn't match a stale marker.
+#[cfg(windows)]
+fn marker_path() -> Option<std::path::PathBuf> {
+    crate::paths::user_local_appdata_dir()
+        .map(|dir| dir.join("RABBIT").join(".cache-exclusion-added"))
+}
+
+/// True when a marker exists and records this exact path (normalized).
+#[cfg(windows)]
+fn marker_matches(path: &Path) -> bool {
+    let Some(marker) = marker_path() else {
+        return false;
+    };
+    match std::fs::read_to_string(&marker) {
+        Ok(content) => {
+            normalize_exclusion(&content) == normalize_exclusion(&path.to_string_lossy())
+        }
+        Err(_) => false,
+    }
+}
+
+/// Best-effort: record that the exclusion for `path` was added.
+#[cfg(windows)]
+fn write_marker(path: &Path) {
+    if let Some(marker) = marker_path() {
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&marker, path.to_string_lossy().as_bytes());
     }
 }
 
@@ -128,8 +197,14 @@ fn query_exclusion_paths() -> Option<Vec<String>> {
 fn add_exclusion_elevated(path: &str) -> Result<(), String> {
     use crate::elevation::{ElevationError, run_elevated_and_wait};
 
+    // Refuse to interpolate a path that could break out of the PowerShell
+    // single-quoted string and inject a command that would then run as
+    // Administrator. Real cache paths never contain these characters.
+    if has_unsafe_exclusion_chars(path) {
+        return Err("cache path contains characters unsafe for the exclusion command".to_string());
+    }
     // The path goes inside a PowerShell single-quoted string, so double any
-    // embedded single quote. Cache paths never contain one, but be exact.
+    // embedded ASCII apostrophe (legitimate in a Windows user name).
     let escaped = path.replace('\'', "''");
     let command = format!("Add-MpPreference -ExclusionPath '{escaped}'");
     let program = powershell_program();
@@ -180,6 +255,40 @@ mod tests {
         assert!(!path_already_excluded(
             &path,
             &[r"C:\Users\x\AppData\Local\Temp".to_string()],
+        ));
+    }
+
+    #[test]
+    fn unsafe_exclusion_chars_flags_powershell_quote_breakouts() {
+        // The Unicode single-quote family can close a PowerShell single-
+        // quoted string and inject a command; a real payload uses U+2019.
+        for injected in [
+            "C:\\Temp\\x\u{2019};Start-Process calc;\u{2019}z\\rabbit-cache",
+            "C:\\Temp\\x\u{2018}z\\rabbit-cache",
+            "C:\\Temp\\x\u{201A}z\\rabbit-cache",
+            "C:\\Temp\\x\u{201B}z\\rabbit-cache",
+            "C:\\Temp\\x\nz\\rabbit-cache",
+        ] {
+            assert!(
+                has_unsafe_exclusion_chars(injected),
+                "should reject: {injected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsafe_exclusion_chars_allows_ordinary_paths_including_apostrophe() {
+        // The ASCII apostrophe is safely doubled, not rejected — a Windows
+        // user named O'Brien has one in their temp path.
+        assert!(!has_unsafe_exclusion_chars(
+            r"C:\Users\O'Brien\AppData\Local\Temp\rabbit-cache"
+        ));
+        assert!(!has_unsafe_exclusion_chars(
+            r"C:\Users\x\AppData\Local\Temp\rabbit-cache"
+        ));
+        // Non-ASCII letters in a path are fine (only the quote family isn't).
+        assert!(!has_unsafe_exclusion_chars(
+            r"C:\Users\Ünïcödé\AppData\Local\Temp\rabbit-cache"
         ));
     }
 }
