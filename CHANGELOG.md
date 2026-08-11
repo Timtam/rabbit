@@ -33,6 +33,17 @@ from this file and posts it as the GitHub release body.
 
 ### Added
 
+- Windows: the wizard now adds a Microsoft Defender exclusion for RABBIT's
+  own download cache folder (`%TEMP%\rabbit-cache`) so freshly built,
+  low-prevalence — but code-signed — installers, chiefly OSARA's
+  development snapshots, aren't quarantined as false positives mid-install.
+  It's scoped to that one folder (never all of `%TEMP%`), added once under a
+  single administrator prompt, and skipped without prompting on later runs
+  once present. RABBIT never turns real-time protection off, and if the
+  prompt is declined or blocked by policy/Tamper Protection the install
+  proceeds anyway (a real block still shows the "allow it in Protection
+  history" guidance). The command-line tool is left untouched so it stays
+  non-interactive for unattended/CI use.
 - The packages page's details pane now answers "what's new?": REAPER and
   SWS show the newest section of their official changelogs, ReaPack shows
   its release notes, and OSARA shows the latest snapshots' list of changes

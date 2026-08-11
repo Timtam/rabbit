@@ -1681,6 +1681,23 @@ pub fn execute_wizard_install_with_progress(
     request: WizardInstallRequest,
     progress: &rabbit_core::progress::ProgressReporter,
 ) -> Result<SetupReport> {
+    // Before any download, make Windows Defender ignore RABBIT's own cache
+    // folder so a freshly built, low-prevalence (but signed) installer —
+    // OSARA's snapshots especially — isn't quarantined as a false positive
+    // mid-download. Interactive GUI path only (the CLI stays non-interactive
+    // for unattended/CI use and never touches Defender); skipped on dry runs
+    // and off Windows. Best-effort: whatever the outcome, the install
+    // proceeds — a real block still surfaces the actionable guidance.
+    if !request.dry_run {
+        let outcome =
+            rabbit_core::antivirus::ensure_cache_excluded_from_antivirus(&request.cache_dir);
+        if !matches!(
+            outcome,
+            rabbit_core::antivirus::DefenderExclusionOutcome::Unsupported
+        ) {
+            eprintln!("antivirus cache exclusion: {outcome:?}");
+        }
+    }
     rabbit_core::setup::execute_setup_operation_with_progress(
         &request.resource_path,
         &request.package_ids,

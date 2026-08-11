@@ -1,3 +1,4 @@
+pub mod antivirus;
 pub mod arch_probe;
 pub mod archive;
 pub mod artifact;
