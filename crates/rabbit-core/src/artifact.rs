@@ -841,12 +841,10 @@ fn fetch_remote_artifact_with_retries(
                 return Ok(());
             }
             Err(StreamCopyError::Write(source)) => {
-                // Disk-side failure (full disk, permissions): retrying the
-                // network won't help.
-                return Err(RabbitError::Io {
-                    path: part_path.to_path_buf(),
-                    source,
-                });
+                // Disk-side failure (full disk, permissions, security
+                // software blocking the write): retrying the network won't
+                // help. Classified so an antivirus block reads as one.
+                return Err(crate::error::io_error_at(part_path.to_path_buf(), source));
             }
             Err(StreamCopyError::Read(source)) => {
                 // Network-side failure mid-body (stall timeout, reset):

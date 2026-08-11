@@ -237,18 +237,12 @@ pub fn extract_bin_directory_from_seven_zip_archive(
             if target.exists()
                 && let Err(error) = fs::remove_file(&target)
             {
-                bail_with!(RabbitError::Io {
-                    path: target.clone(),
-                    source: error,
-                });
+                bail_with!(crate::error::io_error_at(target.clone(), error));
             }
             let mut output = match fs::File::create(&target) {
                 Ok(file) => file,
                 Err(error) => {
-                    bail_with!(RabbitError::Io {
-                        path: target.clone(),
-                        source: error,
-                    });
+                    bail_with!(crate::error::io_error_at(target.clone(), error));
                 }
             };
             let mut buffer = [0u8; 64 * 1024];
@@ -257,24 +251,15 @@ pub fn extract_bin_directory_from_seven_zip_archive(
                     Ok(0) => break,
                     Ok(n) => n,
                     Err(error) => {
-                        bail_with!(RabbitError::Io {
-                            path: target.clone(),
-                            source: error,
-                        });
+                        bail_with!(crate::error::io_error_at(target.clone(), error));
                     }
                 };
                 if let Err(error) = output.write_all(&buffer[..read]) {
-                    bail_with!(RabbitError::Io {
-                        path: target.clone(),
-                        source: error,
-                    });
+                    bail_with!(crate::error::io_error_at(target.clone(), error));
                 }
             }
             if let Err(error) = output.flush() {
-                bail_with!(RabbitError::Io {
-                    path: target.clone(),
-                    source: error,
-                });
+                bail_with!(crate::error::io_error_at(target.clone(), error));
             }
             extracted.borrow_mut().push(ExtractedUserPlugin {
                 source_archive: archive_path_owned.clone(),

@@ -257,6 +257,7 @@ wizard-summary-packages-selected = Ausgewählte Pakete: { $packages }
 wizard-summary-cache = Zwischenspeicher: { $path }
 wizard-summary-planned-app = Geplanter Anwendungspfad: { $path }
 wizard-summary-error = Fehler: { $message }
+wizard-summary-error-antivirus = Die Windows-Sicherheitssoftware hat diesen Download blockiert. Das ist meist ein Fehlalarm bei einem nicht signierten Installationsprogramm – typischerweise bei OSARA-Entwicklungsversionen –, und RABBIT hatte die Datei zuvor bereits anhand der Prüfsumme des Herausgebers überprüft. So geht es weiter: Öffnen Sie die Windows-Sicherheit, gehen Sie zu „Viren- & Bedrohungsschutz“ und dann zum „Schutzverlauf“, wählen Sie das blockierte Element aus und wählen Sie „Zulassen“. Starten Sie RABBIT anschließend erneut. Alternativ können Sie den Download-Ordner von RABBIT zu den Ausschlüssen hinzufügen oder dieses eine Paket von Hand von der Website des Herausgebers installieren. RABBIT schaltet Ihren Virenschutz niemals ab.
 wizard-summary-resource-items-created = Angelegte Ressourceneinträge: { $count }
 wizard-summary-packages-installed-or-checked = Installierte oder geprüfte Pakete: { $count }
 wizard-summary-packages-current = Bereits aktuelle Pakete: { $count }

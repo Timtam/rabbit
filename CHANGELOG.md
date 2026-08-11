@@ -60,6 +60,18 @@ from this file and posts it as the GitHub release body.
 
 ### Fixed
 
+- Windows: when antivirus software blocks a package, RABBIT now says so and
+  explains how to continue, instead of failing with a raw
+  "I/O error … (os error 225)". Microsoft Defender occasionally flags an
+  unsigned third-party installer — OSARA's development snapshots are the
+  usual case — and quarantines it mid-install. The new message states that
+  this is typically a false positive, that RABBIT had already verified the
+  download against the publisher's checksum, and walks through allowing the
+  item under Windows Security → Virus & threat protection → Protection
+  history (or excluding RABBIT's download folder, or installing that one
+  package by hand). The steps also appear in your own language on the
+  wizard's result page, and the README gained a matching section. RABBIT
+  does not, and will not, switch your virus protection off.
 - macOS: Cmd+Q (and the application menu's Quit item) now quits RABBIT.
   The wizard installed no menu bar at all, so macOS had no functional
   Quit item to offer and Cmd+Q was a dead key. RABBIT now installs a

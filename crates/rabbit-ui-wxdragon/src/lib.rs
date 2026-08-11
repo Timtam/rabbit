@@ -1970,6 +1970,22 @@ pub fn summarize_wizard_error(
         format!("Error: {error}"),
     ));
 
+    // The error text itself is English (it goes into bug reports); an
+    // antivirus block is the one failure a user can usually clear
+    // themselves, so follow it with the remediation steps in their own
+    // language.
+    if matches!(error, RabbitError::WindowsFileBlockedByAntivirus { .. }) {
+        detail_lines.push(format_localized_message(
+            localizer.as_ref(),
+            "wizard-summary-error-antivirus",
+            &[],
+            "Windows security software blocked this download. Open Windows Security > \
+             Virus & threat protection > Protection history, allow the blocked item, and run \
+             RABBIT again."
+                .to_string(),
+        ));
+    }
+
     WizardInstallSummary {
         status_line: model.text.done_status_error.clone(),
         detail_lines,
@@ -4824,6 +4840,56 @@ mod tests {
                 .detail_lines
                 .iter()
                 .any(|line| line.contains("Error: preflight failed: REAPER is running."))
+        );
+    }
+
+    /// An antivirus block is the one install failure a user can usually
+    /// clear themselves, so the summary follows the (English, report-bound)
+    /// error text with localized remediation steps. Everything else keeps
+    /// exactly one error line.
+    #[test]
+    fn wizard_error_summary_adds_localized_hint_for_antivirus_blocks() {
+        let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let model = model_from_plan(
+            &localizer,
+            Platform::Windows,
+            Architecture::X64,
+            vec![fake_installation()],
+            Some(0),
+            InstallPlan {
+                target: None,
+                actions: Vec::new(),
+                notes: Vec::new(),
+            },
+        );
+        let request = sample_install_request(PathBuf::from("C:/PortableREAPER"));
+
+        let blocked = rabbit_core::RabbitError::WindowsFileBlockedByAntivirus {
+            path: PathBuf::from("C:/Temp/rabbit-cache/osara/osara.exe"),
+            source: std::io::Error::from_raw_os_error(225),
+        };
+        let summary = super::summarize_wizard_error(&model, &request, &blocked);
+        assert!(
+            summary
+                .detail_lines
+                .iter()
+                .any(|line| line.contains("Protection history")),
+            "antivirus blocks must carry the remediation steps: {:?}",
+            summary.detail_lines
+        );
+
+        // Unrelated failures must not gain the antivirus advice.
+        let other = rabbit_core::RabbitError::PreflightFailed {
+            message: "REAPER is running.".to_string(),
+        };
+        let summary = super::summarize_wizard_error(&model, &request, &other);
+        assert!(
+            !summary
+                .detail_lines
+                .iter()
+                .any(|line| line.contains("Protection history")),
+            "only antivirus blocks get the antivirus advice: {:?}",
+            summary.detail_lines
         );
     }
 

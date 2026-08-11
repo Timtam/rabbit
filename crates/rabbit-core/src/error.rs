@@ -134,6 +134,15 @@ pub enum RabbitError {
         source: std::io::Error,
     },
 
+    #[error(
+        "Windows security software blocked {path} ({source}). RABBIT could not read or move the file because Microsoft Defender (or another antivirus) flagged it and usually removed it. This is typically a FALSE POSITIVE on an unsigned installer such as an OSARA development snapshot, not a sign that RABBIT or the download is unsafe — the file was verified against the publisher's checksum before this step. To continue: open Windows Security > Virus & threat protection > Protection history, find the blocked item and choose Allow (or Restore), then run RABBIT again; alternatively add RABBIT's download folder as an exclusion, or install this one package manually from the publisher's own page. RABBIT deliberately never turns your virus protection off."
+    )]
+    WindowsFileBlockedByAntivirus {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("post-install verification failed; missing paths: {missing_paths:?}")]
     PostInstallVerificationFailed { missing_paths: Vec<PathBuf> },
 
@@ -157,8 +166,38 @@ pub trait IoPathContext<T> {
 impl<T> IoPathContext<T> for std::io::Result<T> {
     fn with_path(self, path: impl Into<PathBuf>) -> Result<T> {
         let path = path.into();
-        self.map_err(|source| RabbitError::Io { path, source })
+        self.map_err(|source| io_error_at(path, source))
     }
+}
+
+/// Windows `ERROR_VIRUS_INFECTED` — the operation was refused because
+/// security software flagged the file.
+#[cfg(windows)]
+const ERROR_VIRUS_INFECTED: i32 = 225;
+/// Windows `ERROR_VIRUS_DELETED` — same, and the file was removed.
+#[cfg(windows)]
+const ERROR_VIRUS_DELETED: i32 = 226;
+
+/// Turn a path-tagged [`std::io::Error`] into the most specific
+/// [`RabbitError`] we can, so users get a cause and a fix instead of a raw
+/// OS code.
+///
+/// Today that means recognising the two Windows status codes that mean
+/// "antivirus blocked this": unlike, say, `ACCESS_DENIED`, codes 225/226
+/// exist for no other reason, so classifying them here — rather than at one
+/// call site — is unambiguous and covers every file operation RABBIT
+/// performs (download, cache, extract, install).
+pub fn io_error_at(path: PathBuf, source: std::io::Error) -> RabbitError {
+    #[cfg(windows)]
+    {
+        if matches!(
+            source.raw_os_error(),
+            Some(ERROR_VIRUS_INFECTED) | Some(ERROR_VIRUS_DELETED)
+        ) {
+            return RabbitError::WindowsFileBlockedByAntivirus { path, source };
+        }
+    }
+    RabbitError::Io { path, source }
 }
 
 pub trait JsonPathContext<T> {
@@ -180,5 +219,53 @@ impl<T> SqlitePathContext<T> for rusqlite::Result<T> {
     fn with_sqlite_path(self, path: impl Into<PathBuf>) -> Result<T> {
         let path = path.into();
         self.map_err(|source| RabbitError::Sqlite { path, source })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Codes that mean something other than "antivirus blocked this" must
+    /// keep the generic I/O shape on every platform.
+    #[test]
+    fn classifies_unrelated_os_errors_as_generic_io() {
+        let path = PathBuf::from("cache/osara/osara.exe");
+        // 2 = ENOENT / ERROR_FILE_NOT_FOUND, 5 = EIO / ERROR_ACCESS_DENIED.
+        for code in [2, 5] {
+            let error = io_error_at(path.clone(), std::io::Error::from_raw_os_error(code));
+            assert!(
+                matches!(error, RabbitError::Io { .. }),
+                "os error {code} should stay a generic Io error"
+            );
+        }
+    }
+
+    /// `ERROR_VIRUS_INFECTED` (225) and `ERROR_VIRUS_DELETED` (226) exist
+    /// only for security-software blocks, so they must produce the
+    /// actionable antivirus error instead of a raw I/O code — this is the
+    /// failure a user hit when Defender quarantined OSARA's unsigned
+    /// snapshot installer mid-install.
+    #[cfg(windows)]
+    #[test]
+    fn classifies_windows_antivirus_blocks() {
+        let path = PathBuf::from(r"C:\Users\x\AppData\Local\Temp\rabbit-cache\osara\osara.exe");
+        for code in [ERROR_VIRUS_INFECTED, ERROR_VIRUS_DELETED] {
+            let error = io_error_at(path.clone(), std::io::Error::from_raw_os_error(code));
+            assert!(
+                matches!(error, RabbitError::WindowsFileBlockedByAntivirus { .. }),
+                "os error {code} should map to WindowsFileBlockedByAntivirus"
+            );
+            let message = error.to_string();
+            // The message has to carry the path and the self-service fix,
+            // and must never suggest turning protection off.
+            assert!(message.contains("osara.exe"), "{message}");
+            assert!(message.contains("Protection history"), "{message}");
+            assert!(message.contains("FALSE POSITIVE"), "{message}");
+            assert!(
+                message.contains("never turns your virus protection off"),
+                "{message}"
+            );
+        }
     }
 }

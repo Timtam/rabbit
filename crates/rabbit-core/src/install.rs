@@ -483,10 +483,7 @@ fn classify_install_write_error(path: &Path, source: std::io::Error) -> RabbitEr
             };
         }
     }
-    RabbitError::Io {
-        path: path.to_path_buf(),
-        source,
-    }
+    crate::error::io_error_at(path.to_path_buf(), source)
 }
 
 fn temporary_target_path(target_path: &Path) -> PathBuf {

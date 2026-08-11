@@ -195,6 +195,30 @@ RABBIT self-update apply --restart             # update + relaunch
 The GUI does this automatically on startup; the CLI commands are there for
 unattended environments and CI.
 
+### If antivirus software blocks an install (Windows)
+
+An install can fail with *"Windows security software blocked …"*. Microsoft
+Defender sometimes flags an unsigned third-party installer — OSARA's
+development snapshots are the usual case — and quarantines it mid-install.
+This is a false positive: RABBIT downloads every package over HTTPS from the
+publisher's own release page and verifies it against the publisher's checksum
+before touching it.
+
+To finish the installation, do **one** of the following:
+
+- Open **Windows Security → Virus & threat protection → Protection history**,
+  find the blocked item, choose **Allow**, then run RABBIT again.
+- Add RABBIT's download folder to **Virus & threat protection → Manage
+  settings → Exclusions**.
+- Install that one package by hand from the publisher's own page, then re-run
+  RABBIT for the rest.
+
+RABBIT will never turn your virus protection off, and you should not need to:
+disabling real-time protection exposes the whole machine, and any installer
+that switches it off is indistinguishable from malware. If a RABBIT release
+itself is flagged, please report it — and consider submitting the file to
+Microsoft as a false positive at <https://www.microsoft.com/en-us/wdsi/filesubmission>.
+
 ## Reports and logs
 
 Every installation produces a JSON report under `<resource>/RABBIT/logs/`.
