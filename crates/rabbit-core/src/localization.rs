@@ -375,6 +375,53 @@ mod tests {
             .collect()
     }
 
+    /// The macOS `.app` must advertise exactly the languages RABBIT ships.
+    /// macOS reads `CFBundleLocalizations` (and the `.lproj` layout) to decide
+    /// what language the app speaks — VoiceOver picks its voice from it — so a
+    /// locale added to RABBIT but missing here means a user gets, say, the
+    /// Spanish UI read aloud in an English voice. Adding Spanish is exactly
+    /// how this drifted once.
+    #[test]
+    fn macos_bundle_advertises_every_embedded_locale() {
+        const INFO_PLIST: &str = include_str!("../../../packaging/macos/Info.plist");
+        const BUILD_SCRIPT: &str = include_str!("../../../packaging/macos/build-bundle.sh");
+
+        // The plist lists bare language subtags ("es"), the embedded locales
+        // are full tags ("es-ES").
+        let expected: Vec<&str> = embedded_locales()
+            .iter()
+            .map(|locale| locale.split('-').next().unwrap_or(locale))
+            .collect();
+
+        let localizations = INFO_PLIST
+            .split_once("<key>CFBundleLocalizations</key>")
+            .and_then(|(_, rest)| rest.split_once("</array>"))
+            .map(|(block, _)| block)
+            .expect("Info.plist declares CFBundleLocalizations");
+        for language in &expected {
+            assert!(
+                localizations.contains(&format!("<string>{language}</string>")),
+                "Info.plist CFBundleLocalizations is missing {language:?}"
+            );
+        }
+
+        // The build script creates a stub .lproj per language; macOS's
+        // accessibility stack inspects that layout as well as the plist key.
+        let lproj_line = BUILD_SCRIPT
+            .lines()
+            .find(|line| line.trim_start().starts_with("for lproj in"))
+            .expect("build-bundle.sh creates .lproj stubs");
+        for language in &expected {
+            assert!(
+                lproj_line
+                    .split_whitespace()
+                    // the last entry carries the shell's `;`
+                    .any(|word| word.trim_end_matches(';') == *language),
+                "build-bundle.sh .lproj list is missing {language:?}: {lproj_line}"
+            );
+        }
+    }
+
     #[test]
     fn every_embedded_locale_defines_the_same_message_keys() {
         // Locale parity is otherwise maintained by hand: a key added to
