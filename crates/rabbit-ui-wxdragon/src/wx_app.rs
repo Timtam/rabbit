@@ -1306,6 +1306,9 @@ struct WizardWidgets {
     package_details: TextCtrl,
     osara_keymap_replace: CheckBox,
     osara_keymap_note: TextCtrl,
+    /// Choice between the two Spanish OSARA translations. Enabled only
+    /// while the Spanish language pack is selected.
+    spanish_variant_pma: CheckBox,
     reapack_ack_confirm: CheckBox,
     review_text: TextCtrl,
     progress_status: StaticText,
@@ -1753,6 +1756,13 @@ pub fn run() {
                             WizardInstallOptions {
                                 osara_keymap_choice: osara_keymap_choice(
                                     &widgets.osara_keymap_replace,
+                                ),
+                                // Ticked = Team PMA's Spanish OSARA
+                                // translation (installs as es_MX); unticked
+                                // = the default REAPER Accesible español
+                                // (es_ES).
+                                package_variants: crate::package_variants_from_choice(
+                                    widgets.spanish_variant_pma.get_value(),
                                 ),
                                 ..WizardInstallOptions::default()
                             },
@@ -2281,15 +2291,20 @@ fn add_pages(
     );
 
     let packages_page = Panel::builder(book).build();
-    let (package_checklist, package_details, osara_keymap_replace, osara_keymap_note) =
-        build_packages_page(
-            &packages_page,
-            model,
-            package_rows,
-            configuration_rows,
-            package_items,
-            can_install,
-        );
+    let (
+        package_checklist,
+        package_details,
+        osara_keymap_replace,
+        osara_keymap_note,
+        spanish_variant_pma,
+    ) = build_packages_page(
+        &packages_page,
+        model,
+        package_rows,
+        configuration_rows,
+        package_items,
+        can_install,
+    );
     book.add_page(
         &packages_page,
         &model.steps[PACKAGES_STEP].label,
@@ -2338,6 +2353,7 @@ fn add_pages(
         package_details,
         osara_keymap_replace,
         osara_keymap_note,
+        spanish_variant_pma,
         reapack_ack_confirm,
         review_text,
         progress_status,
@@ -2661,17 +2677,11 @@ fn start_version_check(ui: VersionCheckUi) {
     let mut completed: i32 = 0;
 
     let dispatcher = move |event: VersionCheckEvent| match event {
-        VersionCheckEvent::Checking { package_id } => {
-            with_ui_localizer(|localizer| {
-                let display = localized_package_display_name(localizer, &package_id);
-                let line = localizer
-                    .format(
-                        "wizard-version-check-status-checking",
-                        &[("package", display.as_str())],
-                    )
-                    .value;
-                ui.widgets.version_check_status.set_label(&line);
-            });
+        VersionCheckEvent::Checking { package_id: _ } => {
+            // Several checks are in flight at once, so naming one package
+            // would just flicker between them. The count line below (updated
+            // per completion) is the honest, calm signal — and it moves even
+            // while a slow language-pack check is still running.
         }
         VersionCheckEvent::Result {
             package_id,
@@ -2679,6 +2689,18 @@ fn start_version_check(ui: VersionCheckUi) {
         } => {
             completed += 1;
             ui.widgets.version_check_gauge.set_value(completed);
+            with_ui_localizer(|localizer| {
+                let line = localizer
+                    .format(
+                        "wizard-version-check-status-progress",
+                        &[
+                            ("done", completed.to_string().as_str()),
+                            ("total", package_count.to_string().as_str()),
+                        ],
+                    )
+                    .value;
+                ui.widgets.version_check_status.set_label(&line);
+            });
             match outcome {
                 Ok((version_str, whats_new)) => {
                     match rabbit_core::version::Version::parse(&version_str) {
@@ -3126,6 +3148,11 @@ fn compute_configuration_group_tristate(
 /// target so each package's What's-New notes can be trimmed to the changes
 /// since the installed version. Detection here is best-effort: a failure
 /// just means untrimmed notes, never a failed check.
+/// How many latest-version checks run at once. Matches the download pool's
+/// modest fan-out: enough to hide one slow check behind the others without
+/// hammering hosts that serve several packages.
+const VERSION_CHECK_CONCURRENCY: usize = 4;
+
 fn spawn_version_check_worker(
     package_ids: Vec<String>,
     resource_path: PathBuf,
@@ -3148,27 +3175,63 @@ fn spawn_version_check_worker(
         if let Some(version) = target_reaper_version {
             installed_versions.insert(PACKAGE_REAPER.to_string(), version);
         }
-        for package_id in package_ids {
-            let id_for_checking = package_id.clone();
-            wxdragon::call_after(Box::new(move || {
-                dispatch_version_check_event(VersionCheckEvent::Checking {
-                    package_id: id_for_checking,
-                });
-            }));
+        // Check packages CONCURRENTLY. The checks are independent network
+        // fetches against different hosts, and their costs are wildly
+        // uneven — most resolve in about a second, but a language pack is
+        // identified by the hash of its contents, so checking one downloads
+        // the whole file (the German pack is ~1.7 MB and takes several
+        // seconds). Run sequentially that one check stalled the whole
+        // progress bar; overlapped, the run costs roughly the slowest single
+        // check instead of the sum of all of them.
+        //
+        // Bounded pool rather than one thread per package: a handful of
+        // parallel requests is polite to the upstream hosts (several
+        // packages share one) and is where the wall-clock win already
+        // saturates.
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(
+            package_ids
+                .into_iter()
+                .collect::<std::collections::VecDeque<_>>(),
+        ));
+        let installed_versions = std::sync::Arc::new(installed_versions);
+        let worker_count =
+            VERSION_CHECK_CONCURRENCY.min(queue.lock().map(|q| q.len()).unwrap_or(1).max(1));
+        let mut workers = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let queue = std::sync::Arc::clone(&queue);
+            let installed_versions = std::sync::Arc::clone(&installed_versions);
+            workers.push(std::thread::spawn(move || {
+                loop {
+                    // Scope the lock so it is never held across a fetch.
+                    let next = queue.lock().ok().and_then(|mut q| q.pop_front());
+                    let Some(package_id) = next else {
+                        break;
+                    };
+                    let id_for_checking = package_id.clone();
+                    wxdragon::call_after(Box::new(move || {
+                        dispatch_version_check_event(VersionCheckEvent::Checking {
+                            package_id: id_for_checking,
+                        });
+                    }));
 
-            let installed = installed_versions.get(&package_id);
-            let outcome = match fetch_latest_details_for_package(&package_id, installed) {
-                Ok(details) => Ok((details.version.to_string(), details.whats_new)),
-                Err(error) => Err(error.to_string()),
-            };
+                    let installed = installed_versions.get(&package_id);
+                    let outcome = match fetch_latest_details_for_package(&package_id, installed) {
+                        Ok(details) => Ok((details.version.to_string(), details.whats_new)),
+                        Err(error) => Err(error.to_string()),
+                    };
 
-            let id_for_result = package_id.clone();
-            wxdragon::call_after(Box::new(move || {
-                dispatch_version_check_event(VersionCheckEvent::Result {
-                    package_id: id_for_result,
-                    outcome,
-                });
+                    let id_for_result = package_id.clone();
+                    wxdragon::call_after(Box::new(move || {
+                        dispatch_version_check_event(VersionCheckEvent::Result {
+                            package_id: id_for_result,
+                            outcome,
+                        });
+                    }));
+                }
             }));
+        }
+        for worker in workers {
+            let _ = worker.join();
         }
         wxdragon::call_after(Box::new(move || {
             dispatch_version_check_event(VersionCheckEvent::Finished);
@@ -3313,7 +3376,7 @@ fn build_packages_page(
     configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     package_items: PackagesStateCell,
     can_install: Rc<Cell<bool>>,
-) -> (PackagesView, TextCtrl, CheckBox, TextCtrl) {
+) -> (PackagesView, TextCtrl, CheckBox, TextCtrl, CheckBox) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     add_heading(
         page,
@@ -3416,6 +3479,24 @@ fn build_packages_page(
     osara_keymap_note.enable(false);
     osara_keymap_note.set_can_focus(false);
     sizer.add(&osara_keymap_note, 0, SizerFlag::All | SizerFlag::Expand, 6);
+
+    // Which of the two Spanish OSARA translations to install. Only the
+    // installed FILE NAME differs (es_ES vs es_MX) — that is what OSARA
+    // reads to pick its translation — so this is a plain either/or rather
+    // than a separate package.
+    let spanish_variant_pma = CheckBox::builder(page)
+        .with_label(&model.text.packages_spanish_variant_label)
+        .build();
+    spanish_variant_pma.set_name(&model.text.packages_spanish_variant_label);
+    spanish_variant_pma.set_label(&model.text.packages_spanish_variant_label);
+    spanish_variant_pma.add_style(WindowStyle::TabStop);
+    spanish_variant_pma.set_value(false);
+    sizer.add(
+        &spanish_variant_pma,
+        0,
+        SizerFlag::All | SizerFlag::Expand,
+        6,
+    );
 
     sync_osara_keymap_widgets(
         model,
@@ -3826,7 +3907,13 @@ fn build_packages_page(
     }
 
     page.set_sizer(sizer, true);
-    (tree, details, osara_keymap_replace, osara_keymap_note)
+    (
+        tree,
+        details,
+        osara_keymap_replace,
+        osara_keymap_note,
+        spanish_variant_pma,
+    )
 }
 
 /// Windows-only: which top-level group a tree item belongs to, if any.
@@ -4335,7 +4422,7 @@ fn build_packages_page(
     configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     package_items: PackagesStateCell,
     can_install: Rc<Cell<bool>>,
-) -> (PackagesView, TextCtrl, CheckBox, TextCtrl) {
+) -> (PackagesView, TextCtrl, CheckBox, TextCtrl, CheckBox) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     add_heading(
         page,
@@ -4470,6 +4557,24 @@ fn build_packages_page(
     osara_keymap_note.set_can_focus(false);
     sizer.add(&osara_keymap_note, 0, SizerFlag::All | SizerFlag::Expand, 6);
 
+    // Which of the two Spanish OSARA translations to install. Only the
+    // installed FILE NAME differs (es_ES vs es_MX) — that is what OSARA
+    // reads to pick its translation — so this is a plain either/or rather
+    // than a separate package.
+    let spanish_variant_pma = CheckBox::builder(page)
+        .with_label(&model.text.packages_spanish_variant_label)
+        .build();
+    spanish_variant_pma.set_name(&model.text.packages_spanish_variant_label);
+    spanish_variant_pma.set_label(&model.text.packages_spanish_variant_label);
+    spanish_variant_pma.add_style(WindowStyle::TabStop);
+    spanish_variant_pma.set_value(false);
+    sizer.add(
+        &spanish_variant_pma,
+        0,
+        SizerFlag::All | SizerFlag::Expand,
+        6,
+    );
+
     sync_osara_keymap_widgets(
         model,
         &package_rows.borrow(),
@@ -4520,7 +4625,13 @@ fn build_packages_page(
     }
 
     page.set_sizer(sizer, true);
-    (tree, details, osara_keymap_replace, osara_keymap_note)
+    (
+        tree,
+        details,
+        osara_keymap_replace,
+        osara_keymap_note,
+        spanish_variant_pma,
+    )
 }
 
 /// Non-Windows: build the `CustomDataViewTreeModel` that backs the packages

@@ -62,9 +62,10 @@ available today, and both translate the SWS extension as well:
   same translation either way, but **OSARA** has two Spanish translations,
   chosen by the pack's file name: installed as `es_ES.ReaperLangPack` you
   get *REAPER Accesible español*, and as `es_MX.ReaperLangPack` you get
-  *Team PMA*'s. RABBIT installs `es_ES` by default; pass
-  `--package-variant langpack-es=pma` to pick Team PMA instead. Switching
-  reinstalls under the new name and removes the old file.
+  *Team PMA*'s. RABBIT installs `es_ES` by default; tick **Use Team PMA's
+  Spanish OSARA translation** on the packages page (or pass
+  `--package-variant langpack-es=pma` on the command line) to pick Team PMA
+  instead. Switching reinstalls under the new name and removes the old file.
 - **German** — maintained by MrData and published in the
   [REAPER Stash](https://stash.reaper.fm/v/26248/), installed as
   `de_DE.ReaperLangPack`.

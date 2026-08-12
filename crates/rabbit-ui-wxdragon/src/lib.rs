@@ -133,6 +133,7 @@ pub struct WizardText {
     pub package_details_label: String,
     pub packages_osara_keymap_heading: String,
     pub packages_osara_keymap_replace_label: String,
+    pub packages_spanish_variant_label: String,
     pub packages_osara_keymap_unavailable_note: String,
     pub packages_osara_keymap_preserve_note: String,
     pub packages_osara_keymap_replace_note: String,
@@ -728,6 +729,7 @@ fn wizard_text(localizer: &Localizer) -> WizardText {
         packages_osara_keymap_replace_label: localizer
             .text("wizard-packages-osara-keymap-replace-label")
             .value,
+        packages_spanish_variant_label: localizer.text("packages-spanish-variant-label").value,
         packages_osara_keymap_unavailable_note: localizer
             .text("wizard-packages-osara-keymap-unavailable-note")
             .value,
@@ -1079,6 +1081,25 @@ pub fn osara_selected_for_rows(package_rows: &[PackageRow], indices: &[usize]) -
         .iter()
         .filter_map(|index| package_rows.get(*index))
         .any(|row| row.package_id == PACKAGE_OSARA)
+}
+
+/// The one package that currently offers a variant choice in the wizard.
+pub const VARIANT_CHOICE_PACKAGE_ID: &str = "langpack-es";
+/// Variant id selected when the wizard's choice control is ticked.
+pub const VARIANT_CHOICE_ALTERNATE_ID: &str = "pma";
+
+/// Build the `package_variants` map from the wizard's choice control.
+pub fn package_variants_from_choice(
+    alternate_selected: bool,
+) -> std::collections::BTreeMap<String, String> {
+    let mut variants = std::collections::BTreeMap::new();
+    if alternate_selected {
+        variants.insert(
+            VARIANT_CHOICE_PACKAGE_ID.to_string(),
+            VARIANT_CHOICE_ALTERNATE_ID.to_string(),
+        );
+    }
+    variants
 }
 
 /// Returns true when ReaPack is selected and its planned action would
@@ -4979,6 +5000,37 @@ mod tests {
     /// clear themselves, so the summary follows the (English, report-bound)
     /// error text with localized remediation steps. Everything else keeps
     /// exactly one error line.
+    /// The wizard's Spanish OSARA-translation checkbox maps to the variant
+    /// the install pipeline understands; unticked means "use the package's
+    /// default" (REAPER Accesible español), which is an empty map rather
+    /// than an explicit choice.
+    #[test]
+    fn spanish_variant_checkbox_maps_to_the_package_variant() {
+        let unticked = super::package_variants_from_choice(false);
+        assert!(unticked.is_empty(), "default is expressed by absence");
+
+        let ticked = super::package_variants_from_choice(true);
+        assert_eq!(
+            ticked
+                .get(super::VARIANT_CHOICE_PACKAGE_ID)
+                .map(String::as_str),
+            Some(super::VARIANT_CHOICE_ALTERNATE_ID)
+        );
+        // And that id must actually exist on the package, or the choice
+        // would silently fall back to the default.
+        let specs = rabbit_core::package::package_specs_by_id(Platform::Windows);
+        let spanish = specs
+            .get(super::VARIANT_CHOICE_PACKAGE_ID)
+            .expect("Spanish language pack");
+        assert!(
+            spanish
+                .variants
+                .iter()
+                .any(|v| v.id == super::VARIANT_CHOICE_ALTERNATE_ID),
+            "the wizard's variant id must exist in the manifest"
+        );
+    }
+
     #[test]
     fn wizard_error_summary_adds_localized_hint_for_antivirus_blocks() {
         let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();

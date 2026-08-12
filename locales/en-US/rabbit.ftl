@@ -149,6 +149,7 @@ wizard-version-check-heading = Checking latest versions
 wizard-version-check-status-pending = Preparing latest-version check…
 # $package is the localized package display name.
 wizard-version-check-status-checking = Checking { $package }…
+wizard-version-check-status-progress = Checking versions… ({ $done } of { $total })
 # $error_count is the number of failed checks.
 wizard-version-check-status-error = { $error_count } version check(s) failed. Use Back to try a different target, or close RABBIT.
 wizard-version-check-progress-label = Progress
@@ -160,6 +161,7 @@ wizard-package-details-label = Package details
 wizard-package-whats-new-heading = What's new in { $package }:
 wizard-packages-osara-keymap-heading = OSARA key map
 wizard-packages-osara-keymap-replace-label = Replace your current key map with latest OSARA key map
+packages-spanish-variant-label = Use Team PMA's Spanish OSARA translation (es_MX) instead of REAPER Accesible español (es_ES)
 wizard-packages-osara-keymap-unavailable-note = Select OSARA to configure its key map behavior.
 wizard-packages-osara-keymap-preserve-note = For advanced users: your current key map will be preserved. Rabbit won't touch reaper-kb.ini, you will need to manage staying up to date with the latest OSARA key map additions manually.
 wizard-packages-osara-keymap-replace-note = Recommended for new through intermediate users: RABBIT will backup a copy of your current reaper-kb.ini file, then replace it with the latest version of the OSARA key map.

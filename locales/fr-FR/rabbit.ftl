@@ -149,6 +149,7 @@ wizard-version-check-heading = Vérification des dernières versions
 wizard-version-check-status-pending = Préparation de la vérification des dernières versions…
 # $package is the localized package display name.
 wizard-version-check-status-checking = Vérification de { $package }…
+wizard-version-check-status-progress = Vérification des versions… ({ $done } sur { $total })
 # $error_count is the number of failed checks.
 wizard-version-check-status-error = { $error_count } vérification(s) de version ont échoué. Utilisez Précédent pour essayer une autre cible, ou fermez RABBIT.
 wizard-version-check-progress-label = Progression
@@ -160,6 +161,7 @@ wizard-package-details-label = Détails du paquet
 wizard-package-whats-new-heading = Nouveautés dans { $package } :
 wizard-packages-osara-keymap-heading = Raccourcis clavier OSARA
 wizard-packages-osara-keymap-replace-label = Remplacer vos raccourcis clavier par les derniers d'OSARA
+packages-spanish-variant-label = Utiliser la traduction espagnole d'OSARA de l'Équipe PMA (es_MX) au lieu de REAPER Accesible español (es_ES)
 wizard-packages-osara-keymap-unavailable-note = Sélectionnez OSARA pour configurer le comportement de ses raccourcis clavier.
 wizard-packages-osara-keymap-preserve-note = Pour les utilisateurs avancés : vos raccourcis clavier actuels seront conservés. RABBIT ne touchera pas à reaper-kb.ini ; vous devrez gérer manuellement la mise à jour avec les derniers ajouts de raccourcis OSARA.
 wizard-packages-osara-keymap-replace-note = Recommandé pour les utilisateurs débutants à intermédiaires : RABBIT sauvegardera une copie de votre fichier reaper-kb.ini actuel, puis le remplacera par la dernière version des raccourcis clavier OSARA.

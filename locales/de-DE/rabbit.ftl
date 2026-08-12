@@ -149,6 +149,7 @@ wizard-version-check-heading = Prüfung auf neueste Versionen
 wizard-version-check-status-pending = Versionsprüfung wird vorbereitet…
 # $package is the localized package display name.
 wizard-version-check-status-checking = { $package } wird geprüft…
+wizard-version-check-status-progress = Versionen werden geprüft… ({ $done } von { $total })
 # $error_count is the number of failed checks.
 wizard-version-check-status-error = { $error_count } Versionsprüfung(en) fehlgeschlagen. Wählen Sie „Zurück“, um ein anderes Ziel zu versuchen, oder schließen Sie RABBIT.
 wizard-version-check-progress-label = Fortschritt
@@ -160,6 +161,7 @@ wizard-package-details-label = Paketdetails
 wizard-package-whats-new-heading = Neuerungen in { $package }:
 wizard-packages-osara-keymap-heading = OSARA-Tastenzuordnung
 wizard-packages-osara-keymap-replace-label = Aktuelle Tastenzuordnung durch OSARA-Tastenzuordnung ersetzen
+packages-spanish-variant-label = Die spanische OSARA-Übersetzung von Team PMA (es_MX) statt REAPER Accesible español (es_ES) verwenden
 wizard-packages-osara-keymap-unavailable-note = Wählen Sie OSARA aus, um das Verhalten der Tastenzuordnung zu konfigurieren.
 wizard-packages-osara-keymap-preserve-note = Die aktuelle Tastenzuordnung wird als nicht standardmäßige Überschreibung beibehalten. RABBIT sollte reaper-kb.ini nicht überschreiben.
 wizard-packages-osara-keymap-replace-note = RABBIT sichert die Datei reaper-kb.ini und ersetzt sie durch die OSARA-Tastenzuordnung. Dies ist die Standardeinstellung.

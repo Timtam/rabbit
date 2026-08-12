@@ -149,6 +149,7 @@ wizard-version-check-heading = Comprobando las últimas versiones…
 wizard-version-check-status-pending = Preparando la comprobación de la última versión…
 # $package is the localized package display name.
 wizard-version-check-status-checking = revisando { $package }…
+wizard-version-check-status-progress = Comprobando versiones… ({ $done } de { $total })
 # $error_count is the number of failed checks.
 wizard-version-check-status-error = { $error_count } en la comprobación de versión (s) falló. Usa el botón atrás para intentar con una ruta diferente, o cierra RABBIT.
 wizard-version-check-progress-label = progreso
@@ -160,6 +161,7 @@ wizard-package-details-label = Detalles del paquete
 wizard-package-whats-new-heading = Novedades en { $package }:
 wizard-packages-osara-keymap-heading = Mapa de atajos de teclado de Osara
 wizard-packages-osara-keymap-replace-label = Reemplazar el mapa de teclado actual con el último mapa de teclado
+packages-spanish-variant-label = Usar la traducción de OSARA al español del Equipo PMA (es_MX) en lugar de REAPER Accesible español (es_ES)
 wizard-packages-osara-keymap-unavailable-note = Selecciona Osara para configurar el comportamiento de su mapa de teclado.
 wizard-packages-osara-keymap-preserve-note = Para usuarios avanzados: Tu mapa de teclado se conservará. Rabbit no modifica tu archivo reaper-kb.ini, debes estar al día con las adiciones al mapa de forma manual.
 wizard-packages-osara-keymap-replace-note = Recomendado para usuarios principiantes o intermedios: RABBIT ará una copia de tu archivo reaper-kb.ini, y reemplazará este archivo con una nueva copia del último mapa de teclado de Osara.
