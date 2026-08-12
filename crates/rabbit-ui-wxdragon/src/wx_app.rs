@@ -2905,7 +2905,11 @@ fn populate_packages_tree(
             rabbit_core::package::PackageCategory::Additional => additional_software_group
                 .as_ref()
                 .unwrap_or(&packages_group),
-            rabbit_core::package::PackageCategory::Core => &packages_group,
+            // Language packs currently hang under the main Packages group;
+            // they get their own group when the wizard's language-pack
+            // handling lands.
+            rabbit_core::package::PackageCategory::Core
+            | rabbit_core::package::PackageCategory::Language => &packages_group,
         };
         let label = format_row_label(&row.summary, row.selected);
         if let Some(item) = tree.append_item(parent, &label, None, None) {
