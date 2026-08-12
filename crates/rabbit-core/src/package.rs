@@ -44,6 +44,9 @@ pub struct PackageSpec {
     /// BCP-47 language subtag this package provides, if it is a language
     /// pack; see [`EmbeddedPackageSpec::language`].
     pub language: Option<String>,
+    /// File name to install under, overriding the upstream name; see
+    /// [`EmbeddedPackageSpec::install_as`].
+    pub install_as: Option<String>,
     /// Mutual-exclusion group; see [`EmbeddedPackageSpec::exclusive_group`].
     pub exclusive_group: Option<String>,
     /// Package ids this package installs on top of; see
@@ -129,6 +132,15 @@ pub struct EmbeddedPackageSpec {
     /// UI language. `None` for everything that isn't a language pack.
     #[serde(default)]
     pub language: Option<String>,
+    /// File name to install the resolved artifact under, overriding whatever
+    /// the upstream calls it. REAPER language packs are selected by FILE
+    /// NAME — OSARA reads it to pick its own translation — so the community
+    /// packs, which ship under names like `DE_(+SWS).ReaperLangPack`, must
+    /// land as a locale-shaped `de_DE.ReaperLangPack`. Also how the two
+    /// Spanish OSARA translations are distinguished (`es_ES` vs `es_MX`).
+    /// `None` keeps the upstream name.
+    #[serde(default)]
+    pub install_as: Option<String>,
     /// Packages sharing a non-empty group are mutually exclusive: installing
     /// one removes any other from the group that RABBIT previously installed
     /// (per its receipts). REAPER loads exactly one language pack, so
@@ -777,6 +789,23 @@ pub fn effective_recommended(spec: &PackageSpec, host: &HostCapabilities) -> boo
     spec.recommended || spec.recommended_when.is_some_and(|cap| host.has(cap))
 }
 
+/// Whether `spec` is a language pack for the language RABBIT itself is
+/// running in — the pack the wizard suggests (and ticks) by default.
+///
+/// Compares language subtags, so a pack declaring `es` matches an `es-ES`
+/// *or* `es-MX` UI. English is deliberately never a match: REAPER is already
+/// English, so no pack exists (or is wanted) for it.
+pub fn matches_ui_language(spec: &PackageSpec, locale: &str) -> bool {
+    let Some(language) = spec.language.as_deref() else {
+        return false;
+    };
+    if language.eq_ignore_ascii_case("en") {
+        return false;
+    }
+    let ui_language = locale.split(['-', '_']).next().unwrap_or(locale);
+    ui_language.eq_ignore_ascii_case(language)
+}
+
 /// Build the package manifest by parsing every embedded per-package file
 /// (gathered by build.rs) into an [`EmbeddedPackageSpec`]. Files are already
 /// sorted by name (numeric-prefix order); the result keeps that order so the
@@ -960,6 +989,7 @@ impl EmbeddedPackageSpec {
             package_kind: self.package_kind,
             install_destination: self.install_destination,
             language: self.language.clone(),
+            install_as: self.install_as.clone(),
             exclusive_group: self.exclusive_group.clone(),
             depends_on: self.depends_on.clone(),
             required: self.required,
@@ -1067,6 +1097,72 @@ mod tests {
         assert!(!version_needs_update(&one, &one, VersionComparison::Exact));
         assert!(version_needs_update(&one, &two, VersionComparison::Exact));
         assert!(version_needs_update(&two, &one, VersionComparison::Exact));
+    }
+
+    /// The wizard ticks the pack matching its own UI language, matching on
+    /// the language subtag so es-MX gets the Spanish pack. English never
+    /// matches: REAPER is already English.
+    #[test]
+    fn matches_ui_language_compares_subtags_and_skips_english() {
+        use super::{matches_ui_language, package_specs_by_id};
+        use crate::model::Platform;
+
+        let specs = package_specs_by_id(Platform::Windows);
+        let spanish = specs.get("langpack-es").expect("Spanish pack");
+        let german = specs.get("langpack-de").expect("German pack");
+        let reaper = specs.get(super::PACKAGE_REAPER).expect("REAPER");
+
+        for locale in ["es-ES", "es_MX", "es"] {
+            assert!(
+                matches_ui_language(spanish, locale),
+                "{locale} should match the Spanish pack"
+            );
+        }
+        assert!(!matches_ui_language(spanish, "de-DE"));
+        assert!(matches_ui_language(german, "de-DE"));
+        assert!(!matches_ui_language(german, "en-US"));
+        // A non-language package never matches.
+        assert!(!matches_ui_language(reaper, "es-ES"));
+    }
+
+    /// A language pack must declare the locale-shaped file name REAPER (and
+    /// OSARA, which reads it to pick its own translation) expects, rather
+    /// than inheriting an upstream name like `DE_(+SWS).ReaperLangPack`.
+    #[test]
+    fn language_packs_install_under_a_locale_shaped_name() {
+        use super::{PackageKind, embedded_package_manifest};
+
+        let mut seen = 0;
+        for spec in embedded_package_manifest().packages {
+            if spec.package_kind != PackageKind::LanguagePack {
+                continue;
+            }
+            seen += 1;
+            let language = spec
+                .language
+                .as_deref()
+                .unwrap_or_else(|| panic!("{} must declare a language", spec.id));
+            let install_as = spec
+                .install_as
+                .as_deref()
+                .unwrap_or_else(|| panic!("{} must declare install_as", spec.id));
+            assert!(
+                install_as.ends_with(".ReaperLangPack"),
+                "{}: {install_as} is not a .ReaperLangPack",
+                spec.id
+            );
+            assert!(
+                install_as
+                    .to_ascii_lowercase()
+                    .starts_with(&format!("{language}_")),
+                "{}: {install_as} should start with the {language}_ locale prefix",
+                spec.id
+            );
+        }
+        assert!(
+            seen >= 2,
+            "expected the Spanish and German packs, saw {seen}"
+        );
     }
 
     /// Every package must declare a comparison mode consistent with its

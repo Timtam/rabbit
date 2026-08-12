@@ -2833,8 +2833,19 @@ fn package_rows(
             //    komplete_kontrol_installed`), so non-recommended packages
             //    (FFmpeg, plain ReaKontrol on a non-KK host) stay unchecked.
             //  - Keep → never ticked (nothing to do).
+            // A language pack for the language RABBIT is running in counts
+            // as recommended, so a Spanish user gets the Spanish pack ticked
+            // without hunting for it. Packs for other languages stay listed
+            // but unticked; nothing is offered for English, since REAPER is
+            // already English.
             let recommended = spec
-                .map(|spec| rabbit_core::package::effective_recommended(spec, host))
+                .map(|spec| {
+                    rabbit_core::package::effective_recommended(spec, host)
+                        || rabbit_core::package::matches_ui_language(
+                            spec,
+                            localizer.active_locale(),
+                        )
+                })
                 .unwrap_or(false);
             let initially_selected = match action.action {
                 PlanActionKind::Update => true,

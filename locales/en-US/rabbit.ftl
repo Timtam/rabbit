@@ -17,6 +17,8 @@ package-jaws-scripts = Snowman's JAWS Scripts for REAPER
 package-ffmpeg = FFmpeg for Improved Video Support
 package-surge-xt = Surge XT
 package-app2clap = app2clap
+package-langpack-es = REAPER in Spanish
+package-langpack-de = REAPER in German
 
 package-reaper-description = REAPER is the digital audio workstation that everything else here builds on. RABBIT can install or update REAPER for you.
 package-osara-description = OSARA is the open source accessibility extension that makes REAPER usable with screen readers. NVDA, JAWS and Narrator on Windows, VoiceOver on macOS are all widely adopted, some other Windows screen readers might also work. Install OSARA if you rely on a screen reader to use REAPER.
@@ -27,6 +29,8 @@ package-jaws-scripts-description = Snowman's scripts improve how JAWS handles va
 package-ffmpeg-description = FFmpeg's shared runtime libraries enable REAPER's video decoder to import and play back common video and audio formats. RABBIT installs the BtbN GPL-shared build's bin folder into UserPlugins; the patch level isn't recoverable from the DLL filenames alone, so externally-installed FFmpegs are reported with a `<major>.0.0` placeholder.
 package-surge-xt-description = Surge XT is a free, open-source hybrid synthesizer. RABBIT runs the vendor installer for you — it lays down the VST3, CLAP, AU (macOS only), and standalone formats system-wide so REAPER and other DAWs can load Surge XT. Tracks the rolling nightly channel because the most recent stable release (1.3.4) is from August 2024 and the project effectively ships through nightlies now. Standard REAPER installations only: the factory data lives outside any portable REAPER folder.
 package-app2clap-description = app2clap is a CLAP plug-in for Windows that captures audio from other applications and brings it into REAPER (or any CLAP host) as a plug-in you insert on a track — handy for recording or processing sound from a browser, media player, or other program. RABBIT downloads the latest build and installs app2clap.clap into your per-user CLAP folder, so no administrator rights are needed. Windows only. Standard REAPER installations only: it installs outside any portable REAPER folder.
+package-langpack-es-description = Translates REAPER's own interface into Spanish, including the SWS extension. Maintained by Javier Robledo for the Spanish REAPER community, and distributed through reaperespa.com — RABBIT downloads the current version and installs it as es_ES.ReaperLangPack. OSARA reads that file name to choose its own Spanish translation. After installing, pick the language in REAPER's preferences (or let RABBIT set it for you).
+package-langpack-de-description = Translates REAPER's own interface into German, including the SWS extension. Maintained by MrData and published in the REAPER Stash — RABBIT downloads the current version and installs it as de_DE.ReaperLangPack. After installing, pick the language in REAPER's preferences (or let RABBIT set it for you).
 
 # $reason is one of the localized "wizard-package-row-unavailable-*" strings
 # explaining *why* the row is unavailable. Appended to the row's main summary

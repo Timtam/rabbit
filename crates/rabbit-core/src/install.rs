@@ -124,19 +124,31 @@ pub fn install_cached_artifacts_with_progress(
         // that doesn't declare one. Root-level so it applies to every
         // artifact source, not just GitHub releases — language packs resolve
         // through `http_artifact` and install to `LangPack/`.
-        let destination = lookup_install_spec(
+        let install_spec = lookup_install_spec(
             &artifact.descriptor.package_id,
             artifact.descriptor.platform,
         )
-        .map(|spec| spec.install_destination)
-        .unwrap_or_default();
+        .ok();
+        let destination = install_spec
+            .as_ref()
+            .map(|spec| spec.install_destination)
+            .unwrap_or_default();
+        // `install_as` renames the installed file, because REAPER selects a
+        // language pack BY FILE NAME (and OSARA reads that name to pick its
+        // own translation). Guarded to single-file packages: applying one
+        // name to a multi-file package — FFmpeg ships a whole set of DLLs —
+        // would collapse them all onto the same target.
+        let install_as = install_spec
+            .as_ref()
+            .and_then(|spec| spec.install_as.as_deref())
+            .filter(|_| prepared.files.len() == 1);
 
         for file in &prepared.files {
             let install_target = resolve_install_target(
                 destination,
                 &artifact.descriptor.package_id,
                 resource_path,
-                &file.target_file_name,
+                install_as.unwrap_or(&file.target_file_name),
             )?;
             let target_path = install_target.target_path;
             let target_exists = target_path.is_file();

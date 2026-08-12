@@ -10,6 +10,7 @@
   ],
   "exclusive_group": "reaper-langpack",
   "language": "es",
+  "install_as": "es_ES.ReaperLangPack",
   "required": false,
   "recommended": false,
   "supported_platforms": [
