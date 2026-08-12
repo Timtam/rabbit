@@ -82,10 +82,16 @@ pub fn extract_user_plugin_from_archive(
 
 fn matches_user_plugin_file(file_name: &str, spec: &PackageSpec) -> bool {
     let lower = file_name.to_ascii_lowercase();
-    let prefix_match = spec
-        .user_plugin_prefixes
-        .iter()
-        .any(|prefix| lower.starts_with(&prefix.to_ascii_lowercase()));
+    // An empty prefix list means "any name": REAPER language packs are named
+    // after their language (es_ES.ReaperLangPack, Deutsch.ReaperLangPack…)
+    // and share no common prefix, so they are identified by suffix alone.
+    // Every other package pins both, and an empty list would otherwise match
+    // nothing rather than everything.
+    let prefix_match = spec.user_plugin_prefixes.is_empty()
+        || spec
+            .user_plugin_prefixes
+            .iter()
+            .any(|prefix| lower.starts_with(&prefix.to_ascii_lowercase()));
     let suffix_match = spec
         .user_plugin_suffixes
         .iter()
@@ -436,6 +442,40 @@ mod tests {
     use crate::error::RabbitError;
     use crate::model::Platform;
     use crate::package::{PACKAGE_FFMPEG, PACKAGE_REAKONTROL, package_specs_by_id};
+
+    /// A package that identifies its file by suffix alone (an empty prefix
+    /// list) must match any basename with that suffix — REAPER language
+    /// packs are named after their language and share no common prefix.
+    /// The previous `prefix_match && suffix_match` made an empty list match
+    /// nothing at all.
+    #[test]
+    fn empty_prefix_list_matches_any_name_with_the_suffix() {
+        let dir = tempdir().unwrap();
+        let archive_path = dir.path().join("langpack.zip");
+        write_test_archive(
+            &archive_path,
+            &[
+                ("readme.txt", b"docs"),
+                ("es_ES.ReaperLangPack", b"langpack-bytes"),
+            ],
+        );
+
+        let mut spec = package_specs_by_id(Platform::Windows)
+            .remove(PACKAGE_REAKONTROL)
+            .unwrap();
+        spec.user_plugin_prefixes = Vec::new();
+        spec.user_plugin_suffixes = vec![".ReaperLangPack".to_string()];
+
+        let extract_dir = dir.path().join("extract");
+        let extracted =
+            extract_user_plugin_from_archive(&archive_path, &spec, &extract_dir).unwrap();
+
+        assert_eq!(extracted.file_name, "es_ES.ReaperLangPack");
+        assert_eq!(
+            std::fs::read(&extracted.extracted_path).unwrap(),
+            b"langpack-bytes"
+        );
+    }
 
     #[test]
     fn extracts_matching_user_plugin_binary_from_zip() {
