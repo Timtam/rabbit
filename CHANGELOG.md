@@ -46,13 +46,19 @@ from this file and posts it as the GitHub release body.
   Preferences, General — untick that step if you only want the file. Only
   one language pack can be active, so installing one removes the previous
   one RABBIT installed; a pack you put in the `LangPack` folder yourself is
-  never touched. Language packs are published without version numbers, so
-  RABBIT tracks them by content and offers an update when the translator
-  publishes a new file. Spanish additionally offers a choice of OSARA
+  never touched. They appear under their own **Language packs** heading in
+  the package list. Language packs are published without version numbers,
+  so RABBIT identifies them by what the server reports about the file (its
+  ETag, or last-modified date and size, falling back to the file's
+  contents) and offers an update when the translator publishes a new one —
+  no RABBIT release needed. Spanish additionally offers a choice of OSARA
   translation — *REAPER Accesible español* (the default) or *Team PMA* —
-  which OSARA picks up from the pack's file name; switching between them
-  reinstalls under the new name and cleans up the old file. Suggested by
-  Carlos Esteban Martínez (#19).
+  which OSARA picks up from the pack's file name. Choose it from the
+  **Spanish OSARA translation** dropdown on the packages page (or
+  `--package-variant langpack-es=pma` on the command line); your choice is
+  remembered, so a later update keeps the translation you picked instead of
+  reverting to the default, and switching cleans up the old file. Suggested
+  by Carlos Esteban Martínez (#19).
 - RABBIT now speaks Spanish. The translation was contributed by Carlos
   Esteban Martínez (#19) and is picked automatically on Spanish systems —
   including regional variants, so an es-MX machine gets the Spanish UI —
@@ -81,6 +87,13 @@ from this file and posts it as the GitHub release body.
 
 ### Changed
 
+- The check for the latest versions now runs several packages at once
+  instead of one after another, so it finishes in roughly the time of the
+  slowest single check rather than the sum of all of them. The status line
+  reports "Checking versions… (3 of 11)" as they complete, so it keeps
+  moving even while a slow check is still running — previously a language
+  pack, whose check has to look at the file itself, could leave the
+  progress bar sitting still for several seconds.
 - A single package failing no longer aborts the whole install. RABBIT now
   records the failure, keeps installing every other selected package, and
   reports what succeeded and what failed at the end (the wizard's result
