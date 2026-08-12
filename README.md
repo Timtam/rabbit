@@ -50,8 +50,35 @@ wizard — extras that aren't tied to REAPER itself. Both are disabled on
 portable REAPER targets, since they install to fixed per-user/system
 locations rather than into the portable REAPER folder.
 
+### Language packs
+
+RABBIT can also translate **REAPER itself** (not just its own wizard), by
+installing a community language pack into `<resource>/LangPack/`. Two are
+available today, and both translate the SWS extension as well:
+
+- **Spanish** — maintained by Javier Robledo for the Spanish REAPER
+  community and published on
+  [reaperespa.com](https://www.reaperespa.com/), installed as
+  `es_ES.ReaperLangPack`.
+- **German** — maintained by MrData and published in the
+  [REAPER Stash](https://stash.reaper.fm/v/26248/), installed as
+  `de_DE.ReaperLangPack`.
+
+The pack matching the language RABBIT is running in is suggested and
+ticked for you; packs for other languages are listed but unticked. Nothing
+is offered in English, since REAPER is already English.
+
+REAPER loads exactly one language pack, so installing one removes the
+previous one **RABBIT** installed — a pack you dropped into `LangPack/`
+yourself is never touched. By default RABBIT also sets the pack as
+REAPER's language (see the configuration step below).
+
+These packs are published without version numbers, so RABBIT identifies
+them by content: it notices when a translator publishes a new file and
+offers it as an update, without RABBIT needing a new release.
+
 Beyond installing packages, RABBIT can also apply small post-install
-configuration tweaks. Today there's one such step:
+configuration tweaks:
 
 - **Add the REAPER Accessibility ReaPack repository to ReaPack**
   (`https://github.com/Timtam/reapack/raw/master/index.xml`). When
@@ -59,6 +86,12 @@ configuration tweaks. Today there's one such step:
   ticked by default; if the repository is already configured in your
   `reapack.ini`, the step shows as *already applied* and is skipped.
   Idempotent and safe to re-run.
+- **Set REAPER's language** to a language pack you're installing, by
+  writing it into `reaper.ini`. Ticked by default whenever a language pack
+  is part of the plan — untick it if you want the file installed without
+  changing REAPER's current language. Only the one setting is touched;
+  the rest of `reaper.ini` is preserved byte for byte, including its
+  original text encoding.
 
 Built with screen reader users in mind: keyboard-first wizard, native
 controls, NVDA/JAWS/Narrator/VoiceOver tested, English, German, Spanish, French
@@ -174,9 +207,21 @@ record of what was installed.
 With no flags, all recommended steps whose dependencies are satisfied
 (and that aren't already applied) run automatically; pass an explicit
 list to opt in to a specific subset, or `--skip-config-step` to opt
-out of one. The only step today is
-`reapack-add-reaper-accessibility-remote`. Run `RABBIT --help` for the
-full set of flags.
+out of one. Step ids today are
+`reapack-add-reaper-accessibility-remote`,
+`reapack-add-reaper-accessible-fr-remote`,
+`reapack-add-reaper-accessible-en-remote`, and
+`set-reaper-language-<language>` (e.g. `set-reaper-language-de`, which
+depends on that language's pack being installed or in the plan). Run
+`RABBIT --help` for the full set of flags.
+
+Language packs install like any other package, e.g.:
+
+```
+RABBIT install-extension --package langpack-de --resource-path "%APPDATA%\REAPER" --apply
+RABBIT setup --resource-path "%APPDATA%\REAPER" --package langpack-es \
+     --config-step set-reaper-language-es --apply
+```
 
 ### Maintain
 

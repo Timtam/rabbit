@@ -33,6 +33,22 @@ from this file and posts it as the GitHub release body.
 
 ### Added
 
+- RABBIT can now install **REAPER language packs**, so REAPER itself speaks
+  your language rather than only RABBIT's wizard. Two are available to
+  start with, both of which also translate the SWS extension: Spanish,
+  maintained by Javier Robledo for the Spanish REAPER community, and
+  German, maintained by MrData in the REAPER Stash. The pack matching the
+  language RABBIT is running in is suggested and ticked for you (a Mexican
+  Spanish system gets the Spanish pack); packs for other languages are
+  listed but left unticked, and nothing is offered in English because
+  REAPER is already English. By default RABBIT also sets the pack as
+  REAPER's language, so you don't have to find it under Options,
+  Preferences, General — untick that step if you only want the file. Only
+  one language pack can be active, so installing one removes the previous
+  one RABBIT installed; a pack you put in the `LangPack` folder yourself is
+  never touched. Language packs are published without version numbers, so
+  RABBIT tracks them by content and offers an update when the translator
+  publishes a new file. Suggested by Carlos Esteban Martínez (#19).
 - RABBIT now speaks Spanish. The translation was contributed by Carlos
   Esteban Martínez (#19) and is picked automatically on Spanish systems —
   including regional variants, so an es-MX machine gets the Spanish UI —
