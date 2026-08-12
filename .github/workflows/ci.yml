@@ -111,16 +111,51 @@ jobs:
         if: matrix.platform_id == 'windows' && runner.arch == 'ARM64'
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           # Choco's llvm package is x86_64-only; bindgen rejects it for an
           # aarch64 target ("invalid DLL (x86-64)"). Pull the woa64 LLVM
           # installer and ARM64 Ninja straight from upstream releases.
+          #
+          # Downloaded with curl rather than Invoke-WebRequest because these
+          # transfers intermittently die mid-body ("The response ended
+          # prematurely"), which has failed builds that had nothing to do with
+          # the change under test — the LLVM installer alone is >100 MB.
+          # curl retries a partial transfer by itself; Invoke-WebRequest does
+          # not. --retry-all-errors is what covers error 18 (partial file),
+          # since plain --retry only covers timeouts and 5xx. The size floor
+          # catches a "successful" download that is actually an error page.
+          # --retry-all-errors needs curl >= 7.71; probe rather than assume,
+          # because passing an unknown option would break every arm64 build —
+          # strictly worse than the intermittent failure being fixed here.
+          $RetryArgs = @("--retry", "5", "--retry-delay", "5")
+          if ((curl.exe --help all 2>&1) -match "--retry-all-errors") {
+            $RetryArgs += "--retry-all-errors"
+          }
+          function Get-Upstream($Url, $OutFile, $MinimumBytes) {
+            curl.exe --location --fail --show-error --silent `
+              @RetryArgs --connect-timeout 30 --output $OutFile $Url
+            if ($LASTEXITCODE -ne 0) {
+              throw "download failed after retries ($Url)"
+            }
+            $size = (Get-Item $OutFile).Length
+            if ($size -lt $MinimumBytes) {
+              throw "download too small: $size bytes from $Url"
+            }
+            Write-Host "downloaded $OutFile ($size bytes)"
+          }
+
           $LlvmVersion = "19.1.7"
           $LlvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LlvmVersion/LLVM-$LlvmVersion-woa64.exe"
-          Invoke-WebRequest -Uri $LlvmUrl -OutFile "$env:RUNNER_TEMP\llvm-installer.exe"
+          Get-Upstream $LlvmUrl "$env:RUNNER_TEMP\llvm-installer.exe" 50MB
           Start-Process -FilePath "$env:RUNNER_TEMP\llvm-installer.exe" -ArgumentList "/S" -Wait
           $NinjaUrl = "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-winarm64.zip"
-          Invoke-WebRequest -Uri $NinjaUrl -OutFile "$env:RUNNER_TEMP\ninja.zip"
+          Get-Upstream $NinjaUrl "$env:RUNNER_TEMP\ninja.zip" 100KB
           Expand-Archive -Path "$env:RUNNER_TEMP\ninja.zip" -DestinationPath "C:\ninja" -Force
+          # Fail here rather than 10 minutes later in bindgen with a confusing
+          # "cannot find libclang" if the silent installer did not land.
+          if (-not (Test-Path "C:\Program Files\LLVM\bin\libclang.dll")) {
+            throw "LLVM installed but libclang.dll is missing"
+          }
           "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "C:\ninja" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
