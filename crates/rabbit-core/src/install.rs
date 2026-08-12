@@ -16,7 +16,7 @@ use crate::package::{InstallDestination, PACKAGE_FFMPEG, PackageSpec, package_sp
 use crate::preflight::{PreflightOptions, PreflightReport, run_install_preflight};
 use crate::progress::{ProgressEvent, ProgressReporter};
 use crate::receipt::{
-    PackageReceiptParams, RECEIPT_RELATIVE_PATH, load_install_state, receipt_path,
+    InstallState, PackageReceiptParams, RECEIPT_RELATIVE_PATH, load_install_state, receipt_path,
     save_install_state, upsert_package_receipt,
 };
 use crate::rollback::{BackupManifest, BackupManifestFile, save_backup_manifest};
@@ -119,15 +119,16 @@ pub fn install_cached_artifacts_with_progress(
         });
         let prepared = prepare_install_source(artifact)?;
         let mut artifact_target_paths = Vec::with_capacity(prepared.files.len());
-        // Install destination is per-package data: the package's
-        // `github_release.install_destination`, defaulting to UserPlugins for
-        // everything that doesn't declare one.
+        // Install destination is per-package data: the package's root-level
+        // `install_destination`, defaulting to UserPlugins for everything
+        // that doesn't declare one. Root-level so it applies to every
+        // artifact source, not just GitHub releases — language packs resolve
+        // through `http_artifact` and install to `LangPack/`.
         let destination = lookup_install_spec(
             &artifact.descriptor.package_id,
             artifact.descriptor.platform,
         )
-        .ok()
-        .and_then(|spec| spec.github_release.map(|github| github.install_destination))
+        .map(|spec| spec.install_destination)
         .unwrap_or_default();
 
         for file in &prepared.files {
@@ -192,6 +193,11 @@ pub fn install_cached_artifacts_with_progress(
                     architecture: Some(artifact.descriptor.architecture),
                 },
             )?;
+            remove_exclusive_group_siblings(
+                &mut state,
+                &artifact.descriptor.package_id,
+                &artifact_target_paths,
+            );
         }
         progress.report(ProgressEvent::InstallCompleted {
             package_id: artifact.descriptor.package_id.clone(),
@@ -221,6 +227,68 @@ pub fn install_cached_artifacts_with_progress(
     }
 
     Ok(report)
+}
+
+/// After installing `package_id`, remove any package in the same exclusive
+/// group that RABBIT previously installed: its files come off disk and its
+/// receipt is dropped. REAPER loads exactly one language pack, so switching
+/// from German to Spanish — or between the two Spanish OSARA variants —
+/// must not leave the old `.ReaperLangPack` behind.
+///
+/// Deliberately receipt-driven: only files RABBIT recorded installing are
+/// removed, so a language pack the user put in `LangPack/` by hand is never
+/// touched. Paths the new install just wrote are skipped, so a sibling that
+/// happens to share a target file name can't delete the file we just put
+/// there. Best-effort — a file that won't delete (locked, already gone)
+/// leaves the receipt alone so a later run retries, and never fails the
+/// install that already succeeded.
+fn remove_exclusive_group_siblings(
+    state: &mut InstallState,
+    package_id: &str,
+    just_installed: &[PathBuf],
+) {
+    remove_exclusive_group_siblings_in(
+        state,
+        &crate::package::exclusive_group_siblings(package_id),
+        package_id,
+        just_installed,
+    );
+}
+
+/// Mechanics of [`remove_exclusive_group_siblings`] with the sibling list
+/// passed in, so the removal rules are testable without depending on the
+/// shipped manifest's grouping.
+fn remove_exclusive_group_siblings_in(
+    state: &mut InstallState,
+    siblings: &[String],
+    package_id: &str,
+    just_installed: &[PathBuf],
+) {
+    for sibling in siblings {
+        let Some(receipt) = state.packages.get(sibling) else {
+            continue;
+        };
+        let mut all_removed = true;
+        for file in &receipt.installed_files {
+            if just_installed.iter().any(|path| path == &file.path) {
+                continue;
+            }
+            match fs::remove_file(&file.path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    eprintln!(
+                        "warning: could not remove {} superseded by {package_id}: {error}",
+                        file.path.display()
+                    );
+                    all_removed = false;
+                }
+            }
+        }
+        if all_removed {
+            state.packages.remove(sibling);
+        }
+    }
 }
 
 /// Where a prepared file installs (`target_path`) and the path used to
@@ -611,6 +679,62 @@ mod tests {
             target.backup_relative,
             PathBuf::from("UserPlugins").join("reaper_kontrol.dll")
         );
+    }
+
+    /// Installing one member of an exclusive group removes the files and
+    /// receipt of the previously-installed member (German -> Spanish), but
+    /// never touches a pack the user placed in LangPack/ themselves, because
+    /// removal is driven purely by RABBIT's own receipts.
+    #[test]
+    fn exclusive_group_removal_is_receipt_driven() {
+        use crate::receipt::{InstalledFileReceipt, PackageReceipt};
+
+        let dir = tempdir().unwrap();
+        let lang_dir = dir.path().join("LangPack");
+        std::fs::create_dir_all(&lang_dir).unwrap();
+
+        let rabbit_installed = lang_dir.join("Deutsch.ReaperLangPack");
+        let user_installed = lang_dir.join("Nederlands.ReaperLangPack");
+        let newly_installed = lang_dir.join("es_ES.ReaperLangPack");
+        for path in [&rabbit_installed, &user_installed, &newly_installed] {
+            std::fs::write(path, b"x").unwrap();
+        }
+
+        let mut state = InstallState::default();
+        state.packages.insert(
+            "langpack-de".to_string(),
+            PackageReceipt {
+                id: "langpack-de".to_string(),
+                version: None,
+                source_url: None,
+                source_sha256: None,
+                installed_files: vec![InstalledFileReceipt {
+                    path: rabbit_installed.clone(),
+                    sha256: None,
+                    size: None,
+                }],
+                installed_at: None,
+                rabbit_version: None,
+                architecture: None,
+            },
+        );
+
+        // Pretend langpack-de shares langpack-es's group. The real grouping
+        // comes from the manifest; this asserts the removal mechanics.
+        super::remove_exclusive_group_siblings_in(
+            &mut state,
+            &["langpack-de".to_string()],
+            "langpack-es",
+            std::slice::from_ref(&newly_installed),
+        );
+
+        assert!(!rabbit_installed.exists(), "RABBIT-installed pack removed");
+        assert!(
+            !state.packages.contains_key("langpack-de"),
+            "receipt dropped"
+        );
+        assert!(user_installed.exists(), "user's own pack untouched");
+        assert!(newly_installed.exists(), "the new pack survives");
     }
 
     #[test]

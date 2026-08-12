@@ -4,6 +4,7 @@
   "display_name_key": "package-reapack",
   "display_description_key": "package-reapack-description",
   "package_kind": "user_plugin_binary",
+  "install_destination": "user_plugins",
   "depends_on": [
     "reaper"
   ],
@@ -71,8 +72,7 @@
         "exact_name": "reaper_reapack-arm64.dylib"
       }
     ],
-    "artifact_kind": "extension_binary",
-    "install_destination": "user_plugins"
+    "artifact_kind": "extension_binary"
   },
   "detectors": [
     "rabbit_receipt",

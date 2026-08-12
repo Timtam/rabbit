@@ -38,6 +38,14 @@ pub struct PackageSpec {
     pub display_name_key: String,
     pub display_description_key: String,
     pub package_kind: PackageKind,
+    /// Where this package's resolved file installs; see
+    /// [`EmbeddedPackageSpec::install_destination`].
+    pub install_destination: InstallDestination,
+    /// BCP-47 language subtag this package provides, if it is a language
+    /// pack; see [`EmbeddedPackageSpec::language`].
+    pub language: Option<String>,
+    /// Mutual-exclusion group; see [`EmbeddedPackageSpec::exclusive_group`].
+    pub exclusive_group: Option<String>,
     /// Package ids this package installs on top of; see
     /// [`EmbeddedPackageSpec::depends_on`]. Used by the operation pipeline
     /// to cascade a failed dependency (a broken REAPER install) into a
@@ -110,6 +118,24 @@ pub struct EmbeddedPackageSpec {
     pub display_description_key: String,
     #[serde(default)]
     pub package_kind: PackageKind,
+    /// Where this package's resolved file installs. Root-level so it applies
+    /// to every artifact source (`github_release`, `http_artifact`,
+    /// `hfs_listing`) rather than only GitHub releases. Defaults to
+    /// `UserPlugins`.
+    #[serde(default)]
+    pub install_destination: InstallDestination,
+    /// BCP-47 language subtag this package provides (`es`), for packages
+    /// that localize REAPER. The wizard suggests the pack matching its own
+    /// UI language. `None` for everything that isn't a language pack.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Packages sharing a non-empty group are mutually exclusive: installing
+    /// one removes any other from the group that RABBIT previously installed
+    /// (per its receipts). REAPER loads exactly one language pack, so
+    /// switching from German to Spanish — or between the two Spanish OSARA
+    /// variants — must not leave the old file behind.
+    #[serde(default)]
+    pub exclusive_group: Option<String>,
     /// Package ids this package installs on top of. When a dependency is
     /// part of the same operation and its install fails (or is itself
     /// skipped because of a failed dependency), this package is skipped
@@ -170,6 +196,9 @@ pub enum PackageKind {
     UserPluginBinary,
     Keymap,
     ReapackPackage,
+    /// A REAPER language pack (`.ReaperLangPack`) translating REAPER's own
+    /// UI — and, for packs like the Spanish one, SWS and OSARA strings too.
+    LanguagePack,
     /// Drop-in script files (e.g. `.jss`/`.jsb`) that a screen reader loads
     /// from a known per-user directory. Platform-gated: a package of this
     /// kind only appears in the wizard when the relevant screen reader is
@@ -189,6 +218,8 @@ pub enum PackageCategory {
     #[default]
     Core,
     Additional,
+    /// REAPER language packs, listed in their own wizard group.
+    Language,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,9 +257,6 @@ pub struct GithubReleaseSpec {
     /// validator rejects a spec where neither is set for some asset.
     #[serde(default)]
     pub artifact_kind: Option<GithubArtifactKind>,
-    /// Where the resolved file installs. Defaults to `UserPlugins`.
-    #[serde(default)]
-    pub install_destination: InstallDestination,
 }
 
 /// Which GitHub release a [`GithubReleaseSpec`] reads. Serializes as the
@@ -735,6 +763,7 @@ pub fn host_supports_package(spec: &PackageSpec, host: &HostCapabilities) -> boo
         PackageKind::ReaperApp
         | PackageKind::UserPluginBinary
         | PackageKind::Keymap
+        | PackageKind::LanguagePack
         | PackageKind::ReapackPackage => true,
     }
 }
@@ -854,6 +883,27 @@ pub fn package_specs_by_id(platform: Platform) -> BTreeMap<String, PackageSpec> 
         .collect()
 }
 
+/// Package ids that share `package_id`'s exclusive group, excluding itself.
+/// Empty when the package declares no group. Installing one member must
+/// remove the others (REAPER loads exactly one language pack, so switching
+/// German → Spanish, or between the two Spanish OSARA variants, must not
+/// leave the previous file behind).
+pub fn exclusive_group_siblings(package_id: &str) -> Vec<String> {
+    let packages = embedded_package_manifest().packages;
+    let Some(group) = packages
+        .iter()
+        .find(|spec| spec.id == package_id)
+        .and_then(|spec| spec.exclusive_group.clone())
+    else {
+        return Vec::new();
+    };
+    packages
+        .into_iter()
+        .filter(|spec| spec.id != package_id && spec.exclusive_group.as_deref() == Some(&group))
+        .map(|spec| spec.id)
+        .collect()
+}
+
 /// How `package_id`'s versions are compared, per the embedded manifest.
 /// Unknown packages fall back to the default ordered comparison.
 pub fn version_comparison_for(package_id: &str) -> VersionComparison {
@@ -908,6 +958,9 @@ impl EmbeddedPackageSpec {
             display_name_key: self.display_name_key.clone(),
             display_description_key: self.display_description_key.clone(),
             package_kind: self.package_kind,
+            install_destination: self.install_destination,
+            language: self.language.clone(),
+            exclusive_group: self.exclusive_group.clone(),
             depends_on: self.depends_on.clone(),
             required: self.required,
             recommended: self.recommended,
@@ -1051,7 +1104,8 @@ mod tests {
         let manifest = embedded_package_manifest();
 
         assert_eq!(manifest.schema_version, 1);
-        assert_eq!(manifest.packages.len(), 9);
+        // 9 software packages + the Spanish REAPER language pack.
+        assert_eq!(manifest.packages.len(), 10);
         assert!(
             manifest
                 .packages
@@ -1090,7 +1144,12 @@ mod tests {
             }
         ));
         assert_eq!(github.artifact_kind, Some(GithubArtifactKind::Archive));
-        assert_eq!(github.install_destination, InstallDestination::UserPlugins);
+        // The install destination is root-level (it applies to every artifact
+        // source, not just GitHub releases).
+        assert_eq!(
+            reakontrol.install_destination,
+            InstallDestination::UserPlugins
+        );
         assert_eq!(reakontrol.user_plugin_prefixes, vec!["reaper_kontrol"]);
         assert!(
             reakontrol

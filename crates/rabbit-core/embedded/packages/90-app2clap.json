@@ -5,6 +5,7 @@
   "display_name_key": "package-app2clap",
   "display_description_key": "package-app2clap-description",
   "package_kind": "user_plugin_binary",
+  "install_destination": "windows_clap_dir",
   "required": false,
   "recommended": false,
   "supported_platforms": [
@@ -33,8 +34,7 @@
         "name_suffix": ".zip"
       }
     ],
-    "artifact_kind": "archive",
-    "install_destination": "windows_clap_dir"
+    "artifact_kind": "archive"
   },
   "detectors": [
     "rabbit_receipt",

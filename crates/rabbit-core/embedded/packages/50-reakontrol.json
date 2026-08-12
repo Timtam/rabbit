@@ -4,6 +4,7 @@
   "display_name_key": "package-reakontrol",
   "display_description_key": "package-reakontrol-description",
   "package_kind": "user_plugin_binary",
+  "install_destination": "user_plugins",
   "depends_on": [
     "reaper"
   ],
@@ -41,8 +42,7 @@
         "name_suffix": ".zip"
       }
     ],
-    "artifact_kind": "archive",
-    "install_destination": "user_plugins"
+    "artifact_kind": "archive"
   },
   "detectors": [
     "rabbit_receipt",

@@ -593,13 +593,10 @@ fn ffmpeg_major_from_libavformat_major(libavformat_major: u64) -> Option<u64> {
 /// destination can't be resolved (e.g. the CLAP folder on a non-Windows
 /// host), in which case detection finds no files.
 fn package_scan_dir(resource_path: &Path, spec: &PackageSpec) -> Option<PathBuf> {
-    match spec
-        .github_release
-        .as_ref()
-        .map(|gh| gh.install_destination)
-    {
-        Some(InstallDestination::WindowsClapDir) => rabbit_platform::windows_clap_dir(),
-        _ => Some(resource_path.join("UserPlugins")),
+    match spec.install_destination {
+        InstallDestination::WindowsClapDir => rabbit_platform::windows_clap_dir(),
+        InstallDestination::LangPack => Some(resource_path.join("LangPack")),
+        InstallDestination::UserPlugins => Some(resource_path.join("UserPlugins")),
     }
 }
 

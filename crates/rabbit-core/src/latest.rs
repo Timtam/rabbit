@@ -1115,7 +1115,7 @@ mod tests {
     };
     use crate::package::{
         AssetSelector, GithubArtifactKind, GithubReleaseSelector, GithubReleaseSpec,
-        InstallDestination, SupportedPlatform, VersionSource,
+        SupportedPlatform, VersionSource,
     };
     use crate::version::Version;
 
@@ -1138,7 +1138,6 @@ mod tests {
                 artifact_kind: None,
             }],
             artifact_kind: Some(GithubArtifactKind::Archive),
-            install_destination: InstallDestination::WindowsClapDir,
         }
     }
 
@@ -1464,7 +1463,6 @@ mod tests {
                 },
             ],
             artifact_kind: Some(GithubArtifactKind::Archive),
-            install_destination: InstallDestination::UserPlugins,
         }
     }
 
@@ -1573,7 +1571,6 @@ mod tests {
             },
             assets: Vec::new(),
             artifact_kind: Some(crate::package::GithubArtifactKind::ExtensionBinary),
-            install_destination: crate::package::InstallDestination::UserPlugins,
         };
         let version = resolve_github_version(body, &github_release_url(&spec), &spec).unwrap();
         assert_eq!(version.raw(), "1.2.6");

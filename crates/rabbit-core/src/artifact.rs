@@ -1481,9 +1481,9 @@ mod tests {
 
     use crate::package::{
         AssetMatch, AssetSelector, GithubArtifactKind, GithubReleaseSelector, GithubReleaseSpec,
-        HrefMatch, HttpArtifactSource, HttpArtifactSpec, HttpArtifactTarget, InstallDestination,
-        PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK,
-        PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS, SupportedPlatform, VersionSource,
+        HrefMatch, HttpArtifactSource, HttpArtifactSpec, HttpArtifactTarget, PACKAGE_APP2CLAP,
+        PACKAGE_FFMPEG, PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK, PACKAGE_REAPER,
+        PACKAGE_SURGE_XT, PACKAGE_SWS, SupportedPlatform, VersionSource,
     };
     use tempfile::tempdir;
 
@@ -1889,7 +1889,6 @@ mod tests {
                 artifact_kind: None,
             }],
             artifact_kind: Some(GithubArtifactKind::Archive),
-            install_destination: InstallDestination::WindowsClapDir,
         }
     }
 
@@ -1921,7 +1920,6 @@ mod tests {
                 },
             ],
             artifact_kind: Some(GithubArtifactKind::Archive),
-            install_destination: InstallDestination::UserPlugins,
         }
     }
 
@@ -1955,7 +1953,6 @@ mod tests {
                 ),
             ],
             artifact_kind: Some(GithubArtifactKind::ExtensionBinary),
-            install_destination: InstallDestination::UserPlugins,
         }
     }
 
@@ -1997,7 +1994,6 @@ mod tests {
                 },
             ],
             artifact_kind: None,
-            install_destination: InstallDestination::default(),
         }
     }
 
