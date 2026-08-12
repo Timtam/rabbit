@@ -1,0 +1,94 @@
+{
+  "id": "langpack-de",
+  "display_name": "REAPER auf Deutsch",
+  "display_name_key": "package-langpack-de",
+  "display_description_key": "package-langpack-de-description",
+  "package_kind": "language_pack",
+  "install_destination": "lang_pack",
+  "depends_on": [
+    "reaper"
+  ],
+  "exclusive_group": "reaper-langpack",
+  "language": "de",
+  "required": false,
+  "recommended": false,
+  "supported_platforms": [
+    "windows",
+    "macos"
+  ],
+  "supported_architectures": [
+    "x86",
+    "x64",
+    "arm64",
+    "arm64-ec",
+    "universal"
+  ],
+  "version": {
+    "content_hash": {
+      "url": "https://stash.reaper.fm/26248/DE_%28%2BSWS%29.ReaperLangPack"
+    }
+  },
+  "version_comparison": "exact",
+  "detectors": [
+    "rabbit_receipt"
+  ],
+  "install_steps": [
+    "copy_user_plugin_binary"
+  ],
+  "uninstall_steps": [
+    "remove_user_plugin_binary"
+  ],
+  "backup_policy": "backup_overwritten_files",
+  "user_plugin_prefixes": [],
+  "user_plugin_suffixes": {
+    "windows": [
+      ".ReaperLangPack"
+    ],
+    "macos": [
+      ".ReaperLangPack"
+    ]
+  },
+  "category": "language",
+  "http_artifact": {
+    "targets": [
+      {
+        "platform": "windows",
+        "match_arches": [
+          "x86",
+          "x64",
+          "arm64",
+          "arm64-ec",
+          "universal",
+          "unknown"
+        ],
+        "report_arch": "universal",
+        "artifact_kind": "extension_binary",
+        "source": {
+          "fixed_url": {
+            "url": "https://stash.reaper.fm/26248/DE_%28%2BSWS%29.ReaperLangPack",
+            "file_name": "DE_(+SWS).ReaperLangPack"
+          }
+        }
+      },
+      {
+        "platform": "macos",
+        "match_arches": [
+          "x86",
+          "x64",
+          "arm64",
+          "arm64-ec",
+          "universal",
+          "unknown"
+        ],
+        "report_arch": "universal",
+        "artifact_kind": "extension_binary",
+        "source": {
+          "fixed_url": {
+            "url": "https://stash.reaper.fm/26248/DE_%28%2BSWS%29.ReaperLangPack",
+            "file_name": "DE_(+SWS).ReaperLangPack"
+          }
+        }
+      }
+    ]
+  }
+}

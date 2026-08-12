@@ -1104,8 +1104,8 @@ mod tests {
         let manifest = embedded_package_manifest();
 
         assert_eq!(manifest.schema_version, 1);
-        // 9 software packages + the Spanish REAPER language pack.
-        assert_eq!(manifest.packages.len(), 10);
+        // 9 software packages + the Spanish and German REAPER language packs.
+        assert_eq!(manifest.packages.len(), 11);
         assert!(
             manifest
                 .packages

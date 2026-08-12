@@ -195,6 +195,7 @@ pub fn install_cached_artifacts_with_progress(
             )?;
             remove_exclusive_group_siblings(
                 &mut state,
+                resource_path,
                 &artifact.descriptor.package_id,
                 &artifact_target_paths,
             );
@@ -244,11 +245,13 @@ pub fn install_cached_artifacts_with_progress(
 /// install that already succeeded.
 fn remove_exclusive_group_siblings(
     state: &mut InstallState,
+    resource_path: &Path,
     package_id: &str,
     just_installed: &[PathBuf],
 ) {
     remove_exclusive_group_siblings_in(
         state,
+        resource_path,
         &crate::package::exclusive_group_siblings(package_id),
         package_id,
         just_installed,
@@ -260,6 +263,7 @@ fn remove_exclusive_group_siblings(
 /// shipped manifest's grouping.
 fn remove_exclusive_group_siblings_in(
     state: &mut InstallState,
+    resource_path: &Path,
     siblings: &[String],
     package_id: &str,
     just_installed: &[PathBuf],
@@ -270,16 +274,25 @@ fn remove_exclusive_group_siblings_in(
         };
         let mut all_removed = true;
         for file in &receipt.installed_files {
-            if just_installed.iter().any(|path| path == &file.path) {
+            // Receipt paths are relative to the resource path when the file
+            // lives inside it, and absolute otherwise (e.g. the per-user CLAP
+            // folder) — resolve before touching the filesystem, or removal
+            // silently targets the process working directory instead.
+            let path = if file.path.is_absolute() {
+                file.path.clone()
+            } else {
+                resource_path.join(&file.path)
+            };
+            if just_installed.iter().any(|installed| installed == &path) {
                 continue;
             }
-            match fs::remove_file(&file.path) {
+            match fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     eprintln!(
                         "warning: could not remove {} superseded by {package_id}: {error}",
-                        file.path.display()
+                        path.display()
                     );
                     all_removed = false;
                 }
@@ -685,15 +698,22 @@ mod tests {
     /// receipt of the previously-installed member (German -> Spanish), but
     /// never touches a pack the user placed in LangPack/ themselves, because
     /// removal is driven purely by RABBIT's own receipts.
+    ///
+    /// Uses RELATIVE receipt paths, which is what `build_installed_file_receipt`
+    /// actually writes for files inside the resource path — an earlier version
+    /// of this test invented absolute paths and so passed while the real
+    /// removal silently resolved against the process working directory,
+    /// dropping the receipt but leaving the file on disk.
     #[test]
     fn exclusive_group_removal_is_receipt_driven() {
         use crate::receipt::{InstalledFileReceipt, PackageReceipt};
 
         let dir = tempdir().unwrap();
-        let lang_dir = dir.path().join("LangPack");
+        let resource = dir.path();
+        let lang_dir = resource.join("LangPack");
         std::fs::create_dir_all(&lang_dir).unwrap();
 
-        let rabbit_installed = lang_dir.join("Deutsch.ReaperLangPack");
+        let rabbit_installed = lang_dir.join("DE_(+SWS).ReaperLangPack");
         let user_installed = lang_dir.join("Nederlands.ReaperLangPack");
         let newly_installed = lang_dir.join("es_ES.ReaperLangPack");
         for path in [&rabbit_installed, &user_installed, &newly_installed] {
@@ -709,7 +729,8 @@ mod tests {
                 source_url: None,
                 source_sha256: None,
                 installed_files: vec![InstalledFileReceipt {
-                    path: rabbit_installed.clone(),
+                    // Relative, exactly as receipts store in-resource files.
+                    path: PathBuf::from("LangPack").join("DE_(+SWS).ReaperLangPack"),
                     sha256: None,
                     size: None,
                 }],
@@ -723,6 +744,7 @@ mod tests {
         // comes from the manifest; this asserts the removal mechanics.
         super::remove_exclusive_group_siblings_in(
             &mut state,
+            resource,
             &["langpack-de".to_string()],
             "langpack-es",
             std::slice::from_ref(&newly_installed),
