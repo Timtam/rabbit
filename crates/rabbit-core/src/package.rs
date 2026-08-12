@@ -944,15 +944,9 @@ pub fn package_specs_by_id(platform: Platform) -> BTreeMap<String, PackageSpec> 
 /// then to the package's plain `install_as`, then to `None` (keep the
 /// upstream name). An unknown variant id falls back the same way rather
 /// than failing — the choice is a preference, not a correctness input.
-pub fn resolved_install_as(
-    spec: &PackageSpec,
-    chosen: &std::collections::BTreeMap<String, String>,
-) -> Option<String> {
+pub fn resolved_install_as(spec: &PackageSpec, chosen: Option<&str>) -> Option<String> {
     if !spec.variants.is_empty() {
-        if let Some(variant) = chosen
-            .get(&spec.id)
-            .and_then(|id| spec.variants.iter().find(|v| &v.id == id))
-        {
+        if let Some(variant) = chosen.and_then(|id| spec.variants.iter().find(|v| v.id == id)) {
             return Some(variant.install_as.clone());
         }
         if let Some(default) = spec.variants.iter().find(|v| v.default) {
@@ -960,6 +954,31 @@ pub fn resolved_install_as(
         }
     }
     spec.install_as.clone()
+}
+
+/// The variant id that should be used for `package_id`: the user's explicit
+/// choice for this run, else the one their last install recorded, else the
+/// manifest default. Remembering matters because both Spanish variants come
+/// from the same download — without it, an update would silently reinstall
+/// a Team PMA user under the default `es_ES` name and switch their OSARA
+/// translation back.
+pub fn effective_variant_id(
+    resource_path: &std::path::Path,
+    package_id: &str,
+    chosen: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    if let Some(explicit) = chosen.get(package_id) {
+        return Some(explicit.clone());
+    }
+    crate::receipt::load_install_state(resource_path)
+        .ok()
+        .flatten()
+        .and_then(|state| {
+            state
+                .packages
+                .get(package_id)
+                .and_then(|r| r.variant.clone())
+        })
 }
 
 /// Package ids that share `package_id`'s exclusive group, excluding itself.
@@ -1150,6 +1169,57 @@ mod tests {
         assert!(version_needs_update(&two, &one, VersionComparison::Exact));
     }
 
+    /// A variant choice must survive to the next run. Both Spanish variants
+    /// come from the same download, so without remembering it an update
+    /// would silently reinstall a Team PMA user under the default es_ES name
+    /// and switch their OSARA translation back.
+    #[test]
+    fn effective_variant_prefers_explicit_then_remembered_then_default() {
+        use super::effective_variant_id;
+        use crate::receipt::{InstallState, PackageReceipt, save_install_state};
+        use std::collections::BTreeMap;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let resource = dir.path();
+        let empty = BTreeMap::new();
+
+        // Nothing installed, no choice -> no opinion (caller uses the
+        // manifest default).
+        assert_eq!(effective_variant_id(resource, "langpack-es", &empty), None);
+
+        let mut state = InstallState::default();
+        state.packages.insert(
+            "langpack-es".to_string(),
+            PackageReceipt {
+                id: "langpack-es".to_string(),
+                version: None,
+                source_url: None,
+                source_sha256: None,
+                variant: Some("pma".to_string()),
+                installed_files: Vec::new(),
+                installed_at: None,
+                rabbit_version: None,
+                architecture: None,
+            },
+        );
+        save_install_state(resource, &state).unwrap();
+
+        // Remembered choice wins over the manifest default.
+        assert_eq!(
+            effective_variant_id(resource, "langpack-es", &empty).as_deref(),
+            Some("pma")
+        );
+        // An explicit choice for this run beats the remembered one, so the
+        // user can switch back.
+        let mut chosen = BTreeMap::new();
+        chosen.insert("langpack-es".to_string(), "rae".to_string());
+        assert_eq!(
+            effective_variant_id(resource, "langpack-es", &chosen).as_deref(),
+            Some("rae")
+        );
+    }
+
     /// The wizard ticks the pack matching its own UI language, matching on
     /// the language subtag so es-MX gets the Spanish pack. English never
     /// matches: REAPER is already English.
@@ -1184,7 +1254,6 @@ mod tests {
     fn spanish_variants_select_the_osara_translation_by_file_name() {
         use super::{package_specs_by_id, resolved_install_as};
         use crate::model::Platform;
-        use std::collections::BTreeMap;
 
         let specs = package_specs_by_id(Platform::Windows);
         let spanish = specs.get("langpack-es").expect("Spanish pack");
@@ -1195,22 +1264,19 @@ mod tests {
             "exactly one variant must be the default"
         );
 
-        let mut chosen = BTreeMap::new();
         // No choice -> the default (REAPER Accesible español).
         assert_eq!(
-            resolved_install_as(spanish, &chosen).as_deref(),
+            resolved_install_as(spanish, None).as_deref(),
             Some("es_ES.ReaperLangPack")
         );
         // Team PMA -> es_MX, which is what makes OSARA load their version.
-        chosen.insert("langpack-es".to_string(), "pma".to_string());
         assert_eq!(
-            resolved_install_as(spanish, &chosen).as_deref(),
+            resolved_install_as(spanish, Some("pma")).as_deref(),
             Some("es_MX.ReaperLangPack")
         );
         // An unknown id falls back to the default rather than failing.
-        chosen.insert("langpack-es".to_string(), "nope".to_string());
         assert_eq!(
-            resolved_install_as(spanish, &chosen).as_deref(),
+            resolved_install_as(spanish, Some("nope")).as_deref(),
             Some("es_ES.ReaperLangPack")
         );
 
@@ -1218,7 +1284,7 @@ mod tests {
         let german = specs.get("langpack-de").expect("German pack");
         assert!(german.variants.is_empty());
         assert_eq!(
-            resolved_install_as(german, &chosen).as_deref(),
+            resolved_install_as(german, Some("pma")).as_deref(),
             Some("de_DE.ReaperLangPack")
         );
     }

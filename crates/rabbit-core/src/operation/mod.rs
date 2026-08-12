@@ -955,7 +955,8 @@ fn wants_different_install_name(
     if spec.variants.is_empty() {
         return false;
     }
-    let Some(wanted) = crate::package::resolved_install_as(spec, chosen) else {
+    let effective = crate::package::effective_variant_id(resource_path, package_id, chosen);
+    let Some(wanted) = crate::package::resolved_install_as(spec, effective.as_deref()) else {
         return false;
     };
     let Ok(Some(state)) = load_install_state(resource_path) else {
@@ -1425,6 +1426,7 @@ fn upsert_unattended_package_receipt(
         state,
         resource_path,
         PackageReceiptParams {
+            variant: None,
             package_id: &artifact.package_id,
             version: Some(artifact.version.clone()),
             source_url: Some(artifact.url.clone()),

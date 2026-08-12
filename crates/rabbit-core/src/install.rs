@@ -142,9 +142,19 @@ pub fn install_cached_artifacts_with_progress(
         // own translation). Guarded to single-file packages: applying one
         // name to a multi-file package — FFmpeg ships a whole set of DLLs —
         // would collapse them all onto the same target.
+        // Explicit choice for this run, else what the last install recorded,
+        // else the manifest default — so an update keeps the variant the
+        // user picked rather than reverting them to the default.
+        let effective_variant = crate::package::effective_variant_id(
+            resource_path,
+            &artifact.descriptor.package_id,
+            &options.package_variants,
+        );
         let install_as = install_spec
             .as_ref()
-            .and_then(|spec| crate::package::resolved_install_as(spec, &options.package_variants))
+            .and_then(|spec| {
+                crate::package::resolved_install_as(spec, effective_variant.as_deref())
+            })
             .filter(|_| prepared.files.len() == 1);
 
         for file in &prepared.files {
@@ -222,6 +232,7 @@ pub fn install_cached_artifacts_with_progress(
                 &mut state,
                 resource_path,
                 PackageReceiptParams {
+                    variant: effective_variant.as_deref(),
                     package_id: &artifact.descriptor.package_id,
                     version: Some(artifact.descriptor.version.clone()),
                     source_url: Some(artifact.descriptor.url.clone()),
@@ -791,6 +802,7 @@ mod tests {
                 version: None,
                 source_url: None,
                 source_sha256: None,
+                variant: None,
                 installed_files: vec![InstalledFileReceipt {
                     // Relative, exactly as receipts store in-resource files.
                     path: PathBuf::from("LangPack").join("DE_(+SWS).ReaperLangPack"),
@@ -968,6 +980,7 @@ mod tests {
                 version: Some(Version::parse("1.2.5").unwrap()),
                 source_url: Some("https://example.test/old.dll".to_string()),
                 source_sha256: Some(sha256_file(&plugins.join("reaper_reapack-x64.dll")).unwrap()),
+                variant: None,
                 installed_files: vec![InstalledFileReceipt {
                     path: PathBuf::from("UserPlugins/reaper_reapack-x64.dll"),
                     sha256: None,

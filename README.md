@@ -80,8 +80,11 @@ yourself is never touched. By default RABBIT also sets the pack as
 REAPER's language (see the configuration step below).
 
 These packs are published without version numbers, so RABBIT identifies
-them by content: it notices when a translator publishes a new file and
-offers it as an update, without RABBIT needing a new release.
+them by what the server reports about the file (its ETag or last-modified
+date and size, falling back to the file's contents): it notices when a
+translator publishes a new file and offers it as an update, without RABBIT
+needing a new release. Your choice of Spanish translation is remembered, so
+an update keeps the variant you picked instead of reverting to the default.
 
 Beyond installing packages, RABBIT can also apply small post-install
 configuration tweaks:

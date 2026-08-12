@@ -2762,6 +2762,12 @@ fn start_version_check(ui: VersionCheckUi) {
                         }
                         ui.can_install.set(plan.can_install);
                         ui.review_can_install.set(false);
+                        // Show the Spanish variant the target already has
+                        // installed, so a Team PMA user isn't presented with
+                        // an unticked box that would switch them back.
+                        ui.widgets
+                            .spanish_variant_pma
+                            .set_value(crate::spanish_variant_alternate_installed(&ui.target.path));
                         rebuild_package_list_widgets(
                             &ui.widgets,
                             &ui.package_items,

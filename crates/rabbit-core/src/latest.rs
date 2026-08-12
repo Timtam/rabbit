@@ -632,6 +632,21 @@ pub fn resolve_version_rule(client: &Client, rule: &VersionRule) -> Result<Versi
             resolve_html_version(&body, url, pattern, format)
         }
         VersionRule::ContentHash { url } => {
+            // Prefer a cheap HEAD: these artifacts carry no version number,
+            // so identity has to come from the file itself — but when the
+            // server offers a validator (ETag, or Last-Modified plus
+            // Content-Length) that identifies the same bytes without
+            // transferring them. A language pack is 0.6–1.7 MB, and
+            // downloading one purely to answer "is there an update?" was the
+            // slowest step of the whole version check.
+            //
+            // Falls back to hashing the body when the server offers nothing
+            // usable. The two forms are tagged differently, so a host that
+            // starts or stops sending validators shows up as a single
+            // spurious update once rather than as silent breakage.
+            if let Some(version) = validator_version(client, url) {
+                return Ok(version);
+            }
             let bytes = http_get_bytes(client, url)?;
             Ok(content_hash_version(&bytes))
         }
@@ -649,6 +664,43 @@ pub(crate) fn content_hash_version(bytes: &[u8]) -> Version {
     let digest = crate::hash::sha256_bytes(bytes);
     Version::parse(format!("h{}", &digest[..12]))
         .unwrap_or_else(|_| Version::parse("h0").expect("literal is a valid version"))
+}
+
+/// Identity derived from HTTP validators via a HEAD request: the ETag if
+/// present, else `Last-Modified` combined with `Content-Length`. Hashed to
+/// keep the value short and opaque, and prefixed `v` so it can never be
+/// confused with a `content_hash_version` value. `None` when the request
+/// fails or the server offers no usable validator, which sends the caller
+/// back to hashing the body.
+fn validator_version(client: &Client, url: &str) -> Option<Version> {
+    let response = crate::http::maybe_apply_github_auth(client.head(url), url)
+        .send()
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    let headers = response.headers();
+    let header = |name: reqwest::header::HeaderName| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    // A weak ETag (`W/"…"`) still identifies the same representation for our
+    // purposes — we only ever compare it to itself — so it is accepted.
+    let validator = match header(reqwest::header::ETAG) {
+        Some(etag) => etag,
+        None => {
+            let modified = header(reqwest::header::LAST_MODIFIED)?;
+            match header(reqwest::header::CONTENT_LENGTH) {
+                Some(length) => format!("{modified}|{length}"),
+                None => modified,
+            }
+        }
+    };
+    let digest = crate::hash::sha256_bytes(validator.as_bytes());
+    Version::parse(format!("v{}", &digest[..12])).ok()
 }
 
 fn http_get_bytes(client: &Client, url: &str) -> Result<Vec<u8>> {

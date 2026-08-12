@@ -1088,18 +1088,42 @@ pub const VARIANT_CHOICE_PACKAGE_ID: &str = "langpack-es";
 /// Variant id selected when the wizard's choice control is ticked.
 pub const VARIANT_CHOICE_ALTERNATE_ID: &str = "pma";
 
+/// Variant id selected when the wizard's choice control is unticked.
+pub const VARIANT_CHOICE_DEFAULT_ID: &str = "rae";
+
 /// Build the `package_variants` map from the wizard's choice control.
+///
+/// Always records an explicit choice, in BOTH directions. An unticked box
+/// has to mean "use REAPER Accesible español", not "no opinion" — the
+/// install path falls back to the previously-installed variant when no
+/// choice is given, so an absent entry would make it impossible to switch
+/// back from Team PMA once chosen.
 pub fn package_variants_from_choice(
     alternate_selected: bool,
 ) -> std::collections::BTreeMap<String, String> {
     let mut variants = std::collections::BTreeMap::new();
-    if alternate_selected {
-        variants.insert(
-            VARIANT_CHOICE_PACKAGE_ID.to_string(),
-            VARIANT_CHOICE_ALTERNATE_ID.to_string(),
-        );
-    }
+    variants.insert(
+        VARIANT_CHOICE_PACKAGE_ID.to_string(),
+        if alternate_selected {
+            VARIANT_CHOICE_ALTERNATE_ID.to_string()
+        } else {
+            VARIANT_CHOICE_DEFAULT_ID.to_string()
+        },
+    );
     variants
+}
+
+/// Whether the Spanish pack currently installed at `resource_path` is the
+/// Team PMA variant, so the wizard can show the user's existing choice
+/// rather than an unticked box that would silently switch them back.
+pub fn spanish_variant_alternate_installed(resource_path: &std::path::Path) -> bool {
+    rabbit_core::package::effective_variant_id(
+        resource_path,
+        VARIANT_CHOICE_PACKAGE_ID,
+        &std::collections::BTreeMap::new(),
+    )
+    .as_deref()
+        == Some(VARIANT_CHOICE_ALTERNATE_ID)
 }
 
 /// Returns true when ReaPack is selected and its planned action would
@@ -5006,8 +5030,17 @@ mod tests {
     /// than an explicit choice.
     #[test]
     fn spanish_variant_checkbox_maps_to_the_package_variant() {
+        // Unticked must be an EXPLICIT "use the default" rather than
+        // silence: the install path falls back to the previously-installed
+        // variant when no choice is given, so an empty map would make it
+        // impossible to switch back from Team PMA once chosen.
         let unticked = super::package_variants_from_choice(false);
-        assert!(unticked.is_empty(), "default is expressed by absence");
+        assert_eq!(
+            unticked
+                .get(super::VARIANT_CHOICE_PACKAGE_ID)
+                .map(String::as_str),
+            Some(super::VARIANT_CHOICE_DEFAULT_ID)
+        );
 
         let ticked = super::package_variants_from_choice(true);
         assert_eq!(
@@ -5022,13 +5055,15 @@ mod tests {
         let spanish = specs
             .get(super::VARIANT_CHOICE_PACKAGE_ID)
             .expect("Spanish language pack");
-        assert!(
-            spanish
-                .variants
-                .iter()
-                .any(|v| v.id == super::VARIANT_CHOICE_ALTERNATE_ID),
-            "the wizard's variant id must exist in the manifest"
-        );
+        for id in [
+            super::VARIANT_CHOICE_ALTERNATE_ID,
+            super::VARIANT_CHOICE_DEFAULT_ID,
+        ] {
+            assert!(
+                spanish.variants.iter().any(|v| v.id == id),
+                "the wizard's variant id {id:?} must exist in the manifest"
+            );
+        }
     }
 
     #[test]

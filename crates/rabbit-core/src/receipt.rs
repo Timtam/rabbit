@@ -32,6 +32,13 @@ pub struct PackageReceipt {
     pub version: Option<Version>,
     pub source_url: Option<String>,
     pub source_sha256: Option<String>,
+    /// Which package variant was installed, when the package offers a
+    /// choice (the Spanish language pack's OSARA translation). Remembered
+    /// so a later run keeps the user's pick instead of silently reverting
+    /// to the manifest default. `None` for packages with no variants, and
+    /// for receipts written before variants existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
     pub installed_files: Vec<InstalledFileReceipt>,
     pub installed_at: Option<String>,
     pub rabbit_version: Option<String>,
@@ -88,6 +95,8 @@ pub fn save_install_state(resource_path: &Path, state: &InstallState) -> Result<
 /// struct so the call site doesn't carry a long positional argument list
 /// (`state` and `resource_path` stay separate as the "where" context).
 pub struct PackageReceiptParams<'a> {
+    /// Variant id to remember; see [`PackageReceipt::variant`].
+    pub variant: Option<&'a str>,
     pub package_id: &'a str,
     pub version: Option<Version>,
     pub source_url: Option<String>,
@@ -110,6 +119,7 @@ pub fn upsert_package_receipt(
         installed_paths,
         installed_at,
         architecture,
+        variant,
     } = params;
     let mut installed_files = installed_paths
         .iter()
@@ -125,6 +135,7 @@ pub fn upsert_package_receipt(
             version,
             source_url,
             source_sha256,
+            variant: variant.map(str::to_string),
             installed_files,
             installed_at,
             rabbit_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -247,6 +258,7 @@ mod tests {
                 version: Some(Version::parse("2024.1").unwrap()),
                 source_url: None,
                 source_sha256: None,
+                variant: None,
                 installed_files: vec![InstalledFileReceipt {
                     path: PathBuf::from("UserPlugins/reaper_osara64.dll"),
                     sha256: None,

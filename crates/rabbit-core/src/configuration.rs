@@ -575,6 +575,7 @@ mod tests {
                 version: None,
                 source_url: None,
                 source_sha256: None,
+                variant: None,
                 installed_files: vec![InstalledFileReceipt {
                     path: std::path::PathBuf::from("LangPack").join("es_MX.ReaperLangPack"),
                     sha256: None,
