@@ -12,9 +12,10 @@ pub const LOCALE_FILE_NAME: &str = "rabbit.ftl";
 
 const DEFAULT_LOCALE_SOURCE: &str = include_str!("../../../locales/en-US/rabbit.ftl");
 const DE_DE_LOCALE_SOURCE: &str = include_str!("../../../locales/de-DE/rabbit.ftl");
+const ES_ES_LOCALE_SOURCE: &str = include_str!("../../../locales/es-ES/rabbit.ftl");
 const FR_FR_LOCALE_SOURCE: &str = include_str!("../../../locales/fr-FR/rabbit.ftl");
 const IT_IT_LOCALE_SOURCE: &str = include_str!("../../../locales/it-IT/rabbit.ftl");
-const EMBEDDED_LOCALES: &[&str] = &[DEFAULT_LOCALE, "de-DE", "fr-FR", "it-IT"];
+const EMBEDDED_LOCALES: &[&str] = &[DEFAULT_LOCALE, "de-DE", "es-ES", "fr-FR", "it-IT"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalizedText {
@@ -229,6 +230,7 @@ pub fn embedded_locale_source(locale: &str) -> Option<&'static str> {
     match locale {
         DEFAULT_LOCALE => Some(DEFAULT_LOCALE_SOURCE),
         "de-DE" => Some(DE_DE_LOCALE_SOURCE),
+        "es-ES" => Some(ES_ES_LOCALE_SOURCE),
         "fr-FR" => Some(FR_FR_LOCALE_SOURCE),
         "it-IT" => Some(IT_IT_LOCALE_SOURCE),
         _ => None,
@@ -339,28 +341,17 @@ mod tests {
     fn exposes_embedded_default_locale_source() {
         assert_eq!(
             embedded_locales(),
-            &[DEFAULT_LOCALE, "de-DE", "fr-FR", "it-IT"]
+            &[DEFAULT_LOCALE, "de-DE", "es-ES", "fr-FR", "it-IT"]
         );
-        assert!(
-            embedded_locale_source(DEFAULT_LOCALE)
-                .unwrap()
-                .contains("app-title")
-        );
-        assert!(
-            embedded_locale_source("de-DE")
-                .unwrap()
-                .contains("app-title")
-        );
-        assert!(
-            embedded_locale_source("fr-FR")
-                .unwrap()
-                .contains("app-title")
-        );
-        assert!(
-            embedded_locale_source("it-IT")
-                .unwrap()
-                .contains("app-title")
-        );
+        // Every advertised locale must actually carry an embedded source.
+        for &locale in embedded_locales() {
+            assert!(
+                embedded_locale_source(locale)
+                    .unwrap_or_else(|| panic!("{locale} has no embedded source"))
+                    .contains("app-title"),
+                "{locale} source looks empty"
+            );
+        }
     }
 
     /// Top-level Fluent message ids in an `.ftl` source: lines starting at
@@ -444,9 +435,10 @@ mod tests {
 
     #[test]
     fn embedded_falls_back_to_default_when_locale_is_unknown() {
-        let localizer = Localizer::embedded("es-ES").unwrap();
+        // Use a locale RABBIT does not ship (es-ES became a real locale).
+        let localizer = Localizer::embedded("ja-JP").unwrap();
 
-        assert_eq!(localizer.requested_locale(), "es-ES");
+        assert_eq!(localizer.requested_locale(), "ja-JP");
         assert_eq!(localizer.active_locale(), DEFAULT_LOCALE);
         assert!(localizer.fallback_used());
         assert_eq!(
@@ -575,7 +567,10 @@ mod tests {
         assert_eq!(match_embedded_locale("en-GB"), Some("en-US".to_string()));
         // Canadian French maps to fr-FR (the embedded French variant).
         assert_eq!(match_embedded_locale("fr-CA"), Some("fr-FR".to_string()));
-        assert_eq!(match_embedded_locale("es-ES"), None);
+        // Mexican Spanish maps to es-ES (the embedded Spanish variant).
+        assert_eq!(match_embedded_locale("es-MX"), Some("es-ES".to_string()));
+        // A locale RABBIT does not ship has no match.
+        assert_eq!(match_embedded_locale("ja-JP"), None);
         assert_eq!(match_embedded_locale(""), None);
     }
 
@@ -594,6 +589,7 @@ mod tests {
             vec![
                 "de-DE".to_string(),
                 DEFAULT_LOCALE.to_string(),
+                "es-ES".to_string(),
                 "fr-FR".to_string(),
                 "it-IT".to_string()
             ]

@@ -73,6 +73,7 @@ wizard-target-language-label = Lingua
 wizard-target-language-restart-note = Cambiare la lingua riavvia RABBIT affinché la nuova lingua abbia effetto.
 wizard-locale-name-en-US = Inglese (Stati Uniti)
 wizard-locale-name-de-DE = Tedesco (Germania)
+wizard-locale-name-es-ES = Spagnolo (Spagna)
 wizard-locale-name-fr-FR = Francese (Francia)
 wizard-locale-name-it-IT = Italiano (Italia)
 wizard-target-choice-label = Percorso di installazione

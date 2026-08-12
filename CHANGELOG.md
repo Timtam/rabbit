@@ -33,6 +33,10 @@ from this file and posts it as the GitHub release body.
 
 ### Added
 
+- RABBIT now speaks Spanish. The translation was contributed by Carlos
+  Esteban Martínez (#19) and is picked automatically on Spanish systems —
+  including regional variants, so an es-MX machine gets the Spanish UI —
+  or from the language picker at any time.
 - Windows: the wizard now adds a Microsoft Defender exclusion for RABBIT's
   own download cache folder (`%TEMP%\rabbit-cache`) so freshly built,
   low-prevalence — but code-signed — installers, chiefly OSARA's
