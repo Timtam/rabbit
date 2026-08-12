@@ -22,6 +22,7 @@ pub mod portable;
 pub mod preflight;
 pub mod progress;
 pub mod reapack;
+pub mod reaper_ini;
 pub mod receipt;
 pub mod report;
 pub mod resource;

@@ -16,8 +16,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::package::PACKAGE_REAPACK;
+use crate::package::{PACKAGE_REAPACK, PackageKind, embedded_package_manifest};
 use crate::reapack::{RemoteUpsertOutcome, is_remote_configured, upsert_remote};
+use crate::reaper_ini::{LangPackSelectionOutcome, select_lang_pack, selected_lang_pack};
 
 /// Stable id for the "configure REAPER Accessibility ReaPack remote"
 /// step. Used by callers (CLI, wizard) to identify the step across
@@ -81,6 +82,10 @@ pub enum ConfigurationStepKind {
     /// `[remotes]` section in `<resource_path>/reapack.ini`. Idempotent
     /// on URL: re-running the wizard doesn't add a duplicate.
     AddReapackRemote { name: String, url: String },
+    /// Point REAPER at an installed language pack by writing
+    /// `langpack=<file_name>` under `[REAPER]` in `<resource>/reaper.ini`.
+    /// Idempotent: selecting the already-active pack writes nothing.
+    SetReaperLanguage { file_name: String },
 }
 
 /// Outcome of applying a single configuration step. Mirrors the
@@ -114,6 +119,12 @@ pub enum ConfigurationMessage {
     ReapackRemoteCreatedFile { name: String, url: String },
     /// Dry-run preview of an `AddReapackRemote` step.
     ReapackRemoteDryRun { name: String, url: String },
+    /// `SetReaperLanguage` step ran and REAPER already used this pack.
+    ReaperLanguageAlreadySelected { file_name: String },
+    /// `SetReaperLanguage` step pointed REAPER at this language pack.
+    ReaperLanguageSelected { file_name: String },
+    /// Dry-run preview of a `SetReaperLanguage` step.
+    ReaperLanguageDryRun { file_name: String },
     /// User opted out of this configuration step.
     Skipped { step_id: String },
     /// The step's `requires_package_id` dependency wasn't satisfied.
@@ -144,7 +155,7 @@ pub enum ConfigurationStatus {
 /// All configuration steps RABBIT knows how to run. Hardcoded today;
 /// can move to JSON later if/when the catalogue grows.
 pub fn builtin_configuration_steps() -> Vec<ConfigurationStep> {
-    vec![
+    let mut steps = vec![
         ConfigurationStep {
             id: CONFIG_REAPER_ACCESSIBILITY_REPACK_REMOTE.to_string(),
             display_name_key: "config-reapack-reaper-accessibility-name".to_string(),
@@ -182,7 +193,44 @@ pub fn builtin_configuration_steps() -> Vec<ConfigurationStep> {
                 url: REAPER_ACCESSIBLE_EN_URL.to_string(),
             },
         },
-    ]
+    ];
+    steps.extend(lang_pack_steps());
+    steps
+}
+
+/// Stable id of the "set REAPER's language" step for a language subtag.
+pub fn config_set_reaper_language_id(language: &str) -> String {
+    format!("set-reaper-language-{language}")
+}
+
+/// One "set REAPER's language" step per language pack in the embedded
+/// manifest, so adding a language pack JSON automatically offers to
+/// activate it — no extra Rust. Each step depends on its own pack, so the
+/// wizard greys it out (and the CLI refuses it) unless that pack is
+/// installed or queued in the current plan.
+fn lang_pack_steps() -> Vec<ConfigurationStep> {
+    embedded_package_manifest()
+        .packages
+        .into_iter()
+        .filter(|spec| spec.package_kind == PackageKind::LanguagePack)
+        .filter_map(|spec| {
+            let language = spec.language.clone()?;
+            let file_name = spec.install_as.clone()?;
+            Some(ConfigurationStep {
+                id: config_set_reaper_language_id(&language),
+                display_name_key: format!("config-set-reaper-language-{language}-name"),
+                display_description_key: format!(
+                    "config-set-reaper-language-{language}-description"
+                ),
+                // Ticked by default: a user installing a language pack
+                // almost certainly wants REAPER to use it. They can untick
+                // to get the file without changing REAPER's setting.
+                recommended: true,
+                requires_package_id: Some(spec.id.clone()),
+                kind: ConfigurationStepKind::SetReaperLanguage { file_name },
+            })
+        })
+        .collect()
 }
 
 /// `true` when the on-disk state under `resource_path` already
@@ -198,6 +246,9 @@ pub fn is_configuration_step_applied(
     match &step.kind {
         ConfigurationStepKind::AddReapackRemote { url, .. } => {
             is_remote_configured(resource_path, url)
+        }
+        ConfigurationStepKind::SetReaperLanguage { file_name } => {
+            Ok(selected_lang_pack(resource_path)?.as_deref() == Some(file_name.as_str()))
         }
     }
 }
@@ -257,6 +308,31 @@ pub fn apply_configuration_step(
                 message_code,
             })
         }
+        ConfigurationStepKind::SetReaperLanguage { file_name } => {
+            let outcome = select_lang_pack(resource_path, file_name)?;
+            let (message, message_code) = match outcome {
+                LangPackSelectionOutcome::AlreadySelected => (
+                    format!("REAPER is already set to use {file_name}."),
+                    ConfigurationMessage::ReaperLanguageAlreadySelected {
+                        file_name: file_name.clone(),
+                    },
+                ),
+                LangPackSelectionOutcome::Replaced
+                | LangPackSelectionOutcome::Added
+                | LangPackSelectionOutcome::CreatedFile => (
+                    format!("Set REAPER's language to {file_name} in reaper.ini."),
+                    ConfigurationMessage::ReaperLanguageSelected {
+                        file_name: file_name.clone(),
+                    },
+                ),
+            };
+            Ok(ConfigurationStepReport {
+                step_id: step.id.clone(),
+                status: ConfigurationStatus::Applied,
+                message,
+                message_code,
+            })
+        }
     }
 }
 
@@ -267,6 +343,12 @@ fn dry_run_message_for(step: &ConfigurationStep) -> (String, ConfigurationMessag
             ConfigurationMessage::ReapackRemoteDryRun {
                 name: name.clone(),
                 url: url.clone(),
+            },
+        ),
+        ConfigurationStepKind::SetReaperLanguage { file_name } => (
+            format!("Would set REAPER's language to {file_name} in reaper.ini."),
+            ConfigurationMessage::ReaperLanguageDryRun {
+                file_name: file_name.clone(),
             },
         ),
     }
@@ -338,6 +420,7 @@ mod tests {
                     "https://github.com/Timtam/reapack/raw/master/index.xml"
                 );
             }
+            other => panic!("unexpected step kind: {other:?}"),
         }
     }
 
@@ -360,6 +443,7 @@ mod tests {
                     "https://github.com/reaperaccessible/rap_fr/raw/main/index.xml"
                 );
             }
+            other => panic!("unexpected step kind: {other:?}"),
         }
     }
 
@@ -380,7 +464,81 @@ mod tests {
                     "https://github.com/reaperaccessible/rap_en/raw/main/index.xml"
                 );
             }
+            other => panic!("unexpected step kind: {other:?}"),
         }
+    }
+
+    /// Language-pack activation steps are generated from the manifest, so
+    /// adding a language pack JSON offers to activate it with no extra Rust.
+    /// Each depends on its own pack, so the wizard greys it out unless that
+    /// pack is installed or queued.
+    #[test]
+    fn builtin_steps_include_one_language_step_per_language_pack() {
+        use crate::package::{PackageKind, embedded_package_manifest};
+
+        let steps = builtin_configuration_steps();
+        let packs: Vec<_> = embedded_package_manifest()
+            .packages
+            .into_iter()
+            .filter(|spec| spec.package_kind == PackageKind::LanguagePack)
+            .collect();
+        assert!(packs.len() >= 2, "expected the Spanish and German packs");
+
+        for pack in packs {
+            let language = pack.language.clone().expect("pack declares a language");
+            let step = steps
+                .iter()
+                .find(|s| s.id == super::config_set_reaper_language_id(&language))
+                .unwrap_or_else(|| panic!("no language step for {}", pack.id));
+            assert!(step.recommended, "{}: should be ticked by default", pack.id);
+            assert_eq!(
+                step.requires_package_id.as_deref(),
+                Some(pack.id.as_str()),
+                "{}: step must depend on its own pack",
+                pack.id
+            );
+            match &step.kind {
+                ConfigurationStepKind::SetReaperLanguage { file_name } => {
+                    // Writes the same name the package installs under.
+                    assert_eq!(Some(file_name.as_str()), pack.install_as.as_deref());
+                }
+                other => panic!("unexpected step kind: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn apply_sets_and_reports_the_reaper_language() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path();
+        let step = builtin_configuration_steps()
+            .into_iter()
+            .find(|s| s.id == super::config_set_reaper_language_id("es"))
+            .expect("Spanish language step");
+
+        // Nothing selected yet.
+        assert!(!is_configuration_step_applied(resource, &step).unwrap());
+
+        let report = apply_configuration_step(resource, &step, false).unwrap();
+        assert_eq!(report.status, ConfigurationStatus::Applied);
+        assert!(matches!(
+            report.message_code,
+            ConfigurationMessage::ReaperLanguageSelected { .. }
+        ));
+        assert_eq!(
+            crate::reaper_ini::selected_lang_pack(resource)
+                .unwrap()
+                .as_deref(),
+            Some("es_ES.ReaperLangPack")
+        );
+
+        // Now it reads as applied, and re-running is a no-op.
+        assert!(is_configuration_step_applied(resource, &step).unwrap());
+        let again = apply_configuration_step(resource, &step, false).unwrap();
+        assert!(matches!(
+            again.message_code,
+            ConfigurationMessage::ReaperLanguageAlreadySelected { .. }
+        ));
     }
 
     #[test]

@@ -130,6 +130,10 @@ config-reapack-reaper-accessible-fr-name = Ajouter le dépôt ReaPack « REAPER 
 config-reapack-reaper-accessible-fr-description = Ajoute le dépôt ReaPack francophone de REAPER Accessible (https://github.com/reaperaccessible/rap_fr/raw/main/index.xml). Une fois ajouté, ouvrez le menu Extensions, ReaPack, Parcourir les paquets pour accéder aux ressources francophones de REAPER Accessible.
 config-reapack-reaper-accessible-en-name = Ajouter le dépôt ReaPack « REAPER Accessible (EN) »
 config-reapack-reaper-accessible-en-description = Ajoute le dépôt ReaPack anglophone de REAPER Accessible (https://github.com/reaperaccessible/rap_en/raw/main/index.xml). Une fois ajouté, ouvrez le menu Extensions, ReaPack, Parcourir les paquets pour accéder aux ressources anglophones de REAPER Accessible.
+config-set-reaper-language-es-name = Définir la langue de REAPER sur l'espagnol
+config-set-reaper-language-es-description = Indique à REAPER d'utiliser le pack de langue espagnol, en l'inscrivant dans reaper.ini. Sans cela, vous devriez sélectionner la langue vous-même dans Options, Préférences, Général. Décochez si vous voulez seulement installer le fichier.
+config-set-reaper-language-de-name = Définir la langue de REAPER sur l'allemand
+config-set-reaper-language-de-description = Indique à REAPER d'utiliser le pack de langue allemand, en l'inscrivant dans reaper.ini. Sans cela, vous devriez sélectionner la langue vous-même dans Options, Préférences, Général. Décochez si vous voulez seulement installer le fichier.
 
 wizard-reapack-ack-heading = Avis de don ReaPack
 wizard-reapack-ack-body = ReaPack est un logiciel libre publié sous licence LGPL. Son auteur, Christian Fillion, accepte des dons facultatifs pour soutenir la poursuite du développement. Christian maintient également les extensions SWS et a, par le passé, intégré du code spécifiquement destiné à améliorer la compatibilité avec OSARA. Tout soutien que vous pourrez lui apporter est amplement mérité.
@@ -322,6 +326,9 @@ config-message-reapack-remote-already-present = Le dépôt ReaPack { $name } ({ 
 config-message-reapack-remote-added = Dépôt ReaPack { $name } ({ $url }) ajouté à reapack.ini.
 config-message-reapack-remote-created-file = reapack.ini créé avec le dépôt ReaPack { $name } ({ $url }). ReaPack ajoutera ses dépôts par défaut au prochain démarrage de REAPER.
 config-message-reapack-remote-dry-run = Le dépôt ReaPack { $name } ({ $url }) serait ajouté à reapack.ini.
+config-message-reaper-language-already-selected = REAPER utilisait déjà { $file }.
+config-message-reaper-language-selected = Langue de REAPER définie sur { $file }.
+config-message-reaper-language-dry-run = Définirait la langue de REAPER sur { $file }.
 # $step is the configuration step id (e.g. `reapack-add-reaper-accessibility-remote`).
 config-message-skipped = L'étape de configuration { $step } n'a pas été sélectionnée.
 # $step is the configuration step id; $dependency is the dependency package id.

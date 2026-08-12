@@ -2712,6 +2712,18 @@ fn localized_configuration_message(
             "config-message-reapack-remote-dry-run",
             &[("name", name.as_str()), ("url", url.as_str())],
         ),
+        Msg::ReaperLanguageAlreadySelected { file_name } => localizer.format(
+            "config-message-reaper-language-already-selected",
+            &[("file", file_name.as_str())],
+        ),
+        Msg::ReaperLanguageSelected { file_name } => localizer.format(
+            "config-message-reaper-language-selected",
+            &[("file", file_name.as_str())],
+        ),
+        Msg::ReaperLanguageDryRun { file_name } => localizer.format(
+            "config-message-reaper-language-dry-run",
+            &[("file", file_name.as_str())],
+        ),
         Msg::Skipped { step_id } => {
             localizer.format("config-message-skipped", &[("step", step_id.as_str())])
         }
