@@ -48,7 +48,11 @@ from this file and posts it as the GitHub release body.
   one RABBIT installed; a pack you put in the `LangPack` folder yourself is
   never touched. Language packs are published without version numbers, so
   RABBIT tracks them by content and offers an update when the translator
-  publishes a new file. Suggested by Carlos Esteban Martínez (#19).
+  publishes a new file. Spanish additionally offers a choice of OSARA
+  translation — *REAPER Accesible español* (the default) or *Team PMA* —
+  which OSARA picks up from the pack's file name; switching between them
+  reinstalls under the new name and cleans up the old file. Suggested by
+  Carlos Esteban Martínez (#19).
 - RABBIT now speaks Spanish. The translation was contributed by Carlos
   Esteban Martínez (#19) and is picked automatically on Spanish systems —
   including regional variants, so an es-MX machine gets the Spanish UI —

@@ -47,6 +47,8 @@ pub struct PackageSpec {
     /// File name to install under, overriding the upstream name; see
     /// [`EmbeddedPackageSpec::install_as`].
     pub install_as: Option<String>,
+    /// Selectable flavours; see [`PackageVariant`].
+    pub variants: Vec<PackageVariant>,
     /// Mutual-exclusion group; see [`EmbeddedPackageSpec::exclusive_group`].
     pub exclusive_group: Option<String>,
     /// Package ids this package installs on top of; see
@@ -132,6 +134,10 @@ pub struct EmbeddedPackageSpec {
     /// UI language. `None` for everything that isn't a language pack.
     #[serde(default)]
     pub language: Option<String>,
+    /// Selectable flavours differing only in installed file name; see
+    /// [`PackageVariant`]. Empty for packages with no choice to make.
+    #[serde(default)]
+    pub variants: Vec<PackageVariant>,
     /// File name to install the resolved artifact under, overriding whatever
     /// the upstream calls it. REAPER language packs are selected by FILE
     /// NAME — OSARA reads it to pick its own translation — so the community
@@ -560,6 +566,26 @@ pub enum VersionRule {
     ContentHash { url: String },
 }
 
+/// One selectable flavour of a package that differs only in the file name
+/// it installs under. REAPER picks a language pack by file name and OSARA
+/// reads that name to choose its own translation, so Spanish has two: the
+/// same REAPER/SWS translation is published as `es_ES` (which loads the
+/// "REAPER Accesible español" OSARA translation) or `es_MX` (Team PMA's).
+/// Same download either way — only the installed name differs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageVariant {
+    /// Stable id used by the CLI flag and the wizard's choice.
+    pub id: String,
+    /// File name this variant installs under, overriding `install_as`.
+    pub install_as: String,
+    /// Fluent key for the variant's display name.
+    pub display_name_key: String,
+    /// Exactly one variant should be the default (used when the user
+    /// expresses no preference).
+    #[serde(default)]
+    pub default: bool,
+}
+
 /// How a package's installed version is compared against the available one
 /// to decide Install / Update / Keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -912,6 +938,30 @@ pub fn package_specs_by_id(platform: Platform) -> BTreeMap<String, PackageSpec> 
         .collect()
 }
 
+/// The file name `package_id` should install under, honoring a chosen
+/// variant. `chosen` maps package id → variant id (what the user picked in
+/// the wizard, or via the CLI). Falls back to the variant marked `default`,
+/// then to the package's plain `install_as`, then to `None` (keep the
+/// upstream name). An unknown variant id falls back the same way rather
+/// than failing — the choice is a preference, not a correctness input.
+pub fn resolved_install_as(
+    spec: &PackageSpec,
+    chosen: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    if !spec.variants.is_empty() {
+        if let Some(variant) = chosen
+            .get(&spec.id)
+            .and_then(|id| spec.variants.iter().find(|v| &v.id == id))
+        {
+            return Some(variant.install_as.clone());
+        }
+        if let Some(default) = spec.variants.iter().find(|v| v.default) {
+            return Some(default.install_as.clone());
+        }
+    }
+    spec.install_as.clone()
+}
+
 /// Package ids that share `package_id`'s exclusive group, excluding itself.
 /// Empty when the package declares no group. Installing one member must
 /// remove the others (REAPER loads exactly one language pack, so switching
@@ -990,6 +1040,7 @@ impl EmbeddedPackageSpec {
             install_destination: self.install_destination,
             language: self.language.clone(),
             install_as: self.install_as.clone(),
+            variants: self.variants.clone(),
             exclusive_group: self.exclusive_group.clone(),
             depends_on: self.depends_on.clone(),
             required: self.required,
@@ -1123,6 +1174,53 @@ mod tests {
         assert!(!matches_ui_language(german, "en-US"));
         // A non-language package never matches.
         assert!(!matches_ui_language(reaper, "es-ES"));
+    }
+
+    /// The Spanish pack offers the two OSARA translations issue #19
+    /// describes, distinguished purely by installed file name. Exactly one
+    /// variant must be the default, and `resolved_install_as` must honour a
+    /// choice, fall back to the default, and ignore an unknown id.
+    #[test]
+    fn spanish_variants_select_the_osara_translation_by_file_name() {
+        use super::{package_specs_by_id, resolved_install_as};
+        use crate::model::Platform;
+        use std::collections::BTreeMap;
+
+        let specs = package_specs_by_id(Platform::Windows);
+        let spanish = specs.get("langpack-es").expect("Spanish pack");
+        assert_eq!(spanish.variants.len(), 2);
+        assert_eq!(
+            spanish.variants.iter().filter(|v| v.default).count(),
+            1,
+            "exactly one variant must be the default"
+        );
+
+        let mut chosen = BTreeMap::new();
+        // No choice -> the default (REAPER Accesible español).
+        assert_eq!(
+            resolved_install_as(spanish, &chosen).as_deref(),
+            Some("es_ES.ReaperLangPack")
+        );
+        // Team PMA -> es_MX, which is what makes OSARA load their version.
+        chosen.insert("langpack-es".to_string(), "pma".to_string());
+        assert_eq!(
+            resolved_install_as(spanish, &chosen).as_deref(),
+            Some("es_MX.ReaperLangPack")
+        );
+        // An unknown id falls back to the default rather than failing.
+        chosen.insert("langpack-es".to_string(), "nope".to_string());
+        assert_eq!(
+            resolved_install_as(spanish, &chosen).as_deref(),
+            Some("es_ES.ReaperLangPack")
+        );
+
+        // A package with no variants is unaffected by any choice.
+        let german = specs.get("langpack-de").expect("German pack");
+        assert!(german.variants.is_empty());
+        assert_eq!(
+            resolved_install_as(german, &chosen).as_deref(),
+            Some("de_DE.ReaperLangPack")
+        );
     }
 
     /// A language pack must declare the locale-shaped file name REAPER (and

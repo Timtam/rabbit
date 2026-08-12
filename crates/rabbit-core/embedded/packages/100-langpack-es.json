@@ -11,6 +11,19 @@
   "exclusive_group": "reaper-langpack",
   "language": "es",
   "install_as": "es_ES.ReaperLangPack",
+  "variants": [
+    {
+      "id": "rae",
+      "install_as": "es_ES.ReaperLangPack",
+      "display_name_key": "package-langpack-es-variant-rae",
+      "default": true
+    },
+    {
+      "id": "pma",
+      "install_as": "es_MX.ReaperLangPack",
+      "display_name_key": "package-langpack-es-variant-pma"
+    }
+  ],
   "required": false,
   "recommended": false,
   "supported_platforms": [

@@ -26,6 +26,10 @@ pub struct InstallOptions {
     pub dry_run: bool,
     pub allow_reaper_running: bool,
     pub target_app_path: Option<PathBuf>,
+    /// Chosen package variant per package id; see
+    /// [`crate::package::PackageVariant`]. Empty means "package defaults".
+    #[serde(default)]
+    pub package_variants: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,7 +144,7 @@ pub fn install_cached_artifacts_with_progress(
         // would collapse them all onto the same target.
         let install_as = install_spec
             .as_ref()
-            .and_then(|spec| spec.install_as.as_deref())
+            .and_then(|spec| crate::package::resolved_install_as(spec, &options.package_variants))
             .filter(|_| prepared.files.len() == 1);
 
         for file in &prepared.files {
@@ -148,7 +152,7 @@ pub fn install_cached_artifacts_with_progress(
                 destination,
                 &artifact.descriptor.package_id,
                 resource_path,
-                install_as.unwrap_or(&file.target_file_name),
+                install_as.as_deref().unwrap_or(&file.target_file_name),
             )?;
             let target_path = install_target.target_path;
             let target_exists = target_path.is_file();
@@ -192,6 +196,28 @@ pub fn install_cached_artifacts_with_progress(
         }
 
         if !options.dry_run {
+            // Files this package installed LAST time. Anything still listed
+            // there but absent from the new set is stale — most visibly when
+            // a language pack is reinstalled under a different name because
+            // the user switched variant (es_ES -> es_MX), where the content
+            // is identical and only the name changes.
+            let previous_paths: Vec<PathBuf> = state
+                .packages
+                .get(&artifact.descriptor.package_id)
+                .map(|receipt| {
+                    receipt
+                        .installed_files
+                        .iter()
+                        .map(|file| {
+                            if file.path.is_absolute() {
+                                file.path.clone()
+                            } else {
+                                resource_path.join(&file.path)
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             upsert_package_receipt(
                 &mut state,
                 resource_path,
@@ -205,6 +231,7 @@ pub fn install_cached_artifacts_with_progress(
                     architecture: Some(artifact.descriptor.architecture),
                 },
             )?;
+            remove_superseded_own_files(&previous_paths, &artifact_target_paths);
             remove_exclusive_group_siblings(
                 &mut state,
                 resource_path,
@@ -240,6 +267,30 @@ pub fn install_cached_artifacts_with_progress(
     }
 
     Ok(report)
+}
+
+/// Remove files a package installed previously that it no longer installs.
+/// Keeps a rename from orphaning the old file — switching the Spanish
+/// language pack between its es_ES and es_MX variants reinstalls identical
+/// content under a new name, so without this both would sit in `LangPack/`.
+/// Best-effort and conservative: only paths the package's own receipt
+/// recorded are considered, and anything in the new set is kept.
+fn remove_superseded_own_files(previous: &[PathBuf], current: &[PathBuf]) {
+    for path in previous {
+        if current.iter().any(|kept| kept == path) {
+            continue;
+        }
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                eprintln!(
+                    "warning: could not remove superseded {}: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
 }
 
 /// After installing `package_id`, remove any package in the same exclusive
@@ -887,6 +938,7 @@ mod tests {
                 dry_run: false,
                 allow_reaper_running: true,
                 target_app_path: None,
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -948,6 +1000,7 @@ mod tests {
                 dry_run: false,
                 allow_reaper_running: true,
                 target_app_path: None,
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -1004,6 +1057,7 @@ mod tests {
                 dry_run: true,
                 allow_reaper_running: false,
                 target_app_path: None,
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -1030,6 +1084,7 @@ mod tests {
                 dry_run: false,
                 allow_reaper_running: true,
                 target_app_path: None,
+                package_variants: Default::default(),
             },
         )
         .unwrap_err();
@@ -1059,6 +1114,7 @@ mod tests {
                 dry_run: false,
                 allow_reaper_running: true,
                 target_app_path: None,
+                package_variants: Default::default(),
             },
         )
         .unwrap_err();
@@ -1145,6 +1201,7 @@ mod tests {
                 dry_run: false,
                 allow_reaper_running: true,
                 target_app_path: None,
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -1210,6 +1267,7 @@ mod tests {
                 dry_run: true,
                 allow_reaper_running: true,
                 target_app_path: None,
+                package_variants: Default::default(),
             },
         )
         .unwrap();

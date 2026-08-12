@@ -19,6 +19,8 @@ package-surge-xt = Surge XT
 package-app2clap = app2clap
 package-langpack-es = REAPER auf Spanisch
 package-langpack-de = REAPER auf Deutsch
+package-langpack-es-variant-rae = REAPER Accesible español (es_ES)
+package-langpack-es-variant-pma = Team PMA (es_MX)
 
 package-reaper-description = Reaper ist eine der vielseitigsten Digital Audio Workstations (DAWs) auf dem Markt und eignet sich sowohl für Einsteiger als auch für Profis. Besonders durch ihre Vielseitigkeit und Anpassungsfähigkeit hebt sich Reaper von anderen DAWs ab und wird von vielen professionellen Produzenten für anspruchsvolle Projekte genutzt.
 package-osara-description = OSARA macht REAPER mit Screenreadern bedienbar — NVDA, JAWS und Narrator unter Windows sowie VoiceOver unter macOS. Installieren Sie OSARA, wenn Sie REAPER mit einem Screenreader nutzen.

@@ -83,9 +83,13 @@ pub enum ConfigurationStepKind {
     /// on URL: re-running the wizard doesn't add a duplicate.
     AddReapackRemote { name: String, url: String },
     /// Point REAPER at an installed language pack by writing
-    /// `langpack=<file_name>` under `[REAPER]` in `<resource>/reaper.ini`.
-    /// Idempotent: selecting the already-active pack writes nothing.
-    SetReaperLanguage { file_name: String },
+    /// `langpack=<file name>` under `[REAPER]` in `<resource>/reaper.ini`.
+    /// The file name is resolved from `package_id`'s install receipt at
+    /// apply time rather than baked in, so it always matches whatever was
+    /// actually installed — including which variant the user picked (the
+    /// Spanish pack installs as es_ES or es_MX). Idempotent: selecting the
+    /// already-active pack writes nothing.
+    SetReaperLanguage { package_id: String },
 }
 
 /// Outcome of applying a single configuration step. Mirrors the
@@ -215,7 +219,6 @@ fn lang_pack_steps() -> Vec<ConfigurationStep> {
         .filter(|spec| spec.package_kind == PackageKind::LanguagePack)
         .filter_map(|spec| {
             let language = spec.language.clone()?;
-            let file_name = spec.install_as.clone()?;
             Some(ConfigurationStep {
                 id: config_set_reaper_language_id(&language),
                 display_name_key: format!("config-set-reaper-language-{language}-name"),
@@ -227,10 +230,29 @@ fn lang_pack_steps() -> Vec<ConfigurationStep> {
                 // to get the file without changing REAPER's setting.
                 recommended: true,
                 requires_package_id: Some(spec.id.clone()),
-                kind: ConfigurationStepKind::SetReaperLanguage { file_name },
+                kind: ConfigurationStepKind::SetReaperLanguage {
+                    package_id: spec.id.clone(),
+                },
             })
         })
         .collect()
+}
+
+/// The `.ReaperLangPack` file `package_id`'s receipt says RABBIT installed,
+/// if any. Resolving from the receipt (rather than a name baked into the
+/// step) keeps activation correct whichever variant the user chose.
+fn installed_lang_pack_file(resource_path: &Path, package_id: &str) -> Result<Option<String>> {
+    let Some(state) = crate::receipt::load_install_state(resource_path)? else {
+        return Ok(None);
+    };
+    Ok(state.packages.get(package_id).and_then(|receipt| {
+        receipt.installed_files.iter().find_map(|file| {
+            let name = file.path.file_name()?.to_str()?;
+            name.to_ascii_lowercase()
+                .ends_with(".reaperlangpack")
+                .then(|| name.to_string())
+        })
+    }))
 }
 
 /// `true` when the on-disk state under `resource_path` already
@@ -247,7 +269,12 @@ pub fn is_configuration_step_applied(
         ConfigurationStepKind::AddReapackRemote { url, .. } => {
             is_remote_configured(resource_path, url)
         }
-        ConfigurationStepKind::SetReaperLanguage { file_name } => {
+        ConfigurationStepKind::SetReaperLanguage { package_id } => {
+            let Some(file_name) = installed_lang_pack_file(resource_path, package_id)? else {
+                // Nothing installed yet: there is no work we could already
+                // have done, so the step is not "applied".
+                return Ok(false);
+            };
             Ok(selected_lang_pack(resource_path)?.as_deref() == Some(file_name.as_str()))
         }
     }
@@ -308,7 +335,15 @@ pub fn apply_configuration_step(
                 message_code,
             })
         }
-        ConfigurationStepKind::SetReaperLanguage { file_name } => {
+        ConfigurationStepKind::SetReaperLanguage { package_id } => {
+            let Some(file_name) = installed_lang_pack_file(resource_path, package_id)? else {
+                return Err(crate::error::RabbitError::InvalidPlannedExecution {
+                    message: format!(
+                        "cannot set REAPER's language: no installed language-pack file is recorded for {package_id}"
+                    ),
+                });
+            };
+            let file_name = &file_name;
             let outcome = select_lang_pack(resource_path, file_name)?;
             let (message, message_code) = match outcome {
                 LangPackSelectionOutcome::AlreadySelected => (
@@ -345,12 +380,13 @@ fn dry_run_message_for(step: &ConfigurationStep) -> (String, ConfigurationMessag
                 url: url.clone(),
             },
         ),
-        ConfigurationStepKind::SetReaperLanguage { file_name } => (
-            format!("Would set REAPER's language to {file_name} in reaper.ini."),
-            ConfigurationMessage::ReaperLanguageDryRun {
-                file_name: file_name.clone(),
-            },
-        ),
+        ConfigurationStepKind::SetReaperLanguage { package_id } => {
+            let file_name = package_id.clone();
+            (
+                format!("Would set REAPER's language to the {file_name} language pack."),
+                ConfigurationMessage::ReaperLanguageDryRun { file_name },
+            )
+        }
     }
 }
 
@@ -498,17 +534,25 @@ mod tests {
                 pack.id
             );
             match &step.kind {
-                ConfigurationStepKind::SetReaperLanguage { file_name } => {
-                    // Writes the same name the package installs under.
-                    assert_eq!(Some(file_name.as_str()), pack.install_as.as_deref());
+                ConfigurationStepKind::SetReaperLanguage { package_id } => {
+                    // The step names the package; the file is resolved from
+                    // its receipt at apply time so a variant switch is
+                    // honoured automatically.
+                    assert_eq!(package_id, &pack.id);
                 }
                 other => panic!("unexpected step kind: {other:?}"),
             }
         }
     }
 
+    /// The step resolves the file name from the package's receipt, so it
+    /// always activates whatever was actually installed — including the
+    /// variant the user picked. With nothing installed there is no name to
+    /// write, so the step reports "not applied" and refuses to guess.
     #[test]
     fn apply_sets_and_reports_the_reaper_language() {
+        use crate::receipt::{InstallState, InstalledFileReceipt, PackageReceipt};
+
         let dir = tempdir().unwrap();
         let resource = dir.path();
         let step = builtin_configuration_steps()
@@ -516,8 +560,32 @@ mod tests {
             .find(|s| s.id == super::config_set_reaper_language_id("es"))
             .expect("Spanish language step");
 
-        // Nothing selected yet.
+        // No receipt yet: nothing is applied, and applying is an error
+        // rather than a guess at the file name.
         assert!(!is_configuration_step_applied(resource, &step).unwrap());
+        assert!(apply_configuration_step(resource, &step, false).is_err());
+
+        // Record the Team PMA variant as installed — the step must follow it
+        // rather than the package's default es_ES name.
+        let mut state = InstallState::default();
+        state.packages.insert(
+            "langpack-es".to_string(),
+            PackageReceipt {
+                id: "langpack-es".to_string(),
+                version: None,
+                source_url: None,
+                source_sha256: None,
+                installed_files: vec![InstalledFileReceipt {
+                    path: std::path::PathBuf::from("LangPack").join("es_MX.ReaperLangPack"),
+                    sha256: None,
+                    size: None,
+                }],
+                installed_at: None,
+                rabbit_version: None,
+                architecture: None,
+            },
+        );
+        crate::receipt::save_install_state(resource, &state).unwrap();
 
         let report = apply_configuration_step(resource, &step, false).unwrap();
         assert_eq!(report.status, ConfigurationStatus::Applied);
@@ -529,7 +597,8 @@ mod tests {
             crate::reaper_ini::selected_lang_pack(resource)
                 .unwrap()
                 .as_deref(),
-            Some("es_ES.ReaperLangPack")
+            Some("es_MX.ReaperLangPack"),
+            "activation must follow the installed variant, not the default"
         );
 
         // Now it reads as applied, and re-running is a no-op.

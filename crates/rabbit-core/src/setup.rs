@@ -34,6 +34,11 @@ pub struct SetupOptions {
     /// an explicit user re-tick actually reruns the install.
     #[serde(default)]
     pub force_reinstall_packages: Vec<String>,
+    /// Forwarded to [`PackageOperationOptions::package_variants`]: the
+    /// chosen flavour per package (the Spanish language pack's es_ES vs
+    /// es_MX OSARA translation today).
+    #[serde(default)]
+    pub package_variants: std::collections::BTreeMap<String, String>,
     /// Ids of [`ConfigurationStep`] entries the user opted in to.
     /// Configuration steps run after the package install pipeline; those
     /// whose dependency package is neither installed nor part of this
@@ -118,6 +123,7 @@ pub fn execute_setup_operation_with_progress(
             target_app_path: options.target_app_path.clone(),
             lock_path: options.lock_path.clone(),
             force_reinstall_packages: options.force_reinstall_packages.clone(),
+            package_variants: options.package_variants.clone(),
         },
         progress,
     )?;
@@ -191,6 +197,7 @@ pub fn execute_resolved_setup_operation_with_progress(
             target_app_path: options.target_app_path.clone(),
             lock_path: options.lock_path.clone(),
             force_reinstall_packages: options.force_reinstall_packages.clone(),
+            package_variants: options.package_variants.clone(),
         },
         progress,
     )?;
@@ -320,6 +327,7 @@ mod tests {
                 target_app_path: None,
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
                 configuration_step_ids: Vec::new(),
             },
         )
@@ -355,6 +363,7 @@ mod tests {
                 target_app_path: None,
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
                 configuration_step_ids: Vec::new(),
             },
         )
@@ -406,6 +415,7 @@ mod tests {
                 target_app_path: Some(app_path.clone()),
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
                 configuration_step_ids: Vec::new(),
             },
         )

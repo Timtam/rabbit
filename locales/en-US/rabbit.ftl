@@ -19,6 +19,8 @@ package-surge-xt = Surge XT
 package-app2clap = app2clap
 package-langpack-es = REAPER in Spanish
 package-langpack-de = REAPER in German
+package-langpack-es-variant-rae = REAPER Accesible español (es_ES)
+package-langpack-es-variant-pma = Team PMA (es_MX)
 
 package-reaper-description = REAPER is the digital audio workstation that everything else here builds on. RABBIT can install or update REAPER for you.
 package-osara-description = OSARA is the open source accessibility extension that makes REAPER usable with screen readers. NVDA, JAWS and Narrator on Windows, VoiceOver on macOS are all widely adopted, some other Windows screen readers might also work. Install OSARA if you rely on a screen reader to use REAPER.

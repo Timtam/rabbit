@@ -192,6 +192,11 @@ enum Command {
         stage_unsupported: bool,
         #[arg(long)]
         preserve_osara_keymap: bool,
+        /// Pick a package flavour, e.g. `--package-variant langpack-es=pma`
+        /// to install Team PMA's Spanish translation (es_MX) instead of the
+        /// default REAPER Accesible español (es_ES). Repeatable.
+        #[arg(long = "package-variant")]
+        package_variant: Vec<String>,
         #[arg(long)]
         accept_reapack_donation_notice: bool,
         #[arg(long)]
@@ -222,6 +227,11 @@ enum Command {
         stage_unsupported: bool,
         #[arg(long)]
         preserve_osara_keymap: bool,
+        /// Pick a package flavour, e.g. `--package-variant langpack-es=pma`
+        /// to install Team PMA's Spanish translation (es_MX) instead of the
+        /// default REAPER Accesible español (es_ES). Repeatable.
+        #[arg(long = "package-variant")]
+        package_variant: Vec<String>,
         #[arg(long)]
         accept_reapack_donation_notice: bool,
         #[arg(long = "config-step")]
@@ -611,6 +621,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     dry_run: !apply,
                     allow_reaper_running,
                     target_app_path,
+                    package_variants: Default::default(),
                 },
             )?;
             let report_path = selected_report_path(
@@ -636,6 +647,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             allow_reaper_running,
             stage_unsupported,
             preserve_osara_keymap,
+            package_variant,
             accept_reapack_donation_notice,
             report_path,
             save_report,
@@ -658,6 +670,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     allow_reaper_running,
                     stage_unsupported,
                     replace_osara_keymap: !preserve_osara_keymap,
+                    package_variants: parse_package_variants(&package_variant)?,
                     target_app_path,
                     lock_path: None,
                     force_reinstall_packages: Vec::new(),
@@ -693,6 +706,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             allow_reaper_running,
             stage_unsupported,
             preserve_osara_keymap,
+            package_variant,
             accept_reapack_donation_notice,
             config_step,
             skip_config_step,
@@ -725,6 +739,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     allow_reaper_running,
                     stage_unsupported,
                     replace_osara_keymap: !preserve_osara_keymap,
+                    package_variants: parse_package_variants(&package_variant)?,
                     target_app_path,
                     lock_path: None,
                     force_reinstall_packages: Vec::new(),
@@ -1244,6 +1259,49 @@ fn print_restore_backup_report(report: &RestoreBackupReport) {
         println!("    Size: {}", action.size);
         println!("    SHA-256: {}", action.sha256);
     }
+}
+
+/// Parse repeated `--package-variant <package>=<variant>` flags into the map
+/// the operation options carry. Rejects a malformed pair loudly rather than
+/// silently ignoring it, so a typo can't quietly install the default
+/// flavour when the user asked for the other one.
+fn parse_package_variants(
+    pairs: &[String],
+) -> Result<std::collections::BTreeMap<String, String>, Box<dyn std::error::Error>> {
+    let mut variants = std::collections::BTreeMap::new();
+    for pair in pairs {
+        let Some((package, variant)) = pair.split_once('=') else {
+            return Err(
+                format!("--package-variant expects <package>=<variant>, got {pair:?}").into(),
+            );
+        };
+        let (package, variant) = (package.trim(), variant.trim());
+        if package.is_empty() || variant.is_empty() {
+            return Err(
+                format!("--package-variant expects <package>=<variant>, got {pair:?}").into(),
+            );
+        }
+        let known: Vec<String> = builtin_package_specs(
+            Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?,
+        )
+        .into_iter()
+        .find(|spec| spec.id == package)
+        .map(|spec| spec.variants.iter().map(|v| v.id.clone()).collect())
+        .unwrap_or_default();
+        if !known.iter().any(|id| id == variant) {
+            return Err(format!(
+                "package {package:?} has no variant {variant:?} (available: {})",
+                if known.is_empty() {
+                    "none".to_string()
+                } else {
+                    known.join(", ")
+                }
+            )
+            .into());
+        }
+        variants.insert(package.to_string(), variant.to_string());
+    }
+    Ok(variants)
 }
 
 fn print_package_operation_report(report: &PackageOperationReport) {

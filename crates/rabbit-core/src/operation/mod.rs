@@ -60,6 +60,14 @@ pub struct PackageOperationOptions {
     /// no-op just because the version matches.
     #[serde(default)]
     pub force_reinstall_packages: Vec<String>,
+    /// Chosen package variant per package id (see
+    /// [`crate::package::PackageVariant`]). Today only the Spanish language
+    /// pack offers a choice — `es_ES` (REAPER Accesible español) vs `es_MX`
+    /// (Team PMA) — which changes the installed file name and therefore
+    /// which OSARA translation loads. Empty means "use each package's
+    /// default variant".
+    #[serde(default)]
+    pub package_variants: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,6 +315,15 @@ fn automation_support_dispatch(
     if matches!(kind, ArtifactKind::Archive) && is_github_release_package(package_id, platform) {
         return PackageAutomationSupport::Direct;
     }
+    // Any archive whose manifest declares no `run_upstream_installer` step
+    // is likewise Direct: there is nothing to launch, so RABBIT extracts the
+    // file and copies it itself. Covers the Spanish language pack, whose ZIP
+    // holds a single `.ReaperLangPack` and which resolves through
+    // `http_artifact` rather than a GitHub release — without this it would
+    // fall through to the vendor-installer path and never install.
+    if matches!(kind, ArtifactKind::Archive) && !runs_upstream_installer(package_id, platform) {
+        return PackageAutomationSupport::Direct;
+    }
     // FFmpeg ships as a `.7z` whose `bin/` we extract directly into
     // UserPlugins — no upstream installer to launch, no user prompt to
     // dismiss. Same automation class as the per-file extension-binary
@@ -344,6 +361,18 @@ fn automation_support_dispatch(
 
 /// Whether `package_id` is defined by a data-driven `github_release` block
 /// (RABBIT extracts/copies it itself — Direct automation).
+/// Whether the package's manifest declares a `run_upstream_installer`
+/// install step — i.e. there is a vendor installer to launch, rather than a
+/// file for RABBIT to place itself.
+fn runs_upstream_installer(package_id: &str, platform: Platform) -> bool {
+    crate::package::package_specs_by_id(platform)
+        .get(package_id)
+        .is_some_and(|spec| {
+            spec.install_steps
+                .contains(&crate::package::InstallStep::RunUpstreamInstaller)
+        })
+}
+
 fn is_github_release_package(package_id: &str, platform: Platform) -> bool {
     crate::package::package_specs_by_id(platform)
         .get(package_id)
@@ -483,11 +512,24 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
             // the install pipeline actually reruns instead of silently
             // skipping. Install/Update stay as-is — there's nothing to
             // promote.
+            // A variant switch changes the installed FILE NAME without
+            // changing the downloaded content, so the version/hash
+            // comparison alone reports Keep and the rename would silently
+            // never happen. Promote to Update when the name on disk isn't
+            // the one the chosen variant asks for.
+            let variant_switched = matches!(computed, PlanActionKind::Keep)
+                && wants_different_install_name(
+                    resource_path,
+                    &artifact.package_id,
+                    platform_of(&artifact),
+                    &options.package_variants,
+                );
             if matches!(computed, PlanActionKind::Keep)
-                && options
-                    .force_reinstall_packages
-                    .iter()
-                    .any(|id| id == &artifact.package_id)
+                && (variant_switched
+                    || options
+                        .force_reinstall_packages
+                        .iter()
+                        .any(|id| id == &artifact.package_id))
             {
                 PlanActionKind::Update
             } else {
@@ -835,6 +877,7 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
                 dry_run: options.dry_run,
                 allow_reaper_running: options.allow_reaper_running,
                 target_app_path: options.target_app_path.clone(),
+                package_variants: options.package_variants.clone(),
             },
             progress,
         ) {
@@ -886,6 +929,46 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
         receipt_backup_manifest_path,
         items,
     })
+}
+
+/// The platform an artifact descriptor was resolved for.
+fn platform_of(artifact: &ArtifactDescriptor) -> Platform {
+    artifact.platform
+}
+
+/// Whether the file name `package_id` is currently installed under (per its
+/// receipt) differs from the one the chosen variant asks for. Used to force
+/// a reinstall on a variant switch, where the downloaded bytes — and so the
+/// content hash — are identical and only the installed name changes.
+/// `false` when the package declares no variants, has no receipt, or the
+/// name already matches.
+fn wants_different_install_name(
+    resource_path: &Path,
+    package_id: &str,
+    platform: Platform,
+    chosen: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    let specs = package_specs_by_id(platform);
+    let Some(spec) = specs.get(package_id) else {
+        return false;
+    };
+    if spec.variants.is_empty() {
+        return false;
+    }
+    let Some(wanted) = crate::package::resolved_install_as(spec, chosen) else {
+        return false;
+    };
+    let Ok(Some(state)) = load_install_state(resource_path) else {
+        return false;
+    };
+    let Some(receipt) = state.packages.get(package_id) else {
+        return false;
+    };
+    receipt
+        .installed_files
+        .iter()
+        .filter_map(|file| file.path.file_name()?.to_str())
+        .any(|name| !name.eq_ignore_ascii_case(&wanted))
 }
 
 fn automation_support_for_artifact(
@@ -2033,6 +2116,7 @@ mod tests {
                 target_app_path: None,
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -2074,6 +2158,7 @@ mod tests {
                 target_app_path: None,
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -2106,6 +2191,7 @@ mod tests {
                 target_app_path: None,
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -2149,6 +2235,7 @@ mod tests {
                 target_app_path: None,
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -2357,6 +2444,7 @@ mod tests {
                 target_app_path: Some(resource_path.join("reaper.exe")),
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -2408,6 +2496,7 @@ mod tests {
                 target_app_path: Some(target_app_path.clone()),
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -2447,6 +2536,7 @@ mod tests {
                 target_app_path: Some(resource_path.join("reaper.exe")),
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -2489,6 +2579,7 @@ mod tests {
                 target_app_path: Some(resource_path.join("reaper.exe")),
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -2531,6 +2622,7 @@ mod tests {
                 target_app_path: Some(resource_path.join("reaper.exe")),
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -2585,6 +2677,7 @@ mod tests {
                 target_app_path: Some(resource_path.join("reaper.exe")),
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -2657,6 +2750,7 @@ mod tests {
                 target_app_path: Some(target_app_path.clone()),
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -2700,6 +2794,7 @@ mod tests {
                 target_app_path: Some(resource_path.join("reaper.exe")),
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -2747,6 +2842,7 @@ mod tests {
                 target_app_path: Some(resource_path.join("reaper.exe")),
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -2799,6 +2895,7 @@ mod tests {
                 target_app_path: Some(resource_path.join("reaper.exe")),
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -2847,6 +2944,7 @@ mod tests {
                 target_app_path: Some(resource_path.join("reaper.exe")),
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -2911,6 +3009,7 @@ mod tests {
                 target_app_path: Some(resource_path.join("reaper.exe")),
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -3042,6 +3141,7 @@ mod tests {
                 target_app_path: Some(resource_path.join("reaper.exe")),
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -3115,6 +3215,7 @@ mod tests {
                 target_app_path: Some(resource_path.join("reaper.exe")),
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -3164,6 +3265,7 @@ mod tests {
                 target_app_path: None,
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -3241,6 +3343,7 @@ mod tests {
                 target_app_path: None,
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -3305,6 +3408,7 @@ mod tests {
                 target_app_path: Some(target_app_path.clone()),
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         )
         .unwrap();
@@ -3395,6 +3499,7 @@ mod tests {
                 target_app_path: None,
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
             },
         );
 

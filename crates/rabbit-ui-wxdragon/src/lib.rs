@@ -325,6 +325,9 @@ pub struct WizardInstallOptions {
     pub allow_reaper_running: bool,
     pub stage_unsupported: bool,
     pub osara_keymap_choice: OsaraKeymapChoice,
+    /// Chosen package flavour per package id; see
+    /// [`rabbit_core::package::PackageVariant`].
+    pub package_variants: std::collections::BTreeMap<String, String>,
     pub cache_dir: Option<PathBuf>,
 }
 
@@ -335,6 +338,7 @@ impl Default for WizardInstallOptions {
             allow_reaper_running: false,
             stage_unsupported: true,
             osara_keymap_choice: OsaraKeymapChoice::ReplaceCurrent,
+            package_variants: std::collections::BTreeMap::new(),
             cache_dir: None,
         }
     }
@@ -352,6 +356,9 @@ pub struct WizardInstallRequest {
     pub allow_reaper_running: bool,
     pub stage_unsupported: bool,
     pub osara_keymap_choice: OsaraKeymapChoice,
+    /// Chosen package flavour per package id, forwarded to
+    /// [`rabbit_core::setup::SetupOptions::package_variants`].
+    pub package_variants: std::collections::BTreeMap<String, String>,
     pub cache_dir: PathBuf,
     /// Packages whose plan-time decision was `Keep` (already current) but
     /// the user explicitly checked the box anyway, opting in to a
@@ -1043,6 +1050,7 @@ pub fn install_request_from_target_and_rows(
         } else {
             OsaraKeymapChoice::PreserveCurrent
         },
+        package_variants: options.package_variants.clone(),
         cache_dir: options.cache_dir.unwrap_or_else(default_cache_dir),
         force_reinstall_packages,
         configuration_step_ids,
@@ -1723,6 +1731,7 @@ pub fn execute_wizard_install_with_progress(
             target_app_path: request.target_app_path.clone(),
             lock_path: None,
             force_reinstall_packages: request.force_reinstall_packages.clone(),
+            package_variants: request.package_variants.clone(),
             configuration_step_ids: request.configuration_step_ids.clone(),
         },
         progress,
@@ -4015,6 +4024,7 @@ mod tests {
                 allow_reaper_running: true,
                 stage_unsupported: false,
                 osara_keymap_choice: OsaraKeymapChoice::ReplaceCurrent,
+                package_variants: Default::default(),
                 cache_dir: Some(PathBuf::from("C:/cache")),
             },
         )
@@ -5320,6 +5330,7 @@ mod tests {
             osara_keymap_choice: OsaraKeymapChoice::ReplaceCurrent,
             cache_dir: PathBuf::from("C:/cache"),
             force_reinstall_packages: Vec::new(),
+            package_variants: Default::default(),
             configuration_step_ids: Vec::new(),
         }
     }

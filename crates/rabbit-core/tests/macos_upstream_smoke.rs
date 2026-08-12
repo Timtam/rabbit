@@ -34,6 +34,7 @@ fn smoke_setup_options(target_app_path: PathBuf, lock_path: PathBuf) -> SetupOpt
         target_app_path: Some(target_app_path),
         lock_path: Some(lock_path),
         force_reinstall_packages: Vec::new(),
+        package_variants: Default::default(),
         configuration_step_ids: Vec::new(),
     }
 }
@@ -47,6 +48,7 @@ fn smoke_package_options(lock_path: PathBuf) -> PackageOperationOptions {
         target_app_path: None,
         lock_path: Some(lock_path),
         force_reinstall_packages: Vec::new(),
+        package_variants: Default::default(),
     }
 }
 
