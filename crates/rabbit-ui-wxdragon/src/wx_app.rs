@@ -349,6 +349,10 @@ struct PackageItems {
     /// sibling of the Packages group. `None` when no package has the
     /// `Additional` category — the group node isn't created then.
     additional_software_group: Option<TreeItemId>,
+    /// The "Language packs" group node (REAPER translations), a sibling of
+    /// the Packages group. `None` when no package has the `Language`
+    /// category — the group node isn't created then.
+    language_group: Option<TreeItemId>,
     /// One TreeItemId per package row, in the same order as `package_rows`
     /// (covering BOTH the Packages and Additional-software groups). The leaf
     /// for `package_rows[i]` is at `packages_leaves[i]` regardless of which
@@ -368,6 +372,7 @@ impl PackageItems {
         Self {
             packages_group: None,
             additional_software_group: None,
+            language_group: None,
             packages_leaves: Vec::new(),
             configuration_group: None,
             configuration_leaves: Vec::new(),
@@ -389,6 +394,9 @@ enum NodeKind {
     /// The synthetic "Additional software" parent, sibling of PackagesGroup.
     /// Holds the `Additional`-category package leaves (Surge XT, app2clap, …).
     AdditionalSoftwareGroup,
+    /// The synthetic "Language packs" parent, sibling of PackagesGroup.
+    /// Holds the `Language`-category package leaves (REAPER translations).
+    LanguageGroup,
     /// A package leaf — index into `package_rows`. Parented under either
     /// PackagesGroup or AdditionalSoftwareGroup depending on the row's
     /// category; the index is into the full `package_rows` either way.
@@ -416,9 +424,11 @@ struct PackageTreeData {
     configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     packages_group_label: String,
     additional_software_group_label: String,
+    language_group_label: String,
     configuration_group_label: String,
     packages_group_node: Box<Node>,
     additional_software_group_node: Box<Node>,
+    language_group_node: Box<Node>,
     package_nodes: Vec<Box<Node>>,
     configuration_group_node: Box<Node>,
     configuration_nodes: Vec<Box<Node>>,
@@ -431,6 +441,7 @@ impl PackageTreeData {
         configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
         packages_group_label: String,
         additional_software_group_label: String,
+        language_group_label: String,
         configuration_group_label: String,
     ) -> Self {
         let package_len = rows.borrow().len();
@@ -454,12 +465,16 @@ impl PackageTreeData {
             configuration_rows,
             packages_group_label,
             additional_software_group_label,
+            language_group_label,
             configuration_group_label,
             packages_group_node: Box::new(Node {
                 kind: NodeKind::PackagesGroup,
             }),
             additional_software_group_node: Box::new(Node {
                 kind: NodeKind::AdditionalSoftwareGroup,
+            }),
+            language_group_node: Box::new(Node {
+                kind: NodeKind::LanguageGroup,
             }),
             package_nodes,
             configuration_group_node: Box::new(Node {
@@ -475,6 +490,20 @@ impl PackageTreeData {
 
     fn additional_software_group_ptr(&self) -> *const Node {
         self.additional_software_group_node.as_ref()
+    }
+
+    fn language_group_ptr(&self) -> *const Node {
+        self.language_group_node.as_ref()
+    }
+
+    /// Whether any package row is in the `Language` category — drives
+    /// whether the "Language packs" group node is exposed as a root child
+    /// (so it never renders empty).
+    fn has_language_packs(&self) -> bool {
+        self.rows
+            .borrow()
+            .iter()
+            .any(|r| r.category == rabbit_core::package::PackageCategory::Language)
     }
 
     /// Whether any package row is in the `Additional` category — drives
@@ -2863,6 +2892,7 @@ fn populate_packages_tree(
         let mut items = package_items.borrow_mut();
         items.packages_group = None;
         items.additional_software_group = None;
+        items.language_group = None;
         items.packages_leaves.clear();
         items.configuration_group = None;
         items.configuration_leaves.clear();
@@ -2895,6 +2925,14 @@ fn populate_packages_tree(
     } else {
         None
     };
+    let has_language = package_rows
+        .iter()
+        .any(|row| row.category == rabbit_core::package::PackageCategory::Language);
+    let language_group = if has_language {
+        tree.append_item(&root, &model.text.language_tree_group_label, None, None)
+    } else {
+        None
+    };
     // One leaf per row, in row order, parented under the group that matches
     // the row's category. `packages_leaves[i]` stays the leaf for
     // `package_rows[i]` regardless of which group it hangs under, so every
@@ -2905,11 +2943,10 @@ fn populate_packages_tree(
             rabbit_core::package::PackageCategory::Additional => additional_software_group
                 .as_ref()
                 .unwrap_or(&packages_group),
-            // Language packs currently hang under the main Packages group;
-            // they get their own group when the wizard's language-pack
-            // handling lands.
-            rabbit_core::package::PackageCategory::Core
-            | rabbit_core::package::PackageCategory::Language => &packages_group,
+            rabbit_core::package::PackageCategory::Language => {
+                language_group.as_ref().unwrap_or(&packages_group)
+            }
+            rabbit_core::package::PackageCategory::Core => &packages_group,
         };
         let label = format_row_label(&row.summary, row.selected);
         if let Some(item) = tree.append_item(parent, &label, None, None) {
@@ -2923,6 +2960,10 @@ fn populate_packages_tree(
     if let Some(group) = additional_software_group.as_ref() {
         let additional_state = compute_additional_software_group_tristate(package_rows);
         native_tree_checkboxes::set_check_state_tri(tree.get_handle(), group, additional_state);
+    }
+    if let Some(group) = language_group.as_ref() {
+        let language_state = compute_language_group_tristate(package_rows);
+        native_tree_checkboxes::set_check_state_tri(tree.get_handle(), group, language_state);
     }
 
     // Configuration group + leaves. Always created, even if no
@@ -2956,6 +2997,7 @@ fn populate_packages_tree(
         let mut items = package_items.borrow_mut();
         items.packages_group = Some(packages_group.clone());
         items.additional_software_group = additional_software_group.clone();
+        items.language_group = language_group.clone();
         items.packages_leaves = packages_leaves;
         items.configuration_group = Some(configuration_group.clone());
         items.configuration_leaves = configuration_leaves;
@@ -2963,6 +3005,9 @@ fn populate_packages_tree(
 
     tree.expand(&packages_group);
     if let Some(group) = additional_software_group.as_ref() {
+        tree.expand(group);
+    }
+    if let Some(group) = language_group.as_ref() {
         tree.expand(group);
     }
     tree.expand(&configuration_group);
@@ -2992,6 +3037,12 @@ fn compute_additional_software_group_tristate(
     rows: &[crate::PackageRow],
 ) -> native_tree_checkboxes::TriState {
     compute_package_category_tristate(rows, rabbit_core::package::PackageCategory::Additional)
+}
+
+/// Windows-only: the same aggregate for the "Language packs" group node.
+#[cfg(target_os = "windows")]
+fn compute_language_group_tristate(rows: &[crate::PackageRow]) -> native_tree_checkboxes::TriState {
+    compute_package_category_tristate(rows, rabbit_core::package::PackageCategory::Language)
 }
 
 /// Windows-only: tristate over the available rows of a single package
@@ -3786,6 +3837,7 @@ fn build_packages_page(
 enum WhichGroup {
     Packages,
     AdditionalSoftware,
+    Language,
     Configuration,
 }
 
@@ -3824,6 +3876,13 @@ fn classify_group(items: &PackageItems, candidate: &TreeItemId) -> Option<WhichG
         .is_some_and(|group| native_tree_handle(group) == candidate_handle)
     {
         return Some(WhichGroup::AdditionalSoftware);
+    }
+    if items
+        .language_group
+        .as_ref()
+        .is_some_and(|group| native_tree_handle(group) == candidate_handle)
+    {
+        return Some(WhichGroup::Language);
     }
     if items
         .configuration_group
@@ -4022,6 +4081,12 @@ fn handle_packages_left_up(
         {
             Some(WhichGroup::AdditionalSoftware)
         } else if items
+            .language_group
+            .as_ref()
+            .is_some_and(|g| native_tree_handle(g) == h_item)
+        {
+            Some(WhichGroup::Language)
+        } else if items
             .configuration_group
             .as_ref()
             .is_some_and(|g| native_tree_handle(g) == h_item)
@@ -4176,12 +4241,13 @@ fn propagate_group_toggle_to_leaves(
     wizard_model: &WizardModel,
 ) {
     match target_group {
-        WhichGroup::Packages | WhichGroup::AdditionalSoftware => {
-            // Both package groups share the same `packages_leaves` vec
+        WhichGroup::Packages | WhichGroup::AdditionalSoftware | WhichGroup::Language => {
+            // All three package groups share the same `packages_leaves` vec
             // (row-indexed); the category decides which rows this toggle
             // owns so the click only flips its own group's children.
             let category = match target_group {
                 WhichGroup::AdditionalSoftware => rabbit_core::package::PackageCategory::Additional,
+                WhichGroup::Language => rabbit_core::package::PackageCategory::Language,
                 _ => rabbit_core::package::PackageCategory::Core,
             };
             let pre_state = compute_package_category_tristate(&package_rows.borrow(), category);
@@ -4303,6 +4369,7 @@ fn build_packages_page(
         Rc::clone(&configuration_rows),
         model.text.packages_tree_group_label.clone(),
         model.text.additional_software_tree_group_label.clone(),
+        model.text.language_tree_group_label.clone(),
         model.text.configuration_tree_group_label.clone(),
     );
     let dv_model = build_packages_tree_model(
@@ -4492,6 +4559,7 @@ fn build_packages_tree_model(
                 Some(node) => match node.kind {
                     NodeKind::PackagesGroup
                     | NodeKind::AdditionalSoftwareGroup
+                    | NodeKind::LanguageGroup
                     | NodeKind::ConfigurationGroup => None,
                     NodeKind::Package(idx) => {
                         let category = data
@@ -4500,10 +4568,16 @@ fn build_packages_tree_model(
                             .get(idx)
                             .map(|r| r.category)
                             .unwrap_or_default();
-                        if category == rabbit_core::package::PackageCategory::Additional {
-                            Some(data.additional_software_group_ptr() as *mut Node)
-                        } else {
-                            Some(data.packages_group_ptr() as *mut Node)
+                        match category {
+                            rabbit_core::package::PackageCategory::Additional => {
+                                Some(data.additional_software_group_ptr() as *mut Node)
+                            }
+                            rabbit_core::package::PackageCategory::Language => {
+                                Some(data.language_group_ptr() as *mut Node)
+                            }
+                            rabbit_core::package::PackageCategory::Core => {
+                                Some(data.packages_group_ptr() as *mut Node)
+                            }
                         }
                     }
                     NodeKind::Configuration(_) => Some(data.configuration_group_ptr() as *mut Node),
@@ -4518,6 +4592,7 @@ fn build_packages_tree_model(
                     node.kind,
                     NodeKind::PackagesGroup
                         | NodeKind::AdditionalSoftwareGroup
+                        | NodeKind::LanguageGroup
                         | NodeKind::ConfigurationGroup
                 ),
             }
@@ -4533,6 +4608,9 @@ fn build_packages_tree_model(
                     if data.has_additional_software() {
                         roots.push(data.additional_software_group_ptr() as *mut Node);
                     }
+                    if data.has_language_packs() {
+                        roots.push(data.language_group_ptr() as *mut Node);
+                    }
                     roots.push(data.configuration_group_ptr() as *mut Node);
                     roots
                 }
@@ -4544,6 +4622,11 @@ fn build_packages_tree_model(
                         .collect(),
                     NodeKind::AdditionalSoftwareGroup => data
                         .package_ptrs_in_category(rabbit_core::package::PackageCategory::Additional)
+                        .into_iter()
+                        .map(|p| p as *mut Node)
+                        .collect(),
+                    NodeKind::LanguageGroup => data
+                        .package_ptrs_in_category(rabbit_core::package::PackageCategory::Language)
                         .into_iter()
                         .map(|p| p as *mut Node)
                         .collect(),
@@ -4600,6 +4683,23 @@ fn build_packages_tree_model(
                         Variant::from_string(&data.additional_software_group_label)
                     }
                 }
+                NodeKind::LanguageGroup => {
+                    if col == PACKAGE_COL_TOGGLE {
+                        let rows = rows_for_get_value.borrow();
+                        let mut any_available = false;
+                        let all_checked = rows
+                            .iter()
+                            .filter(|r| {
+                                r.category == rabbit_core::package::PackageCategory::Language
+                                    && r.available_for_target
+                            })
+                            .inspect(|_| any_available = true)
+                            .all(|r| r.selected);
+                        Variant::from_bool(any_available && all_checked)
+                    } else {
+                        Variant::from_string(&data.language_group_label)
+                    }
+                }
                 NodeKind::Package(idx) => {
                     let rows = rows_for_get_value.borrow();
                     let Some(row) = rows.get(idx) else {
@@ -4650,15 +4750,21 @@ fn build_packages_tree_model(
                 let new_state = var.get_bool().unwrap_or(false);
 
                 match node.kind {
-                    NodeKind::PackagesGroup | NodeKind::AdditionalSoftwareGroup => {
+                    NodeKind::PackagesGroup
+                    | NodeKind::AdditionalSoftwareGroup
+                    | NodeKind::LanguageGroup => {
                         // Group toggle propagates to every available leaf in
                         // this group's category; unavailable rows stay
                         // untouched so the install plan never carries
                         // something we can't honor.
-                        let category = if matches!(node.kind, NodeKind::AdditionalSoftwareGroup) {
-                            rabbit_core::package::PackageCategory::Additional
-                        } else {
-                            rabbit_core::package::PackageCategory::Core
+                        let category = match node.kind {
+                            NodeKind::AdditionalSoftwareGroup => {
+                                rabbit_core::package::PackageCategory::Additional
+                            }
+                            NodeKind::LanguageGroup => {
+                                rabbit_core::package::PackageCategory::Language
+                            }
+                            _ => rabbit_core::package::PackageCategory::Core,
                         };
                         let mut rows = rows_for_set_value.borrow_mut();
                         for row in rows.iter_mut() {
@@ -4713,6 +4819,7 @@ fn build_packages_tree_model(
                     node.kind,
                     NodeKind::PackagesGroup
                         | NodeKind::AdditionalSoftwareGroup
+                        | NodeKind::LanguageGroup
                         | NodeKind::Package(_)
                 );
                 if recomputed_configuration {
@@ -4756,6 +4863,14 @@ fn build_packages_tree_model(
                             model.items_changed(&leaf_ptrs);
                             model.item_value_changed(parent_ptr, PACKAGE_COL_TOGGLE);
                         }
+                        NodeKind::LanguageGroup => {
+                            let parent_ptr = data.language_group_ptr();
+                            let leaf_ptrs = data.package_ptrs_in_category(
+                                rabbit_core::package::PackageCategory::Language,
+                            );
+                            model.items_changed(&leaf_ptrs);
+                            model.item_value_changed(parent_ptr, PACKAGE_COL_TOGGLE);
+                        }
                         NodeKind::Package(idx) => {
                             let leaf_ptr = data.package_ptr(idx);
                             model.item_value_changed(leaf_ptr, PACKAGE_COL_LABEL);
@@ -4767,12 +4882,17 @@ fn build_packages_tree_model(
                                 .get(idx)
                                 .map(|r| r.category)
                                 .unwrap_or_default();
-                            let parent_ptr =
-                                if category == rabbit_core::package::PackageCategory::Additional {
+                            let parent_ptr = match category {
+                                rabbit_core::package::PackageCategory::Additional => {
                                     data.additional_software_group_ptr()
-                                } else {
+                                }
+                                rabbit_core::package::PackageCategory::Language => {
+                                    data.language_group_ptr()
+                                }
+                                rabbit_core::package::PackageCategory::Core => {
                                     data.packages_group_ptr()
-                                };
+                                }
+                            };
                             model.item_value_changed(parent_ptr, PACKAGE_COL_TOGGLE);
                         }
                         NodeKind::ConfigurationGroup => {
@@ -4811,6 +4931,7 @@ fn build_packages_tree_model(
                 match node.kind {
                     NodeKind::PackagesGroup
                     | NodeKind::AdditionalSoftwareGroup
+                    | NodeKind::LanguageGroup
                     | NodeKind::ConfigurationGroup => true,
                     NodeKind::Package(idx) => rows_for_is_enabled
                         .borrow()
@@ -4840,6 +4961,7 @@ fn build_packages_tree_model(
 fn expand_packages_group(tree: &PackagesView, model: &CustomDataViewTreeModel) {
     let mut packages_group_ptr: *const Node = std::ptr::null();
     let mut additional_software_group_ptr: *const Node = std::ptr::null();
+    let mut language_group_ptr: *const Node = std::ptr::null();
     let mut configuration_group_ptr: *const Node = std::ptr::null();
     model.with_userdata_mut::<PackageTreeData, ()>(|data| {
         packages_group_ptr = data.packages_group_ptr();
@@ -4849,11 +4971,16 @@ fn expand_packages_group(tree: &PackagesView, model: &CustomDataViewTreeModel) {
         if data.has_additional_software() {
             additional_software_group_ptr = data.additional_software_group_ptr();
         }
+        // Same guard for the language-packs group.
+        if data.has_language_packs() {
+            language_group_ptr = data.language_group_ptr();
+        }
         configuration_group_ptr = data.configuration_group_ptr();
     });
     for ptr in [
         packages_group_ptr,
         additional_software_group_ptr,
+        language_group_ptr,
         configuration_group_ptr,
     ] {
         if ptr.is_null() {
@@ -4886,6 +5013,7 @@ fn rebuild_packages_tree_model(
     };
     let packages_group_label = model.text.packages_tree_group_label.clone();
     let additional_software_group_label = model.text.additional_software_tree_group_label.clone();
+    let language_group_label = model.text.language_tree_group_label.clone();
     let configuration_group_label = model.text.configuration_tree_group_label.clone();
     dv_model.with_userdata_mut::<PackageTreeData, ()>(|data| {
         // Sync the shared Rc<RefCell<Vec<_>>>s in case the caller
@@ -4902,6 +5030,7 @@ fn rebuild_packages_tree_model(
         }
         data.packages_group_label = packages_group_label;
         data.additional_software_group_label = additional_software_group_label;
+        data.language_group_label = language_group_label;
         data.configuration_group_label = configuration_group_label;
         data.package_nodes = (0..pkg_len)
             .map(|i| {

@@ -110,6 +110,7 @@ wizard-packages-heading = Pakete auswählen
 wizard-packages-list-label = Zu installierende oder zu aktualisierende Pakete
 wizard-packages-tree-group-label = Pakete
 wizard-additional-software-tree-group-label = Zusätzliche Software
+wizard-language-tree-group-label = Sprachpakete
 wizard-configuration-tree-group-label = Konfiguration
 # $package ist der lokalisierte Paketname, von dem der Konfigurationsschritt abhängt.
 wizard-configuration-row-unavailable = Nicht verfügbar: erfordert, dass { $package } installiert ist.

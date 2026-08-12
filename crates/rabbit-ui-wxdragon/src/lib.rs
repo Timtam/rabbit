@@ -120,6 +120,7 @@ pub struct WizardText {
     pub packages_list_label: String,
     pub packages_tree_group_label: String,
     pub additional_software_tree_group_label: String,
+    pub language_tree_group_label: String,
     pub configuration_tree_group_label: String,
     pub reapack_ack_heading: String,
     pub reapack_ack_body: String,
@@ -703,6 +704,7 @@ fn wizard_text(localizer: &Localizer) -> WizardText {
         additional_software_tree_group_label: localizer
             .text("wizard-additional-software-tree-group-label")
             .value,
+        language_tree_group_label: localizer.text("wizard-language-tree-group-label").value,
         configuration_tree_group_label: localizer
             .text("wizard-configuration-tree-group-label")
             .value,
