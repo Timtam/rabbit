@@ -31,6 +31,14 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Fixed
+
+- macOS: the app bundle now declares Spanish, so VoiceOver reads RABBIT's
+  Spanish interface with a Spanish voice instead of an English one. RABBIT
+  gained its Spanish translation in 0.4.0, but the bundle still advertised
+  only English, German, French and Italian — and macOS decides what language
+  an app speaks from that declaration.
+
 ## [0.4.0] - 2026-08-12
 
 ### Added
@@ -64,9 +72,7 @@ from this file and posts it as the GitHub release body.
 - RABBIT now speaks Spanish. The translation was contributed by Carlos
   Esteban Martínez (#19) and is picked automatically on Spanish systems —
   including regional variants, so an es-MX machine gets the Spanish UI —
-  or from the language picker at any time. On macOS the app bundle also
-  declares Spanish, so VoiceOver reads the Spanish interface with a Spanish
-  voice rather than an English one.
+  or from the language picker at any time.
 - Windows: the wizard now adds a Microsoft Defender exclusion for RABBIT's
   own download cache folder (`%TEMP%\rabbit-cache`) so freshly built,
   low-prevalence — but code-signed — installers, chiefly OSARA's
