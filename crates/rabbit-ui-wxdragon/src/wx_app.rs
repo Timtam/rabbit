@@ -4218,7 +4218,7 @@ fn refresh_after_packages_toggle(
     details: &TextCtrl,
     osara_checkbox: &CheckBox,
     osara_note: &TextCtrl,
-    _spanish_checkbox: &Choice,
+    spanish_checkbox: &Choice,
 ) {
     // Configuration rows depend on the package plan (e.g. ReaPack must
     // be installed/queued for the REAPER Accessibility step). Re-evaluate
@@ -4297,6 +4297,7 @@ fn refresh_after_packages_toggle(
         osara_checkbox,
         osara_note,
     );
+    sync_spanish_variant_widget(&package_rows.borrow(), spanish_checkbox);
 }
 
 /// Windows-only: implement the parent-checkbox propagation for the
@@ -4598,8 +4599,8 @@ fn build_packages_page(
                 &package_rows.borrow(),
                 &osara_checkbox,
                 &osara_note,
-                &spanish_checkbox,
             );
+            sync_spanish_variant_widget(&package_rows.borrow(), &spanish_checkbox);
         });
     }
 
