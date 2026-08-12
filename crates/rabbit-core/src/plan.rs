@@ -79,10 +79,20 @@ pub fn build_install_plan(
             )
         } else if let (Some(installed), Some(available)) = (&installed_version, &available_version)
         {
-            if installed.cmp_lenient(available).is_lt() {
+            let comparison = crate::package::version_comparison_for(package_id);
+            if crate::package::version_needs_update(installed, available, comparison) {
                 (
                     PlanActionKind::Update,
-                    "Installed version is older than the available version.".to_string(),
+                    match comparison {
+                        // A content-hash package has no ordering to speak of:
+                        // the digest simply changed upstream.
+                        crate::package::VersionComparison::Exact => {
+                            "Available version differs from the installed one.".to_string()
+                        }
+                        crate::package::VersionComparison::Ordered => {
+                            "Installed version is older than the available version.".to_string()
+                        }
+                    },
                 )
             } else {
                 (

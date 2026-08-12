@@ -72,6 +72,9 @@ pub struct PackageSpec {
     /// the generic engine from manifest data rather than per-package Rust. See
     /// [`VersionRule`].
     pub version: Option<VersionRule>,
+    /// How the resolved version is compared against the installed one. See
+    /// [`VersionComparison`].
+    pub version_comparison: VersionComparison,
     pub detectors: Vec<PackageDetector>,
     pub install_steps: Vec<InstallStep>,
     pub uninstall_steps: Vec<UninstallStep>,
@@ -133,6 +136,10 @@ pub struct EmbeddedPackageSpec {
     pub supported_architectures: Vec<Architecture>,
     #[serde(default)]
     pub version: Option<VersionRule>,
+    /// How `version` is compared against the installed version. Defaults to
+    /// newest-wins ordering; `exact` is required for content-hash versions.
+    #[serde(default)]
+    pub version_comparison: VersionComparison,
     #[serde(default)]
     pub whats_new: Option<WhatsNewRule>,
     #[serde(default)]
@@ -334,6 +341,10 @@ pub enum InstallDestination {
     /// `%LOCALAPPDATA%\Programs\Common\CLAP` — the per-user CLAP folder
     /// (app2clap), outside any REAPER resource path.
     WindowsClapDir,
+    /// `<resource>/LangPack/` — where REAPER looks for `.ReaperLangPack`
+    /// translation files. Inside the resource path, so it works for portable
+    /// installs too.
+    LangPack,
 }
 
 /// Data-driven artifact (download) resolution for packages that are NOT a
@@ -500,6 +511,28 @@ pub enum VersionRule {
     /// Fetch `url` and parse the trimmed body as a version. Covers FFmpeg's
     /// Gyan `*.ver` plain-text endpoint.
     PlainText { url: String },
+    /// Fetch `url` and use the SHA-256 of the response body as the version.
+    /// For artifacts published without any version string — community REAPER
+    /// language packs are a fixed URL on a translator's web server, updated
+    /// in place — the content digest IS the identity: a changed digest means
+    /// a new release. Pair with [`VersionComparison::Exact`], since ordering
+    /// two hex digests is meaningless.
+    ContentHash { url: String },
+}
+
+/// How a package's installed version is compared against the available one
+/// to decide Install / Update / Keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VersionComparison {
+    /// Newer-than comparison over numeric segments ([`Version::cmp_lenient`]).
+    /// The default, and correct for every package with a real version string.
+    #[default]
+    Ordered,
+    /// Equality: anything other than an exact match means "update". Required
+    /// for [`VersionRule::ContentHash`] packages, whose "version" is a hex
+    /// digest that has no meaningful ordering.
+    Exact,
 }
 
 fn default_capture_format() -> String {
@@ -821,6 +854,32 @@ pub fn package_specs_by_id(platform: Platform) -> BTreeMap<String, PackageSpec> 
         .collect()
 }
 
+/// How `package_id`'s versions are compared, per the embedded manifest.
+/// Unknown packages fall back to the default ordered comparison.
+pub fn version_comparison_for(package_id: &str) -> VersionComparison {
+    embedded_package_manifest()
+        .packages
+        .into_iter()
+        .find(|spec| spec.id == package_id)
+        .map(|spec| spec.version_comparison)
+        .unwrap_or_default()
+}
+
+/// Whether `installed` should be replaced by `available` for a package using
+/// `comparison`. Ordered packages update only on a strictly newer version;
+/// exact (content-hash) packages update whenever the value differs at all,
+/// since their "version" is a digest with no meaningful ordering.
+pub fn version_needs_update(
+    installed: &crate::version::Version,
+    available: &crate::version::Version,
+    comparison: VersionComparison,
+) -> bool {
+    match comparison {
+        VersionComparison::Ordered => installed.cmp_lenient(available).is_lt(),
+        VersionComparison::Exact => installed != available,
+    }
+}
+
 /// The package ids `package_id` declares as dependencies in the embedded
 /// manifest (empty if the package is unknown or standalone). The operation
 /// pipeline uses this to cascade a failed dependency into a skip of its
@@ -858,6 +917,7 @@ impl EmbeddedPackageSpec {
             supported_platforms: self.supported_platforms.clone(),
             supported_architectures: self.supported_architectures.clone(),
             version: self.version.clone(),
+            version_comparison: self.version_comparison,
             detectors: self.detectors.clone(),
             install_steps: self.install_steps.clone(),
             uninstall_steps: self.uninstall_steps.clone(),
@@ -921,6 +981,60 @@ fn all_supported_architectures() -> Vec<Architecture> {
 
 #[cfg(test)]
 mod tests {
+    /// Ordered packages update only on a strictly newer version; exact
+    /// (content-hash) packages update on ANY difference, because their
+    /// "version" is a digest whose numeric-segment ordering is meaningless.
+    #[test]
+    fn version_needs_update_honors_the_comparison_mode() {
+        use super::{VersionComparison, version_needs_update};
+        use crate::version::Version;
+
+        let older = Version::parse("1.2.3").unwrap();
+        let newer = Version::parse("1.2.4").unwrap();
+        assert!(version_needs_update(
+            &older,
+            &newer,
+            VersionComparison::Ordered
+        ));
+        assert!(!version_needs_update(
+            &newer,
+            &older,
+            VersionComparison::Ordered
+        ));
+        assert!(!version_needs_update(
+            &newer,
+            &newer,
+            VersionComparison::Ordered
+        ));
+
+        // Two digests: identical means keep, different means update — in
+        // BOTH directions, which ordered comparison would get wrong.
+        let one = Version::parse("h0a1b2c3d4e5").unwrap();
+        let two = Version::parse("h9f8e7d6c5b4").unwrap();
+        assert!(!version_needs_update(&one, &one, VersionComparison::Exact));
+        assert!(version_needs_update(&one, &two, VersionComparison::Exact));
+        assert!(version_needs_update(&two, &one, VersionComparison::Exact));
+    }
+
+    /// Every package must declare a comparison mode consistent with its
+    /// version rule: a content-hash version compared by ordering would
+    /// produce arbitrary update decisions.
+    #[test]
+    fn content_hash_packages_use_exact_comparison() {
+        use super::{VersionComparison, VersionRule, embedded_package_manifest};
+
+        for spec in embedded_package_manifest().packages {
+            if matches!(spec.version, Some(VersionRule::ContentHash { .. })) {
+                assert_eq!(
+                    spec.version_comparison,
+                    VersionComparison::Exact,
+                    "{} uses a content-hash version and must compare exactly",
+                    spec.id
+                );
+            }
+        }
+    }
+
     use crate::model::{Architecture, Platform};
     use crate::package::{
         BackupPolicy, GithubArtifactKind, GithubReleaseSelector, HostCapabilities, HostCapability,

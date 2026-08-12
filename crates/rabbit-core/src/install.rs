@@ -260,6 +260,15 @@ fn resolve_install_target(
                 backup_relative: PathBuf::from("CLAP").join(file_name),
             })
         }
+        InstallDestination::LangPack => {
+            // REAPER reads translations from <resource>/LangPack/. Inside the
+            // resource path, so portable installs work unchanged.
+            let relative = PathBuf::from("LangPack").join(file_name);
+            Ok(InstallTarget {
+                target_path: resource_path.join(&relative),
+                backup_relative: relative,
+            })
+        }
         InstallDestination::UserPlugins => {
             let relative = PathBuf::from("UserPlugins").join(file_name);
             Ok(InstallTarget {
@@ -601,6 +610,30 @@ mod tests {
         assert_eq!(
             target.backup_relative,
             PathBuf::from("UserPlugins").join("reaper_kontrol.dll")
+        );
+    }
+
+    #[test]
+    fn install_target_for_a_language_pack_is_the_langpack_folder() {
+        // REAPER reads translations from <resource>/LangPack/ — verified
+        // against real installs, which keep e.g. Deutsch.ReaperLangPack there.
+        let resource = PathBuf::from("/some/reaper");
+        let target = resolve_install_target(
+            InstallDestination::LangPack,
+            "langpack-es",
+            &resource,
+            "es_ES.ReaperLangPack",
+        )
+        .expect("LangPack target resolves");
+        assert_eq!(
+            target.target_path,
+            resource.join("LangPack").join("es_ES.ReaperLangPack")
+        );
+        // Inside the resource path, so portable installs work unchanged.
+        assert!(target.target_path.starts_with(&resource));
+        assert_eq!(
+            target.backup_relative,
+            PathBuf::from("LangPack").join("es_ES.ReaperLangPack")
         );
     }
 

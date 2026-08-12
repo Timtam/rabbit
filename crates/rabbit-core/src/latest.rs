@@ -631,7 +631,43 @@ pub fn resolve_version_rule(client: &Client, rule: &VersionRule) -> Result<Versi
             let body = http_get_text(client, url)?;
             resolve_html_version(&body, url, pattern, format)
         }
+        VersionRule::ContentHash { url } => {
+            let bytes = http_get_bytes(client, url)?;
+            Ok(content_hash_version(&bytes))
+        }
     }
+}
+
+/// The "version" of a [`VersionRule::ContentHash`] artifact: the SHA-256 of
+/// its bytes. Only ever compared for equality (see
+/// [`VersionComparison::Exact`]), so the short prefix is plenty to
+/// distinguish releases while staying readable in the UI and reports. The
+/// `h` prefix keeps [`Version::parse`] happy for the astronomically unlikely
+/// all-letter digest prefix, and marks the value as a digest rather than a
+/// number wherever it's displayed.
+pub(crate) fn content_hash_version(bytes: &[u8]) -> Version {
+    let digest = crate::hash::sha256_bytes(bytes);
+    Version::parse(format!("h{}", &digest[..12]))
+        .unwrap_or_else(|_| Version::parse("h0").expect("literal is a valid version"))
+}
+
+fn http_get_bytes(client: &Client, url: &str) -> Result<Vec<u8>> {
+    let request = crate::http::maybe_apply_github_auth(client.get(url), url);
+    let response = request
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map_err(|source| RabbitError::Http {
+            url: url.to_string(),
+            source,
+        })?;
+
+    response
+        .bytes()
+        .map(|bytes| bytes.to_vec())
+        .map_err(|source| RabbitError::Http {
+            url: url.to_string(),
+            source,
+        })
 }
 
 /// Plain-text-side of [`resolve_version_rule`], split out so it's unit-testable

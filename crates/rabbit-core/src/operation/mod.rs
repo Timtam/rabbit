@@ -916,7 +916,13 @@ fn plan_action_for_artifact(
         return PlanActionKind::Update;
     };
 
-    if installed_version.cmp_lenient(&artifact.version).is_lt() {
+    // Content-hash packages (language packs) compare for equality, not
+    // ordering: their "version" is a digest, so any change means update.
+    if crate::package::version_needs_update(
+        installed_version,
+        &artifact.version,
+        crate::package::version_comparison_for(&artifact.package_id),
+    ) {
         PlanActionKind::Update
     } else {
         PlanActionKind::Keep

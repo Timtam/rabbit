@@ -22,6 +22,15 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     Ok(to_hex(&hasher.finalize()))
 }
 
+/// SHA-256 of an in-memory buffer, hex-encoded. Used for artifacts whose
+/// identity IS their content (community language packs published at a fixed
+/// URL with no version string).
+pub fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    to_hex(&hasher.finalize())
+}
+
 fn to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -38,7 +47,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::sha256_file;
+    use super::{sha256_bytes, sha256_file};
 
     #[test]
     fn hashes_file_content() {
@@ -50,5 +59,16 @@ mod tests {
             sha256_file(&file).unwrap(),
             "d37d96b42ad43384915e4513505c30c0b1c4e7c765b5577eda25b5dbd7f26d89"
         );
+    }
+
+    #[test]
+    fn hashes_in_memory_bytes_like_a_file() {
+        // Content-hash "versions" are computed from bytes in memory; they
+        // must match what hashing the same bytes on disk produces.
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("sample.txt");
+        fs::write(&file, b"rabbit").unwrap();
+
+        assert_eq!(sha256_bytes(b"rabbit"), sha256_file(&file).unwrap());
     }
 }
