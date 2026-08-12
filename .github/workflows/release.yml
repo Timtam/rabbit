@@ -139,7 +139,8 @@ jobs:
 
       - name: Build Windows release rabbit binary with GUI feature
         if: matrix.platform_id == 'windows'
-        run: cargo build --release -p rabbit --features gui
+        shell: bash
+        run: scripts/ci-cargo-gui.sh cargo build --release -p rabbit --features gui
 
       - name: Resolve Windows artifact name
         if: matrix.platform_id == 'windows'
@@ -236,7 +237,7 @@ jobs:
           # builds the matching slice automatically.
           mkdir -p dist
           for TARGET in aarch64-apple-darwin x86_64-apple-darwin; do
-            cargo build --release --target "$TARGET" -p rabbit --features gui
+            scripts/ci-cargo-gui.sh cargo build --release --target "$TARGET" -p rabbit --features gui
           done
           ARTIFACT="rabbit-${RABBIT_VERSION}-macos-universal"
           lipo -create -output "dist/${ARTIFACT}" \

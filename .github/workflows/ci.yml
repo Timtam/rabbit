@@ -63,7 +63,8 @@ jobs:
           echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
 
       - name: Clippy (GUI feature)
-        run: cargo clippy -p rabbit-ui-wxdragon --features gui --all-targets
+        shell: bash
+        run: scripts/ci-cargo-gui.sh cargo clippy -p rabbit-ui-wxdragon --features gui --all-targets
 
       - name: Test workspace
         run: cargo test --workspace
@@ -187,7 +188,8 @@ jobs:
 
       - name: Build Windows release rabbit binary with GUI feature
         if: matrix.platform_id == 'windows'
-        run: cargo build --release -p rabbit --features gui
+        shell: bash
+        run: scripts/ci-cargo-gui.sh cargo build --release -p rabbit --features gui
 
       - name: Resolve Windows artifact name
         if: matrix.platform_id == 'windows'
@@ -227,7 +229,7 @@ jobs:
           for PAIR in "aarch64:aarch64-apple-darwin" "x86_64:x86_64-apple-darwin"; do
             ARCH="${PAIR%%:*}"
             TARGET="${PAIR##*:}"
-            cargo build --release --target "$TARGET" -p rabbit --features gui
+            scripts/ci-cargo-gui.sh cargo build --release --target "$TARGET" -p rabbit --features gui
             ARTIFACT="rabbit-${RABBIT_VERSION}-macos-${ARCH}"
             cp "target/${TARGET}/release/rabbit" "dist/${ARTIFACT}"
             chmod +x "dist/${ARTIFACT}"
