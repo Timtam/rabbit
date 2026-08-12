@@ -81,8 +81,6 @@ fn fire_post_install_hook() {
 /// Stages of the deferred latest-version fetch the wizard runs once the user
 /// transitions Target → Packages.
 enum VersionCheckEvent {
-    /// "Checking <package>…" — emitted before each fetch starts.
-    Checking { package_id: String },
     /// Per-package outcome: a fetched version plus the package's optional
     /// What's-New notes, or an error message.
     Result {
@@ -1308,7 +1306,7 @@ struct WizardWidgets {
     osara_keymap_note: TextCtrl,
     /// Choice between the two Spanish OSARA translations. Enabled only
     /// while the Spanish language pack is selected.
-    spanish_variant_pma: CheckBox,
+    spanish_variant_choice: Choice,
     reapack_ack_confirm: CheckBox,
     review_text: TextCtrl,
     progress_status: StaticText,
@@ -1495,12 +1493,6 @@ pub fn run() {
         bind_done_page_enter_closes(&wizard_widgets.done_details, &frame, &current_step);
 
         {
-            let book = book;
-            let step_label = step_label;
-            let back = back;
-            let next = next;
-            let install = install;
-            let close = close;
             let current_step = Arc::clone(&current_step);
             let labels = Arc::clone(&labels);
             let model = Arc::clone(&model);
@@ -1554,12 +1546,6 @@ pub fn run() {
         }
 
         {
-            let book = book;
-            let step_label = step_label;
-            let back = back;
-            let next = next;
-            let install = install;
-            let close = close;
             let current_step = Arc::clone(&current_step);
             let labels = Arc::clone(&labels);
             let model = Arc::clone(&model);
@@ -1602,13 +1588,13 @@ pub fn run() {
                             can_install: Rc::clone(&can_install),
                             review_can_install: Rc::clone(&review_can_install),
                             target: selected_target,
-                            book: book.clone(),
-                            step_label: step_label.clone(),
+                            book,
+                            step_label,
                             labels: Arc::clone(&labels),
-                            back: back.clone(),
-                            next: next.clone(),
-                            install: install.clone(),
-                            close: close.clone(),
+                            back,
+                            next,
+                            install,
+                            close,
                             current_step: Arc::clone(&current_step),
                         });
                         VERSION_CHECK_STEP
@@ -1670,12 +1656,6 @@ pub fn run() {
         }
 
         {
-            let book = book;
-            let step_label = step_label;
-            let back = back;
-            let next = next;
-            let install = install;
-            let close = close;
             let current_step = Arc::clone(&current_step);
             let labels = Arc::clone(&labels);
             let model = Arc::clone(&model);
@@ -1762,7 +1742,7 @@ pub fn run() {
                                 // = the default REAPER Accesible español
                                 // (es_ES).
                                 package_variants: crate::package_variants_from_choice(
-                                    widgets.spanish_variant_pma.get_value(),
+                                    widgets.spanish_variant_choice.get_selection(),
                                 ),
                                 ..WizardInstallOptions::default()
                             },
@@ -1837,7 +1817,6 @@ pub fn run() {
                 // anything.
                 {
                     let model = Arc::clone(&model);
-                    let widgets = widgets;
                     let package_rows = Rc::clone(&package_rows);
                     let package_notes = Rc::clone(&package_notes);
                     let package_items = Rc::clone(&package_items);
@@ -1878,6 +1857,7 @@ pub fn run() {
                             &widgets.package_details,
                             &widgets.osara_keymap_replace,
                             &widgets.osara_keymap_note,
+                            &widgets.spanish_variant_choice,
                             &model,
                             &package_rows.borrow(),
                             &configuration_rows.borrow(),
@@ -2121,7 +2101,7 @@ pub fn run() {
             });
         }
 
-        let frame_for_close = frame.clone();
+        let frame_for_close = frame;
         close.on_click(move |_| {
             frame_for_close.close(true);
         });
@@ -2134,7 +2114,7 @@ pub fn run() {
         // button and the window close box. Bound on every platform, but
         // only macOS installs a menu that can emit it.
         {
-            let frame_for_quit = frame.clone();
+            let frame_for_quit = frame;
             frame.on_menu_selected(move |event| {
                 if event.get_id() == wxdragon::id::ID_EXIT {
                     frame_for_quit.close(true);
@@ -2163,7 +2143,7 @@ pub fn run() {
             let model = Arc::clone(&model);
             let widgets = wizard_widgets;
             let last_reaper_app_path = Arc::clone(&last_reaper_app_path);
-            let frame_for_launch = frame.clone();
+            let frame_for_launch = frame;
             widgets.done_launch_reaper.on_click(move |_| {
                 let Some(app_path) = clone_last_path(&last_reaper_app_path) else {
                     append_done_status(&widgets.done_status, &model.text.done_no_reaper_app);
@@ -2258,6 +2238,7 @@ pub fn run() {
     });
 }
 
+#[allow(clippy::too_many_arguments)] // UI plumbing: one parameter per widget handle.
 fn add_pages(
     book: &SimpleBook,
     model: &WizardModel,
@@ -2296,7 +2277,7 @@ fn add_pages(
         package_details,
         osara_keymap_replace,
         osara_keymap_note,
-        spanish_variant_pma,
+        spanish_variant_choice,
     ) = build_packages_page(
         &packages_page,
         model,
@@ -2353,7 +2334,7 @@ fn add_pages(
         package_details,
         osara_keymap_replace,
         osara_keymap_note,
-        spanish_variant_pma,
+        spanish_variant_choice,
         reapack_ack_confirm,
         review_text,
         progress_status,
@@ -2512,12 +2493,12 @@ fn build_target_page(page: &Panel, model: &WizardModel) -> (Choice, TextCtrl, Te
                 &current,
             )
             .build();
-            if dialog.show_modal() == ID_OK {
-                if let Some(path) = dialog.get_path() {
-                    // Fires on_text_changed, which runs the same flip-to-portable
-                    // + update-details logic typing does.
-                    browse_target.set_value(&path);
-                }
+            if dialog.show_modal() == ID_OK
+                && let Some(path) = dialog.get_path()
+            {
+                // Fires on_text_changed, which runs the same flip-to-portable
+                // + update-details logic typing does.
+                browse_target.set_value(&path);
             }
         });
     }
@@ -2677,12 +2658,6 @@ fn start_version_check(ui: VersionCheckUi) {
     let mut completed: i32 = 0;
 
     let dispatcher = move |event: VersionCheckEvent| match event {
-        VersionCheckEvent::Checking { package_id: _ } => {
-            // Several checks are in flight at once, so naming one package
-            // would just flicker between them. The count line below (updated
-            // per completion) is the honest, calm signal — and it moves even
-            // while a slow language-pack check is still running.
-        }
         VersionCheckEvent::Result {
             package_id,
             outcome,
@@ -2735,17 +2710,16 @@ fn start_version_check(ui: VersionCheckUi) {
                     &accumulated,
                 ) {
                     Ok(mut plan) => {
-                        if !errors.is_empty() {
-                            if let Ok(localizer) =
+                        if !errors.is_empty()
+                            && let Ok(localizer) =
                                 localizer_from_options(&ui.model.bootstrap_options)
-                            {
-                                plan.can_install = apply_version_check_failures_to_rows(
-                                    &localizer,
-                                    &mut plan.package_rows,
-                                    &mut plan.notes,
-                                    &errors,
-                                );
-                            }
+                        {
+                            plan.can_install = apply_version_check_failures_to_rows(
+                                &localizer,
+                                &mut plan.package_rows,
+                                &mut plan.notes,
+                                &errors,
+                            );
                         }
                         *ui.package_rows.borrow_mut() = plan.package_rows;
                         *ui.package_notes.borrow_mut() = plan.notes;
@@ -2766,8 +2740,8 @@ fn start_version_check(ui: VersionCheckUi) {
                         // installed, so a Team PMA user isn't presented with
                         // an unticked box that would switch them back.
                         ui.widgets
-                            .spanish_variant_pma
-                            .set_value(crate::spanish_variant_alternate_installed(&ui.target.path));
+                            .spanish_variant_choice
+                            .set_selection(crate::spanish_variant_selection(&ui.target.path));
                         rebuild_package_list_widgets(
                             &ui.widgets,
                             &ui.package_items,
@@ -3213,13 +3187,6 @@ fn spawn_version_check_worker(
                     let Some(package_id) = next else {
                         break;
                     };
-                    let id_for_checking = package_id.clone();
-                    wxdragon::call_after(Box::new(move || {
-                        dispatch_version_check_event(VersionCheckEvent::Checking {
-                            package_id: id_for_checking,
-                        });
-                    }));
-
                     let installed = installed_versions.get(&package_id);
                     let outcome = match fetch_latest_details_for_package(&package_id, installed) {
                         Ok(details) => Ok((details.version.to_string(), details.whats_new)),
@@ -3382,7 +3349,7 @@ fn build_packages_page(
     configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     package_items: PackagesStateCell,
     can_install: Rc<Cell<bool>>,
-) -> (PackagesView, TextCtrl, CheckBox, TextCtrl, CheckBox) {
+) -> (PackagesView, TextCtrl, CheckBox, TextCtrl, Choice) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     add_heading(
         page,
@@ -3490,15 +3457,20 @@ fn build_packages_page(
     // installed FILE NAME differs (es_ES vs es_MX) — that is what OSARA
     // reads to pick its translation — so this is a plain either/or rather
     // than a separate package.
-    let spanish_variant_pma = CheckBox::builder(page)
-        .with_label(&model.text.packages_spanish_variant_label)
-        .build();
-    spanish_variant_pma.set_name(&model.text.packages_spanish_variant_label);
-    spanish_variant_pma.set_label(&model.text.packages_spanish_variant_label);
-    spanish_variant_pma.add_style(WindowStyle::TabStop);
-    spanish_variant_pma.set_value(false);
+    add_label(
+        page,
+        &sizer,
+        &model.text.packages_spanish_variant_label,
+        "rabbit-spanish-variant-label",
+    );
+    let spanish_variant_choice = Choice::builder(page).build();
+    spanish_variant_choice.set_name(&model.text.packages_spanish_variant_label);
+    for label in &model.text.packages_spanish_variant_options {
+        spanish_variant_choice.append(label);
+    }
+    spanish_variant_choice.set_selection(0);
     sizer.add(
-        &spanish_variant_pma,
+        &spanish_variant_choice,
         0,
         SizerFlag::All | SizerFlag::Expand,
         6,
@@ -3510,6 +3482,7 @@ fn build_packages_page(
         &osara_keymap_replace,
         &osara_keymap_note,
     );
+    sync_spanish_variant_widget(&package_rows.borrow(), &spanish_variant_choice);
 
     // Selection-change updates the package details text. The event fires
     // when the focused row changes via mouse or arrow keys; we use the
@@ -3520,9 +3493,9 @@ fn build_packages_page(
         let configuration_rows = Rc::clone(&configuration_rows);
         let package_items = Rc::clone(&package_items);
         let model_text = model.clone();
-        let details = details;
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
+        let spanish_checkbox = spanish_variant_choice;
         tree.on_selection_changed(move |event| {
             if let Some(item) = event.get_item() {
                 match classify_leaf(&package_items.borrow(), &item) {
@@ -3545,6 +3518,7 @@ fn build_packages_page(
                 &osara_checkbox,
                 &osara_note,
             );
+            sync_spanish_variant_widget(&package_rows.borrow(), &spanish_checkbox);
         });
     }
 
@@ -3561,9 +3535,9 @@ fn build_packages_page(
         let package_items = Rc::clone(&package_items);
         let can_install = Rc::clone(&can_install);
         let wizard_model = model.clone();
-        let details = details;
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
+        let spanish_checkbox = spanish_variant_choice;
         tree.bind_internal(EventType::TREE_STATE_IMAGE_CLICK, move |event| {
             handle_native_checkbox_toggle(
                 &tree_widget,
@@ -3575,6 +3549,7 @@ fn build_packages_page(
                 &details,
                 &osara_checkbox,
                 &osara_note,
+                &spanish_checkbox,
                 TreeEventData::new(event).get_item(),
             );
         });
@@ -3645,25 +3620,26 @@ fn build_packages_page(
         let package_items = Rc::clone(&package_items);
         let can_install = Rc::clone(&can_install);
         let wizard_model = model.clone();
-        let details = details;
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
+        let spanish_checkbox = spanish_variant_choice;
         tree.on_mouse_left_up(move |event| {
-            if let WindowEventData::MouseButton(mb) = &event {
-                if let Some(pos) = mb.get_position() {
-                    handle_packages_left_up(
-                        &tree_widget,
-                        &package_items,
-                        &package_rows,
-                        &configuration_rows,
-                        &can_install,
-                        &wizard_model,
-                        &details,
-                        &osara_checkbox,
-                        &osara_note,
-                        pos,
-                    );
-                }
+            if let WindowEventData::MouseButton(mb) = &event
+                && let Some(pos) = mb.get_position()
+            {
+                handle_packages_left_up(
+                    &tree_widget,
+                    &package_items,
+                    &package_rows,
+                    &configuration_rows,
+                    &can_install,
+                    &wizard_model,
+                    &details,
+                    &osara_checkbox,
+                    &osara_note,
+                    &spanish_checkbox,
+                    pos,
+                );
             }
             event.skip(true);
         });
@@ -3683,9 +3659,9 @@ fn build_packages_page(
         let package_items = Rc::clone(&package_items);
         let can_install = Rc::clone(&can_install);
         let wizard_model = model.clone();
-        let details = details;
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
+        let spanish_checkbox = spanish_variant_choice;
         tree.on_key_down(move |event| {
             let key_code = if let WindowEventData::Keyboard(kbd) = &event {
                 kbd.get_key_code()
@@ -3747,6 +3723,7 @@ fn build_packages_page(
                 &details,
                 &osara_checkbox,
                 &osara_note,
+                &spanish_checkbox,
             );
             // Consume the event so the native control doesn't *also*
             // toggle the parent's state image after us.
@@ -3771,9 +3748,9 @@ fn build_packages_page(
         let package_items = Rc::clone(&package_items);
         let can_install = Rc::clone(&can_install);
         let wizard_model = model.clone();
-        let details = details;
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
+        let spanish_checkbox = spanish_variant_choice;
         tree.on_key_up(move |event| {
             let key_code = if let WindowEventData::Keyboard(kbd) = &event {
                 kbd.get_key_code()
@@ -3846,6 +3823,7 @@ fn build_packages_page(
                 &details,
                 &osara_checkbox,
                 &osara_note,
+                &spanish_checkbox,
             );
         });
     }
@@ -3870,9 +3848,9 @@ fn build_packages_page(
         let package_items = Rc::clone(&package_items);
         let can_install = Rc::clone(&can_install);
         let wizard_model = model.clone();
-        let details = details;
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
+        let spanish_checkbox = spanish_variant_choice;
         tree.on_item_activated(move |event| {
             let Some(item) = event.get_item() else {
                 return;
@@ -3898,6 +3876,7 @@ fn build_packages_page(
                 &details,
                 &osara_checkbox,
                 &osara_note,
+                &spanish_checkbox,
             );
         });
     }
@@ -3907,8 +3886,10 @@ fn build_packages_page(
         let rows = Rc::clone(&package_rows);
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
+        let spanish_checkbox = spanish_variant_choice;
         osara_keymap_replace.on_toggled(move |_| {
             sync_osara_keymap_widgets(&model_text, &rows.borrow(), &osara_checkbox, &osara_note);
+            sync_spanish_variant_widget(&rows.borrow(), &spanish_checkbox);
         });
     }
 
@@ -3918,7 +3899,7 @@ fn build_packages_page(
         details,
         osara_keymap_replace,
         osara_keymap_note,
-        spanish_variant_pma,
+        spanish_variant_choice,
     )
 }
 
@@ -4061,6 +4042,7 @@ fn handle_native_checkbox_toggle(
     details: &TextCtrl,
     osara_checkbox: &CheckBox,
     osara_note: &TextCtrl,
+    spanish_checkbox: &Choice,
     item: Option<TreeItemId>,
 ) {
     let Some(item) = item else {
@@ -4121,6 +4103,7 @@ fn handle_native_checkbox_toggle(
         details,
         osara_checkbox,
         osara_note,
+        spanish_checkbox,
     );
 }
 
@@ -4147,6 +4130,7 @@ fn handle_packages_left_up(
     details: &TextCtrl,
     osara_checkbox: &CheckBox,
     osara_note: &TextCtrl,
+    spanish_checkbox: &Choice,
     pos: Point,
 ) {
     let hwnd = tree.get_handle();
@@ -4211,6 +4195,7 @@ fn handle_packages_left_up(
         details,
         osara_checkbox,
         osara_note,
+        spanish_checkbox,
     );
 }
 
@@ -4233,6 +4218,7 @@ fn refresh_after_packages_toggle(
     details: &TextCtrl,
     osara_checkbox: &CheckBox,
     osara_note: &TextCtrl,
+    _spanish_checkbox: &Choice,
 ) {
     // Configuration rows depend on the package plan (e.g. ReaPack must
     // be installed/queued for the REAPER Accessibility step). Re-evaluate
@@ -4345,12 +4331,7 @@ fn propagate_group_toggle_to_leaves(
             };
             let pre_state = compute_package_category_tristate(&package_rows.borrow(), category);
             let target = !matches!(pre_state, native_tree_checkboxes::TriState::Checked);
-            let leaves: Vec<TreeItemId> = package_items
-                .borrow()
-                .packages_leaves
-                .iter()
-                .map(|leaf| leaf.clone())
-                .collect();
+            let leaves: Vec<TreeItemId> = package_items.borrow().packages_leaves.to_vec();
             {
                 let mut rows = package_rows.borrow_mut();
                 for row in rows
@@ -4374,12 +4355,7 @@ fn propagate_group_toggle_to_leaves(
         WhichGroup::Configuration => {
             let pre_state = compute_configuration_group_tristate(&configuration_rows.borrow());
             let target = !matches!(pre_state, native_tree_checkboxes::TriState::Checked);
-            let leaves: Vec<TreeItemId> = package_items
-                .borrow()
-                .configuration_leaves
-                .iter()
-                .map(|leaf| leaf.clone())
-                .collect();
+            let leaves: Vec<TreeItemId> = package_items.borrow().configuration_leaves.to_vec();
             {
                 let mut rows = configuration_rows.borrow_mut();
                 for row in rows
@@ -4428,7 +4404,7 @@ fn build_packages_page(
     configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     package_items: PackagesStateCell,
     can_install: Rc<Cell<bool>>,
-) -> (PackagesView, TextCtrl, CheckBox, TextCtrl, CheckBox) {
+) -> (PackagesView, TextCtrl, CheckBox, TextCtrl, Choice) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     add_heading(
         page,
@@ -4567,15 +4543,20 @@ fn build_packages_page(
     // installed FILE NAME differs (es_ES vs es_MX) — that is what OSARA
     // reads to pick its translation — so this is a plain either/or rather
     // than a separate package.
-    let spanish_variant_pma = CheckBox::builder(page)
-        .with_label(&model.text.packages_spanish_variant_label)
-        .build();
-    spanish_variant_pma.set_name(&model.text.packages_spanish_variant_label);
-    spanish_variant_pma.set_label(&model.text.packages_spanish_variant_label);
-    spanish_variant_pma.add_style(WindowStyle::TabStop);
-    spanish_variant_pma.set_value(false);
+    add_label(
+        page,
+        &sizer,
+        &model.text.packages_spanish_variant_label,
+        "rabbit-spanish-variant-label",
+    );
+    let spanish_variant_choice = Choice::builder(page).build();
+    spanish_variant_choice.set_name(&model.text.packages_spanish_variant_label);
+    for label in &model.text.packages_spanish_variant_options {
+        spanish_variant_choice.append(label);
+    }
+    spanish_variant_choice.set_selection(0);
     sizer.add(
-        &spanish_variant_pma,
+        &spanish_variant_choice,
         0,
         SizerFlag::All | SizerFlag::Expand,
         6,
@@ -4587,13 +4568,14 @@ fn build_packages_page(
         &osara_keymap_replace,
         &osara_keymap_note,
     );
+    sync_spanish_variant_widget(&package_rows.borrow(), &spanish_variant_choice);
 
     {
         let package_rows = Rc::clone(&package_rows);
         let model_text = model.clone();
-        let details = details;
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
+        let spanish_checkbox = spanish_variant_choice;
         tree.on_selection_changed(move |event| {
             if let Some(item) = event.get_item() {
                 if let Some(node_ptr) = item.get_id::<Node>() {
@@ -4616,6 +4598,7 @@ fn build_packages_page(
                 &package_rows.borrow(),
                 &osara_checkbox,
                 &osara_note,
+                &spanish_checkbox,
             );
         });
     }
@@ -4625,8 +4608,10 @@ fn build_packages_page(
         let rows = Rc::clone(&package_rows);
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
+        let spanish_checkbox = spanish_variant_choice;
         osara_keymap_replace.on_toggled(move |_| {
             sync_osara_keymap_widgets(&model_text, &rows.borrow(), &osara_checkbox, &osara_note);
+            sync_spanish_variant_widget(&rows.borrow(), &spanish_checkbox);
         });
     }
 
@@ -4636,7 +4621,7 @@ fn build_packages_page(
         details,
         osara_keymap_replace,
         osara_keymap_note,
-        spanish_variant_pma,
+        spanish_variant_choice,
     )
 }
 
@@ -5171,12 +5156,14 @@ fn rebuild_packages_tree_model(
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(clippy::too_many_arguments)] // UI plumbing: one parameter per widget handle.
 fn refresh_package_checklist(
     tree: &PackagesView,
     package_items: &PackagesStateCell,
     details: &TextCtrl,
     osara_keymap_replace: &CheckBox,
     osara_keymap_note: &TextCtrl,
+    spanish_variant_choice: &Choice,
     model: &WizardModel,
     rows: &[crate::PackageRow],
     configuration_rows: &[ConfigurationRow],
@@ -5184,6 +5171,7 @@ fn refresh_package_checklist(
     rebuild_packages_tree_model(tree, package_items, model, rows, configuration_rows);
     details.set_value(&rows.first().map(package_details).unwrap_or_default());
     sync_osara_keymap_widgets(model, rows, osara_keymap_replace, osara_keymap_note);
+    sync_spanish_variant_widget(rows, spanish_variant_choice);
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -5453,7 +5441,7 @@ fn build_done_page(page: &Panel, model: &WizardModel) -> (TextCtrl, TextCtrl, Bu
     sizer.add(&details, 1, SizerFlag::All | SizerFlag::Expand, 6);
 
     let toggle_details = details;
-    let toggle_page = page.clone();
+    let toggle_page = *page;
     show_details.on_toggled(move |event| {
         let visible = event.is_checked();
         toggle_details.show(visible);
@@ -5657,12 +5645,14 @@ fn effective_can_install(plan_can_install: &Cell<bool>, review_can_install: &Cel
 
 /// Windows: re-render the native TreeCtrl after a row replacement.
 #[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)] // UI plumbing: one parameter per widget handle.
 fn refresh_package_checklist(
     tree: &PackagesView,
     package_items: &PackagesStateCell,
     details: &TextCtrl,
     osara_keymap_replace: &CheckBox,
     osara_keymap_note: &TextCtrl,
+    spanish_variant_choice: &Choice,
     model: &WizardModel,
     rows: &[crate::PackageRow],
     configuration_rows: &[ConfigurationRow],
@@ -5670,6 +5660,18 @@ fn refresh_package_checklist(
     populate_packages_tree(tree, package_items, model, rows, configuration_rows);
     details.set_value(&rows.first().map(package_details).unwrap_or_default());
     sync_osara_keymap_widgets(model, rows, osara_keymap_replace, osara_keymap_note);
+    sync_spanish_variant_widget(rows, spanish_variant_choice);
+}
+
+/// Enable the Spanish OSARA-translation choice only while the Spanish
+/// language pack is actually selected for install — the setting has no
+/// effect otherwise, and a live-but-inert control is a trap for a screen
+/// reader. Mirrors how the OSARA key-map choice is gated on OSARA.
+fn sync_spanish_variant_widget(rows: &[crate::PackageRow], choice: &Choice) {
+    let selected_indices = checked_package_indices(rows);
+    let selected = crate::variant_choice_package_selected(rows, &selected_indices);
+    choice.enable(selected);
+    choice.set_can_focus(selected);
 }
 
 fn sync_osara_keymap_widgets(
@@ -5753,7 +5755,7 @@ fn bind_reapack_ack_navigation_updates(
 /// install worker is still running — `DONE_STEP` is stored only after the
 /// worker finished, or before it is even spawned on a preparation error.
 fn bind_done_page_enter_closes(text: &TextCtrl, frame: &Frame, current_step: &Arc<AtomicUsize>) {
-    let frame = frame.clone();
+    let frame = *frame;
     let current_step = Arc::clone(current_step);
     text.on_key_down(move |event| {
         let key_code = if let WindowEventData::Keyboard(kbd) = &event {
@@ -5917,51 +5919,7 @@ fn launch_reaper(path: &Path) -> std::io::Result<()> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::fs;
-    use std::path::PathBuf;
-
-    use tempfile::tempdir;
-
-    use super::{can_launch_reaper_path, planned_reaper_launch_path_for_target};
-    use crate::TargetRow;
-
-    #[test]
-    fn launchability_requires_existing_path() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("reaper.exe");
-
-        assert!(!can_launch_reaper_path(Some(&path)));
-
-        fs::write(&path, b"stub").unwrap();
-
-        assert!(can_launch_reaper_path(Some(&path)));
-        assert!(!can_launch_reaper_path(None));
-    }
-
-    #[test]
-    fn planned_launch_path_uses_target_planned_app_path() {
-        let target = TargetRow {
-            label: "Portable REAPER".to_string(),
-            details: String::new(),
-            app_path: None,
-            planned_app_path: PathBuf::from("C:/PortableREAPER/reaper.exe"),
-            path: PathBuf::from("C:/PortableREAPER"),
-            version: None,
-            portable: true,
-            selected: true,
-            writable: true,
-            architecture: rabbit_core::model::Architecture::current(),
-        };
-
-        assert_eq!(
-            planned_reaper_launch_path_for_target(&target),
-            PathBuf::from("C:/PortableREAPER/reaper.exe")
-        );
-    }
-}
-
+#[allow(clippy::too_many_arguments)] // UI plumbing: one parameter per widget handle.
 fn update_navigation(
     step: usize,
     book: &SimpleBook,
@@ -6007,4 +5965,49 @@ fn update_navigation(
     // relaunches RABBIT and discards wizard progress, so a footer on later
     // pages would just be a tripwire.
     language_footer.show(step == TARGET_STEP);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use tempfile::tempdir;
+
+    use super::{can_launch_reaper_path, planned_reaper_launch_path_for_target};
+    use crate::TargetRow;
+
+    #[test]
+    fn launchability_requires_existing_path() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("reaper.exe");
+
+        assert!(!can_launch_reaper_path(Some(&path)));
+
+        fs::write(&path, b"stub").unwrap();
+
+        assert!(can_launch_reaper_path(Some(&path)));
+        assert!(!can_launch_reaper_path(None));
+    }
+
+    #[test]
+    fn planned_launch_path_uses_target_planned_app_path() {
+        let target = TargetRow {
+            label: "Portable REAPER".to_string(),
+            details: String::new(),
+            app_path: None,
+            planned_app_path: PathBuf::from("C:/PortableREAPER/reaper.exe"),
+            path: PathBuf::from("C:/PortableREAPER"),
+            version: None,
+            portable: true,
+            selected: true,
+            writable: true,
+            architecture: rabbit_core::model::Architecture::current(),
+        };
+
+        assert_eq!(
+            planned_reaper_launch_path_for_target(&target),
+            PathBuf::from("C:/PortableREAPER/reaper.exe")
+        );
+    }
 }

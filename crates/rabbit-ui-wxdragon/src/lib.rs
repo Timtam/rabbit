@@ -134,6 +134,9 @@ pub struct WizardText {
     pub packages_osara_keymap_heading: String,
     pub packages_osara_keymap_replace_label: String,
     pub packages_spanish_variant_label: String,
+    /// The selectable Spanish OSARA translations, in the same order as
+    /// [`VARIANT_CHOICE_IDS`].
+    pub packages_spanish_variant_options: Vec<String>,
     pub packages_osara_keymap_unavailable_note: String,
     pub packages_osara_keymap_preserve_note: String,
     pub packages_osara_keymap_replace_note: String,
@@ -730,6 +733,14 @@ fn wizard_text(localizer: &Localizer) -> WizardText {
             .text("wizard-packages-osara-keymap-replace-label")
             .value,
         packages_spanish_variant_label: localizer.text("packages-spanish-variant-label").value,
+        packages_spanish_variant_options: VARIANT_CHOICE_IDS
+            .iter()
+            .map(|id| {
+                localizer
+                    .text(&format!("package-langpack-es-variant-{id}"))
+                    .value
+            })
+            .collect(),
         packages_osara_keymap_unavailable_note: localizer
             .text("wizard-packages-osara-keymap-unavailable-note")
             .value,
@@ -1083,47 +1094,62 @@ pub fn osara_selected_for_rows(package_rows: &[PackageRow], indices: &[usize]) -
         .any(|row| row.package_id == PACKAGE_OSARA)
 }
 
+/// Whether a package offering a variant choice is currently selected for
+/// install, so the wizard can enable its choice control. Today only the
+/// Spanish language pack qualifies: its two variants pick which OSARA
+/// translation loads.
+pub fn variant_choice_package_selected(package_rows: &[PackageRow], indices: &[usize]) -> bool {
+    indices
+        .iter()
+        .filter_map(|index| package_rows.get(*index))
+        .any(|row| row.package_id == VARIANT_CHOICE_PACKAGE_ID)
+}
+
 /// The one package that currently offers a variant choice in the wizard.
 pub const VARIANT_CHOICE_PACKAGE_ID: &str = "langpack-es";
-/// Variant id selected when the wizard's choice control is ticked.
-pub const VARIANT_CHOICE_ALTERNATE_ID: &str = "pma";
+/// The selectable Spanish OSARA translations, in the order the wizard's
+/// dropdown lists them. Index 0 is the default. Kept as an explicit list so
+/// the dropdown's position maps to a manifest variant id without the UI
+/// hard-coding which is which.
+pub const VARIANT_CHOICE_IDS: &[&str] = &["rae", "pma"];
 
-/// Variant id selected when the wizard's choice control is unticked.
-pub const VARIANT_CHOICE_DEFAULT_ID: &str = "rae";
-
-/// Build the `package_variants` map from the wizard's choice control.
+/// Build the `package_variants` map from the wizard's dropdown selection.
 ///
-/// Always records an explicit choice, in BOTH directions. An unticked box
-/// has to mean "use REAPER Accesible español", not "no opinion" — the
-/// install path falls back to the previously-installed variant when no
-/// choice is given, so an absent entry would make it impossible to switch
-/// back from Team PMA once chosen.
+/// Always records an explicit choice. Picking the first entry has to mean
+/// "use REAPER Accesible español", not "no opinion" — the install path
+/// falls back to the previously-installed variant when no choice is given,
+/// so an absent entry would make it impossible to switch back from Team PMA
+/// once chosen. An out-of-range index falls back to the first entry.
 pub fn package_variants_from_choice(
-    alternate_selected: bool,
+    selection: Option<u32>,
 ) -> std::collections::BTreeMap<String, String> {
+    let index = selection.unwrap_or(0) as usize;
+    let id = VARIANT_CHOICE_IDS
+        .get(index)
+        .copied()
+        .unwrap_or(VARIANT_CHOICE_IDS[0]);
     let mut variants = std::collections::BTreeMap::new();
-    variants.insert(
-        VARIANT_CHOICE_PACKAGE_ID.to_string(),
-        if alternate_selected {
-            VARIANT_CHOICE_ALTERNATE_ID.to_string()
-        } else {
-            VARIANT_CHOICE_DEFAULT_ID.to_string()
-        },
-    );
+    variants.insert(VARIANT_CHOICE_PACKAGE_ID.to_string(), id.to_string());
     variants
 }
 
-/// Whether the Spanish pack currently installed at `resource_path` is the
-/// Team PMA variant, so the wizard can show the user's existing choice
-/// rather than an unticked box that would silently switch them back.
-pub fn spanish_variant_alternate_installed(resource_path: &std::path::Path) -> bool {
-    rabbit_core::package::effective_variant_id(
+/// Dropdown index matching the Spanish variant currently installed at
+/// `resource_path`, so the wizard shows the user's existing choice rather
+/// than a default that would silently switch them. Falls back to the first
+/// entry when nothing is installed.
+pub fn spanish_variant_selection(resource_path: &std::path::Path) -> u32 {
+    let installed = rabbit_core::package::effective_variant_id(
         resource_path,
         VARIANT_CHOICE_PACKAGE_ID,
         &std::collections::BTreeMap::new(),
-    )
-    .as_deref()
-        == Some(VARIANT_CHOICE_ALTERNATE_ID)
+    );
+    installed
+        .and_then(|id| {
+            VARIANT_CHOICE_IDS
+                .iter()
+                .position(|candidate| *candidate == id)
+        })
+        .unwrap_or(0) as u32
 }
 
 /// Returns true when ReaPack is selected and its planned action would
@@ -2856,6 +2882,7 @@ fn architecture_label_for_summary(architecture: Architecture) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Row building needs the full wizard context.
 fn package_rows(
     localizer: &Localizer,
     text: &WizardText,
@@ -5024,46 +5051,55 @@ mod tests {
     /// clear themselves, so the summary follows the (English, report-bound)
     /// error text with localized remediation steps. Everything else keeps
     /// exactly one error line.
-    /// The wizard's Spanish OSARA-translation checkbox maps to the variant
-    /// the install pipeline understands; unticked means "use the package's
-    /// default" (REAPER Accesible español), which is an empty map rather
-    /// than an explicit choice.
+    /// The wizard's Spanish OSARA-translation dropdown maps each position to
+    /// a manifest variant id. Every position must record an EXPLICIT choice:
+    /// the install path falls back to the previously-installed variant when
+    /// none is given, so picking the first entry has to actively mean
+    /// "REAPER Accesible español" or a Team PMA user could never switch back.
     #[test]
-    fn spanish_variant_checkbox_maps_to_the_package_variant() {
-        // Unticked must be an EXPLICIT "use the default" rather than
-        // silence: the install path falls back to the previously-installed
-        // variant when no choice is given, so an empty map would make it
-        // impossible to switch back from Team PMA once chosen.
-        let unticked = super::package_variants_from_choice(false);
-        assert_eq!(
-            unticked
-                .get(super::VARIANT_CHOICE_PACKAGE_ID)
-                .map(String::as_str),
-            Some(super::VARIANT_CHOICE_DEFAULT_ID)
-        );
-
-        let ticked = super::package_variants_from_choice(true);
-        assert_eq!(
-            ticked
-                .get(super::VARIANT_CHOICE_PACKAGE_ID)
-                .map(String::as_str),
-            Some(super::VARIANT_CHOICE_ALTERNATE_ID)
-        );
-        // And that id must actually exist on the package, or the choice
-        // would silently fall back to the default.
+    fn spanish_variant_dropdown_maps_each_position_to_a_manifest_variant() {
         let specs = rabbit_core::package::package_specs_by_id(Platform::Windows);
         let spanish = specs
             .get(super::VARIANT_CHOICE_PACKAGE_ID)
             .expect("Spanish language pack");
-        for id in [
-            super::VARIANT_CHOICE_ALTERNATE_ID,
-            super::VARIANT_CHOICE_DEFAULT_ID,
-        ] {
+
+        // The dropdown offers exactly the variants the manifest declares.
+        assert_eq!(super::VARIANT_CHOICE_IDS.len(), spanish.variants.len());
+        for id in super::VARIANT_CHOICE_IDS {
             assert!(
-                spanish.variants.iter().any(|v| v.id == id),
-                "the wizard's variant id {id:?} must exist in the manifest"
+                spanish.variants.iter().any(|v| v.id == *id),
+                "dropdown id {id:?} must exist in the manifest"
             );
         }
+        // Position 0 is the manifest's default, so an untouched dropdown
+        // agrees with what a CLI run with no flag would install.
+        assert!(
+            spanish
+                .variants
+                .iter()
+                .any(|v| v.default && v.id == super::VARIANT_CHOICE_IDS[0]),
+            "the first entry must be the manifest default"
+        );
+
+        for (index, expected) in super::VARIANT_CHOICE_IDS.iter().enumerate() {
+            let chosen = super::package_variants_from_choice(Some(index as u32));
+            assert_eq!(
+                chosen
+                    .get(super::VARIANT_CHOICE_PACKAGE_ID)
+                    .map(String::as_str),
+                Some(*expected),
+                "position {index} should select {expected:?}"
+            );
+        }
+        // An out-of-range selection falls back to the default rather than
+        // silently recording no choice.
+        let fallback = super::package_variants_from_choice(Some(99));
+        assert_eq!(
+            fallback
+                .get(super::VARIANT_CHOICE_PACKAGE_ID)
+                .map(String::as_str),
+            Some(super::VARIANT_CHOICE_IDS[0])
+        );
     }
 
     #[test]
