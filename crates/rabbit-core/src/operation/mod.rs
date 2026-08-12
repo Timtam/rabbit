@@ -132,6 +132,13 @@ pub enum PackageOperationMessage {
         installed_version: String,
         available_version: String,
     },
+    /// Plan kept the installed copy of a content-tracked package (a
+    /// language pack) because upstream still publishes exactly the same
+    /// file. Distinct from [`Self::SkippedCurrent`] because these packages
+    /// have no version numbers to be "newer" than — talking about ordering
+    /// would be meaningless (and would read as "hd6debe3ec507 is current or
+    /// newer than hd6debe3ec507").
+    SkippedContentUnchanged,
     /// Dry-run preview: this artifact would be downloaded and run
     /// unattended.
     DryRunWouldRunUnattended { artifact_kind: ArtifactKind },
@@ -941,16 +948,31 @@ fn skipped_current_item(
         .unwrap_or_else(|| "unknown".to_string());
 
     let available_version = artifact.version.to_string();
+    // Content-tracked packages (language packs) are identified by digest,
+    // not a version number, so their "kept" message must not talk about one
+    // version being newer than another.
+    let content_tracked = matches!(
+        crate::package::version_comparison_for(&artifact.package_id),
+        crate::package::VersionComparison::Exact
+    );
     PackageOperationItem {
         package_id: artifact.package_id.clone(),
         plan_action: PlanActionKind::Keep,
         status: PackageOperationStatus::SkippedCurrent,
-        message: format!(
-            "Installed version {installed_version} is current or newer than available version {available_version}.",
-        ),
-        message_code: PackageOperationMessage::SkippedCurrent {
-            installed_version,
-            available_version,
+        message: if content_tracked {
+            "The installed copy is identical to the one published upstream.".to_string()
+        } else {
+            format!(
+                "Installed version {installed_version} is current or newer than available version {available_version}.",
+            )
+        },
+        message_code: if content_tracked {
+            PackageOperationMessage::SkippedContentUnchanged
+        } else {
+            PackageOperationMessage::SkippedCurrent {
+                installed_version,
+                available_version,
+            }
         },
         artifact,
         cached_artifact: None,

@@ -2610,6 +2610,7 @@ fn localized_package_operation_message(
                 ("available", available_version.as_str()),
             ],
         ),
+        Msg::SkippedContentUnchanged => localizer.text("package-status-skipped-content-unchanged"),
         Msg::DryRunWouldRunUnattended { artifact_kind } => localizer.format(
             "package-status-dry-run-would-run-unattended",
             &[(

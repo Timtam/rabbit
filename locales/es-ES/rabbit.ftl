@@ -299,6 +299,7 @@ status-skipped-dependency-failed = Omitido (falló una dependencia)
 package-status-extension-binary-installed = RABBIT manejó el archivo binario simple de instalación.
 # $installed is the on-disk version; $available is the latest upstream version.
 package-status-skipped-current = La versión instalada { $installed } esmás reciente que la versión disponible { $available }.
+package-status-skipped-content-unchanged = La copia instalada es idéntica a la publicada por el editor.
 # $error es el texto del error. $dependency es el paquete (p. ej. REAPER) que falló primero.
 package-status-install-failed = La instalación falló: { $error }
 package-status-skipped-dependency-failed = Omitido porque { $dependency }, que necesita, no se instaló correctamente.

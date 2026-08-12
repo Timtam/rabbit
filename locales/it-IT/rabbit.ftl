@@ -299,6 +299,7 @@ status-skipped-dependency-failed = Saltato (dipendenza non riuscita)
 package-status-extension-binary-installed = Singolo binario di estensione gestito dal programma di installazione di RABBIT.
 # $installed is the on-disk version; $available is the latest upstream version.
 package-status-skipped-current = La versione installata { $installed } è uguale o più recente della versione disponibile { $available }.
+package-status-skipped-content-unchanged = La copia installata è identica a quella pubblicata dall'editore.
 package-status-install-failed = Installazione non riuscita: { $error }
 package-status-skipped-dependency-failed = Saltato perché { $dependency }, da cui dipende, non è stato installato correttamente.
 # $automation is one of the "package-automation-*" labels (vendor installer / archive extraction / ...).
