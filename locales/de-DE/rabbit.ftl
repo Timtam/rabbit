@@ -245,6 +245,14 @@ wizard-self-update-status-checking = Suche nach RABBIT-Aktualisierungen…
 wizard-self-update-prompt-title = RABBIT-Aktualisierung verfügbar
 wizard-self-update-prompt-body = RABBIT { $latest } ist verfügbar. Sie haben aktuell { $current }. Jetzt aktualisieren? RABBIT wird nach Abschluss der Aktualisierung neu gestartet.
 
+# Shown in the update prompt when the release notes could be fetched. The
+# heading doubles as the accessible name of the read-only notes box, so it
+# has to read well on its own; $current is the running version, since the
+# notes cover every release published since then.
+wizard-self-update-prompt-notes-heading = Neuerungen seit RABBIT { $current }:
+wizard-self-update-prompt-update-button = Jetzt aktualisieren
+wizard-self-update-prompt-later-button = Jetzt nicht
+
 # $current is the running RABBIT version, $latest is the version offered by the
 # release manifest, $channel is the release channel id (e.g. "stable").
 self-update-status-update-available = RABBIT-Aktualisierung verfügbar: { $current } → { $latest } (Kanal { $channel }). Starten Sie RABBIT neu, um erneut gefragt zu werden.

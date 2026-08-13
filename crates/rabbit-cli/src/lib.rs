@@ -30,7 +30,8 @@ use rabbit_core::rollback::{
 use rabbit_core::self_update::{
     ApplySelfUpdateOptions, DEFAULT_SELF_UPDATE_MANIFEST_URL, SelfUpdateApplyReport,
     SelfUpdateCheckReport, SelfUpdateStageReport, apply_self_update, check_self_update,
-    default_self_update_staging_dir, relaunch_current_executable, stage_self_update,
+    default_self_update_staging_dir, relaunch_current_executable,
+    resolve_self_update_release_notes, stage_self_update,
 };
 use rabbit_core::setup::{SetupOptions, SetupReport, execute_setup_operation};
 use serde::Serialize;
@@ -803,6 +804,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {
                     print_self_update_report(&report);
+                    // Only the check command pays for the notes fetch: stage
+                    // and apply print the same report, and neither should
+                    // spend a round-trip on text nobody asked to read while
+                    // an update is being installed.
+                    print_self_update_release_notes(&report);
                 }
             }
             SelfUpdateCommand::Stage {
@@ -1606,6 +1612,19 @@ fn print_self_update_report(report: &SelfUpdateCheckReport) {
     println!("Asset platform: {:?}", report.asset.platform);
     println!("Asset URL: {}", report.asset.url);
     println!("Asset SHA-256: {}", report.asset.sha256);
+}
+
+/// Print what the pending update actually changes, covering every release
+/// between the running version and the latest. Silent when there is no
+/// update, or when the notes can't be fetched — the check itself has already
+/// reported everything that matters.
+fn print_self_update_release_notes(report: &SelfUpdateCheckReport) {
+    let Some(notes) = resolve_self_update_release_notes(report) else {
+        return;
+    };
+    println!();
+    println!("What's new since {}:", report.current_version);
+    println!("{notes}");
 }
 
 fn print_self_update_stage_report(report: &SelfUpdateStageReport) {

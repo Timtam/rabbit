@@ -447,6 +447,31 @@ mod tests {
     }
 
     #[test]
+    fn self_update_notes_heading_formats_in_every_embedded_locale() {
+        // Same exposure as the package heading below: composed with
+        // .format() without a missing-key fallback, and it doubles as the
+        // accessible name of the notes box in the update prompt — a locale
+        // that forgot the key would have the screen reader announce the raw
+        // key id at the exact moment the user is deciding whether to update.
+        for &locale in embedded_locales() {
+            let localizer = Localizer::embedded(locale).unwrap();
+            let message = localizer.format(
+                "wizard-self-update-prompt-notes-heading",
+                &[("current", "0.3.2")],
+            );
+            assert!(
+                !message.missing,
+                "locale {locale} is missing wizard-self-update-prompt-notes-heading"
+            );
+            assert!(
+                message.value.contains("0.3.2"),
+                "locale {locale} should interpolate the running version, got {:?}",
+                message.value
+            );
+        }
+    }
+
+    #[test]
     fn whats_new_heading_formats_in_every_embedded_locale() {
         // The heading is composed with .format() at row-build time without a
         // missing-key fallback, so a locale that forgets the key would show

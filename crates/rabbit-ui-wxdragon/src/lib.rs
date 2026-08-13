@@ -42,7 +42,7 @@ use rabbit_core::resource::{
 use rabbit_core::self_update::{
     ApplySelfUpdateOptions, DEFAULT_SELF_UPDATE_MANIFEST_URL, SelfUpdateApplyReport,
     SelfUpdateCheckReport, apply_self_update, check_self_update, default_self_update_staging_dir,
-    relaunch_current_executable, stage_self_update,
+    relaunch_current_executable, resolve_self_update_release_notes, stage_self_update,
 };
 use rabbit_core::setup::{SetupOptions, SetupReport, setup_requires_extension_support};
 use rabbit_core::version::Version;
@@ -1812,6 +1812,18 @@ pub fn execute_wizard_install_with_progress(
 pub fn run_wizard_self_update_check() -> Result<SelfUpdateCheckReport> {
     let platform = Platform::current().ok_or(RabbitError::UnsupportedPlatform)?;
     check_self_update(platform, DEFAULT_SELF_UPDATE_MANIFEST_URL)
+}
+
+/// What's-New notes for a pending RABBIT update, covering every release
+/// between the running version and the latest one.
+///
+/// Called from the same startup worker thread as
+/// [`run_wizard_self_update_check`], never from the UI thread: it performs an
+/// HTTP round-trip, and the wizard must stay responsive while it runs. The
+/// result is best-effort — `None` simply means the prompt falls back to its
+/// plain version-to-version wording.
+pub fn run_wizard_self_update_release_notes(report: &SelfUpdateCheckReport) -> Option<String> {
+    resolve_self_update_release_notes(report)
 }
 
 pub fn run_wizard_self_update_apply() -> Result<SelfUpdateApplyReport> {

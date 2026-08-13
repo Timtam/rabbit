@@ -131,7 +131,8 @@ use crate::{
     install_request_from_target_and_rows, load_wizard_model, localized_package_display_name,
     localizer_from_options, osara_keymap_note, osara_selected_for_rows,
     reapack_selected_for_install_or_update, refreshed_target_row, relaunch_rabbit_after_apply,
-    run_wizard_self_update_apply, run_wizard_self_update_check, save_wizard_outcome_report,
+    run_wizard_self_update_apply, run_wizard_self_update_check,
+    run_wizard_self_update_release_notes, save_wizard_outcome_report,
     selected_configuration_step_ids, wizard_desired_package_ids, wizard_outcome_report_from_error,
     wizard_outcome_report_from_success, wizard_package_plan_for_target,
     wizard_package_plan_for_target_with_available,
@@ -179,6 +180,10 @@ struct SelfUpdateUiState {
     /// startup probe is still running; `Some(Ok)` on success; `Some(Err)`
     /// carries the formatted error message (RabbitError isn't Clone).
     check: Option<std::result::Result<SelfUpdateCheckReport, String>>,
+    /// What's-New notes for the pending update, resolved by the same startup
+    /// worker as `check`. `None` when there is no update, or when the notes
+    /// couldn't be fetched — the prompt then falls back to its plain form.
+    release_notes: Option<String>,
     /// Last status string written to the status bar — used to suppress
     /// screen-reader re-announcements when nothing has changed.
     last_status: String,
@@ -235,6 +240,7 @@ fn render_self_update_status(
     }
     state_guard.prompted = true;
     let Ok(report) = check else { return };
+    let release_notes = state_guard.release_notes.clone();
     // Drop the lock before showing the modal — `MessageDialog::show_modal`
     // runs a nested wxWidgets event loop, and any UI-thread callback that
     // re-enters `render_self_update_status` while the modal is open would
@@ -257,15 +263,25 @@ fn render_self_update_status(
     // closure runs on the UI thread, so the thread-local was populated
     // by `run()` before any worker fired.
     with_ui_frame(|frame| {
-        let dialog = MessageDialog::builder(frame, &body, &title)
-            .with_style(
-                MessageDialogStyle::YesNo
-                    | MessageDialogStyle::IconQuestion
-                    | MessageDialogStyle::Centre,
-            )
-            .build();
+        let accepted = match release_notes.as_deref() {
+            Some(notes) => {
+                show_self_update_prompt_with_notes(frame, localizer, &title, &body, &current, notes)
+            }
+            // No notes to show (fetch failed, or the release carries no
+            // body): the plain native message box, exactly as before.
+            None => {
+                let dialog = MessageDialog::builder(frame, &body, &title)
+                    .with_style(
+                        MessageDialogStyle::YesNo
+                            | MessageDialogStyle::IconQuestion
+                            | MessageDialogStyle::Centre,
+                    )
+                    .build();
+                dialog.show_modal() == ID_YES
+            }
+        };
 
-        if dialog.show_modal() == ID_YES {
+        if accepted {
             start_self_update_apply(
                 widgets.done_status,
                 widgets.self_update_status,
@@ -273,6 +289,145 @@ fn render_self_update_status(
             );
         }
     });
+}
+
+/// The update prompt in its rich form: the same question the plain message
+/// box asks, plus the release notes for everything the update brings, so the
+/// answer to "should I say yes?" is on screen when the question is asked.
+/// Returns `true` when the user accepted.
+///
+/// A `wxMessageDialog` can't host this — its message is a single unscrollable
+/// static label, and RABBIT's release notes routinely run past a screenful.
+/// Hence a plain `Dialog` carrying a read-only multiline `TextCtrl`, which is
+/// the same control (and therefore the same screen-reader behaviour) the
+/// packages page already uses for a package's What's-New notes.
+///
+/// Accessibility notes, in the spirit of the Done page:
+/// - Focus parks on the notes control, so the screen reader reads what the
+///   update contains instead of announcing a bare button.
+/// - The notes control's accessible name carries the heading, since a
+///   `StaticText` label sits outside the tab order and would otherwise never
+///   be announced.
+/// - Update is the default button, so Enter accepts from anywhere in the
+///   dialog, and Escape maps to Later.
+fn show_self_update_prompt_with_notes(
+    frame: &Frame,
+    localizer: &Localizer,
+    title: &str,
+    body: &str,
+    current: &str,
+    notes: &str,
+) -> bool {
+    let notes_heading = localizer
+        .format(
+            "wizard-self-update-prompt-notes-heading",
+            &[("current", current)],
+        )
+        .value;
+    let update_label = localizer
+        .text("wizard-self-update-prompt-update-button")
+        .value;
+    let later_label = localizer
+        .text("wizard-self-update-prompt-later-button")
+        .value;
+
+    let dialog = Dialog::builder(frame, title)
+        // Resizable so a long set of notes can be opened up, rather than
+        // forcing everything through one fixed-height scroll region.
+        .with_style(DialogStyle::DefaultDialogStyle | DialogStyle::ResizeBorder)
+        .with_size(560, 420)
+        .build();
+    // Controls go on a child Panel rather than straight onto the dialog:
+    // that's what gives MSW its dialog-navigation behaviour (Tab/arrow
+    // traversal between the notes and the buttons) for free.
+    let panel = Panel::builder(&dialog).build();
+    let sizer = BoxSizer::builder(Orientation::Vertical).build();
+
+    let question = StaticText::builder(&panel).with_label(body).build();
+    question.set_name("rabbit-self-update-prompt-question");
+    sizer.add(&question, 0, SizerFlag::All | SizerFlag::Expand, 6);
+
+    let heading = StaticText::builder(&panel)
+        .with_label(&notes_heading)
+        .build();
+    heading.set_name("rabbit-self-update-prompt-notes-heading");
+    sizer.add(&heading, 0, SizerFlag::All | SizerFlag::Expand, 6);
+
+    let notes_text = TextCtrl::builder(&panel)
+        .with_value(notes)
+        .with_style(TextCtrlStyle::MultiLine | TextCtrlStyle::ReadOnly | TextCtrlStyle::WordWrap)
+        .build();
+    notes_text.set_name(&notes_heading);
+    sizer.add(&notes_text, 1, SizerFlag::All | SizerFlag::Expand, 6);
+
+    // The buttons carry the standard yes/no ids rather than generated ones
+    // so `set_escape_id` below has something to act on: wxWidgets answers
+    // Escape by emulating a click on the button holding the escape id, and
+    // does nothing at all when no button has it.
+    //
+    // `TabStop` + `set_can_focus` for the same reason the wizard's own
+    // navigation buttons carry them: without it macOS leaves buttons out of
+    // the Tab ring unless Full Keyboard Access is on.
+    let buttons = BoxSizer::builder(Orientation::Horizontal).build();
+    let update = Button::builder(&panel)
+        .with_id(ID_YES)
+        .with_label(&update_label)
+        .build();
+    update.set_name("rabbit-self-update-prompt-update");
+    update.add_style(WindowStyle::TabStop);
+    update.set_can_focus(true);
+    buttons.add(&update, 0, SizerFlag::All, 6);
+    let later = Button::builder(&panel)
+        .with_id(ID_NO)
+        .with_label(&later_label)
+        .build();
+    later.set_name("rabbit-self-update-prompt-later");
+    later.add_style(WindowStyle::TabStop);
+    later.set_can_focus(true);
+    buttons.add(&later, 0, SizerFlag::All, 6);
+    sizer.add_sizer(&buttons, 0, SizerFlag::AlignRight, 0);
+
+    panel.set_sizer(sizer, true);
+    // Same frame → panel → content nesting `run()` builds for the wizard
+    // window: the dialog's own sizer is what makes the panel track the
+    // dialog when it is resized.
+    let dialog_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    dialog_sizer.add(&panel, 1, SizerFlag::Expand, 0);
+    dialog.set_sizer(dialog_sizer, true);
+
+    // `Dialog` is `Copy`, so each `move` handler closes over its own copy
+    // and the original stays usable below. Neither handler skips the event,
+    // so it stops at the button and wxDialog's own button handling never
+    // gets a second go at ending the modal.
+    update.on_click(move |_| dialog.end_modal(ID_YES));
+    later.on_click(move |_| dialog.end_modal(ID_NO));
+    dialog.set_affirmative_id(ID_YES);
+    dialog.set_escape_id(ID_NO);
+    update.set_default();
+
+    // A multiline TextCtrl claims Enter for itself (DLGC_WANTALLKEYS on
+    // MSW, the NSTextView swallows it on macOS), so the default button
+    // never sees the key while focus is parked on the notes — the same
+    // trap `bind_done_page_enter_closes` works around on the Done page.
+    notes_text.on_key_down(move |event| {
+        let key_code = if let WindowEventData::Keyboard(kbd) = &event {
+            kbd.get_key_code()
+        } else {
+            None
+        };
+        if !matches!(key_code, Some(WXK_RETURN) | Some(WXK_NUMPAD_ENTER)) {
+            return;
+        }
+        // Consume the key so the read-only control neither beeps nor
+        // tries to insert a newline before the dialog closes.
+        event.skip(false);
+        dialog.end_modal(ID_YES);
+    });
+
+    notes_text.set_focus();
+    let accepted = dialog.show_modal() == ID_YES;
+    dialog.destroy();
+    accepted
 }
 
 /// `wx/defs.h`: `WXK_SPACE = 32` (just the ASCII value). Kept around as a
@@ -2197,8 +2352,18 @@ pub fn run() {
             let state = Arc::clone(&self_update_state);
             std::thread::spawn(move || {
                 let check = run_wizard_self_update_check();
+                // Resolve the What's-New notes on this same worker, while
+                // the status line still reads "Checking for RABBIT
+                // updates…": the prompt is only raised once the whole probe
+                // lands on the UI thread, so fetching notes here costs the
+                // user nothing and spares the UI thread an HTTP round-trip.
+                let release_notes = check
+                    .as_ref()
+                    .ok()
+                    .and_then(run_wizard_self_update_release_notes);
                 {
                     let mut state = state.lock().unwrap();
+                    state.release_notes = release_notes;
                     state.check = Some(match check {
                         Ok(report) => Ok(report),
                         Err(error) => Err(error.to_string()),

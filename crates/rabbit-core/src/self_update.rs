@@ -24,6 +24,19 @@ const USER_AGENT: &str = concat!(
 pub const DEFAULT_SELF_UPDATE_MANIFEST_URL: &str =
     "https://github.com/Timtam/rabbit/releases/latest/download/rabbit-update-stable.json";
 
+/// GitHub's release listing for RABBIT itself — the What's-New source behind
+/// the notes shown next to an available self-update. It is the same endpoint
+/// shape ReaPack's `whats_new` rule reads, so
+/// [`crate::latest::resolve_github_release_bodies`] renders both the same
+/// way: one heading line per release, then the body the maintainer wrote.
+/// `per_page` is capped well above the ten sections the renderer stops at,
+/// so asking for more would only cost bandwidth. Deliberately separate from
+/// [`DEFAULT_SELF_UPDATE_MANIFEST_URL`]: the manifest is a release asset
+/// carrying download URLs and checksums, while the notes come from the
+/// release metadata GitHub keeps for every published tag.
+pub const DEFAULT_SELF_UPDATE_RELEASE_NOTES_URL: &str =
+    "https://api.github.com/repos/Timtam/rabbit/releases?per_page=20";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelfUpdateManifest {
     pub version: Version,
@@ -303,6 +316,43 @@ pub fn check_self_update(platform: Platform, manifest_url: &str) -> Result<SelfU
         current_rabbit_version()?,
         &manifest,
     )
+}
+
+/// The release notes covering every RABBIT release above `installed`, newest
+/// first, rendered the same way the packages page renders a package's
+/// What's-New notes. Someone who skipped two releases reads all three sets of
+/// notes rather than only the newest, which is the whole point of showing
+/// them at the update prompt: the answer to "what do I get if I say yes?"
+/// spans everything they missed, not just the last tag.
+///
+/// The section cap and the draft/prerelease skip live in
+/// [`crate::latest::resolve_github_release_bodies`]; RABBIT knows its own
+/// installed version exactly (it is compiled in), so the trim is precise
+/// here in a way it can never be for a third-party package detected on disk.
+pub fn fetch_self_update_release_notes(notes_url: &str, installed: &Version) -> Result<String> {
+    let client = crate::latest::build_http_client()?;
+    let body = crate::latest::http_get_text(&client, notes_url)?;
+    crate::latest::resolve_github_release_bodies(&body, notes_url, Some(installed))
+}
+
+/// Best-effort [`fetch_self_update_release_notes`] for a completed check.
+/// `None` when there is nothing to update to, or when the notes can't be
+/// fetched or rendered.
+///
+/// Notes are decoration around the update prompt, never a precondition for
+/// it: a GitHub outage, an API rate limit, or a release published without a
+/// body must not keep the user from updating, so every failure degrades to
+/// the plain prompt instead of surfacing an error. This mirrors how the
+/// packages page treats a package's What's-New source.
+pub fn resolve_self_update_release_notes(report: &SelfUpdateCheckReport) -> Option<String> {
+    if !report.update_available {
+        return None;
+    }
+    fetch_self_update_release_notes(
+        DEFAULT_SELF_UPDATE_RELEASE_NOTES_URL,
+        &report.current_version,
+    )
+    .ok()
 }
 
 pub fn stage_self_update(
@@ -1505,12 +1555,13 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        ApplySelfUpdateOptions, SelfUpdateAssetKind, SelfUpdateAssetSelection,
-        SelfUpdateCheckReport, SelfUpdateManifest, SelfUpdateStageReport, apply_self_update,
-        arch_token_from_asset_url, current_rabbit_version, enclosing_app_bundle,
+        ApplySelfUpdateOptions, DEFAULT_SELF_UPDATE_RELEASE_NOTES_URL, SelfUpdateAssetKind,
+        SelfUpdateAssetSelection, SelfUpdateCheckReport, SelfUpdateManifest, SelfUpdateStageReport,
+        apply_self_update, arch_token_from_asset_url, current_rabbit_version, enclosing_app_bundle,
         evaluate_self_update_report, extracted_main_binary, locate_extracted_app,
-        parse_self_update_manifest, select_asset_for_platform_with_context,
-        stage_self_update_from_report, swap_bundle_directories, sweep_stale_update_scratch_dirs,
+        parse_self_update_manifest, resolve_self_update_release_notes,
+        select_asset_for_platform_with_context, stage_self_update_from_report,
+        swap_bundle_directories, sweep_stale_update_scratch_dirs,
     };
     use crate::RabbitError;
     use crate::hash::sha256_file;
@@ -1838,6 +1889,38 @@ mod tests {
 
         assert!(report.update_available);
         assert!(report.requires_manual_transition);
+    }
+
+    #[test]
+    fn release_notes_are_skipped_when_no_update_is_available() {
+        // The `update_available` guard is what keeps an up-to-date RABBIT
+        // from spending a GitHub API request on notes nobody will see — and
+        // it is what keeps this test offline, since returning early is the
+        // only path through `resolve_self_update_release_notes` that never
+        // reaches the network.
+        let manifest = sample_manifest();
+        let report = evaluate_self_update_report(
+            Platform::Windows,
+            Architecture::X64,
+            MANIFEST_URL,
+            manifest.version.clone(),
+            &manifest,
+        )
+        .unwrap();
+
+        assert!(!report.update_available);
+        assert_eq!(resolve_self_update_release_notes(&report), None);
+    }
+
+    #[test]
+    fn release_notes_url_points_at_the_github_release_listing() {
+        // A single-release endpoint (`/releases/latest`) would silently
+        // reduce the notes to the newest version only, defeating the whole
+        // point of spanning everything the user skipped. The renderer
+        // accepts either shape, so nothing else would catch the mistake.
+        assert!(DEFAULT_SELF_UPDATE_RELEASE_NOTES_URL.starts_with("https://api.github.com/"));
+        assert!(DEFAULT_SELF_UPDATE_RELEASE_NOTES_URL.contains("/repos/Timtam/rabbit/releases"));
+        assert!(!DEFAULT_SELF_UPDATE_RELEASE_NOTES_URL.contains("/releases/latest"));
     }
 
     #[test]
