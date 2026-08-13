@@ -253,6 +253,11 @@ wizard-self-update-prompt-notes-heading = Novedades desde RABBIT { $current }:
 wizard-self-update-prompt-update-button = Actualizar ahora
 wizard-self-update-prompt-later-button = Ahora no
 
+# Title of the modeless window shown while RABBIT downloads and installs
+# its own update. It doubles as the accessible name of the progress log
+# inside it, so it has to read well on its own.
+wizard-self-update-progress-title = Actualizando RABBIT
+
 # $current is the running RABBIT version, $latest is the version offered by the
 # release manifest, $channel is the release channel id (e.g. "stable").
 self-update-status-update-available = Actualización de RABBIT disponible: { $current } → { $latest } (Canal { $channel }). Reinicia RABBIT para volver a preguntar.

@@ -3399,9 +3399,24 @@ fn start_self_update_apply(
 ) {
     append_done_status(&done_status, &model.text.done_self_update_apply_running);
     self_update_status.set_status_text(&model.text.done_self_update_apply_running, 0);
+    // Put the progress window up before the worker starts, so the very
+    // first event has somewhere to land. It is modeless: the worker's
+    // completion path runs through `call_after` on this same thread, which
+    // a modal dialog's nested event loop would let run but would also trap
+    // the exit-after-relaunch behind its own dismissal.
+    open_self_update_progress_window(&model);
     let model_for_thread = Arc::clone(&model);
     std::thread::spawn(move || {
-        let result = run_wizard_self_update_apply();
+        // Every event crosses back to the UI thread — widgets must not be
+        // touched from here — and `ProgressEvent` is `Send`, so it rides
+        // inside the `call_after` closure.
+        let progress = ProgressReporter::new(|event| {
+            wxdragon::call_after(Box::new(move || {
+                update_self_update_progress_window(&event);
+            }));
+        });
+        let result = run_wizard_self_update_apply(&progress);
+        wxdragon::call_after(Box::new(close_self_update_progress_window));
         wxdragon::call_after(Box::new(move || match result {
             Ok(report) => {
                 with_ui_localizer(|localizer| {
@@ -3444,6 +3459,226 @@ fn start_self_update_apply(
             }
         }));
     });
+}
+
+/// Widgets of the live self-update progress window. Held in a thread-local
+/// because none of them are `Send`: the worker thread never touches them,
+/// it only posts `ProgressEvent`s through `call_after`, and the closure
+/// that runs on the UI thread picks the widgets up from here.
+struct SelfUpdateProgressWindow {
+    dialog: Dialog,
+    status: StaticText,
+    gauge: Gauge,
+    log: TextCtrl,
+    /// Localized product name, resolved once at construction so each event
+    /// doesn't have to go back through the localizer for it.
+    app_name: String,
+}
+
+thread_local! {
+    static SELF_UPDATE_PROGRESS: RefCell<Option<SelfUpdateProgressWindow>> =
+        const { RefCell::new(None) };
+}
+
+/// Share of the bar given to the download. The remainder covers the
+/// install, which is a single opaque step: the bar jumps to this mark when
+/// the bytes are in and finishes when the swap is done.
+const SELF_UPDATE_DOWNLOAD_SHARE: i32 = 90;
+
+/// Put up the update progress window: a status line, a bar, and a running
+/// log of the phases as they complete.
+///
+/// The same three-part shape as the wizard's own progress page, for the
+/// same reason — the bar is what a sighted user reads, while the log is
+/// what a screen reader can be walked through afterwards, line by line,
+/// which a bar alone never affords. Modeless, and it takes no buttons: the
+/// update cannot be cancelled once started (nothing in the core can unwind
+/// a half-applied swap), so a Cancel button would be a lie.
+fn open_self_update_progress_window(model: &Arc<WizardModel>) {
+    close_self_update_progress_window();
+    with_ui_frame(|frame| {
+        with_ui_localizer(|localizer| {
+            let title = localizer.text("wizard-self-update-progress-title").value;
+            let app_name = localizer.text("app-short-name").value;
+            let dialog = Dialog::builder(frame, &title)
+                .with_style(DialogStyle::Caption | DialogStyle::ResizeBorder)
+                .with_size(460, 260)
+                .build();
+            let panel = Panel::builder(&dialog).build();
+            let sizer = BoxSizer::builder(Orientation::Vertical).build();
+
+            let status = StaticText::builder(&panel)
+                .with_label(&model.text.done_self_update_apply_running)
+                .build();
+            status.set_name("rabbit-self-update-progress-status");
+            sizer.add(&status, 0, SizerFlag::All | SizerFlag::Expand, 6);
+
+            let gauge = Gauge::builder(&panel).with_range(100).build();
+            gauge.set_name("rabbit-self-update-progress-gauge");
+            sizer.add(&gauge, 0, SizerFlag::All | SizerFlag::Expand, 6);
+
+            let log = TextCtrl::builder(&panel)
+                .with_value("")
+                .with_style(
+                    TextCtrlStyle::MultiLine | TextCtrlStyle::ReadOnly | TextCtrlStyle::WordWrap,
+                )
+                .build();
+            log.set_name(&title);
+            sizer.add(&log, 1, SizerFlag::All | SizerFlag::Expand, 6);
+
+            panel.set_sizer(sizer, true);
+            let dialog_sizer = BoxSizer::builder(Orientation::Vertical).build();
+            dialog_sizer.add(&panel, 1, SizerFlag::Expand, 0);
+            dialog.set_sizer(dialog_sizer, true);
+
+            // No Cancel button also means Escape does nothing: wxWidgets
+            // answers it by emulating a click on the escape-id button, and
+            // there is none here. That is the behaviour we want — dismissing
+            // the window would leave the update running unreported.
+            dialog.show(true);
+            log.set_focus();
+
+            SELF_UPDATE_PROGRESS.with(|cell| {
+                *cell.borrow_mut() = Some(SelfUpdateProgressWindow {
+                    dialog,
+                    status,
+                    gauge,
+                    log,
+                    app_name,
+                });
+            });
+        });
+    });
+}
+
+/// Fold one progress event into the window. Silently does nothing when no
+/// window is up — events can still be in flight when it has been closed.
+fn update_self_update_progress_window(event: &ProgressEvent) {
+    SELF_UPDATE_PROGRESS.with(|cell| {
+        let borrowed = cell.borrow();
+        let Some(window) = borrowed.as_ref() else {
+            return;
+        };
+        with_ui_localizer(|localizer| {
+            let package = window.app_name.as_str();
+            match event {
+                ProgressEvent::DownloadStarted { .. } => {
+                    window.gauge.set_value(0);
+                    window.status.set_label(
+                        &localizer
+                            .format(
+                                "wizard-progress-status-downloading",
+                                &[("package", package)],
+                            )
+                            .value,
+                    );
+                    // Only the phase change is logged; the byte ticks below
+                    // would flood a screen reader reading the log.
+                    append_self_update_progress_log(
+                        window,
+                        &localizer
+                            .format(
+                                "wizard-progress-log-download-started",
+                                &[("package", package)],
+                            )
+                            .value,
+                    );
+                }
+                ProgressEvent::DownloadProgress {
+                    bytes_downloaded,
+                    bytes_total,
+                    ..
+                } => {
+                    // Without a Content-Length there is no fraction to show,
+                    // so the bar stays where it is and the byte counter in
+                    // the status line carries the news instead.
+                    if let Some(total) = bytes_total.filter(|total| *total > 0) {
+                        let ratio = (*bytes_downloaded as f64 / total as f64).clamp(0.0, 1.0);
+                        window
+                            .gauge
+                            .set_value((ratio * SELF_UPDATE_DOWNLOAD_SHARE as f64) as i32);
+                    }
+                    let downloaded = format_bytes_human(*bytes_downloaded);
+                    let total = bytes_total.map_or_else(|| "?".to_string(), format_bytes_human);
+                    window.status.set_label(
+                        &localizer
+                            .format(
+                                "wizard-progress-status-downloading-with-bytes",
+                                &[
+                                    ("package", package),
+                                    ("downloaded", downloaded.as_str()),
+                                    ("total", total.as_str()),
+                                ],
+                            )
+                            .value,
+                    );
+                }
+                ProgressEvent::DownloadCompleted { .. } => {
+                    window.gauge.set_value(SELF_UPDATE_DOWNLOAD_SHARE);
+                    append_self_update_progress_log(
+                        window,
+                        &localizer
+                            .format(
+                                "wizard-progress-log-download-completed",
+                                &[("package", package)],
+                            )
+                            .value,
+                    );
+                }
+                ProgressEvent::InstallStarted { .. } => {
+                    window.status.set_label(
+                        &localizer
+                            .format("wizard-progress-status-installing", &[("package", package)])
+                            .value,
+                    );
+                    append_self_update_progress_log(
+                        window,
+                        &localizer
+                            .format(
+                                "wizard-progress-log-install-started",
+                                &[("package", package)],
+                            )
+                            .value,
+                    );
+                }
+                ProgressEvent::InstallCompleted { .. } => {
+                    window.gauge.set_value(100);
+                    append_self_update_progress_log(
+                        window,
+                        &localizer
+                            .format(
+                                "wizard-progress-log-install-completed",
+                                &[("package", package)],
+                            )
+                            .value,
+                    );
+                }
+                // Configuration steps belong to package installs; RABBIT's
+                // own update never emits them.
+                ProgressEvent::ConfigurationStarted { .. }
+                | ProgressEvent::ConfigurationCompleted { .. } => {}
+            }
+        });
+    });
+}
+
+/// Append one line to the progress window's log, keeping the newest line in
+/// view.
+fn append_self_update_progress_log(window: &SelfUpdateProgressWindow, line: &str) {
+    let existing = window.log.get_value();
+    let separator = if existing.is_empty() { "" } else { "\n" };
+    window
+        .log
+        .set_value(&format!("{existing}{separator}{line}"));
+}
+
+/// Tear the progress window down. Safe to call when none is up, and safe to
+/// call twice — the second call finds the slot empty.
+fn close_self_update_progress_window() {
+    let window = SELF_UPDATE_PROGRESS.with(|cell| cell.borrow_mut().take());
+    if let Some(window) = window {
+        window.dialog.destroy();
+    }
 }
 
 /// macOS: tell Cocoa what language this process is running in by setting the

@@ -33,6 +33,16 @@ from this file and posts it as the GitHub release body.
 
 ### Added
 
+- Accepting a RABBIT update now opens a progress window instead of leaving
+  you watching a status line: it names the phase ("Downloading RABBIT…
+  4.1 MB of 10.2 MB"), fills a progress bar as the bytes arrive, and keeps
+  a running log of each step as it completes, so a screen reader can be
+  walked back through what happened. The bar covers the download, the
+  checksum verification and the install, and the window closes on its own
+  when RABBIT relaunches into the new version. It has no Cancel button on
+  purpose — once the file swap starts there is nothing to safely undo — and
+  it can't be dismissed by mistake with Escape.
+
 - The "RABBIT update available" prompt now answers "what would I be
   updating to?" before you decide: alongside the question it shows the
   release notes for the update, in a read-only box you can read through
