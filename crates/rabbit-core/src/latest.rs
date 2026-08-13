@@ -353,20 +353,93 @@ fn render_release_section(release: &Value) -> Option<String> {
     }
 }
 
-/// The maintainer-written release body with Markdown list markers rendered
-/// as bullets, other lines verbatim, surrounding whitespace trimmed.
+/// The maintainer-written release body as plain text: list markers become
+/// bullets, every other piece of Markdown syntax is removed, and surrounding
+/// whitespace is trimmed.
+///
+/// Release bodies are written to be *read* on a web page, where the syntax
+/// disappears into bold text and links. Here they are *listened to*, and
+/// every marker survives as spoken punctuation — "asterisk asterisk REAPER
+/// language packs asterisk asterisk". So the markers go and the words stay.
 fn render_release_body_lines(notes: &str) -> String {
     let lines: Vec<String> = notes
         .lines()
         .map(|line| {
-            let line = line.trim_end();
+            let line = strip_markdown_markup(line.trim_end());
             match line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
                 Some(item) => format!("• {item}"),
-                None => line.to_string(),
+                None => line,
             }
         })
         .collect();
     lines.join("\n").trim().to_string()
+}
+
+/// One line of Markdown reduced to the text it renders as: heading markers,
+/// emphasis, inline code and link syntax are removed, and what the reader
+/// would have seen is kept.
+///
+/// Deliberately *not* handled: underscores, which mean emphasis in Markdown
+/// but appear far more often in these notes as parts of identifiers
+/// (`whats_new`, `depends_on`) — stripping those would corrupt the very
+/// names a listener needs to hear exactly. Bare URLs are left intact too:
+/// unlike a link's target, a URL written out on its own is content.
+pub(crate) fn strip_markdown_markup(line: &str) -> String {
+    // Headings first, on the raw line: `#` only opens a heading at the very
+    // start, so this can't be a general replacement. A line of nothing but
+    // hashes is a horizontal rule and collapses to nothing.
+    let without_headings = line.trim_start_matches('#');
+    let line = if without_headings.len() == line.len() {
+        line
+    } else {
+        without_headings.trim_start()
+    };
+    let line = markdown_link_regex().replace_all(line, "$text");
+    let line = markdown_code_regex().replace_all(&line, "$code");
+    let line = markdown_bold_regex().replace_all(&line, "$text");
+    markdown_italic_regex().replace_all(&line, "$text").into()
+}
+
+/// An inline link or image — `[ReaPack](https://reapack.com)`,
+/// `![shot](img.png)` — reduced to its visible text. The target is a place
+/// to click, which a spoken list of changes has no use for.
+fn markdown_link_regex() -> &'static Regex {
+    static MARKDOWN_LINK: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    MARKDOWN_LINK.get_or_init(|| {
+        Regex::new(r"!?\[(?<text>[^\]]*)\]\([^)]*\)").expect("static markdown link regex is valid")
+    })
+}
+
+/// Inline code spans, whatever the backtick run length. The content is kept
+/// verbatim: it is usually a path, flag or identifier the listener needs
+/// exactly as written — only the backticks around it go.
+fn markdown_code_regex() -> &'static Regex {
+    static MARKDOWN_CODE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    MARKDOWN_CODE.get_or_init(|| {
+        Regex::new(r"`+(?<code>[^`]+)`+").expect("static markdown code regex is valid")
+    })
+}
+
+/// Bold, `**like this**`. Run before the italic pass so the doubled markers
+/// are gone before single ones are considered.
+fn markdown_bold_regex() -> &'static Regex {
+    static MARKDOWN_BOLD: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    MARKDOWN_BOLD.get_or_init(|| {
+        Regex::new(r"\*\*(?<text>[^*]+)\*\*").expect("static markdown bold regex is valid")
+    })
+}
+
+/// Italic, `*like this*`. Markdown's own rule applies at both ends — no
+/// space just inside either marker — and it is what keeps stray asterisks
+/// from pairing up: in `Renders *.wav files 2 * 3 times faster` the closing
+/// candidate is preceded by a space, so nothing matches and the line
+/// survives intact.
+fn markdown_italic_regex() -> &'static Regex {
+    static MARKDOWN_ITALIC: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    MARKDOWN_ITALIC.get_or_init(|| {
+        Regex::new(r"\*(?<text>[^*\s](?:[^*]*[^*\s])?)\*")
+            .expect("static markdown italic regex is valid")
+    })
 }
 
 /// The version a release advertises via its `tag_name` (`v1.2.6`). `None`
@@ -884,7 +957,7 @@ pub(crate) fn jaws_for_reaper_version_from_filename(name: &str) -> Option<Versio
     last.and_then(|candidate| Version::parse(candidate).ok())
 }
 
-fn build_http_client() -> Result<Client> {
+pub(crate) fn build_http_client() -> Result<Client> {
     Client::builder()
         .user_agent(USER_AGENT)
         .build()
@@ -894,7 +967,7 @@ fn build_http_client() -> Result<Client> {
         })
 }
 
-fn http_get_text(client: &Client, url: &str) -> Result<String> {
+pub(crate) fn http_get_text(client: &Client, url: &str) -> Result<String> {
     let request = crate::http::maybe_apply_github_auth(client.get(url), url);
     let response = request
         .send()
@@ -1329,6 +1402,51 @@ mod tests {
         assert_eq!(no_body.unwrap(), "v1");
         let blank = super::resolve_github_release_bodies(r#"{"body":"  \r\n "}"#, url, None);
         assert!(blank.is_err());
+    }
+
+    #[test]
+    fn strips_markdown_markup_from_a_release_body() {
+        // RABBIT's own release bodies are whole Keep a Changelog sections:
+        // headings, bold, inline code and links throughout. Every marker
+        // that survives is punctuation spoken out loud, so none of them do.
+        let url = "https://api.github.com/repos/Timtam/rabbit/releases?per_page=20";
+        // The body's opening quote stays on the line above: a `r#"` literal
+        // whose content started with `"#` would close on the spot.
+        let body = concat!(
+            r#"{"tag_name":"v0.4.0","body":""#,
+            r#"### Added\r\n\r\n- Install **REAPER language packs**\r\n"#,
+            r#"- Read [the manual](https://reapack.com/) about `--package-variant`\r\n"#,
+            r#"\r\n###\r\nThe *whats_new* block. C# is a note name.""#,
+            "}"
+        );
+        let notes = super::resolve_github_release_bodies(body, url, None).unwrap();
+        assert_eq!(
+            notes,
+            concat!(
+                "v0.4.0\nAdded\n\n• Install REAPER language packs\n",
+                "• Read the manual about --package-variant\n",
+                // Two blank lines: the one the author wrote, plus the
+                // horizontal rule that collapsed into another.
+                "\n\nThe whats_new block. C# is a note name."
+            )
+        );
+    }
+
+    #[test]
+    fn markdown_stripping_leaves_prose_and_identifiers_alone() {
+        // The strip runs over every line of every release body, so what it
+        // must NOT touch matters as much as what it removes: underscores
+        // read as emphasis in Markdown but are identifier characters here,
+        // a lone asterisk is a glob or a footnote mark, and a bare URL is
+        // content rather than a link's hidden target.
+        for line in [
+            "Set depends_on in the manifest",
+            "Renders *.wav files 2 * 3 times faster",
+            "See https://reapack.com/donate for details",
+            "Plain prose, nothing to strip.",
+        ] {
+            assert_eq!(super::strip_markdown_markup(line), line);
+        }
     }
 
     #[test]

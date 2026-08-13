@@ -31,6 +31,27 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Added
+
+- The "RABBIT update available" prompt now answers "what would I be
+  updating to?" before you decide: alongside the question it shows the
+  release notes for the update, in a read-only box you can read through
+  and scroll like the package details pane. The notes cover every release
+  published since the version you are running, not just the newest one, so
+  skipping a couple of updates still tells the whole story. Update now is
+  the default button, so Enter accepts from anywhere in the dialog and
+  Escape declines. When the notes can't be fetched — no network, GitHub
+  down — the prompt falls back to the short question it has always asked,
+  since nothing about the notes should stand between you and an update.
+  `rabbit self-update check` prints the same notes. Release notes are also
+  stripped of their Markdown wherever they are shown, RABBIT's own and
+  ReaPack's alike — headings, bold, inline code and links now read as the
+  words they contain rather than as strings of asterisks, hashes and
+  backticks spoken out loud. Underscores are left alone, since in these
+  notes they are far more often part of a name you need to hear exactly
+  (`depends_on`) than emphasis, and a link's address is dropped while the
+  text you would have clicked is kept.
+
 ### Fixed
 
 - macOS: the app bundle now declares Spanish, so VoiceOver reads RABBIT's
