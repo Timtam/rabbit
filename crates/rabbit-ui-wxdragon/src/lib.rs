@@ -42,7 +42,8 @@ use rabbit_core::resource::{
 use rabbit_core::self_update::{
     ApplySelfUpdateOptions, DEFAULT_SELF_UPDATE_MANIFEST_URL, SelfUpdateApplyReport,
     SelfUpdateCheckReport, apply_self_update, check_self_update, default_self_update_staging_dir,
-    relaunch_current_executable, resolve_self_update_release_notes, stage_self_update,
+    relaunch_current_executable, resolve_self_update_release_notes,
+    stage_self_update_with_progress,
 };
 use rabbit_core::setup::{SetupOptions, SetupReport, setup_requires_extension_support};
 use rabbit_core::version::Version;
@@ -1826,15 +1827,32 @@ pub fn run_wizard_self_update_release_notes(report: &SelfUpdateCheckReport) -> O
     resolve_self_update_release_notes(report)
 }
 
-pub fn run_wizard_self_update_apply() -> Result<SelfUpdateApplyReport> {
+/// Download-then-install for RABBIT itself, reporting both phases through
+/// `progress`.
+///
+/// Runs on a worker thread, so `progress` is invoked off the UI thread and
+/// the caller is responsible for forwarding events onto it — the same
+/// contract the package install pipeline has. Pass
+/// `ProgressReporter::noop()` to run it silently.
+///
+/// [`ProgressReporter`]: rabbit_core::progress::ProgressReporter
+pub fn run_wizard_self_update_apply(
+    progress: &rabbit_core::progress::ProgressReporter,
+) -> Result<SelfUpdateApplyReport> {
     let platform = Platform::current().ok_or(RabbitError::UnsupportedPlatform)?;
     let staging_dir = default_self_update_staging_dir();
-    let stage = stage_self_update(platform, DEFAULT_SELF_UPDATE_MANIFEST_URL, &staging_dir)?;
+    let stage = stage_self_update_with_progress(
+        platform,
+        DEFAULT_SELF_UPDATE_MANIFEST_URL,
+        &staging_dir,
+        progress,
+    )?;
     apply_self_update(
         &stage,
         &ApplySelfUpdateOptions {
             install_root: None,
             install_target_basename: None,
+            progress: Some(progress.clone()),
         },
     )
 }

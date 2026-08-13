@@ -10,6 +10,7 @@ use crate::Result;
 use crate::error::{IoPathContext, RabbitError};
 use crate::hash::sha256_file;
 use crate::model::{Architecture, Platform};
+use crate::progress::{ProgressEvent, ProgressReporter};
 use crate::signature::{SignatureVerdict, verify_executable_signature};
 use crate::version::Version;
 
@@ -143,6 +144,11 @@ pub struct ApplySelfUpdateOptions {
     /// install target — RABBIT swaps in place under the user's existing
     /// filename regardless of what the download was called.
     pub install_target_basename: Option<String>,
+    /// Where to send the apply phase's progress events. `None` — the
+    /// default — reports nothing, which is what the CLI and the tests want.
+    /// A GUI passes a reporter so its progress dialog can say "Installing"
+    /// once the download is done and close itself when the swap lands.
+    pub progress: Option<ProgressReporter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,13 +361,41 @@ pub fn resolve_self_update_release_notes(report: &SelfUpdateCheckReport) -> Opti
     .ok()
 }
 
+/// Progress identity for RABBIT's own update, standing where a package id
+/// stands for an install. RABBIT is not a package — it is never in the
+/// manifest and never in an install plan — but the download engine and the
+/// UI both speak [`ProgressEvent`], so borrowing the slot lets the update
+/// reuse that pipeline whole rather than growing a parallel one.
+pub const SELF_UPDATE_PROGRESS_ID: &str = "rabbit-self-update";
+
 pub fn stage_self_update(
     platform: Platform,
     manifest_url: &str,
     staging_dir: &Path,
 ) -> Result<SelfUpdateStageReport> {
+    stage_self_update_with_progress(
+        platform,
+        manifest_url,
+        staging_dir,
+        &ProgressReporter::noop(),
+    )
+}
+
+/// [`stage_self_update`] reporting download progress as it goes.
+///
+/// The events are the ones the install pipeline emits — `DownloadStarted`,
+/// `DownloadProgress`, `DownloadCompleted` — all carrying
+/// [`SELF_UPDATE_PROGRESS_ID`], and they arrive on the calling thread. A UI
+/// that wants to show a progress bar therefore forwards them to its own
+/// thread exactly as it does for a package install.
+pub fn stage_self_update_with_progress(
+    platform: Platform,
+    manifest_url: &str,
+    staging_dir: &Path,
+    progress: &ProgressReporter,
+) -> Result<SelfUpdateStageReport> {
     let report = check_self_update(platform, manifest_url)?;
-    stage_self_update_from_report(&report, staging_dir)
+    stage_self_update_from_report_with_progress(&report, staging_dir, progress)
 }
 
 pub fn relaunch_current_executable() -> Result<u32> {
@@ -436,6 +470,16 @@ pub fn apply_self_update(
             Some(root) => root,
             None => PathBuf::new(),
         });
+
+    // Everything above is verification; from here on files move. The
+    // install phase is a single opaque step to a progress bar — a bundle
+    // swap has no meaningful sub-steps to count — so it is bracketed as one
+    // started/completed pair.
+    if let Some(progress) = options.progress.as_ref() {
+        progress.report(ProgressEvent::InstallStarted {
+            package_id: SELF_UPDATE_PROGRESS_ID.to_string(),
+        });
+    }
 
     let mut replaced = Vec::new();
     let mut skipped = Vec::new();
@@ -515,6 +559,14 @@ pub fn apply_self_update(
             ROLLBACK_SUFFIX
         )
     };
+
+    // Only on the success path: an error return short-circuits without a
+    // completion event, matching how the install pipeline treats failures.
+    if let Some(progress) = options.progress.as_ref() {
+        progress.report(ProgressEvent::InstallCompleted {
+            package_id: SELF_UPDATE_PROGRESS_ID.to_string(),
+        });
+    }
 
     Ok(SelfUpdateApplyReport {
         stage: stage.clone(),
@@ -1150,9 +1202,19 @@ fn evaluate_self_update_report(
     })
 }
 
+/// Staging without progress, kept as the shape every existing caller and
+/// test already uses.
 fn stage_self_update_from_report(
     report: &SelfUpdateCheckReport,
     staging_dir: &Path,
+) -> Result<SelfUpdateStageReport> {
+    stage_self_update_from_report_with_progress(report, staging_dir, &ProgressReporter::noop())
+}
+
+fn stage_self_update_from_report_with_progress(
+    report: &SelfUpdateCheckReport,
+    staging_dir: &Path,
+    progress: &ProgressReporter,
 ) -> Result<SelfUpdateStageReport> {
     if !report.update_available {
         return Ok(SelfUpdateStageReport {
@@ -1190,6 +1252,16 @@ fn stage_self_update_from_report(
     if target_path.is_file() {
         let existing_sha256 = sha256_file(&target_path)?;
         if existing_sha256 == report.asset.sha256 {
+            // Already staged by an earlier run: report the pair anyway so a
+            // UI sees a download phase open and close instead of jumping
+            // straight to installing with an empty bar behind it.
+            progress.report(ProgressEvent::DownloadStarted {
+                package_id: SELF_UPDATE_PROGRESS_ID.to_string(),
+                bytes_total: None,
+            });
+            progress.report(ProgressEvent::DownloadCompleted {
+                package_id: SELF_UPDATE_PROGRESS_ID.to_string(),
+            });
             return Ok(SelfUpdateStageReport {
                 check: report.clone(),
                 staging_dir: staging_dir.to_path_buf(),
@@ -1212,7 +1284,12 @@ fn stage_self_update_from_report(
         &report.asset.url,
         local_source_path.as_deref(),
         &target_path,
+        progress,
     )?;
+    // The checksum runs over ~10 MB and is not instant on a slow disk, so
+    // the download is only reported complete once the file is known good —
+    // a UI that hides its progress bar on `DownloadCompleted` would
+    // otherwise sit blank through the verification.
     let verified_sha256 = sha256_file(&target_path)?;
     if verified_sha256 != report.asset.sha256 {
         let _ = fs::remove_file(&target_path);
@@ -1222,6 +1299,10 @@ fn stage_self_update_from_report(
             actual: verified_sha256,
         });
     }
+
+    progress.report(ProgressEvent::DownloadCompleted {
+        package_id: SELF_UPDATE_PROGRESS_ID.to_string(),
+    });
 
     Ok(SelfUpdateStageReport {
         check: report.clone(),
@@ -1422,6 +1503,7 @@ fn download_self_update_asset(
     url: &str,
     local_source_path: Option<&Path>,
     target_path: &Path,
+    progress: &ProgressReporter,
 ) -> Result<()> {
     let part_path = target_path.with_extension(format!(
         "{}.part",
@@ -1432,6 +1514,14 @@ fn download_self_update_asset(
     ));
 
     if let Some(source_path) = local_source_path {
+        // A local file (test fixture, file:// manifest) has no byte
+        // progress to report, but the started/completed pair still has to
+        // bracket it: a UI that only shows its progress bar between the two
+        // would otherwise never show one at all.
+        progress.report(ProgressEvent::DownloadStarted {
+            package_id: SELF_UPDATE_PROGRESS_ID.to_string(),
+            bytes_total: None,
+        });
         fs::copy(source_path, &part_path).with_path(source_path)?;
         fs::rename(&part_path, target_path).with_path(target_path)?;
         return Ok(());
@@ -1442,13 +1532,10 @@ fn download_self_update_asset(
     // retry with resume, and network failures classified as download
     // interruptions instead of I/O errors at the .part path. (The staged
     // file's sha256 is verified against the manifest afterwards, so a
-    // resumed download can never swap in a mismatched binary.)
-    crate::artifact::download_url_with_retries(
-        url,
-        &part_path,
-        "rabbit-self-update",
-        &crate::progress::ProgressReporter::noop(),
-    )?;
+    // resumed download can never swap in a mismatched binary.) It emits
+    // `DownloadStarted` and the byte-progress ticks; the completion event
+    // is ours to send once the checksum has been verified.
+    crate::artifact::download_url_with_retries(url, &part_path, SELF_UPDATE_PROGRESS_ID, progress)?;
 
     fs::rename(&part_path, target_path).with_path(target_path)?;
     Ok(())
@@ -2309,6 +2396,7 @@ mod tests {
             &ApplySelfUpdateOptions {
                 install_root: Some(install_root.path().to_path_buf()),
                 install_target_basename: Some("RABBIT.exe".to_string()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2344,6 +2432,7 @@ mod tests {
             &ApplySelfUpdateOptions {
                 install_root: Some(install_root.path().to_path_buf()),
                 install_target_basename: Some("RABBIT".to_string()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2380,6 +2469,7 @@ mod tests {
             &ApplySelfUpdateOptions {
                 install_root: Some(install_root.path().to_path_buf()),
                 install_target_basename: Some("RABBIT.exe".to_string()),
+                ..Default::default()
             },
         )
         .unwrap_err();
@@ -2418,6 +2508,7 @@ mod tests {
             &ApplySelfUpdateOptions {
                 install_root: Some(install_root.path().to_path_buf()),
                 install_target_basename: Some("RABBIT.exe".to_string()),
+                ..Default::default()
             },
         )
         .unwrap_err();
@@ -2460,6 +2551,7 @@ mod tests {
             &ApplySelfUpdateOptions {
                 install_root: Some(install_root.path().to_path_buf()),
                 install_target_basename: Some("rabbit".to_string()),
+                ..Default::default()
             },
         )
         .unwrap();
