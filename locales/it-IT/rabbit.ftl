@@ -19,6 +19,7 @@ package-surge-xt = Surge XT
 package-app2clap = app2clap
 package-langpack-es = REAPER in spagnolo
 package-langpack-de = REAPER in tedesco
+package-langpack-fr = REAPER in francese
 package-langpack-es-variant-rae = REAPER Accesible español (es_ES)
 package-langpack-es-variant-pma = Team PMA (es_MX)
 
@@ -33,6 +34,7 @@ package-surge-xt-description = Surge XT è un sintetizzatore ibrido gratuito e o
 package-app2clap-description = app2clap è un plug-in CLAP per Windows che cattura l'audio di altre applicazioni e lo porta in REAPER (o in qualsiasi host CLAP) come plug-in da inserire su una traccia — utile per registrare o elaborare il suono di un browser, un lettore multimediale o un altro programma. RABBIT scarica la versione più recente e installa app2clap.clap nella tua cartella CLAP personale, senza bisogno dei diritti di amministratore. Solo Windows. Solo installazioni standard di REAPER: viene installato al di fuori di qualsiasi cartella REAPER portatile.
 package-langpack-es-description = Traduce l'interfaccia di REAPER in spagnolo, inclusa l'estensione SWS. Curato da Javier Robledo per la comunità ispanofona di REAPER e pubblicato su reaperespa.com: RABBIT scarica la versione attuale e la installa come es_ES.ReaperLangPack. OSARA usa quel nome di file per scegliere la propria traduzione spagnola. Dopo l'installazione, seleziona la lingua nelle preferenze di REAPER (oppure lascia che sia RABBIT a farlo).
 package-langpack-de-description = Traduce l'interfaccia di REAPER in tedesco, inclusa l'estensione SWS. Curato da MrData e pubblicato nello Stash di REAPER: RABBIT scarica la versione attuale e la installa come de_DE.ReaperLangPack. Dopo l'installazione, seleziona la lingua nelle preferenze di REAPER (oppure lascia che sia RABBIT a farlo).
+package-langpack-fr-description = Traduce l'interfaccia di REAPER in francese, inclusa l'estensione SWS. Curato da Lee Julien e Pierre-Marie Curt per ReaperAccessible, la comunità francese degli utenti di screen reader, e pubblicato nel loro repository ReaPack: RABBIT scarica la versione attuale e la installa come fr_CA.ReaperLangPack. OSARA legge quel nome di file per scegliere la propria traduzione francese: quella fr_CA è quasi completa, mentre quella fr_FR lascia ancora circa un terzo dei messaggi in inglese; il pacchetto in sé è lo stesso francese standard in entrambi i casi. Dopo l'installazione, seleziona la lingua nelle preferenze di REAPER (oppure lascia che sia RABBIT a farlo).
 
 # $reason is one of the localized "wizard-package-row-unavailable-*" strings
 # explaining *why* the row is unavailable. Appended to the row's main summary
@@ -137,6 +139,8 @@ config-set-reaper-language-es-name = Imposta la lingua di REAPER su spagnolo
 config-set-reaper-language-es-description = Indica a REAPER di usare il pacchetto lingua spagnolo, scrivendolo in reaper.ini. Senza questo dovresti selezionare la lingua manualmente in Opzioni, Preferenze, Generale. Deseleziona se vuoi solo installare il file.
 config-set-reaper-language-de-name = Imposta la lingua di REAPER su tedesco
 config-set-reaper-language-de-description = Indica a REAPER di usare il pacchetto lingua tedesco, scrivendolo in reaper.ini. Senza questo dovresti selezionare la lingua manualmente in Opzioni, Preferenze, Generale. Deseleziona se vuoi solo installare il file.
+config-set-reaper-language-fr-name = Imposta la lingua di REAPER sul francese
+config-set-reaper-language-fr-description = Indica a REAPER di usare il pacchetto lingua francese, scrivendolo in reaper.ini. Senza questo dovresti selezionare la lingua manualmente in Opzioni, Preferenze, Generale. Deseleziona se vuoi solo installare il file.
 
 wizard-reapack-ack-heading = Avviso di donazione ReaPack
 wizard-reapack-ack-body = ReaPack è software libero rilasciato sotto licenza LGPL. Il suo autore, Christian Fillion, accetta donazioni facoltative per sostenere lo sviluppo continuo. Christian gestisce anche le estensioni SWS e in passato ha integrato codice specificamente pensato per migliorare la compatibilità con OSARA. Qualsiasi sostegno tu possa offrirgli è ampiamente meritato.

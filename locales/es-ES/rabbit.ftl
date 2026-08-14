@@ -19,6 +19,7 @@ package-surge-xt = Surge XT
 package-app2clap = app2clap
 package-langpack-es = REAPER en español
 package-langpack-de = REAPER en alemán
+package-langpack-fr = REAPER en francés
 package-langpack-es-variant-rae = REAPER Accesible español (es_ES)
 package-langpack-es-variant-pma = Equipo PMA (es_MX)
 
@@ -33,6 +34,7 @@ package-surge-xt-description = Surge XT es un sintetizador híbrido gratuito y d
 package-app2clap-description = app2clap es un complemento CLAP para Windows que captura audio de otras aplicaciones y lo lleva a REAPER (o cualquier host CLAP) como un plug‑in que insertas en una pista — útil para grabar o procesar sonido desde un navegador, reproductor multimedia u otro programa. RABBIT descarga la última compilación e instala app2clap.clap en tu carpeta CLAP de usuario, por lo que no se requieren privilegios de administrador. Solo para Windows. Solo en instalaciones estándar de REAPER. se instala fuera de cualquier carpeta portátil de REAPER.
 package-langpack-es-description = Traduce la interfaz de REAPER al español, incluida la extensión SWS. Mantenido por Javier Robledo para la comunidad hispanohablante de REAPER y publicado en reaperespa.com: RABBIT descarga la versión actual y la instala como es_ES.ReaperLangPack. OSARA usa ese nombre de archivo para elegir su propia traducción al español. Después de instalarlo, selecciona el idioma en las preferencias de REAPER (o deja que RABBIT lo haga por ti).
 package-langpack-de-description = Traduce la interfaz de REAPER al alemán, incluida la extensión SWS. Mantenido por MrData y publicado en el Stash de REAPER: RABBIT descarga la versión actual y la instala como de_DE.ReaperLangPack. Después de instalarlo, selecciona el idioma en las preferencias de REAPER (o deja que RABBIT lo haga por ti).
+package-langpack-fr-description = Traduce la interfaz de REAPER al francés, incluida la extensión SWS. Mantenido por Lee Julien y Pierre-Marie Curt para ReaperAccessible, la comunidad francesa de usuarios de lectores de pantalla, y publicado en su repositorio de ReaPack: RABBIT descarga la versión actual y la instala como fr_CA.ReaperLangPack. OSARA lee ese nombre de archivo para elegir su propia traducción al francés: la fr_CA está casi completa, mientras que la fr_FR todavía deja alrededor de un tercio de los mensajes en inglés; el paquete en sí es el mismo francés estándar en ambos casos. Después de instalarlo, selecciona el idioma en las preferencias de REAPER (o deja que RABBIT lo haga por ti).
 
 # $reason is one of the localized "wizard-package-row-unavailable-*" strings
 # explaining *why* the row is unavailable. Appended to the row's main summary
@@ -137,6 +139,8 @@ config-set-reaper-language-es-name = Configurar REAPER en español
 config-set-reaper-language-es-description = Indica a REAPER que use el paquete de idioma español, escribiéndolo en reaper.ini. Sin esto tendrías que seleccionar el idioma manualmente en Opciones, Preferencias, General. Desmarca esta casilla si solo quieres que se instale el archivo.
 config-set-reaper-language-de-name = Configurar REAPER en alemán
 config-set-reaper-language-de-description = Indica a REAPER que use el paquete de idioma alemán, escribiéndolo en reaper.ini. Sin esto tendrías que seleccionar el idioma manualmente en Opciones, Preferencias, General. Desmarca esta casilla si solo quieres que se instale el archivo.
+config-set-reaper-language-fr-name = Establecer el idioma de REAPER en francés
+config-set-reaper-language-fr-description = Indica a REAPER que use el paquete de idioma francés, escribiéndolo en reaper.ini. Sin esto tendrías que seleccionar el idioma manualmente en Opciones, Preferencias, General. Desmarca esta casilla si solo quieres que se instale el archivo.
 
 wizard-reapack-ack-heading = Anuncio de donaciones para ReaPack
 wizard-reapack-ack-body = ReaPack es software gratuito publicado bajo la licencia LGPL. Su autor, Christian Fillion, acepta donaciones opcionales para apoyar el desarrollo continuo. Christian también mantiene las extensiones SWS y en el pasado ha incorporado código específicamente para mejorar la compatibilidad con OSARA. Cualquier apoyo que puedas brindar está más que justificado.

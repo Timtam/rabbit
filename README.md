@@ -53,8 +53,8 @@ locations rather than into the portable REAPER folder.
 ### Language packs
 
 RABBIT can also translate **REAPER itself** (not just its own wizard), by
-installing a community language pack into `<resource>/LangPack/`. Two are
-available today, and both translate the SWS extension as well:
+installing a community language pack into `<resource>/LangPack/`. Three are
+available today, and all of them translate the SWS extension as well:
 
 - **Spanish** — maintained by Javier Robledo for the Spanish REAPER
   community and published on
@@ -68,6 +68,16 @@ available today, and both translate the SWS extension as well:
 - **German** — maintained by MrData and published in the
   [REAPER Stash](https://stash.reaper.fm/v/26248/), installed as
   `de_DE.ReaperLangPack`.
+- **French** — maintained by Lee Julien and Pierre-Marie Curt for
+  [ReaperAccessible](https://reaperaccessible.fr/), the French
+  screen-reader community, and published in their
+  [ReaPack repository](https://github.com/reaperaccessible/rap_fr).
+  Installed as `fr_CA.ReaperLangPack`, which is what makes **OSARA** load
+  its `fr_CA` translation: that one is all but complete, while OSARA's
+  `fr_FR` translation still leaves about a third of its messages in
+  English. The pack itself is the same standard French under either name —
+  only OSARA's own strings differ, and a few of them are Canadian
+  (*muté*, *soloté*).
 
 The pack matching the language RABBIT is running in is suggested and
 ticked for you; packs for other languages are listed but unticked. Nothing
@@ -78,12 +88,14 @@ previous one **RABBIT** installed — a pack you dropped into `LangPack/`
 yourself is never touched. By default RABBIT also sets the pack as
 REAPER's language (see the configuration step below).
 
-These packs are published without version numbers, so RABBIT identifies
-them by what the server reports about the file (its ETag or last-modified
-date and size, falling back to the file's contents): it notices when a
-translator publishes a new file and offers it as an update, without RABBIT
-needing a new release. Your choice of Spanish translation is remembered, so
-an update keeps the variant you picked instead of reverting to the default.
+The Spanish and German packs are published without version numbers, so
+RABBIT identifies them by what the server reports about the file (its ETag
+or last-modified date and size, falling back to the file's contents): it
+notices when a translator publishes a new file and offers it as an update,
+without RABBIT needing a new release. The French pack does carry a version
+(`7.75.1` at the time of writing), read from its ReaPack index. Your choice
+of Spanish translation is remembered, so an update keeps the variant you
+picked instead of reverting to the default.
 
 Beyond installing packages, RABBIT can also apply small post-install
 configuration tweaks:
