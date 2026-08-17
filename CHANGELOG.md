@@ -74,6 +74,16 @@ from this file and posts it as the GitHub release body.
 
 ### Fixed
 
+- A failed REAPER install no longer reports itself as a confusing language
+  error. If REAPER can't be installed, the language pack that depends on it
+  is correctly skipped — but the step that sets REAPER's language ran
+  anyway and failed the whole run with "cannot set REAPER's language: no
+  installed language-pack file is recorded for langpack-de", hiding the
+  real problem. Configuration steps now look at what actually landed on
+  disk rather than what was planned, so the genuine failure is what you
+  see; and if a language pack is missing for any other reason, setting the
+  language is skipped with an explanation instead of aborting the install.
+
 - macOS: the app bundle now declares Spanish, so VoiceOver reads RABBIT's
   Spanish interface with a Spanish voice instead of an English one. RABBIT
   gained its Spanish translation in 0.4.0, but the bundle still advertised
