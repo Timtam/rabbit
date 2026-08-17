@@ -129,7 +129,9 @@ pub fn execute_setup_operation_with_progress(
     )?;
 
     let _ = architecture;
-    let installed_or_pending = installed_or_pending_packages(resource_path, platform, package_ids);
+    let mut installed_or_pending =
+        installed_or_pending_packages(resource_path, platform, package_ids);
+    retain_packages_that_landed(&mut installed_or_pending, &package_operation);
     let configuration_steps = run_configuration_steps(
         resource_path,
         &options.configuration_step_ids,
@@ -209,7 +211,8 @@ pub fn execute_resolved_setup_operation_with_progress(
     // the resolved-artifact entry point, which is mainly used by the
     // wizard install button (the wizard knows up-front whether ReaPack
     // is queued and only enables the configuration row when it is).
-    let installed_or_pending: BTreeSet<String> = pending_package_ids.into_iter().collect();
+    let mut installed_or_pending: BTreeSet<String> = pending_package_ids.into_iter().collect();
+    retain_packages_that_landed(&mut installed_or_pending, &package_operation);
     let configuration_steps = run_configuration_steps(
         resource_path,
         &options.configuration_step_ids,
@@ -252,6 +255,32 @@ fn installed_or_pending_packages(
 /// `SkippedDependencyMissing` report. Apply errors propagate up so
 /// the caller can surface them — configuration is best-effort but
 /// failures shouldn't be silently swallowed.
+/// Drop from the dependency set any package this run did NOT actually put on
+/// disk. The set is otherwise built from the *plan* — what the user asked
+/// for — which is wrong the moment a package fails or is skipped because its
+/// own dependency failed: the configuration step would then run against
+/// something that isn't there.
+///
+/// This is what made a failed REAPER install surface as
+/// "cannot set REAPER's language: no installed language-pack file is recorded
+/// for langpack-de" — the language pack was correctly skipped, but its
+/// activation step ran anyway and buried the real cause.
+fn retain_packages_that_landed(
+    installed_or_pending: &mut BTreeSet<String>,
+    report: &crate::operation::PackageOperationReport,
+) {
+    use crate::operation::PackageOperationStatus;
+
+    for item in &report.items {
+        if matches!(
+            item.status,
+            PackageOperationStatus::Failed | PackageOperationStatus::SkippedDependencyFailed
+        ) {
+            installed_or_pending.remove(&item.package_id);
+        }
+    }
+}
+
 fn run_configuration_steps(
     resource_path: &Path,
     selected_ids: &[String],
@@ -295,6 +324,79 @@ fn setup_requires_extension_support_for_artifacts(artifacts: &[ArtifactDescripto
 
 #[cfg(test)]
 mod tests {
+    /// A configuration step must not run when the package it depends on did
+    /// not actually land — the dependency set is otherwise built from the
+    /// PLAN, so a failed package still looked satisfied. That is what made a
+    /// failed REAPER install surface to a user as "cannot set REAPER's
+    /// language: no installed language-pack file is recorded for langpack-de",
+    /// hiding the real cause.
+    #[test]
+    fn config_step_dependencies_follow_what_actually_installed() {
+        use super::retain_packages_that_landed;
+        use crate::artifact::{ArtifactDescriptor, ArtifactKind};
+        use crate::model::{Architecture, Platform};
+        use crate::operation::{
+            PackageOperationItem, PackageOperationMessage, PackageOperationReport,
+            PackageOperationStatus,
+        };
+        use crate::plan::PlanActionKind;
+        use crate::version::Version;
+        use std::collections::BTreeSet;
+
+        let item = |id: &str, status| PackageOperationItem {
+            package_id: id.to_string(),
+            plan_action: PlanActionKind::Install,
+            status,
+            artifact: ArtifactDescriptor {
+                package_id: id.to_string(),
+                version: Version::parse("1.0.0").unwrap(),
+                platform: Platform::Windows,
+                architecture: Architecture::X64,
+                kind: ArtifactKind::ExtensionBinary,
+                url: "https://example.test/x".to_string(),
+                file_name: "x".to_string(),
+            },
+            cached_artifact: None,
+            install_action: None,
+            backup_paths: Vec::new(),
+            backup_manifest_path: None,
+            planned_execution: None,
+            manual_instruction: None,
+            message: String::new(),
+            message_code: PackageOperationMessage::UnattendedInstalled,
+        };
+
+        let report = PackageOperationReport {
+            resource_path: std::path::PathBuf::from("x"),
+            dry_run: false,
+            install_report: None,
+            receipt_backup_path: None,
+            receipt_backup_manifest_path: None,
+            items: vec![
+                item("reaper", PackageOperationStatus::Failed),
+                item(
+                    "langpack-de",
+                    PackageOperationStatus::SkippedDependencyFailed,
+                ),
+                item("osara", PackageOperationStatus::InstalledOrChecked),
+                item("sws", PackageOperationStatus::SkippedCurrent),
+            ],
+        };
+
+        let mut set: BTreeSet<String> = ["reaper", "langpack-de", "osara", "sws"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        retain_packages_that_landed(&mut set, &report);
+
+        // Gone: the failure and the package skipped because of it.
+        assert!(!set.contains("reaper"));
+        assert!(!set.contains("langpack-de"));
+        // Kept: installed, and already-current (which IS on disk).
+        assert!(set.contains("osara"));
+        assert!(set.contains("sws"));
+    }
+
     use std::fs;
 
     use tempfile::tempdir;

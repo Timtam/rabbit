@@ -1204,6 +1204,9 @@ fn evaluate_self_update_report(
 
 /// Staging without progress, kept as the shape every existing caller and
 /// test already uses.
+/// Progress-free wrapper kept for the tests, which don't exercise the
+/// progress reporting; production paths call the `_with_progress` form.
+#[cfg(test)]
 fn stage_self_update_from_report(
     report: &SelfUpdateCheckReport,
     staging_dir: &Path,

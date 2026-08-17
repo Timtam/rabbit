@@ -337,10 +337,23 @@ pub fn apply_configuration_step(
         }
         ConfigurationStepKind::SetReaperLanguage { package_id } => {
             let Some(file_name) = installed_lang_pack_file(resource_path, package_id)? else {
-                return Err(crate::error::RabbitError::InvalidPlannedExecution {
+                // The pack isn't on disk — most likely its install failed, or
+                // it was skipped because REAPER itself failed. Report that and
+                // move on rather than erroring: this step is best-effort, and
+                // failing here aborts the whole run with a message about the
+                // language pack that buries the actual cause the user needs to
+                // see. The caller already filters steps whose package didn't
+                // land; this is the backstop for anything that slips through.
+                return Ok(ConfigurationStepReport {
+                    step_id: step.id.clone(),
+                    status: ConfigurationStatus::SkippedDependencyMissing,
                     message: format!(
-                        "cannot set REAPER's language: no installed language-pack file is recorded for {package_id}"
+                        "Skipped: {package_id} is not installed, so REAPER's language was left unchanged."
                     ),
+                    message_code: ConfigurationMessage::SkippedDependencyMissing {
+                        step_id: step.id.clone(),
+                        dep_id: package_id.clone(),
+                    },
                 });
             };
             let file_name = &file_name;
@@ -560,10 +573,22 @@ mod tests {
             .find(|s| s.id == super::config_set_reaper_language_id("es"))
             .expect("Spanish language step");
 
-        // No receipt yet: nothing is applied, and applying is an error
-        // rather than a guess at the file name.
+        // No receipt yet: nothing is applied, and applying SKIPS rather than
+        // erroring. Erroring here aborted the whole run and buried the real
+        // cause — a user whose REAPER install failed was told
+        // "no installed language-pack file is recorded for langpack-de"
+        // instead of that REAPER had failed.
         assert!(!is_configuration_step_applied(resource, &step).unwrap());
-        assert!(apply_configuration_step(resource, &step, false).is_err());
+        let skipped = apply_configuration_step(resource, &step, false)
+            .expect("a missing language pack must not be fatal");
+        assert_eq!(
+            skipped.status,
+            ConfigurationStatus::SkippedDependencyMissing
+        );
+        assert!(matches!(
+            skipped.message_code,
+            ConfigurationMessage::SkippedDependencyMissing { .. }
+        ));
 
         // Record the Team PMA variant as installed — the step must follow it
         // rather than the package's default es_ES name.
