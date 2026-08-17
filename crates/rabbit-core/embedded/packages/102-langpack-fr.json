@@ -1,0 +1,95 @@
+{
+  "id": "langpack-fr",
+  "display_name": "REAPER en français",
+  "display_name_key": "package-langpack-fr",
+  "display_description_key": "package-langpack-fr-description",
+  "package_kind": "language_pack",
+  "install_destination": "lang_pack",
+  "depends_on": [
+    "reaper"
+  ],
+  "exclusive_group": "reaper-langpack",
+  "language": "fr",
+  "install_as": "fr_CA.ReaperLangPack",
+  "required": false,
+  "recommended": false,
+  "supported_platforms": [
+    "windows",
+    "macos"
+  ],
+  "supported_architectures": [
+    "x86",
+    "x64",
+    "arm64",
+    "arm64-ec",
+    "universal"
+  ],
+  "version": {
+    "html": {
+      "url": "https://raw.githubusercontent.com/reaperaccessible/rap_fr/main/index.xml",
+      "pattern": "V([0-9][0-9.]*) par ReaperAccessible"
+    }
+  },
+  "detectors": [
+    "rabbit_receipt"
+  ],
+  "install_steps": [
+    "copy_user_plugin_binary"
+  ],
+  "uninstall_steps": [
+    "remove_user_plugin_binary"
+  ],
+  "backup_policy": "backup_overwritten_files",
+  "user_plugin_prefixes": [],
+  "user_plugin_suffixes": {
+    "windows": [
+      ".ReaperLangPack"
+    ],
+    "macos": [
+      ".ReaperLangPack"
+    ]
+  },
+  "category": "language",
+  "http_artifact": {
+    "targets": [
+      {
+        "platform": "windows",
+        "match_arches": [
+          "x86",
+          "x64",
+          "arm64",
+          "arm64-ec",
+          "universal",
+          "unknown"
+        ],
+        "report_arch": "universal",
+        "artifact_kind": "extension_binary",
+        "source": {
+          "fixed_url": {
+            "url": "https://raw.githubusercontent.com/reaperaccessible/rap_fr/main/LangPack/REAPER_SWS_FRC.ReaperLangPack",
+            "file_name": "REAPER_SWS_FRC.ReaperLangPack"
+          }
+        }
+      },
+      {
+        "platform": "macos",
+        "match_arches": [
+          "x86",
+          "x64",
+          "arm64",
+          "arm64-ec",
+          "universal",
+          "unknown"
+        ],
+        "report_arch": "universal",
+        "artifact_kind": "extension_binary",
+        "source": {
+          "fixed_url": {
+            "url": "https://raw.githubusercontent.com/reaperaccessible/rap_fr/main/LangPack/REAPER_SWS_FRC.ReaperLangPack",
+            "file_name": "REAPER_SWS_FRC.ReaperLangPack"
+          }
+        }
+      }
+    ]
+  }
+}

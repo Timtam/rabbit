@@ -62,6 +62,16 @@ from this file and posts it as the GitHub release body.
   (`depends_on`) than emphasis, and a link's address is dropped while the
   text you would have clicked is kept.
 
+- A **French REAPER language pack** joins the Spanish and German ones, so
+  REAPER and the SWS extension speak French too. It is maintained by Lee
+  Julien and Pierre-Marie Curt for ReaperAccessible, the French
+  screen-reader community. RABBIT installs it as `fr_CA.ReaperLangPack`,
+  the name that makes OSARA load its own French translation — the `fr_CA`
+  one, which is all but complete where OSARA's `fr_FR` translation still
+  leaves about a third of its messages in English. Unlike the other two
+  packs, this one is published with a version number, which RABBIT reads
+  from ReaperAccessible's ReaPack index and shows in the wizard.
+
 ### Fixed
 
 - macOS: the app bundle now declares Spanish, so VoiceOver reads RABBIT's

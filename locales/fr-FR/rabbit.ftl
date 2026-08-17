@@ -19,6 +19,7 @@ package-surge-xt = Surge XT
 package-app2clap = app2clap
 package-langpack-es = REAPER en espagnol
 package-langpack-de = REAPER en allemand
+package-langpack-fr = REAPER en français
 package-langpack-es-variant-rae = REAPER Accesible español (es_ES)
 package-langpack-es-variant-pma = Équipe PMA (es_MX)
 
@@ -33,6 +34,7 @@ package-surge-xt-description = Surge XT est un synthétiseur hybride gratuit et 
 package-app2clap-description = app2clap est un plug-in CLAP pour Windows qui capture l'audio d'autres applications et l'amène dans REAPER (ou tout hôte CLAP) sous forme de plug-in à insérer sur une piste — pratique pour enregistrer ou traiter le son d'un navigateur, d'un lecteur multimédia ou d'un autre programme. RABBIT télécharge la dernière version et installe app2clap.clap dans votre dossier CLAP personnel, sans droits d'administrateur. Windows uniquement. Installations standard de REAPER uniquement : l'installation se fait en dehors de tout dossier REAPER portable.
 package-langpack-es-description = Traduit l'interface de REAPER en espagnol, y compris l'extension SWS. Maintenu par Javier Robledo pour la communauté hispanophone de REAPER et publié sur reaperespa.com — RABBIT télécharge la version actuelle et l'installe sous le nom es_ES.ReaperLangPack. OSARA se sert de ce nom de fichier pour choisir sa propre traduction espagnole. Après l'installation, sélectionnez la langue dans les préférences de REAPER (ou laissez RABBIT s'en charger).
 package-langpack-de-description = Traduit l'interface de REAPER en allemand, y compris l'extension SWS. Maintenu par MrData et publié dans le Stash de REAPER — RABBIT télécharge la version actuelle et l'installe sous le nom de_DE.ReaperLangPack. Après l'installation, sélectionnez la langue dans les préférences de REAPER (ou laissez RABBIT s'en charger).
+package-langpack-fr-description = Traduit l'interface de REAPER en français, y compris l'extension SWS. Maintenu par Lee Julien et Pierre-Marie Curt pour ReaperAccessible, la communauté francophone des utilisateurs de lecteurs d'écran, et publié dans leur dépôt ReaPack — RABBIT télécharge la version actuelle et l'installe sous le nom fr_CA.ReaperLangPack. OSARA lit ce nom de fichier pour choisir sa propre traduction française : sa traduction fr_CA est presque complète, là où sa traduction fr_FR laisse encore environ un tiers des messages en anglais ; le pack, lui, est le même français standard dans les deux cas. Après l'installation, sélectionnez la langue dans les préférences de REAPER (ou laissez RABBIT s'en charger).
 
 # $reason is one of the localized "wizard-package-row-unavailable-*" strings
 # explaining *why* the row is unavailable. Appended to the row's main summary
@@ -137,6 +139,8 @@ config-set-reaper-language-es-name = Définir la langue de REAPER sur l'espagnol
 config-set-reaper-language-es-description = Indique à REAPER d'utiliser le pack de langue espagnol, en l'inscrivant dans reaper.ini. Sans cela, vous devriez sélectionner la langue vous-même dans Options, Préférences, Général. Décochez si vous voulez seulement installer le fichier.
 config-set-reaper-language-de-name = Définir la langue de REAPER sur l'allemand
 config-set-reaper-language-de-description = Indique à REAPER d'utiliser le pack de langue allemand, en l'inscrivant dans reaper.ini. Sans cela, vous devriez sélectionner la langue vous-même dans Options, Préférences, Général. Décochez si vous voulez seulement installer le fichier.
+config-set-reaper-language-fr-name = Définir la langue de REAPER sur le français
+config-set-reaper-language-fr-description = Indique à REAPER d'utiliser le pack de langue français, en l'inscrivant dans reaper.ini. Sans cela, vous devriez sélectionner la langue vous-même dans Options, Préférences, Général. Décochez si vous voulez seulement installer le fichier.
 
 wizard-reapack-ack-heading = Avis de don ReaPack
 wizard-reapack-ack-body = ReaPack est un logiciel libre publié sous licence LGPL. Son auteur, Christian Fillion, accepte des dons facultatifs pour soutenir la poursuite du développement. Christian maintient également les extensions SWS et a, par le passé, intégré du code spécifiquement destiné à améliorer la compatibilité avec OSARA. Tout soutien que vous pourrez lui apporter est amplement mérité.

@@ -19,6 +19,7 @@ package-surge-xt = Surge XT
 package-app2clap = app2clap
 package-langpack-es = REAPER auf Spanisch
 package-langpack-de = REAPER auf Deutsch
+package-langpack-fr = REAPER auf Französisch
 package-langpack-es-variant-rae = REAPER Accesible español (es_ES)
 package-langpack-es-variant-pma = Team PMA (es_MX)
 
@@ -33,6 +34,7 @@ package-surge-xt-description = Surge XT ist ein freier, quelloffener Hybrid-Synt
 package-app2clap-description = app2clap ist ein CLAP-Plugin für Windows, das Audio aus anderen Anwendungen erfasst und es in REAPER (oder jeden CLAP-Host) als Plug-in einspeist, das du in eine Spur einfügst — praktisch, um Ton aus einem Browser, Mediaplayer oder anderen Programm aufzunehmen oder zu bearbeiten. RABBIT lädt die neueste Version herunter und installiert app2clap.clap in deinen benutzereigenen CLAP-Ordner, sodass keine Administratorrechte nötig sind. Nur für Windows. Nur Standard-REAPER-Installationen: Die Installation erfolgt außerhalb eines portablen REAPER-Ordners.
 package-langpack-es-description = Übersetzt die Oberfläche von REAPER ins Spanische, einschließlich der SWS-Erweiterung. Betreut von Javier Robledo für die spanische REAPER-Community und über reaperespa.com veröffentlicht — RABBIT lädt die aktuelle Fassung herunter und installiert sie als es_ES.ReaperLangPack. OSARA wählt anhand dieses Dateinamens seine eigene spanische Übersetzung. Stellen Sie die Sprache anschließend in den REAPER-Einstellungen ein (oder lassen Sie RABBIT das übernehmen).
 package-langpack-de-description = Übersetzt die Oberfläche von REAPER ins Deutsche, einschließlich der SWS-Erweiterung. Betreut von MrData und im REAPER-Stash veröffentlicht — RABBIT lädt die aktuelle Fassung herunter und installiert sie als de_DE.ReaperLangPack. Stellen Sie die Sprache anschließend in den REAPER-Einstellungen ein (oder lassen Sie RABBIT das übernehmen).
+package-langpack-fr-description = Übersetzt die Oberfläche von REAPER ins Französische, einschließlich der SWS-Erweiterung. Betreut von Lee Julien und Pierre-Marie Curt für ReaperAccessible, die französische Screenreader-Gemeinschaft, und in deren ReaPack-Repository veröffentlicht — RABBIT lädt die aktuelle Fassung herunter und installiert sie als fr_CA.ReaperLangPack. OSARA wählt anhand dieses Dateinamens seine eigene französische Übersetzung: die fr_CA-Fassung ist nahezu vollständig, während die fr_FR-Fassung noch etwa ein Drittel der Meldungen auf Englisch lässt; das Sprachpaket selbst ist in beiden Fällen dasselbe Standardfranzösisch. Stellen Sie die Sprache anschließend in den REAPER-Einstellungen ein (oder lassen Sie RABBIT das übernehmen).
 
 # $reason is one of the localized "wizard-package-row-unavailable-*" strings
 # explaining *why* the row is unavailable. Appended to the row's main summary
@@ -137,6 +139,8 @@ config-set-reaper-language-es-name = REAPER-Sprache auf Spanisch einstellen
 config-set-reaper-language-es-description = Trägt das spanische Sprachpaket in die reaper.ini ein, damit REAPER es verwendet. Andernfalls müssten Sie die Sprache selbst unter „Optionen“, „Einstellungen“, „Allgemein“ auswählen. Abwählen, wenn nur die Datei installiert werden soll.
 config-set-reaper-language-de-name = REAPER-Sprache auf Deutsch einstellen
 config-set-reaper-language-de-description = Trägt das deutsche Sprachpaket in die reaper.ini ein, damit REAPER es verwendet. Andernfalls müssten Sie die Sprache selbst unter „Optionen“, „Einstellungen“, „Allgemein“ auswählen. Abwählen, wenn nur die Datei installiert werden soll.
+config-set-reaper-language-fr-name = REAPERs Sprache auf Französisch setzen
+config-set-reaper-language-fr-description = Trägt das französische Sprachpaket in die reaper.ini ein, damit REAPER es verwendet. Andernfalls müssten Sie die Sprache selbst unter „Optionen“, „Einstellungen“, „Allgemein“ auswählen. Abwählen, wenn nur die Datei installiert werden soll.
 
 wizard-reapack-ack-heading = ReaPack-Spendenhinweis
 wizard-reapack-ack-body = ReaPack ist freie Software und steht unter der LGPL. Sein Autor Christian Fillion nimmt Spenden zur Unterstützung der Weiterentwicklung an. Spenden sind vollständig freiwillig und für die Nutzung von ReaPack oder RABBIT niemals erforderlich.

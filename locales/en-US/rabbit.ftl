@@ -19,6 +19,7 @@ package-surge-xt = Surge XT
 package-app2clap = app2clap
 package-langpack-es = REAPER in Spanish
 package-langpack-de = REAPER in German
+package-langpack-fr = REAPER in French
 package-langpack-es-variant-rae = REAPER Accesible español (es_ES)
 package-langpack-es-variant-pma = Team PMA (es_MX)
 
@@ -33,6 +34,7 @@ package-surge-xt-description = Surge XT is a free, open-source hybrid synthesize
 package-app2clap-description = app2clap is a CLAP plug-in for Windows that captures audio from other applications and brings it into REAPER (or any CLAP host) as a plug-in you insert on a track — handy for recording or processing sound from a browser, media player, or other program. RABBIT downloads the latest build and installs app2clap.clap into your per-user CLAP folder, so no administrator rights are needed. Windows only. Standard REAPER installations only: it installs outside any portable REAPER folder.
 package-langpack-es-description = Translates REAPER's own interface into Spanish, including the SWS extension. Maintained by Javier Robledo for the Spanish REAPER community, and distributed through reaperespa.com — RABBIT downloads the current version and installs it as es_ES.ReaperLangPack. OSARA reads that file name to choose its own Spanish translation. After installing, pick the language in REAPER's preferences (or let RABBIT set it for you).
 package-langpack-de-description = Translates REAPER's own interface into German, including the SWS extension. Maintained by MrData and published in the REAPER Stash — RABBIT downloads the current version and installs it as de_DE.ReaperLangPack. After installing, pick the language in REAPER's preferences (or let RABBIT set it for you).
+package-langpack-fr-description = Translates REAPER's own interface into French, including the SWS extension. Maintained by Lee Julien and Pierre-Marie Curt for ReaperAccessible, the French screen-reader community, and published in their ReaPack repository — RABBIT downloads the current version and installs it as fr_CA.ReaperLangPack. OSARA reads that file name to choose its own French translation, and its fr_CA one is nearly complete where its fr_FR one still leaves about a third of the messages in English; the pack itself is the same standard French either way. After installing, pick the language in REAPER's preferences (or let RABBIT set it for you).
 
 # $reason is one of the localized "wizard-package-row-unavailable-*" strings
 # explaining *why* the row is unavailable. Appended to the row's main summary
@@ -137,6 +139,8 @@ config-set-reaper-language-es-name = Set REAPER's language to Spanish
 config-set-reaper-language-es-description = Tells REAPER to use the Spanish language pack, by writing it into reaper.ini. Without this you would have to select the language yourself under Options, Preferences, General. Untick if you only want the file installed.
 config-set-reaper-language-de-name = Set REAPER's language to German
 config-set-reaper-language-de-description = Tells REAPER to use the German language pack, by writing it into reaper.ini. Without this you would have to select the language yourself under Options, Preferences, General. Untick if you only want the file installed.
+config-set-reaper-language-fr-name = Set REAPER's language to French
+config-set-reaper-language-fr-description = Tells REAPER to use the French language pack, by writing it into reaper.ini. Without this you would have to select the language yourself under Options, Preferences, General. Untick if you only want the file installed.
 
 wizard-reapack-ack-heading = ReaPack donation notice
 wizard-reapack-ack-body = ReaPack is free software released under the LGPL. Its author Christian Fillion accepts optional donations to support continued development. Christian also maintains the SWS extensions and has landed code specifically to improve compatibility with OSARA in the past. Any support you can send has been well earned.
