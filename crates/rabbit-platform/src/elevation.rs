@@ -278,6 +278,21 @@ fn quote_arguments(arguments: &[String]) -> String {
         .join(" ")
 }
 
+/// Is this the NSIS `/D=<path>` destination argument?
+///
+/// NSIS reads it straight out of `GetCommandLine()` rather than from the
+/// parsed argument vector, takes everything after `/D=` literally to the end
+/// of the line, and so requires it to be **last and unquoted**. Any quoting
+/// added on our behalf — by this module for `ShellExecuteExW`, or by
+/// `std::process::Command` when it builds a Windows command line — ends up
+/// inside the directory name and the installer silently goes somewhere else.
+///
+/// Every path that launches an installer has to honour this, so the rule
+/// lives here rather than being restated at each call site.
+pub fn is_nsis_destination_argument(argument: &str) -> bool {
+    argument.len() >= 3 && argument[..3].eq_ignore_ascii_case("/D=")
+}
+
 /// Quote a single argument for the `lpParameters` string passed to
 /// `ShellExecuteExW`.
 ///
@@ -292,7 +307,7 @@ fn quote_arguments(arguments: &[String]) -> String {
 /// are therefore returned verbatim regardless of spaces or backslashes.
 fn quote_one(argument: &str) -> String {
     // NSIS: /D=<path> must be unquoted and last in the parameter string.
-    if argument.len() >= 3 && argument[..3].eq_ignore_ascii_case("/D=") {
+    if is_nsis_destination_argument(argument) {
         return argument.to_string();
     }
 

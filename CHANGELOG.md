@@ -31,6 +31,21 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Fixed
+
+- Installing into a folder whose path contains a space — a portable REAPER
+  on the Desktop under `REAPER Portable`, say — failed with
+  `post-install verification failed; missing paths: [...reaper.exe]`, and
+  took OSARA, SWS and FFmpeg down with it as dependents of a REAPER that
+  never landed. REAPER, OSARA and SWS all ship NSIS installers, and NSIS
+  reads its `/D=<path>` destination straight out of the raw command line
+  rather than from parsed arguments, so it needs that argument last and
+  unquoted. Rust quotes any argument containing a space when it builds a
+  Windows command line, so NSIS was handed `"/D=C:\...\REAPER Portable"`
+  and took the quote as part of the directory name. RABBIT already got this
+  right for installs that need administrator rights; a portable install into
+  a folder you own doesn't, and that path had been quoting it all along.
+
 ## [0.4.1] - 2026-08-18
 
 ### Added

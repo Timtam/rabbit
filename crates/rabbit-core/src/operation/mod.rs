@@ -2722,6 +2722,99 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
+    fn portable_installer_gets_an_unquoted_destination_when_the_path_has_spaces() {
+        // Reported against 0.4.1: a portable install into
+        // "C:\Users\...\Desktop\REAPER Portable" failed with
+        // `post-install verification failed; missing paths: [...reaper.exe]`.
+        //
+        // Rust's std::process::Command quotes any argument containing a
+        // space when it builds the Windows command line, so NSIS was handed
+        // `"/D=C:\...\REAPER Portable"`. NSIS parses /D= out of the raw
+        // command line and requires it unquoted and last, so it never saw a
+        // usable destination and REAPER landed somewhere else — or nowhere.
+        //
+        // The elevated path already got this right (see
+        // rabbit_platform::elevation); this is the direct, non-elevated path
+        // a user-writable portable target takes.
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let source_path = dir.path().join("reaper-installer.cmd");
+        std::fs::write(&source_path, reaper_mock_installer_script()).unwrap();
+        // The space is the entire point of this test.
+        let resource_path = dir.path().join("REAPER Portable");
+
+        let report = execute_resolved_package_operation(
+            &resource_path,
+            vec![artifact_with_url(
+                PACKAGE_REAPER,
+                ArtifactKind::Installer,
+                "reaper-installer.cmd",
+                &source_path.display().to_string(),
+            )],
+            cache.path(),
+            &PackageOperationOptions {
+                dry_run: false,
+                allow_reaper_running: false,
+                stage_unsupported: false,
+                replace_osara_keymap: false,
+                target_app_path: Some(resource_path.join("reaper.exe")),
+                lock_path: Some(dir.path().join("install.lock")),
+                force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
+            },
+        )
+        .unwrap();
+
+        let raw_args = find_recorded_raw_arguments(&[dir.path(), cache.path()])
+            .expect("the mock installer should have recorded its raw arguments");
+        assert!(
+            !raw_args.contains("\"/D="),
+            "NSIS needs /D= unquoted, but the command line quoted it: {raw_args}"
+        );
+        assert!(
+            raw_args.contains(&format!("/D={}", resource_path.display())),
+            "the destination must reach the installer intact: {raw_args}"
+        );
+        assert_eq!(
+            report.items[0].status,
+            PackageOperationStatus::InstalledOrChecked,
+            "{}",
+            report.items[0].message
+        );
+        assert!(resource_path.join("reaper.exe").is_file());
+    }
+
+    /// The mock drops `raw-args.txt` beside whichever copy of itself ran, so
+    /// look in both the source directory and the download cache.
+    #[cfg(target_os = "windows")]
+    fn find_recorded_raw_arguments(roots: &[&std::path::Path]) -> Option<String> {
+        fn walk(dir: &std::path::Path, found: &mut Option<String>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, found);
+                } else if path.file_name().is_some_and(|name| name == "raw-args.txt")
+                    && let Ok(text) = std::fs::read_to_string(&path)
+                {
+                    *found = Some(text.trim().to_string());
+                }
+            }
+        }
+        let mut found = None;
+        for root in roots {
+            walk(root, &mut found);
+            if found.is_some() {
+                break;
+            }
+        }
+        found
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
     fn executes_reaper_windows_standard_installer_and_receipt_tracks_app_only() {
         let dir = tempdir().unwrap();
         let cache = tempdir().unwrap();
@@ -3559,22 +3652,26 @@ mod tests {
     fn osara_mock_installer_script() -> &'static str {
         r#"@echo off
 setlocal EnableExtensions EnableDelayedExpansion
-set "DEST="
-:next
-if "%~1"=="" goto args_done
-set "ARG=%~1"
-if /I "!ARG:~0,3!"=="/D=" set "DEST=!ARG:~3!"
-shift
-goto next
-:args_done
-if "%DEST%"=="" exit /b 4
-mkdir "%DEST%\UserPlugins" 2>nul
-mkdir "%DEST%\KeyMaps" 2>nul
-mkdir "%DEST%\osara\locale" 2>nul
-echo osara dll> "%DEST%\UserPlugins\reaper_osara64.dll"
-echo osara keymap> "%DEST%\KeyMaps\OSARA.ReaperKeyMap"
-echo en locale> "%DEST%\osara\locale\en.po"
-echo uninstall> "%DEST%\osara\uninstall.exe"
+rem NSIS reads /D= out of GetCommandLine() and takes the rest of the line
+rem literally, so parse the raw argument string rather than %~1. cmd.exe
+rem splits on "=" as well as spaces, so %~1 can only see an intact "/D=" if
+rem someone quoted it -- and a quote there is the very bug this must catch.
+set "RAW=%*"
+> "%~dp0raw-args.txt" echo !RAW!
+set "AFTER=!RAW:*/D=!"
+if "!AFTER!"=="!RAW!" exit /b 4
+set "DEST=!AFTER:~1!"
+if "!DEST!"=="" exit /b 4
+rem A quoted /D= leaves a trailing double-quote in !DEST!, so the mkdir and
+rem the writes below quietly fail and the caller's post-install verification
+rem reports the missing paths -- which is exactly the real-world symptom.
+mkdir "!DEST!\UserPlugins" 2>nul
+mkdir "!DEST!\KeyMaps" 2>nul
+mkdir "!DEST!\osara\locale" 2>nul
+echo osara dll> "!DEST!\UserPlugins\reaper_osara64.dll"
+echo osara keymap> "!DEST!\KeyMaps\OSARA.ReaperKeyMap"
+echo en locale> "!DEST!\osara\locale\en.po"
+echo uninstall> "!DEST!\osara\uninstall.exe"
 exit /b 0
 "#
     }
@@ -3583,20 +3680,26 @@ exit /b 0
     fn reaper_mock_installer_script() -> &'static str {
         r#"@echo off
 setlocal EnableExtensions EnableDelayedExpansion
-set "DEST="
+rem NSIS reads /D= out of GetCommandLine() and takes the rest of the line
+rem literally, so parse the raw argument string rather than %~1. cmd.exe
+rem splits on "=" as well as spaces, so %~1 can only see an intact "/D=" if
+rem someone quoted it -- and a quote there is the very bug this must catch.
+set "RAW=%*"
+> "%~dp0raw-args.txt" echo !RAW!
+set "AFTER=!RAW:*/D=!"
+if "!AFTER!"=="!RAW!" exit /b 4
+set "DEST=!AFTER:~1!"
+if "!DEST!"=="" exit /b 4
+rem A quoted /D= leaves a trailing double-quote in !DEST!, so the mkdir and
+rem the writes below quietly fail and the caller's post-install verification
+rem reports the missing paths -- which is exactly the real-world symptom.
 set "PORTABLE=0"
-:next
-if "%~1"=="" goto args_done
-set "ARG=%~1"
-if /I "!ARG!"=="/PORTABLE" set "PORTABLE=1"
-if /I "!ARG:~0,3!"=="/D=" set "DEST=!ARG:~3!"
-shift
-goto next
-:args_done
-if "%DEST%"=="" exit /b 4
-mkdir "%DEST%" 2>nul
-echo reaper exe> "%DEST%\reaper.exe"
-if "%PORTABLE%"=="1" echo portable ini> "%DEST%\reaper.ini"
+echo !RAW! | findstr /I /C:"/PORTABLE" >nul && set "PORTABLE=1"
+mkdir "!DEST!" 2>nul
+mkdir "!DEST!\UserPlugins" 2>nul
+mkdir "!DEST!\KeyMaps" 2>nul
+echo reaper exe> "!DEST!\reaper.exe"
+if "!PORTABLE!"=="1" echo portable ini> "!DEST!\reaper.ini"
 exit /b 0
 "#
     }
@@ -3605,21 +3708,25 @@ exit /b 0
     fn sws_mock_installer_script() -> &'static str {
         r#"@echo off
 setlocal EnableExtensions EnableDelayedExpansion
-set "DEST="
-:next
-if "%~1"=="" goto args_done
-set "ARG=%~1"
-if /I "!ARG:~0,3!"=="/D=" set "DEST=!ARG:~3!"
-shift
-goto next
-:args_done
-if "%DEST%"=="" exit /b 4
-mkdir "%DEST%\UserPlugins" 2>nul
-mkdir "%DEST%\Scripts" 2>nul
-mkdir "%DEST%\Data\Grooves" 2>nul
-type nul > "%DEST%\UserPlugins\reaper_sws-x64.dll"
-type nul > "%DEST%\Scripts\sws_python.py"
-type nul > "%DEST%\Data\Grooves\default.rgt"
+rem NSIS reads /D= out of GetCommandLine() and takes the rest of the line
+rem literally, so parse the raw argument string rather than %~1. cmd.exe
+rem splits on "=" as well as spaces, so %~1 can only see an intact "/D=" if
+rem someone quoted it -- and a quote there is the very bug this must catch.
+set "RAW=%*"
+> "%~dp0raw-args.txt" echo !RAW!
+set "AFTER=!RAW:*/D=!"
+if "!AFTER!"=="!RAW!" exit /b 4
+set "DEST=!AFTER:~1!"
+if "!DEST!"=="" exit /b 4
+rem A quoted /D= leaves a trailing double-quote in !DEST!, so the mkdir and
+rem the writes below quietly fail and the caller's post-install verification
+rem reports the missing paths -- which is exactly the real-world symptom.
+mkdir "!DEST!\UserPlugins" 2>nul
+mkdir "!DEST!\Scripts" 2>nul
+mkdir "!DEST!\Data\Grooves" 2>nul
+type nul > "!DEST!\UserPlugins\reaper_sws-x64.dll"
+type nul > "!DEST!\Scripts\sws_python.py"
+type nul > "!DEST!\Data\Grooves\default.rgt"
 exit /b 0
 "#
     }

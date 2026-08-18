@@ -124,6 +124,24 @@ fn execute_program_plan(plan: &PlannedExecutionPlan) -> Result<()> {
     }
 
     let mut command = Command::new(program);
+    // On Windows, `Command` quotes any argument containing a space when it
+    // builds the command line — which breaks NSIS's `/D=<path>`, since NSIS
+    // reads that out of the raw command line and needs it unquoted. A
+    // portable install into "…\\Desktop\\REAPER Portable" is user-writable,
+    // so it comes through here rather than through the elevated path that
+    // already handled this, and REAPER ended up installed nowhere.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        for argument in &plan.arguments {
+            if rabbit_platform::is_nsis_destination_argument(argument) {
+                command.raw_arg(argument);
+            } else {
+                command.arg(argument);
+            }
+        }
+    }
+    #[cfg(not(windows))]
     command.args(&plan.arguments);
     if let Some(working_directory) = &plan.working_directory {
         command.current_dir(working_directory);
