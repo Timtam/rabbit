@@ -55,142 +55,256 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Detect {
+        /// Also probe this folder for a portable REAPER install. Repeatable.
         #[arg(long)]
         portable: Vec<PathBuf>,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
     Components {
+        /// REAPER's resource folder — the one holding `reaper.ini`. Usually
+        /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
+        /// Support/REAPER` on macOS; for a portable install it is the REAPER
+        /// folder itself.
         #[arg(long)]
         resource_path: PathBuf,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
     Latest {
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
     Artifacts {
+        /// Package id to resolve, repeatable. Defaults to the recommended
+        /// set.
         #[arg(long)]
         package: Vec<String>,
+        /// Install for this architecture instead of the one detected for the
+        /// host.
         #[arg(long, value_enum)]
         architecture: Option<CliArchitecture>,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
     Download {
+        /// Package id to download, repeatable. Defaults to the recommended
+        /// set.
         #[arg(long)]
         package: Vec<String>,
+        /// Install for this architecture instead of the one detected for the
+        /// host.
         #[arg(long, value_enum)]
         architecture: Option<CliArchitecture>,
+        /// Where downloads are cached. Defaults to RABBIT's own folder inside
+        /// the system temp directory.
         #[arg(long)]
         cache_dir: Option<PathBuf>,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
     Packages {
+        /// Read the package manifest from this file instead of the built-in
+        /// one.
         #[arg(long)]
         manifest: bool,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
     Preflight {
+        /// REAPER's resource folder — the one holding `reaper.ini`. Usually
+        /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
+        /// Support/REAPER` on macOS; for a portable install it is the REAPER
+        /// folder itself.
         #[arg(long)]
         resource_path: PathBuf,
+        /// Path to REAPER itself (`reaper.exe`, or `REAPER.app` on macOS)
+        /// when it is not in the usual place for the given resource folder.
         #[arg(long)]
         target_app_path: Option<PathBuf>,
+        /// Report what preflight would check without touching anything.
         #[arg(long)]
         dry_run: bool,
+        /// Run even though REAPER is open. Files REAPER holds open may fail
+        /// to be replaced, so prefer closing it first.
         #[arg(long)]
         allow_reaper_running: bool,
+        /// Write the JSON run report to exactly this path.
         #[arg(long)]
         report_path: Option<PathBuf>,
+        /// Save a JSON run report under the resource folder's `RABBIT`
+        /// directory, so there is a record of what happened.
         #[arg(long)]
         save_report: bool,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
     InitResource {
+        /// REAPER's resource folder — the one holding `reaper.ini`. Usually
+        /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
+        /// Support/REAPER` on macOS; for a portable install it is the REAPER
+        /// folder itself.
         #[arg(long)]
         resource_path: PathBuf,
+        /// Path to REAPER itself (`reaper.exe`, or `REAPER.app` on macOS)
+        /// when it is not in the usual place for the given resource folder.
         #[arg(long)]
         target_app_path: Option<PathBuf>,
+        /// Prepare the folder as a portable REAPER install rather than a
+        /// system one.
         #[arg(long)]
         portable: bool,
+        /// Actually make the changes. Without it the command is a dry run
+        /// that only reports what it would do.
         #[arg(long)]
         apply: bool,
+        /// Run even though REAPER is open. Files REAPER holds open may fail
+        /// to be replaced, so prefer closing it first.
         #[arg(long)]
         allow_reaper_running: bool,
+        /// Write the JSON run report to exactly this path.
         #[arg(long)]
         report_path: Option<PathBuf>,
+        /// Save a JSON run report under the resource folder's `RABBIT`
+        /// directory, so there is a record of what happened.
         #[arg(long)]
         save_report: bool,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
     Backups {
+        /// REAPER's resource folder — the one holding `reaper.ini`. Usually
+        /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
+        /// Support/REAPER` on macOS; for a portable install it is the REAPER
+        /// folder itself.
         #[arg(long)]
         resource_path: PathBuf,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
     RestoreBackup {
+        /// REAPER's resource folder — the one holding `reaper.ini`. Usually
+        /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
+        /// Support/REAPER` on macOS; for a portable install it is the REAPER
+        /// folder itself.
         #[arg(long)]
         resource_path: PathBuf,
+        /// Which backup set to roll back to, as listed by `backups`.
         #[arg(long)]
         backup_id: String,
+        /// Actually make the changes. Without it the command is a dry run
+        /// that only reports what it would do.
         #[arg(long)]
         apply: bool,
+        /// Run even though REAPER is open. Files REAPER holds open may fail
+        /// to be replaced, so prefer closing it first.
         #[arg(long)]
         allow_reaper_running: bool,
+        /// Write the JSON run report to exactly this path.
         #[arg(long)]
         report_path: Option<PathBuf>,
+        /// Save a JSON run report under the resource folder's `RABBIT`
+        /// directory, so there is a record of what happened.
         #[arg(long)]
         save_report: bool,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
     InstallExtension {
+        /// REAPER's resource folder — the one holding `reaper.ini`. Usually
+        /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
+        /// Support/REAPER` on macOS; for a portable install it is the REAPER
+        /// folder itself.
         #[arg(long)]
         resource_path: PathBuf,
+        /// Path to REAPER itself (`reaper.exe`, or `REAPER.app` on macOS)
+        /// when it is not in the usual place for the given resource folder.
         #[arg(long)]
         target_app_path: Option<PathBuf>,
+        /// Package id to install, repeatable. Required — use `apply-packages`
+        /// to install everything that needs it.
         #[arg(long, required = true)]
         package: Vec<String>,
+        /// Install for this architecture instead of the one detected for the
+        /// host.
         #[arg(long, value_enum)]
         architecture: Option<CliArchitecture>,
+        /// Where downloads are cached. Defaults to RABBIT's own folder inside
+        /// the system temp directory.
         #[arg(long)]
         cache_dir: Option<PathBuf>,
+        /// Actually make the changes. Without it the command is a dry run
+        /// that only reports what it would do.
         #[arg(long)]
         apply: bool,
+        /// Run even though REAPER is open. Files REAPER holds open may fail
+        /// to be replaced, so prefer closing it first.
         #[arg(long)]
         allow_reaper_running: bool,
+        /// Acknowledge ReaPack's donation notice. ReaPack shows it on first
+        /// run and RABBIT will not install it unattended until this is
+        /// passed.
         #[arg(long)]
         accept_reapack_donation_notice: bool,
+        /// Write the JSON run report to exactly this path.
         #[arg(long)]
         report_path: Option<PathBuf>,
+        /// Save a JSON run report under the resource folder's `RABBIT`
+        /// directory, so there is a record of what happened.
         #[arg(long)]
         save_report: bool,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
     ApplyPackages {
+        /// REAPER's resource folder — the one holding `reaper.ini`. Usually
+        /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
+        /// Support/REAPER` on macOS; for a portable install it is the REAPER
+        /// folder itself.
         #[arg(long)]
         resource_path: PathBuf,
+        /// Path to REAPER itself (`reaper.exe`, or `REAPER.app` on macOS)
+        /// when it is not in the usual place for the given resource folder.
         #[arg(long)]
         target_app_path: Option<PathBuf>,
+        /// Package id to act on, repeatable. Defaults to every package that
+        /// needs installing or updating.
         #[arg(long)]
         package: Vec<String>,
+        /// Install for this architecture instead of the one detected for the
+        /// host.
         #[arg(long, value_enum)]
         architecture: Option<CliArchitecture>,
+        /// Where downloads are cached. Defaults to RABBIT's own folder inside
+        /// the system temp directory.
         #[arg(long)]
         cache_dir: Option<PathBuf>,
+        /// Actually make the changes. Without it the command is a dry run
+        /// that only reports what it would do.
         #[arg(long)]
         apply: bool,
+        /// Run even though REAPER is open. Files REAPER holds open may fail
+        /// to be replaced, so prefer closing it first.
         #[arg(long)]
         allow_reaper_running: bool,
+        /// Download the packages RABBIT cannot install automatically and
+        /// leave them in the cache for you to run yourself, instead of
+        /// skipping them.
         #[arg(long)]
         stage_unsupported: bool,
+        /// Keep OSARA's current key map instead of replacing it with OSARA's
+        /// current default.
         #[arg(long)]
         preserve_osara_keymap: bool,
         /// Pick a package flavour, e.g. `--package-variant langpack-es=pma`
@@ -198,34 +312,64 @@ enum Command {
         /// default REAPER Accesible español (es_ES). Repeatable.
         #[arg(long = "package-variant")]
         package_variant: Vec<String>,
+        /// Acknowledge ReaPack's donation notice. ReaPack shows it on first
+        /// run and RABBIT will not install it unattended until this is
+        /// passed.
         #[arg(long)]
         accept_reapack_donation_notice: bool,
+        /// Write the JSON run report to exactly this path.
         #[arg(long)]
         report_path: Option<PathBuf>,
+        /// Save a JSON run report under the resource folder's `RABBIT`
+        /// directory, so there is a record of what happened.
         #[arg(long)]
         save_report: bool,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
     Setup {
+        /// REAPER's resource folder — the one holding `reaper.ini`. Usually
+        /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
+        /// Support/REAPER` on macOS; for a portable install it is the REAPER
+        /// folder itself.
         #[arg(long)]
         resource_path: PathBuf,
+        /// Path to REAPER itself (`reaper.exe`, or `REAPER.app` on macOS)
+        /// when it is not in the usual place for the given resource folder.
         #[arg(long)]
         target_app_path: Option<PathBuf>,
+        /// Treat the target as a portable REAPER install, creating it if
+        /// needed.
         #[arg(long)]
         portable: bool,
+        /// Package id to install, repeatable. Defaults to the recommended set
+        /// for this host.
         #[arg(long)]
         package: Vec<String>,
+        /// Install for this architecture instead of the one detected for the
+        /// host.
         #[arg(long, value_enum)]
         architecture: Option<CliArchitecture>,
+        /// Where downloads are cached. Defaults to RABBIT's own folder inside
+        /// the system temp directory.
         #[arg(long)]
         cache_dir: Option<PathBuf>,
+        /// Actually make the changes. Without it the command is a dry run
+        /// that only reports what it would do.
         #[arg(long)]
         apply: bool,
+        /// Run even though REAPER is open. Files REAPER holds open may fail
+        /// to be replaced, so prefer closing it first.
         #[arg(long)]
         allow_reaper_running: bool,
+        /// Download the packages RABBIT cannot install automatically and
+        /// leave them in the cache for you to run yourself, instead of
+        /// skipping them.
         #[arg(long)]
         stage_unsupported: bool,
+        /// Keep OSARA's current key map instead of replacing it with OSARA's
+        /// current default.
         #[arg(long)]
         preserve_osara_keymap: bool,
         /// Pick a package flavour, e.g. `--package-variant langpack-es=pma`
@@ -233,10 +377,17 @@ enum Command {
         /// default REAPER Accesible español (es_ES). Repeatable.
         #[arg(long = "package-variant")]
         package_variant: Vec<String>,
+        /// Acknowledge ReaPack's donation notice. ReaPack shows it on first
+        /// run and RABBIT will not install it unattended until this is
+        /// passed.
         #[arg(long)]
         accept_reapack_donation_notice: bool,
+        /// Run exactly this configuration step, repeatable. Overrides the
+        /// default selection, so only the steps you list run.
         #[arg(long = "config-step")]
         config_step: Vec<String>,
+        /// Skip this configuration step, repeatable. Everything else that
+        /// would run by default still runs.
         #[arg(long = "skip-config-step")]
         skip_config_step: Vec<String>,
         /// Language pack to make active after installing, e.g.
@@ -245,34 +396,47 @@ enum Command {
         /// installed pack when there is exactly one.
         #[arg(long = "reaper-language")]
         reaper_language: Option<String>,
+        /// Write the JSON run report to exactly this path.
         #[arg(long)]
         report_path: Option<PathBuf>,
+        /// Save a JSON run report under the resource folder's `RABBIT`
+        /// directory, so there is a record of what happened.
         #[arg(long)]
         save_report: bool,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
     Locales {
+        /// Directory holding the `.ftl` translation files.
         #[arg(long, default_value = "locales")]
         locales_dir: PathBuf,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
     Localize {
+        /// Locale to render the message in, e.g. `de-DE`.
         #[arg(long, default_value_t = DEFAULT_LOCALE.to_string())]
         locale: String,
+        /// Directory holding the `.ftl` translation files.
         #[arg(long, default_value = "locales")]
         locales_dir: PathBuf,
+        /// Message id to render.
         #[arg(long)]
         id: String,
+        /// Message argument as `name=value`, repeatable.
         #[arg(long = "arg")]
         args: Vec<String>,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
     PortableCheck {
+        /// Directory holding the `.ftl` translation files.
         #[arg(long, default_value = "locales")]
         locales_dir: PathBuf,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
@@ -281,16 +445,27 @@ enum Command {
         command: SelfUpdateCommand,
     },
     Plan {
+        /// REAPER's resource folder — the one holding `reaper.ini`. Usually
+        /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
+        /// Support/REAPER` on macOS; for a portable install it is the REAPER
+        /// folder itself.
         #[arg(long)]
         resource_path: Option<PathBuf>,
+        /// Also probe this folder for a portable REAPER install. Repeatable.
         #[arg(long)]
         portable: Vec<PathBuf>,
+        /// Compare what is installed against the live upstream feeds instead
+        /// of planning offline.
         #[arg(long)]
         online: bool,
+        /// Output format for the plan.
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
+        /// Write the JSON run report to exactly this path.
         #[arg(long)]
         report_path: Option<PathBuf>,
+        /// Save a JSON run report under the resource folder's `RABBIT`
+        /// directory, so there is a record of what happened.
         #[arg(long)]
         save_report: bool,
     },
@@ -304,29 +479,43 @@ enum OutputFormat {
 
 #[derive(Debug, Subcommand)]
 enum SelfUpdateCommand {
+    /// Report whether a newer RABBIT has been published, and what changed.
     Check {
+        /// Release manifest to check. Defaults to RABBIT's own.
         #[arg(long, default_value = DEFAULT_SELF_UPDATE_MANIFEST_URL)]
         manifest_url: String,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
+    /// Download and verify an update without installing it yet.
     Stage {
+        /// Release manifest to update from. Defaults to RABBIT's own.
         #[arg(long, default_value = DEFAULT_SELF_UPDATE_MANIFEST_URL)]
         manifest_url: String,
+        /// Where to put the downloaded update. Defaults to a folder
+        /// alongside the current install.
         #[arg(long)]
         staging_dir: Option<PathBuf>,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
+    /// Install a staged update over the current RABBIT.
     Apply {
+        /// Release manifest to update from. Defaults to RABBIT's own.
         #[arg(long, default_value = DEFAULT_SELF_UPDATE_MANIFEST_URL)]
         manifest_url: String,
+        /// Where the staged update was downloaded to, if not the default.
         #[arg(long)]
         staging_dir: Option<PathBuf>,
+        /// Which RABBIT installation to replace, if not the running one.
         #[arg(long)]
         install_root: Option<PathBuf>,
+        /// Relaunch RABBIT once the update is installed.
         #[arg(long)]
         restart: bool,
+        /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
@@ -2049,5 +2238,32 @@ mod tests {
             Some(dir.path()),
         );
         assert_eq!(explicit, vec!["langpack-de".to_string()]);
+    }
+    /// Every flag has to explain itself. The README's advice for anything
+    /// not covered by its examples is "run `RABBIT --help`", which is only
+    /// honest if `--help` actually says something — and 47 of 50 flags used
+    /// to print nothing but their own name.
+    #[test]
+    fn every_cli_flag_documents_itself() {
+        use clap::CommandFactory;
+
+        fn walk(command: &clap::Command, path: &str, missing: &mut Vec<String>) {
+            for arg in command.get_arguments() {
+                let id = arg.get_id().as_str();
+                if matches!(id, "help" | "version") {
+                    continue;
+                }
+                if arg.get_help().is_none() && arg.get_long_help().is_none() {
+                    missing.push(format!("{path} --{id}"));
+                }
+            }
+            for sub in command.get_subcommands() {
+                walk(sub, &format!("{path} {}", sub.get_name()), missing);
+            }
+        }
+
+        let mut missing = Vec::new();
+        walk(&super::Cli::command(), "rabbit", &mut missing);
+        assert!(missing.is_empty(), "flags with no help text: {missing:#?}");
     }
 }

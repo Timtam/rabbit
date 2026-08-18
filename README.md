@@ -231,24 +231,39 @@ RABBIT install-extension --package osara --resource-path "%APPDATA%\REAPER" --ap
 
 # Install/update everything that needs it for an existing REAPER:
 RABBIT apply-packages --resource-path "%APPDATA%\REAPER" --apply
+
+# ReaPack shows a donation notice on first run, so installing it
+# unattended means acknowledging that notice up front:
+RABBIT setup --resource-path "%APPDATA%\REAPER" --package reapack \
+     --accept-reapack-donation-notice --apply
 ```
 
 The CLI is dry-run by default; pass `--apply` to actually make changes.
 `--save-report` writes a JSON report next to the resource path so you have a
-record of what was installed.
+record of what was installed, and `--json` prints the result as JSON for
+scripting. A few other flags are worth knowing: `--allow-reaper-running`
+proceeds even though REAPER is open (files it holds open may fail to be
+replaced), `--preserve-osara-keymap` keeps your current OSARA key map
+instead of taking OSARA's current default, and `--stage-unsupported`
+downloads the packages RABBIT can't install automatically and leaves them
+in the cache for you to run yourself instead of skipping them. Every flag
+is documented in `RABBIT <command> --help`.
 
 `setup` also accepts `--config-step <id>` (repeatable) and
 `--skip-config-step <id>` for the post-install configuration tweaks.
-With no flags, all recommended steps whose dependencies are satisfied
+With no flags, the recommended steps whose dependencies are satisfied
 (and that aren't already applied) run automatically; pass an explicit
 list to opt in to a specific subset, or `--skip-config-step` to opt
-out of one. Step ids today are
+out of one. **Set REAPER's language** is the exception: it only runs by
+default when the run actually asks for a language pack, so a machine that
+merely has one on disk does not get its interface language changed. Ask
+for it with `--config-step set-reaper-language` to switch to a pack you
+installed earlier. Step ids today are
 `reapack-add-reaper-accessibility-remote`,
 `reapack-add-reaper-accessible-fr-remote`,
 `reapack-add-reaper-accessible-en-remote`, and
 `set-reaper-language` (one step for every language; it depends on at
-least one language pack being installed or in the plan). Run
-`RABBIT --help` for the full set of flags.
+least one language pack being installed or in the plan).
 
 Language packs install like any other package, e.g.:
 
@@ -256,7 +271,16 @@ Language packs install like any other package, e.g.:
 RABBIT install-extension --package langpack-de --resource-path "%APPDATA%\REAPER" --apply
 RABBIT setup --resource-path "%APPDATA%\REAPER" --package langpack-es \
      --package langpack-de --reaper-language langpack-de --apply
+
+# Pick Team PMA's Spanish translation (es_MX) over the default es_ES:
+RABBIT setup --resource-path "%APPDATA%\REAPER" --package langpack-es \
+     --package-variant langpack-es=pma --reaper-language langpack-es --apply
 ```
+
+`--reaper-language` only accepts a language pack, and lists the ones it
+knows if you mistype it. Unlike the wizard, the CLI never records a package
+you left out as "don't offer this again" — `--package` is a scope for this
+run, not a standing preference.
 
 ### Maintain
 
