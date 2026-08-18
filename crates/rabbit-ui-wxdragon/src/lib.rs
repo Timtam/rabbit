@@ -599,6 +599,13 @@ fn model_from_plan_with_options(
     let text = wizard_text(localizer);
     let target_rows = target_rows(localizer, &installations, selected_target_index);
     let host = detect_host_capabilities();
+    let target_resource_path = selected_target_index
+        .and_then(|idx| target_rows.get(idx))
+        .map(|row| row.path.clone());
+    let declined = target_resource_path
+        .as_deref()
+        .map(rabbit_core::receipt::declined_packages)
+        .unwrap_or_default();
     let package_rows = package_rows(
         localizer,
         &text,
@@ -608,10 +615,8 @@ fn model_from_plan_with_options(
         &plan.actions,
         &available_packages,
         &host,
+        &declined,
     );
-    let target_resource_path = selected_target_index
-        .and_then(|idx| target_rows.get(idx))
-        .map(|row| row.path.clone());
     let configuration_rows =
         configuration_rows(localizer, &package_rows, target_resource_path.as_deref());
     let review_lines = review_lines(localizer, &target_rows, &package_rows, &plan.notes);
@@ -1443,6 +1448,9 @@ pub fn wizard_package_plan_for_target_with_available(
     );
     let package_specs = builtin_package_specs(model.platform);
     let host = detect_host_capabilities();
+    let declined = target
+        .map(|target| rabbit_core::receipt::declined_packages(&target.path))
+        .unwrap_or_default();
     let mut package_rows = package_rows(
         &localizer,
         &model.text,
@@ -1452,6 +1460,7 @@ pub fn wizard_package_plan_for_target_with_available(
         &plan.actions,
         available_packages,
         &host,
+        &declined,
     );
 
     // Some packages can't honor a portable target: they install to a fixed
@@ -1816,7 +1825,7 @@ pub fn execute_wizard_install_with_progress(
             eprintln!("antivirus cache exclusion: {outcome:?}");
         }
     }
-    rabbit_core::setup::execute_setup_operation_with_progress(
+    let report = rabbit_core::setup::execute_setup_operation_with_progress(
         &request.resource_path,
         &request.package_ids,
         request.platform,
@@ -1839,7 +1848,33 @@ pub fn execute_wizard_install_with_progress(
             configuration_step_ids: request.configuration_step_ids.clone(),
         },
         progress,
-    )
+    )?;
+
+    // Remember the packages the user turned down, so a default RABBIT picks
+    // for them — a language pack matching RABBIT's own language — does not
+    // come back ticked on the next launch. Inferring the answer from
+    // `package_ids` is only sound here: the wizard always offers the whole
+    // list, so "not in the list" really does mean "the user said no". The
+    // CLI, where `--package` is a deliberately narrow scope rather than a
+    // verdict, does not record anything.
+    if !request.dry_run {
+        let (accepted, declined): (Vec<String>, Vec<String>) =
+            builtin_package_specs(request.platform)
+                .into_iter()
+                .filter(|spec| spec.remember_opt_out)
+                .map(|spec| spec.id)
+                .partition(|id| request.package_ids.contains(id));
+        if let Err(error) = rabbit_core::receipt::record_package_opt_outs(
+            &request.resource_path,
+            &declined,
+            &accepted,
+        ) {
+            // A preference is never worth failing a finished install over.
+            eprintln!("could not record package opt-outs: {error}");
+        }
+    }
+
+    Ok(report)
 }
 
 pub fn run_wizard_self_update_check() -> Result<SelfUpdateCheckReport> {
@@ -2954,6 +2989,7 @@ fn package_rows(
     actions: &[PlanAction],
     available_packages: &[AvailablePackage],
     host: &HostCapabilities,
+    declined: &std::collections::BTreeSet<String>,
 ) -> Vec<PackageRow> {
     let specs_by_id: BTreeMap<_, _> = package_specs
         .iter()
@@ -2998,11 +3034,16 @@ fn package_rows(
             // already English.
             let recommended = spec
                 .map(|spec| {
-                    rabbit_core::package::effective_recommended(spec, host)
+                    let default_on = rabbit_core::package::effective_recommended(spec, host)
                         || rabbit_core::package::matches_ui_language(
                             spec,
                             localizer.active_locale(),
-                        )
+                        );
+                    // A package that remembers being turned down stops
+                    // being ticked for the user once they have said no on
+                    // this install. It stays listed and tickable — this
+                    // suppresses the automatic tick, not the package.
+                    default_on && !(spec.remember_opt_out && declined.contains(&action.package_id))
                 })
                 .unwrap_or(false);
             let initially_selected = match action.action {
@@ -4052,6 +4093,63 @@ mod tests {
     }
 
     #[test]
+    fn a_declined_language_pack_stops_being_ticked_by_default() {
+        // RABBIT running in German suggests the German pack — that is the
+        // whole point of the UI-language match. But someone who does not
+        // want it had to untick it on every single launch, because nothing
+        // remembered the refusal.
+        let localizer = Localizer::embedded("de-DE").unwrap();
+        let text = super::wizard_text(&localizer);
+        let specs = builtin_package_specs(Platform::Windows);
+        let host = HostCapabilities::default();
+        let actions = vec![PlanAction {
+            package_id: "langpack-de".to_string(),
+            action: PlanActionKind::Install,
+            installed_version: None,
+            available_version: None,
+            reason: "Missing".to_string(),
+        }];
+
+        let suggested = super::package_rows(
+            &localizer,
+            &text,
+            Platform::Windows,
+            Architecture::X64,
+            &specs,
+            &actions,
+            &[],
+            &host,
+            &Default::default(),
+        );
+        assert!(
+            suggested[0].selected,
+            "a German RABBIT should suggest the German pack"
+        );
+
+        let declined: std::collections::BTreeSet<String> =
+            ["langpack-de".to_string()].into_iter().collect();
+        let remembered = super::package_rows(
+            &localizer,
+            &text,
+            Platform::Windows,
+            Architecture::X64,
+            &specs,
+            &actions,
+            &[],
+            &host,
+            &declined,
+        );
+        assert!(
+            !remembered[0].selected,
+            "a pack the user turned down must not come back ticked"
+        );
+        assert!(
+            remembered[0].available_for_target,
+            "it must stay listed and tickable — this suppresses the tick, not the package"
+        );
+    }
+
+    #[test]
     fn language_step_does_not_auto_tick_for_a_merely_installed_pack() {
         // A language pack that is already on disk arrives as an unticked
         // `Keep` row. The step must stay AVAILABLE — the user can still
@@ -4261,6 +4359,7 @@ mod tests {
             }],
             &[],
             &host,
+            &Default::default(),
         );
         assert!(
             rows[0].selected,
@@ -4285,6 +4384,7 @@ mod tests {
             }],
             &[],
             &HostCapabilities::default(),
+            &Default::default(),
         );
         assert!(
             !rows[0].selected,

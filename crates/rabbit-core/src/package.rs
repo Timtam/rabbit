@@ -66,6 +66,18 @@ pub struct PackageSpec {
     /// [`effective_recommended`] rather than reading this field directly.
     #[serde(default)]
     pub recommended_when: Option<HostCapability>,
+    /// When `true`, a run in which the user leaves this package unticked
+    /// records that choice in the install receipt, and later runs stop
+    /// ticking it by default.
+    ///
+    /// For packages RABBIT turns on by *guessing* — a language pack
+    /// matching RABBIT's own language — "no" needs to stick, or the user
+    /// has to untick it on every single launch. Deliberately only the
+    /// negative answer: "yes" is already remembered by the package being
+    /// installed. The package stays listed and tickable either way, and
+    /// ticking it again forgets the earlier "no".
+    #[serde(default)]
+    pub remember_opt_out: bool,
     /// When `true`, the wizard must show a package-specific acknowledgement
     /// page and the CLI must require an explicit `--accept-<package>-notice`
     /// flag before RABBIT stages or launches the install of this package.
@@ -170,6 +182,9 @@ pub struct EmbeddedPackageSpec {
     /// See [`PackageSpec::recommended_when`].
     #[serde(default)]
     pub recommended_when: Option<HostCapability>,
+    /// See [`PackageSpec::remember_opt_out`].
+    #[serde(default)]
+    pub remember_opt_out: bool,
     #[serde(default)]
     pub requires_user_acknowledgement: bool,
     #[serde(default)]
@@ -1064,6 +1079,7 @@ impl EmbeddedPackageSpec {
             depends_on: self.depends_on.clone(),
             required: self.required,
             recommended: self.recommended,
+            remember_opt_out: self.remember_opt_out,
             recommended_when: self.recommended_when,
             requires_user_acknowledgement: self.requires_user_acknowledgement,
             requires_standard_install: self.requires_standard_install,

@@ -996,6 +996,7 @@ mod tests {
             &InstallState {
                 schema_version: 1,
                 packages,
+                declined_packages: Default::default(),
             },
         )
         .unwrap();

@@ -12,6 +12,7 @@
   "install_as": "de_DE.ReaperLangPack",
   "required": false,
   "recommended": false,
+  "remember_opt_out": true,
   "supported_platforms": [
     "windows",
     "macos"

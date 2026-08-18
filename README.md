@@ -83,6 +83,12 @@ The pack matching the language RABBIT is running in is suggested and
 ticked for you; packs for other languages are listed but unticked. Nothing
 is offered in English, since REAPER is already English.
 
+If you don't want it, untick it and RABBIT remembers: the pack stays listed
+and tickable, but it won't be ticked for you again on this REAPER install.
+Tick it again at any point and RABBIT forgets the refusal. The choice is
+stored per install (in `RABBIT/install-state.json`), so you can say no on
+one REAPER and yes on another.
+
 You can install as many language packs as you like — REAPER keeps them all
 in `LangPack/` — and switch between them later from REAPER's own
 preferences. Only one is *active* at a time, so if you install several,
@@ -113,8 +119,12 @@ configuration tweaks:
 - **Set REAPER's language** to one of the language packs you're
   installing, by writing it into `reaper.ini`. A single step covers every
   language — which one it activates comes from the dropdown above. Ticked
-  by default whenever a language pack is part of the plan; untick it if you
-  want the files installed without changing REAPER's current language. Only the one setting is touched;
+  by default only when a language pack is actually being installed in this
+  run; a pack that is merely already on disk leaves it unticked, since a
+  run that installs nothing language-related shouldn't change the language
+  you're already using. Untick it if you want the files installed without
+  changing REAPER's current language, or tick it yourself to switch to a
+  pack you installed earlier. Only the one setting is touched;
   the rest of `reaper.ini` is preserved byte for byte, including its
   original text encoding.
 

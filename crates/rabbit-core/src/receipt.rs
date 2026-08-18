@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +15,21 @@ pub const RECEIPT_RELATIVE_PATH: &str = "RABBIT/install-state.json";
 pub struct InstallState {
     pub schema_version: u32,
     pub packages: BTreeMap<String, PackageReceipt>,
+    /// Packages the user turned down and does not want offered again on
+    /// this install.
+    ///
+    /// Only ever the *negative* answer, and only for packages whose spec
+    /// sets `remember_opt_out`. "Yes" needs no memory — an installed
+    /// package is already recorded in `packages` — while "no" was otherwise
+    /// forgotten the moment the wizard closed, so a default RABBIT picked
+    /// for you (a language pack matching RABBIT's own language) came back
+    /// ticked on every launch no matter how often you declined it.
+    ///
+    /// Left out of the file entirely when empty, and read with
+    /// `#[serde(default)]`, so receipts written by older RABBITs still load
+    /// and older RABBITs still load receipts written by this one.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub declined_packages: BTreeSet<String>,
 }
 
 impl Default for InstallState {
@@ -22,6 +37,7 @@ impl Default for InstallState {
         Self {
             schema_version: 1,
             packages: BTreeMap::new(),
+            declined_packages: BTreeSet::new(),
         }
     }
 }
@@ -73,6 +89,43 @@ pub fn load_install_state(resource_path: &Path) -> Result<Option<InstallState>> 
     let content = fs::read_to_string(&path).with_path(&path)?;
     let state = serde_json::from_str(&content).with_json_path(&path)?;
     Ok(Some(state))
+}
+
+/// The packages this install remembers the user declining.
+///
+/// Missing receipt, unreadable receipt, or a receipt from an older RABBIT
+/// all mean "nothing declined" — a preference is never worth failing a run
+/// over.
+pub fn declined_packages(resource_path: &Path) -> BTreeSet<String> {
+    load_install_state(resource_path)
+        .ok()
+        .flatten()
+        .map(|state| state.declined_packages)
+        .unwrap_or_default()
+}
+
+/// Record the user's answer for the packages that remember one.
+///
+/// `declined` are the remembering packages they left unticked; `accepted`
+/// are the ones they ticked, whose earlier "no" must be forgotten so a
+/// change of mind sticks. Never called for a dry run.
+pub fn record_package_opt_outs(
+    resource_path: &Path,
+    declined: &[String],
+    accepted: &[String],
+) -> Result<()> {
+    let mut state = load_install_state(resource_path)?.unwrap_or_default();
+    let before = state.declined_packages.clone();
+    for id in declined {
+        state.declined_packages.insert(id.clone());
+    }
+    for id in accepted {
+        state.declined_packages.remove(id);
+    }
+    if state.declined_packages == before {
+        return Ok(());
+    }
+    save_install_state(resource_path, &state)
 }
 
 pub fn save_install_state(resource_path: &Path, state: &InstallState) -> Result<()> {
@@ -237,8 +290,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        InstallState, InstalledFileReceipt, PackageReceipt, ReceiptVerification,
-        load_install_state, save_install_state, verify_package_receipt,
+        InstallState, InstalledFileReceipt, PackageReceipt, RECEIPT_RELATIVE_PATH,
+        ReceiptVerification, declined_packages, load_install_state, record_package_opt_outs,
+        save_install_state, verify_package_receipt,
     };
     use crate::package::PACKAGE_OSARA;
     use crate::version::Version;
@@ -273,6 +327,7 @@ mod tests {
         let state = InstallState {
             schema_version: 1,
             packages,
+            declined_packages: Default::default(),
         };
         save_install_state(dir.path(), &state).unwrap();
 
@@ -282,5 +337,80 @@ mod tests {
             verify_package_receipt(dir.path(), Some(&loaded), PACKAGE_OSARA).unwrap(),
             ReceiptVerification::Verified(_)
         ));
+    }
+    #[test]
+    fn records_and_forgets_package_opt_outs() {
+        let dir = tempdir().unwrap();
+        assert!(declined_packages(dir.path()).is_empty());
+
+        // Turning a package down is remembered...
+        record_package_opt_outs(dir.path(), &["langpack-de".to_string()], &[]).unwrap();
+        assert!(declined_packages(dir.path()).contains("langpack-de"));
+
+        // ...and a later change of mind forgets it, so the package goes back
+        // to being offered by default.
+        record_package_opt_outs(dir.path(), &[], &["langpack-de".to_string()]).unwrap();
+        assert!(declined_packages(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn opt_outs_do_not_disturb_installed_package_receipts() {
+        let dir = tempdir().unwrap();
+        let mut packages = BTreeMap::new();
+        packages.insert(
+            "osara".to_string(),
+            PackageReceipt {
+                id: "osara".to_string(),
+                version: None,
+                variant: None,
+                source_url: None,
+                source_sha256: None,
+                installed_files: Vec::new(),
+                installed_at: None,
+                rabbit_version: None,
+                architecture: None,
+            },
+        );
+        save_install_state(
+            dir.path(),
+            &InstallState {
+                schema_version: 1,
+                packages,
+                declined_packages: Default::default(),
+            },
+        )
+        .unwrap();
+
+        record_package_opt_outs(dir.path(), &["langpack-de".to_string()], &[]).unwrap();
+        let state = load_install_state(dir.path()).unwrap().unwrap();
+        assert!(
+            state.packages.contains_key("osara"),
+            "install facts survive"
+        );
+        assert!(state.declined_packages.contains("langpack-de"));
+    }
+
+    #[test]
+    fn receipts_stay_compatible_in_both_directions() {
+        let dir = tempdir().unwrap();
+        // A receipt written by an older RABBIT has no `declined_packages`
+        // key at all; it must still load.
+        fs::create_dir_all(dir.path().join("RABBIT")).unwrap();
+        fs::write(
+            dir.path().join(RECEIPT_RELATIVE_PATH),
+            r#"{"schema_version":1,"packages":{}}"#,
+        )
+        .unwrap();
+        let state = load_install_state(dir.path()).unwrap().unwrap();
+        assert!(state.declined_packages.is_empty());
+
+        // And with nothing declined we write the key out again, so an older
+        // RABBIT reading our file sees exactly what it wrote.
+        save_install_state(dir.path(), &state).unwrap();
+        let text = fs::read_to_string(dir.path().join(RECEIPT_RELATIVE_PATH)).unwrap();
+        assert!(
+            !text.contains("declined_packages"),
+            "an empty opt-out set must not appear in the receipt: {text}"
+        );
     }
 }

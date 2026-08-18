@@ -74,6 +74,19 @@ from this file and posts it as the GitHub release body.
 
 ### Changed
 
+- **A language pack you turn down stays turned down.** RABBIT ticks the pack
+  matching its own language for you, which is right for most people and was
+  wrong for anyone who doesn't want it: unticking it lasted exactly one run,
+  and the pack came back ticked on the next launch. That refusal is now
+  remembered in the install receipt, so the pack stays listed and tickable
+  but is not ticked for you again. Tick it yourself and the refusal is
+  forgotten, so a change of mind sticks too. The memory is per REAPER
+  install, so you can say no on one and yes on another, and packages opt
+  into this through a new `remember_opt_out` manifest flag — only the
+  language packs set it, because they are the ones RABBIT turns on by
+  guessing. Receipts stay readable by older RABBITs, which simply ignore the
+  new field.
+
 - The wizard no longer grows a "Set REAPER's language to X" configuration
   step for every language it supports. There is one **Set REAPER's
   language** step, and which pack it activates comes from a **REAPER
