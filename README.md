@@ -85,9 +85,14 @@ is offered in English, since REAPER is already English.
 
 If you don't want it, untick it and RABBIT remembers: the pack stays listed
 and tickable, but it won't be ticked for you again on this REAPER install.
-Tick it again at any point and RABBIT forgets the refusal. The choice is
-stored per install (in `RABBIT/install-state.json`), so you can say no on
-one REAPER and yes on another.
+That covers updates too — if you installed a pack, later stopped using it,
+and turn down its next update, RABBIT takes that as a no and stops offering
+it. Tick it again at any point and RABBIT forgets the refusal. What is *not*
+a refusal is a pack that is simply installed and up to date: it sits
+unticked because there is nothing to do, and RABBIT reads that as silence
+rather than a decision. The choice is stored per install (in
+`RABBIT/install-state.json`), so you can say no on one REAPER and yes on
+another.
 
 You can install as many language packs as you like — REAPER keeps them all
 in `LangPack/` — and switch between them later from REAPER's own

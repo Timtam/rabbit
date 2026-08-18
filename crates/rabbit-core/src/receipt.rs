@@ -109,6 +109,14 @@ pub fn declined_packages(resource_path: &Path) -> BTreeSet<String> {
 /// `declined` are the remembering packages they left unticked; `accepted`
 /// are the ones they ticked, whose earlier "no" must be forgotten so a
 /// change of mind sticks. Never called for a dry run.
+///
+/// Being installed is NOT a reason to ignore a refusal: someone who stopped
+/// using a language pack and turns down its update has refused it just as
+/// meaningfully as someone who never installed it. What must never reach
+/// this function is a package that had nothing to offer in the first place
+/// — an installed, up-to-date package sits unticked because its row is
+/// `Keep`, and that is silence, not a "no". Callers decide that, because
+/// only they can see the row's action.
 pub fn record_package_opt_outs(
     resource_path: &Path,
     declined: &[String],
@@ -412,5 +420,47 @@ mod tests {
             !text.contains("declined_packages"),
             "an empty opt-out set must not appear in the receipt: {text}"
         );
+    }
+    #[test]
+    fn refusing_an_update_to_an_installed_package_is_remembered() {
+        // Someone who stopped using the German pack and turns down its
+        // update has refused it. Being installed does not make that any less
+        // of a "no" — the previous version of this skipped anything with a
+        // receipt, which silently threw the refusal away.
+        let dir = tempdir().unwrap();
+        let mut packages = BTreeMap::new();
+        packages.insert(
+            "langpack-de".to_string(),
+            PackageReceipt {
+                id: "langpack-de".to_string(),
+                version: None,
+                variant: None,
+                source_url: None,
+                source_sha256: None,
+                installed_files: Vec::new(),
+                installed_at: None,
+                rabbit_version: None,
+                architecture: None,
+            },
+        );
+        save_install_state(
+            dir.path(),
+            &InstallState {
+                schema_version: 1,
+                packages,
+                declined_packages: Default::default(),
+            },
+        )
+        .unwrap();
+
+        record_package_opt_outs(dir.path(), &["langpack-de".to_string()], &[]).unwrap();
+        assert!(
+            declined_packages(dir.path()).contains("langpack-de"),
+            "turning down an update to an installed package must be remembered"
+        );
+
+        // And ticking it again clears it, as for any other package.
+        record_package_opt_outs(dir.path(), &[], &["langpack-de".to_string()]).unwrap();
+        assert!(declined_packages(dir.path()).is_empty());
     }
 }

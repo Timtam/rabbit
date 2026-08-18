@@ -388,6 +388,19 @@ pub struct WizardInstallRequest {
     /// Configuration step ids the user opted in to. Forwarded straight
     /// through to [`SetupOptions::configuration_step_ids`].
     pub configuration_step_ids: Vec<String>,
+    /// Opt-out-remembering packages the user actively turned down: the row
+    /// had something to offer (an install or an update) and they left it
+    /// unticked. Recorded so the suggestion does not come back next launch.
+    ///
+    /// A `Keep` row is deliberately absent from this and from
+    /// `accepted_packages`. An installed, up-to-date package sits unticked
+    /// because there is nothing to do, which is silence rather than a
+    /// verdict; reading it as a refusal would eventually turn RABBIT's own
+    /// successful install into a "no".
+    pub declined_packages: Vec<String>,
+    /// Opt-out-remembering packages the user ticked, clearing any refusal
+    /// recorded earlier so a change of mind sticks.
+    pub accepted_packages: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1069,6 +1082,28 @@ pub fn install_request_from_target_and_rows(
         })
         .collect();
 
+    // Only rows that actually offered something carry a verdict: ticked is
+    // a yes, unticked is a no. A `Keep` row offered nothing, so it says
+    // nothing either way.
+    let remembers_opt_out: std::collections::BTreeSet<String> =
+        builtin_package_specs(model.platform)
+            .into_iter()
+            .filter(|spec| spec.remember_opt_out)
+            .map(|spec| spec.id)
+            .collect();
+    let mut declined_packages = Vec::new();
+    let mut accepted_packages = Vec::new();
+    for (index, row) in package_rows.iter().enumerate() {
+        if !remembers_opt_out.contains(&row.package_id) {
+            continue;
+        }
+        if selected_package_indices.contains(&index) {
+            accepted_packages.push(row.package_id.clone());
+        } else if row.original_action != PlanActionKind::Keep {
+            declined_packages.push(row.package_id.clone());
+        }
+    }
+
     Ok(WizardInstallRequest {
         resource_path: target.path.clone(),
         package_ids,
@@ -1089,6 +1124,8 @@ pub fn install_request_from_target_and_rows(
         cache_dir: options.cache_dir.unwrap_or_else(default_cache_dir),
         force_reinstall_packages,
         configuration_step_ids,
+        declined_packages,
+        accepted_packages,
     })
 }
 
@@ -1850,26 +1887,24 @@ pub fn execute_wizard_install_with_progress(
         progress,
     )?;
 
-    // Remember the packages the user turned down, so a default RABBIT picks
-    // for them — a language pack matching RABBIT's own language — does not
-    // come back ticked on the next launch. Inferring the answer from
-    // `package_ids` is only sound here: the wizard always offers the whole
-    // list, so "not in the list" really does mean "the user said no". The
-    // CLI, where `--package` is a deliberately narrow scope rather than a
-    // verdict, does not record anything.
-    if !request.dry_run {
-        let (accepted, declined): (Vec<String>, Vec<String>) =
-            builtin_package_specs(request.platform)
-                .into_iter()
-                .filter(|spec| spec.remember_opt_out)
-                .map(|spec| spec.id)
-                .partition(|id| request.package_ids.contains(id));
-        if let Err(error) = rabbit_core::receipt::record_package_opt_outs(
+    // Remember what the user decided about the packages that remember it,
+    // so a default RABBIT picked for them — a language pack matching
+    // RABBIT's own language — does not come back ticked on the next launch.
+    // The verdict is worked out where the rows are (see
+    // `install_request_from_target_and_rows`), because only there can a
+    // deliberate "no" be told apart from a row that had nothing to offer.
+    // The CLI records nothing: `--package` is a scope for one run, not a
+    // standing preference.
+    let has_verdict =
+        !(request.declined_packages.is_empty() && request.accepted_packages.is_empty());
+    if !request.dry_run && has_verdict {
+        let recorded = rabbit_core::receipt::record_package_opt_outs(
             &request.resource_path,
-            &declined,
-            &accepted,
-        ) {
-            // A preference is never worth failing a finished install over.
+            &request.declined_packages,
+            &request.accepted_packages,
+        );
+        // A preference is never worth failing a finished install over.
+        if let Err(error) = recorded {
             eprintln!("could not record package opt-outs: {error}");
         }
     }
@@ -3032,23 +3067,28 @@ fn package_rows(
             // without hunting for it. Packs for other languages stay listed
             // but unticked; nothing is offered for English, since REAPER is
             // already English.
+            // Has the user turned this package down on this install? It
+            // stays listed and tickable either way — a refusal suppresses
+            // the automatic tick, never the package itself.
+            let refused = spec
+                .is_some_and(|spec| spec.remember_opt_out && declined.contains(&action.package_id));
             let recommended = spec
                 .map(|spec| {
-                    let default_on = rabbit_core::package::effective_recommended(spec, host)
+                    rabbit_core::package::effective_recommended(spec, host)
                         || rabbit_core::package::matches_ui_language(
                             spec,
                             localizer.active_locale(),
-                        );
-                    // A package that remembers being turned down stops
-                    // being ticked for the user once they have said no on
-                    // this install. It stays listed and tickable — this
-                    // suppresses the automatic tick, not the package.
-                    default_on && !(spec.remember_opt_out && declined.contains(&action.package_id))
+                        )
                 })
                 .unwrap_or(false);
             let initially_selected = match action.action {
-                PlanActionKind::Update => true,
-                PlanActionKind::Install => recommended,
+                // Updates are ticked by default because a package you have
+                // should stay current — but not once you have said no to it.
+                // Someone who stopped using a language pack and turned its
+                // update down would otherwise be re-offered it, ticked,
+                // every time the translators publish a fix.
+                PlanActionKind::Update => !refused,
+                PlanActionKind::Install => recommended && !refused,
                 PlanActionKind::Keep => false,
             };
             // When the auto-tick rule leaves an Install/Update row unticked,
@@ -4090,6 +4130,117 @@ mod tests {
         rows.iter()
             .find(|row| row.step_id == rabbit_core::configuration::CONFIG_SET_REAPER_LANGUAGE)
             .expect("set-reaper-language row should exist")
+    }
+
+    #[test]
+    fn a_declined_package_does_not_auto_tick_its_updates_either() {
+        // Someone who stopped using a language pack and turned it down has
+        // said no to the package, not merely to one version of it. Ticking
+        // its next update for them would re-offer it every time the
+        // translators publish a fix, which is the exact loop the refusal is
+        // meant to end. The row is still there to tick by hand.
+        let localizer = Localizer::embedded("de-DE").unwrap();
+        let text = super::wizard_text(&localizer);
+        let specs = builtin_package_specs(Platform::Windows);
+        let declined: std::collections::BTreeSet<String> =
+            ["langpack-de".to_string()].into_iter().collect();
+
+        let rows = super::package_rows(
+            &localizer,
+            &text,
+            Platform::Windows,
+            Architecture::X64,
+            &specs,
+            &[PlanAction {
+                package_id: "langpack-de".to_string(),
+                action: PlanActionKind::Update,
+                installed_version: None,
+                available_version: None,
+                reason: "upstream file changed".to_string(),
+            }],
+            &[],
+            &HostCapabilities::default(),
+            &declined,
+        );
+        assert!(
+            !rows[0].selected,
+            "a refused package must not have its update ticked for the user"
+        );
+        assert!(
+            rows[0].available_for_target,
+            "the update must still be listed so it can be taken deliberately"
+        );
+    }
+
+    #[test]
+    fn only_rows_that_offered_something_record_a_verdict() {
+        // Three language-pack rows in three states, and only two of them
+        // mean anything:
+        //   - an Update left unticked is a refusal (the user was offered a
+        //     newer pack and said no),
+        //   - a Keep is silence (there was nothing to accept or refuse),
+        //   - anything ticked is a yes.
+        let localizer = Localizer::embedded("de-DE").unwrap();
+        let installation = fake_installation();
+        let action = |id: &str, kind| PlanAction {
+            package_id: id.to_string(),
+            action: kind,
+            installed_version: None,
+            available_version: None,
+            reason: "test".to_string(),
+        };
+        let model = model_from_plan(
+            &localizer,
+            Platform::Windows,
+            Architecture::X64,
+            vec![installation.clone()],
+            Some(0),
+            InstallPlan {
+                target: Some(installation),
+                actions: vec![
+                    action("langpack-de", PlanActionKind::Update),
+                    action("langpack-es", PlanActionKind::Keep),
+                    action("langpack-fr", PlanActionKind::Install),
+                    action(PACKAGE_OSARA, PlanActionKind::Install),
+                ],
+                notes: Vec::new(),
+            },
+        );
+        let index_of = |id: &str| {
+            model
+                .package_rows
+                .iter()
+                .position(|row| row.package_id == id)
+                .unwrap_or_else(|| panic!("row for {id} should exist"))
+        };
+
+        // Tick only the French pack (and OSARA, so the request is valid).
+        let request = super::install_request_from_target(
+            &model,
+            &model.target_rows[0],
+            &[index_of("langpack-fr"), index_of(PACKAGE_OSARA)],
+            super::WizardInstallOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            request.accepted_packages,
+            vec!["langpack-fr".to_string()],
+            "a ticked pack is a yes"
+        );
+        assert_eq!(
+            request.declined_packages,
+            vec!["langpack-de".to_string()],
+            "an unticked Update is a no; the Keep row must say nothing"
+        );
+        assert!(
+            !request
+                .declined_packages
+                .iter()
+                .any(|id| id == "langpack-es"),
+            "an installed, up-to-date pack sits unticked because there is \
+             nothing to do — that is not a refusal"
+        );
     }
 
     #[test]
@@ -5846,6 +5997,8 @@ mod tests {
             package_variants: Default::default(),
             reaper_language_package: None,
             configuration_step_ids: Vec::new(),
+            declined_packages: Vec::new(),
+            accepted_packages: Vec::new(),
         }
     }
 }

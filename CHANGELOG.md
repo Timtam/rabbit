@@ -79,8 +79,12 @@ from this file and posts it as the GitHub release body.
   wrong for anyone who doesn't want it: unticking it lasted exactly one run,
   and the pack came back ticked on the next launch. That refusal is now
   remembered in the install receipt, so the pack stays listed and tickable
-  but is not ticked for you again. Tick it yourself and the refusal is
-  forgotten, so a change of mind sticks too. The memory is per REAPER
+  but is not ticked for you again — including its updates, so a pack you
+  installed and later stopped using stops re-offering itself every time the
+  translators publish a fix. A pack that is merely installed and up to date
+  is not a refusal: it sits unticked because there is nothing to do, and
+  RABBIT reads that as silence rather than a decision. Tick it yourself and
+  the refusal is forgotten, so a change of mind sticks too. The memory is per REAPER
   install, so you can say no on one and yes on another, and packages opt
   into this through a new `remember_opt_out` manifest flag — only the
   language packs set it, because they are the ones RABBIT turns on by
