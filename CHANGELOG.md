@@ -31,6 +31,8 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-18
+
 ### Fixed
 
 - Installing into a folder whose path contains a space — a portable REAPER
