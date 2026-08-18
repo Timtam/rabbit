@@ -1294,4 +1294,38 @@ mod tests {
         assert!(!dir.path().join("UserPlugins").exists());
         assert!(load_install_state(dir.path()).unwrap().is_none());
     }
+    /// A CLI install writes the receipt through load-modify-save, so the
+    /// wizard's remembered opt-outs have to survive it. If an install ever
+    /// rebuilt the receipt from scratch instead, a single `rabbit setup`
+    /// would silently forget every package the user had turned down.
+    #[test]
+    fn installing_a_package_preserves_remembered_opt_outs() {
+        let dir = tempdir().unwrap();
+        crate::receipt::record_package_opt_outs(dir.path(), &["langpack-de".to_string()], &[])
+            .unwrap();
+
+        let mut state = load_install_state(dir.path()).unwrap().unwrap();
+        state.packages.insert(
+            "osara".to_string(),
+            PackageReceipt {
+                id: "osara".to_string(),
+                version: None,
+                variant: None,
+                source_url: None,
+                source_sha256: None,
+                installed_files: Vec::new(),
+                installed_at: None,
+                rabbit_version: None,
+                architecture: None,
+            },
+        );
+        save_install_state(dir.path(), &state).unwrap();
+
+        let after = load_install_state(dir.path()).unwrap().unwrap();
+        assert!(after.packages.contains_key("osara"));
+        assert!(
+            after.declined_packages.contains("langpack-de"),
+            "installing an unrelated package must not forget a declined one"
+        );
+    }
 }

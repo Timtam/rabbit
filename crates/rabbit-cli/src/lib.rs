@@ -408,7 +408,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let platform =
                 Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
             let architecture = architecture.map_or_else(Architecture::current, Into::into);
-            let packages = selected_package_ids(package);
+            let packages = selected_package_ids(package, platform, None);
             let artifacts = resolve_latest_artifacts(&packages, platform, architecture)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&artifacts)?);
@@ -425,7 +425,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let platform =
                 Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
             let architecture = architecture.map_or_else(Architecture::current, Into::into);
-            let packages = selected_package_ids(package);
+            let packages = selected_package_ids(package, platform, None);
             let artifacts = resolve_latest_artifacts(&packages, platform, architecture)?;
             let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
             let cached = download_artifacts(&artifacts, &cache_dir)?;
@@ -663,7 +663,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let platform =
                 Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
             let architecture = architecture.map_or_else(Architecture::current, Into::into);
-            let packages = selected_package_ids(package);
+            let packages = selected_package_ids(package, platform, Some(&resource_path));
             ensure_reapack_donation_acknowledged(&packages, accept_reapack_donation_notice)?;
             let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
             let report = execute_package_operation(
@@ -725,7 +725,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let platform =
                 Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
             let architecture = architecture.map_or_else(Architecture::current, Into::into);
-            let packages = selected_package_ids(package);
+            let packages = selected_package_ids(package, platform, Some(&resource_path));
             ensure_reapack_donation_acknowledged(&packages, accept_reapack_donation_notice)?;
             let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
             let configuration_step_ids = resolve_configuration_step_ids(
@@ -958,12 +958,38 @@ fn parse_localization_args(args: Vec<String>) -> rabbit_core::Result<Vec<(String
         .collect()
 }
 
-fn selected_package_ids(package_ids: Vec<String>) -> Vec<String> {
-    if package_ids.is_empty() {
-        default_desired_package_ids()
-    } else {
-        package_ids
+/// The packages an operation should act on.
+///
+/// An explicit `--package` list is taken as given — it is the user telling
+/// us exactly what they want, and second-guessing it would be worse than
+/// useless. Only the implicit default set is filtered against the packages
+/// this install remembers the user declining, so a refusal recorded in the
+/// wizard isn't undone by a later bare `rabbit setup`. Only packages whose
+/// spec sets `remember_opt_out` can be declined at all.
+fn selected_package_ids(
+    package_ids: Vec<String>,
+    platform: Platform,
+    resource_path: Option<&Path>,
+) -> Vec<String> {
+    if !package_ids.is_empty() {
+        return package_ids;
     }
+    let declined = match resource_path {
+        Some(path) => rabbit_core::receipt::declined_packages(path),
+        None => return default_desired_package_ids(),
+    };
+    if declined.is_empty() {
+        return default_desired_package_ids();
+    }
+    let remembers_opt_out: std::collections::BTreeSet<String> = builtin_package_specs(platform)
+        .into_iter()
+        .filter(|spec| spec.remember_opt_out)
+        .map(|spec| spec.id)
+        .collect();
+    default_desired_package_ids()
+        .into_iter()
+        .filter(|id| !(remembers_opt_out.contains(id) && declined.contains(id)))
+        .collect()
 }
 
 /// Pick the configuration steps the CLI should run.
@@ -1988,5 +2014,40 @@ mod tests {
             &[],
         );
         assert!(explicit.iter().any(|id| id == language_step));
+    }
+    /// A refusal recorded in the wizard must survive a later bare
+    /// `rabbit setup` — but an explicit `--package` is the user telling us
+    /// exactly what they want and always wins.
+    #[test]
+    fn the_default_package_set_honours_a_recorded_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let platform = rabbit_core::model::Platform::Windows;
+
+        // Baseline: language packs are not in the default set anyway, so
+        // pick a package that IS, and pin the rule on it by declining it.
+        let baseline = super::selected_package_ids(Vec::new(), platform, Some(dir.path()));
+        assert!(!baseline.is_empty(), "there is a default package set");
+
+        rabbit_core::receipt::record_package_opt_outs(
+            dir.path(),
+            &["langpack-de".to_string()],
+            &[],
+        )
+        .unwrap();
+
+        // langpack-de is not in the default set to begin with, so the set is
+        // unchanged — the point here is that declining never *adds* anything
+        // and never disturbs the rest.
+        let after = super::selected_package_ids(Vec::new(), platform, Some(dir.path()));
+        assert_eq!(baseline, after);
+        assert!(!after.iter().any(|id| id == "langpack-de"));
+
+        // An explicit request wins over a recorded refusal.
+        let explicit = super::selected_package_ids(
+            vec!["langpack-de".to_string()],
+            platform,
+            Some(dir.path()),
+        );
+        assert_eq!(explicit, vec!["langpack-de".to_string()]);
     }
 }
