@@ -31,6 +31,8 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-18
+
 ### Added
 
 - Accepting a RABBIT update now opens a progress window instead of leaving
