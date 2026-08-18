@@ -8,7 +8,6 @@
   "depends_on": [
     "reaper"
   ],
-  "exclusive_group": "reaper-langpack",
   "language": "es",
   "install_as": "es_ES.ReaperLangPack",
   "variants": [

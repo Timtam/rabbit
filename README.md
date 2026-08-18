@@ -83,10 +83,14 @@ The pack matching the language RABBIT is running in is suggested and
 ticked for you; packs for other languages are listed but unticked. Nothing
 is offered in English, since REAPER is already English.
 
-REAPER loads exactly one language pack, so installing one removes the
-previous one **RABBIT** installed — a pack you dropped into `LangPack/`
-yourself is never touched. By default RABBIT also sets the pack as
-REAPER's language (see the configuration step below).
+You can install as many language packs as you like — REAPER keeps them all
+in `LangPack/` — and switch between them later from REAPER's own
+preferences. Only one is *active* at a time, so if you install several,
+pick which one REAPER starts in from the **REAPER language after
+installation** dropdown on the packages page (or `--reaper-language
+<package>` on the command line). Installing a pack never removes another
+one; the only file RABBIT replaces is the one it installed for that same
+pack, e.g. when you switch Spanish translations.
 
 The Spanish and German packs are published without version numbers, so
 RABBIT identifies them by what the server reports about the file (its ETag
@@ -106,10 +110,11 @@ configuration tweaks:
   ticked by default; if the repository is already configured in your
   `reapack.ini`, the step shows as *already applied* and is skipped.
   Idempotent and safe to re-run.
-- **Set REAPER's language** to a language pack you're installing, by
-  writing it into `reaper.ini`. Ticked by default whenever a language pack
-  is part of the plan — untick it if you want the file installed without
-  changing REAPER's current language. Only the one setting is touched;
+- **Set REAPER's language** to one of the language packs you're
+  installing, by writing it into `reaper.ini`. A single step covers every
+  language — which one it activates comes from the dropdown above. Ticked
+  by default whenever a language pack is part of the plan; untick it if you
+  want the files installed without changing REAPER's current language. Only the one setting is touched;
   the rest of `reaper.ini` is preserved byte for byte, including its
   original text encoding.
 
@@ -231,8 +236,8 @@ out of one. Step ids today are
 `reapack-add-reaper-accessibility-remote`,
 `reapack-add-reaper-accessible-fr-remote`,
 `reapack-add-reaper-accessible-en-remote`, and
-`set-reaper-language-<language>` (e.g. `set-reaper-language-de`, which
-depends on that language's pack being installed or in the plan). Run
+`set-reaper-language` (one step for every language; it depends on at
+least one language pack being installed or in the plan). Run
 `RABBIT --help` for the full set of flags.
 
 Language packs install like any other package, e.g.:
@@ -240,7 +245,7 @@ Language packs install like any other package, e.g.:
 ```
 RABBIT install-extension --package langpack-de --resource-path "%APPDATA%\REAPER" --apply
 RABBIT setup --resource-path "%APPDATA%\REAPER" --package langpack-es \
-     --config-step set-reaper-language-es --apply
+     --package langpack-de --reaper-language langpack-de --apply
 ```
 
 ### Maintain

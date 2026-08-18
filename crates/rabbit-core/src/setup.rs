@@ -39,6 +39,13 @@ pub struct SetupOptions {
     /// es_MX OSARA translation today).
     #[serde(default)]
     pub package_variants: std::collections::BTreeMap<String, String>,
+    /// Which language pack the "set REAPER's language" step should activate.
+    /// Several packs can be installed side by side — REAPER keeps them all in
+    /// `LangPack/` — but only one is active, so this is the user's single
+    /// choice of which. `None` activates the sole installed pack when there
+    /// is exactly one, and leaves REAPER's setting alone when ambiguous.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reaper_language_package: Option<String>,
     /// Ids of [`ConfigurationStep`] entries the user opted in to.
     /// Configuration steps run after the package install pipeline; those
     /// whose dependency package is neither installed nor part of this
@@ -136,6 +143,9 @@ pub fn execute_setup_operation_with_progress(
         resource_path,
         &options.configuration_step_ids,
         &installed_or_pending,
+        &crate::configuration::ConfigurationContext {
+            reaper_language_package: options.reaper_language_package.as_deref(),
+        },
         options.dry_run,
         progress,
     )?;
@@ -217,6 +227,9 @@ pub fn execute_resolved_setup_operation_with_progress(
         resource_path,
         &options.configuration_step_ids,
         &installed_or_pending,
+        &crate::configuration::ConfigurationContext {
+            reaper_language_package: options.reaper_language_package.as_deref(),
+        },
         options.dry_run,
         progress,
     )?;
@@ -285,6 +298,7 @@ fn run_configuration_steps(
     resource_path: &Path,
     selected_ids: &[String],
     installed_or_pending: &BTreeSet<String>,
+    context: &crate::configuration::ConfigurationContext<'_>,
     dry_run: bool,
     progress: &ProgressReporter,
 ) -> Result<Vec<ConfigurationStepReport>> {
@@ -296,8 +310,13 @@ fn run_configuration_steps(
             reports.push(skipped_step_report(step, ConfigurationStatus::Skipped));
             continue;
         }
-        if let Some(required) = &step.requires_package_id
-            && !installed_or_pending.contains(required)
+        // ANY-of: one satisfied dependency is enough. An empty list means
+        // the step has no package dependency at all.
+        if !step.requires_packages.is_empty()
+            && !step
+                .requires_packages
+                .iter()
+                .any(|required| installed_or_pending.contains(required))
         {
             reports.push(skipped_step_report(
                 step,
@@ -308,7 +327,12 @@ fn run_configuration_steps(
         progress.report(ProgressEvent::ConfigurationStarted {
             step_id: step.id.clone(),
         });
-        reports.push(apply_configuration_step(resource_path, step, dry_run)?);
+        reports.push(apply_configuration_step(
+            resource_path,
+            step,
+            context,
+            dry_run,
+        )?);
         progress.report(ProgressEvent::ConfigurationCompleted {
             step_id: step.id.clone(),
         });
@@ -430,6 +454,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                reaper_language_package: None,
                 configuration_step_ids: Vec::new(),
             },
         )
@@ -466,6 +491,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                reaper_language_package: None,
                 configuration_step_ids: Vec::new(),
             },
         )
@@ -518,6 +544,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                reaper_language_package: None,
                 configuration_step_ids: Vec::new(),
             },
         )

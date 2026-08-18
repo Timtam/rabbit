@@ -67,11 +67,13 @@ pub struct ConfigurationStep {
     /// "auto-apply recommended configuration" path enable it. The user
     /// can still untick it.
     pub recommended: bool,
-    /// Package the step depends on. The wizard disables (greys out)
-    /// the row when this package isn't already installed *and* isn't
-    /// queued for install in the current plan; the CLI refuses to run
-    /// the step in the same situation.
-    pub requires_package_id: Option<String>,
+    /// Packages the step depends on, with ANY-of semantics: the step is
+    /// available when at least one of them is already installed or queued in
+    /// the current plan, and the wizard greys the row out otherwise. A list
+    /// rather than a single id because "set REAPER's language" applies to
+    /// whichever language pack the user picked — one step for all of them,
+    /// instead of one step per language cluttering the configuration group.
+    pub requires_packages: Vec<String>,
     pub kind: ConfigurationStepKind,
 }
 
@@ -82,14 +84,29 @@ pub enum ConfigurationStepKind {
     /// `[remotes]` section in `<resource_path>/reapack.ini`. Idempotent
     /// on URL: re-running the wizard doesn't add a duplicate.
     AddReapackRemote { name: String, url: String },
-    /// Point REAPER at an installed language pack by writing
+    /// Point REAPER at one installed language pack by writing
     /// `langpack=<file name>` under `[REAPER]` in `<resource>/reaper.ini`.
-    /// The file name is resolved from `package_id`'s install receipt at
-    /// apply time rather than baked in, so it always matches whatever was
-    /// actually installed — including which variant the user picked (the
-    /// Spanish pack installs as es_ES or es_MX). Idempotent: selecting the
-    /// already-active pack writes nothing.
-    SetReaperLanguage { package_id: String },
+    ///
+    /// A single step covers every language, rather than one step per
+    /// language: several packs can be installed side by side (REAPER keeps
+    /// them all in `LangPack/`), but exactly one is *active*, so this is one
+    /// decision, not N. Which pack it activates comes from the run's
+    /// `reaper_language_package` choice, and the file name is read from that
+    /// package's install receipt at apply time — so it always matches what
+    /// was actually installed, including which Spanish variant was picked.
+    /// Idempotent: selecting the already-active pack writes nothing.
+    SetReaperLanguage,
+}
+
+/// Per-run inputs a configuration step needs beyond the step definition
+/// itself. Grouped so adding another doesn't grow every signature.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConfigurationContext<'a> {
+    /// Which language pack the user chose to activate. `None` means no
+    /// explicit choice — the step then activates the sole installed pack if
+    /// there is exactly one, and reports "skipped" if the choice is
+    /// ambiguous, rather than picking a language for the user.
+    pub reaper_language_package: Option<&'a str>,
 }
 
 /// Outcome of applying a single configuration step. Mirrors the
@@ -131,7 +148,7 @@ pub enum ConfigurationMessage {
     ReaperLanguageDryRun { file_name: String },
     /// User opted out of this configuration step.
     Skipped { step_id: String },
-    /// The step's `requires_package_id` dependency wasn't satisfied.
+    /// None of the step's `requires_packages` was satisfied.
     SkippedDependencyMissing { step_id: String, dep_id: String },
     /// Generic "applied with no observable change" fallback used by
     /// [`skipped_step_report`] when called with `Applied`.
@@ -147,7 +164,7 @@ pub enum ConfigurationStatus {
     Applied,
     /// User opted out (or didn't opt in for non-recommended steps).
     Skipped,
-    /// The step's `requires_package_id` dependency isn't satisfied —
+    /// None of the step's `requires_packages` is satisfied —
     /// e.g. the user wants to add a ReaPack remote but didn't install
     /// ReaPack and it isn't already on disk.
     SkippedDependencyMissing,
@@ -165,7 +182,7 @@ pub fn builtin_configuration_steps() -> Vec<ConfigurationStep> {
             display_name_key: "config-reapack-reaper-accessibility-name".to_string(),
             display_description_key: "config-reapack-reaper-accessibility-description".to_string(),
             recommended: true,
-            requires_package_id: Some(PACKAGE_REAPACK.to_string()),
+            requires_packages: vec![PACKAGE_REAPACK.to_string()],
             kind: ConfigurationStepKind::AddReapackRemote {
                 name: REAPER_ACCESSIBILITY_REPACK_NAME.to_string(),
                 url: REAPER_ACCESSIBILITY_REPACK_URL.to_string(),
@@ -180,7 +197,7 @@ pub fn builtin_configuration_steps() -> Vec<ConfigurationStep> {
             // everyone — users who want it opt in on the wizard's
             // configuration page (or via `--config-step`).
             recommended: false,
-            requires_package_id: Some(PACKAGE_REAPACK.to_string()),
+            requires_packages: vec![PACKAGE_REAPACK.to_string()],
             kind: ConfigurationStepKind::AddReapackRemote {
                 name: REAPER_ACCESSIBLE_FR_NAME.to_string(),
                 url: REAPER_ACCESSIBLE_FR_URL.to_string(),
@@ -191,7 +208,7 @@ pub fn builtin_configuration_steps() -> Vec<ConfigurationStep> {
             display_name_key: "config-reapack-reaper-accessible-en-name".to_string(),
             display_description_key: "config-reapack-reaper-accessible-en-description".to_string(),
             recommended: true,
-            requires_package_id: Some(PACKAGE_REAPACK.to_string()),
+            requires_packages: vec![PACKAGE_REAPACK.to_string()],
             kind: ConfigurationStepKind::AddReapackRemote {
                 name: REAPER_ACCESSIBLE_EN_NAME.to_string(),
                 url: REAPER_ACCESSIBLE_EN_URL.to_string(),
@@ -202,40 +219,61 @@ pub fn builtin_configuration_steps() -> Vec<ConfigurationStep> {
     steps
 }
 
-/// Stable id of the "set REAPER's language" step for a language subtag.
-pub fn config_set_reaper_language_id(language: &str) -> String {
-    format!("set-reaper-language-{language}")
-}
+/// Stable id of the single "set REAPER's language" step.
+pub const CONFIG_SET_REAPER_LANGUAGE: &str = "set-reaper-language";
 
-/// One "set REAPER's language" step per language pack in the embedded
-/// manifest, so adding a language pack JSON automatically offers to
-/// activate it — no extra Rust. Each step depends on its own pack, so the
-/// wizard greys it out (and the CLI refuses it) unless that pack is
-/// installed or queued in the current plan.
+/// The one "set REAPER's language" step, offered when any language pack is
+/// installed or queued. Deliberately ONE step for all languages: packs
+/// coexist in `LangPack/` but only one can be active, so this is a single
+/// decision — and a step per language would add a row and two translated
+/// strings per locale for every language ever added, for a choice the user
+/// makes once.
 fn lang_pack_steps() -> Vec<ConfigurationStep> {
-    embedded_package_manifest()
+    let language_packs: Vec<String> = embedded_package_manifest()
         .packages
         .into_iter()
         .filter(|spec| spec.package_kind == PackageKind::LanguagePack)
-        .filter_map(|spec| {
-            let language = spec.language.clone()?;
-            Some(ConfigurationStep {
-                id: config_set_reaper_language_id(&language),
-                display_name_key: format!("config-set-reaper-language-{language}-name"),
-                display_description_key: format!(
-                    "config-set-reaper-language-{language}-description"
-                ),
-                // Ticked by default: a user installing a language pack
-                // almost certainly wants REAPER to use it. They can untick
-                // to get the file without changing REAPER's setting.
-                recommended: true,
-                requires_package_id: Some(spec.id.clone()),
-                kind: ConfigurationStepKind::SetReaperLanguage {
-                    package_id: spec.id.clone(),
-                },
-            })
-        })
-        .collect()
+        .map(|spec| spec.id)
+        .collect();
+    if language_packs.is_empty() {
+        return Vec::new();
+    }
+    vec![ConfigurationStep {
+        id: CONFIG_SET_REAPER_LANGUAGE.to_string(),
+        display_name_key: "config-set-reaper-language-name".to_string(),
+        display_description_key: "config-set-reaper-language-description".to_string(),
+        // Ticked by default: someone installing a language pack almost
+        // certainly wants REAPER to use it. Untick to get the file only.
+        recommended: true,
+        requires_packages: language_packs,
+        kind: ConfigurationStepKind::SetReaperLanguage,
+    }]
+}
+
+/// The `.ReaperLangPack` file to activate: the run's chosen package, or —
+/// when no choice was made — the sole installed language pack. Returns
+/// `None` when nothing is installed, and also when several packs are
+/// installed but no choice was given, because guessing a language for the
+/// user would be worse than leaving REAPER's setting alone.
+fn chosen_lang_pack_file(
+    resource_path: &Path,
+    step: &ConfigurationStep,
+    context: &ConfigurationContext<'_>,
+) -> Result<Option<String>> {
+    if let Some(package_id) = context.reaper_language_package {
+        return installed_lang_pack_file(resource_path, package_id);
+    }
+    let mut installed = Vec::new();
+    for package_id in &step.requires_packages {
+        if let Some(file) = installed_lang_pack_file(resource_path, package_id)? {
+            installed.push(file);
+        }
+    }
+    Ok(if installed.len() == 1 {
+        installed.pop()
+    } else {
+        None
+    })
 }
 
 /// The `.ReaperLangPack` file `package_id`'s receipt says RABBIT installed,
@@ -264,13 +302,14 @@ fn installed_lang_pack_file(resource_path: &Path, package_id: &str) -> Result<Op
 pub fn is_configuration_step_applied(
     resource_path: &Path,
     step: &ConfigurationStep,
+    context: &ConfigurationContext<'_>,
 ) -> Result<bool> {
     match &step.kind {
         ConfigurationStepKind::AddReapackRemote { url, .. } => {
             is_remote_configured(resource_path, url)
         }
-        ConfigurationStepKind::SetReaperLanguage { package_id } => {
-            let Some(file_name) = installed_lang_pack_file(resource_path, package_id)? else {
+        ConfigurationStepKind::SetReaperLanguage => {
+            let Some(file_name) = chosen_lang_pack_file(resource_path, step, context)? else {
                 // Nothing installed yet: there is no work we could already
                 // have done, so the step is not "applied".
                 return Ok(false);
@@ -286,6 +325,7 @@ pub fn is_configuration_step_applied(
 pub fn apply_configuration_step(
     resource_path: &Path,
     step: &ConfigurationStep,
+    context: &ConfigurationContext<'_>,
     dry_run: bool,
 ) -> Result<ConfigurationStepReport> {
     if dry_run {
@@ -335,8 +375,8 @@ pub fn apply_configuration_step(
                 message_code,
             })
         }
-        ConfigurationStepKind::SetReaperLanguage { package_id } => {
-            let Some(file_name) = installed_lang_pack_file(resource_path, package_id)? else {
+        ConfigurationStepKind::SetReaperLanguage => {
+            let Some(file_name) = chosen_lang_pack_file(resource_path, step, context)? else {
                 // The pack isn't on disk — most likely its install failed, or
                 // it was skipped because REAPER itself failed. Report that and
                 // move on rather than erroring: this step is best-effort, and
@@ -347,12 +387,10 @@ pub fn apply_configuration_step(
                 return Ok(ConfigurationStepReport {
                     step_id: step.id.clone(),
                     status: ConfigurationStatus::SkippedDependencyMissing,
-                    message: format!(
-                        "Skipped: {package_id} is not installed, so REAPER's language was left unchanged."
-                    ),
+                    message: "Skipped: no installed language pack to activate, so REAPER's language was left unchanged.".to_string(),
                     message_code: ConfigurationMessage::SkippedDependencyMissing {
                         step_id: step.id.clone(),
-                        dep_id: package_id.clone(),
+                        dep_id: step.requires_packages.join(", "),
                     },
                 });
             };
@@ -393,10 +431,14 @@ fn dry_run_message_for(step: &ConfigurationStep) -> (String, ConfigurationMessag
                 url: url.clone(),
             },
         ),
-        ConfigurationStepKind::SetReaperLanguage { package_id } => {
-            let file_name = package_id.clone();
+        ConfigurationStepKind::SetReaperLanguage => {
+            let file_name = step
+                .requires_packages
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "language pack".to_string());
             (
-                format!("Would set REAPER's language to the {file_name} language pack."),
+                format!("Would set REAPER's language to the installed {file_name} language pack."),
                 ConfigurationMessage::ReaperLanguageDryRun { file_name },
             )
         }
@@ -418,10 +460,11 @@ pub fn skipped_step_report(
             },
         ),
         ConfigurationStatus::SkippedDependencyMissing => {
-            let dep = step
-                .requires_package_id
-                .clone()
-                .unwrap_or_else(|| "(unknown package)".to_string());
+            let dep = if step.requires_packages.is_empty() {
+                "(unknown package)".to_string()
+            } else {
+                step.requires_packages.join(", ")
+            };
             (
                 format!(
                     "Configuration step {:?} skipped because its dependency package {dep:?} was not installed and is not part of this plan.",
@@ -460,7 +503,7 @@ mod tests {
             .find(|s| s.id == CONFIG_REAPER_ACCESSIBILITY_REPACK_REMOTE)
             .expect("REAPER Accessibility ReaPack remote step is missing");
         assert!(step.recommended);
-        assert_eq!(step.requires_package_id.as_deref(), Some(PACKAGE_REAPACK));
+        assert_eq!(step.requires_packages, vec![PACKAGE_REAPACK.to_string()]);
         match &step.kind {
             ConfigurationStepKind::AddReapackRemote { name, url } => {
                 assert_eq!(name, "REAPER Accessibility");
@@ -483,7 +526,7 @@ mod tests {
         // French-language resources: offered, but opt-in rather than
         // pre-selected.
         assert!(!step.recommended);
-        assert_eq!(step.requires_package_id.as_deref(), Some(PACKAGE_REAPACK));
+        assert_eq!(step.requires_packages, vec![PACKAGE_REAPACK.to_string()]);
         match &step.kind {
             ConfigurationStepKind::AddReapackRemote { name, url } => {
                 assert_eq!(name, "REAPER Accessible (FR)");
@@ -504,7 +547,7 @@ mod tests {
             .find(|s| s.id == CONFIG_REAPER_ACCESSIBLE_EN_REMOTE)
             .expect("REAPER Accessible (EN) ReaPack remote step is missing");
         assert!(step.recommended);
-        assert_eq!(step.requires_package_id.as_deref(), Some(PACKAGE_REAPACK));
+        assert_eq!(step.requires_packages, vec![PACKAGE_REAPACK.to_string()]);
         match &step.kind {
             ConfigurationStepKind::AddReapackRemote { name, url } => {
                 assert_eq!(name, "REAPER Accessible (EN)");
@@ -517,123 +560,44 @@ mod tests {
         }
     }
 
-    /// Language-pack activation steps are generated from the manifest, so
-    /// adding a language pack JSON offers to activate it with no extra Rust.
-    /// Each depends on its own pack, so the wizard greys it out unless that
-    /// pack is installed or queued.
+    /// ONE "set REAPER's language" step covers every language, rather than
+    /// one per language: packs coexist in LangPack/ but only one is active,
+    /// so this is a single decision. A step per language also cost a row and
+    /// two translated strings per locale for every language ever added.
     #[test]
-    fn builtin_steps_include_one_language_step_per_language_pack() {
+    fn a_single_language_step_covers_every_language_pack() {
         use crate::package::{PackageKind, embedded_package_manifest};
 
-        let steps = builtin_configuration_steps();
-        let packs: Vec<_> = embedded_package_manifest()
+        let packs: Vec<String> = embedded_package_manifest()
             .packages
             .into_iter()
             .filter(|spec| spec.package_kind == PackageKind::LanguagePack)
+            .map(|spec| spec.id)
             .collect();
-        assert!(packs.len() >= 2, "expected the Spanish and German packs");
+        assert!(packs.len() >= 2, "expected several language packs");
 
-        for pack in packs {
-            let language = pack.language.clone().expect("pack declares a language");
-            let step = steps
-                .iter()
-                .find(|s| s.id == super::config_set_reaper_language_id(&language))
-                .unwrap_or_else(|| panic!("no language step for {}", pack.id));
-            assert!(step.recommended, "{}: should be ticked by default", pack.id);
-            assert_eq!(
-                step.requires_package_id.as_deref(),
-                Some(pack.id.as_str()),
-                "{}: step must depend on its own pack",
-                pack.id
+        let steps = builtin_configuration_steps();
+        let language_steps: Vec<_> = steps
+            .iter()
+            .filter(|s| matches!(s.kind, ConfigurationStepKind::SetReaperLanguage))
+            .collect();
+        assert_eq!(
+            language_steps.len(),
+            1,
+            "exactly one language step, however many packs exist"
+        );
+
+        let step = language_steps[0];
+        assert_eq!(step.id, super::CONFIG_SET_REAPER_LANGUAGE);
+        assert!(step.recommended);
+        // ANY-of: every pack is listed, so the step lights up for whichever
+        // one the user picked.
+        for pack in &packs {
+            assert!(
+                step.requires_packages.contains(pack),
+                "{pack} should satisfy the language step"
             );
-            match &step.kind {
-                ConfigurationStepKind::SetReaperLanguage { package_id } => {
-                    // The step names the package; the file is resolved from
-                    // its receipt at apply time so a variant switch is
-                    // honoured automatically.
-                    assert_eq!(package_id, &pack.id);
-                }
-                other => panic!("unexpected step kind: {other:?}"),
-            }
         }
-    }
-
-    /// The step resolves the file name from the package's receipt, so it
-    /// always activates whatever was actually installed — including the
-    /// variant the user picked. With nothing installed there is no name to
-    /// write, so the step reports "not applied" and refuses to guess.
-    #[test]
-    fn apply_sets_and_reports_the_reaper_language() {
-        use crate::receipt::{InstallState, InstalledFileReceipt, PackageReceipt};
-
-        let dir = tempdir().unwrap();
-        let resource = dir.path();
-        let step = builtin_configuration_steps()
-            .into_iter()
-            .find(|s| s.id == super::config_set_reaper_language_id("es"))
-            .expect("Spanish language step");
-
-        // No receipt yet: nothing is applied, and applying SKIPS rather than
-        // erroring. Erroring here aborted the whole run and buried the real
-        // cause — a user whose REAPER install failed was told
-        // "no installed language-pack file is recorded for langpack-de"
-        // instead of that REAPER had failed.
-        assert!(!is_configuration_step_applied(resource, &step).unwrap());
-        let skipped = apply_configuration_step(resource, &step, false)
-            .expect("a missing language pack must not be fatal");
-        assert_eq!(
-            skipped.status,
-            ConfigurationStatus::SkippedDependencyMissing
-        );
-        assert!(matches!(
-            skipped.message_code,
-            ConfigurationMessage::SkippedDependencyMissing { .. }
-        ));
-
-        // Record the Team PMA variant as installed — the step must follow it
-        // rather than the package's default es_ES name.
-        let mut state = InstallState::default();
-        state.packages.insert(
-            "langpack-es".to_string(),
-            PackageReceipt {
-                id: "langpack-es".to_string(),
-                version: None,
-                source_url: None,
-                source_sha256: None,
-                variant: None,
-                installed_files: vec![InstalledFileReceipt {
-                    path: std::path::PathBuf::from("LangPack").join("es_MX.ReaperLangPack"),
-                    sha256: None,
-                    size: None,
-                }],
-                installed_at: None,
-                rabbit_version: None,
-                architecture: None,
-            },
-        );
-        crate::receipt::save_install_state(resource, &state).unwrap();
-
-        let report = apply_configuration_step(resource, &step, false).unwrap();
-        assert_eq!(report.status, ConfigurationStatus::Applied);
-        assert!(matches!(
-            report.message_code,
-            ConfigurationMessage::ReaperLanguageSelected { .. }
-        ));
-        assert_eq!(
-            crate::reaper_ini::selected_lang_pack(resource)
-                .unwrap()
-                .as_deref(),
-            Some("es_MX.ReaperLangPack"),
-            "activation must follow the installed variant, not the default"
-        );
-
-        // Now it reads as applied, and re-running is a no-op.
-        assert!(is_configuration_step_applied(resource, &step).unwrap());
-        let again = apply_configuration_step(resource, &step, false).unwrap();
-        assert!(matches!(
-            again.message_code,
-            ConfigurationMessage::ReaperLanguageAlreadySelected { .. }
-        ));
     }
 
     #[test]
@@ -645,7 +609,8 @@ mod tests {
             .find(|s| s.id == CONFIG_REAPER_ACCESSIBILITY_REPACK_REMOTE)
             .unwrap();
 
-        let report = apply_configuration_step(dir.path(), step, false).unwrap();
+        let report =
+            apply_configuration_step(dir.path(), step, &Default::default(), false).unwrap();
         assert_eq!(report.status, ConfigurationStatus::Applied);
         assert!(
             dir.path()
@@ -663,7 +628,7 @@ mod tests {
             .find(|s| s.id == CONFIG_REAPER_ACCESSIBILITY_REPACK_REMOTE)
             .unwrap();
 
-        let report = apply_configuration_step(dir.path(), step, true).unwrap();
+        let report = apply_configuration_step(dir.path(), step, &Default::default(), true).unwrap();
         assert_eq!(report.status, ConfigurationStatus::DryRun);
         assert!(
             !dir.path()
@@ -681,9 +646,9 @@ mod tests {
             .find(|s| s.id == CONFIG_REAPER_ACCESSIBILITY_REPACK_REMOTE)
             .unwrap();
 
-        assert!(!is_configuration_step_applied(dir.path(), step).unwrap());
-        apply_configuration_step(dir.path(), step, false).unwrap();
-        assert!(is_configuration_step_applied(dir.path(), step).unwrap());
+        assert!(!is_configuration_step_applied(dir.path(), step, &Default::default()).unwrap());
+        apply_configuration_step(dir.path(), step, &Default::default(), false).unwrap();
+        assert!(is_configuration_step_applied(dir.path(), step, &Default::default()).unwrap());
     }
 
     #[test]
@@ -695,8 +660,9 @@ mod tests {
             .find(|s| s.id == CONFIG_REAPER_ACCESSIBILITY_REPACK_REMOTE)
             .unwrap();
 
-        apply_configuration_step(dir.path(), step, false).unwrap();
-        let second = apply_configuration_step(dir.path(), step, false).unwrap();
+        apply_configuration_step(dir.path(), step, &Default::default(), false).unwrap();
+        let second =
+            apply_configuration_step(dir.path(), step, &Default::default(), false).unwrap();
         // Idempotent: still reports Applied, but the message records the
         // already-configured state so reports stay accurate.
         assert_eq!(second.status, ConfigurationStatus::Applied);

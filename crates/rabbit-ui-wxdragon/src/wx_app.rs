@@ -1459,6 +1459,10 @@ struct WizardWidgets {
     package_details: TextCtrl,
     osara_keymap_replace: CheckBox,
     osara_keymap_note: TextCtrl,
+    /// Which installed language pack REAPER should use. Enabled only while
+    /// at least one language pack is selected; several can be installed
+    /// side by side, but only one is active.
+    reaper_language_choice: Choice,
     /// Choice between the two Spanish OSARA translations. Enabled only
     /// while the Spanish language pack is selected.
     spanish_variant_choice: Choice,
@@ -1899,6 +1903,17 @@ pub fn run() {
                                 package_variants: crate::package_variants_from_choice(
                                     widgets.spanish_variant_choice.get_selection(),
                                 ),
+                                // Which of the installed language packs REAPER
+                                // starts in. The dropdown lists the ticked
+                                // packs in row order, so the selection index
+                                // maps straight back to a package id.
+                                reaper_language_package: crate::selected_language_packs(
+                                    &rows,
+                                    &selected_packages,
+                                )
+                                .get(widgets.reaper_language_choice.get_selection().unwrap_or(0)
+                                    as usize)
+                                .map(|(id, _)| id.clone()),
                                 ..WizardInstallOptions::default()
                             },
                         )
@@ -2013,6 +2028,7 @@ pub fn run() {
                             &widgets.osara_keymap_replace,
                             &widgets.osara_keymap_note,
                             &widgets.spanish_variant_choice,
+                            &widgets.reaper_language_choice,
                             &model,
                             &package_rows.borrow(),
                             &configuration_rows.borrow(),
@@ -2443,6 +2459,7 @@ fn add_pages(
         osara_keymap_replace,
         osara_keymap_note,
         spanish_variant_choice,
+        reaper_language_choice,
     ) = build_packages_page(
         &packages_page,
         model,
@@ -2500,6 +2517,7 @@ fn add_pages(
         osara_keymap_replace,
         osara_keymap_note,
         spanish_variant_choice,
+        reaper_language_choice,
         reapack_ack_confirm,
         review_text,
         progress_status,
@@ -3749,7 +3767,7 @@ fn build_packages_page(
     configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     package_items: PackagesStateCell,
     can_install: Rc<Cell<bool>>,
-) -> (PackagesView, TextCtrl, CheckBox, TextCtrl, Choice) {
+) -> (PackagesView, TextCtrl, CheckBox, TextCtrl, Choice, Choice) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     add_heading(
         page,
@@ -3853,6 +3871,25 @@ fn build_packages_page(
     osara_keymap_note.set_can_focus(false);
     sizer.add(&osara_keymap_note, 0, SizerFlag::All | SizerFlag::Expand, 6);
 
+    // Which installed language pack REAPER starts in. Several packs can be
+    // installed at once (REAPER keeps them all in LangPack/ and you can
+    // switch inside REAPER later), so this only picks the one active
+    // straight after installing.
+    add_label(
+        page,
+        &sizer,
+        &model.text.packages_reaper_language_label,
+        "rabbit-reaper-language-label",
+    );
+    let reaper_language_choice = Choice::builder(page).build();
+    reaper_language_choice.set_name(&model.text.packages_reaper_language_label);
+    sizer.add(
+        &reaper_language_choice,
+        0,
+        SizerFlag::All | SizerFlag::Expand,
+        6,
+    );
+
     // Which of the two Spanish OSARA translations to install. Only the
     // installed FILE NAME differs (es_ES vs es_MX) — that is what OSARA
     // reads to pick its translation — so this is a plain either/or rather
@@ -3883,6 +3920,7 @@ fn build_packages_page(
         &osara_keymap_note,
     );
     sync_spanish_variant_widget(&package_rows.borrow(), &spanish_variant_choice);
+    sync_reaper_language_widget(&package_rows.borrow(), &reaper_language_choice);
 
     // Selection-change updates the package details text. The event fires
     // when the focused row changes via mouse or arrow keys; we use the
@@ -3896,6 +3934,7 @@ fn build_packages_page(
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
         let spanish_checkbox = spanish_variant_choice;
+        let language_choice = reaper_language_choice;
         tree.on_selection_changed(move |event| {
             if let Some(item) = event.get_item() {
                 match classify_leaf(&package_items.borrow(), &item) {
@@ -3919,6 +3958,7 @@ fn build_packages_page(
                 &osara_note,
             );
             sync_spanish_variant_widget(&package_rows.borrow(), &spanish_checkbox);
+            sync_reaper_language_widget(&package_rows.borrow(), &language_choice);
         });
     }
 
@@ -3938,6 +3978,7 @@ fn build_packages_page(
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
         let spanish_checkbox = spanish_variant_choice;
+        let language_choice = reaper_language_choice;
         tree.bind_internal(EventType::TREE_STATE_IMAGE_CLICK, move |event| {
             handle_native_checkbox_toggle(
                 &tree_widget,
@@ -3950,6 +3991,7 @@ fn build_packages_page(
                 &osara_checkbox,
                 &osara_note,
                 &spanish_checkbox,
+                &language_choice,
                 TreeEventData::new(event).get_item(),
             );
         });
@@ -4023,6 +4065,7 @@ fn build_packages_page(
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
         let spanish_checkbox = spanish_variant_choice;
+        let language_choice = reaper_language_choice;
         tree.on_mouse_left_up(move |event| {
             if let WindowEventData::MouseButton(mb) = &event
                 && let Some(pos) = mb.get_position()
@@ -4038,6 +4081,7 @@ fn build_packages_page(
                     &osara_checkbox,
                     &osara_note,
                     &spanish_checkbox,
+                    &language_choice,
                     pos,
                 );
             }
@@ -4062,6 +4106,7 @@ fn build_packages_page(
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
         let spanish_checkbox = spanish_variant_choice;
+        let language_choice = reaper_language_choice;
         tree.on_key_down(move |event| {
             let key_code = if let WindowEventData::Keyboard(kbd) = &event {
                 kbd.get_key_code()
@@ -4124,6 +4169,7 @@ fn build_packages_page(
                 &osara_checkbox,
                 &osara_note,
                 &spanish_checkbox,
+                &language_choice,
             );
             // Consume the event so the native control doesn't *also*
             // toggle the parent's state image after us.
@@ -4151,6 +4197,7 @@ fn build_packages_page(
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
         let spanish_checkbox = spanish_variant_choice;
+        let language_choice = reaper_language_choice;
         tree.on_key_up(move |event| {
             let key_code = if let WindowEventData::Keyboard(kbd) = &event {
                 kbd.get_key_code()
@@ -4224,6 +4271,7 @@ fn build_packages_page(
                 &osara_checkbox,
                 &osara_note,
                 &spanish_checkbox,
+                &language_choice,
             );
         });
     }
@@ -4251,6 +4299,7 @@ fn build_packages_page(
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
         let spanish_checkbox = spanish_variant_choice;
+        let language_choice = reaper_language_choice;
         tree.on_item_activated(move |event| {
             let Some(item) = event.get_item() else {
                 return;
@@ -4277,6 +4326,7 @@ fn build_packages_page(
                 &osara_checkbox,
                 &osara_note,
                 &spanish_checkbox,
+                &language_choice,
             );
         });
     }
@@ -4287,9 +4337,11 @@ fn build_packages_page(
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
         let spanish_checkbox = spanish_variant_choice;
+        let language_choice = reaper_language_choice;
         osara_keymap_replace.on_toggled(move |_| {
             sync_osara_keymap_widgets(&model_text, &rows.borrow(), &osara_checkbox, &osara_note);
             sync_spanish_variant_widget(&rows.borrow(), &spanish_checkbox);
+            sync_reaper_language_widget(&rows.borrow(), &language_choice);
         });
     }
 
@@ -4300,6 +4352,7 @@ fn build_packages_page(
         osara_keymap_replace,
         osara_keymap_note,
         spanish_variant_choice,
+        reaper_language_choice,
     )
 }
 
@@ -4443,6 +4496,7 @@ fn handle_native_checkbox_toggle(
     osara_checkbox: &CheckBox,
     osara_note: &TextCtrl,
     spanish_checkbox: &Choice,
+    language_choice: &Choice,
     item: Option<TreeItemId>,
 ) {
     let Some(item) = item else {
@@ -4504,6 +4558,7 @@ fn handle_native_checkbox_toggle(
         osara_checkbox,
         osara_note,
         spanish_checkbox,
+        language_choice,
     );
 }
 
@@ -4531,6 +4586,7 @@ fn handle_packages_left_up(
     osara_checkbox: &CheckBox,
     osara_note: &TextCtrl,
     spanish_checkbox: &Choice,
+    language_choice: &Choice,
     pos: Point,
 ) {
     let hwnd = tree.get_handle();
@@ -4596,6 +4652,7 @@ fn handle_packages_left_up(
         osara_checkbox,
         osara_note,
         spanish_checkbox,
+        language_choice,
     );
 }
 
@@ -4619,6 +4676,7 @@ fn refresh_after_packages_toggle(
     osara_checkbox: &CheckBox,
     osara_note: &TextCtrl,
     spanish_checkbox: &Choice,
+    language_choice: &Choice,
 ) {
     // Configuration rows depend on the package plan (e.g. ReaPack must
     // be installed/queued for the REAPER Accessibility step). Re-evaluate
@@ -4698,6 +4756,8 @@ fn refresh_after_packages_toggle(
         osara_note,
     );
     sync_spanish_variant_widget(&package_rows.borrow(), spanish_checkbox);
+    sync_reaper_language_widget(&package_rows.borrow(), language_choice);
+    sync_reaper_language_widget(&package_rows.borrow(), language_choice);
 }
 
 /// Windows-only: implement the parent-checkbox propagation for the
@@ -4805,7 +4865,7 @@ fn build_packages_page(
     configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     package_items: PackagesStateCell,
     can_install: Rc<Cell<bool>>,
-) -> (PackagesView, TextCtrl, CheckBox, TextCtrl, Choice) {
+) -> (PackagesView, TextCtrl, CheckBox, TextCtrl, Choice, Choice) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     add_heading(
         page,
@@ -4940,6 +5000,25 @@ fn build_packages_page(
     osara_keymap_note.set_can_focus(false);
     sizer.add(&osara_keymap_note, 0, SizerFlag::All | SizerFlag::Expand, 6);
 
+    // Which installed language pack REAPER starts in. Several packs can be
+    // installed at once (REAPER keeps them all in LangPack/ and you can
+    // switch inside REAPER later), so this only picks the one active
+    // straight after installing.
+    add_label(
+        page,
+        &sizer,
+        &model.text.packages_reaper_language_label,
+        "rabbit-reaper-language-label",
+    );
+    let reaper_language_choice = Choice::builder(page).build();
+    reaper_language_choice.set_name(&model.text.packages_reaper_language_label);
+    sizer.add(
+        &reaper_language_choice,
+        0,
+        SizerFlag::All | SizerFlag::Expand,
+        6,
+    );
+
     // Which of the two Spanish OSARA translations to install. Only the
     // installed FILE NAME differs (es_ES vs es_MX) — that is what OSARA
     // reads to pick its translation — so this is a plain either/or rather
@@ -4970,6 +5049,7 @@ fn build_packages_page(
         &osara_keymap_note,
     );
     sync_spanish_variant_widget(&package_rows.borrow(), &spanish_variant_choice);
+    sync_reaper_language_widget(&package_rows.borrow(), &reaper_language_choice);
 
     {
         let package_rows = Rc::clone(&package_rows);
@@ -4977,6 +5057,7 @@ fn build_packages_page(
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
         let spanish_checkbox = spanish_variant_choice;
+        let language_choice = reaper_language_choice;
         tree.on_selection_changed(move |event| {
             if let Some(item) = event.get_item() {
                 if let Some(node_ptr) = item.get_id::<Node>() {
@@ -5001,6 +5082,7 @@ fn build_packages_page(
                 &osara_note,
             );
             sync_spanish_variant_widget(&package_rows.borrow(), &spanish_checkbox);
+            sync_reaper_language_widget(&package_rows.borrow(), &language_choice);
         });
     }
 
@@ -5010,9 +5092,11 @@ fn build_packages_page(
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
         let spanish_checkbox = spanish_variant_choice;
+        let language_choice = reaper_language_choice;
         osara_keymap_replace.on_toggled(move |_| {
             sync_osara_keymap_widgets(&model_text, &rows.borrow(), &osara_checkbox, &osara_note);
             sync_spanish_variant_widget(&rows.borrow(), &spanish_checkbox);
+            sync_reaper_language_widget(&rows.borrow(), &language_choice);
         });
     }
 
@@ -5023,6 +5107,7 @@ fn build_packages_page(
         osara_keymap_replace,
         osara_keymap_note,
         spanish_variant_choice,
+        reaper_language_choice,
     )
 }
 
@@ -5565,6 +5650,7 @@ fn refresh_package_checklist(
     osara_keymap_replace: &CheckBox,
     osara_keymap_note: &TextCtrl,
     spanish_variant_choice: &Choice,
+    reaper_language_choice: &Choice,
     model: &WizardModel,
     rows: &[crate::PackageRow],
     configuration_rows: &[ConfigurationRow],
@@ -5573,6 +5659,7 @@ fn refresh_package_checklist(
     details.set_value(&rows.first().map(package_details).unwrap_or_default());
     sync_osara_keymap_widgets(model, rows, osara_keymap_replace, osara_keymap_note);
     sync_spanish_variant_widget(rows, spanish_variant_choice);
+    sync_reaper_language_widget(rows, reaper_language_choice);
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -6054,6 +6141,7 @@ fn refresh_package_checklist(
     osara_keymap_replace: &CheckBox,
     osara_keymap_note: &TextCtrl,
     spanish_variant_choice: &Choice,
+    reaper_language_choice: &Choice,
     model: &WizardModel,
     rows: &[crate::PackageRow],
     configuration_rows: &[ConfigurationRow],
@@ -6062,12 +6150,38 @@ fn refresh_package_checklist(
     details.set_value(&rows.first().map(package_details).unwrap_or_default());
     sync_osara_keymap_widgets(model, rows, osara_keymap_replace, osara_keymap_note);
     sync_spanish_variant_widget(rows, spanish_variant_choice);
+    sync_reaper_language_widget(rows, reaper_language_choice);
 }
 
 /// Enable the Spanish OSARA-translation choice only while the Spanish
 /// language pack is actually selected for install — the setting has no
 /// effect otherwise, and a live-but-inert control is a trap for a screen
 /// reader. Mirrors how the OSARA key-map choice is gated on OSARA.
+/// Refill the "REAPER language after installation" dropdown from the
+/// language packs currently ticked, preserving the user's pick when it is
+/// still on the list. Disabled when nothing is ticked, since there would be
+/// nothing to choose. Several packs can be installed at once, so this is a
+/// list rather than a consequence of which pack was chosen.
+fn sync_reaper_language_widget(rows: &[crate::PackageRow], choice: &Choice) {
+    let selected_indices = checked_package_indices(rows);
+    let packs = crate::selected_language_packs(rows, &selected_indices);
+    let previous = choice
+        .get_selection()
+        .and_then(|index| choice.get_string(index));
+    choice.clear();
+    for (_, display_name) in &packs {
+        choice.append(display_name);
+    }
+    let restored = previous
+        .and_then(|name| packs.iter().position(|(_, display)| *display == name))
+        .unwrap_or(0);
+    if !packs.is_empty() {
+        choice.set_selection(restored as u32);
+    }
+    choice.enable(!packs.is_empty());
+    choice.set_can_focus(!packs.is_empty());
+}
+
 fn sync_spanish_variant_widget(rows: &[crate::PackageRow], choice: &Choice) {
     let selected_indices = checked_package_indices(rows);
     let selected = crate::variant_choice_package_selected(rows, &selected_indices);

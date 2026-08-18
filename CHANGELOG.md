@@ -72,7 +72,27 @@ from this file and posts it as the GitHub release body.
   packs, this one is published with a version number, which RABBIT reads
   from ReaperAccessible's ReaPack index and shows in the wizard.
 
+### Changed
+
+- The wizard no longer grows a "Set REAPER's language to X" configuration
+  step for every language it supports. There is one **Set REAPER's
+  language** step, and which pack it activates comes from a **REAPER
+  language after installation** dropdown listing the packs you ticked — one
+  decision instead of a row per language, and two translated strings rather
+  than two per language. On the command line the step id is now
+  `set-reaper-language` (it was `set-reaper-language-<language>`), and
+  `--reaper-language <package>` picks which pack to activate.
+
 ### Fixed
+
+- Installing a language pack no longer deletes the other ones. RABBIT
+  treated language packs as mutually exclusive and removed the previously
+  installed pack, which was simply wrong: REAPER keeps every pack in its
+  `LangPack` folder and only *activates* one, so a multilingual user can
+  install German and Spanish and switch between them in REAPER whenever
+  they like. Packs now sit side by side; the only file RABBIT still
+  replaces is the one it installed for that same pack, such as when you
+  switch between the two Spanish translations.
 
 - A failed REAPER install no longer reports itself as a confusing language
   error. If REAPER can't be installed, the language pack that depends on it

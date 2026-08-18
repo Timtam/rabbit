@@ -134,6 +134,7 @@ pub struct WizardText {
     pub package_details_label: String,
     pub packages_osara_keymap_heading: String,
     pub packages_osara_keymap_replace_label: String,
+    pub packages_reaper_language_label: String,
     pub packages_spanish_variant_label: String,
     /// The selectable Spanish OSARA translations, in the same order as
     /// [`VARIANT_CHOICE_IDS`].
@@ -333,6 +334,9 @@ pub struct WizardInstallOptions {
     /// Chosen package flavour per package id; see
     /// [`rabbit_core::package::PackageVariant`].
     pub package_variants: std::collections::BTreeMap<String, String>,
+    /// Language pack to make active after installing; see
+    /// [`WizardInstallRequest::reaper_language_package`].
+    pub reaper_language_package: Option<String>,
     pub cache_dir: Option<PathBuf>,
 }
 
@@ -344,6 +348,7 @@ impl Default for WizardInstallOptions {
             stage_unsupported: true,
             osara_keymap_choice: OsaraKeymapChoice::ReplaceCurrent,
             package_variants: std::collections::BTreeMap::new(),
+            reaper_language_package: None,
             cache_dir: None,
         }
     }
@@ -364,6 +369,9 @@ pub struct WizardInstallRequest {
     /// Chosen package flavour per package id, forwarded to
     /// [`rabbit_core::setup::SetupOptions::package_variants`].
     pub package_variants: std::collections::BTreeMap<String, String>,
+    /// Language pack to make active after installing. Several can be
+    /// installed at once — REAPER keeps them all — but only one is active.
+    pub reaper_language_package: Option<String>,
     pub cache_dir: PathBuf,
     /// Packages whose plan-time decision was `Keep` (already current) but
     /// the user explicitly checked the box anyway, opting in to a
@@ -733,6 +741,7 @@ fn wizard_text(localizer: &Localizer) -> WizardText {
         packages_osara_keymap_replace_label: localizer
             .text("wizard-packages-osara-keymap-replace-label")
             .value,
+        packages_reaper_language_label: localizer.text("packages-reaper-language-label").value,
         packages_spanish_variant_label: localizer.text("packages-spanish-variant-label").value,
         packages_spanish_variant_options: VARIANT_CHOICE_IDS
             .iter()
@@ -1065,6 +1074,7 @@ pub fn install_request_from_target_and_rows(
             OsaraKeymapChoice::PreserveCurrent
         },
         package_variants: options.package_variants.clone(),
+        reaper_language_package: options.reaper_language_package.clone(),
         cache_dir: options.cache_dir.unwrap_or_else(default_cache_dir),
         force_reinstall_packages,
         configuration_step_ids,
@@ -1104,6 +1114,21 @@ pub fn variant_choice_package_selected(package_rows: &[PackageRow], indices: &[u
         .iter()
         .filter_map(|index| package_rows.get(*index))
         .any(|row| row.package_id == VARIANT_CHOICE_PACKAGE_ID)
+}
+
+/// Ticked language packs, in row order, as (package id, display name). The
+/// wizard's "REAPER language after installation" dropdown lists these: any
+/// number can be installed side by side, but exactly one is made active.
+pub fn selected_language_packs(
+    package_rows: &[PackageRow],
+    indices: &[usize],
+) -> Vec<(String, String)> {
+    indices
+        .iter()
+        .filter_map(|index| package_rows.get(*index))
+        .filter(|row| row.category == rabbit_core::package::PackageCategory::Language)
+        .map(|row| (row.package_id.clone(), row.display_name.clone()))
+        .collect()
 }
 
 /// The one package that currently offers a variant choice in the wizard.
@@ -1804,6 +1829,7 @@ pub fn execute_wizard_install_with_progress(
             lock_path: None,
             force_reinstall_packages: request.force_reinstall_packages.clone(),
             package_variants: request.package_variants.clone(),
+            reaper_language_package: request.reaper_language_package.clone(),
             configuration_step_ids: request.configuration_step_ids.clone(),
         },
         progress,
@@ -3113,14 +3139,17 @@ pub fn configuration_rows(
                     text.value
                 }
             };
-            let dependency_satisfied = step
-                .requires_package_id
-                .as_deref()
-                .map(|pkg| installed_or_pending.get(pkg).copied().unwrap_or(false))
-                .unwrap_or(true);
+            let dependency_satisfied = configuration_dependency_satisfied(&step, |pkg| {
+                installed_or_pending.get(pkg).copied().unwrap_or(false)
+            });
             let already_applied = target_resource_path
                 .and_then(|path| {
-                    rabbit_core::configuration::is_configuration_step_applied(path, &step).ok()
+                    rabbit_core::configuration::is_configuration_step_applied(
+                        path,
+                        &step,
+                        &Default::default(),
+                    )
+                    .ok()
                 })
                 .unwrap_or(false);
 
@@ -3172,7 +3201,7 @@ fn configuration_row_summary(
     already_applied: bool,
 ) -> String {
     let status = if !dependency_satisfied {
-        let dep_id = step.requires_package_id.clone().unwrap_or_default();
+        let dep_id = step.requires_packages.first().cloned().unwrap_or_default();
         let dep_name = localizer.text(&format!("package-{dep_id}"));
         let dep_label = if dep_name.missing {
             dep_id
@@ -3223,7 +3252,7 @@ fn build_configuration_unavailability_reason(
     already_applied: bool,
 ) -> Option<String> {
     if !dependency_satisfied {
-        let dep_id = step.requires_package_id.clone().unwrap_or_default();
+        let dep_id = step.requires_packages.first().cloned().unwrap_or_default();
         let dep_name = localizer.text(&format!("package-{dep_id}"));
         let dep_label = if dep_name.missing {
             dep_id
@@ -3260,6 +3289,21 @@ fn build_configuration_unavailability_reason(
 /// from available → unavailable, in which case it's force-unticked
 /// (we never want to ship the install with a configuration step
 /// queued whose dependency isn't available).
+/// ANY-of dependency check for a configuration step: satisfied when at least
+/// one required package will be on disk, or when the step requires none.
+/// "Set REAPER's language" lists every language pack, so it lights up
+/// whichever one the user picked.
+fn configuration_dependency_satisfied(
+    step: &rabbit_core::configuration::ConfigurationStep,
+    mut is_present: impl FnMut(&str) -> bool,
+) -> bool {
+    step.requires_packages.is_empty()
+        || step
+            .requires_packages
+            .iter()
+            .any(|pkg| is_present(pkg.as_str()))
+}
+
 pub fn recompute_configuration_row_availability(
     localizer: &Localizer,
     package_rows: &[PackageRow],
@@ -3275,14 +3319,17 @@ pub fn recompute_configuration_row_availability(
         let Some(step) = steps.iter().find(|step| step.id == row.step_id) else {
             continue;
         };
-        let dependency_satisfied = step
-            .requires_package_id
-            .as_deref()
-            .map(|pkg| installed_or_pending.get(pkg).copied().unwrap_or(false))
-            .unwrap_or(true);
+        let dependency_satisfied = configuration_dependency_satisfied(step, |pkg| {
+            installed_or_pending.get(pkg).copied().unwrap_or(false)
+        });
         let already_applied = target_resource_path
             .and_then(|path| {
-                rabbit_core::configuration::is_configuration_step_applied(path, step).ok()
+                rabbit_core::configuration::is_configuration_step_applied(
+                    path,
+                    step,
+                    &Default::default(),
+                )
+                .ok()
             })
             .unwrap_or(row.already_applied);
         let was_actionable = row.available_for_target && !row.already_applied;
@@ -4127,6 +4174,7 @@ mod tests {
                 stage_unsupported: false,
                 osara_keymap_choice: OsaraKeymapChoice::ReplaceCurrent,
                 package_variants: Default::default(),
+                reaper_language_package: None,
                 cache_dir: Some(PathBuf::from("C:/cache")),
             },
         )
@@ -5484,6 +5532,7 @@ mod tests {
             cache_dir: PathBuf::from("C:/cache"),
             force_reinstall_packages: Vec::new(),
             package_variants: Default::default(),
+            reaper_language_package: None,
             configuration_step_ids: Vec::new(),
         }
     }

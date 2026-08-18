@@ -239,6 +239,12 @@ enum Command {
         config_step: Vec<String>,
         #[arg(long = "skip-config-step")]
         skip_config_step: Vec<String>,
+        /// Language pack to make active after installing, e.g.
+        /// `--reaper-language langpack-de`. Several packs can be installed
+        /// at once; this picks which one REAPER uses. Defaults to the only
+        /// installed pack when there is exactly one.
+        #[arg(long = "reaper-language")]
+        reaper_language: Option<String>,
         #[arg(long)]
         report_path: Option<PathBuf>,
         #[arg(long)]
@@ -711,6 +717,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             accept_reapack_donation_notice,
             config_step,
             skip_config_step,
+            reaper_language,
             report_path,
             save_report,
             json,
@@ -744,6 +751,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     target_app_path,
                     lock_path: None,
                     force_reinstall_packages: Vec::new(),
+                    reaper_language_package: reaper_language,
                     configuration_step_ids,
                 },
             )?;
@@ -1003,18 +1011,25 @@ fn resolve_configuration_step_ids(
         .into_iter()
         .filter(|step| step.recommended && !skip_set.contains(step.id.as_str()))
         .filter(|step| {
-            step.requires_package_id
-                .as_deref()
-                .map(|pkg| installed_or_pending.contains(pkg))
-                .unwrap_or(true)
+            // ANY-of: "set REAPER's language" lists every language pack, so
+            // one installed pack is enough to make the step relevant.
+            step.requires_packages.is_empty()
+                || step
+                    .requires_packages
+                    .iter()
+                    .any(|pkg| installed_or_pending.contains(pkg))
         })
         .filter(|step| {
             // Skip recommended steps that are already in place — they'd
             // be a no-op. Users can still force a re-run via explicit
             // `--config-step <id>` (the early `if !explicit.is_empty()`
             // branch above bypasses this filter).
-            !rabbit_core::configuration::is_configuration_step_applied(resource_path, step)
-                .unwrap_or(false)
+            !rabbit_core::configuration::is_configuration_step_applied(
+                resource_path,
+                step,
+                &Default::default(),
+            )
+            .unwrap_or(false)
         })
         .map(|step| step.id)
         .collect()
