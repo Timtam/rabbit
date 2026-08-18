@@ -20,6 +20,7 @@
 //!
 //! Other targets compile to a stub that returns an `Unsupported` error.
 
+#[cfg(windows)]
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -205,12 +206,11 @@ fn platform_run_elevated_and_wait(
     let command_line = if arguments.is_empty() {
         applescript_quote(&program.display().to_string())
     } else {
-        let joined = std::iter::once(program.display().to_string())
+        std::iter::once(program.display().to_string())
             .chain(arguments.iter().cloned())
             .map(|argument| applescript_quote(&argument))
             .collect::<Vec<_>>()
-            .join(" & space & ");
-        joined
+            .join(" & space & ")
     };
     let script = format!(
         "do shell script ({command_line}) with administrator privileges",
@@ -269,6 +269,7 @@ fn applescript_quote(argument: &str) -> String {
 /// Quote each argument the way `ShellExecuteEx` expects (one space-joined
 /// command-line string), wrapping arguments containing whitespace or quotes
 /// in double-quotes and escaping internal quotes.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn quote_arguments(arguments: &[String]) -> String {
     arguments
         .iter()

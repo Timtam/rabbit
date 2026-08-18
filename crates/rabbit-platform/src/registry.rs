@@ -20,6 +20,7 @@ use windows_sys::Win32::System::Registry::{
     REG_SZ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
 };
 
+#[cfg(windows)]
 const UNINSTALL_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
 
 #[cfg_attr(not(windows), allow(unused_variables))]

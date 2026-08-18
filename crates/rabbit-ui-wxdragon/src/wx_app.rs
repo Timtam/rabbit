@@ -4757,7 +4757,6 @@ fn refresh_after_packages_toggle(
     );
     sync_spanish_variant_widget(&package_rows.borrow(), spanish_checkbox);
     sync_reaper_language_widget(&package_rows.borrow(), language_choice);
-    sync_reaper_language_widget(&package_rows.borrow(), language_choice);
 }
 
 /// Windows-only: implement the parent-checkbox propagation for the
@@ -4902,11 +4901,13 @@ fn build_packages_page(
         model.text.language_tree_group_label.clone(),
         model.text.configuration_tree_group_label.clone(),
     );
+    let side_widgets: PackagesSideWidgetsCell = Rc::new(RefCell::new(None));
     let dv_model = build_packages_tree_model(
         tree_data,
         Rc::clone(&package_rows),
         Rc::clone(&configuration_rows),
         Rc::clone(&package_items),
+        Rc::clone(&side_widgets),
         Rc::clone(&can_install),
         model.clone(),
     );
@@ -5051,6 +5052,17 @@ fn build_packages_page(
     sync_spanish_variant_widget(&package_rows.borrow(), &spanish_variant_choice);
     sync_reaper_language_widget(&package_rows.borrow(), &reaper_language_choice);
 
+    // Hand the tree model its handles now that the widgets exist. All four
+    // types are `Copy`, so the moves into the event closures below still
+    // work. This runs before `page.set_sizer`, i.e. before the user can
+    // interact with anything.
+    *side_widgets.borrow_mut() = Some(PackagesSideWidgets {
+        osara_checkbox: osara_keymap_replace,
+        osara_note: osara_keymap_note,
+        spanish_choice: spanish_variant_choice,
+        language_choice: reaper_language_choice,
+    });
+
     {
         let package_rows = Rc::clone(&package_rows);
         let model_text = model.clone();
@@ -5111,6 +5123,26 @@ fn build_packages_page(
     )
 }
 
+/// Non-Windows: the widgets that sit *below* the packages tree and whose
+/// state depends on which packages are ticked.
+///
+/// They cannot be captured by the model's `set_value` closure, because
+/// creation order is tab order: the tree has to be created before them, and
+/// the model is built with the tree. So they arrive afterwards through a
+/// cell, exactly like the self-referential model handle in
+/// `PackagesStateCell`.
+#[cfg(not(target_os = "windows"))]
+#[derive(Clone, Copy)]
+struct PackagesSideWidgets {
+    osara_checkbox: CheckBox,
+    osara_note: TextCtrl,
+    spanish_choice: Choice,
+    language_choice: Choice,
+}
+
+#[cfg(not(target_os = "windows"))]
+type PackagesSideWidgetsCell = Rc<RefCell<Option<PackagesSideWidgets>>>;
+
 /// Non-Windows: build the `CustomDataViewTreeModel` that backs the packages
 /// tree. The closures capture clones of `package_rows`, `package_items`
 /// (the self-referential model handle cell), `can_install`, and the wizard
@@ -5123,6 +5155,7 @@ fn build_packages_tree_model(
     rows: Rc<RefCell<Vec<crate::PackageRow>>>,
     configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     model_cell: PackagesStateCell,
+    side_widgets: PackagesSideWidgetsCell,
     can_install: Rc<Cell<bool>>,
     wizard_model: WizardModel,
 ) -> CustomDataViewTreeModel {
@@ -5137,6 +5170,7 @@ fn build_packages_tree_model(
     let configuration_rows_for_recompute = Rc::clone(&configuration_rows);
     let wizard_model_for_recompute = wizard_model.clone();
     let model_cell_for_set_value = Rc::clone(&model_cell);
+    let side_widgets_for_set_value = Rc::clone(&side_widgets);
 
     CustomDataViewTreeModel::new(
         data,
@@ -5305,7 +5339,11 @@ fn build_packages_tree_model(
                         let mut any_available = false;
                         let all_checked = cfg_rows
                             .iter()
-                            .filter(|r| r.available_for_target)
+                            // already-applied rows are excluded, exactly as
+                            // compute_configuration_group_tristate does on
+                            // Windows: they are forced unselected and would
+                            // otherwise pin the group to "unchecked" forever.
+                            .filter(|r| r.available_for_target && !r.already_applied)
                             .inspect(|_| any_available = true)
                             .all(|r| r.selected);
                         Variant::from_bool(any_available && all_checked)
@@ -5425,6 +5463,27 @@ fn build_packages_tree_model(
                             None,
                             &mut cfg_rows,
                         );
+                    }
+
+                    // Same tail as the Windows `refresh_after_packages_toggle`:
+                    // ticking a package can change which OSARA keymap note
+                    // applies, whether the Spanish variant picker is usable,
+                    // and — because it owns the dropdown's *contents*, not
+                    // just its enabled state — what the REAPER-language
+                    // dropdown offers. Without this, toggling a row that is
+                    // already selected (Space, or clicking its checkbox)
+                    // leaves all three stale, because `on_selection_changed`
+                    // never fires.
+                    if let Some(widgets) = *side_widgets_for_set_value.borrow() {
+                        let rows = rows_for_set_value.borrow();
+                        sync_osara_keymap_widgets(
+                            &wizard_model_for_recompute,
+                            &rows,
+                            &widgets.osara_checkbox,
+                            &widgets.osara_note,
+                        );
+                        sync_spanish_variant_widget(&rows, &widgets.spanish_choice);
+                        sync_reaper_language_widget(&rows, &widgets.language_choice);
                     }
                 }
 

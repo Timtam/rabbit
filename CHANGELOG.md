@@ -85,6 +85,18 @@ from this file and posts it as the GitHub release body.
 
 ### Fixed
 
+- On macOS and Linux, ticking a package on the row that already had focus
+  (Space, or clicking its checkbox) left every control below the package
+  list stale: the OSARA keymap note, the Spanish translation picker and the
+  new REAPER-language dropdown only refreshed when the *selection* changed.
+  Arrow onto a row and press Space and nothing below the list caught up.
+  Windows was unaffected — it refreshes them on every toggle route.
+- On macOS and Linux, the **Configuration** group checkbox could be ticked
+  but never unticked, and always drew as unchecked, as soon as one of its
+  steps was already applied at the target — which is the normal case, since
+  an existing ReaPack remote counts as applied. It counted already-applied
+  steps as unticked members of the group, so "all ticked" was never true.
+
 - Installing a language pack no longer deletes the other ones. RABBIT
   treated language packs as mutually exclusive and removed the previously
   installed pack, which was simply wrong: REAPER keeps every pack in its

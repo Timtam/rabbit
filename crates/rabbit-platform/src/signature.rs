@@ -213,7 +213,7 @@ mod tests {
     #[cfg(unix)]
     fn exit_status(code: c_int) -> ExitStatus {
         use std::os::unix::process::ExitStatusExt;
-        ExitStatus::from_raw((code as i32) << 8)
+        ExitStatus::from_raw(code << 8)
     }
 
     #[cfg(windows)]
