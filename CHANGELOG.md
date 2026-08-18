@@ -84,8 +84,9 @@ from this file and posts it as the GitHub release body.
   translators publish a fix. A pack that is merely installed and up to date
   is not a refusal: it sits unticked because there is nothing to do, and
   RABBIT reads that as silence rather than a decision. Tick it yourself and
-  the refusal is forgotten, so a change of mind sticks too. The memory is per REAPER
-  install, so you can say no on one and yes on another, and packages opt
+  the refusal is forgotten, so a change of mind sticks too. The memory is
+  per REAPER install, so you can say no on one and yes on another, and
+  packages opt
   into this through a new `remember_opt_out` manifest flag — only the
   language packs set it, because they are the ones RABBIT turns on by
   guessing. Receipts stay readable by older RABBITs, which simply ignore the
@@ -114,6 +115,15 @@ from this file and posts it as the GitHub release body.
   switch the interface out from under them. `rabbit setup` follows the same
   rule for its defaults, while `--config-step set-reaper-language` still
   activates an already-installed pack for people who want exactly that.
+
+- `RABBIT <command> --help` now explains every flag. 47 of the 50 printed
+  nothing but their own name, which made RABBIT's own advice — "run
+  `--help` for anything not covered here" — worth very little.
+  `--accept-reapack-donation-notice` was the sharp edge: ReaPack cannot be
+  installed unattended without it, and neither the help nor the README said
+  so, which simply reads as a broken install. The README also gains that
+  example, a Spanish-variant one, and a short tour of the flags most likely
+  to be wanted.
 
 ### Fixed
 
