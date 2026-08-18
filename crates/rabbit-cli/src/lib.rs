@@ -1230,13 +1230,13 @@ fn resolve_configuration_step_ids(
             // ANY-of: "set REAPER's language" lists every language pack, so
             // one pack is enough to make the step relevant.
             //
-            // Steps flagged `auto_select_only_when_installing` are matched
+            // Steps flagged `requires_fresh_dependency` are matched
             // against the packages THIS RUN asks for, not against whatever
             // is already on disk. Otherwise `rabbit setup` on a machine
             // that happens to have a language pack installed would switch
             // REAPER's interface language without being asked. Such a step
             // is still reachable with an explicit `--config-step`.
-            let candidates: &BTreeSet<String> = if step.auto_select_only_when_installing {
+            let candidates: &BTreeSet<String> = if step.requires_fresh_dependency {
                 &requested
             } else {
                 &installed_or_pending

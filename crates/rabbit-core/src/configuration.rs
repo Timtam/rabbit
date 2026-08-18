@@ -74,17 +74,20 @@ pub struct ConfigurationStep {
     /// whichever language pack the user picked — one step for all of them,
     /// instead of one step per language cluttering the configuration group.
     pub requires_packages: Vec<String>,
-    /// Tick this step by default only when one of its `requires_packages`
-    /// is actually being installed or updated in this run — not merely
-    /// already present on disk.
+    /// Treat this step's dependency as satisfied only by a package being
+    /// installed or updated in THIS run, not by one that merely happens to
+    /// be on disk already.
     ///
     /// For additive steps (adding a ReaPack remote) "the package is there"
     /// is reason enough. Changing REAPER's interface language is not
-    /// additive: someone who has a language pack on disk but runs REAPER
-    /// in English chose English, and a run that installs nothing
-    /// language-related must not switch their UI out from under them. The
-    /// step stays *available* so they can still tick it deliberately.
-    pub auto_select_only_when_installing: bool,
+    /// additive, and it is meaningless without a pack in the run: the
+    /// wizard's "REAPER language after installation" dropdown lists exactly
+    /// the packs you ticked, so with none ticked the step has nothing to
+    /// activate. Tying the two together keeps the step and the dropdown
+    /// telling the same story — untick every language pack and the step
+    /// greys out and clears itself; tick one and it comes back ticked,
+    /// ready to be unticked if you want the files without the switch.
+    pub requires_fresh_dependency: bool,
     pub kind: ConfigurationStepKind,
 }
 
@@ -194,7 +197,7 @@ pub fn builtin_configuration_steps() -> Vec<ConfigurationStep> {
             display_description_key: "config-reapack-reaper-accessibility-description".to_string(),
             recommended: true,
             requires_packages: vec![PACKAGE_REAPACK.to_string()],
-            auto_select_only_when_installing: false,
+            requires_fresh_dependency: false,
             kind: ConfigurationStepKind::AddReapackRemote {
                 name: REAPER_ACCESSIBILITY_REPACK_NAME.to_string(),
                 url: REAPER_ACCESSIBILITY_REPACK_URL.to_string(),
@@ -210,7 +213,7 @@ pub fn builtin_configuration_steps() -> Vec<ConfigurationStep> {
             // configuration page (or via `--config-step`).
             recommended: false,
             requires_packages: vec![PACKAGE_REAPACK.to_string()],
-            auto_select_only_when_installing: false,
+            requires_fresh_dependency: false,
             kind: ConfigurationStepKind::AddReapackRemote {
                 name: REAPER_ACCESSIBLE_FR_NAME.to_string(),
                 url: REAPER_ACCESSIBLE_FR_URL.to_string(),
@@ -222,7 +225,7 @@ pub fn builtin_configuration_steps() -> Vec<ConfigurationStep> {
             display_description_key: "config-reapack-reaper-accessible-en-description".to_string(),
             recommended: true,
             requires_packages: vec![PACKAGE_REAPACK.to_string()],
-            auto_select_only_when_installing: false,
+            requires_fresh_dependency: false,
             kind: ConfigurationStepKind::AddReapackRemote {
                 name: REAPER_ACCESSIBLE_EN_NAME.to_string(),
                 url: REAPER_ACCESSIBLE_EN_URL.to_string(),
@@ -260,7 +263,7 @@ fn lang_pack_steps() -> Vec<ConfigurationStep> {
         // certainly wants REAPER to use it. Untick to get the file only.
         recommended: true,
         requires_packages: language_packs,
-        auto_select_only_when_installing: true,
+        requires_fresh_dependency: true,
         kind: ConfigurationStepKind::SetReaperLanguage,
     }]
 }

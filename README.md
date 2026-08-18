@@ -123,15 +123,18 @@ configuration tweaks:
   Idempotent and safe to re-run.
 - **Set REAPER's language** to one of the language packs you're
   installing, by writing it into `reaper.ini`. A single step covers every
-  language — which one it activates comes from the dropdown above. Ticked
-  by default only when a language pack is actually being installed in this
-  run; a pack that is merely already on disk leaves it unticked, since a
-  run that installs nothing language-related shouldn't change the language
-  you're already using. Untick it if you want the files installed without
-  changing REAPER's current language, or tick it yourself to switch to a
-  pack you installed earlier. Only the one setting is touched;
-  the rest of `reaper.ini` is preserved byte for byte, including its
-  original text encoding.
+  language — which one it activates comes from the dropdown above. The step
+  is tied to the packs you tick: with none ticked it is greyed out, because
+  the dropdown it reads from is empty and there would be nothing to
+  activate. Tick a language pack and the step ticks itself, ready to be
+  unticked if you want the files installed without changing the language
+  REAPER is in; untick the last pack and the step clears itself again. A
+  pack merely sitting on disk from an earlier run doesn't count — a run
+  that installs nothing language-related leaves your current language
+  alone. (On the command line the step is still reachable directly with
+  `--config-step set-reaper-language`, which activates an already-installed
+  pack.) Only the one setting is touched; the rest of `reaper.ini` is
+  preserved byte for byte, including its original text encoding.
 
 Built with screen reader users in mind: keyboard-first wizard, native
 controls, NVDA/JAWS/Narrator/VoiceOver tested, English, German, Spanish, French

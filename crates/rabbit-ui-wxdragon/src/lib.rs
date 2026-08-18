@@ -280,12 +280,6 @@ pub struct ConfigurationRow {
     /// the step's `recommended` flag intersected with the row's
     /// `available_for_target`.
     pub selected: bool,
-    /// What the recommended-default rule wants for this row right now.
-    ///
-    /// Kept alongside `selected` so a recompute can tell "the default just
-    /// changed" (follow it) from "the default is unchanged and the user
-    /// unticked the row" (leave their decision alone).
-    pub auto_selected: bool,
     /// Row label as rendered in the tree. For configuration rows the
     /// summary is just `display_name` today; kept as a separate field
     /// so the wizard's tree-refresh helpers can stay symmetric with
@@ -3240,9 +3234,8 @@ pub fn configuration_rows(
                     text.value
                 }
             };
-            let dependency_satisfied = configuration_dependency_satisfied(&step, |pkg| {
-                installed_or_pending.get(pkg).copied().unwrap_or(false)
-            });
+            let dependency_satisfied =
+                configuration_dependency_met(&step, &installed_or_pending, &installing_now);
             let already_applied = target_resource_path
                 .and_then(|path| {
                     rabbit_core::configuration::is_configuration_step_applied(
@@ -3274,16 +3267,11 @@ pub fn configuration_rows(
                 format!("{summary}\n\n{description}")
             };
 
-            let auto_selected = configuration_auto_selected(&step, |pkg| {
-                installing_now.get(pkg).copied().unwrap_or(false)
-            });
-
             ConfigurationRow {
                 step_id: step.id.clone(),
                 display_name,
                 description,
-                selected: dependency_satisfied && !already_applied && auto_selected,
-                auto_selected,
+                selected: dependency_satisfied && !already_applied && step.recommended,
                 summary,
                 details,
                 available_for_target: dependency_satisfied,
@@ -3410,18 +3398,22 @@ fn configuration_dependency_satisfied(
             .any(|pkg| is_present(pkg.as_str()))
 }
 
-/// Does the recommended-default rule want this step ticked?
+/// Is this step's dependency satisfied?
 ///
-/// `step.recommended` is the baseline; steps flagged
-/// `auto_select_only_when_installing` additionally require one of their
-/// dependency packages to be installing in this run.
-fn configuration_auto_selected(
+/// Steps flagged `requires_fresh_dependency` count only packages being
+/// installed or updated in this run; every other step also counts packages
+/// that are already on disk.
+fn configuration_dependency_met(
     step: &rabbit_core::configuration::ConfigurationStep,
-    is_installing: impl FnMut(&str) -> bool,
+    landing: &BTreeMap<&str, bool>,
+    installing: &BTreeMap<&str, bool>,
 ) -> bool {
-    step.recommended
-        && (!step.auto_select_only_when_installing
-            || configuration_dependency_satisfied(step, is_installing))
+    let source = if step.requires_fresh_dependency {
+        installing
+    } else {
+        landing
+    };
+    configuration_dependency_satisfied(step, |pkg| source.get(pkg).copied().unwrap_or(false))
 }
 
 pub fn recompute_configuration_row_availability(
@@ -3443,9 +3435,8 @@ pub fn recompute_configuration_row_availability(
         let Some(step) = steps.iter().find(|step| step.id == row.step_id) else {
             continue;
         };
-        let dependency_satisfied = configuration_dependency_satisfied(step, |pkg| {
-            installed_or_pending.get(pkg).copied().unwrap_or(false)
-        });
+        let dependency_satisfied =
+            configuration_dependency_met(step, &installed_or_pending, &installing_now);
         let already_applied = target_resource_path
             .and_then(|path| {
                 rabbit_core::configuration::is_configuration_step_applied(
@@ -3481,27 +3472,19 @@ pub fn recompute_configuration_row_availability(
         } else {
             format!("{}\n\n{}", row.summary, row.description)
         };
-        let auto_selected = configuration_auto_selected(step, |pkg| {
-            installing_now.get(pkg).copied().unwrap_or(false)
-        });
-        // Was the row still sitting where the default put it? If so it is
-        // safe to move it with the default; if the user has since overridden
-        // it, their decision wins.
-        let follows_default = row.selected == row.auto_selected;
         let actionable_now = dependency_satisfied && !already_applied;
         if !actionable_now {
+            // Nothing to act on, so nothing ticked. Unticking the last
+            // language pack clears "Set REAPER's language" through this
+            // branch, rather than leaving a ticked step pointing at no pack.
             row.selected = false;
-        } else if !was_actionable || follows_default {
-            // Re-becoming actionable (dep just got satisfied, or the
-            // user reverted an external apply), or the default itself
-            // moved — e.g. ticking a language pack turns the "set REAPER's
-            // language" default on, unticking it again turns it back off.
-            // A row the user explicitly overrode is left alone, because
-            // then `follows_default` is false and it was already
-            // actionable.
-            row.selected = auto_selected;
+        } else if !was_actionable {
+            // Just became actionable — e.g. a language pack was ticked.
+            // Restore the recommended default so the user doesn't have to
+            // hunt for the step; unticking it afterwards survives, because
+            // by then the row was already actionable.
+            row.selected = step.recommended;
         }
-        row.auto_selected = auto_selected;
     }
 }
 
@@ -4301,26 +4284,22 @@ mod tests {
     }
 
     #[test]
-    fn language_step_does_not_auto_tick_for_a_merely_installed_pack() {
-        // A language pack that is already on disk arrives as an unticked
-        // `Keep` row. The step must stay AVAILABLE — the user can still
-        // switch REAPER to that pack deliberately — but must not be ticked
-        // by default: nothing language-related is being installed, and
-        // silently switching REAPER's interface language would be a change
-        // the user never asked for.
+    fn language_step_is_unavailable_while_no_language_pack_is_ticked() {
+        // The step activates one of the packs you ticked — the "REAPER
+        // language after installation" dropdown lists exactly those — so
+        // with none ticked it has nothing to point at. It must be greyed
+        // out rather than tickable-but-meaningless, even when a pack is
+        // already sitting on disk from an earlier run.
         let (_localizer, model) = langpack_model(PlanActionKind::Keep);
         let pack = &model.package_rows[0];
         assert!(!pack.selected, "an already-installed pack starts unticked");
 
         let step = language_step(&model.configuration_rows);
         assert!(
-            step.available_for_target,
-            "the pack is on disk, so the step must remain tickable"
+            !step.available_for_target,
+            "no language pack is ticked, so the step must not be tickable"
         );
-        assert!(
-            !step.selected,
-            "the step must not auto-tick when no language pack is being installed"
-        );
+        assert!(!step.selected, "and it must not be ticked");
     }
 
     #[test]
@@ -4338,8 +4317,13 @@ mod tests {
             None,
             &mut configuration_rows,
         );
+        let step = language_step(&configuration_rows);
         assert!(
-            language_step(&configuration_rows).selected,
+            step.available_for_target,
+            "ticking a language pack must make the step usable"
+        );
+        assert!(
+            step.selected,
             "ticking a language pack must tick the step that activates it"
         );
 
@@ -4351,9 +4335,14 @@ mod tests {
             None,
             &mut configuration_rows,
         );
+        let step = language_step(&configuration_rows);
         assert!(
-            !language_step(&configuration_rows).selected,
-            "unticking the pack must untick the step again"
+            !step.selected,
+            "unticking the last pack must untick the step again"
+        );
+        assert!(
+            !step.available_for_target,
+            "and must grey it out, since there is no longer a pack to activate"
         );
     }
 
