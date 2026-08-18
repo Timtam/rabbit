@@ -751,7 +751,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     target_app_path,
                     lock_path: None,
                     force_reinstall_packages: Vec::new(),
-                    reaper_language_package: reaper_language,
+                    reaper_language_package: validate_reaper_language(reaper_language)?,
                     configuration_step_ids,
                 },
             )?;
@@ -998,7 +998,8 @@ fn resolve_configuration_step_ids(
             .collect();
     }
 
-    let mut installed_or_pending: BTreeSet<String> = package_ids.iter().cloned().collect();
+    let requested: BTreeSet<String> = package_ids.iter().cloned().collect();
+    let mut installed_or_pending: BTreeSet<String> = requested.clone();
     if let Ok(detections) = rabbit_core::detection::detect_components(resource_path, platform) {
         for detection in detections {
             if detection.installed {
@@ -1012,12 +1013,24 @@ fn resolve_configuration_step_ids(
         .filter(|step| step.recommended && !skip_set.contains(step.id.as_str()))
         .filter(|step| {
             // ANY-of: "set REAPER's language" lists every language pack, so
-            // one installed pack is enough to make the step relevant.
+            // one pack is enough to make the step relevant.
+            //
+            // Steps flagged `auto_select_only_when_installing` are matched
+            // against the packages THIS RUN asks for, not against whatever
+            // is already on disk. Otherwise `rabbit setup` on a machine
+            // that happens to have a language pack installed would switch
+            // REAPER's interface language without being asked. Such a step
+            // is still reachable with an explicit `--config-step`.
+            let candidates: &BTreeSet<String> = if step.auto_select_only_when_installing {
+                &requested
+            } else {
+                &installed_or_pending
+            };
             step.requires_packages.is_empty()
                 || step
                     .requires_packages
                     .iter()
-                    .any(|pkg| installed_or_pending.contains(pkg))
+                    .any(|pkg| candidates.contains(pkg))
         })
         .filter(|step| {
             // Skip recommended steps that are already in place — they'd
@@ -1324,6 +1337,40 @@ fn parse_package_variants(
         variants.insert(package.to_string(), variant.to_string());
     }
     Ok(variants)
+}
+
+/// Check `--reaper-language <package>` names a language pack we actually
+/// ship. Without this the value is looked up in the install receipts, finds
+/// nothing for a typo, and the run quietly leaves REAPER in English — the
+/// user asked for German and got silence. Same standard as
+/// `parse_package_variants`: reject loudly rather than install the wrong
+/// thing.
+fn validate_reaper_language(
+    package: Option<String>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let Some(package) = package else {
+        return Ok(None);
+    };
+    let package = package.trim().to_string();
+    // The one "set REAPER's language" step lists every language pack we
+    // ship, so it is the authoritative set.
+    let known: Vec<String> = rabbit_core::configuration::builtin_configuration_steps()
+        .into_iter()
+        .find(|step| step.id == rabbit_core::configuration::CONFIG_SET_REAPER_LANGUAGE)
+        .map(|step| step.requires_packages)
+        .unwrap_or_default();
+    if !known.contains(&package) {
+        return Err(format!(
+            "--reaper-language expects a language pack, got {package:?} (available: {})",
+            if known.is_empty() {
+                "none".to_string()
+            } else {
+                known.join(", ")
+            }
+        )
+        .into());
+    }
+    Ok(Some(package))
 }
 
 fn print_package_operation_report(report: &PackageOperationReport) {
@@ -1887,5 +1934,59 @@ mod tests {
             },
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+    /// A language pack that is merely already installed must not drag the
+    /// "set REAPER's language" step into the DEFAULT step set. Otherwise
+    /// `rabbit setup` on a machine that happens to have a pack on disk
+    /// would switch REAPER's interface language without being asked.
+    #[test]
+    fn language_step_is_not_a_default_for_a_merely_installed_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("RABBIT")).unwrap();
+        std::fs::create_dir_all(root.join("LangPack")).unwrap();
+        std::fs::write(root.join("LangPack").join("de_DE.ReaperLangPack"), b"x").unwrap();
+        std::fs::write(
+            root.join("RABBIT").join("install-state.json"),
+            r#"{"schema_version":1,"packages":{"langpack-de":{"id":"langpack-de","version":null,"source_url":null,"source_sha256":null,"installed_files":[{"path":"LangPack/de_DE.ReaperLangPack","sha256":null,"size":null}],"installed_at":null,"rabbit_version":null,"architecture":null}}}"#,
+        )
+        .unwrap();
+
+        let language_step = rabbit_core::configuration::CONFIG_SET_REAPER_LANGUAGE;
+
+        let defaults = super::resolve_configuration_step_ids(
+            root,
+            rabbit_core::model::Platform::Windows,
+            &["osara".to_string()],
+            &[],
+            &[],
+        );
+        assert!(
+            !defaults.iter().any(|id| id == language_step),
+            "installing something unrelated must not activate a language pack: {defaults:?}"
+        );
+
+        // Asking for the pack in this run opts in.
+        let requested = super::resolve_configuration_step_ids(
+            root,
+            rabbit_core::model::Platform::Windows,
+            &["langpack-de".to_string()],
+            &[],
+            &[],
+        );
+        assert!(
+            requested.iter().any(|id| id == language_step),
+            "requesting a language pack must select the step that activates it: {requested:?}"
+        );
+
+        // And it stays reachable explicitly even when nothing is requested.
+        let explicit = super::resolve_configuration_step_ids(
+            root,
+            rabbit_core::model::Platform::Windows,
+            &[],
+            &[language_step.to_string()],
+            &[],
+        );
+        assert!(explicit.iter().any(|id| id == language_step));
     }
 }

@@ -81,7 +81,19 @@ from this file and posts it as the GitHub release body.
   decision instead of a row per language, and two translated strings rather
   than two per language. On the command line the step id is now
   `set-reaper-language` (it was `set-reaper-language-<language>`), and
-  `--reaper-language <package>` picks which pack to activate.
+  `--reaper-language <package>` picks which pack to activate. An unknown
+  package there is now rejected with the list of language packs rather than
+  quietly leaving REAPER in English.
+
+- **Set REAPER's language** is only ticked for you when a language pack is
+  actually being installed in this run. Having a pack sitting on disk from
+  an earlier run no longer arrives pre-ticked — someone who keeps a German
+  pack installed but runs REAPER in English chose English, and a run that
+  installs nothing language-related must not switch the interface out from
+  under them. The step stays available, so ticking it yourself still
+  switches REAPER to an already-installed pack. `rabbit setup` follows the
+  same rule: the step is a default only when the run asks for a language
+  pack, and `--config-step set-reaper-language` still forces it.
 
 ### Fixed
 

@@ -280,6 +280,12 @@ pub struct ConfigurationRow {
     /// the step's `recommended` flag intersected with the row's
     /// `available_for_target`.
     pub selected: bool,
+    /// What the recommended-default rule wants for this row right now.
+    ///
+    /// Kept alongside `selected` so a recompute can tell "the default just
+    /// changed" (follow it) from "the default is unchanged and the user
+    /// unticked the row" (leave their decision alone).
+    pub auto_selected: bool,
     /// Row label as rendered in the tree. For configuration rows the
     /// summary is just `display_name` today; kept as a separate field
     /// so the wizard's tree-refresh helpers can stay symmetric with
@@ -3102,6 +3108,16 @@ fn package_rows(
 /// is flipped to `Keep` (so `selected=false` but `action=Keep`). Both
 /// must read as "won't be on disk", which the simpler action-only check
 /// got wrong for the latter and our new default broke for the former.
+/// Is this package being written to disk *by this run* — as opposed to
+/// merely being there already? Steps that change existing configuration
+/// rather than adding to it auto-tick off this, not off
+/// [`package_row_will_land_on_disk`].
+fn package_row_installs_now(row: &PackageRow) -> bool {
+    row.available_for_target
+        && row.selected
+        && matches!(row.action, PlanActionKind::Install | PlanActionKind::Update)
+}
+
 fn package_row_will_land_on_disk(row: &PackageRow) -> bool {
     if !row.available_for_target {
         return false;
@@ -3125,6 +3141,10 @@ pub fn configuration_rows(
     let installed_or_pending: BTreeMap<&str, bool> = package_rows
         .iter()
         .map(|row| (row.package_id.as_str(), package_row_will_land_on_disk(row)))
+        .collect();
+    let installing_now: BTreeMap<&str, bool> = package_rows
+        .iter()
+        .map(|row| (row.package_id.as_str(), package_row_installs_now(row)))
         .collect();
 
     rabbit_core::configuration::builtin_configuration_steps()
@@ -3173,11 +3193,16 @@ pub fn configuration_rows(
                 format!("{summary}\n\n{description}")
             };
 
+            let auto_selected = configuration_auto_selected(&step, |pkg| {
+                installing_now.get(pkg).copied().unwrap_or(false)
+            });
+
             ConfigurationRow {
                 step_id: step.id.clone(),
                 display_name,
                 description,
-                selected: dependency_satisfied && !already_applied && step.recommended,
+                selected: dependency_satisfied && !already_applied && auto_selected,
+                auto_selected,
                 summary,
                 details,
                 available_for_target: dependency_satisfied,
@@ -3304,6 +3329,20 @@ fn configuration_dependency_satisfied(
             .any(|pkg| is_present(pkg.as_str()))
 }
 
+/// Does the recommended-default rule want this step ticked?
+///
+/// `step.recommended` is the baseline; steps flagged
+/// `auto_select_only_when_installing` additionally require one of their
+/// dependency packages to be installing in this run.
+fn configuration_auto_selected(
+    step: &rabbit_core::configuration::ConfigurationStep,
+    is_installing: impl FnMut(&str) -> bool,
+) -> bool {
+    step.recommended
+        && (!step.auto_select_only_when_installing
+            || configuration_dependency_satisfied(step, is_installing))
+}
+
 pub fn recompute_configuration_row_availability(
     localizer: &Localizer,
     package_rows: &[PackageRow],
@@ -3313,6 +3352,10 @@ pub fn recompute_configuration_row_availability(
     let installed_or_pending: BTreeMap<&str, bool> = package_rows
         .iter()
         .map(|row| (row.package_id.as_str(), package_row_will_land_on_disk(row)))
+        .collect();
+    let installing_now: BTreeMap<&str, bool> = package_rows
+        .iter()
+        .map(|row| (row.package_id.as_str(), package_row_installs_now(row)))
         .collect();
     let steps = rabbit_core::configuration::builtin_configuration_steps();
     for row in configuration_rows.iter_mut() {
@@ -3357,18 +3400,27 @@ pub fn recompute_configuration_row_availability(
         } else {
             format!("{}\n\n{}", row.summary, row.description)
         };
+        let auto_selected = configuration_auto_selected(step, |pkg| {
+            installing_now.get(pkg).copied().unwrap_or(false)
+        });
+        // Was the row still sitting where the default put it? If so it is
+        // safe to move it with the default; if the user has since overridden
+        // it, their decision wins.
+        let follows_default = row.selected == row.auto_selected;
         let actionable_now = dependency_satisfied && !already_applied;
         if !actionable_now {
             row.selected = false;
-        } else if !was_actionable {
+        } else if !was_actionable || follows_default {
             // Re-becoming actionable (dep just got satisfied, or the
-            // user reverted an external apply): restore the
-            // recommended-default tick so they don't have to manually
-            // re-check. If the row was actionable before and the user
-            // explicitly unticked it, that decision is preserved
-            // because `was_actionable` was already true.
-            row.selected = step.recommended;
+            // user reverted an external apply), or the default itself
+            // moved — e.g. ticking a language pack turns the "set REAPER's
+            // language" default on, unticking it again turns it back off.
+            // A row the user explicitly overrode is left alone, because
+            // then `follows_default` is false and it was already
+            // actionable.
+            row.selected = auto_selected;
         }
+        row.auto_selected = auto_selected;
     }
 }
 
@@ -3965,6 +4017,166 @@ mod tests {
         assert_eq!(row.original_action, PlanActionKind::Install);
         assert_eq!(row.action, PlanActionKind::Keep);
         assert!(!row.selected);
+    }
+
+    /// Build a one-package model whose single row is the German language
+    /// pack in the given plan state.
+    fn langpack_model(action: PlanActionKind) -> (Localizer, super::WizardModel) {
+        let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let installation = fake_installation();
+        let model = model_from_plan(
+            &localizer,
+            Platform::Windows,
+            Architecture::X64,
+            vec![installation.clone()],
+            Some(0),
+            InstallPlan {
+                target: Some(installation),
+                actions: vec![PlanAction {
+                    package_id: "langpack-de".to_string(),
+                    action,
+                    installed_version: None,
+                    available_version: None,
+                    reason: "test".to_string(),
+                }],
+                notes: Vec::new(),
+            },
+        );
+        (localizer, model)
+    }
+
+    fn language_step(rows: &[super::ConfigurationRow]) -> &super::ConfigurationRow {
+        rows.iter()
+            .find(|row| row.step_id == rabbit_core::configuration::CONFIG_SET_REAPER_LANGUAGE)
+            .expect("set-reaper-language row should exist")
+    }
+
+    #[test]
+    fn language_step_does_not_auto_tick_for_a_merely_installed_pack() {
+        // A language pack that is already on disk arrives as an unticked
+        // `Keep` row. The step must stay AVAILABLE — the user can still
+        // switch REAPER to that pack deliberately — but must not be ticked
+        // by default: nothing language-related is being installed, and
+        // silently switching REAPER's interface language would be a change
+        // the user never asked for.
+        let (_localizer, model) = langpack_model(PlanActionKind::Keep);
+        let pack = &model.package_rows[0];
+        assert!(!pack.selected, "an already-installed pack starts unticked");
+
+        let step = language_step(&model.configuration_rows);
+        assert!(
+            step.available_for_target,
+            "the pack is on disk, so the step must remain tickable"
+        );
+        assert!(
+            !step.selected,
+            "the step must not auto-tick when no language pack is being installed"
+        );
+    }
+
+    #[test]
+    fn language_step_follows_the_pack_being_ticked_and_unticked() {
+        let (localizer, model) = langpack_model(PlanActionKind::Keep);
+        let mut package_rows = model.package_rows.clone();
+        let mut configuration_rows = model.configuration_rows.clone();
+
+        // Tick the pack: the user explicitly wants it re-staged, so the
+        // step's default flips on.
+        super::apply_checkbox_state_to_package_row(&model, &mut package_rows[0], true).unwrap();
+        super::recompute_configuration_row_availability(
+            &localizer,
+            &package_rows,
+            None,
+            &mut configuration_rows,
+        );
+        assert!(
+            language_step(&configuration_rows).selected,
+            "ticking a language pack must tick the step that activates it"
+        );
+
+        // Untick it again: nothing language-related is happening any more.
+        super::apply_checkbox_state_to_package_row(&model, &mut package_rows[0], false).unwrap();
+        super::recompute_configuration_row_availability(
+            &localizer,
+            &package_rows,
+            None,
+            &mut configuration_rows,
+        );
+        assert!(
+            !language_step(&configuration_rows).selected,
+            "unticking the pack must untick the step again"
+        );
+    }
+
+    #[test]
+    fn language_step_keeps_an_explicit_user_override() {
+        let (localizer, model) = langpack_model(PlanActionKind::Keep);
+        let mut package_rows = model.package_rows.clone();
+        let mut configuration_rows = model.configuration_rows.clone();
+
+        super::apply_checkbox_state_to_package_row(&model, &mut package_rows[0], true).unwrap();
+        super::recompute_configuration_row_availability(
+            &localizer,
+            &package_rows,
+            None,
+            &mut configuration_rows,
+        );
+        assert!(language_step(&configuration_rows).selected);
+
+        // The user unticks the step by hand: install the pack, but leave
+        // REAPER's language alone. A later recompute must not re-tick it.
+        let index = configuration_rows
+            .iter()
+            .position(|row| row.step_id == rabbit_core::configuration::CONFIG_SET_REAPER_LANGUAGE)
+            .unwrap();
+        configuration_rows[index].selected = false;
+        super::recompute_configuration_row_availability(
+            &localizer,
+            &package_rows,
+            None,
+            &mut configuration_rows,
+        );
+        assert!(
+            !language_step(&configuration_rows).selected,
+            "an explicit untick must survive a recompute"
+        );
+    }
+
+    #[test]
+    fn additive_steps_still_auto_tick_for_an_already_installed_dependency() {
+        // The guard is deliberately narrow: only steps that CHANGE existing
+        // configuration wait for a fresh install. Adding the ReaPack remote
+        // is additive, so an already-installed ReaPack still auto-ticks it.
+        let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let installation = fake_installation();
+        let model = model_from_plan(
+            &localizer,
+            Platform::Windows,
+            Architecture::X64,
+            vec![installation.clone()],
+            Some(0),
+            InstallPlan {
+                target: Some(installation),
+                actions: vec![PlanAction {
+                    package_id: PACKAGE_REAPACK.to_string(),
+                    action: PlanActionKind::Keep,
+                    installed_version: Some(Version::parse("1.2.6").unwrap()),
+                    available_version: Some(Version::parse("1.2.6").unwrap()),
+                    reason: "installed".to_string(),
+                }],
+                notes: Vec::new(),
+            },
+        );
+        let remote = model
+            .configuration_rows
+            .iter()
+            .find(|row| row.step_id == "reapack-add-reaper-accessibility-remote")
+            .expect("reapack remote row should exist");
+        assert!(remote.available_for_target);
+        assert!(
+            remote.selected,
+            "additive steps must keep auto-ticking for a dependency that is already installed"
+        );
     }
 
     #[test]
