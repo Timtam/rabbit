@@ -117,7 +117,7 @@ wizard-additional-software-tree-group-label = Logiciels supplémentaires
 wizard-language-tree-group-label = Packs de langue
 wizard-configuration-tree-group-label = Configuration
 # $package is the localized package name the configuration step depends on.
-wizard-configuration-row-unavailable = Indisponible : nécessite l'installation de { $package }.
+wizard-configuration-row-unavailable = Indisponible : { $package } doit être installé.
 wizard-configuration-row-already-applied = Déjà appliqué sur cette cible REAPER.
 # Short status tag appended in parentheses to a configuration row's tree label
 # when the row isn't actionable. Kept terse so the tree label stays readable;
@@ -129,6 +129,9 @@ wizard-configuration-row-summary-suffix = ({ $reason })
 # $package is the localized name of the dependency package.
 wizard-configuration-row-status-requires = nécessite { $package }
 wizard-configuration-row-status-already-applied = déjà appliqué
+# Nomme la dependance d'une etape de configuration que n'importe lequel de
+# plusieurs paquets satisfait.
+config-dependency-language-pack = un pack de langue
 config-reapack-reaper-accessibility-name = Ajouter le dépôt ReaPack « REAPER Accessibility » de Toni
 config-reapack-reaper-accessibility-description = Ajoute le dépôt ReaPack « REAPER Accessibility » de Toni Barth (https://github.com/Timtam/reapack/raw/master/index.xml). Une fois ajouté, ouvrez le menu Extensions, ReaPack, Parcourir les paquets pour obtenir des scripts et des extensions accessibles supplémentaires.
 config-reapack-reaper-accessible-fr-name = Ajouter le dépôt ReaPack « REAPER Accessible (FR) »

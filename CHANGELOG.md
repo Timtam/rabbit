@@ -31,6 +31,16 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Fixed
+
+- The **Set REAPER's language** row no longer claims to require one
+  particular language pack. It listed every pack it accepts and then named
+  whichever sorted first, so a step that any pack satisfies advertised
+  itself as "requires REAPER in Spanish". It now says "requires a language
+  pack" in all five interface languages. Steps with a single dependency —
+  the ReaPack ones — still name it, since there it is the truth.
+  (Reported by Scott Chesworth from Q&A.)
+
 ## [0.4.2] - 2026-08-18
 
 ### Fixed

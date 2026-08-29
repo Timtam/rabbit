@@ -74,6 +74,14 @@ pub struct ConfigurationStep {
     /// whichever language pack the user picked — one step for all of them,
     /// instead of one step per language cluttering the configuration group.
     pub requires_packages: Vec<String>,
+    /// Localization key naming this step's dependency as a group, for steps
+    /// that any one of several packages satisfies.
+    ///
+    /// "Set REAPER's language" lists every language pack, so naming one of
+    /// them - whichever happened to sort first - told users the step
+    /// "requires REAPER en espanol" when any pack at all would do. `None`
+    /// means the step has a single dependency worth naming directly.
+    pub dependency_name_key: Option<String>,
     /// Treat this step's dependency as satisfied only by a package being
     /// installed or updated in THIS run, not by one that merely happens to
     /// be on disk already.
@@ -197,6 +205,7 @@ pub fn builtin_configuration_steps() -> Vec<ConfigurationStep> {
             display_description_key: "config-reapack-reaper-accessibility-description".to_string(),
             recommended: true,
             requires_packages: vec![PACKAGE_REAPACK.to_string()],
+            dependency_name_key: None,
             requires_fresh_dependency: false,
             kind: ConfigurationStepKind::AddReapackRemote {
                 name: REAPER_ACCESSIBILITY_REPACK_NAME.to_string(),
@@ -213,6 +222,7 @@ pub fn builtin_configuration_steps() -> Vec<ConfigurationStep> {
             // configuration page (or via `--config-step`).
             recommended: false,
             requires_packages: vec![PACKAGE_REAPACK.to_string()],
+            dependency_name_key: None,
             requires_fresh_dependency: false,
             kind: ConfigurationStepKind::AddReapackRemote {
                 name: REAPER_ACCESSIBLE_FR_NAME.to_string(),
@@ -225,6 +235,7 @@ pub fn builtin_configuration_steps() -> Vec<ConfigurationStep> {
             display_description_key: "config-reapack-reaper-accessible-en-description".to_string(),
             recommended: true,
             requires_packages: vec![PACKAGE_REAPACK.to_string()],
+            dependency_name_key: None,
             requires_fresh_dependency: false,
             kind: ConfigurationStepKind::AddReapackRemote {
                 name: REAPER_ACCESSIBLE_EN_NAME.to_string(),
@@ -263,6 +274,7 @@ fn lang_pack_steps() -> Vec<ConfigurationStep> {
         // certainly wants REAPER to use it. Untick to get the file only.
         recommended: true,
         requires_packages: language_packs,
+        dependency_name_key: Some("config-dependency-language-pack".to_string()),
         requires_fresh_dependency: true,
         kind: ConfigurationStepKind::SetReaperLanguage,
     }]

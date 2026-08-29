@@ -117,7 +117,7 @@ wizard-additional-software-tree-group-label = Software adicional
 wizard-language-tree-group-label = Paquetes de idioma
 wizard-configuration-tree-group-label = Configuración
 # $package is the localized package name the configuration step depends on.
-wizard-configuration-row-unavailable = No está disponible: Se requiere instalar { $package } .
+wizard-configuration-row-unavailable = No está disponible: Se requiere instalar { $package }.
 wizard-configuration-row-already-applied = Ya se aplicó en esta ruta de Reaper.
 # Short status tag appended in parentheses to a configuration row's tree label
 # when the row isn't actionable. Kept terse so the tree label stays readable;
@@ -129,6 +129,9 @@ wizard-configuration-row-summary-suffix = ({ $reason })
 # $package is the localized name of the dependency package.
 wizard-configuration-row-status-requires = Se requiere { $package }
 wizard-configuration-row-status-already-applied = Ya se aplicó
+# Nombra la dependencia de un paso de configuracion que satisface cualquiera
+# de varios paquetes.
+config-dependency-language-pack = un paquete de idioma
 config-reapack-reaper-accessibility-name = Agregar el repositorio de scripts de Toni a ReaPack
 config-reapack-reaper-accessibility-description = Agregar el repositorio de scripts de Ttoni Barth (https://github.com/Timtam/reapack/raw/master/index.xml). Después de agregarlo, abre el menú de extensiones de Reaper, ReaPack, Browse Packages para obtener scripts y plugings adicionales.
 config-reapack-reaper-accessible-fr-name = Agregar el repositorio de Reaper Accessible (francés) a ReaPack

@@ -129,6 +129,9 @@ wizard-configuration-row-summary-suffix = ({ $reason })
 # $package is the localized name of the dependency package.
 wizard-configuration-row-status-requires = requires { $package }
 wizard-configuration-row-status-already-applied = already applied
+# Names the dependency of a configuration step that any one of several
+# packages satisfies, so the step doesn't advertise one arbitrary package.
+config-dependency-language-pack = a language pack
 config-reapack-reaper-accessibility-name = Add Toni's REAPER Accessibility ReaPack repository
 config-reapack-reaper-accessibility-description = Adds Ttoni Barth's REAPER Accessibility ReaPack repository (https://github.com/Timtam/reapack/raw/master/index.xml). Once added, go to the Extensions menu, ReaPack, Browse Packages to get extra accessible scripts and plug-ins.
 config-reapack-reaper-accessible-fr-name = Add the REAPER Accessible (FR) ReaPack repository

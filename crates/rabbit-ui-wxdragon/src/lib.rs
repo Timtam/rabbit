@@ -3287,6 +3287,31 @@ pub fn configuration_rows(
 /// display name plus a short parenthesised status tag (`(requires
 /// ReaPack)`, `(already applied)`) so the indicator is visible without
 /// the user having to focus the row to read its details.
+/// How to refer to a configuration step's dependency in a message.
+///
+/// A step satisfied by any one of several packages names the group ("a
+/// language pack") rather than whichever package sorts first, which is how
+/// "Set REAPER's language" came to advertise itself as requiring Spanish.
+/// Steps with a single dependency keep naming it directly.
+fn configuration_dependency_label(
+    localizer: &Localizer,
+    step: &rabbit_core::configuration::ConfigurationStep,
+) -> String {
+    if let Some(key) = step.dependency_name_key.as_deref() {
+        let text = localizer.text(key);
+        if !text.missing {
+            return text.value;
+        }
+    }
+    let dep_id = step.requires_packages.first().cloned().unwrap_or_default();
+    let dep_name = localizer.text(&format!("package-{dep_id}"));
+    if dep_name.missing {
+        dep_id
+    } else {
+        dep_name.value
+    }
+}
+
 fn configuration_row_summary(
     localizer: &Localizer,
     step: &rabbit_core::configuration::ConfigurationStep,
@@ -3295,13 +3320,7 @@ fn configuration_row_summary(
     already_applied: bool,
 ) -> String {
     let status = if !dependency_satisfied {
-        let dep_id = step.requires_packages.first().cloned().unwrap_or_default();
-        let dep_name = localizer.text(&format!("package-{dep_id}"));
-        let dep_label = if dep_name.missing {
-            dep_id
-        } else {
-            dep_name.value
-        };
+        let dep_label = configuration_dependency_label(localizer, step);
         Some(
             localizer
                 .format(
@@ -3346,13 +3365,7 @@ fn build_configuration_unavailability_reason(
     already_applied: bool,
 ) -> Option<String> {
     if !dependency_satisfied {
-        let dep_id = step.requires_packages.first().cloned().unwrap_or_default();
-        let dep_name = localizer.text(&format!("package-{dep_id}"));
-        let dep_label = if dep_name.missing {
-            dep_id
-        } else {
-            dep_name.value
-        };
+        let dep_label = configuration_dependency_label(localizer, step);
         return Some(
             localizer
                 .format(
@@ -4280,6 +4293,73 @@ mod tests {
         assert!(
             remembered[0].available_for_target,
             "it must stay listed and tickable — this suppresses the tick, not the package"
+        );
+    }
+
+    #[test]
+    fn the_language_step_names_a_language_pack_not_a_particular_one() {
+        // Reported from Q&A: the row read "Set REAPER's language (requires
+        // REAPER en espanol)". The step lists every language pack as an
+        // any-of dependency and langpack-es sorts first, so the message
+        // picked it out and made a general requirement look Spanish-specific.
+        let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let step = rabbit_core::configuration::builtin_configuration_steps()
+            .into_iter()
+            .find(|step| step.id == rabbit_core::configuration::CONFIG_SET_REAPER_LANGUAGE)
+            .expect("the language step exists");
+        assert!(
+            step.requires_packages.len() > 1,
+            "this test only means anything while the step is an any-of"
+        );
+
+        let summary = super::configuration_row_summary(
+            &localizer,
+            &step,
+            "Set REAPER's language",
+            false,
+            false,
+        );
+        let reason =
+            super::build_configuration_unavailability_reason(&localizer, &step, false, false)
+                .expect("an unsatisfied dependency has a reason");
+
+        for text in [&summary, &reason] {
+            assert!(
+                text.contains("language pack"),
+                "the message should name the group: {text}"
+            );
+            for package_id in &step.requires_packages {
+                let name = localizer.text(&format!("package-{package_id}"));
+                if name.missing || name.value.is_empty() {
+                    continue;
+                }
+                assert!(
+                    !text.contains(&name.value),
+                    "must not single out {:?}: {text}",
+                    name.value
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_single_dependency_step_still_names_its_package() {
+        // The fix above must not generalise away a genuinely specific
+        // requirement: the ReaPack steps depend on exactly one package and
+        // should keep saying so.
+        let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let step = rabbit_core::configuration::builtin_configuration_steps()
+            .into_iter()
+            .find(|step| step.id == "reapack-add-reaper-accessibility-remote")
+            .expect("the ReaPack remote step exists");
+
+        let reason =
+            super::build_configuration_unavailability_reason(&localizer, &step, false, false)
+                .expect("an unsatisfied dependency has a reason");
+        let reapack = localizer.text("package-reapack");
+        assert!(
+            reason.contains(&reapack.value),
+            "a one-package step should name it: {reason}"
         );
     }
 
