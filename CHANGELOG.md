@@ -41,6 +41,17 @@ from this file and posts it as the GitHub release body.
   the ReaPack ones — still name it, since there it is the truth.
   (Reported by Scott Chesworth from Q&A.)
 
+- The package list on the **Packages** page could go missing entirely
+  unless the window was maximized. The page had grown — the OSARA key-map
+  note, then the Spanish-variant and REAPER-language dropdowns — until the
+  controls stacked below the list no longer fitted the default window, and
+  the layout took the whole shortfall out of the only control allowed to
+  stretch: the list itself. It collapsed to nothing, and a control of zero
+  height is not exposed to screen readers at all, so VoiceOver, NVDA,
+  JAWS and Narrator alike found no list to read. The wizard pages now
+  scroll instead of clipping what does not fit, so every control keeps its
+  size whatever the window size and the language of the interface.
+
 ## [0.4.2] - 2026-08-18
 
 ### Fixed

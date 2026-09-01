@@ -2419,6 +2419,36 @@ pub fn run() {
     });
 }
 
+/// A wizard page: a scrolling panel rather than a plain one.
+///
+/// Every page stacks fixed-height controls — lists, detail panes, notes —
+/// and their total height grows with the UI language, since longer
+/// translations wrap the labels between them onto extra lines. A plain
+/// `wxPanel` cannot scroll, so whatever no longer fits is silently clipped,
+/// and a `BoxSizer` short of room takes the whole deficit out of its only
+/// proportion-1 child. On the Packages page that child is the package list
+/// itself: it collapsed to nothing on a window that wasn't maximized, and a
+/// control of zero height is not in the platform's accessibility tree at
+/// all, so screen readers stopped seeing the list. Scrolling keeps every
+/// control laid out at its real size and reachable whatever the window size.
+type WizardPage = ScrolledWindow;
+
+/// Vertical scroll step for a wizard page, in pixels. The horizontal step is
+/// 0, which turns horizontal scrolling off: page content expands to the page
+/// width instead of extending past it.
+const WIZARD_PAGE_SCROLL_STEP: i32 = 10;
+
+/// Build one empty wizard page inside the book.
+fn new_wizard_page(book: &SimpleBook) -> WizardPage {
+    let page = ScrolledWindow::builder(book).build();
+    page.set_scroll_rate(0, WIZARD_PAGE_SCROLL_STEP);
+    // wxScrolledWindow is created without wxTAB_TRAVERSAL, which wxPanel
+    // gets by default — without it Tab stops moving between the controls of
+    // a page. Put the flag back before any child is created.
+    page.set_style_raw(page.get_style_raw() | PanelStyle::TabTraversal.bits());
+    page
+}
+
 #[allow(clippy::too_many_arguments)] // UI plumbing: one parameter per widget handle.
 fn add_pages(
     book: &SimpleBook,
@@ -2430,11 +2460,11 @@ fn add_pages(
     self_update_status: StatusBar,
     language_footer: Panel,
 ) -> WizardWidgets {
-    let target_page = Panel::builder(book).build();
+    let target_page = new_wizard_page(book);
     let (target_choice, portable_folder, target_details) = build_target_page(&target_page, model);
     book.add_page(&target_page, &model.steps[TARGET_STEP].label, true, None);
 
-    let version_check_page = Panel::builder(book).build();
+    let version_check_page = new_wizard_page(book);
     let (
         version_check_status,
         version_check_gauge,
@@ -2452,7 +2482,7 @@ fn add_pages(
         None,
     );
 
-    let packages_page = Panel::builder(book).build();
+    let packages_page = new_wizard_page(book);
     let (
         package_checklist,
         package_details,
@@ -2475,7 +2505,7 @@ fn add_pages(
         None,
     );
 
-    let reapack_ack_page = Panel::builder(book).build();
+    let reapack_ack_page = new_wizard_page(book);
     let (_reapack_donate_link, reapack_ack_confirm) =
         build_reapack_ack_page(&reapack_ack_page, model);
     book.add_page(
@@ -2485,11 +2515,11 @@ fn add_pages(
         None,
     );
 
-    let review_page = Panel::builder(book).build();
+    let review_page = new_wizard_page(book);
     let review_text = build_review_page(&review_page, model);
     book.add_page(&review_page, &model.steps[REVIEW_STEP].label, false, None);
 
-    let progress_page = Panel::builder(book).build();
+    let progress_page = new_wizard_page(book);
     let (progress_status, progress_gauge, progress_details) =
         build_progress_page(&progress_page, model);
     book.add_page(
@@ -2499,7 +2529,7 @@ fn add_pages(
         None,
     );
 
-    let done_page = Panel::builder(book).build();
+    let done_page = new_wizard_page(book);
     let (done_status, done_details, done_launch_reaper, done_open_resource) =
         build_done_page(&done_page, model);
     book.add_page(&done_page, &model.steps[DONE_STEP].label, false, None);
@@ -2532,7 +2562,7 @@ fn add_pages(
     }
 }
 
-fn build_target_page(page: &Panel, model: &WizardModel) -> (Choice, TextCtrl, TextCtrl) {
+fn build_target_page(page: &WizardPage, model: &WizardModel) -> (Choice, TextCtrl, TextCtrl) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     add_heading(
         page,
@@ -3761,7 +3791,7 @@ fn relaunch_with_locale(locale: &str) {
 /// style after wx has created the control.
 #[cfg(target_os = "windows")]
 fn build_packages_page(
-    page: &Panel,
+    page: &WizardPage,
     model: &WizardModel,
     package_rows: Rc<RefCell<Vec<crate::PackageRow>>>,
     configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
@@ -4858,7 +4888,7 @@ fn propagate_group_toggle_to_leaves(
 /// `set_value` callback owns all the toggle side effects.
 #[cfg(not(target_os = "windows"))]
 fn build_packages_page(
-    page: &Panel,
+    page: &WizardPage,
     model: &WizardModel,
     package_rows: Rc<RefCell<Vec<crate::PackageRow>>>,
     configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
@@ -5762,7 +5792,7 @@ fn focus_packages_list_top(widgets: &WizardWidgets, _package_items: &PackagesSta
 }
 
 fn build_version_check_page(
-    page: &Panel,
+    page: &WizardPage,
     model: &WizardModel,
     package_count: i32,
 ) -> (StaticText, Gauge, StaticText, TextCtrl) {
@@ -5820,7 +5850,7 @@ fn build_version_check_page(
 /// transition routes through it conditionally. The Continue button stays
 /// disabled until the user checks the acknowledgement; that gating happens
 /// in `update_navigation` based on `reapack_ack_confirm.get_value()`.
-fn build_reapack_ack_page(page: &Panel, model: &WizardModel) -> (Button, CheckBox) {
+fn build_reapack_ack_page(page: &WizardPage, model: &WizardModel) -> (Button, CheckBox) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     add_heading(
         page,
@@ -5892,7 +5922,7 @@ fn open_external_url(url: &str) -> std::io::Result<()> {
     }
 }
 
-fn build_review_page(page: &Panel, model: &WizardModel) -> TextCtrl {
+fn build_review_page(page: &WizardPage, model: &WizardModel) -> TextCtrl {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     add_heading(
         page,
@@ -5910,7 +5940,7 @@ fn build_review_page(page: &Panel, model: &WizardModel) -> TextCtrl {
     review
 }
 
-fn build_progress_page(page: &Panel, model: &WizardModel) -> (StaticText, Gauge, TextCtrl) {
+fn build_progress_page(page: &WizardPage, model: &WizardModel) -> (StaticText, Gauge, TextCtrl) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     add_heading(
         page,
@@ -5944,7 +5974,7 @@ fn build_progress_page(page: &Panel, model: &WizardModel) -> (StaticText, Gauge,
     (status, gauge, details)
 }
 
-fn build_done_page(page: &Panel, model: &WizardModel) -> (TextCtrl, TextCtrl, Button, Button) {
+fn build_done_page(page: &WizardPage, model: &WizardModel) -> (TextCtrl, TextCtrl, Button, Button) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     add_heading(
         page,
@@ -6029,13 +6059,13 @@ fn build_done_page(page: &Panel, model: &WizardModel) -> (TextCtrl, TextCtrl, Bu
     (status, details, launch_reaper, open_resource)
 }
 
-fn add_heading(page: &Panel, sizer: &BoxSizer, label: &str, name: &str) {
+fn add_heading<W: WxWidget>(page: &W, sizer: &BoxSizer, label: &str, name: &str) {
     let heading = StaticText::builder(page).with_label(label).build();
     heading.set_name(name);
     sizer.add(&heading, 0, SizerFlag::All | SizerFlag::Expand, 6);
 }
 
-fn add_label(page: &Panel, sizer: &BoxSizer, label: &str, name: &str) {
+fn add_label<W: WxWidget>(page: &W, sizer: &BoxSizer, label: &str, name: &str) {
     let widget = StaticText::builder(page).with_label(label).build();
     widget.set_name(name);
     sizer.add(
