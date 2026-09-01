@@ -3909,7 +3909,7 @@ fn build_packages_page(
         page,
         &sizer,
         &model.text.packages_reaper_language_label,
-        "rabbit-reaper-language-label",
+        REAPER_LANGUAGE_LABEL_NAME,
     );
     let reaper_language_choice = Choice::builder(page).build();
     reaper_language_choice.set_name(&model.text.packages_reaper_language_label);
@@ -3928,7 +3928,7 @@ fn build_packages_page(
         page,
         &sizer,
         &model.text.packages_spanish_variant_label,
-        "rabbit-spanish-variant-label",
+        SPANISH_VARIANT_LABEL_NAME,
     );
     let spanish_variant_choice = Choice::builder(page).build();
     spanish_variant_choice.set_name(&model.text.packages_spanish_variant_label);
@@ -5039,7 +5039,7 @@ fn build_packages_page(
         page,
         &sizer,
         &model.text.packages_reaper_language_label,
-        "rabbit-reaper-language-label",
+        REAPER_LANGUAGE_LABEL_NAME,
     );
     let reaper_language_choice = Choice::builder(page).build();
     reaper_language_choice.set_name(&model.text.packages_reaper_language_label);
@@ -5058,7 +5058,7 @@ fn build_packages_page(
         page,
         &sizer,
         &model.text.packages_spanish_variant_label,
-        "rabbit-spanish-variant-label",
+        SPANISH_VARIANT_LABEL_NAME,
     );
     let spanish_variant_choice = Choice::builder(page).build();
     spanish_variant_choice.set_name(&model.text.packages_spanish_variant_label);
@@ -6269,6 +6269,7 @@ fn sync_reaper_language_widget(rows: &[crate::PackageRow], choice: &Choice) {
     }
     choice.enable(!packs.is_empty());
     choice.set_can_focus(!packs.is_empty());
+    set_optional_choice_shown(choice, REAPER_LANGUAGE_LABEL_NAME, !packs.is_empty());
 }
 
 fn sync_spanish_variant_widget(rows: &[crate::PackageRow], choice: &Choice) {
@@ -6276,6 +6277,39 @@ fn sync_spanish_variant_widget(rows: &[crate::PackageRow], choice: &Choice) {
     let selected = crate::variant_choice_package_selected(rows, &selected_indices);
     choice.enable(selected);
     choice.set_can_focus(selected);
+    set_optional_choice_shown(choice, SPANISH_VARIANT_LABEL_NAME, selected);
+}
+
+/// wxWindow names of the labels sitting above the two Packages-page
+/// dropdowns that only apply to some selections. `set_optional_choice_shown`
+/// looks a label up by name from the dropdown's parent page, which keeps the
+/// dozen call sites that already carry a dropdown handle unchanged.
+const REAPER_LANGUAGE_LABEL_NAME: &str = "rabbit-reaper-language-label";
+const SPANISH_VARIANT_LABEL_NAME: &str = "rabbit-spanish-variant-label";
+
+/// Show or hide a dropdown together with its label, then re-lay out the page
+/// so the row's space is reclaimed (or given back).
+///
+/// A dropdown that doesn't apply to the current selection used to stay on
+/// the page, greyed out and — for the REAPER language — empty. Tab already
+/// skipped it, but a screen reader walking the page still stopped on a dead
+/// control and read out an empty combo box; hiding it removes it from the
+/// accessibility tree entirely, and it comes straight back when ticking a
+/// package makes the choice mean something again.
+fn set_optional_choice_shown(choice: &Choice, label_name: &str, shown: bool) {
+    if choice.is_shown() == shown {
+        return;
+    }
+    choice.show(shown);
+    let Some(page) = choice.get_parent() else {
+        return;
+    };
+    if let Some(label) = page.find_window_by_name(label_name) {
+        label.show(shown);
+    }
+    // The sizer reads each child's visibility when it lays the page out, so
+    // the hidden row only stops taking vertical space once we ask for it.
+    page.layout();
 }
 
 fn sync_osara_keymap_widgets(

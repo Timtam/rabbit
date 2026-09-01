@@ -31,6 +31,17 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Changed
+
+- The **REAPER language after installation** and **Spanish OSARA
+  translation** dropdowns on the Packages page now disappear while the
+  packages you ticked leave them nothing to decide, instead of staying on
+  the page greyed out — and, in the language one's case, greyed out and
+  empty. Tab already skipped both, but a screen reader reading the page
+  from top to bottom still stopped on them and announced a dead control.
+  They come back the moment you tick a package that gives them something
+  to choose.
+
 ### Fixed
 
 - The **Set REAPER's language** row no longer claims to require one
