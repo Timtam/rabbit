@@ -31,6 +31,17 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Changed
+
+- The **REAPER language after installation** and **Spanish OSARA
+  translation** dropdowns on the Packages page now disappear while the
+  packages you ticked leave them nothing to decide, instead of staying on
+  the page greyed out — and, in the language one's case, greyed out and
+  empty. Tab already skipped both, but a screen reader reading the page
+  from top to bottom still stopped on them and announced a dead control.
+  They come back the moment you tick a package that gives them something
+  to choose.
+
 ### Fixed
 
 - The **Set REAPER's language** row no longer claims to require one
@@ -40,6 +51,17 @@ from this file and posts it as the GitHub release body.
   pack" in all five interface languages. Steps with a single dependency —
   the ReaPack ones — still name it, since there it is the truth.
   (Reported by Scott Chesworth from Q&A.)
+
+- The package list on the **Packages** page could go missing entirely
+  unless the window was maximized. The page had grown — the OSARA key-map
+  note, then the Spanish-variant and REAPER-language dropdowns — until the
+  controls stacked below the list no longer fitted the default window, and
+  the layout took the whole shortfall out of the only control allowed to
+  stretch: the list itself. It collapsed to nothing, and a control of zero
+  height is not exposed to screen readers at all, so VoiceOver, NVDA,
+  JAWS and Narrator alike found no list to read. The wizard pages now
+  scroll instead of clipping what does not fit, so every control keeps its
+  size whatever the window size and the language of the interface.
 
 ## [0.4.2] - 2026-08-18
 
