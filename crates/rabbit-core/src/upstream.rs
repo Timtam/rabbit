@@ -176,10 +176,15 @@ fn execute_program_plan(plan: &PlannedExecutionPlan) -> Result<()> {
 fn execute_program_plan_elevated(plan: &PlannedExecutionPlan, program: &str) -> Result<()> {
     use rabbit_platform::ElevationError;
 
+    // `Show`: these are the vendor's own installers. Even the ones RABBIT
+    // drives silently can fall back to their own progress or error windows,
+    // and hiding those would leave the user in front of a wizard that had
+    // apparently stalled.
     let exit_code = rabbit_platform::run_elevated_and_wait(
         Path::new(program),
         &plan.arguments,
         plan.working_directory.as_deref(),
+        rabbit_platform::ElevatedWindow::Show,
     )
     .map_err(|error| match error {
         ElevationError::UserCancelledElevation { .. } => RabbitError::UserCancelledElevation {

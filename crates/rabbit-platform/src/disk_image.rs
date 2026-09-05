@@ -221,7 +221,7 @@ fn platform_run_pkg_installer_from_disk_image(
     image_path: &Path,
     pkg_suffix: &str,
 ) -> Result<PathBuf, DiskImageError> {
-    use crate::elevation::{ElevationError, run_elevated_and_wait};
+    use crate::elevation::{ElevatedWindow, ElevationError, run_elevated_and_wait};
 
     let mount = mount_disk_image(image_path)?;
     let pkg = find_pkg_in_directory(mount.mount_point(), pkg_suffix).ok_or_else(|| {
@@ -238,7 +238,16 @@ fn platform_run_pkg_installer_from_disk_image(
         "/".to_string(),
     ];
 
-    let exit = run_elevated_and_wait(Path::new("/usr/sbin/installer"), &installer_args, None);
+    // `Show`: `installer(8)` is the vendor's own package running under the
+    // user's eyes, same reasoning as the Windows vendor installers. The value
+    // is moot on macOS, where the elevated call runs through `osascript` and
+    // shows no terminal either way.
+    let exit = run_elevated_and_wait(
+        Path::new("/usr/sbin/installer"),
+        &installer_args,
+        None,
+        ElevatedWindow::Show,
+    );
 
     // Detach regardless of installer success so the volume doesn't stay
     // mounted under /Volumes. Best-effort: if the detach itself fails we

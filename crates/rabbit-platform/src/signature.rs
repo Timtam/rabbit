@@ -72,12 +72,11 @@ fn verify_executable_signature_impl(path: &Path) -> std::io::Result<SignatureVer
         });
     };
 
-    let output = Command::new(&signtool)
-        .arg("verify")
-        .arg("/pa")
-        .arg("/q")
-        .arg(path)
-        .output()?;
+    // `signtool` is a console program and its output is read through the
+    // pipe below, so a console window would be pure noise on screen.
+    let mut command = Command::new(&signtool);
+    command.arg("verify").arg("/pa").arg("/q").arg(path);
+    let output = crate::process::without_console_window(&mut command).output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
