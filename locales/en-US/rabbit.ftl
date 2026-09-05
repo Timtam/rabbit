@@ -199,6 +199,9 @@ wizard-review-package = { $package }: { $action }
 wizard-progress-heading = Installation progress
 wizard-progress-status-idle = Ready to install.
 wizard-progress-status-running = Installing selected packages. This might take a few minutes.
+# Shown from the moment the user confirms the stop until the pipeline finishes
+# the step it is on. Not "stopped": nothing has stopped yet when it appears.
+wizard-progress-status-cancelling = Stopping. RABBIT is finishing the step it started, then it closes.
 wizard-progress-details-label = Progress details
 wizard-progress-details-idle = No installation is running.
 wizard-progress-details-starting = Starting setup operation.
@@ -227,6 +230,7 @@ wizard-done-status-idle = No installation has been run from this window yet.
 wizard-done-status-success = RABBIT finished working its magic! Review the details below.
 wizard-done-status-error = Installation failed. Review the error below.
 wizard-done-status-completed-with-errors = Installation completed with errors. Review the details below.
+wizard-done-status-cancelled = You stopped the installation. The list below shows what RABBIT finished before it stopped.
 wizard-done-status-no-packages = No package was selected for installation or update.
 wizard-done-show-details = Show details
 # Mnemonic messages are single-character native access keys. Choose a character
@@ -242,6 +246,16 @@ wizard-done-self-update-apply-running = Applying RABBIT update…
 wizard-done-self-update-error-prefix = RABBIT self-update failed
 wizard-done-self-update-relaunch-prefix = Relaunched RABBIT
 wizard-self-update-status-checking = Checking for RABBIT updates…
+
+# Asked when the user closes the window while an install is running. The No
+# button is the focused one, so a stray Enter never ends a running install.
+wizard-close-during-install-title = Stop the installation?
+wizard-close-during-install-body = RABBIT is installing. If you stop now, RABBIT finishes the step it started, keeps what is already installed, cleans up what it started, and then closes. Packages it has not reached yet stay uninstalled. Stop the installation?
+
+# Shown instead when the user closes the window while RABBIT is replacing its
+# own files. Not a question: that swap has no safe interruption point.
+wizard-close-during-self-update-title = RABBIT is updating itself
+wizard-close-during-self-update-body = RABBIT is replacing its own program files. This step cannot be stopped without damaging the installation. Wait for it to finish, then close RABBIT.
 
 # Modal dialog shown once per session when a startup self-update check finds a
 # newer release. Title is short; body uses the same { $current } / { $latest }
@@ -313,6 +327,7 @@ status-deferred-unattended = Deferred unattended
 status-skipped-current = Skipped (already current)
 status-failed = Failed
 status-skipped-dependency-failed = Skipped (dependency failed)
+status-cancelled = Not installed (you stopped)
 
 # Per-package status messages surfaced on the wizard's Done page next to the
 # package name (e.g. "OSARA: <message>"). The wrapper template
@@ -325,6 +340,7 @@ package-status-skipped-content-unchanged = The installed copy is identical to th
 # $error is the failure text. $dependency is the package (e.g. REAPER) that failed first.
 package-status-install-failed = Installation failed: { $error }
 package-status-skipped-dependency-failed = Skipped because { $dependency }, which it needs, did not install successfully.
+package-status-cancelled = Not installed: you stopped the setup before RABBIT reached this package.
 # $automation is one of the "package-automation-*" labels (vendor installer / archive extraction / ...).
 package-status-dry-run-would-run-unattended = Dry run: RABBIT would download and run this { $automation } unattended.
 # $automation is one of the "package-automation-*" labels.
@@ -358,6 +374,7 @@ config-message-skipped = Configuration step { $step } was not selected.
 # $step is the configuration step id; $dependency is the dependency package id.
 config-message-skipped-dependency-missing = Configuration step { $step } skipped because its dependency package { $dependency } was not installed and is not part of this plan.
 config-message-applied-no-op = Configuration step applied without changes.
+config-message-cancelled = This configuration step did not run: you stopped the setup first.
 
 # Per-configuration-step status sub-line on the Done page. Sibling to
 # `wizard-summary-package-status` which handles per-package items.
@@ -369,6 +386,7 @@ config-status-applied = Applied
 config-status-skipped = Skipped
 config-status-skipped-dependency-missing = Skipped (dependency missing)
 config-status-dry-run = Dry run
+config-status-cancelled = Did not run (you stopped)
 wizard-summary-planned-execution-title = Planned unattended execution:
 wizard-summary-planned-execution-runner =   Runner: { $runner }
 wizard-summary-planned-execution-artifact =   Artifact: { $artifact }

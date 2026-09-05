@@ -199,6 +199,9 @@ wizard-review-package = { $package }: { $action }
 wizard-progress-heading = Installationsfortschritt
 wizard-progress-status-idle = Bereit zur Installation.
 wizard-progress-status-running = Ausgewählte Pakete werden installiert. Dies kann mehrere Minuten dauern.
+# Shown from the moment the user confirms the stop until the pipeline finishes
+# the step it is on. Not "stopped": nothing has stopped yet when it appears.
+wizard-progress-status-cancelling = Wird angehalten. RABBIT beendet den begonnenen Schritt und schließt sich dann.
 wizard-progress-details-label = Fortschrittsdetails
 wizard-progress-details-idle = Es läuft keine Installation.
 wizard-progress-details-starting = Einrichtungsvorgang wird gestartet.
@@ -227,6 +230,7 @@ wizard-done-status-idle = Aus diesem Fenster wurde noch keine Installation ausge
 wizard-done-status-success = Installation abgeschlossen. Bitte prüfen Sie die Details unten.
 wizard-done-status-error = Installation fehlgeschlagen. Bitte prüfen Sie den Fehler unten.
 wizard-done-status-completed-with-errors = Installation mit Fehlern abgeschlossen. Bitte prüfen Sie die Details unten.
+wizard-done-status-cancelled = Sie haben die Installation angehalten. Die Liste unten zeigt, was RABBIT vorher fertiggestellt hat.
 wizard-done-status-no-packages = Es wurde kein Paket zur Installation oder Aktualisierung ausgewählt.
 wizard-done-show-details = Details anzeigen
 # Mnemonic messages are single-character native access keys. Choose a character
@@ -242,6 +246,16 @@ wizard-done-self-update-apply-running = RABBIT-Aktualisierung wird angewendet…
 wizard-done-self-update-error-prefix = RABBIT-Selbstaktualisierung fehlgeschlagen
 wizard-done-self-update-relaunch-prefix = RABBIT neu gestartet
 wizard-self-update-status-checking = Suche nach RABBIT-Aktualisierungen…
+
+# Asked when the user closes the window while an install is running. The No
+# button is the focused one, so a stray Enter never ends a running install.
+wizard-close-during-install-title = Installation anhalten?
+wizard-close-during-install-body = RABBIT installiert gerade. Wenn Sie jetzt anhalten, beendet RABBIT den begonnenen Schritt, behält das bereits Installierte, räumt Angefangenes auf und schließt sich dann. Pakete, die noch nicht an der Reihe waren, bleiben nicht installiert. Installation anhalten?
+
+# Shown instead when the user closes the window while RABBIT is replacing its
+# own files. Not a question: that swap has no safe interruption point.
+wizard-close-during-self-update-title = RABBIT aktualisiert sich selbst
+wizard-close-during-self-update-body = RABBIT ersetzt gerade seine eigenen Programmdateien. Dieser Schritt lässt sich nicht anhalten, ohne die Installation zu beschädigen. Warten Sie, bis er fertig ist, und schließen Sie RABBIT danach.
 
 # Modaler Dialog, der einmal pro Sitzung erscheint, wenn die Startprüfung
 # eine neuere Version findet. Titel ist kurz, der Text verwendet dieselben
@@ -313,6 +327,7 @@ status-deferred-unattended = Unbeaufsichtigt verschoben
 status-skipped-current = Übersprungen (bereits aktuell)
 status-failed = Fehlgeschlagen
 status-skipped-dependency-failed = Übersprungen (Abhängigkeit fehlgeschlagen)
+status-cancelled = Nicht installiert (von Ihnen angehalten)
 
 # Paketstatus-Meldungen, die auf der Fertig-Seite des Assistenten neben dem
 # Paketnamen erscheinen (z. B. „OSARA: <Meldung>"). Die Wrapper-Vorlage
@@ -324,6 +339,7 @@ package-status-skipped-current = Installierte Version { $installed } ist aktuell
 package-status-skipped-content-unchanged = Die installierte Fassung ist identisch mit der beim Herausgeber veröffentlichten.
 package-status-install-failed = Installation fehlgeschlagen: { $error }
 package-status-skipped-dependency-failed = Übersprungen, weil { $dependency }, was dafür benötigt wird, nicht erfolgreich installiert wurde.
+package-status-cancelled = Nicht installiert: Sie haben die Einrichtung angehalten, bevor RABBIT dieses Paket erreicht hat.
 # $automation ist einer der „package-automation-*"-Texte (Vendor-Installationsprogramm / Archiv-Entpacken / …).
 package-status-dry-run-would-run-unattended = Probelauf: RABBIT würde dieses { $automation } unbeaufsichtigt herunterladen und ausführen.
 # $automation ist einer der „package-automation-*"-Texte.
@@ -358,6 +374,7 @@ config-message-skipped = Konfigurationsschritt { $step } wurde nicht ausgewählt
 # $step ist die Schritt-Kennung; $dependency ist die Kennung des abhängigen Pakets.
 config-message-skipped-dependency-missing = Konfigurationsschritt { $step } übersprungen, weil das abhängige Paket { $dependency } weder installiert ist noch zu diesem Lauf gehört.
 config-message-applied-no-op = Konfigurationsschritt ohne Änderungen angewendet.
+config-message-cancelled = Dieser Konfigurationsschritt wurde nicht ausgeführt: Sie haben die Einrichtung vorher angehalten.
 
 # Statuszeile pro Konfigurationsschritt auf der Fertig-Seite, analog zu
 # `wizard-summary-package-status` für die Pakete.
@@ -369,6 +386,7 @@ config-status-applied = Angewendet
 config-status-skipped = Übersprungen
 config-status-skipped-dependency-missing = Übersprungen (Abhängigkeit fehlt)
 config-status-dry-run = Probelauf
+config-status-cancelled = Nicht ausgeführt (von Ihnen angehalten)
 wizard-summary-planned-execution-title = Geplante unbeaufsichtigte Ausführung:
 wizard-summary-planned-execution-runner =   Ausführer: { $runner }
 wizard-summary-planned-execution-artifact =   Artefakt: { $artifact }
