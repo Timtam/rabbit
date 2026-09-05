@@ -15,6 +15,7 @@ use crate::artifact::{
     ArtifactDescriptor, ArtifactKind, CachedArtifact, DownloadHandle, expected_artifact_kind,
     resolve_latest_artifacts, spawn_download_pool,
 };
+use crate::cancel::CancelToken;
 use crate::detection::{
     default_standard_installation, detect_components, matching_user_plugin_files,
 };
@@ -93,6 +94,17 @@ impl PackageOperationReport {
                 PackageOperationStatus::Failed | PackageOperationStatus::SkippedDependencyFailed
             )
         })
+    }
+
+    /// True when the user stopped the run and at least one package was
+    /// left untouched because of it. Deliberately not folded into
+    /// [`Self::has_failures`]: a cancelled package installed nothing and
+    /// broke nothing, so calling it a failure would send the user hunting
+    /// for a problem that isn't there.
+    pub fn was_cancelled(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| matches!(item.status, PackageOperationStatus::Cancelled))
     }
 }
 
@@ -184,6 +196,8 @@ pub enum PackageOperationMessage {
     /// This package was skipped because `dependency` (a package it installs
     /// on top of, e.g. REAPER) failed or was skipped earlier in this run.
     SkippedDependencyFailed { dependency: String },
+    /// The user stopped the run before this package was reached.
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,6 +292,11 @@ pub enum PackageOperationStatus {
     /// This package was not attempted because a package it depends on
     /// (e.g. REAPER) failed or was itself skipped earlier in this run.
     SkippedDependencyFailed,
+    /// The user stopped the run before this package was reached. Nothing
+    /// was written for it, so the target is exactly as it was — which is
+    /// why this is not a failure: the report says "we never got here",
+    /// not "we tried and it broke".
+    Cancelled,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -395,13 +414,16 @@ pub fn execute_package_operation(
         cache_dir,
         options,
         &ProgressReporter::noop(),
+        &CancelToken::new(),
     )
 }
 
 /// Like [`execute_package_operation`] but threads a [`ProgressReporter`]
 /// down through the download and install phases so UIs can render a
-/// live progress bar. The no-op overload above keeps existing callers on
-/// the previous signature.
+/// live progress bar, and a [`CancelToken`] back up so they can stop the
+/// run. The no-op overload above keeps existing callers on the previous
+/// signature.
+#[allow(clippy::too_many_arguments)] // The pipeline's full-control entry point.
 pub fn execute_package_operation_with_progress(
     resource_path: &Path,
     package_ids: &[String],
@@ -410,6 +432,7 @@ pub fn execute_package_operation_with_progress(
     cache_dir: &Path,
     options: &PackageOperationOptions,
     progress: &ProgressReporter,
+    cancel: &CancelToken,
 ) -> Result<PackageOperationReport> {
     let artifacts = resolve_latest_artifacts(package_ids, platform, architecture)?;
     let detections = detect_components(resource_path, platform)?;
@@ -420,6 +443,7 @@ pub fn execute_package_operation_with_progress(
         cache_dir,
         options,
         progress,
+        cancel,
     )
 }
 
@@ -436,6 +460,7 @@ pub fn execute_resolved_package_operation(
         cache_dir,
         options,
         &ProgressReporter::noop(),
+        &CancelToken::new(),
     )
 }
 
@@ -446,6 +471,7 @@ pub fn execute_resolved_package_operation_with_progress(
     cache_dir: &Path,
     options: &PackageOperationOptions,
     progress: &ProgressReporter,
+    cancel: &CancelToken,
 ) -> Result<PackageOperationReport> {
     execute_resolved_package_operation_with_detections_and_progress(
         resource_path,
@@ -454,6 +480,7 @@ pub fn execute_resolved_package_operation_with_progress(
         cache_dir,
         options,
         progress,
+        cancel,
     )
 }
 
@@ -471,6 +498,7 @@ pub fn execute_resolved_package_operation_with_detections(
         cache_dir,
         options,
         &ProgressReporter::noop(),
+        &CancelToken::new(),
     )
 }
 
@@ -479,6 +507,15 @@ pub fn execute_resolved_package_operation_with_detections(
 /// boundary events as packages move through each phase; callers that
 /// don't care about the events use one of the wrappers above which
 /// pass a [`ProgressReporter::noop`] here.
+///
+/// `cancel` is read once per package, before that package's download is
+/// waited on. A package already installing keeps installing — a vendor
+/// installer cannot be unwound halfway — but nothing new starts, and every
+/// package the run never reached is recorded as
+/// [`PackageOperationStatus::Cancelled`] instead of silently vanishing
+/// from the report. The operation still returns `Ok`, so the install lock
+/// and the extraction temp dirs are released on the normal path and the
+/// caller gets a report saying exactly how far the run got.
 pub fn execute_resolved_package_operation_with_detections_and_progress(
     resource_path: &Path,
     artifacts: Vec<ArtifactDescriptor>,
@@ -486,6 +523,7 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
     cache_dir: &Path,
     options: &PackageOperationOptions,
     progress: &ProgressReporter,
+    cancel: &CancelToken,
 ) -> Result<PackageOperationReport> {
     ensure_resource_path_ready(resource_path, options.dry_run)?;
 
@@ -608,7 +646,7 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
     let (_download_pool, mut download_handles) = if download_jobs.is_empty() {
         (None, Vec::new())
     } else {
-        let (pool, handles) = spawn_download_pool(&download_jobs, cache_dir, progress);
+        let (pool, handles) = spawn_download_pool(&download_jobs, cache_dir, progress, cancel);
         (Some(pool), handles)
     };
     let mut handle_iter = download_handles.drain(..);
@@ -664,6 +702,18 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
         // downloaded or run.
         for (planned, handle) in unattended_installable.iter().zip(unattended_handles) {
             let package_id = planned.artifact.package_id.clone();
+            // Checked before the download is waited on, so a stop request
+            // that arrives while REAPER's installer is running takes effect
+            // the moment that installer returns rather than dragging the
+            // rest of the queue along behind it. Dropping `handle` unqueues
+            // this package's download.
+            if cancel.is_cancelled() {
+                items.push(cancelled_item(
+                    planned.artifact.clone(),
+                    planned.plan_action,
+                ));
+                continue;
+            }
             if let Some(dependency) = first_failed_dependency(&package_id, &failed) {
                 // Dropping `handle` here asks the pool to stop this
                 // package's (now pointless) download.
@@ -677,6 +727,17 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
             }
             let cached = match handle.wait() {
                 Ok(cached) => cached,
+                // A download aborted by the cancel reports as an interrupted
+                // transfer. Read the token before the error: "you stopped
+                // it" is the truth, and telling the user their connection
+                // dropped would send them debugging their network.
+                Err(_) if cancel.is_cancelled() => {
+                    items.push(cancelled_item(
+                        planned.artifact.clone(),
+                        planned.plan_action,
+                    ));
+                    continue;
+                }
                 Err(error) => {
                     items.push(failed_operation_item(
                         planned.artifact.clone(),
@@ -786,7 +847,7 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
     // queued last on the pool (lowest priority) and nothing installs them, so
     // waiting on them earlier would only delay the pipeline. The report is
     // sorted by package id at the end, so collection order is invisible.
-    let staged_deferred = if deferred_needs_download {
+    let staged_deferred = if deferred_needs_download && !cancel.is_cancelled() {
         let mut staged = Vec::with_capacity(deferred_handles.len());
         for handle in deferred_handles {
             // Deferred packages are only staged, never installed here, so a
@@ -849,6 +910,13 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
     let mut install_report: Option<InstallReport> = None;
     for (planned, handle) in direct_installable.iter().zip(direct_handles) {
         let package_id = planned.artifact.package_id.clone();
+        if cancel.is_cancelled() {
+            items.push(cancelled_item(
+                planned.artifact.clone(),
+                planned.plan_action,
+            ));
+            continue;
+        }
         if let Some(dependency) = first_failed_dependency(&package_id, &failed) {
             items.push(skipped_dependency_item(
                 planned.artifact.clone(),
@@ -860,6 +928,13 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
         }
         let cached = match handle.wait() {
             Ok(cached) => cached,
+            Err(_) if cancel.is_cancelled() => {
+                items.push(cancelled_item(
+                    planned.artifact.clone(),
+                    planned.plan_action,
+                ));
+                continue;
+            }
             Err(error) => {
                 items.push(failed_operation_item(
                     planned.artifact.clone(),
@@ -1175,6 +1250,30 @@ fn skipped_dependency_item(
         message_code: PackageOperationMessage::SkippedDependencyFailed {
             dependency: dependency.to_string(),
         },
+        artifact,
+        cached_artifact: None,
+        install_action: None,
+        backup_paths: Vec::new(),
+        backup_manifest_path: None,
+        planned_execution: None,
+        manual_instruction: None,
+    }
+}
+
+/// A package the run never reached because the user stopped it. Nothing was
+/// downloaded, nothing was written, and the package is left exactly as the
+/// run found it.
+fn cancelled_item(
+    artifact: ArtifactDescriptor,
+    plan_action: PlanActionKind,
+) -> PackageOperationItem {
+    PackageOperationItem {
+        package_id: artifact.package_id.clone(),
+        plan_action,
+        status: PackageOperationStatus::Cancelled,
+        message: "Not installed: you stopped the setup before RABBIT reached this package."
+            .to_string(),
+        message_code: PackageOperationMessage::Cancelled,
         artifact,
         cached_artifact: None,
         install_action: None,
@@ -2082,10 +2181,12 @@ mod tests {
         PackageAutomationSupport, PackageOperationMessage, PackageOperationOptions,
         PackageOperationStatus, PlannedArtifact, PlannedAutomationKind, PlannedExecutionKind,
         dependency_ordered, execute_resolved_package_operation,
-        execute_resolved_package_operation_with_detections, first_failed_dependency,
+        execute_resolved_package_operation_with_detections,
+        execute_resolved_package_operation_with_detections_and_progress, first_failed_dependency,
         plan_action_for_artifact,
     };
     use crate::artifact::{ArtifactDescriptor, ArtifactKind};
+    use crate::cancel::CancelToken;
     use crate::detection::detect_components;
     use crate::error::RabbitError;
     use crate::model::{Architecture, ComponentDetection, Confidence, Platform};
@@ -2094,6 +2195,7 @@ mod tests {
         PACKAGE_SWS,
     };
     use crate::plan::PlanActionKind;
+    use crate::progress::{ProgressEvent, ProgressReporter};
     use crate::receipt::{InstallState, load_install_state, save_install_state};
     use crate::version::Version;
     use std::collections::HashSet;
@@ -3607,6 +3709,171 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// The wizard's Close button cancels through this path, so a cancelled
+    /// run has to look like a run that stopped, not one that broke: no
+    /// package reports a failure, the report says what was skipped, and the
+    /// install lock is released the same way a clean finish releases it.
+    #[test]
+    fn a_cancelled_run_reports_every_untouched_package_and_releases_its_lock() {
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let lock_path = dir.path().join("install.lock");
+        let cancel = CancelToken::new();
+        cancel.cancel();
+
+        let report = execute_resolved_package_operation_with_detections_and_progress(
+            dir.path(),
+            vec![
+                artifact(
+                    PACKAGE_REAPACK,
+                    ArtifactKind::ExtensionBinary,
+                    "reaper_reapack-x64.dll",
+                ),
+                artifact(
+                    PACKAGE_REAKONTROL,
+                    ArtifactKind::ExtensionBinary,
+                    "reaper_reakontrol-x64.dll",
+                ),
+            ],
+            &[],
+            cache.path(),
+            &PackageOperationOptions {
+                dry_run: false,
+                allow_reaper_running: false,
+                stage_unsupported: false,
+                replace_osara_keymap: false,
+                target_app_path: None,
+                lock_path: Some(lock_path.clone()),
+                force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
+            },
+            &ProgressReporter::noop(),
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(report.items.len(), 2);
+        for item in &report.items {
+            assert_eq!(
+                item.status,
+                PackageOperationStatus::Cancelled,
+                "{} should be cancelled",
+                item.package_id
+            );
+            assert_eq!(item.message_code, PackageOperationMessage::Cancelled);
+        }
+        // Stopping is not failing: the wizard picks its result heading from
+        // these two, and a cancelled run must not read as an error.
+        assert!(report.was_cancelled());
+        assert!(!report.has_failures());
+        // The artifacts point at URLs no test can reach, so any download
+        // that ran would have failed the run instead of cancelling it.
+        assert!(
+            report
+                .items
+                .iter()
+                .all(|item| item.cached_artifact.is_none())
+        );
+        // The lock guard unwound with the operation. Left behind, it would
+        // block the next run against this target.
+        assert!(!lock_path.exists());
+    }
+
+    /// Cancelling partway keeps what already landed and stops before the
+    /// next package. This is the case the close button actually produces:
+    /// the user stops during a multi-package run, and needs the report to
+    /// tell them which half of it happened.
+    #[test]
+    fn cancelling_partway_keeps_what_already_installed() {
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let first_source = dir.path().join("reaper_reapack-x64.dll");
+        fs::write(&first_source, b"reapack").unwrap();
+        let second_source = dir.path().join("reaper_reakontrol-x64.dll");
+        fs::write(&second_source, b"reakontrol").unwrap();
+        let resource_path = dir.path().join("PortableREAPER");
+        fs::create_dir_all(&resource_path).unwrap();
+
+        let cancel = CancelToken::new();
+        let cancel_on_first_install = cancel.clone();
+        // Installs run one at a time in input order, so cancelling when the
+        // first one completes lands squarely on the second's checkpoint.
+        let progress = ProgressReporter::new(move |event| {
+            if matches!(
+                event,
+                ProgressEvent::InstallCompleted { ref package_id } if package_id == PACKAGE_REAPACK
+            ) {
+                cancel_on_first_install.cancel();
+            }
+        });
+
+        let report = execute_resolved_package_operation_with_detections_and_progress(
+            &resource_path,
+            vec![
+                artifact_with_url(
+                    PACKAGE_REAPACK,
+                    ArtifactKind::ExtensionBinary,
+                    "reaper_reapack-x64.dll",
+                    &first_source.display().to_string(),
+                ),
+                artifact_with_url(
+                    PACKAGE_REAKONTROL,
+                    ArtifactKind::ExtensionBinary,
+                    "reaper_reakontrol-x64.dll",
+                    &second_source.display().to_string(),
+                ),
+            ],
+            &[],
+            cache.path(),
+            &PackageOperationOptions {
+                dry_run: false,
+                allow_reaper_running: false,
+                stage_unsupported: false,
+                replace_osara_keymap: false,
+                target_app_path: None,
+                lock_path: Some(dir.path().join("install.lock")),
+                force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
+            },
+            &progress,
+            &cancel,
+        )
+        .unwrap();
+
+        let status_of = |package_id: &str| {
+            report
+                .items
+                .iter()
+                .find(|item| item.package_id == package_id)
+                .unwrap_or_else(|| panic!("{package_id} is missing from the report"))
+                .status
+        };
+        assert_eq!(
+            status_of(PACKAGE_REAPACK),
+            PackageOperationStatus::InstalledOrChecked
+        );
+        assert_eq!(
+            status_of(PACKAGE_REAKONTROL),
+            PackageOperationStatus::Cancelled
+        );
+        assert!(report.was_cancelled());
+        assert!(!report.has_failures());
+        // The half that landed really landed: a stop must not roll back
+        // work the user already waited through.
+        assert!(
+            resource_path
+                .join("UserPlugins")
+                .join("reaper_reapack-x64.dll")
+                .is_file()
+        );
+        assert!(
+            !resource_path
+                .join("UserPlugins")
+                .join("reaper_reakontrol-x64.dll")
+                .exists()
+        );
     }
 
     fn artifact(package_id: &str, kind: ArtifactKind, file_name: &str) -> ArtifactDescriptor {

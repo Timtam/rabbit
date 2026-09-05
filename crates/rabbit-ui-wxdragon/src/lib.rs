@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use rabbit_core::arch_probe::probe_executable_architecture;
 use rabbit_core::artifact::{default_cache_dir, expected_artifact_kind};
+use rabbit_core::cancel::CancelToken;
 use rabbit_core::detection::{
     DiscoveryOptions, colocated_portable_root, default_standard_installation, detect_components,
     discover_installations,
@@ -161,6 +162,10 @@ pub struct WizardText {
     pub progress_heading: String,
     pub progress_status: String,
     pub progress_status_running: String,
+    /// Shown from the moment the user confirms the stop until the pipeline
+    /// finishes the step it is on. Deliberately not "cancelled": nothing has
+    /// stopped yet when it first appears.
+    pub progress_status_cancelling: String,
     pub progress_details_label: String,
     pub progress_details_idle: String,
     pub progress_details_starting: String,
@@ -170,6 +175,7 @@ pub struct WizardText {
     pub done_status_success: String,
     pub done_status_completed_with_errors: String,
     pub done_status_error: String,
+    pub done_status_cancelled: String,
     pub done_status_no_packages: String,
     pub done_show_details_label: String,
     pub done_launch_reaper_label: String,
@@ -181,6 +187,10 @@ pub struct WizardText {
     pub done_self_update_error_prefix: String,
     pub done_self_update_relaunch_prefix: String,
     pub self_update_status_checking: String,
+    pub close_during_install_title: String,
+    pub close_during_install_body: String,
+    pub close_during_self_update_title: String,
+    pub close_during_self_update_body: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,6 +436,11 @@ pub enum WizardOutcomeStatus {
     /// the done page shows "completed with errors".
     CompletedWithErrors,
     Error,
+    /// The user stopped the run. Some packages may have installed before
+    /// the stop; the ones after it were never touched. Distinct from both
+    /// `CompletedWithErrors` (nothing broke) and `Error` (the run did what
+    /// it was asked to do, right up to being asked to stop).
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -801,6 +816,7 @@ fn wizard_text(localizer: &Localizer) -> WizardText {
         done_heading: localizer.text("wizard-done-heading").value,
         done_status: localizer.text("wizard-done-status-idle").value,
         progress_status_running: localizer.text("wizard-progress-status-running").value,
+        progress_status_cancelling: localizer.text("wizard-progress-status-cancelling").value,
         progress_details_label: localizer.text("wizard-progress-details-label").value,
         progress_details_idle: localizer.text("wizard-progress-details-idle").value,
         progress_details_starting: localizer.text("wizard-progress-details-starting").value,
@@ -810,6 +826,7 @@ fn wizard_text(localizer: &Localizer) -> WizardText {
             .text("wizard-done-status-completed-with-errors")
             .value,
         done_status_error: localizer.text("wizard-done-status-error").value,
+        done_status_cancelled: localizer.text("wizard-done-status-cancelled").value,
         done_status_no_packages: localizer.text("wizard-done-status-no-packages").value,
         done_show_details_label: localizer.text("wizard-done-show-details").value,
         done_launch_reaper_label: localized_wx_mnemonic_label(
@@ -837,6 +854,12 @@ fn wizard_text(localizer: &Localizer) -> WizardText {
             .text("wizard-done-self-update-relaunch-prefix")
             .value,
         self_update_status_checking: localizer.text("wizard-self-update-status-checking").value,
+        close_during_install_title: localizer.text("wizard-close-during-install-title").value,
+        close_during_install_body: localizer.text("wizard-close-during-install-body").value,
+        close_during_self_update_title: localizer
+            .text("wizard-close-during-self-update-title")
+            .value,
+        close_during_self_update_body: localizer.text("wizard-close-during-self-update-body").value,
     }
 }
 
@@ -1825,7 +1848,11 @@ fn default_portable_reaper_app_path(platform: Platform, resource_path: &Path) ->
 }
 
 pub fn execute_wizard_install(request: WizardInstallRequest) -> Result<SetupReport> {
-    execute_wizard_install_with_progress(request, &rabbit_core::progress::ProgressReporter::noop())
+    execute_wizard_install_with_progress(
+        request,
+        &rabbit_core::progress::ProgressReporter::noop(),
+        &CancelToken::new(),
+    )
 }
 
 /// Like [`execute_wizard_install`] but threads a [`ProgressReporter`]
@@ -1833,11 +1860,15 @@ pub fn execute_wizard_install(request: WizardInstallRequest) -> Result<SetupRepo
 /// render a live status bar. The plain [`execute_wizard_install`]
 /// delegates here with a [`ProgressReporter::noop`].
 ///
+/// `cancel` travels the other way: the wizard flips it when the user asks
+/// to stop, and the pipeline reads it at each package boundary.
+///
 /// [`ProgressReporter`]: rabbit_core::progress::ProgressReporter
 /// [`ProgressReporter::noop`]: rabbit_core::progress::ProgressReporter::noop
 pub fn execute_wizard_install_with_progress(
     request: WizardInstallRequest,
     progress: &rabbit_core::progress::ProgressReporter,
+    cancel: &CancelToken,
 ) -> Result<SetupReport> {
     // Before any download, make Windows Defender ignore RABBIT's own cache
     // folder so a freshly built, low-prevalence (but signed) installer —
@@ -1879,6 +1910,7 @@ pub fn execute_wizard_install_with_progress(
             configuration_step_ids: request.configuration_step_ids.clone(),
         },
         progress,
+        cancel,
     )?;
 
     // Remember what the user decided about the packages that remember it,
@@ -2080,7 +2112,12 @@ pub fn wizard_outcome_report_from_success(
 ) -> WizardOutcomeReport {
     let summary = summarize_setup_report(model, report);
     WizardOutcomeReport {
-        status: if report.package_operation.has_failures() {
+        // Cancellation outranks a package failure in the heading: "you
+        // stopped it" explains the half-finished run, where "finished with
+        // errors" would send the user looking for a fault.
+        status: if report.was_cancelled() {
+            WizardOutcomeStatus::Cancelled
+        } else if report.package_operation.has_failures() {
             WizardOutcomeStatus::CompletedWithErrors
         } else {
             WizardOutcomeStatus::Success
@@ -2786,6 +2823,7 @@ fn status_label_for_summary(
             "status-skipped-dependency-failed",
             "Skipped (dependency failed)",
         ),
+        PackageOperationStatus::Cancelled => ("status-cancelled", "Not installed (you stopped)"),
     };
     localizer
         .map(|localizer| localizer.text(id).value)
@@ -2855,6 +2893,7 @@ fn localized_package_operation_message(
             "package-status-skipped-dependency-failed",
             &[("dependency", dependency.as_str())],
         ),
+        Msg::Cancelled => localizer.text("package-status-cancelled"),
     };
     if message.missing {
         fallback_english.to_string()
@@ -2941,6 +2980,7 @@ fn localized_configuration_message(
             &[("step", step_id.as_str()), ("dependency", dep_id.as_str())],
         ),
         Msg::AppliedNoOp => localizer.text("config-message-applied-no-op"),
+        Msg::Cancelled { .. } => localizer.text("config-message-cancelled"),
     };
     if message.missing {
         fallback_english.to_string()
@@ -2988,6 +3028,7 @@ fn configuration_status_label_for_summary(
             "Skipped (dependency missing)",
         ),
         ConfigurationStatus::DryRun => ("config-status-dry-run", "Dry run"),
+        ConfigurationStatus::Cancelled => ("config-status-cancelled", "Did not run (you stopped)"),
     };
     localizer
         .map(|localizer| localizer.text(id).value)

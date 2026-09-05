@@ -31,6 +31,26 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Changed
+
+- Closing the wizard while an install is running now stops the run instead of
+  killing it. RABBIT asks first ("Stop the installation?", with **No** as the
+  focused button so a stray Enter can't end a running install), then finishes
+  the step it is on, releases everything it was holding, writes the report, and
+  closes. Before this, the close button tore the process down wherever the
+  worker happened to be — mid-download, mid-extract, or between a vendor
+  installer finishing and RABBIT recording it. Nothing unwound, so the install
+  lock file, the extraction temp folders and any part-downloaded files were
+  left behind, and the user got no record of what had actually landed.
+  The result page now has a third outcome next to "finished" and "finished with
+  errors": a stopped run lists which packages installed and which RABBIT never
+  reached, and does not report either as a failure. All five interface
+  languages carry the new wording.
+- Closing the wizard while RABBIT is updating itself is refused rather than
+  obeyed. Replacing RABBIT's own program files has no safe interruption point,
+  so RABBIT explains that and waits instead of leaving a half-swapped
+  executable behind.
+
 ### Fixed
 
 - The **Set REAPER's language** row no longer claims to require one

@@ -5,9 +5,10 @@ use std::process::Command;
 use std::rc::Rc;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
+use rabbit_core::cancel::CancelToken;
 use rabbit_core::localization::{Localizer, resolve_runtime_locale};
 use rabbit_core::self_update::SelfUpdateCheckReport;
 
@@ -174,6 +175,86 @@ const REVIEW_STEP: usize = 4;
 const PROGRESS_STEP: usize = 5;
 const DONE_STEP: usize = 6;
 
+/// Set while the self-update worker is swapping RABBIT's own files. That
+/// swap has no unwind path — the whole point of the progress window having
+/// no Cancel button — so the close handler refuses to quit under it rather
+/// than leaving a half-replaced executable behind. A plain static because
+/// `start_self_update_apply` is reachable from the startup prompt and from
+/// the Done page, neither of which shares the wizard's state.
+static SELF_UPDATE_APPLYING: AtomicBool = AtomicBool::new(false);
+
+/// The install worker's half of the close handshake.
+///
+/// Closing the window used to end the process wherever the worker happened
+/// to be: mid-download, mid-extract, or between a vendor installer finishing
+/// and RABBIT writing the receipt that records it. Nothing was cleaned up,
+/// because nothing unwound — no `Drop` ran, so the install lock file, the
+/// extraction temp dirs and any `.part` downloads stayed behind, and the
+/// user got no report of what had actually landed.
+///
+/// Now the close handler talks to the worker instead. It flips `cancel`,
+/// leaves `close_when_done` set, and vetoes the close; the pipeline stops at
+/// its next package boundary, unwinds normally, writes its report, and the
+/// completion closure closes the window for real.
+#[derive(Default)]
+struct InstallRunState {
+    /// The running install's token. `None` before the first install and
+    /// after each one finishes.
+    cancel: Mutex<Option<CancelToken>>,
+    /// True between the Install click and the worker's completion closure.
+    running: AtomicBool,
+    /// Set when the user asked to close during an install: the completion
+    /// closure closes the window once the worker is done.
+    close_when_done: AtomicBool,
+}
+
+impl InstallRunState {
+    fn begin(&self) -> CancelToken {
+        let token = CancelToken::new();
+        if let Ok(mut slot) = self.cancel.lock() {
+            *slot = Some(token.clone());
+        }
+        self.running.store(true, Ordering::SeqCst);
+        token
+    }
+
+    fn finish(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        self.close_when_done.store(false, Ordering::SeqCst);
+        if let Ok(mut slot) = self.cancel.lock() {
+            *slot = None;
+        }
+    }
+
+    fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    /// Ask the pipeline to stop, and remember that the window should close
+    /// once it has. Returns `false` when there was nothing left to stop —
+    /// the run finished while the confirmation dialog was on screen, whose
+    /// nested event loop is what lets the worker's completion closure run
+    /// mid-question. Both halves happen under the one lock `finish` takes,
+    /// so the answer can't go stale between them.
+    fn request_stop_and_close(&self) -> bool {
+        let Ok(slot) = self.cancel.lock() else {
+            return false;
+        };
+        match slot.as_ref() {
+            Some(token) => {
+                self.close_when_done.store(true, Ordering::SeqCst);
+                token.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn stop_requested(&self) -> bool {
+        self.close_when_done.load(Ordering::SeqCst)
+    }
+}
+
 #[derive(Default)]
 struct SelfUpdateUiState {
     /// Result of the one-shot manifest check at startup. `None` while the
@@ -192,6 +273,98 @@ struct SelfUpdateUiState {
     /// result (e.g., a step change that re-invokes render) skip the
     /// modal so the user isn't re-prompted after dismissing it.
     prompted: bool,
+}
+
+/// What closing the window should do right now.
+enum CloseVerdict {
+    /// Nothing is running: destroy the window.
+    Allow,
+    /// An install is running and the user has not been asked yet.
+    Ask,
+    /// An install is running and the user already said "stop": the worker
+    /// is unwinding and will close the window when it is done.
+    AlreadyStopping,
+    /// RABBIT is replacing its own files. There is no safe moment to quit.
+    SelfUpdateInProgress,
+}
+
+/// Say that RABBIT is stopping, in both places the progress page speaks
+/// from: the status heading and the running log.
+///
+/// The log is a `TextCtrl` and takes focus; the status heading is a
+/// `StaticText` and cannot, and a label change on its own is not something
+/// a screen reader announces. Moving focus onto the log is what makes the
+/// answer to "did it hear me?" audible.
+fn announce_stopping(widgets: &WizardWidgets, model: &WizardModel) {
+    widgets
+        .progress_status
+        .set_label(&model.text.progress_status_cancelling);
+    widgets
+        .progress_details
+        .append_text(&format!("\n{}", model.text.progress_status_cancelling));
+    widgets.progress_details.set_focus();
+}
+
+fn close_verdict(install_run: &InstallRunState) -> CloseVerdict {
+    if SELF_UPDATE_APPLYING.load(Ordering::SeqCst) {
+        return CloseVerdict::SelfUpdateInProgress;
+    }
+    if !install_run.is_running() {
+        return CloseVerdict::Allow;
+    }
+    if install_run.stop_requested() {
+        return CloseVerdict::AlreadyStopping;
+    }
+    CloseVerdict::Ask
+}
+
+/// Ask before throwing away a running install. Returns `true` when the user
+/// confirmed.
+///
+/// `wxNO_DEFAULT` puts the focused button on **No**: this dialog appears
+/// over work the user asked for, so a stray Enter or Space — from a screen
+/// reader user tabbing around the progress page, say — must not be what
+/// stops their REAPER install halfway. wxdragon's `MessageDialogStyle`
+/// doesn't name the flag, so it comes from the raw wx constant.
+fn confirm_stop_install(model: &WizardModel) -> bool {
+    let no_default = MessageDialogStyle::from_bits_retain(wxdragon::ffi::WXD_NO_DEFAULT);
+    let mut confirmed = false;
+    with_ui_frame(|frame| {
+        let dialog = MessageDialog::builder(
+            frame,
+            &model.text.close_during_install_body,
+            &model.text.close_during_install_title,
+        )
+        .with_style(
+            MessageDialogStyle::YesNo
+                | MessageDialogStyle::IconWarning
+                | MessageDialogStyle::Centre
+                | no_default,
+        )
+        .build();
+        confirmed = dialog.show_modal() == ID_YES;
+    });
+    confirmed
+}
+
+/// Tell the user why the window will not close during a self-update. There
+/// is no Yes/No here because there is no "yes": the file swap has no unwind
+/// path, so the only honest answer is "wait".
+fn show_close_blocked_by_self_update(model: &WizardModel) {
+    with_ui_frame(|frame| {
+        let dialog = MessageDialog::builder(
+            frame,
+            &model.text.close_during_self_update_body,
+            &model.text.close_during_self_update_title,
+        )
+        .with_style(
+            MessageDialogStyle::OK
+                | MessageDialogStyle::IconInformation
+                | MessageDialogStyle::Centre,
+        )
+        .build();
+        dialog.show_modal();
+    });
 }
 
 fn render_self_update_status(
@@ -1250,12 +1423,19 @@ fn format_bytes_human(bytes: u64) -> String {
 /// touch the package spec list — the install handler builds the maps
 /// once, before spawning the worker thread, and they're shared via
 /// `Arc<HashMap<…>>`.
+///
+/// `status_frozen` holds the status label at whatever the close handler
+/// wrote there. Without it the next download or install event would paint
+/// "Downloading OSARA…" over "Stopping…" and the wizard would look like it
+/// had ignored the user. The log lines below keep flowing either way, so the
+/// step that is still finishing stays visible.
 fn apply_progress_event_to_ui(
     state: &Arc<Mutex<ProgressUiState>>,
     widgets: &WizardWidgets,
     package_display_names: &Arc<HashMap<String, String>>,
     configuration_display_names: &Arc<HashMap<String, String>>,
     event: ProgressEvent,
+    status_frozen: bool,
 ) {
     let mut state = state.lock().unwrap();
     let mut status_line: Option<String> = None;
@@ -1416,7 +1596,9 @@ fn apply_progress_event_to_ui(
     });
 
     widgets.progress_gauge.set_value(state.percentage());
-    if let Some(line) = status_line {
+    if let Some(line) = status_line
+        && !status_frozen
+    {
         widgets.progress_status.set_label(&line);
     }
     // Hold the lock no longer than necessary — the TextCtrl call below
@@ -1558,6 +1740,7 @@ pub fn run() {
         let last_report = Arc::new(Mutex::new(None::<WizardOutcomeReport>));
         let last_reaper_app_path = Arc::new(Mutex::new(None::<PathBuf>));
         let last_resource_path = Arc::new(Mutex::new(None::<PathBuf>));
+        let install_run = Arc::new(InstallRunState::default());
         // Build the wizard pages first, the buttons row, then the language
         // footer. Footer is constructed after the buttons so its widgets
         // come *after* the buttons in tab order, but it needs to exist
@@ -1828,6 +2011,7 @@ pub fn run() {
             let last_report = Arc::clone(&last_report);
             let last_reaper_app_path = Arc::clone(&last_reaper_app_path);
             let last_resource_path = Arc::clone(&last_resource_path);
+            let install_run = Arc::clone(&install_run);
             install.on_click(move |_| {
                 current_step.store(PROGRESS_STEP, Ordering::SeqCst);
                 update_navigation(
@@ -2110,6 +2294,7 @@ pub fn run() {
                 // or status after the completion closure wrote the outcome.
                 let operation_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let operation_finished_for_reporter = Arc::clone(&operation_finished);
+                let install_run_for_reporter = Arc::clone(&install_run);
                 let progress = ProgressReporter::new(move |event| {
                     // The reporter fires on the worker thread; forward each
                     // event to the UI thread so the gauge / status / log can
@@ -2124,6 +2309,7 @@ pub fn run() {
                     let configuration_display_names =
                         Arc::clone(&configuration_display_names_for_reporter);
                     let widgets = progress_widgets;
+                    let status_frozen = install_run_for_reporter.stop_requested();
                     wxdragon::call_after(Box::new(move || {
                         apply_progress_event_to_ui(
                             &state,
@@ -2131,12 +2317,15 @@ pub fn run() {
                             &package_display_names,
                             &configuration_display_names,
                             event,
+                            status_frozen,
                         );
                     }));
                 });
 
+                let cancel = install_run.begin();
+                let install_run_for_worker = Arc::clone(&install_run);
                 std::thread::spawn(move || {
-                    let result = execute_wizard_install_with_progress(request, &progress);
+                    let result = execute_wizard_install_with_progress(request, &progress, &cancel);
                     operation_finished.store(true, std::sync::atomic::Ordering::Relaxed);
                     wxdragon::call_after(Box::new(move || {
                         widgets.progress_gauge.set_value(100);
@@ -2168,10 +2357,14 @@ pub fn run() {
                                 }
                                 // The operation returns Ok even when some
                                 // packages failed (it installs everything it
-                                // can). Pick an honest heading: a plain
-                                // "success" line would contradict the
-                                // "finished with errors" summary otherwise.
-                                let heading = if report.package_operation.has_failures() {
+                                // can), and when the user stopped it partway.
+                                // Pick an honest heading: a plain "success"
+                                // line would contradict the "finished with
+                                // errors" summary otherwise, and a stopped run
+                                // is neither of those.
+                                let heading = if report.was_cancelled() {
+                                    &ui_model.text.done_status_cancelled
+                                } else if report.package_operation.has_failures() {
                                     &ui_model.text.done_status_completed_with_errors
                                 } else {
                                     &ui_model.text.done_status_success
@@ -2267,6 +2460,16 @@ pub fn run() {
                         // and action buttons instead of cycling back to
                         // an earlier widget.
                         widgets.done_status.set_focus();
+                        // The worker is done and everything it held has been
+                        // dropped, so the window can go now. Force the close:
+                        // there is nothing left to ask the user about, and the
+                        // close handler would otherwise re-open the same
+                        // question it already answered.
+                        let close_now = install_run_for_worker.stop_requested();
+                        install_run_for_worker.finish();
+                        if close_now {
+                            with_ui_frame(|frame| frame.close(true));
+                        }
                     }));
                 });
             });
@@ -2274,8 +2477,65 @@ pub fn run() {
 
         let frame_for_close = frame;
         close.on_click(move |_| {
-            frame_for_close.close(true);
+            // Not forced: the frame's close handler has to be able to stop
+            // this while an install is running.
+            frame_for_close.close(false);
         });
+
+        // Every route out of the wizard — the Close button, the window's
+        // close box, Alt+F4, Cmd+Q — arrives here, which is the one place
+        // that knows whether it is safe to go.
+        {
+            let model_for_close = Arc::clone(&model);
+            let install_run = Arc::clone(&install_run);
+            let widgets = wizard_widgets;
+            let close_button = close;
+            frame.on_close(move |event| {
+                match close_verdict(&install_run) {
+                    CloseVerdict::Allow => {
+                        // Let wxWidgets' own frame handler run and destroy
+                        // the window. Nothing is in flight, so there is
+                        // nothing to unwind.
+                        event.skip(true);
+                    }
+                    CloseVerdict::SelfUpdateInProgress => {
+                        // Not a question: there is no answer that makes
+                        // quitting safe here, so say what is happening
+                        // instead of offering a choice RABBIT can't honour.
+                        show_close_blocked_by_self_update(&model_for_close);
+                    }
+                    CloseVerdict::AlreadyStopping => {
+                        // A second press while the first stop is still
+                        // unwinding. Re-announce rather than re-ask.
+                        announce_stopping(&widgets, &model_for_close);
+                    }
+                    CloseVerdict::Ask => {
+                        if !confirm_stop_install(&model_for_close) {
+                            return;
+                        }
+                        if !install_run.request_stop_and_close() {
+                            // The install finished while the question was on
+                            // screen, so there is nothing left to stop and
+                            // nobody left to close the window for us. Queue
+                            // the close for the next turn of the event loop
+                            // rather than re-entering this handler from
+                            // inside itself.
+                            wxdragon::call_after(Box::new(|| {
+                                with_ui_frame(|frame| frame.close(true));
+                            }));
+                            return;
+                        }
+                        // The button that raised the question is now the
+                        // wrong thing to press again.
+                        close_button.enable(false);
+                        announce_stopping(&widgets, &model_for_close);
+                    }
+                }
+                // Every branch except `Allow` falls through without
+                // skipping, which is what keeps the window alive: the
+                // default handler that would destroy it never runs.
+            });
+        }
 
         // Handle the application-menu Quit item: the macOS menu bar
         // installed below carries a stock wxID_EXIT item, which wxOSX
@@ -2288,7 +2548,7 @@ pub fn run() {
             let frame_for_quit = frame;
             frame.on_menu_selected(move |event| {
                 if event.get_id() == wxdragon::id::ID_EXIT {
-                    frame_for_quit.close(true);
+                    frame_for_quit.close(false);
                 }
             });
         }
@@ -3423,6 +3683,10 @@ fn start_self_update_apply(
     // a modal dialog's nested event loop would let run but would also trap
     // the exit-after-relaunch behind its own dismissal.
     open_self_update_progress_window(&model);
+    // Held for the whole swap so the close handler refuses to quit under a
+    // half-replaced RABBIT. Cleared on every exit from the worker, including
+    // the failure paths — the relaunch path exits the process instead.
+    SELF_UPDATE_APPLYING.store(true, Ordering::SeqCst);
     let model_for_thread = Arc::clone(&model);
     std::thread::spawn(move || {
         // Every event crosses back to the UI thread — widgets must not be
@@ -3434,6 +3698,7 @@ fn start_self_update_apply(
             }));
         });
         let result = run_wizard_self_update_apply(&progress);
+        SELF_UPDATE_APPLYING.store(false, Ordering::SeqCst);
         wxdragon::call_after(Box::new(close_self_update_progress_window));
         wxdragon::call_after(Box::new(move || match result {
             Ok(report) => {

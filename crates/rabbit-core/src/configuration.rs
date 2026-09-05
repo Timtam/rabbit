@@ -172,6 +172,8 @@ pub enum ConfigurationMessage {
     Skipped { step_id: String },
     /// None of the step's `requires_packages` was satisfied.
     SkippedDependencyMissing { step_id: String, dep_id: String },
+    /// The user stopped the run before this step was reached.
+    Cancelled { step_id: String },
     /// Generic "applied with no observable change" fallback used by
     /// [`skipped_step_report`] when called with `Applied`.
     #[default]
@@ -193,6 +195,9 @@ pub enum ConfigurationStatus {
     /// `dry_run` was set; we didn't write anything but report what
     /// would have happened.
     DryRun,
+    /// The user stopped the run before this step was reached. The step was
+    /// selected and its dependency was satisfied; it simply never ran.
+    Cancelled,
 }
 
 /// All configuration steps RABBIT knows how to run. Hardcoded today;
@@ -509,6 +514,15 @@ pub fn skipped_step_report(
         ConfigurationStatus::Applied => (
             format!("Configuration step {:?} applied without changes.", step.id),
             ConfigurationMessage::AppliedNoOp,
+        ),
+        ConfigurationStatus::Cancelled => (
+            format!(
+                "Configuration step {:?} did not run: you stopped the setup first.",
+                step.id
+            ),
+            ConfigurationMessage::Cancelled {
+                step_id: step.id.clone(),
+            },
         ),
         ConfigurationStatus::DryRun => dry_run_message_for(step),
     };
