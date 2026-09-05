@@ -33,6 +33,17 @@ from this file and posts it as the GitHub release body.
 
 ### Fixed
 
+- Console windows no longer flash on screen while RABBIT works. RABBIT's
+  release build owns no console of its own, so every console program it
+  launched got a brand new console window from Windows: a PowerShell window
+  when RABBIT added its Defender cache exclusion (the one users noticed,
+  since it only appears on the runs that actually need the exclusion), a
+  `signtool` window during signature checks on machines with the Windows SDK,
+  and a `cmd` window every time the wizard opened a link. All three now run
+  windowless. Vendor installers still show their windows: those are the
+  user's own installers, and hiding them would leave a wizard that looked
+  stalled.
+
 - The **Set REAPER's language** row no longer claims to require one
   particular language pack. It listed every pack it accepts and then named
   whichever sorted first, so a step that any pack satisfies advertised

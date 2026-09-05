@@ -10,6 +10,10 @@ gui = ["dep:wxdragon"]
 
 [dependencies]
 rabbit-core = { path = "../rabbit-core" }
+# Only for `process::without_console_window`: the wizard opens external URLs
+# through `cmd /C start` on Windows, which needs the same console-window
+# suppression as the helpers rabbit-core runs.
+rabbit-platform = { path = "../rabbit-platform" }
 serde.workspace = true
 wxdragon = { workspace = true, optional = true }
 

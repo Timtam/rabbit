@@ -5872,7 +5872,13 @@ fn build_reapack_ack_page(page: &Panel, model: &WizardModel) -> (Button, CheckBo
 fn open_external_url(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd").args(["/C", "start", "", url]).spawn()?;
+        // `cmd` is a console program, and RABBIT's release build owns no
+        // console to lend it, so without this a black window flashes up
+        // every time the user follows a link. The browser `start` hands the
+        // URL to is a separate process and still opens normally.
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        rabbit_platform::process::without_console_window(&mut command).spawn()?;
         Ok(())
     }
 
