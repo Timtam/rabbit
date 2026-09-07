@@ -166,18 +166,14 @@ fn powershell_program() -> std::path::PathBuf {
 /// idempotent elevated add.
 #[cfg(windows)]
 fn query_exclusion_paths() -> Option<Vec<String>> {
-    use std::os::windows::process::CommandExt;
-
-    // CREATE_NO_WINDOW: no console flashes for the background read.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let output = std::process::Command::new(powershell_program())
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "(Get-MpPreference).ExclusionPath -join [Environment]::NewLine",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
+    let mut command = std::process::Command::new(powershell_program());
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "(Get-MpPreference).ExclusionPath -join [Environment]::NewLine",
+    ]);
+    let output = crate::process::without_console_window(&mut command)
         .output()
         .ok()?;
     if !output.status.success() {
@@ -195,7 +191,7 @@ fn query_exclusion_paths() -> Option<Vec<String>> {
 /// Add a single Defender path exclusion under UAC elevation.
 #[cfg(windows)]
 fn add_exclusion_elevated(path: &str) -> Result<(), String> {
-    use crate::elevation::{ElevationError, run_elevated_and_wait};
+    use crate::elevation::{ElevatedWindow, ElevationError, run_elevated_and_wait};
 
     // Refuse to interpolate a path that could break out of the PowerShell
     // single-quoted string and inject a command that would then run as
@@ -208,6 +204,10 @@ fn add_exclusion_elevated(path: &str) -> Result<(), String> {
     let escaped = path.replace('\'', "''");
     let command = format!("Add-MpPreference -ExclusionPath '{escaped}'");
     let program = powershell_program();
+    // `-WindowStyle Hidden` only takes effect once the PowerShell host is
+    // already up, so on its own it still let a console window appear and
+    // vanish. `ElevatedWindow::Hidden` is what actually keeps it off screen;
+    // the switch stays as a second line of defence.
     let arguments = vec![
         "-NoProfile".to_string(),
         "-NonInteractive".to_string(),
@@ -216,7 +216,7 @@ fn add_exclusion_elevated(path: &str) -> Result<(), String> {
         "-Command".to_string(),
         command,
     ];
-    match run_elevated_and_wait(&program, &arguments, None) {
+    match run_elevated_and_wait(&program, &arguments, None, ElevatedWindow::Hidden) {
         Ok(Some(0)) => Ok(()),
         Ok(Some(code)) => Err(format!("powershell exited with code {code}")),
         Ok(None) => Err("powershell returned no exit code".to_string()),

@@ -51,7 +51,27 @@ from this file and posts it as the GitHub release body.
   so RABBIT explains that and waits instead of leaving a half-swapped
   executable behind.
 
+- The **REAPER language after installation** and **Spanish OSARA
+  translation** dropdowns on the Packages page now disappear while the
+  packages you ticked leave them nothing to decide, instead of staying on
+  the page greyed out — and, in the language one's case, greyed out and
+  empty. Tab already skipped both, but a screen reader reading the page
+  from top to bottom still stopped on them and announced a dead control.
+  They come back the moment you tick a package that gives them something
+  to choose.
+
 ### Fixed
+
+- Console windows no longer flash on screen while RABBIT works. RABBIT's
+  release build owns no console of its own, so every console program it
+  launched got a brand new console window from Windows: a PowerShell window
+  when RABBIT added its Defender cache exclusion (the one users noticed,
+  since it only appears on the runs that actually need the exclusion), a
+  `signtool` window during signature checks on machines with the Windows SDK,
+  and a `cmd` window every time the wizard opened a link. All three now run
+  windowless. Vendor installers still show their windows: those are the
+  user's own installers, and hiding them would leave a wizard that looked
+  stalled.
 
 - The **Set REAPER's language** row no longer claims to require one
   particular language pack. It listed every pack it accepts and then named
@@ -60,6 +80,17 @@ from this file and posts it as the GitHub release body.
   pack" in all five interface languages. Steps with a single dependency —
   the ReaPack ones — still name it, since there it is the truth.
   (Reported by Scott Chesworth from Q&A.)
+
+- The package list on the **Packages** page could go missing entirely
+  unless the window was maximized. The page had grown — the OSARA key-map
+  note, then the Spanish-variant and REAPER-language dropdowns — until the
+  controls stacked below the list no longer fitted the default window, and
+  the layout took the whole shortfall out of the only control allowed to
+  stretch: the list itself. It collapsed to nothing, and a control of zero
+  height is not exposed to screen readers at all, so VoiceOver, NVDA,
+  JAWS and Narrator alike found no list to read. The wizard pages now
+  scroll instead of clipping what does not fit, so every control keeps its
+  size whatever the window size and the language of the interface.
 
 ## [0.4.2] - 2026-08-18
 
