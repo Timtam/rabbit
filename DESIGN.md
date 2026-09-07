@@ -1062,6 +1062,18 @@ Extension files:
   requires it.
 - Do not delete unknown files during update. Only remove files listed in a RABBIT
   receipt or explicitly owned by the package manifest.
+- Closing the window during an install stops the run; it does not abandon it.
+  Ask first, with **No** as the focused button, then let the pipeline stop at
+  its next package boundary so every guard unwinds the way it does on a clean
+  finish: the install lock is released, extraction temp dirs are removed, and
+  the run writes a report saying which packages landed and which were never
+  reached. Whatever step is running when the user confirms runs to completion
+  — an elevated vendor installer has no halfway point to return to — so the
+  wizard says it is finishing that step rather than pretending the stop is
+  instant.
+- Refuse to close at all while RABBIT is replacing its own program files.
+  That swap has no unwind path, so there is no answer that makes quitting
+  safe; say so instead of offering a choice that cannot be honoured.
 
 ## Localization
 

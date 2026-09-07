@@ -3,13 +3,13 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::cancel::CancelToken;
 use crate::error::{IoPathContext, RabbitError, Result};
 use crate::hash::sha256_file;
 use crate::hfs::{fetch_file_list, file_url as hfs_file_url};
@@ -419,7 +419,12 @@ pub fn download_artifacts(
     artifacts: &[ArtifactDescriptor],
     cache_dir: &Path,
 ) -> Result<Vec<CachedArtifact>> {
-    download_artifacts_with_progress(artifacts, cache_dir, &ProgressReporter::noop())
+    download_artifacts_with_progress(
+        artifacts,
+        cache_dir,
+        &ProgressReporter::noop(),
+        &CancelToken::new(),
+    )
 }
 
 /// Like [`download_artifacts`] but emits per-artifact and per-chunk
@@ -431,12 +436,18 @@ pub fn download_artifacts(
 /// ([`DOWNLOAD_POOL_CONCURRENCY`] workers); results are returned in input
 /// order and the first failing artifact (in input order) aborts the batch,
 /// cancelling the remaining downloads.
+///
+/// `cancel` stops the batch the same way, at each worker's next chunk or
+/// retry checkpoint. A cancelled download reports
+/// [`RabbitError::DownloadInterrupted`]; the caller decides whether that
+/// reads as a failure or as "the user asked us to stop".
 pub fn download_artifacts_with_progress(
     artifacts: &[ArtifactDescriptor],
     cache_dir: &Path,
     progress: &ProgressReporter,
+    cancel: &CancelToken,
 ) -> Result<Vec<CachedArtifact>> {
-    let (pool, handles) = spawn_download_pool(artifacts, cache_dir, progress);
+    let (pool, handles) = spawn_download_pool(artifacts, cache_dir, progress, cancel);
     let mut cached = Vec::with_capacity(handles.len());
     for handle in handles {
         match handle.wait() {
@@ -487,12 +498,12 @@ impl DownloadHandle {
 ///
 /// [`cancel`]: DownloadPool::cancel
 pub(crate) struct DownloadPool {
-    cancel: Arc<AtomicBool>,
+    cancel: CancelToken,
 }
 
 impl DownloadPool {
     pub(crate) fn cancel(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.cancel.cancel();
     }
 }
 
@@ -518,10 +529,14 @@ pub(crate) fn spawn_download_pool(
     artifacts: &[ArtifactDescriptor],
     cache_dir: &Path,
     progress: &ProgressReporter,
+    cancel: &CancelToken,
 ) -> (DownloadPool, Vec<DownloadHandle>) {
     type ResultSender = std::sync::mpsc::SyncSender<Result<CachedArtifact>>;
 
-    let cancel = Arc::new(AtomicBool::new(false));
+    // A child of the caller's token: the pool stops when the caller cancels
+    // the whole operation, and the batch can also stop its own workers on a
+    // failed artifact without cancelling anything above it.
+    let cancel = cancel.child();
     let mut queue: std::collections::VecDeque<(ArtifactDescriptor, Vec<ResultSender>)> =
         std::collections::VecDeque::with_capacity(artifacts.len());
     let mut job_index_by_target: std::collections::HashMap<(String, String, String), usize> =
@@ -552,7 +567,7 @@ pub(crate) fn spawn_download_pool(
     let worker_count = DOWNLOAD_POOL_CONCURRENCY.min(job_count);
     for _ in 0..worker_count {
         let queue = Arc::clone(&queue);
-        let cancel = Arc::clone(&cancel);
+        let cancel = cancel.clone();
         let cache_dir = cache_dir.to_path_buf();
         let progress = progress.clone();
         std::thread::spawn(move || {
@@ -561,7 +576,7 @@ pub(crate) fn spawn_download_pool(
             // per job (it is practically impossible and not clonable).
             let client = download_http_client();
             loop {
-                if cancel.load(Ordering::Relaxed) {
+                if cancel.is_cancelled() {
                     return;
                 }
                 let job = queue.lock().ok().and_then(|mut queue| queue.pop_front());
@@ -613,7 +628,7 @@ fn download_artifact(
     artifact: &ArtifactDescriptor,
     cache_dir: &Path,
     progress: &ProgressReporter,
-    cancel: &AtomicBool,
+    cancel: &CancelToken,
 ) -> Result<CachedArtifact> {
     let package_dir = cache_dir
         .join(&artifact.package_id)
@@ -694,7 +709,7 @@ fn fetch_remote_artifact_with_retries(
     package_id: &str,
     progress: &ProgressReporter,
     retry_delays: &[Duration],
-    cancel: &AtomicBool,
+    cancel: &CancelToken,
 ) -> Result<()> {
     let mut bytes_downloaded: u64 = 0;
     let mut bytes_total: Option<u64> = None;
@@ -707,7 +722,7 @@ fn fetch_remote_artifact_with_retries(
     let mut max_bytes_downloaded: u64 = 0;
 
     for attempt in 0..DOWNLOAD_MAX_ATTEMPTS {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_cancelled() {
             return Err(RabbitError::DownloadInterrupted {
                 url: url.to_string(),
                 bytes_downloaded: max_bytes_downloaded,
@@ -932,14 +947,14 @@ fn stream_response_to_file(
     bytes_downloaded: &mut u64,
     bytes_total: Option<u64>,
     progress: &ProgressReporter,
-    cancel: &AtomicBool,
+    cancel: &CancelToken,
 ) -> std::result::Result<(), StreamCopyError> {
     let mut buffer = vec![0u8; DOWNLOAD_CHUNK_SIZE];
     let mut bytes_at_last_event: u64 = *bytes_downloaded;
     let mut last_event_at = Instant::now();
 
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_cancelled() {
             return Err(StreamCopyError::Read(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "the operation was cancelled",
@@ -1269,7 +1284,6 @@ pub(crate) fn download_url_with_retries(
     package_id: &str,
     progress: &ProgressReporter,
 ) -> Result<()> {
-    static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
     fetch_remote_artifact_with_retries(
         &download_http_client()?,
         url,
@@ -1277,7 +1291,7 @@ pub(crate) fn download_url_with_retries(
         package_id,
         progress,
         &DOWNLOAD_RETRY_DELAYS,
-        &NEVER_CANCELLED,
+        &CancelToken::new(),
     )
 }
 
@@ -1562,7 +1576,6 @@ mod tests {
     }
 
     fn fetch_with_zero_delays(url: &str, part_path: &std::path::Path) -> Result<()> {
-        static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
         fetch_remote_artifact_with_retries(
             &download_http_client().unwrap(),
             url,
@@ -1570,7 +1583,7 @@ mod tests {
             "test-package",
             &ProgressReporter::noop(),
             &[Duration::ZERO, Duration::ZERO, Duration::ZERO],
-            &NEVER_CANCELLED,
+            &CancelToken::new(),
         )
     }
 
@@ -2211,8 +2224,12 @@ mod tests {
 
         let cache_dir = tempdir().unwrap();
         let started = std::time::Instant::now();
-        let (_pool, handles) =
-            spawn_download_pool(&[slow, fast], cache_dir.path(), &ProgressReporter::noop());
+        let (_pool, handles) = spawn_download_pool(
+            &[slow, fast],
+            cache_dir.path(),
+            &ProgressReporter::noop(),
+            &CancelToken::new(),
+        );
         let mut handles = handles.into_iter();
         let slow_handle = handles.next().unwrap();
         let fast_handle = handles.next().unwrap();
@@ -2256,6 +2273,7 @@ mod tests {
             &[artifact.clone(), artifact],
             cache_dir.path(),
             &ProgressReporter::noop(),
+            &CancelToken::new(),
         );
         for handle in handles {
             let cached = handle.wait().unwrap();

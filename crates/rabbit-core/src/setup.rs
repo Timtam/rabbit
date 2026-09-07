@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 use crate::artifact::ArtifactDescriptor;
+use crate::cancel::CancelToken;
 use crate::configuration::{
     ConfigurationStatus, ConfigurationStepReport, apply_configuration_step,
     builtin_configuration_steps, skipped_step_report,
@@ -67,6 +68,21 @@ pub struct SetupReport {
     pub configuration_steps: Vec<ConfigurationStepReport>,
 }
 
+impl SetupReport {
+    /// True when the user stopped the run and something was left undone
+    /// because of it. Drives the "stopped" wording on the wizard's result
+    /// page, which must not read as either success or failure.
+    pub fn was_cancelled(&self) -> bool {
+        self.package_operation.was_cancelled()
+            || self.configuration_steps.iter().any(|step| {
+                matches!(
+                    step.status,
+                    crate::configuration::ConfigurationStatus::Cancelled
+                )
+            })
+    }
+}
+
 pub fn setup_requires_extension_support(package_ids: &[String]) -> bool {
     package_ids
         .iter()
@@ -89,6 +105,7 @@ pub fn execute_setup_operation(
         cache_dir,
         options,
         &ProgressReporter::noop(),
+        &CancelToken::new(),
     )
 }
 
@@ -96,6 +113,7 @@ pub fn execute_setup_operation(
 /// through to the download, install, and configuration phases. Wired
 /// up by the wxdragon wizard to drive a live progress bar; the no-op
 /// overload above is what the CLI and tests use.
+#[allow(clippy::too_many_arguments)] // The pipeline's full-control entry point.
 pub fn execute_setup_operation_with_progress(
     resource_path: &Path,
     package_ids: &[String],
@@ -104,6 +122,7 @@ pub fn execute_setup_operation_with_progress(
     cache_dir: &Path,
     options: &SetupOptions,
     progress: &ProgressReporter,
+    cancel: &CancelToken,
 ) -> Result<SetupReport> {
     let resource_init = initialize_resource_path(
         resource_path,
@@ -133,6 +152,7 @@ pub fn execute_setup_operation_with_progress(
             package_variants: options.package_variants.clone(),
         },
         progress,
+        cancel,
     )?;
 
     let _ = architecture;
@@ -148,6 +168,7 @@ pub fn execute_setup_operation_with_progress(
         },
         options.dry_run,
         progress,
+        cancel,
     )?;
 
     Ok(SetupReport {
@@ -171,6 +192,7 @@ pub fn execute_resolved_setup_operation(
         cache_dir,
         options,
         &ProgressReporter::noop(),
+        &CancelToken::new(),
     )
 }
 
@@ -181,6 +203,7 @@ pub fn execute_resolved_setup_operation_with_progress(
     cache_dir: &Path,
     options: &SetupOptions,
     progress: &ProgressReporter,
+    cancel: &CancelToken,
 ) -> Result<SetupReport> {
     let resource_init = initialize_resource_path(
         resource_path,
@@ -212,6 +235,7 @@ pub fn execute_resolved_setup_operation_with_progress(
             package_variants: options.package_variants.clone(),
         },
         progress,
+        cancel,
     )?;
 
     // We don't have a platform/architecture handy on this code path
@@ -232,6 +256,7 @@ pub fn execute_resolved_setup_operation_with_progress(
         },
         options.dry_run,
         progress,
+        cancel,
     )?;
 
     Ok(SetupReport {
@@ -287,7 +312,9 @@ fn retain_packages_that_landed(
     for item in &report.items {
         if matches!(
             item.status,
-            PackageOperationStatus::Failed | PackageOperationStatus::SkippedDependencyFailed
+            PackageOperationStatus::Failed
+                | PackageOperationStatus::SkippedDependencyFailed
+                | PackageOperationStatus::Cancelled
         ) {
             installed_or_pending.remove(&item.package_id);
         }
@@ -301,6 +328,7 @@ fn run_configuration_steps(
     context: &crate::configuration::ConfigurationContext<'_>,
     dry_run: bool,
     progress: &ProgressReporter,
+    cancel: &CancelToken,
 ) -> Result<Vec<ConfigurationStepReport>> {
     let selected: BTreeSet<&str> = selected_ids.iter().map(String::as_str).collect();
     let steps = builtin_configuration_steps();
@@ -322,6 +350,13 @@ fn run_configuration_steps(
                 step,
                 ConfigurationStatus::SkippedDependencyMissing,
             ));
+            continue;
+        }
+        // Steps write into REAPER's own ini files, so the checkpoint sits
+        // before the step rather than inside it: a half-rewritten
+        // `reaper.ini` is worse than one the run never touched.
+        if cancel.is_cancelled() {
+            reports.push(skipped_step_report(step, ConfigurationStatus::Cancelled));
             continue;
         }
         progress.report(ProgressEvent::ConfigurationStarted {

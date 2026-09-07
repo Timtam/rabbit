@@ -2,6 +2,7 @@ pub mod antivirus;
 pub mod arch_probe;
 pub mod archive;
 pub mod artifact;
+pub mod cancel;
 pub mod configuration;
 pub mod detection;
 pub mod disk_image;
