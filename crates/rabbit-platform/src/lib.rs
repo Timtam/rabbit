@@ -19,6 +19,7 @@ pub mod jaws;
 pub mod komplete_kontrol;
 pub mod locale;
 pub mod paths;
+pub mod process;
 pub mod registry;
 pub mod signature;
 
@@ -28,7 +29,9 @@ pub use disk_image::{
     DiskImageError, MountedDiskImage, copy_directory_recursive, find_app_bundle_in_directory,
     install_app_bundle_from_disk_image, mount_disk_image, run_pkg_installer_from_disk_image,
 };
-pub use elevation::{ElevationError, is_nsis_destination_argument, run_elevated_and_wait};
+pub use elevation::{
+    ElevatedWindow, ElevationError, is_nsis_destination_argument, run_elevated_and_wait,
+};
 pub use file_version::{
     read_file_version_parts, read_file_version_string, read_string_file_info_key,
 };

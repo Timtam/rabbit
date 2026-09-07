@@ -1394,6 +1394,7 @@ name = "rabbit-ui-wxdragon"
 version = "0.4.2"
 dependencies = [
  "rabbit-core",
+ "rabbit-platform",
  "serde",
  "tempfile",
  "wxdragon",

@@ -68,17 +68,55 @@ impl std::fmt::Display for ElevationError {
 
 impl std::error::Error for ElevationError {}
 
+/// Whether the elevated child is allowed to put a window on screen.
+///
+/// This is not cosmetic on Windows. RABBIT's release GUI build owns no
+/// console, so a console-subsystem child launched with a visible show
+/// command gets a console window of its own — which is what made a
+/// PowerShell window flash up mid-install while RABBIT added its Defender
+/// exclusion. The UAC consent dialog is drawn by the system on its own
+/// desktop and is unaffected by either value, so hiding the child never
+/// hides the prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElevatedWindow {
+    /// The child owns UI the user is meant to see. Vendor installers use
+    /// this: even the silent ones may fall back to their own progress or
+    /// error windows, and suppressing those would leave the user staring
+    /// at a wizard that had apparently stopped.
+    Show,
+    /// The child is a console helper doing bookkeeping on RABBIT's behalf,
+    /// with nothing to show and nothing to read.
+    Hidden,
+}
+
+#[cfg(windows)]
+impl ElevatedWindow {
+    /// The `nShow` value `ShellExecuteExW` expects for this choice.
+    fn show_command(self) -> i32 {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
+
+        match self {
+            Self::Show => SW_SHOWNORMAL,
+            Self::Hidden => SW_HIDE,
+        }
+    }
+}
+
 /// Launch `program` with `arguments` under UAC elevation and block until it
 /// exits. Returns the process exit code (`Some(n)`) on a clean exit, or
 /// `None` if the OS could not return one (rare). Working directory may be
 /// `None` to inherit the current directory.
+///
+/// `window` says whether the child may show a window; see
+/// [`ElevatedWindow`]. It never affects the UAC prompt itself.
 #[cfg_attr(not(windows), allow(unused_variables))]
 pub fn run_elevated_and_wait(
     program: &Path,
     arguments: &[String],
     working_directory: Option<&Path>,
+    window: ElevatedWindow,
 ) -> Result<Option<i32>, ElevationError> {
-    platform_run_elevated_and_wait(program, arguments, working_directory)
+    platform_run_elevated_and_wait(program, arguments, working_directory, window)
 }
 
 #[cfg(windows)]
@@ -86,6 +124,7 @@ fn platform_run_elevated_and_wait(
     program: &Path,
     arguments: &[String],
     working_directory: Option<&Path>,
+    window: ElevatedWindow,
 ) -> Result<Option<i32>, ElevationError> {
     use std::os::windows::ffi::OsStrExt;
 
@@ -96,7 +135,6 @@ fn platform_run_elevated_and_wait(
     use windows_sys::Win32::UI::Shell::{
         SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
     };
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
     let verb_w: Vec<u16> = OsStr::new("runas").encode_wide().chain(Some(0)).collect();
     let program_w: Vec<u16> = program.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -123,7 +161,7 @@ fn platform_run_elevated_and_wait(
             .as_ref()
             .map(|w| w.as_ptr())
             .unwrap_or(std::ptr::null()),
-        nShow: SW_SHOWNORMAL,
+        nShow: window.show_command(),
         hInstApp: std::ptr::null_mut(),
         lpIDList: std::ptr::null_mut(),
         lpClass: std::ptr::null(),
@@ -195,6 +233,7 @@ fn platform_run_elevated_and_wait(
     program: &Path,
     arguments: &[String],
     working_directory: Option<&Path>,
+    window: ElevatedWindow,
 ) -> Result<Option<i32>, ElevationError> {
     use std::process::Command;
 
@@ -217,6 +256,12 @@ fn platform_run_elevated_and_wait(
         command_line = command_line
     );
 
+    // `window` has no counterpart here: `do shell script … with
+    // administrator privileges` runs the command with no terminal at all,
+    // which is already what `ElevatedWindow::Hidden` asks for, and macOS
+    // vendor installers are `.pkg` files driven by `installer(8)` rather
+    // than windows RABBIT could show or hide.
+    let _ = window;
     let mut command = Command::new("/usr/bin/osascript");
     command.arg("-e").arg(&script);
     if let Some(working_directory) = working_directory {
@@ -253,6 +298,7 @@ fn platform_run_elevated_and_wait(
     _program: &Path,
     _arguments: &[String],
     _working_directory: Option<&Path>,
+    _window: ElevatedWindow,
 ) -> Result<Option<i32>, ElevationError> {
     Err(ElevationError::Unsupported)
 }
@@ -352,6 +398,8 @@ fn quote_one(argument: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::ElevatedWindow;
     use super::quote_arguments;
 
     #[test]
@@ -381,5 +429,18 @@ mod tests {
     fn skips_quoting_for_simple_arguments() {
         assert_eq!(quote_arguments(&["/S".to_string()]), "/S");
         assert_eq!(quote_arguments(&[]), "");
+    }
+
+    /// The two values must map to different show commands, and `Hidden` must
+    /// be the one that draws nothing. Getting this backwards is invisible in
+    /// review and shows up only as a console window flashing on a user's
+    /// screen mid-install, which is the bug this enum exists to fix.
+    #[cfg(windows)]
+    #[test]
+    fn hidden_maps_to_the_show_command_that_draws_nothing() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
+
+        assert_eq!(ElevatedWindow::Hidden.show_command(), SW_HIDE);
+        assert_eq!(ElevatedWindow::Show.show_command(), SW_SHOWNORMAL);
     }
 }
