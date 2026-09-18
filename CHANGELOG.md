@@ -33,6 +33,14 @@ from this file and posts it as the GitHub release body.
 
 ### Changed
 
+- RABBIT now builds on wxdragon 0.9.19, which brings wxWidgets 3.3.3 (up from
+  3.3.2) under every window and control in the wizard. Nothing is meant to
+  look or sound different, but every control now comes from a newer toolkit,
+  so reports of anything that reads or behaves differently with a screen
+  reader are especially welcome. The upgrade is groundwork: it adds the
+  window-wide keyboard event that a planned keyboard shortcut needs to work
+  whichever control has focus.
+
 - Closing the wizard while an install is running now stops the run instead of
   killing it. RABBIT asks first ("Stop the installation?", with **No** as the
   focused button so a stray Enter can't end a running install), then finishes
