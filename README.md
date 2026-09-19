@@ -225,7 +225,8 @@ first page below the REAPER installation:
   landoleet currently offers, whether that is a development build, a release
   candidate or a release.
 - **OSARA builds**: regular snapshots, or the test build of an open OSARA
-  pull request. RABBIT fetches the list from GitHub when expert mode comes on.
+  pull request. RABBIT fetches the list from GitHub when expert mode comes on,
+  with the newest pull request (the highest number) first.
   These builds are unreviewed, unsigned code. GitHub deletes them after 90
   days, and Windows security software is more likely to flag them (see
   [below](#if-antivirus-software-blocks-an-install-windows)).

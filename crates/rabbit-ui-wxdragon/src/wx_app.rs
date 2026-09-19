@@ -500,15 +500,25 @@ fn select_osara_build(wanted: Option<u32>) {
                     )
                     .value;
             });
-            choice.append(&label);
             OSARA_PULL_REQUESTS.with(|list| {
                 let mut list = list.borrow_mut();
-                list.push(Some(number));
-                list.len() - 1
+                let index = osara_build_insert_position(&list, number);
+                choice.insert(&label, index);
+                list.insert(index, Some(number));
+                index
             })
         }
     };
     choice.set_selection(index as u32);
+}
+
+/// Where pull request `number` belongs in OSARA's build list: after the
+/// regular snapshot (always first) and every higher pull request number, so
+/// one added under its number keeps the list's highest-first order.
+fn osara_build_insert_position(list: &[Option<u32>], number: u32) -> usize {
+    list.iter()
+        .position(|listed| listed.is_some_and(|listed| listed < number))
+        .unwrap_or(list.len())
 }
 
 /// List OSARA's pull requests that have a test build, in the background.
@@ -7366,6 +7376,16 @@ fn update_navigation(
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn a_pull_request_added_later_keeps_the_list_highest_number_first() {
+        let list = [None, Some(1454), Some(1448), Some(1404)];
+        assert_eq!(super::osara_build_insert_position(&list, 1460), 1);
+        assert_eq!(super::osara_build_insert_position(&list, 1450), 2);
+        assert_eq!(super::osara_build_insert_position(&list, 1300), 4);
+        // Only the snapshot so far (the list is still loading or failed).
+        assert_eq!(super::osara_build_insert_position(&[None], 1454), 1);
+    }
 
     use tempfile::tempdir;
 

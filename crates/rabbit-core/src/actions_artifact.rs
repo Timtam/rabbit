@@ -170,9 +170,9 @@ fn collect_builds(
     Ok((builds, complete))
 }
 
-/// The live pull-request builds for `platform`, newest run first, one entry
-/// per pull request (its latest run). This is what the wizard's expert mode
-/// offers to choose from.
+/// The live pull-request builds for `platform`, one entry per pull request
+/// (its latest run), highest pull request number first. This is what the
+/// wizard's expert mode offers to choose from.
 pub fn pull_request_builds(
     spec: &GithubActionsArtifactSpec,
     platform: Platform,
@@ -183,10 +183,18 @@ pub fn pull_request_builds(
     let client = crate::latest::build_http_client()?;
     // Two pages cover the pull requests anyone is likely testing right now,
     // and keep a wizard refresh cheap on the anonymous rate limit.
-    let (mut builds, _) = collect_builds(&client, spec, target, 2, None)?;
-    let mut seen = std::collections::BTreeSet::new();
-    builds.retain(|build| seen.insert(build.pull_request));
-    Ok(builds)
+    let (builds, _) = collect_builds(&client, spec, target, 2, None)?;
+    Ok(one_per_pull_request(builds))
+}
+
+/// Each pull request's newest build, ordered by pull request number, highest
+/// first. Numbers go up as pull requests are opened, so that is newest first
+/// and stays put, where ordering by latest build would reshuffle the list
+/// every time CI rebuilds an older pull request.
+pub(crate) fn one_per_pull_request(mut builds: Vec<PullRequestBuild>) -> Vec<PullRequestBuild> {
+    builds.sort_by_key(|build| std::cmp::Reverse((build.pull_request, build.run)));
+    builds.dedup_by_key(|build| build.pull_request);
+    builds
 }
 
 /// A pull request that currently has a test build, as the wizard offers it.
@@ -199,7 +207,7 @@ pub struct PullRequestChoice {
 }
 
 /// The pull requests of `package_id` that have a live test build for
-/// `platform`, newest first, with their titles. For the wizard's expert-mode
+/// `platform`, highest pull request number first, with their titles. For the wizard's expert-mode
 /// build choice. Empty when the package offers no pull-request channel.
 pub fn pull_request_choices(
     package_id: &str,
@@ -413,6 +421,31 @@ mod tests {
         ]}"#;
         let page = builds_in_listing(body, "test", WINDOWS).unwrap();
         assert!(!page.reached_expired);
+    }
+
+    #[test]
+    fn the_wizard_lists_each_pull_request_once_highest_number_first() {
+        let build = |pull_request: u32, run: u64| PullRequestBuild {
+            pull_request,
+            run,
+            version: format!("pr{pull_request}-{run},240c4663"),
+            artifact_id: run,
+            artifact_name: String::new(),
+            expires_at: None,
+        };
+        // As collect_builds returns them: newest run first. The old pull
+        // request 1404 was rebuilt last, and 1454 has two runs.
+        let builds = one_per_pull_request(vec![
+            build(1404, 540),
+            build(1454, 534),
+            build(1448, 520),
+            build(1454, 512),
+        ]);
+        let order: Vec<(u32, u64)> = builds
+            .iter()
+            .map(|build| (build.pull_request, build.run))
+            .collect();
+        assert_eq!(order, vec![(1454, 534), (1448, 520), (1404, 540)]);
     }
 
     #[test]
