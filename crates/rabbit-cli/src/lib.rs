@@ -278,7 +278,8 @@ enum Command {
         /// otherwise. Repeatable.
         #[arg(long = "package-channel")]
         package_channel: Vec<String>,
-        /// Write the JSON run report to exactly this path.
+        /// Write the JSON run report to exactly this path. Without `--apply`
+        /// the report says which artifacts would be downloaded and installed.
         #[arg(long)]
         report_path: Option<PathBuf>,
         /// Save a JSON run report under the resource folder's `RABBIT`
@@ -879,13 +880,53 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let artifacts =
                 resolve_latest_artifacts_on(&package, platform, architecture, &channels)?;
             warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
+            // Without --apply, nothing is downloaded: every other command
+            // treats "no --apply" as "change nothing on this machine", and a
+            // download is a change to it. There is no file to install from
+            // and so no install report; what there is to say is which
+            // artifacts would be fetched, and whether the target is ready
+            // for them.
+            if !apply {
+                let preflight = run_install_preflight(
+                    &resource_path,
+                    &PreflightOptions {
+                        dry_run: true,
+                        allow_reaper_running,
+                        target_app_path: target_app_path.clone(),
+                    },
+                );
+                let planned = PlannedInstall {
+                    resource_path: resource_path.clone(),
+                    dry_run: true,
+                    preflight,
+                    artifacts,
+                };
+                let report_path = selected_report_path(
+                    Some(&resource_path),
+                    report_path,
+                    save_report,
+                    "install-extension",
+                )?;
+                save_optional_report(report_path.as_deref(), &planned)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&planned)?);
+                } else {
+                    print_preflight_report(&planned.preflight);
+                    print_artifacts(&planned.artifacts);
+                    println!(
+                        "Dry run: nothing was downloaded or installed. Pass --apply to install, \
+                         or use `rabbit download` to fetch without installing."
+                    );
+                }
+                return Ok(());
+            }
             let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
             let cached = download_artifacts(&artifacts, &cache_dir)?;
             let report = install_cached_artifacts(
                 &resource_path,
                 &cached,
                 &InstallOptions {
-                    dry_run: !apply,
+                    dry_run: false,
                     allow_reaper_running,
                     target_app_path,
                     package_variants: Default::default(),
@@ -1386,6 +1427,18 @@ fn ensure_reapack_donation_acknowledged(
          https://reapack.com/donate and want RABBIT to install or update ReaPack."
             .into(),
     )
+}
+
+/// What `install-extension` reports without `--apply`: the artifacts it
+/// would download and install, and whether the target is ready for them.
+/// Not an [`InstallReport`], because nothing was downloaded and so nothing
+/// was planned file by file.
+#[derive(Debug, serde::Serialize)]
+struct PlannedInstall {
+    resource_path: PathBuf,
+    dry_run: bool,
+    preflight: PreflightReport,
+    artifacts: Vec<ArtifactDescriptor>,
 }
 
 fn save_optional_report<T>(
