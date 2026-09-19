@@ -623,21 +623,22 @@ fn toggle_expert_mode(model: &WizardModel, widgets: &WizardWidgets, step: usize)
             return;
         }
     }
+    // Focus stays where the user pressed the keys: the dialog hands it back
+    // when it closes. Only a build choice that is about to be hidden gives it
+    // up, to the REAPER installation choice above it, before it disappears.
     if expert_mode() {
+        if widgets.reaper_build_choice.has_focus() || widgets.osara_build_choice.has_focus() {
+            widgets.target_choice.set_focus();
+        }
         EXPERT_MODE.store(false, Ordering::SeqCst);
         apply_expert_mode(model, widgets);
         show_expert_mode_message(&text.expert_disabled_title, &text.expert_disabled_body);
-        // The control that had focus may just have been hidden.
-        widgets.target_choice.set_focus();
     } else {
         if !confirm_expert_mode(model) {
             return;
         }
         EXPERT_MODE.store(true, Ordering::SeqCst);
         apply_expert_mode(model, widgets);
-        // Land on the first new choice, so the screen reader says what
-        // appeared instead of leaving it to be discovered.
-        widgets.reaper_build_choice.set_focus();
     }
 }
 
