@@ -62,6 +62,10 @@ from this file and posts it as the GitHub release body.
   RABBIT can tell a development REAPER from a regular one and knows when to
   put the regular release back. A switch between channels reinstalls even
   when both builds carry the same version number.
+- The README now explains `GITHUB_TOKEN`. Without it, GitHub allows 60 API
+  requests an hour, which testers following OSARA pull request builds can
+  run out of. With a personal access token set, the limit is 5,000. RABBIT
+  already used the variable, but only CI knew about it.
 
 ### Changed
 
@@ -131,6 +135,17 @@ from this file and posts it as the GitHub release body.
   JAWS and Narrator alike found no list to read. The wizard pages now
   scroll instead of clipping what does not fit, so every control keeps its
   size whatever the window size and the language of the interface.
+
+### Security
+
+- RABBIT no longer hands a `GITHUB_TOKEN` from its environment to the
+  programs it starts. That covers every installer that runs without admin
+  rights, OSARA's pull request builds included, the macOS admin shell that
+  runs installers, and REAPER when the wizard starts it. They used to inherit
+  the whole environment, token included. With expert mode, that can be code
+  nobody has reviewed yet, such as an OSARA pull request build or REAPER
+  running one. RABBIT only needs the token for its own requests to GitHub's
+  API.
 
 ## [0.4.2] - 2026-08-18
 

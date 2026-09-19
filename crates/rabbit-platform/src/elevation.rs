@@ -264,6 +264,8 @@ fn platform_run_elevated_and_wait(
     let _ = window;
     let mut command = Command::new("/usr/bin/osascript");
     command.arg("-e").arg(&script);
+    // The admin shell and the installer it runs inherit this environment.
+    crate::process::without_rabbit_secrets(&mut command);
     if let Some(working_directory) = working_directory {
         command.current_dir(working_directory);
     }

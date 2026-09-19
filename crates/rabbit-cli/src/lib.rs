@@ -13,7 +13,8 @@ use rabbit_core::localization::{
 };
 use rabbit_core::model::{Architecture, Platform};
 use rabbit_core::operation::{
-    PackageOperationOptions, PackageOperationReport, execute_package_operation,
+    PackageOperationOptions, PackageOperationReport, PlannedExecutionKind,
+    execute_package_operation,
 };
 use rabbit_core::package::{PackageChannels, STABLE_CHANNEL, remembered_channels};
 use rabbit_core::package::{
@@ -1840,6 +1841,8 @@ fn print_package_operation_report(report: &PackageOperationReport) {
             println!("    Artifact: {}", plan.artifact_location);
             if let Some(program) = &plan.program {
                 println!("    Program: {program}");
+            } else if plan.kind == PlannedExecutionKind::LaunchInstallerExecutable {
+                println!("    Program: the installer inside the .zip, once it is downloaded");
             }
             if !plan.arguments.is_empty() {
                 println!("    Arguments: {}", plan.arguments.join(" "));
