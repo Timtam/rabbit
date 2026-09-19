@@ -391,6 +391,7 @@ wizard-summary-planned-execution-title = Ejecución desatendida planeada:
 wizard-summary-planned-execution-runner =   Se ejecuta: { $runner }
 wizard-summary-planned-execution-artifact =   Artefacto: { $artifact }
 wizard-summary-planned-execution-program =   Programa: { $program }
+wizard-summary-planned-execution-program-zipped =   Programa: el instalador contenido en el archivo .zip, una vez descargado
 wizard-summary-planned-execution-arguments =   Argumentos: { $arguments }
 wizard-summary-planned-execution-working-directory =   Directorio de trabajo: { $path }
 wizard-summary-planned-execution-verify =   Verificar: { $path }

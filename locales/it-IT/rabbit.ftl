@@ -390,6 +390,7 @@ wizard-summary-planned-execution-title = Esecuzione automatica prevista:
 wizard-summary-planned-execution-runner =   Esecutore: { $runner }
 wizard-summary-planned-execution-artifact =   Artefatto: { $artifact }
 wizard-summary-planned-execution-program =   Programma: { $program }
+wizard-summary-planned-execution-program-zipped =   Programma: il programma di installazione contenuto nel file .zip, una volta scaricato
 wizard-summary-planned-execution-arguments =   Argomenti: { $arguments }
 wizard-summary-planned-execution-working-directory =   Directory di lavoro: { $path }
 wizard-summary-planned-execution-verify =   Verifica: { $path }

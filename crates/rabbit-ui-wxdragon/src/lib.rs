@@ -26,7 +26,7 @@ use rabbit_core::localization::{DEFAULT_LOCALE, Localizer, embedded_locales};
 use rabbit_core::metadata::file_version;
 use rabbit_core::model::{Architecture, Confidence, Installation, InstallationKind, Platform};
 use rabbit_core::operation::{
-    PackageAutomationSupport, PackageOperationStatus, PlannedExecutionKind,
+    PackageAutomationSupport, PackageOperationStatus, PlannedExecutionKind, PlannedExecutionPlan,
     package_automation_support, preview_manual_instruction,
 };
 use rabbit_core::package::{
@@ -2628,14 +2628,7 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
                 &[("artifact", plan.artifact_location.clone())],
                 format!("  Artifact: {}", plan.artifact_location),
             ));
-            if let Some(program) = &plan.program {
-                detail_lines.push(format_localized_message(
-                    localizer.as_ref(),
-                    "wizard-summary-planned-execution-program",
-                    &[("program", program.clone())],
-                    format!("  Program: {program}"),
-                ));
-            }
+            detail_lines.extend(planned_execution_program_line(localizer.as_ref(), plan));
             if !plan.arguments.is_empty() {
                 let arguments = plan.arguments.join(" ");
                 detail_lines.push(format_localized_message(
@@ -2765,6 +2758,34 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
             ),
         ),
         detail_lines,
+    }
+}
+
+/// The summary's "Program" line for a planned execution. An installer that
+/// arrives zipped (an OSARA pull-request build) has no program to name until
+/// it is downloaded and unpacked, so the line says what will run instead of
+/// leaving the reader to wonder why it is missing. Other plans without a
+/// program (archives, disk images) get no line, as before.
+fn planned_execution_program_line(
+    localizer: Option<&Localizer>,
+    plan: &PlannedExecutionPlan,
+) -> Option<String> {
+    match &plan.program {
+        Some(program) => Some(format_localized_message(
+            localizer,
+            "wizard-summary-planned-execution-program",
+            &[("program", program.clone())],
+            format!("  Program: {program}"),
+        )),
+        None if plan.kind == PlannedExecutionKind::LaunchInstallerExecutable => {
+            Some(format_localized_message(
+                localizer,
+                "wizard-summary-planned-execution-program-zipped",
+                &[],
+                "  Program: the installer inside the .zip, once it is downloaded".to_string(),
+            ))
+        }
+        None => None,
     }
 }
 
@@ -5672,6 +5693,46 @@ mod tests {
         assert_eq!(
             super::WizardInstallOptions::default().osara_keymap_choice,
             OsaraKeymapChoice::ReplaceCurrent
+        );
+    }
+
+    #[test]
+    fn the_summary_says_what_runs_for_an_installer_still_in_its_zip() {
+        let plan = |kind, program: Option<&str>| PlannedExecutionPlan {
+            kind,
+            artifact_location: "https://nightly.link/jcsteh/osara/actions/artifacts/1.zip"
+                .to_string(),
+            program: program.map(str::to_string),
+            arguments: Vec::new(),
+            working_directory: None,
+            verification_paths: Vec::new(),
+            requires_elevation: false,
+            freshness_paths: Vec::new(),
+        };
+        let english = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let german = Localizer::embedded("de-DE").unwrap();
+
+        let zipped = plan(PlannedExecutionKind::LaunchInstallerExecutable, None);
+        let line = super::planned_execution_program_line(Some(&english), &zipped).unwrap();
+        assert!(line.contains("the installer inside the .zip"), "{line}");
+        let line = super::planned_execution_program_line(Some(&german), &zipped).unwrap();
+        assert!(line.contains("ZIP-Datei"), "{line}");
+
+        let downloaded = plan(
+            PlannedExecutionKind::LaunchInstallerExecutable,
+            Some(r"C:\cache\osara.unzipped\osara.exe"),
+        );
+        let line = super::planned_execution_program_line(Some(&english), &downloaded).unwrap();
+        assert!(
+            line.contains(r"C:\cache\osara.unzipped\osara.exe"),
+            "{line}"
+        );
+
+        // A plan that never names a program still gets no line.
+        let archive = plan(PlannedExecutionKind::ExtractArchiveAndRunInstaller, None);
+        assert_eq!(
+            super::planned_execution_program_line(Some(&english), &archive),
+            None
         );
     }
 

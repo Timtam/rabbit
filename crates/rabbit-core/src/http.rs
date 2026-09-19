@@ -16,7 +16,7 @@ pub(crate) fn maybe_apply_github_auth(builder: RequestBuilder, url: &str) -> Req
     if !is_github_api_url(url) {
         return builder;
     }
-    let Ok(token) = env::var("GITHUB_TOKEN") else {
+    let Ok(token) = env::var(rabbit_platform::process::GITHUB_TOKEN_ENV) else {
         return builder;
     };
     if token.trim().is_empty() {

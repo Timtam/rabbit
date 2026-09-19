@@ -391,6 +391,7 @@ wizard-summary-planned-execution-title = Planned unattended execution:
 wizard-summary-planned-execution-runner =   Runner: { $runner }
 wizard-summary-planned-execution-artifact =   Artifact: { $artifact }
 wizard-summary-planned-execution-program =   Program: { $program }
+wizard-summary-planned-execution-program-zipped =   Program: the installer inside the .zip, once it is downloaded
 wizard-summary-planned-execution-arguments =   Arguments: { $arguments }
 wizard-summary-planned-execution-working-directory =   Working directory: { $path }
 wizard-summary-planned-execution-verify =   Verify: { $path }

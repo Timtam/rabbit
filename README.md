@@ -362,6 +362,22 @@ has no build left, RABBIT installs the regular snapshot and prints a warning
 saying so. It never counts a network failure as a missing build, so an outage
 can't quietly downgrade anything.
 
+RABBIT asks GitHub's API about several packages, and without signing in
+GitHub allows 60 such requests an hour for each internet connection.
+Following OSARA pull request builds takes several more on every run, so
+testers can run into that limit. Version checks then fail with GitHub's "rate
+limit exceeded" error, and the wizard can't list OSARA's pull request builds.
+To lift the limit to 5,000 an hour, set the environment variable
+`GITHUB_TOKEN` to a GitHub personal access token before starting RABBIT. The
+wizard and the CLI both use it. RABBIT only reads public data, so a token
+without any extra permissions is enough. RABBIT only sends it to
+`api.github.com`, and never hands it to OSARA's test builds or to REAPER:
+
+```
+$env:GITHUB_TOKEN = "<your token>"; .\RABBIT.exe                        # Windows, PowerShell
+GITHUB_TOKEN="<your token>" /Applications/Rabbit.app/Contents/MacOS/rabbit   # macOS
+```
+
 ### Maintain
 
 ```
@@ -408,9 +424,10 @@ Microsoft as a false positive at <https://www.microsoft.com/en-us/wdsi/filesubmi
 ## Reports and logs
 
 Every installation produces a JSON report under `<resource>/RABBIT/logs/`.
-Backups go to `<resource>/RABBIT/backups/<timestamp>/`. The download cache lives
-in `%LOCALAPPDATA%\RABBIT\cache` (Windows) or `~/Library/Caches/RABBIT` (macOS) and
-can be deleted safely at any time.
+Backups go to `<resource>/RABBIT/backups/<timestamp>/`. The download cache is a
+`rabbit-cache` folder in your temporary folder, usually `%TEMP%\rabbit-cache` on
+Windows and `$TMPDIR/rabbit-cache` on macOS. It can be deleted safely at any time, and
+the CLI's `--cache-dir` points a single run somewhere else.
 
 ## Made with the help of AI
 

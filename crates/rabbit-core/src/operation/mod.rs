@@ -1823,7 +1823,13 @@ fn planned_execution_for_artifact(
     match artifact.kind {
         ArtifactKind::Installer => PlannedExecutionPlan {
             kind: PlannedExecutionKind::LaunchInstallerExecutable,
-            program: Some(artifact_location.clone()),
+            // A zipped installer (how GitHub hands out a workflow artifact,
+            // such as an OSARA pull-request build) has no program to name
+            // until it is downloaded: what runs is the .exe inside, which only
+            // exists once the zip is unpacked. Naming the zip's URL instead
+            // made a dry run claim RABBIT would launch a .zip.
+            program: (cached_artifact.is_some() || !installer_arrives_zipped(artifact))
+                .then(|| artifact_location.clone()),
             arguments: installer_arguments_for_artifact(
                 artifact,
                 resource_path,
@@ -1869,6 +1875,12 @@ fn planned_execution_for_artifact(
             freshness_paths,
         },
     }
+}
+
+/// Whether an installer is delivered inside a zip, to be unpacked once it
+/// is downloaded (see `cached_artifact` in the artifact module).
+fn installer_arrives_zipped(artifact: &ArtifactDescriptor) -> bool {
+    artifact.file_name.to_ascii_lowercase().ends_with(".zip")
 }
 
 /// Per-package decision: does this artifact's runner need to launch through
@@ -2218,7 +2230,7 @@ mod tests {
         execute_resolved_package_operation_with_detections_and_progress, first_failed_dependency,
         plan_action_for_artifact,
     };
-    use crate::artifact::{ArtifactDescriptor, ArtifactKind};
+    use crate::artifact::{ArtifactDescriptor, ArtifactKind, CachedArtifact};
     use crate::cancel::CancelToken;
     use crate::detection::detect_components;
     use crate::error::RabbitError;
@@ -2474,6 +2486,58 @@ mod tests {
             ),
             PackageAutomationSupport::AvailableUnattended(PlannedAutomationKind::ArchiveExtraction)
         );
+    }
+
+    #[test]
+    fn a_zipped_installer_names_no_program_until_it_is_unpacked() {
+        let resource_path = std::path::Path::new(r"C:\REAPER Portable");
+        let descriptor = ArtifactDescriptor {
+            package_id: PACKAGE_OSARA.to_string(),
+            version: Version::parse("pr1454-534,240c4663").unwrap(),
+            platform: Platform::Windows,
+            architecture: Architecture::X64,
+            kind: ArtifactKind::Installer,
+            url: "https://nightly.link/jcsteh/osara/actions/artifacts/9888938295.zip".to_string(),
+            file_name: "osara_windows_pr1454-534,240c4663.zip".to_string(),
+            channel: Some("pr:1454".to_string()),
+        };
+
+        // A dry run has only the zip's URL, and RABBIT never runs a .zip.
+        let dry =
+            super::planned_execution_for_artifact(&descriptor, None, resource_path, None, true);
+        assert_eq!(dry.kind, PlannedExecutionKind::LaunchInstallerExecutable);
+        assert_eq!(dry.program, None);
+        assert_eq!(dry.artifact_location, descriptor.url);
+
+        // Once downloaded, the cached artifact is the unpacked .exe, and
+        // that is exactly what runs.
+        let unpacked =
+            r"C:\cache\osara_windows_pr1454-534,240c4663.unzipped\osara_pr1454-534,240c4663.exe";
+        let cached = CachedArtifact {
+            descriptor: descriptor.clone(),
+            path: std::path::PathBuf::from(unpacked),
+            size: 1_740_067,
+            sha256: String::new(),
+            reused_existing_file: false,
+        };
+        let real = super::planned_execution_for_artifact(
+            &descriptor,
+            Some(&cached),
+            resource_path,
+            None,
+            true,
+        );
+        assert_eq!(real.program.as_deref(), Some(unpacked));
+
+        // An ordinary installer still names its URL in a dry run.
+        let exe = ArtifactDescriptor {
+            url: "https://example.invalid/osara_2026.8.29.2333.dd330f65.exe".to_string(),
+            file_name: "osara_2026.8.29.2333.dd330f65.exe".to_string(),
+            channel: None,
+            ..descriptor
+        };
+        let plain = super::planned_execution_for_artifact(&exe, None, resource_path, None, true);
+        assert_eq!(plain.program.as_deref(), Some(exe.url.as_str()));
     }
 
     #[test]

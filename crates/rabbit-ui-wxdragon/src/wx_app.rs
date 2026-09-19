@@ -7294,10 +7294,13 @@ fn open_resource_folder(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Start REAPER. It never gets RABBIT's GitHub token: it may be running an
+/// OSARA pull-request build. An app bundle started through `open` gets its
+/// environment from launchd, not from RABBIT, so it needs nothing removed.
 fn launch_reaper(path: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        Command::new(path).spawn()?;
+        rabbit_platform::process::without_rabbit_secrets(&mut Command::new(path)).spawn()?;
         Ok(())
     }
 
@@ -7310,7 +7313,7 @@ fn launch_reaper(path: &Path) -> std::io::Result<()> {
         {
             Command::new("open").arg(path).spawn()?;
         } else {
-            Command::new(path).spawn()?;
+            rabbit_platform::process::without_rabbit_secrets(&mut Command::new(path)).spawn()?;
         }
         Ok(())
     }

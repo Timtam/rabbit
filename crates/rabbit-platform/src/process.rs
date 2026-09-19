@@ -16,6 +16,21 @@
 
 use std::process::Command;
 
+/// The environment variable RABBIT reads a GitHub token from, to lift
+/// GitHub's API rate limit.
+pub const GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
+
+/// Keep RABBIT's secrets out of a program it starts that is not its own.
+///
+/// A child inherits RABBIT's environment, and with it a `GITHUB_TOKEN` a
+/// tester exported for RABBIT's sake. The programs this is for run code
+/// RABBIT did not write, and in expert mode code nobody has reviewed yet:
+/// an OSARA pull-request build's installer, or REAPER with that build
+/// loaded. Nothing they do needs the token.
+pub fn without_rabbit_secrets(command: &mut Command) -> &mut Command {
+    command.env_remove(GITHUB_TOKEN_ENV)
+}
+
 /// Run a console-subsystem child with no console window.
 ///
 /// Only the console *window* is suppressed. Handles redirected through
@@ -43,6 +58,25 @@ pub fn without_console_window(command: &mut Command) -> &mut Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_program_rabbit_starts_does_not_inherit_the_github_token() {
+        let mut command = Command::new("installer.exe");
+        command.env(GITHUB_TOKEN_ENV, "secret").env("OTHER", "kept");
+        without_rabbit_secrets(&mut command);
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(
+            envs.contains(&(std::ffi::OsStr::new(GITHUB_TOKEN_ENV), None)),
+            "{envs:?}"
+        );
+        assert!(
+            envs.contains(&(
+                std::ffi::OsStr::new("OTHER"),
+                Some(std::ffi::OsStr::new("kept"))
+            )),
+            "{envs:?}"
+        );
+    }
 
     /// The flag must suppress the console window without costing the caller
     /// the output it was after. Every site that uses this reads the child
