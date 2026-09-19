@@ -5,7 +5,7 @@ use std::process::Command;
 use std::rc::Rc;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 use rabbit_core::cancel::CancelToken;
@@ -110,7 +110,21 @@ fn install_version_check_dispatcher(dispatcher: VersionCheckDispatcher) {
     });
 }
 
-fn dispatch_version_check_event(event: VersionCheckEvent) {
+/// Which version check is current. Each check tags its events with the
+/// number it started under, and Back from the check's page moves the number
+/// on, so a check that was left behind can neither advance the wizard nor mix
+/// its results into the next one. It would carry the builds chosen before
+/// Back, and those may since have changed (or expert mode been turned off).
+static VERSION_CHECK_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn abandon_version_check() {
+    VERSION_CHECK_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+fn dispatch_version_check_event(generation: u64, event: VersionCheckEvent) {
+    if generation != VERSION_CHECK_GENERATION.load(Ordering::SeqCst) {
+        return;
+    }
     VERSION_CHECK_DISPATCHER.with(|cell| {
         if let Some(dispatcher) = cell.borrow_mut().as_mut() {
             dispatcher(event);
@@ -319,14 +333,6 @@ fn close_verdict(install_run: &InstallRunState) -> CloseVerdict {
     CloseVerdict::Ask
 }
 
-/// Ask before throwing away a running install. Returns `true` when the user
-/// confirmed.
-///
-/// `wxNO_DEFAULT` puts the focused button on **No**: this dialog appears
-/// over work the user asked for, so a stray Enter or Space — from a screen
-/// reader user tabbing around the progress page, say — must not be what
-/// stops their REAPER install halfway. wxdragon's `MessageDialogStyle`
-/// doesn't name the flag, so it comes from the raw wx constant.
 /// Expert mode for this session: the hidden unlock for pre-release builds.
 /// Never saved - RABBIT keeps no settings file - so it starts from
 /// `RABBIT_EXPERT` and is otherwise toggled with Ctrl+Shift+E (Cmd+Shift+E).
@@ -456,22 +462,59 @@ fn seed_build_choices(target_path: Option<&Path>, reaper_choice: &Choice) {
     select_remembered_osara_build();
 }
 
-/// Select the remembered pull request in OSARA's build choice, or the
-/// regular snapshot when it has no build any more.
+/// Select the pull request the target's OSARA was last installed from.
 fn select_remembered_osara_build() {
+    select_osara_build(OSARA_REMEMBERED_PULL_REQUEST.get());
+}
+
+/// The pull request OSARA's build choice has selected (`None` = snapshots).
+fn selected_osara_build() -> Option<u32> {
+    let choice = OSARA_BUILD_CHOICE.get()?;
+    let index = choice.get_selection()? as usize;
+    OSARA_PULL_REQUESTS.with(|list| list.borrow().get(index).copied().flatten())
+}
+
+/// Select pull request `wanted` (`None` = the regular snapshot) in OSARA's
+/// build choice. A pull request missing from the list is added under its
+/// number. The list only reaches back so far, and it can fail to load or not
+/// have arrived yet. None of those may quietly take a tester off the build
+/// they are on. If that build really is gone, resolution falls back to the
+/// snapshot and the package row says so.
+fn select_osara_build(wanted: Option<u32>) {
     let Some(choice) = OSARA_BUILD_CHOICE.get() else {
         return;
     };
-    let wanted = OSARA_REMEMBERED_PULL_REQUEST.get();
-    let index = OSARA_PULL_REQUESTS
-        .with(|list| list.borrow().iter().position(|number| *number == wanted))
-        .unwrap_or(0);
+    let listed =
+        OSARA_PULL_REQUESTS.with(|list| list.borrow().iter().position(|number| *number == wanted));
+    let index = match (listed, wanted) {
+        (Some(index), _) => index,
+        (None, None) => 0,
+        (None, Some(number)) => {
+            let number_text = number.to_string();
+            let mut label = number_text.clone();
+            with_ui_localizer(|localizer| {
+                label = localizer
+                    .format(
+                        "wizard-expert-osara-builds-pr-untitled",
+                        &[("number", number_text.as_str())],
+                    )
+                    .value;
+            });
+            choice.append(&label);
+            OSARA_PULL_REQUESTS.with(|list| {
+                let mut list = list.borrow_mut();
+                list.push(Some(number));
+                list.len() - 1
+            })
+        }
+    };
     choice.set_selection(index as u32);
 }
 
 /// List OSARA's pull requests that have a test build, in the background.
-/// The choice says it is looking in the meantime, and still means "regular
-/// snapshots" if someone moves on before the list arrives.
+/// Until the list arrives, the choice says it is looking, which still means
+/// "regular snapshots", and it already offers the pull request the target is
+/// on, so moving on early keeps that build.
 fn start_osara_build_listing(model: &WizardModel, widgets: &WizardWidgets) {
     let choice = widgets.osara_build_choice;
     OSARA_BUILD_CHOICE.set(Some(choice));
@@ -479,6 +522,7 @@ fn start_osara_build_listing(model: &WizardModel, widgets: &WizardWidgets) {
     choice.clear();
     choice.append(&model.text.expert_osara_builds_loading);
     choice.set_selection(0);
+    select_remembered_osara_build();
     let platform = model.platform;
     std::thread::spawn(move || {
         let result = rabbit_core::actions_artifact::pull_request_choices(
@@ -496,6 +540,10 @@ fn fill_osara_build_choice(
     let Some(choice) = OSARA_BUILD_CHOICE.get() else {
         return;
     };
+    // Whatever is selected now stays selected. That is the remembered pull
+    // request, or whatever the user has picked since. A second listing (expert
+    // mode turned off and on again) must not undo their pick.
+    let keep = selected_osara_build();
     with_ui_localizer(|localizer| {
         choice.clear();
         let mut numbers = vec![None];
@@ -529,7 +577,7 @@ fn fill_osara_build_choice(
         }
         OSARA_PULL_REQUESTS.with(|list| *list.borrow_mut() = numbers);
     });
-    select_remembered_osara_build();
+    select_osara_build(keep);
 }
 
 /// Show or hide everything expert mode adds, and bring it up to date.
@@ -616,6 +664,14 @@ fn bind_expert_mode_chord(
     });
 }
 
+/// Ask before throwing away a running install. Returns `true` when the user
+/// confirmed.
+///
+/// `wxNO_DEFAULT` puts the focused button on **No**: this dialog appears
+/// over work the user asked for, so a stray Enter or Space — from a screen
+/// reader user tabbing around the progress page, say — must not be what
+/// stops their REAPER install halfway. wxdragon's `MessageDialogStyle`
+/// doesn't name the flag, so it comes from the raw wx constant.
 fn confirm_stop_install(model: &WizardModel) -> bool {
     let no_default = MessageDialogStyle::from_bits_retain(wxdragon::ffi::WXD_NO_DEFAULT);
     let mut confirmed = false;
@@ -2151,6 +2207,9 @@ pub fn run() {
                 //   currently-selected plan; otherwise PACKAGES_STEP, again to
                 //   skip the now-irrelevant ack page.
                 let current = current_step.load(Ordering::SeqCst);
+                if current == VERSION_CHECK_STEP {
+                    abandon_version_check();
+                }
                 let step = match current {
                     PACKAGES_STEP => TARGET_STEP,
                     REAPACK_ACK_STEP => {
@@ -3313,6 +3372,7 @@ fn build_target_page(
         let dir_details = details;
         let dir_portable_folder = portable_folder;
         let dir_portable_browse = portable_folder_browse;
+        let dir_reaper_builds = reaper_build_choice;
         // Fires both for keyboard input AND for `set_value` from the Browse
         // button below — wxTextCtrl::SetValue generates wxEVT_TEXT — so this
         // single handler handles typing and the picker dialog uniformly.
@@ -3327,6 +3387,15 @@ fn build_target_page(
                 configure_portable_folder(&dir_portable_folder, &dir_portable_browse, true);
             }
             dir_details.set_value(&portable_target_details(&model, &dir_portable_folder));
+            // A different folder is a different REAPER, possibly installed
+            // from other builds: start the choices from its receipt, as a
+            // change of target does.
+            if expert_mode() {
+                seed_build_choices(
+                    portable_folder_path(&dir_portable_folder).as_deref(),
+                    &dir_reaper_builds,
+                );
+            }
         });
     }
 
@@ -3644,12 +3713,14 @@ fn start_version_check(ui: VersionCheckUi) {
     };
 
     install_version_check_dispatcher(Box::new(dispatcher));
+    let generation = VERSION_CHECK_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     spawn_version_check_worker(
         package_ids,
         target_resource_path,
         target_platform,
         target_reaper_version,
         channels,
+        generation,
     );
 }
 
@@ -4002,6 +4073,7 @@ fn spawn_version_check_worker(
     platform: Platform,
     target_reaper_version: Option<Version>,
     channels: rabbit_core::package::PackageChannels,
+    generation: u64,
 ) {
     std::thread::spawn(move || {
         let mut installed_versions: HashMap<String, Version> =
@@ -4070,10 +4142,13 @@ fn spawn_version_check_worker(
 
                     let id_for_result = package_id.clone();
                     wxdragon::call_after(Box::new(move || {
-                        dispatch_version_check_event(VersionCheckEvent::Result {
-                            package_id: id_for_result,
-                            outcome,
-                        });
+                        dispatch_version_check_event(
+                            generation,
+                            VersionCheckEvent::Result {
+                                package_id: id_for_result,
+                                outcome,
+                            },
+                        );
                     }));
                 }
             }));
@@ -4082,7 +4157,7 @@ fn spawn_version_check_worker(
             let _ = worker.join();
         }
         wxdragon::call_after(Box::new(move || {
-            dispatch_version_check_event(VersionCheckEvent::Finished);
+            dispatch_version_check_event(generation, VersionCheckEvent::Finished);
         }));
     });
 }

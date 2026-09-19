@@ -19,7 +19,7 @@ use rabbit_core::package::{PackageChannels, STABLE_CHANNEL, remembered_channels}
 use rabbit_core::package::{
     builtin_package_specs, default_desired_package_ids, embedded_package_manifest,
 };
-use rabbit_core::plan::{AvailablePackage, build_install_plan};
+use rabbit_core::plan::{AvailablePackage, build_install_plan_with_installed_channels};
 use rabbit_core::portable::{PortabilityCheckStatus, PortabilityReport, check_portable_runtime};
 use rabbit_core::preflight::{PreflightOptions, PreflightReport, run_install_preflight};
 use rabbit_core::report::{default_report_path, save_json_and_text_reports};
@@ -1183,7 +1183,17 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 (Vec::new(), Vec::new())
             };
-            let mut plan = build_install_plan(target, &components, &desired, &available);
+            let installed_channels = detection_path
+                .as_deref()
+                .map(rabbit_core::receipt::installed_channels_at)
+                .unwrap_or_default();
+            let mut plan = build_install_plan_with_installed_channels(
+                target,
+                &components,
+                &desired,
+                &available,
+                &installed_channels,
+            );
             // Surface per-provider failures as plan notes instead of failing
             // the whole plan: one unreachable upstream shouldn't block update
             // guidance for everything else.
@@ -1731,8 +1741,8 @@ fn channel_fallbacks<'a>(
             let wanted = requested.get(package_id)?;
             (wanted != STABLE_CHANNEL && channel != Some(wanted.as_str())).then(|| {
                 format!(
-                    "{package_id}: no build found for {wanted}, so the regular release is used \
-                     instead (GitHub deletes pull request builds after 90 days)"
+                    "{package_id}: nothing to install from {wanted}, so the regular release is \
+                     used instead (the pull request is closed, or GitHub deleted its build)"
                 )
             })
         })
@@ -2199,7 +2209,7 @@ mod tests {
         );
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
-            lines[0].starts_with("osara: no build found for pr:1"),
+            lines[0].starts_with("osara: nothing to install from pr:1"),
             "{lines:?}"
         );
     }

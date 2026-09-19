@@ -695,7 +695,11 @@ pub enum ChannelParameter {
 impl ChannelParameter {
     fn accepts(self, value: &str) -> bool {
         match self {
-            ChannelParameter::PullRequest => value.parse::<u32>().is_ok_and(|number| number > 0),
+            // Only the plain form, so `pr:01454` or `pr:+1454` can't become a
+            // second name for `pr:1454` that a receipt then compares unequal.
+            ChannelParameter::PullRequest => value
+                .parse::<u32>()
+                .is_ok_and(|number| number > 0 && number.to_string() == value),
         }
     }
 }
@@ -1035,6 +1039,14 @@ pub fn embedded_package_manifest() -> PackageManifest {
 /// fallback (so the resolver never has to guess a kind).
 pub fn validate_package_spec(spec: &EmbeddedPackageSpec) -> Result<(), String> {
     validate_resolvable_spec(spec)?;
+    // Pull-request builds need a pull request number, which only a channel
+    // parameter supplies. On the package itself it could never resolve.
+    if spec.github_actions_artifact.is_some() {
+        return Err(
+            "github_actions_artifact is only allowed on a channel that takes a pull request"
+                .to_string(),
+        );
+    }
 
     let mut seen = std::collections::BTreeSet::new();
     for channel in &spec.channels {
@@ -1053,9 +1065,26 @@ pub fn validate_package_spec(spec: &EmbeddedPackageSpec) -> Result<(), String> {
         if !seen.insert(channel.id.as_str()) {
             return Err(format!("declares channel {:?} twice", channel.id));
         }
+        // A pull request number is only any use to a source that looks one
+        // up, and that source can't resolve without one.
+        match (channel.parameter, channel.github_actions_artifact.is_some()) {
+            (Some(ChannelParameter::PullRequest), false) => {
+                return Err(format!(
+                    "channel {:?} takes a pull request but has no github_actions_artifact to look it up",
+                    channel.id
+                ));
+            }
+            (None, true) => {
+                return Err(format!(
+                    "channel {:?} uses github_actions_artifact, which needs `parameter: pull_request`",
+                    channel.id
+                ));
+            }
+            _ => {}
+        }
         // A channel must resolve on its own, exactly as the package does:
         // at most one artifact source, a valid What's-New pattern, and so on.
-        validate_resolvable_spec(&spec.on_channel(Some(&channel.id)))
+        validate_resolvable_spec(&spec.overlaid_with(channel, None))
             .map_err(|message| format!("channel {:?}: {message}", channel.id))?;
     }
     Ok(())
@@ -1350,6 +1379,21 @@ impl EmbeddedPackageSpec {
         let Some(overlay) = channel.and_then(|channel| self.find_channel(channel)) else {
             return self.clone();
         };
+        self.overlaid_with(
+            overlay,
+            channel.and_then(|channel| split_channel(channel).1),
+        )
+    }
+
+    /// This package with `overlay` applied, and `parameter` (the `1454` of
+    /// `pr:1454`) handed to the source that needs it. Validation calls this
+    /// without a parameter, so it checks a parameterised channel's own fields
+    /// rather than falling back to the package as declared.
+    fn overlaid_with(
+        &self,
+        overlay: &PackageChannel,
+        parameter: Option<&str>,
+    ) -> EmbeddedPackageSpec {
         let mut spec = self.clone();
         if let Some(comparison) = overlay.version_comparison {
             spec.version_comparison = comparison;
@@ -1376,10 +1420,8 @@ impl EmbeddedPackageSpec {
         }
         // A parameterised channel hands its parameter to the source that
         // needs it: `pr:1454` becomes the pull request to look up.
-        if let (Some(ChannelParameter::PullRequest), Some(value)) = (
-            overlay.parameter,
-            channel.and_then(|channel| split_channel(channel).1),
-        ) && let Some(actions) = spec.github_actions_artifact.as_mut()
+        if let (Some(ChannelParameter::PullRequest), Some(value)) = (overlay.parameter, parameter)
+            && let Some(actions) = spec.github_actions_artifact.as_mut()
         {
             actions.pull_request = value.parse().ok();
         }
@@ -2140,6 +2182,42 @@ mod tests {
     }
 
     #[test]
+    fn a_pull_request_channel_is_validated_on_its_own_fields() {
+        let osara = || {
+            super::embedded_package_manifest()
+                .packages
+                .into_iter()
+                .find(|spec| spec.id == super::PACKAGE_OSARA)
+                .expect("OSARA is in the manifest")
+        };
+        assert!(super::validate_package_spec(&osara()).is_ok());
+
+        // A second source on the pr channel must be caught, even though the
+        // channel can't be looked up without a pull request number.
+        let mut spec = osara();
+        spec.channels[0].http_artifact = reaper_manifest_spec().http_artifact;
+        assert!(spec.channels[0].http_artifact.is_some());
+        assert!(
+            super::validate_package_spec(&spec)
+                .unwrap_err()
+                .contains("multiple artifact sources")
+        );
+
+        let mut no_parameter = osara();
+        no_parameter.channels[0].parameter = None;
+        assert!(
+            super::validate_package_spec(&no_parameter)
+                .unwrap_err()
+                .contains("needs `parameter: pull_request`")
+        );
+
+        let mut on_the_package = osara();
+        on_the_package.github_actions_artifact =
+            on_the_package.channels[0].github_actions_artifact.clone();
+        assert!(super::validate_package_spec(&on_the_package).is_err());
+    }
+
+    #[test]
     fn remembered_channels_come_from_the_receipt_and_only_while_still_offered() {
         let dir = tempfile::tempdir().unwrap();
         let receipt = |channel: &str| crate::receipt::PackageReceipt {
@@ -2189,7 +2267,9 @@ mod tests {
             .find(|spec| spec.id == super::PACKAGE_OSARA)
             .expect("OSARA is in the manifest");
         assert!(osara.offers_channel("pr:1454"));
-        for malformed in ["pr", "pr:", "pr:abc", "pr:0", "pr:-3"] {
+        for malformed in [
+            "pr", "pr:", "pr:abc", "pr:0", "pr:-3", "pr:01454", "pr:+1454",
+        ] {
             assert!(
                 !osara.offers_channel(malformed),
                 "{malformed:?} must not be offered"

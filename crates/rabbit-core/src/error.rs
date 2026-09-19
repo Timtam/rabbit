@@ -42,7 +42,7 @@ pub enum RabbitError {
     /// request that is closed stops getting new ones. Not an outage - the
     /// listing was reachable and simply had nothing - so callers take the
     /// package back to its regular release rather than failing.
-    #[error("pull request {pull_request} of {package_id} has no test build any more")]
+    #[error("pull request {pull_request} of {package_id} is closed or has no test build any more")]
     PullRequestBuildGone {
         package_id: String,
         pull_request: u32,

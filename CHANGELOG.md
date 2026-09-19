@@ -43,20 +43,21 @@ from this file and posts it as the GitHub release body.
     pull request, picked from a list fetched from GitHub.
 
   The window title shows when expert mode is on, and each package row says
-  when it comes from a pre-release build. Expert mode is never saved and lasts until RABBIT closes. The next
-  install without it takes every package that came from a pre-release build
-  back to its regular release, and the row says so. The same happens when a
-  pull request build RABBIT installed has since been deleted by GitHub. A
-  network failure is never counted as a missing build, so an outage can't
-  downgrade anything. All five interface languages carry the new wording.
+  when it comes from a pre-release build. Expert mode is never saved and
+  lasts until RABBIT closes. The next install without it takes every package
+  that came from a pre-release build back to its regular release, and the
+  row says so. The same happens to an OSARA test build once its pull request
+  is merged or closed, or GitHub has deleted the build. A network failure is
+  never counted as a missing build, so an outage can't downgrade anything.
+  All five interface languages carry the new wording.
 - The CLI gets the same builds through `--package-channel`, with no unlock
   needed. For example, `--package-channel reaper=dev` or
   `--package-channel osara=pr:1454`, and `<package>=stable` goes back.
   It works on `latest`, `artifacts`, `download`, `plan`, `install-extension`,
   `apply-packages` and `setup`. A package stays on the channel it was last
   installed from until told otherwise, and `RABBIT packages` lists each
-  package's channels. When a pull request has no build left, the CLI prints a
-  warning and installs the regular snapshot.
+  package's channels. When a pull request is merged or closed, or has no
+  build left, the CLI prints a warning and installs the regular snapshot.
 - Install receipts now record which channel each package came from, so
   RABBIT can tell a development REAPER from a regular one and knows when to
   put the regular release back. A switch between channels reinstalls even

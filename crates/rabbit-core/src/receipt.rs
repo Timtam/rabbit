@@ -87,6 +87,24 @@ pub fn receipt_path(resource_path: &Path) -> PathBuf {
     resource_path.join(RECEIPT_RELATIVE_PATH)
 }
 
+/// The channel each package at `resource_path` was last installed from, as
+/// its receipt recorded it. Read raw rather than filtered to the channels
+/// the manifest still offers: a package sitting on a channel that no longer
+/// exists has to be offered the way back to stable, not left stranded.
+pub fn installed_channels_at(resource_path: &Path) -> crate::package::PackageChannels {
+    load_install_state(resource_path)
+        .ok()
+        .flatten()
+        .map(|state| {
+            state
+                .packages
+                .into_iter()
+                .filter_map(|(id, receipt)| receipt.channel.map(|channel| (id, channel)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn load_install_state(resource_path: &Path) -> Result<Option<InstallState>> {
     let path = receipt_path(resource_path);
     if !path.exists() {

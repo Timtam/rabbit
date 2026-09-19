@@ -282,6 +282,10 @@ pub struct PackageRow {
     /// disabled on a portable REAPER target (the package installs to a fixed
     /// location outside any portable folder).
     pub requires_standard_install: bool,
+    /// The channel the available build is on; `None` is the regular release.
+    pub available_channel: Option<String>,
+    /// The channel the installed build came from, as its receipt recorded it.
+    pub installed_channel: Option<String>,
 }
 
 /// Wizard-side row for a single [`crate::configuration::ConfigurationStep`]
@@ -651,7 +655,7 @@ fn model_from_plan_with_options(
         .unwrap_or_default();
     let installed_channels = target_resource_path
         .as_deref()
-        .map(installed_channels_at)
+        .map(rabbit_core::receipt::installed_channels_at)
         .unwrap_or_default();
     let package_rows = package_rows(
         localizer,
@@ -1549,7 +1553,7 @@ pub fn wizard_package_plan_for_target_with_available(
         .map(|target| rabbit_core::receipt::declined_packages(&target.path))
         .unwrap_or_default();
     let installed_channels = target
-        .map(|target| installed_channels_at(&target.path))
+        .map(|target| rabbit_core::receipt::installed_channels_at(&target.path))
         .unwrap_or_default();
     let mut package_rows = package_rows(
         &localizer,
@@ -1611,17 +1615,7 @@ fn mark_row_unavailable(localizer: &Localizer, row: &mut PackageRow, reason_key:
     row.selected = false;
     row.action = PlanActionKind::Keep;
     row.action_label = action_label(localizer, PlanActionKind::Keep);
-    let summary = localizer
-        .format(
-            "wizard-package-row",
-            &[
-                ("package", row.display_name.as_str()),
-                ("action", row.action_label.as_str()),
-                ("installed", row.installed_version.as_str()),
-                ("available", row.available_version.as_str()),
-            ],
-        )
-        .value;
+    let summary = package_row_summary(localizer, row);
     let indicator = localizer
         .format(
             "wizard-package-row-unavailable-suffix",
@@ -1697,23 +1691,11 @@ pub fn apply_checkbox_state_to_package_row(
     } else {
         PlanActionKind::Keep
     };
-    let action_label = action_label(&localizer, new_action);
-    let summary = localizer
-        .format(
-            "wizard-package-row",
-            &[
-                ("package", row.display_name.as_str()),
-                ("action", action_label.as_str()),
-                ("installed", row.installed_version.as_str()),
-                ("available", row.available_version.as_str()),
-            ],
-        )
-        .value;
     row.action = new_action;
-    row.action_label = action_label;
-    row.summary = summary.clone();
+    row.action_label = action_label(&localizer, new_action);
+    row.summary = package_row_summary(&localizer, row);
     row.selected = checked;
-    Ok(summary)
+    Ok(row.summary.clone())
 }
 
 /// Localized package display name for `package_id`, falling back to the raw id
@@ -3104,58 +3086,85 @@ fn architecture_label_for_summary(architecture: Architecture) -> String {
 
 /// The row tag and details sentence for a package whose build is not the
 /// regular release, or which this run takes back to it. `None` for the
-/// ordinary case.
+/// ordinary case. The sentence says what the install will do, so a row
+/// that installs nothing (`acting` false) gets the tag without it.
 fn package_channel_note(
     localizer: &Localizer,
     package: &str,
     available_channel: Option<&str>,
     installed_channel: Option<&str>,
     acting: bool,
-) -> Option<(String, String)> {
+) -> Option<(String, Option<String>)> {
     let text = |key: &str, args: &[(&str, &str)]| localizer.format(key, args).value;
     match available_channel.map(rabbit_core::package::split_channel) {
         Some(("pr", Some(number))) => Some((
             text("wizard-package-channel-pr", &[("number", number)]),
-            text(
-                "wizard-package-channel-pr-details",
-                &[("package", package), ("number", number)],
-            ),
+            acting.then(|| {
+                text(
+                    "wizard-package-channel-pr-details",
+                    &[("package", package), ("number", number)],
+                )
+            }),
         )),
         Some(_) => Some((
             text("wizard-package-channel-dev", &[]),
-            text(
-                "wizard-package-channel-dev-details",
-                &[("package", package)],
-            ),
+            acting.then(|| {
+                text(
+                    "wizard-package-channel-dev-details",
+                    &[("package", package)],
+                )
+            }),
         )),
         // Installed from a pre-release, and this run puts the regular
         // release back - which is exactly what leaving expert mode does.
         None if installed_channel.is_some() && acting => Some((
             text("wizard-package-channel-back", &[]),
-            text(
+            Some(text(
                 "wizard-package-channel-back-details",
                 &[("package", package)],
-            ),
+            )),
         )),
         None => None,
     }
 }
 
-/// The channel each package at `resource_path` was last installed from, as
-/// its receipt recorded it - raw, not filtered to channels still offered,
-/// so a package stranded on a retired channel is still reported as such.
-pub fn installed_channels_at(resource_path: &Path) -> rabbit_core::package::PackageChannels {
-    rabbit_core::receipt::load_install_state(resource_path)
-        .ok()
-        .flatten()
-        .map(|state| {
-            state
-                .packages
-                .into_iter()
-                .filter_map(|(id, receipt)| receipt.channel.map(|channel| (id, channel)))
-                .collect()
-        })
-        .unwrap_or_default()
+fn row_installs(action: PlanActionKind) -> bool {
+    matches!(action, PlanActionKind::Install | PlanActionKind::Update)
+}
+
+/// A package row's one-line label: package, action and versions, then a tag
+/// when the build is not the regular release, or this run takes it back to
+/// one. Everything that changes a row's action rebuilds the label through
+/// here, so ticking or unticking a row never drops the tag.
+fn package_row_summary(localizer: &Localizer, row: &PackageRow) -> String {
+    let summary = localizer
+        .format(
+            "wizard-package-row",
+            &[
+                ("package", row.display_name.as_str()),
+                ("action", row.action_label.as_str()),
+                ("installed", row.installed_version.as_str()),
+                ("available", row.available_version.as_str()),
+            ],
+        )
+        .value;
+    match package_channel_note(
+        localizer,
+        &row.display_name,
+        row.available_channel.as_deref(),
+        row.installed_channel.as_deref(),
+        row_installs(row.action),
+    ) {
+        Some((tag, _)) => {
+            localizer
+                .format(
+                    "wizard-package-row-channel-suffix",
+                    &[("row", summary.as_str()), ("channel", tag.as_str())],
+                )
+                .value
+        }
+        None => summary,
+    }
 }
 
 /// Environment variable that turns the wizard's expert mode on at launch.
@@ -3295,45 +3304,23 @@ fn package_rows(
                 PlanActionKind::Keep
             };
             let action_label = action_label(localizer, initial_action);
-            let summary = localizer
-                .format(
-                    "wizard-package-row",
-                    &[
-                        ("package", display_name.as_str()),
-                        ("action", action_label.as_str()),
-                        ("installed", installed_version.as_str()),
-                        ("available", available_version.as_str()),
-                    ],
-                )
-                .value;
             // Say in the row itself when a build is not the regular release,
             // or when this run takes a pre-release back to the regular one.
             // The plan's own reason text stays out of the wizard, and the
             // unlock dialog is long gone by the time a later run switches a
             // package back - so the row is the one place it is always heard.
-            let channel_note = package_channel_note(
+            let available_channel = channel_by_id
+                .get(action.package_id.as_str())
+                .map(|channel| channel.to_string());
+            let installed_channel = installed_channels.get(&action.package_id).cloned();
+            let channel_sentence = package_channel_note(
                 localizer,
                 &display_name,
-                channel_by_id.get(action.package_id.as_str()).copied(),
-                installed_channels
-                    .get(&action.package_id)
-                    .map(String::as_str),
-                matches!(
-                    action.action,
-                    PlanActionKind::Install | PlanActionKind::Update
-                ),
-            );
-            let summary = match &channel_note {
-                Some((tag, _)) => {
-                    localizer
-                        .format(
-                            "wizard-package-row-channel-suffix",
-                            &[("row", summary.as_str()), ("channel", tag.as_str())],
-                        )
-                        .value
-                }
-                None => summary,
-            };
+                available_channel.as_deref(),
+                installed_channel.as_deref(),
+                row_installs(initial_action),
+            )
+            .and_then(|(_, sentence)| sentence);
             let (handling_summary, manual_attention_expected) =
                 package_handling_summary(text, &action.package_id, platform, architecture);
             // Compose the details text shown in the wizard's package
@@ -3344,8 +3331,34 @@ fn package_rows(
             // automation-kind detail are not localized for end users —
             // both stay on PackageRow as structured fields for the saved
             // report and stay out of the wizard pane.
-            let details = match &channel_note {
-                Some((_, sentence)) => format!("{summary}\n\n{sentence}"),
+            let mut row = PackageRow {
+                package_id: action.package_id.clone(),
+                summary: String::new(),
+                details: String::new(),
+                display_name: display_name.clone(),
+                description: description.clone(),
+                selected: initially_selected,
+                installed_version,
+                available_version,
+                action: initial_action,
+                action_label,
+                original_action: action.action,
+                reason: action.reason.clone(),
+                handling_summary,
+                manual_attention_expected,
+                available_for_target: true,
+                unavailability_reason: None,
+                category: spec.map(|spec| spec.category).unwrap_or_default(),
+                requires_standard_install: spec
+                    .map(|spec| spec.requires_standard_install)
+                    .unwrap_or(false),
+                available_channel,
+                installed_channel,
+            };
+            row.summary = package_row_summary(localizer, &row);
+            let summary = &row.summary;
+            let details = match &channel_sentence {
+                Some(sentence) => format!("{summary}\n\n{sentence}"),
                 None => summary.clone(),
             };
             let details = if description.is_empty() {
@@ -3369,28 +3382,8 @@ fn package_rows(
                 }
                 None => details,
             };
-            PackageRow {
-                package_id: action.package_id.clone(),
-                summary: summary.clone(),
-                details,
-                display_name: display_name.clone(),
-                description,
-                selected: initially_selected,
-                installed_version,
-                available_version,
-                action: initial_action,
-                action_label,
-                original_action: action.action,
-                reason: action.reason.clone(),
-                handling_summary,
-                manual_attention_expected,
-                available_for_target: true,
-                unavailability_reason: None,
-                category: spec.map(|spec| spec.category).unwrap_or_default(),
-                requires_standard_install: spec
-                    .map(|spec| spec.requires_standard_install)
-                    .unwrap_or(false),
-            }
+            row.details = details;
+            row
         })
         .collect()
 }
@@ -4522,6 +4515,57 @@ mod tests {
             row.summary
         );
         assert!(row.details.contains("unsupported"), "{}", row.details);
+    }
+
+    #[test]
+    fn ticking_a_row_keeps_its_channel_tag() {
+        let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let installation = fake_installation();
+        let model = model_from_plan(
+            &localizer,
+            Platform::Windows,
+            Architecture::X64,
+            vec![installation.clone()],
+            Some(0),
+            InstallPlan {
+                target: Some(installation),
+                actions: Vec::new(),
+                notes: Vec::new(),
+            },
+        );
+        let mut row = reaper_row(PlanActionKind::Update, Some("dev"), None);
+        super::apply_checkbox_state_to_package_row(&model, &mut row, false).unwrap();
+        super::apply_checkbox_state_to_package_row(&model, &mut row, true).unwrap();
+        assert!(
+            row.summary.contains("(development build)"),
+            "{}",
+            row.summary
+        );
+
+        // The way back is only announced while the row actually takes it.
+        let mut back = reaper_row(PlanActionKind::Update, None, Some("dev"));
+        super::apply_checkbox_state_to_package_row(&model, &mut back, false).unwrap();
+        assert!(!back.summary.contains("back to"), "{}", back.summary);
+        super::apply_checkbox_state_to_package_row(&model, &mut back, true).unwrap();
+        assert!(back.summary.contains("back to"), "{}", back.summary);
+    }
+
+    #[test]
+    fn a_row_that_installs_nothing_does_not_promise_an_install() {
+        // After installing a development build, the re-plan keeps REAPER.
+        // The tag still says which build it is, but "will be installed"
+        // would be false.
+        let row = reaper_row(PlanActionKind::Keep, Some("dev"), Some("dev"));
+        assert!(
+            row.summary.contains("(development build)"),
+            "{}",
+            row.summary
+        );
+        assert!(
+            !row.details.contains("will be installed"),
+            "{}",
+            row.details
+        );
     }
 
     #[test]

@@ -237,9 +237,9 @@ Expert mode is never saved. It lasts until RABBIT closes, and pressing the
 same keys again on the first page turns it off. Leaving it has a consequence.
 The next install without expert mode takes every package that came from a
 pre-release build back to its regular release, and the row says "back to the
-regular release". The same thing happens when a pull request build RABBIT
-installed has since been deleted. The mode can only be changed on the first
-page, never while an install is running.
+regular release". The same thing happens to an OSARA test build once its pull
+request is merged or closed, or GitHub has deleted the build. The mode can only
+be changed on the first page, never while an install is running.
 
 ## Command-line usage
 
@@ -356,10 +356,10 @@ expert mode, the CLI keeps a package on the channel it was last installed
 from until you pass `<package>=stable`, so a later `apply-packages` keeps a
 development REAPER on development builds. OSARA pull request builds come
 through [nightly.link](https://nightly.link/), because GitHub hands workflow
-builds only to signed-in users. When a pull request has no build left,
-RABBIT installs the regular snapshot and prints a warning saying so. It never
-counts a network failure as a missing build, so an outage can't quietly
-downgrade anything.
+builds only to signed-in users. When a pull request is merged or closed, or
+has no build left, RABBIT installs the regular snapshot and prints a warning
+saying so. It never counts a network failure as a missing build, so an outage
+can't quietly downgrade anything.
 
 ### Maintain
 

@@ -56,6 +56,30 @@ pub fn build_install_plan(
     desired_package_ids: &[String],
     available_packages: &[AvailablePackage],
 ) -> InstallPlan {
+    let installed_channels = target
+        .as_ref()
+        .map(|target| crate::receipt::installed_channels_at(&target.resource_path))
+        .unwrap_or_default();
+    build_install_plan_with_installed_channels(
+        target,
+        detections,
+        desired_package_ids,
+        available_packages,
+        &installed_channels,
+    )
+}
+
+/// [`build_install_plan`], told what channel each package was installed from
+/// instead of reading it from the target's receipts. For a caller whose
+/// detections came from a folder that is not `target`'s, such as
+/// `rabbit plan --resource-path` naming a folder no REAPER was found in.
+pub fn build_install_plan_with_installed_channels(
+    target: Option<Installation>,
+    detections: &[ComponentDetection],
+    desired_package_ids: &[String],
+    available_packages: &[AvailablePackage],
+    installed_channels: &crate::package::PackageChannels,
+) -> InstallPlan {
     let detections_by_id: BTreeMap<_, _> = detections
         .iter()
         .map(|detection| (detection.package_id.as_str(), detection))
@@ -64,26 +88,6 @@ pub fn build_install_plan(
         .iter()
         .map(|available| (available.package_id.as_str(), available))
         .collect();
-    // What channel each installed package came from, as the last RABBIT
-    // install recorded it. Read raw rather than filtered to the channels the
-    // manifest still offers: a package sitting on a channel that no longer
-    // exists has to be offered the way back to stable, not left stranded.
-    let installed_channels = target
-        .as_ref()
-        .and_then(|target| {
-            crate::receipt::load_install_state(&target.resource_path)
-                .ok()
-                .flatten()
-        })
-        .map(|state| {
-            state
-                .packages
-                .into_iter()
-                .filter_map(|(id, receipt)| receipt.channel.map(|channel| (id, channel)))
-                .collect::<BTreeMap<String, String>>()
-        })
-        .unwrap_or_default();
-
     let mut actions = Vec::new();
     for package_id in desired_package_ids {
         let available = available_by_id.get(package_id.as_str()).copied();
