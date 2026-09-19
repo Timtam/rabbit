@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand, ValueEnum};
 use rabbit_core::artifact::{
     ArtifactDescriptor, CachedArtifact, default_cache_dir, download_artifacts,
-    resolve_latest_artifacts,
+    resolve_latest_artifacts_on,
 };
 use rabbit_core::detection::{DiscoveryOptions, detect_components, discover_installations};
 use rabbit_core::install::{InstallOptions, InstallReport, install_cached_artifacts};
-use rabbit_core::latest::fetch_latest_versions;
+use rabbit_core::latest::fetch_latest_versions_on;
 use rabbit_core::localization::{
     DEFAULT_LOCALE, LocalizedText, Localizer, available_locales, resolve_runtime_locale,
 };
@@ -15,10 +15,11 @@ use rabbit_core::model::{Architecture, Platform};
 use rabbit_core::operation::{
     PackageOperationOptions, PackageOperationReport, execute_package_operation,
 };
+use rabbit_core::package::{PackageChannels, STABLE_CHANNEL, remembered_channels};
 use rabbit_core::package::{
     builtin_package_specs, default_desired_package_ids, embedded_package_manifest,
 };
-use rabbit_core::plan::{AvailablePackage, build_install_plan};
+use rabbit_core::plan::{AvailablePackage, build_install_plan_with_installed_channels};
 use rabbit_core::portable::{PortabilityCheckStatus, PortabilityReport, check_portable_runtime};
 use rabbit_core::preflight::{PreflightOptions, PreflightReport, run_install_preflight};
 use rabbit_core::report::{default_report_path, save_json_and_text_reports};
@@ -74,6 +75,10 @@ enum Command {
         json: bool,
     },
     Latest {
+        /// Check a package on another channel instead of its regular release,
+        /// e.g. `--package-channel reaper=dev`. Repeatable.
+        #[arg(long = "package-channel")]
+        package_channel: Vec<String>,
         /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
@@ -87,6 +92,10 @@ enum Command {
         /// host.
         #[arg(long, value_enum)]
         architecture: Option<CliArchitecture>,
+        /// Check a package on another channel instead of its regular release,
+        /// e.g. `--package-channel reaper=dev`. Repeatable.
+        #[arg(long = "package-channel")]
+        package_channel: Vec<String>,
         /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
@@ -104,6 +113,10 @@ enum Command {
         /// the system temp directory.
         #[arg(long)]
         cache_dir: Option<PathBuf>,
+        /// Check a package on another channel instead of its regular release,
+        /// e.g. `--package-channel reaper=dev`. Repeatable.
+        #[arg(long = "package-channel")]
+        package_channel: Vec<String>,
         /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
@@ -256,6 +269,14 @@ enum Command {
         /// passed.
         #[arg(long)]
         accept_reapack_donation_notice: bool,
+        /// Install a package from another channel, e.g. `--package-channel
+        /// reaper=dev` for REAPER's development builds from landoleet.org, or
+        /// `--package-channel osara=pr:1454` for the test build of an OSARA pull
+        /// request. `<package>=stable` goes back to the regular release. A
+        /// package stays on the channel it was last installed from until told
+        /// otherwise. Repeatable.
+        #[arg(long = "package-channel")]
+        package_channel: Vec<String>,
         /// Write the JSON run report to exactly this path.
         #[arg(long)]
         report_path: Option<PathBuf>,
@@ -312,6 +333,14 @@ enum Command {
         /// default REAPER Accesible español (es_ES). Repeatable.
         #[arg(long = "package-variant")]
         package_variant: Vec<String>,
+        /// Install a package from another channel, e.g. `--package-channel
+        /// reaper=dev` for REAPER's development builds from landoleet.org, or
+        /// `--package-channel osara=pr:1454` for the test build of an OSARA pull
+        /// request. `<package>=stable` goes back to the regular release. A
+        /// package stays on the channel it was last installed from until told
+        /// otherwise. Repeatable.
+        #[arg(long = "package-channel")]
+        package_channel: Vec<String>,
         /// Acknowledge ReaPack's donation notice. ReaPack shows it on first
         /// run and RABBIT will not install it unattended until this is
         /// passed.
@@ -377,6 +406,14 @@ enum Command {
         /// default REAPER Accesible español (es_ES). Repeatable.
         #[arg(long = "package-variant")]
         package_variant: Vec<String>,
+        /// Install a package from another channel, e.g. `--package-channel
+        /// reaper=dev` for REAPER's development builds from landoleet.org, or
+        /// `--package-channel osara=pr:1454` for the test build of an OSARA pull
+        /// request. `<package>=stable` goes back to the regular release. A
+        /// package stays on the channel it was last installed from until told
+        /// otherwise. Repeatable.
+        #[arg(long = "package-channel")]
+        package_channel: Vec<String>,
         /// Acknowledge ReaPack's donation notice. ReaPack shows it on first
         /// run and RABBIT will not install it unattended until this is
         /// passed.
@@ -458,6 +495,14 @@ enum Command {
         /// of planning offline.
         #[arg(long)]
         online: bool,
+        /// Install a package from another channel, e.g. `--package-channel
+        /// reaper=dev` for REAPER's development builds from landoleet.org, or
+        /// `--package-channel osara=pr:1454` for the test build of an OSARA pull
+        /// request. `<package>=stable` goes back to the regular release. A
+        /// package stays on the channel it was last installed from until told
+        /// otherwise. Repeatable.
+        #[arg(long = "package-channel")]
+        package_channel: Vec<String>,
         /// Output format for the plan.
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
@@ -573,8 +618,19 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 print_components(&components);
             }
         }
-        Command::Latest { json } => {
-            let latest = fetch_latest_versions()?;
+        Command::Latest {
+            json,
+            package_channel,
+        } => {
+            let channels = parse_package_channels(&package_channel)?;
+            let latest = fetch_latest_versions_on(&channels)?;
+            warn_channel_fallbacks(
+                &channels,
+                latest
+                    .packages
+                    .iter()
+                    .map(|package| (package.package_id.as_str(), package.channel.as_deref())),
+            );
             if json {
                 println!("{}", serde_json::to_string_pretty(&latest)?);
             } else {
@@ -593,12 +649,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             package,
             architecture,
             json,
+            package_channel,
         } => {
             let platform =
                 Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
             let architecture = architecture.map_or_else(Architecture::current, Into::into);
             let packages = selected_package_ids(package, platform, None);
-            let artifacts = resolve_latest_artifacts(&packages, platform, architecture)?;
+            let channels = parse_package_channels(&package_channel)?;
+            let artifacts =
+                resolve_latest_artifacts_on(&packages, platform, architecture, &channels)?;
+            warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
             if json {
                 println!("{}", serde_json::to_string_pretty(&artifacts)?);
             } else {
@@ -610,12 +670,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             architecture,
             cache_dir,
             json,
+            package_channel,
         } => {
             let platform =
                 Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
             let architecture = architecture.map_or_else(Architecture::current, Into::into);
             let packages = selected_package_ids(package, platform, None);
-            let artifacts = resolve_latest_artifacts(&packages, platform, architecture)?;
+            let channels = parse_package_channels(&package_channel)?;
+            let artifacts =
+                resolve_latest_artifacts_on(&packages, platform, architecture, &channels)?;
+            warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
             let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
             let cached = download_artifacts(&artifacts, &cache_dir)?;
             if json {
@@ -637,6 +701,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         println!("  Kind: {}", serialized_name(&package.package_kind));
                         println!("  Required: {}", yes_no(package.required));
                         println!("  Recommended: {}", yes_no(package.recommended));
+                        println!("  Channels: {}", channel_names(&package.channels));
                         println!(
                             "  Supported platforms: {}",
                             serialized_names(&package.supported_platforms)
@@ -802,12 +867,17 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             report_path,
             save_report,
             json,
+            package_channel,
         } => {
             ensure_reapack_donation_acknowledged(&package, accept_reapack_donation_notice)?;
             let platform =
                 Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
             let architecture = architecture.map_or_else(Architecture::current, Into::into);
-            let artifacts = resolve_latest_artifacts(&package, platform, architecture)?;
+            let channels =
+                effective_package_channels(Some(&resource_path), &package, &package_channel)?;
+            let artifacts =
+                resolve_latest_artifacts_on(&package, platform, architecture, &channels)?;
+            warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
             let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
             let cached = download_artifacts(&artifacts, &cache_dir)?;
             let report = install_cached_artifacts(
@@ -848,6 +918,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             report_path,
             save_report,
             json,
+            package_channel,
         } => {
             let platform =
                 Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
@@ -855,6 +926,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let packages = selected_package_ids(package, platform, Some(&resource_path));
             ensure_reapack_donation_acknowledged(&packages, accept_reapack_donation_notice)?;
             let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
+            let channels =
+                effective_package_channels(Some(&resource_path), &packages, &package_channel)?;
             let report = execute_package_operation(
                 &resource_path,
                 &packages,
@@ -867,11 +940,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     stage_unsupported,
                     replace_osara_keymap: !preserve_osara_keymap,
                     package_variants: parse_package_variants(&package_variant)?,
+                    package_channels: channels.clone(),
                     target_app_path,
                     lock_path: None,
                     force_reinstall_packages: Vec::new(),
                 },
             )?;
+            warn_channel_fallbacks(&channels, item_channels(&report.items));
             let report_path = selected_report_path(
                 Some(&resource_path),
                 report_path,
@@ -903,6 +978,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             stage_unsupported,
             preserve_osara_keymap,
             package_variant,
+            package_channel,
             accept_reapack_donation_notice,
             config_step,
             skip_config_step,
@@ -924,6 +1000,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &config_step,
                 &skip_config_step,
             );
+            let channels =
+                effective_package_channels(Some(&resource_path), &packages, &package_channel)?;
             let report = execute_setup_operation(
                 &resource_path,
                 &packages,
@@ -937,6 +1015,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     stage_unsupported,
                     replace_osara_keymap: !preserve_osara_keymap,
                     package_variants: parse_package_variants(&package_variant)?,
+                    package_channels: channels.clone(),
                     target_app_path,
                     lock_path: None,
                     force_reinstall_packages: Vec::new(),
@@ -944,6 +1023,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     configuration_step_ids,
                 },
             )?;
+            warn_channel_fallbacks(&channels, item_channels(&report.package_operation.items));
             let report_path =
                 selected_report_path(Some(&resource_path), report_path, save_report, "setup")?;
             save_optional_report(report_path.as_deref(), &report)?;
@@ -1063,6 +1143,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             format,
             report_path,
             save_report,
+            package_channel,
         } => {
             let platform =
                 Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
@@ -1088,19 +1169,31 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .as_ref()
                     .map(|installation| installation.resource_path.clone())
             });
-            let components = match detection_path {
-                Some(path) => detect_components(&path, platform)?,
+            let components = match detection_path.as_ref() {
+                Some(path) => detect_components(path, platform)?,
                 None => Vec::new(),
             };
 
             let desired = default_desired_package_ids();
+            let channels =
+                effective_package_channels(detection_path.as_deref(), &desired, &package_channel)?;
             let (available, version_check_failures) = if online {
-                let report = fetch_latest_versions()?;
+                let report = fetch_latest_versions_on(&channels)?;
                 (report.packages, report.failures)
             } else {
                 (Vec::new(), Vec::new())
             };
-            let mut plan = build_install_plan(target, &components, &desired, &available);
+            let installed_channels = detection_path
+                .as_deref()
+                .map(rabbit_core::receipt::installed_channels_at)
+                .unwrap_or_default();
+            let mut plan = build_install_plan_with_installed_channels(
+                target,
+                &components,
+                &desired,
+                &available,
+                &installed_channels,
+            );
             // Surface per-provider failures as plan notes instead of failing
             // the whole plan: one unreachable upstream shouldn't block update
             // guidance for everything else.
@@ -1110,6 +1203,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     failure.package_id, failure.message
                 ));
             }
+            plan.notes.extend(channel_fallbacks(
+                &channels,
+                available
+                    .iter()
+                    .map(|package| (package.package_id.as_str(), package.channel.as_deref())),
+            ));
             let report_path = selected_report_path(
                 plan_report_resource_path.as_deref(),
                 report_path,
@@ -1554,6 +1653,127 @@ fn parse_package_variants(
     Ok(variants)
 }
 
+/// Parse repeated `--package-channel <package>=<channel>` flags. Rejected
+/// loudly - an unknown package, a channel the package doesn't offer, or a
+/// parameter of the wrong shape (`osara=pr:abc`) - so a typo can't quietly
+/// install the regular release instead. `<package>=stable` is accepted and
+/// kept, so it can override a channel remembered from an earlier install.
+fn parse_package_channels(pairs: &[String]) -> Result<PackageChannels, Box<dyn std::error::Error>> {
+    let manifest = embedded_package_manifest();
+    let mut channels = PackageChannels::new();
+    for pair in pairs {
+        let Some((package, channel)) = pair.split_once('=') else {
+            return Err(
+                format!("--package-channel expects <package>=<channel>, got {pair:?}").into(),
+            );
+        };
+        let (package, channel) = (package.trim(), channel.trim());
+        if package.is_empty() || channel.is_empty() {
+            return Err(
+                format!("--package-channel expects <package>=<channel>, got {pair:?}").into(),
+            );
+        }
+        let Some(spec) = manifest.packages.iter().find(|spec| spec.id == package) else {
+            return Err(format!("--package-channel names unknown package {package:?}").into());
+        };
+        if channel != STABLE_CHANNEL && !spec.offers_channel(channel) {
+            let offered: Vec<String> = std::iter::once(STABLE_CHANNEL.to_string())
+                .chain(
+                    spec.channels
+                        .iter()
+                        .map(|candidate| match candidate.parameter {
+                            Some(_) => format!("{}:<number>", candidate.id),
+                            None => candidate.id.clone(),
+                        }),
+                )
+                .collect();
+            return Err(format!(
+                "package {package:?} has no channel {channel:?} (available: {})",
+                offered.join(", ")
+            )
+            .into());
+        }
+        channels.insert(package.to_string(), channel.to_string());
+    }
+    Ok(channels)
+}
+
+/// `stable` followed by every channel a package offers, as a user would
+/// type it: `dev`, or `pr:<number>` for one that takes a parameter.
+fn channel_names(channels: &[rabbit_core::package::PackageChannel]) -> String {
+    std::iter::once(STABLE_CHANNEL.to_string())
+        .chain(channels.iter().map(|channel| match channel.parameter {
+            Some(_) => format!("{}:<number>", channel.id),
+            None => channel.id.clone(),
+        }))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The channel each of `package_ids` should use: the one its last install at
+/// `resource_path` recorded, overridden by any `--package-channel` flag. The
+/// CLI counts as expert mode, so unlike the wizard's normal mode it keeps a
+/// package on its channel between runs.
+fn effective_package_channels(
+    resource_path: Option<&Path>,
+    package_ids: &[String],
+    flags: &[String],
+) -> Result<PackageChannels, Box<dyn std::error::Error>> {
+    let mut channels = resource_path
+        .map(|path| remembered_channels(path, package_ids))
+        .unwrap_or_default();
+    channels.extend(parse_package_channels(flags)?);
+    Ok(channels)
+}
+
+/// One line for each package that was asked for a channel but resolved to
+/// the regular release. Only a pull request whose test build is gone does
+/// that, and falling back is right, since an expired build should not fail
+/// the run. But someone who asked for `osara=pr:1454` has to hear that they
+/// are getting the snapshot instead.
+fn channel_fallbacks<'a>(
+    requested: &PackageChannels,
+    resolved: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+) -> Vec<String> {
+    resolved
+        .into_iter()
+        .filter_map(|(package_id, channel)| {
+            let wanted = requested.get(package_id)?;
+            (wanted != STABLE_CHANNEL && channel != Some(wanted.as_str())).then(|| {
+                format!(
+                    "{package_id}: nothing to install from {wanted}, so the regular release is \
+                     used instead (the pull request is closed, or GitHub deleted its build)"
+                )
+            })
+        })
+        .collect()
+}
+
+fn artifact_channels(
+    artifacts: &[rabbit_core::artifact::ArtifactDescriptor],
+) -> impl Iterator<Item = (&str, Option<&str>)> {
+    artifacts
+        .iter()
+        .map(|artifact| (artifact.package_id.as_str(), artifact.channel.as_deref()))
+}
+
+fn item_channels(
+    items: &[rabbit_core::operation::PackageOperationItem],
+) -> impl Iterator<Item = (&str, Option<&str>)> {
+    items
+        .iter()
+        .map(|item| (item.package_id.as_str(), item.artifact.channel.as_deref()))
+}
+
+fn warn_channel_fallbacks<'a>(
+    requested: &PackageChannels,
+    resolved: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+) {
+    for line in channel_fallbacks(requested, resolved) {
+        eprintln!("warning: {line}");
+    }
+}
+
 /// Check `--reaper-language <package>` names a language pack we actually
 /// ship. Without this the value is looked up in the install receipts, finds
 /// nothing for a typo, and the run quietly leaves REAPER in English — the
@@ -1683,6 +1903,7 @@ fn print_package_specs(packages: &[rabbit_core::package::PackageSpec]) {
         println!("  Kind: {}", serialized_name(&package.package_kind));
         println!("  Required: {}", yes_no(package.required));
         println!("  Recommended: {}", yes_no(package.recommended));
+        println!("  Channels: {}", channel_names(&package.channels));
         println!(
             "  Supported platforms: {}",
             serialized_names(&package.supported_platforms)
@@ -1967,6 +2188,31 @@ mod tests {
     use clap::Parser;
 
     use super::{Cli, Command, DEFAULT_SELF_UPDATE_MANIFEST_URL, SelfUpdateCommand};
+
+    #[test]
+    fn a_channel_that_resolved_to_the_regular_release_is_reported() {
+        let requested: rabbit_core::package::PackageChannels = [
+            ("osara".to_string(), "pr:1".to_string()),
+            ("reaper".to_string(), "dev".to_string()),
+            ("sws".to_string(), "stable".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let lines = super::channel_fallbacks(
+            &requested,
+            [
+                ("osara", None),
+                ("reaper", Some("dev")),
+                ("sws", None),
+                ("reapack", None),
+            ],
+        );
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].starts_with("osara: nothing to install from pr:1"),
+            "{lines:?}"
+        );
+    }
 
     #[test]
     fn setup_command_parses_target_app_path() {
@@ -2265,5 +2511,71 @@ mod tests {
         let mut missing = Vec::new();
         walk(&super::Cli::command(), "rabbit", &mut missing);
         assert!(missing.is_empty(), "flags with no help text: {missing:#?}");
+    }
+    #[test]
+    fn package_channel_flags_are_validated_against_the_manifest() {
+        let parsed = super::parse_package_channels(&["reaper=dev".to_string()]).unwrap();
+        assert_eq!(parsed.get("reaper").map(String::as_str), Some("dev"));
+        // `stable` is always accepted, so it can undo a remembered channel.
+        let stable = super::parse_package_channels(&["reaper=stable".to_string()]).unwrap();
+        assert_eq!(stable.get("reaper").map(String::as_str), Some("stable"));
+
+        for bad in [
+            "reaper=nightly",
+            "reaper=dev:1",
+            "nosuch=dev",
+            "reaper",
+            "=dev",
+            "reaper=",
+        ] {
+            assert!(
+                super::parse_package_channels(&[bad.to_string()]).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_channel_flag_overrides_the_remembered_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut packages = std::collections::BTreeMap::new();
+        packages.insert(
+            "reaper".to_string(),
+            rabbit_core::receipt::PackageReceipt {
+                id: "reaper".to_string(),
+                version: None,
+                variant: None,
+                channel: Some("dev".to_string()),
+                source_url: None,
+                source_sha256: None,
+                installed_files: Vec::new(),
+                installed_at: None,
+                rabbit_version: None,
+                architecture: None,
+            },
+        );
+        rabbit_core::receipt::save_install_state(
+            dir.path(),
+            &rabbit_core::receipt::InstallState {
+                schema_version: 1,
+                packages,
+                declined_packages: Default::default(),
+            },
+        )
+        .unwrap();
+        let ids = vec!["reaper".to_string()];
+
+        // The CLI counts as expert mode: with no flag, it stays on dev.
+        let remembered = super::effective_package_channels(Some(dir.path()), &ids, &[]).unwrap();
+        assert_eq!(remembered.get("reaper").map(String::as_str), Some("dev"));
+
+        // `reaper=stable` is how you go back.
+        let back = super::effective_package_channels(
+            Some(dir.path()),
+            &ids,
+            &["reaper=stable".to_string()],
+        )
+        .unwrap();
+        assert_eq!(back.get("reaper").map(String::as_str), Some("stable"));
     }
 }

@@ -43,8 +43,7 @@ use rabbit_core::resource::{
 use rabbit_core::self_update::{
     ApplySelfUpdateOptions, DEFAULT_SELF_UPDATE_MANIFEST_URL, SelfUpdateApplyReport,
     SelfUpdateCheckReport, apply_self_update, check_self_update, default_self_update_staging_dir,
-    relaunch_current_executable, resolve_self_update_release_notes,
-    stage_self_update_with_progress,
+    resolve_self_update_release_notes, stage_self_update_with_progress,
 };
 use rabbit_core::setup::{SetupOptions, SetupReport, setup_requires_extension_support};
 use rabbit_core::version::Version;
@@ -191,6 +190,20 @@ pub struct WizardText {
     pub close_during_install_body: String,
     pub close_during_self_update_title: String,
     pub close_during_self_update_body: String,
+    pub expert_enable_title: String,
+    pub expert_enable_body: String,
+    pub expert_disabled_title: String,
+    pub expert_disabled_body: String,
+    pub expert_first_page_title: String,
+    pub expert_first_page_body: String,
+    pub expert_busy_body: String,
+    pub expert_reaper_builds_label: String,
+    pub expert_reaper_builds_stable: String,
+    pub expert_reaper_builds_dev: String,
+    pub expert_osara_builds_label: String,
+    pub expert_osara_builds_snapshot: String,
+    pub expert_osara_builds_loading: String,
+    pub expert_osara_builds_unavailable: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,6 +282,10 @@ pub struct PackageRow {
     /// disabled on a portable REAPER target (the package installs to a fixed
     /// location outside any portable folder).
     pub requires_standard_install: bool,
+    /// The channel the available build is on; `None` is the regular release.
+    pub available_channel: Option<String>,
+    /// The channel the installed build came from, as its receipt recorded it.
+    pub installed_channel: Option<String>,
 }
 
 /// Wizard-side row for a single [`crate::configuration::ConfigurationStep`]
@@ -348,6 +365,9 @@ pub struct WizardInstallOptions {
     /// [`WizardInstallRequest::reaper_language_package`].
     pub reaper_language_package: Option<String>,
     pub cache_dir: Option<PathBuf>,
+    /// Channel per package for this run; see
+    /// [`WizardInstallRequest::package_channels`].
+    pub package_channels: rabbit_core::package::PackageChannels,
 }
 
 impl Default for WizardInstallOptions {
@@ -360,6 +380,7 @@ impl Default for WizardInstallOptions {
             package_variants: std::collections::BTreeMap::new(),
             reaper_language_package: None,
             cache_dir: None,
+            package_channels: Default::default(),
         }
     }
 }
@@ -405,6 +426,10 @@ pub struct WizardInstallRequest {
     /// Opt-out-remembering packages the user ticked, clearing any refusal
     /// recorded earlier so a change of mind sticks.
     pub accepted_packages: Vec<String>,
+    /// The channel each package is installed from. Empty outside expert
+    /// mode, which is exactly what sends a package that came from a
+    /// development build back to stable.
+    pub package_channels: rabbit_core::package::PackageChannels,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -628,6 +653,10 @@ fn model_from_plan_with_options(
         .as_deref()
         .map(rabbit_core::receipt::declined_packages)
         .unwrap_or_default();
+    let installed_channels = target_resource_path
+        .as_deref()
+        .map(rabbit_core::receipt::installed_channels_at)
+        .unwrap_or_default();
     let package_rows = package_rows(
         localizer,
         &text,
@@ -638,6 +667,7 @@ fn model_from_plan_with_options(
         &available_packages,
         &host,
         &declined,
+        &installed_channels,
     );
     let configuration_rows =
         configuration_rows(localizer, &package_rows, target_resource_path.as_deref());
@@ -860,6 +890,22 @@ fn wizard_text(localizer: &Localizer) -> WizardText {
             .text("wizard-close-during-self-update-title")
             .value,
         close_during_self_update_body: localizer.text("wizard-close-during-self-update-body").value,
+        expert_enable_title: localizer.text("wizard-expert-enable-title").value,
+        expert_enable_body: localizer.text("wizard-expert-enable-body").value,
+        expert_disabled_title: localizer.text("wizard-expert-disabled-title").value,
+        expert_disabled_body: localizer.text("wizard-expert-disabled-body").value,
+        expert_first_page_title: localizer.text("wizard-expert-first-page-title").value,
+        expert_first_page_body: localizer.text("wizard-expert-first-page-body").value,
+        expert_busy_body: localizer.text("wizard-expert-busy-body").value,
+        expert_reaper_builds_label: localizer.text("wizard-expert-reaper-builds-label").value,
+        expert_reaper_builds_stable: localizer.text("wizard-expert-reaper-builds-stable").value,
+        expert_reaper_builds_dev: localizer.text("package-channel-reaper-dev").value,
+        expert_osara_builds_label: localizer.text("wizard-expert-osara-builds-label").value,
+        expert_osara_builds_snapshot: localizer.text("wizard-expert-osara-builds-snapshot").value,
+        expert_osara_builds_loading: localizer.text("wizard-expert-osara-builds-loading").value,
+        expert_osara_builds_unavailable: localizer
+            .text("wizard-expert-osara-builds-unavailable")
+            .value,
     }
 }
 
@@ -1143,6 +1189,7 @@ pub fn install_request_from_target_and_rows(
         configuration_step_ids,
         declined_packages,
         accepted_packages,
+        package_channels: options.package_channels.clone(),
     })
 }
 
@@ -1505,6 +1552,9 @@ pub fn wizard_package_plan_for_target_with_available(
     let declined = target
         .map(|target| rabbit_core::receipt::declined_packages(&target.path))
         .unwrap_or_default();
+    let installed_channels = target
+        .map(|target| rabbit_core::receipt::installed_channels_at(&target.path))
+        .unwrap_or_default();
     let mut package_rows = package_rows(
         &localizer,
         &model.text,
@@ -1515,6 +1565,7 @@ pub fn wizard_package_plan_for_target_with_available(
         available_packages,
         &host,
         &declined,
+        &installed_channels,
     );
 
     // Some packages can't honor a portable target: they install to a fixed
@@ -1564,17 +1615,7 @@ fn mark_row_unavailable(localizer: &Localizer, row: &mut PackageRow, reason_key:
     row.selected = false;
     row.action = PlanActionKind::Keep;
     row.action_label = action_label(localizer, PlanActionKind::Keep);
-    let summary = localizer
-        .format(
-            "wizard-package-row",
-            &[
-                ("package", row.display_name.as_str()),
-                ("action", row.action_label.as_str()),
-                ("installed", row.installed_version.as_str()),
-                ("available", row.available_version.as_str()),
-            ],
-        )
-        .value;
+    let summary = package_row_summary(localizer, row);
     let indicator = localizer
         .format(
             "wizard-package-row-unavailable-suffix",
@@ -1650,23 +1691,11 @@ pub fn apply_checkbox_state_to_package_row(
     } else {
         PlanActionKind::Keep
     };
-    let action_label = action_label(&localizer, new_action);
-    let summary = localizer
-        .format(
-            "wizard-package-row",
-            &[
-                ("package", row.display_name.as_str()),
-                ("action", action_label.as_str()),
-                ("installed", row.installed_version.as_str()),
-                ("available", row.available_version.as_str()),
-            ],
-        )
-        .value;
     row.action = new_action;
-    row.action_label = action_label;
-    row.summary = summary.clone();
+    row.action_label = action_label(&localizer, new_action);
+    row.summary = package_row_summary(&localizer, row);
     row.selected = checked;
-    Ok(summary)
+    Ok(row.summary.clone())
 }
 
 /// Localized package display name for `package_id`, falling back to the raw id
@@ -1906,6 +1935,7 @@ pub fn execute_wizard_install_with_progress(
             lock_path: None,
             force_reinstall_packages: request.force_reinstall_packages.clone(),
             package_variants: request.package_variants.clone(),
+            package_channels: request.package_channels.clone(),
             reaper_language_package: request.reaper_language_package.clone(),
             configuration_step_ids: request.configuration_step_ids.clone(),
         },
@@ -1985,8 +2015,13 @@ pub fn run_wizard_self_update_apply(
     )
 }
 
-pub fn relaunch_rabbit_after_apply() -> Result<u32> {
-    relaunch_current_executable()
+/// Relaunch RABBIT after a self-update, keeping expert mode as it was:
+/// nothing saves it, so the new process only has it if we pass it on.
+pub fn relaunch_rabbit_after_apply(expert_mode: bool) -> Result<u32> {
+    rabbit_core::self_update::relaunch_current_executable_with(&[(
+        EXPERT_MODE_ENV,
+        expert_mode.then_some("1"),
+    )])
 }
 
 pub fn format_self_update_check_summary(
@@ -3049,6 +3084,127 @@ fn architecture_label_for_summary(architecture: Architecture) -> String {
     }
 }
 
+/// The row tag and details sentence for a package whose build is not the
+/// regular release, or which this run takes back to it. `None` for the
+/// ordinary case. The sentence says what the install will do, so a row
+/// that installs nothing (`acting` false) gets the tag without it.
+fn package_channel_note(
+    localizer: &Localizer,
+    package: &str,
+    available_channel: Option<&str>,
+    installed_channel: Option<&str>,
+    acting: bool,
+) -> Option<(String, Option<String>)> {
+    let text = |key: &str, args: &[(&str, &str)]| localizer.format(key, args).value;
+    match available_channel.map(rabbit_core::package::split_channel) {
+        Some(("pr", Some(number))) => Some((
+            text("wizard-package-channel-pr", &[("number", number)]),
+            acting.then(|| {
+                text(
+                    "wizard-package-channel-pr-details",
+                    &[("package", package), ("number", number)],
+                )
+            }),
+        )),
+        Some(_) => Some((
+            text("wizard-package-channel-dev", &[]),
+            acting.then(|| {
+                text(
+                    "wizard-package-channel-dev-details",
+                    &[("package", package)],
+                )
+            }),
+        )),
+        // Installed from a pre-release, and this run puts the regular
+        // release back - which is exactly what leaving expert mode does.
+        None if installed_channel.is_some() && acting => Some((
+            text("wizard-package-channel-back", &[]),
+            Some(text(
+                "wizard-package-channel-back-details",
+                &[("package", package)],
+            )),
+        )),
+        None => None,
+    }
+}
+
+fn row_installs(action: PlanActionKind) -> bool {
+    matches!(action, PlanActionKind::Install | PlanActionKind::Update)
+}
+
+/// A package row's one-line label: package, action and versions, then a tag
+/// when the build is not the regular release, or this run takes it back to
+/// one. Everything that changes a row's action rebuilds the label through
+/// here, so ticking or unticking a row never drops the tag.
+fn package_row_summary(localizer: &Localizer, row: &PackageRow) -> String {
+    let summary = localizer
+        .format(
+            "wizard-package-row",
+            &[
+                ("package", row.display_name.as_str()),
+                ("action", row.action_label.as_str()),
+                ("installed", row.installed_version.as_str()),
+                ("available", row.available_version.as_str()),
+            ],
+        )
+        .value;
+    match package_channel_note(
+        localizer,
+        &row.display_name,
+        row.available_channel.as_deref(),
+        row.installed_channel.as_deref(),
+        row_installs(row.action),
+    ) {
+        Some((tag, _)) => {
+            localizer
+                .format(
+                    "wizard-package-row-channel-suffix",
+                    &[("row", summary.as_str()), ("channel", tag.as_str())],
+                )
+                .value
+        }
+        None => summary,
+    }
+}
+
+/// Environment variable that turns the wizard's expert mode on at launch.
+/// Expert mode is never saved - RABBIT keeps no settings file - so this is
+/// how someone who always wants it gets it.
+pub const EXPERT_MODE_ENV: &str = "RABBIT_EXPERT";
+
+/// Whether `RABBIT_EXPERT` asks for expert mode (`1`, `true`, `yes`, `on`).
+pub fn expert_mode_requested_by_env() -> bool {
+    std::env::var(EXPERT_MODE_ENV).is_ok_and(|value| expert_mode_value_enabled(&value))
+}
+
+fn expert_mode_value_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// The channels a wizard run installs from. Outside expert mode that is no
+/// channel at all, which is what takes any package that came from a
+/// pre-release back to its regular release. In expert mode it is whatever
+/// the build choices say.
+pub fn wizard_channels(
+    expert_mode: bool,
+    reaper: Option<String>,
+    osara: Option<String>,
+) -> rabbit_core::package::PackageChannels {
+    let mut channels = rabbit_core::package::PackageChannels::new();
+    if expert_mode {
+        if let Some(channel) = reaper {
+            channels.insert(rabbit_core::package::PACKAGE_REAPER.to_string(), channel);
+        }
+        if let Some(channel) = osara {
+            channels.insert(PACKAGE_OSARA.to_string(), channel);
+        }
+    }
+    channels
+}
+
 #[allow(clippy::too_many_arguments)] // Row building needs the full wizard context.
 fn package_rows(
     localizer: &Localizer,
@@ -3060,7 +3216,17 @@ fn package_rows(
     available_packages: &[AvailablePackage],
     host: &HostCapabilities,
     declined: &std::collections::BTreeSet<String>,
+    installed_channels: &rabbit_core::package::PackageChannels,
 ) -> Vec<PackageRow> {
+    let channel_by_id: BTreeMap<_, _> = available_packages
+        .iter()
+        .filter_map(|available| {
+            available
+                .channel
+                .as_deref()
+                .map(|channel| (available.package_id.as_str(), channel))
+        })
+        .collect();
     let specs_by_id: BTreeMap<_, _> = package_specs
         .iter()
         .map(|spec| (spec.id.as_str(), spec))
@@ -3138,17 +3304,23 @@ fn package_rows(
                 PlanActionKind::Keep
             };
             let action_label = action_label(localizer, initial_action);
-            let summary = localizer
-                .format(
-                    "wizard-package-row",
-                    &[
-                        ("package", display_name.as_str()),
-                        ("action", action_label.as_str()),
-                        ("installed", installed_version.as_str()),
-                        ("available", available_version.as_str()),
-                    ],
-                )
-                .value;
+            // Say in the row itself when a build is not the regular release,
+            // or when this run takes a pre-release back to the regular one.
+            // The plan's own reason text stays out of the wizard, and the
+            // unlock dialog is long gone by the time a later run switches a
+            // package back - so the row is the one place it is always heard.
+            let available_channel = channel_by_id
+                .get(action.package_id.as_str())
+                .map(|channel| channel.to_string());
+            let installed_channel = installed_channels.get(&action.package_id).cloned();
+            let channel_sentence = package_channel_note(
+                localizer,
+                &display_name,
+                available_channel.as_deref(),
+                installed_channel.as_deref(),
+                row_installs(initial_action),
+            )
+            .and_then(|(_, sentence)| sentence);
             let (handling_summary, manual_attention_expected) =
                 package_handling_summary(text, &action.package_id, platform, architecture);
             // Compose the details text shown in the wizard's package
@@ -3159,10 +3331,40 @@ fn package_rows(
             // automation-kind detail are not localized for end users —
             // both stay on PackageRow as structured fields for the saved
             // report and stay out of the wizard pane.
+            let mut row = PackageRow {
+                package_id: action.package_id.clone(),
+                summary: String::new(),
+                details: String::new(),
+                display_name: display_name.clone(),
+                description: description.clone(),
+                selected: initially_selected,
+                installed_version,
+                available_version,
+                action: initial_action,
+                action_label,
+                original_action: action.action,
+                reason: action.reason.clone(),
+                handling_summary,
+                manual_attention_expected,
+                available_for_target: true,
+                unavailability_reason: None,
+                category: spec.map(|spec| spec.category).unwrap_or_default(),
+                requires_standard_install: spec
+                    .map(|spec| spec.requires_standard_install)
+                    .unwrap_or(false),
+                available_channel,
+                installed_channel,
+            };
+            row.summary = package_row_summary(localizer, &row);
+            let summary = &row.summary;
+            let details = match &channel_sentence {
+                Some(sentence) => format!("{summary}\n\n{sentence}"),
+                None => summary.clone(),
+            };
             let details = if description.is_empty() {
-                summary.clone()
+                details
             } else {
-                format!("{summary}\n\n{description}")
+                format!("{details}\n\n{description}")
             };
             // The available version's What's-New notes (resolved by the
             // deferred version check for packages that declare a source)
@@ -3180,28 +3382,8 @@ fn package_rows(
                 }
                 None => details,
             };
-            PackageRow {
-                package_id: action.package_id.clone(),
-                summary: summary.clone(),
-                details,
-                display_name: display_name.clone(),
-                description,
-                selected: initially_selected,
-                installed_version,
-                available_version,
-                action: initial_action,
-                action_label,
-                original_action: action.action,
-                reason: action.reason.clone(),
-                handling_summary,
-                manual_attention_expected,
-                available_for_target: true,
-                unavailability_reason: None,
-                category: spec.map(|spec| spec.category).unwrap_or_default(),
-                requires_standard_install: spec
-                    .map(|spec| spec.requires_standard_install)
-                    .unwrap_or(false),
-            }
+            row.details = details;
+            row
         })
         .collect()
 }
@@ -4198,6 +4380,7 @@ mod tests {
             &[],
             &HostCapabilities::default(),
             &declined,
+            &Default::default(),
         );
         assert!(
             !rows[0].selected,
@@ -4280,6 +4463,154 @@ mod tests {
         );
     }
 
+    /// One REAPER row planned against `available` on `channel`, for a target
+    /// whose REAPER was last installed from `installed_channel`.
+    fn reaper_row(
+        action: PlanActionKind,
+        channel: Option<&str>,
+        installed_channel: Option<&str>,
+    ) -> super::PackageRow {
+        let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let text = super::wizard_text(&localizer);
+        let specs = builtin_package_specs(Platform::Windows);
+        let installed_channels: rabbit_core::package::PackageChannels = installed_channel
+            .map(|channel| {
+                [(PACKAGE_REAPER.to_string(), channel.to_string())]
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default();
+        super::package_rows(
+            &localizer,
+            &text,
+            Platform::Windows,
+            Architecture::X64,
+            &specs,
+            &[PlanAction {
+                package_id: PACKAGE_REAPER.to_string(),
+                action,
+                installed_version: Some(Version::parse("7.80").unwrap()),
+                available_version: Some(Version::parse("7.80+dev0918").unwrap()),
+                reason: "test".to_string(),
+            }],
+            &[AvailablePackage {
+                package_id: PACKAGE_REAPER.to_string(),
+                version: Some(Version::parse("7.80+dev0918").unwrap()),
+                whats_new: None,
+                channel: channel.map(str::to_string),
+            }],
+            &HostCapabilities::default(),
+            &Default::default(),
+            &installed_channels,
+        )
+        .remove(0)
+    }
+
+    #[test]
+    fn a_development_build_says_so_in_the_row_itself() {
+        let row = reaper_row(PlanActionKind::Update, Some("dev"), None);
+        assert!(
+            row.summary.contains("(development build)"),
+            "{}",
+            row.summary
+        );
+        assert!(row.details.contains("unsupported"), "{}", row.details);
+    }
+
+    #[test]
+    fn ticking_a_row_keeps_its_channel_tag() {
+        let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let installation = fake_installation();
+        let model = model_from_plan(
+            &localizer,
+            Platform::Windows,
+            Architecture::X64,
+            vec![installation.clone()],
+            Some(0),
+            InstallPlan {
+                target: Some(installation),
+                actions: Vec::new(),
+                notes: Vec::new(),
+            },
+        );
+        let mut row = reaper_row(PlanActionKind::Update, Some("dev"), None);
+        super::apply_checkbox_state_to_package_row(&model, &mut row, false).unwrap();
+        super::apply_checkbox_state_to_package_row(&model, &mut row, true).unwrap();
+        assert!(
+            row.summary.contains("(development build)"),
+            "{}",
+            row.summary
+        );
+
+        // The way back is only announced while the row actually takes it.
+        let mut back = reaper_row(PlanActionKind::Update, None, Some("dev"));
+        super::apply_checkbox_state_to_package_row(&model, &mut back, false).unwrap();
+        assert!(!back.summary.contains("back to"), "{}", back.summary);
+        super::apply_checkbox_state_to_package_row(&model, &mut back, true).unwrap();
+        assert!(back.summary.contains("back to"), "{}", back.summary);
+    }
+
+    #[test]
+    fn a_row_that_installs_nothing_does_not_promise_an_install() {
+        // After installing a development build, the re-plan keeps REAPER.
+        // The tag still says which build it is, but "will be installed"
+        // would be false.
+        let row = reaper_row(PlanActionKind::Keep, Some("dev"), Some("dev"));
+        assert!(
+            row.summary.contains("(development build)"),
+            "{}",
+            row.summary
+        );
+        assert!(
+            !row.details.contains("will be installed"),
+            "{}",
+            row.details
+        );
+    }
+
+    #[test]
+    fn a_pull_request_build_names_its_pull_request() {
+        let row = reaper_row(PlanActionKind::Update, Some("pr:1454"), None);
+        assert!(row.summary.contains("pull request 1454"), "{}", row.summary);
+        assert!(row.details.contains("90 days"), "{}", row.details);
+    }
+
+    #[test]
+    fn going_back_to_the_regular_release_is_announced() {
+        // Leaving expert mode quietly takes a pre-release back to the regular
+        // release. The unlock dialog is long gone by then, so the row is the
+        // only place that can say why REAPER is being "updated" to an older
+        // version.
+        let row = reaper_row(PlanActionKind::Update, None, Some("dev"));
+        assert!(
+            row.summary.contains("back to the regular release"),
+            "{}",
+            row.summary
+        );
+        // ...but only when this run actually does something with it.
+        let kept = reaper_row(PlanActionKind::Keep, None, Some("dev"));
+        assert!(!kept.summary.contains("back to"), "{}", kept.summary);
+        // and an ordinary stable row carries no note at all.
+        let plain = reaper_row(PlanActionKind::Update, None, None);
+        assert!(!plain.summary.contains('('), "{}", plain.summary);
+    }
+
+    #[test]
+    fn expert_mode_env_values_and_channels_outside_expert_mode() {
+        for on in ["1", "true", "YES", " on "] {
+            assert!(super::expert_mode_value_enabled(on), "{on:?}");
+        }
+        for off in ["", "0", "false", "no", "maybe"] {
+            assert!(!super::expert_mode_value_enabled(off), "{off:?}");
+        }
+        // Outside expert mode no channel is passed, whatever the choices
+        // say - which is what sends pre-release packages back to stable.
+        assert!(super::wizard_channels(false, Some("dev".into()), Some("pr:1".into())).is_empty());
+        let on = super::wizard_channels(true, Some("dev".into()), None);
+        assert_eq!(on.get(PACKAGE_REAPER).map(String::as_str), Some("dev"));
+        assert!(!on.contains_key(PACKAGE_OSARA));
+    }
+
     #[test]
     fn a_declined_language_pack_stops_being_ticked_by_default() {
         // RABBIT running in German suggests the German pack — that is the
@@ -4308,6 +4639,7 @@ mod tests {
             &[],
             &host,
             &Default::default(),
+            &Default::default(),
         );
         assert!(
             suggested[0].selected,
@@ -4326,6 +4658,7 @@ mod tests {
             &[],
             &host,
             &declined,
+            &Default::default(),
         );
         assert!(
             !remembered[0].selected,
@@ -4621,6 +4954,7 @@ mod tests {
             &[],
             &host,
             &Default::default(),
+            &Default::default(),
         );
         assert!(
             rows[0].selected,
@@ -4645,6 +4979,7 @@ mod tests {
             }],
             &[],
             &HostCapabilities::default(),
+            &Default::default(),
             &Default::default(),
         );
         assert!(
@@ -4749,6 +5084,7 @@ mod tests {
                 package_variants: Default::default(),
                 reaper_language_package: None,
                 cache_dir: Some(PathBuf::from("C:/cache")),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -5145,6 +5481,7 @@ mod tests {
             package_id: PACKAGE_OSARA.to_string(),
             version: Some(Version::parse("2026.8.1.2278,857265da").unwrap()),
             whats_new: Some("• Fix the slider.\n• Logging improvements.".to_string()),
+            channel: None,
         }];
         let plan =
             super::wizard_package_plan_for_target_with_available(&model, Some(&target), &available)
@@ -5384,6 +5721,7 @@ mod tests {
                         kind: ArtifactKind::Installer,
                         url: "https://example.test/osara.exe".to_string(),
                         file_name: "osara.exe".to_string(),
+                        channel: None,
                     },
                     cached_artifact: None,
                     install_action: None,
@@ -5529,6 +5867,7 @@ mod tests {
                         kind: ArtifactKind::ExtensionBinary,
                         url: "https://example.test/reaper_reapack-x64.dll".to_string(),
                         file_name: "reaper_reapack-x64.dll".to_string(),
+                        channel: None,
                     },
                     cached_artifact: None,
                     install_action: None,
@@ -5616,6 +5955,7 @@ mod tests {
                         kind: ArtifactKind::Installer,
                         url: "https://example.test/osara.exe".to_string(),
                         file_name: "osara.exe".to_string(),
+                        channel: None,
                     },
                     cached_artifact: None,
                     install_action: None,
@@ -6033,6 +6373,7 @@ mod tests {
                 kind: ArtifactKind::Installer,
                 url: "https://example.test/osara.exe".to_string(),
                 file_name: "osara.exe".to_string(),
+                channel: None,
             },
             cached_artifact: None,
             install_action: None,
@@ -6109,6 +6450,7 @@ mod tests {
             configuration_step_ids: Vec::new(),
             declined_packages: Vec::new(),
             accepted_packages: Vec::new(),
+            package_channels: Default::default(),
         }
     }
 }

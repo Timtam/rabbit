@@ -122,5 +122,32 @@
         }
       }
     ]
-  }
+  },
+  "channels": [
+    {
+      "id": "pr",
+      "display_name_key": "package-channel-osara-pr",
+      "expert": true,
+      "parameter": "pull_request",
+      "version_comparison": "exact",
+      "github_actions_artifact": {
+        "repo": "jcsteh/osara",
+        "download_url": "https://nightly.link/{repo}/actions/artifacts/{id}.zip",
+        "targets": [
+          {
+            "platform": "windows",
+            "name_prefix": "osara_windows_",
+            "report_arch": "universal",
+            "artifact_kind": "installer"
+          },
+          {
+            "platform": "macos",
+            "name_prefix": "osara_mac_",
+            "report_arch": "universal",
+            "artifact_kind": "archive"
+          }
+        ]
+      }
+    }
+  ]
 }

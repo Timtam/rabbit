@@ -55,6 +55,13 @@ pub struct PackageReceipt {
     /// for receipts written before variants existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
+    /// The channel this install came from - `dev` for REAPER's development
+    /// builds, `pr:1454` for an OSARA pull-request build. `None` means
+    /// stable, which is also what every receipt written before channels
+    /// existed reads as. Remembered so the CLI and the wizard's expert mode
+    /// keep a package on its channel between runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
     pub installed_files: Vec<InstalledFileReceipt>,
     pub installed_at: Option<String>,
     pub rabbit_version: Option<String>,
@@ -78,6 +85,24 @@ pub enum ReceiptVerification {
 
 pub fn receipt_path(resource_path: &Path) -> PathBuf {
     resource_path.join(RECEIPT_RELATIVE_PATH)
+}
+
+/// The channel each package at `resource_path` was last installed from, as
+/// its receipt recorded it. Read raw rather than filtered to the channels
+/// the manifest still offers: a package sitting on a channel that no longer
+/// exists has to be offered the way back to stable, not left stranded.
+pub fn installed_channels_at(resource_path: &Path) -> crate::package::PackageChannels {
+    load_install_state(resource_path)
+        .ok()
+        .flatten()
+        .map(|state| {
+            state
+                .packages
+                .into_iter()
+                .filter_map(|(id, receipt)| receipt.channel.map(|channel| (id, channel)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn load_install_state(resource_path: &Path) -> Result<Option<InstallState>> {
@@ -158,6 +183,8 @@ pub fn save_install_state(resource_path: &Path, state: &InstallState) -> Result<
 pub struct PackageReceiptParams<'a> {
     /// Variant id to remember; see [`PackageReceipt::variant`].
     pub variant: Option<&'a str>,
+    /// Channel to remember; see [`PackageReceipt::channel`]. `None` is stable.
+    pub channel: Option<&'a str>,
     pub package_id: &'a str,
     pub version: Option<Version>,
     pub source_url: Option<String>,
@@ -181,6 +208,7 @@ pub fn upsert_package_receipt(
         installed_at,
         architecture,
         variant,
+        channel,
     } = params;
     let mut installed_files = installed_paths
         .iter()
@@ -197,6 +225,11 @@ pub fn upsert_package_receipt(
             source_url,
             source_sha256,
             variant: variant.map(str::to_string),
+            // Stable is recorded as nothing at all, so a receipt only ever
+            // names a channel when there is one to remember.
+            channel: channel
+                .filter(|id| *id != crate::package::STABLE_CHANNEL)
+                .map(str::to_string),
             installed_files,
             installed_at,
             rabbit_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -321,6 +354,7 @@ mod tests {
                 source_url: None,
                 source_sha256: None,
                 variant: None,
+                channel: None,
                 installed_files: vec![InstalledFileReceipt {
                     path: PathBuf::from("UserPlugins/reaper_osara64.dll"),
                     sha256: None,
@@ -371,6 +405,7 @@ mod tests {
                 id: "osara".to_string(),
                 version: None,
                 variant: None,
+                channel: None,
                 source_url: None,
                 source_sha256: None,
                 installed_files: Vec::new(),
@@ -435,6 +470,7 @@ mod tests {
                 id: "langpack-de".to_string(),
                 version: None,
                 variant: None,
+                channel: None,
                 source_url: None,
                 source_sha256: None,
                 installed_files: Vec::new(),

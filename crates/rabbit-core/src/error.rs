@@ -37,6 +37,17 @@ pub enum RabbitError {
     #[error("remote data error for {url}: {message}")]
     RemoteData { url: String, message: String },
 
+    /// The pull request a package was installed from no longer has a test
+    /// build: GitHub removes workflow artifacts after 90 days, and a pull
+    /// request that is closed stops getting new ones. Not an outage - the
+    /// listing was reachable and simply had nothing - so callers take the
+    /// package back to its regular release rather than failing.
+    #[error("pull request {pull_request} of {package_id} is closed or has no test build any more")]
+    PullRequestBuildGone {
+        package_id: String,
+        pull_request: u32,
+    },
+
     #[error("invalid artifact URL {url}: {message}")]
     InvalidArtifactUrl { url: String, message: String },
 

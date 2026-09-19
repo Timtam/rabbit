@@ -119,6 +119,10 @@ pub struct PackageSpec {
     /// Data-driven rejetto-HFS definition driving both version and download
     /// (JAWS-for-REAPER scripts). See [`HfsListingSpec`].
     pub hfs_listing: Option<HfsListingSpec>,
+    /// A GitHub Actions artifact. See [`GithubActionsArtifactSpec`].
+    pub github_actions_artifact: Option<GithubActionsArtifactSpec>,
+    /// Alternative sources for this package's builds. See [`PackageChannel`].
+    pub channels: Vec<PackageChannel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,6 +223,12 @@ pub struct EmbeddedPackageSpec {
     pub http_artifact: Option<HttpArtifactSpec>,
     #[serde(default)]
     pub hfs_listing: Option<HfsListingSpec>,
+    /// A GitHub Actions artifact. See [`GithubActionsArtifactSpec`].
+    #[serde(default)]
+    pub github_actions_artifact: Option<GithubActionsArtifactSpec>,
+    /// Alternative sources for this package's builds. See [`PackageChannel`].
+    #[serde(default)]
+    pub channels: Vec<PackageChannel>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -587,6 +597,142 @@ pub enum VersionRule {
 /// same REAPER/SWS translation is published as `es_ES` (which loads the
 /// "REAPER Accesible español" OSARA translation) or `es_MX` (Team PMA's).
 /// Same download either way — only the installed name differs.
+/// A build published as a GitHub Actions workflow artifact - the test build
+/// OSARA's CI makes for every pull request.
+///
+/// Found through GitHub's public REST API, which lists a repository's
+/// artifacts without authentication, and downloaded through nightly.link,
+/// because GitHub's own artifact download needs a signed-in user. That is the
+/// same link OSARA's own pull-request bot posts for testers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubActionsArtifactSpec {
+    /// `owner/name`.
+    pub repo: String,
+    /// Download URL, with `{repo}` and `{id}` (the artifact id) filled in.
+    pub download_url: String,
+    pub targets: Vec<GithubActionsArtifactTarget>,
+    /// The pull request whose build to install. Filled in from the channel's
+    /// parameter (`pr:1454`) when the package is put on that channel; never
+    /// read from the manifest.
+    #[serde(skip)]
+    pub pull_request: Option<u32>,
+}
+
+/// One platform's artifact within a [`GithubActionsArtifactSpec`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubActionsArtifactTarget {
+    pub platform: SupportedPlatform,
+    /// Artifact names are `<name_prefix><version>`, where the version names
+    /// the pull request, the CI run and the commit: `pr1454-534,240c4663`.
+    pub name_prefix: String,
+    pub report_arch: Architecture,
+    /// The kind of file inside the downloaded zip. An `installer` arrives
+    /// zipped and is unwrapped before it runs.
+    pub artifact_kind: GithubArtifactKind,
+}
+
+/// The channel every package is on unless something says otherwise: builds
+/// exactly as the package's own manifest entry describes them.
+pub const STABLE_CHANNEL: &str = "stable";
+
+/// Which channel each package should use for one run, by package id. A
+/// package that is absent, or mapped to [`STABLE_CHANNEL`], resolves exactly
+/// as its manifest entry declares. Callers pass a fully decided map: the
+/// install pipeline never guesses a channel on its own.
+pub type PackageChannels = BTreeMap<String, String>;
+
+/// An alternative place a package's builds come from - REAPER's development
+/// builds on landoleet.org, say.
+///
+/// Not a [`PackageVariant`]. A variant is the *same* download installed under
+/// a different file name, and never reaches artifact resolution; a channel
+/// changes where the download comes from, how its version is read and
+/// compared, and where its release notes live. Every field the channel sets
+/// replaces the package's own while the package is on this channel; every
+/// field it leaves out is inherited unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageChannel {
+    /// Stable id used by `--package-channel` and recorded in the receipt.
+    pub id: String,
+    /// Fluent key for the channel's display name.
+    pub display_name_key: String,
+    /// Offered in the wizard only while expert mode is on. The CLI needs no
+    /// unlock: it already counts as the expert interface.
+    #[serde(default)]
+    pub expert: bool,
+    /// What, if anything, follows the id after a colon. OSARA's pull-request
+    /// channel is `pr:1454`: one channel, parameterised by the pull request
+    /// whose build to install. A channel without a parameter is written as
+    /// its bare id.
+    #[serde(default)]
+    pub parameter: Option<ChannelParameter>,
+    #[serde(default)]
+    pub version: Option<VersionRule>,
+    #[serde(default)]
+    pub version_comparison: Option<VersionComparison>,
+    #[serde(default)]
+    pub whats_new: Option<WhatsNewRule>,
+    /// An artifact source replaces the package's source outright rather than
+    /// merging with it, because a package may only ever declare one.
+    #[serde(default)]
+    pub github_release: Option<GithubReleaseSpec>,
+    #[serde(default)]
+    pub http_artifact: Option<HttpArtifactSpec>,
+    #[serde(default)]
+    pub hfs_listing: Option<HfsListingSpec>,
+    #[serde(default)]
+    pub github_actions_artifact: Option<GithubActionsArtifactSpec>,
+}
+
+/// The kind of value a parameterised channel takes after its colon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelParameter {
+    /// A pull request number, e.g. the `1454` in `pr:1454`.
+    PullRequest,
+}
+
+impl ChannelParameter {
+    fn accepts(self, value: &str) -> bool {
+        match self {
+            // Only the plain form, so `pr:01454` or `pr:+1454` can't become a
+            // second name for `pr:1454` that a receipt then compares unequal.
+            ChannelParameter::PullRequest => value
+                .parse::<u32>()
+                .is_ok_and(|number| number > 0 && number.to_string() == value),
+        }
+    }
+}
+
+/// Split a channel string into its id and optional parameter: `dev` gives
+/// (`dev`, None), `pr:1454` gives (`pr`, Some(`1454`)).
+pub fn split_channel(channel: &str) -> (&str, Option<&str>) {
+    match channel.split_once(':') {
+        Some((id, parameter)) => (id, Some(parameter)),
+        None => (channel, None),
+    }
+}
+
+impl PackageChannel {
+    /// Whether `parameter` (the part after the colon, if any) is exactly what
+    /// this channel expects: nothing for a plain channel, a well-formed value
+    /// for a parameterised one.
+    fn accepts_parameter(&self, parameter: Option<&str>) -> bool {
+        match (self.parameter, parameter) {
+            (None, None) => true,
+            (Some(kind), Some(value)) => kind.accepts(value),
+            _ => false,
+        }
+    }
+
+    fn sets_artifact_source(&self) -> bool {
+        self.github_release.is_some()
+            || self.http_artifact.is_some()
+            || self.hfs_listing.is_some()
+            || self.github_actions_artifact.is_some()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageVariant {
     /// Stable id used by the CLI flag and the wizard's choice.
@@ -733,11 +879,24 @@ pub struct PlatformSuffixes {
 }
 
 pub fn builtin_package_specs(platform: Platform) -> Vec<PackageSpec> {
+    builtin_package_specs_on(platform, &PackageChannels::new())
+}
+
+/// [`builtin_package_specs`], with each package resolved on the channel
+/// `channels` chooses for it.
+pub fn builtin_package_specs_on(
+    platform: Platform,
+    channels: &PackageChannels,
+) -> Vec<PackageSpec> {
     embedded_package_manifest()
         .packages
         .iter()
         .filter(|package| package.supports_platform(platform))
-        .map(|package| package.to_package_spec(platform))
+        .map(|package| {
+            package
+                .on_channel(channels.get(&package.id).map(String::as_str))
+                .to_package_spec(platform)
+        })
         .collect()
 }
 
@@ -879,10 +1038,69 @@ pub fn embedded_package_manifest() -> PackageManifest {
 /// resolve an artifact kind from its own `artifact_kind` or the spec-wide
 /// fallback (so the resolver never has to guess a kind).
 pub fn validate_package_spec(spec: &EmbeddedPackageSpec) -> Result<(), String> {
+    validate_resolvable_spec(spec)?;
+    // Pull-request builds need a pull request number, which only a channel
+    // parameter supplies. On the package itself it could never resolve.
+    if spec.github_actions_artifact.is_some() {
+        return Err(
+            "github_actions_artifact is only allowed on a channel that takes a pull request"
+                .to_string(),
+        );
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    for channel in &spec.channels {
+        if channel.id.contains(':') {
+            return Err(format!(
+                "channel id {:?} may not contain ':', which separates a channel from its parameter",
+                channel.id
+            ));
+        }
+        if channel.id.is_empty() || channel.id == STABLE_CHANNEL {
+            return Err(format!(
+                "channel id {:?} is reserved or empty; the package itself is the stable channel",
+                channel.id
+            ));
+        }
+        if !seen.insert(channel.id.as_str()) {
+            return Err(format!("declares channel {:?} twice", channel.id));
+        }
+        // A pull request number is only any use to a source that looks one
+        // up, and that source can't resolve without one.
+        match (channel.parameter, channel.github_actions_artifact.is_some()) {
+            (Some(ChannelParameter::PullRequest), false) => {
+                return Err(format!(
+                    "channel {:?} takes a pull request but has no github_actions_artifact to look it up",
+                    channel.id
+                ));
+            }
+            (None, true) => {
+                return Err(format!(
+                    "channel {:?} uses github_actions_artifact, which needs `parameter: pull_request`",
+                    channel.id
+                ));
+            }
+            _ => {}
+        }
+        // A channel must resolve on its own, exactly as the package does:
+        // at most one artifact source, a valid What's-New pattern, and so on.
+        validate_resolvable_spec(&spec.overlaid_with(channel, None))
+            .map_err(|message| format!("channel {:?}: {message}", channel.id))?;
+    }
+    Ok(())
+}
+
+/// The checks that apply to anything the resolvers will be handed: the
+/// package as declared, and the package on each of its channels.
+fn validate_resolvable_spec(spec: &EmbeddedPackageSpec) -> Result<(), String> {
     let sources = [
         ("github_release", spec.github_release.is_some()),
         ("http_artifact", spec.http_artifact.is_some()),
         ("hfs_listing", spec.hfs_listing.is_some()),
+        (
+            "github_actions_artifact",
+            spec.github_actions_artifact.is_some(),
+        ),
     ];
     let set: Vec<&str> = sources
         .iter()
@@ -947,7 +1165,15 @@ pub fn parse_package_manifest(source: &str) -> Result<PackageManifest, serde_jso
 }
 
 pub fn package_specs_by_id(platform: Platform) -> BTreeMap<String, PackageSpec> {
-    builtin_package_specs(platform)
+    package_specs_by_id_on(platform, &PackageChannels::new())
+}
+
+/// [`package_specs_by_id`], with each package resolved on its chosen channel.
+pub fn package_specs_by_id_on(
+    platform: Platform,
+    channels: &PackageChannels,
+) -> BTreeMap<String, PackageSpec> {
+    builtin_package_specs_on(platform, channels)
         .into_iter()
         .map(|spec| (spec.id.clone(), spec))
         .collect()
@@ -1020,12 +1246,55 @@ pub fn exclusive_group_siblings(package_id: &str) -> Vec<String> {
 /// How `package_id`'s versions are compared, per the embedded manifest.
 /// Unknown packages fall back to the default ordered comparison.
 pub fn version_comparison_for(package_id: &str) -> VersionComparison {
+    version_comparison_on(package_id, None)
+}
+
+/// How `package_id`'s versions are compared on `channel`. REAPER's
+/// development channel compares exactly: its builds carry a month and day
+/// but no year, and release candidates sort after the final release under
+/// the ordered comparison, so "different" is the only safe signal there.
+pub fn version_comparison_on(package_id: &str, channel: Option<&str>) -> VersionComparison {
     embedded_package_manifest()
         .packages
         .into_iter()
         .find(|spec| spec.id == package_id)
-        .map(|spec| spec.version_comparison)
+        .map(|spec| spec.on_channel(channel).version_comparison)
         .unwrap_or_default()
+}
+
+/// The channel the last RABBIT install of `package_id` recorded at
+/// `resource_path`, if it was anything other than stable and the manifest
+/// still offers it. `None` means stable.
+pub fn remembered_channel(resource_path: &std::path::Path, package_id: &str) -> Option<String> {
+    let channel = crate::receipt::load_install_state(resource_path)
+        .ok()
+        .flatten()
+        .and_then(|state| {
+            state
+                .packages
+                .get(package_id)
+                .and_then(|r| r.channel.clone())
+        })?;
+    let offered = embedded_package_manifest()
+        .packages
+        .iter()
+        .any(|spec| spec.id == package_id && spec.offers_channel(&channel));
+    offered.then_some(channel)
+}
+
+/// Every package among `package_ids` whose last install at `resource_path`
+/// was on a non-stable channel the manifest still offers, mapped to that
+/// channel. Used where the channel should persist between runs - the CLI,
+/// and the wizard in expert mode. Outside expert mode the wizard passes an
+/// empty map instead, which is what sends those packages back to stable.
+pub fn remembered_channels(
+    resource_path: &std::path::Path,
+    package_ids: &[String],
+) -> PackageChannels {
+    package_ids
+        .iter()
+        .filter_map(|id| remembered_channel(resource_path, id).map(|channel| (id.clone(), channel)))
+        .collect()
 }
 
 /// Whether `installed` should be replaced by `available` for a package using
@@ -1097,7 +1366,85 @@ impl EmbeddedPackageSpec {
             github_release: self.github_release.clone(),
             http_artifact: self.http_artifact.clone(),
             hfs_listing: self.hfs_listing.clone(),
+            github_actions_artifact: self.github_actions_artifact.clone(),
+            channels: self.channels.clone(),
         }
+    }
+
+    /// This package as it resolves on `channel`. `None`, [`STABLE_CHANNEL`] or
+    /// a channel the manifest does not offer all give the package exactly as
+    /// declared - so a receipt naming a channel that has since been removed
+    /// quietly sends the package back to stable instead of failing.
+    pub fn on_channel(&self, channel: Option<&str>) -> EmbeddedPackageSpec {
+        let Some(overlay) = channel.and_then(|channel| self.find_channel(channel)) else {
+            return self.clone();
+        };
+        self.overlaid_with(
+            overlay,
+            channel.and_then(|channel| split_channel(channel).1),
+        )
+    }
+
+    /// This package with `overlay` applied, and `parameter` (the `1454` of
+    /// `pr:1454`) handed to the source that needs it. Validation calls this
+    /// without a parameter, so it checks a parameterised channel's own fields
+    /// rather than falling back to the package as declared.
+    fn overlaid_with(
+        &self,
+        overlay: &PackageChannel,
+        parameter: Option<&str>,
+    ) -> EmbeddedPackageSpec {
+        let mut spec = self.clone();
+        if let Some(comparison) = overlay.version_comparison {
+            spec.version_comparison = comparison;
+        }
+        if overlay.sets_artifact_source() {
+            // A channel that brings its own download also brings its own
+            // version and release notes, even if that means none. Inheriting
+            // them would describe the wrong build: OSARA's pull-request
+            // channel would report the snapshot's version and changelog for
+            // a pull request's test build.
+            spec.github_release = overlay.github_release.clone();
+            spec.http_artifact = overlay.http_artifact.clone();
+            spec.hfs_listing = overlay.hfs_listing.clone();
+            spec.github_actions_artifact = overlay.github_actions_artifact.clone();
+            spec.version = overlay.version.clone();
+            spec.whats_new = overlay.whats_new.clone();
+        } else {
+            if overlay.version.is_some() {
+                spec.version = overlay.version.clone();
+            }
+            if overlay.whats_new.is_some() {
+                spec.whats_new = overlay.whats_new.clone();
+            }
+        }
+        // A parameterised channel hands its parameter to the source that
+        // needs it: `pr:1454` becomes the pull request to look up.
+        if let (Some(ChannelParameter::PullRequest), Some(value)) = (overlay.parameter, parameter)
+            && let Some(actions) = spec.github_actions_artifact.as_mut()
+        {
+            actions.pull_request = value.parse().ok();
+        }
+        spec
+    }
+
+    /// Whether `channel` names one of this package's non-stable channels,
+    /// with a parameter of the right shape when the channel takes one.
+    pub fn offers_channel(&self, channel: &str) -> bool {
+        self.find_channel(channel).is_some()
+    }
+
+    /// The channel `channel` refers to, if this package offers it in that
+    /// exact form. `pr` without a number, `pr:abc` and `dev:1` all miss.
+    pub fn find_channel(&self, channel: &str) -> Option<&PackageChannel> {
+        let (id, parameter) = split_channel(channel);
+        if id == STABLE_CHANNEL {
+            return None;
+        }
+        self.channels
+            .iter()
+            .find(|candidate| candidate.id == id)
+            .filter(|candidate| candidate.accepts_parameter(parameter))
     }
 }
 
@@ -1213,6 +1560,7 @@ mod tests {
                 source_url: None,
                 source_sha256: None,
                 variant: Some("pma".to_string()),
+                channel: None,
                 installed_files: Vec::new(),
                 installed_at: None,
                 rabbit_version: None,
@@ -1730,5 +2078,229 @@ mod tests {
         assert!(!package.required);
         assert_eq!(package.backup_policy, BackupPolicy::None);
         assert!(package.supports_platform(Platform::MacOs));
+    }
+    fn reaper_manifest_spec() -> super::EmbeddedPackageSpec {
+        super::embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == super::PACKAGE_REAPER)
+            .expect("REAPER is in the manifest")
+    }
+
+    #[test]
+    fn reaper_offers_a_dev_channel_only_the_expert_mode_shows() {
+        let reaper = reaper_manifest_spec();
+        let dev = reaper
+            .find_channel("dev")
+            .expect("REAPER has a dev channel");
+        assert!(dev.expert, "development builds are for expert mode only");
+        assert!(reaper.offers_channel("dev"));
+        // A channel that takes no parameter must not accept one, and stable is
+        // not a channel you can pick by name.
+        assert!(!reaper.offers_channel("dev:1"));
+        assert!(!reaper.offers_channel(super::STABLE_CHANNEL));
+        assert!(!reaper.offers_channel("nightly"));
+    }
+
+    #[test]
+    fn a_channel_replaces_source_version_notes_and_comparison() {
+        let reaper = reaper_manifest_spec();
+        let stable = reaper.on_channel(None);
+        let dev = reaper.on_channel(Some("dev"));
+
+        assert_eq!(
+            stable, reaper,
+            "no channel means the package exactly as declared"
+        );
+        assert_eq!(reaper.on_channel(Some(super::STABLE_CHANNEL)), reaper);
+        assert_eq!(
+            reaper.on_channel(Some("no-such-channel")),
+            reaper,
+            "an unknown channel - e.g. one a later manifest dropped - falls back to stable"
+        );
+
+        assert_eq!(dev.version_comparison, super::VersionComparison::Exact);
+        assert_ne!(dev.version, stable.version);
+        assert_ne!(dev.whats_new, stable.whats_new);
+        let page_of =
+            |spec: &super::EmbeddedPackageSpec| match &spec.http_artifact.as_ref().unwrap().targets
+                [0]
+            .source
+            {
+                super::HttpArtifactSource::ScrapeHref { page_url, .. } => page_url.clone(),
+                other => panic!("REAPER scrapes its download page, got {other:?}"),
+            };
+        assert!(page_of(&dev).starts_with("https://www.landoleet.org/"));
+        assert!(page_of(&stable).starts_with("https://www.reaper.fm/"));
+        // Everything the channel leaves alone is inherited.
+        assert_eq!(dev.install_steps, stable.install_steps);
+        assert_eq!(dev.detectors, stable.detectors);
+    }
+
+    #[test]
+    fn channel_validation_rejects_ambiguous_ids() {
+        let mut spec = reaper_manifest_spec();
+        let original = spec.channels[0].clone();
+
+        spec.channels = vec![original.clone(), original.clone()];
+        assert!(
+            super::validate_package_spec(&spec)
+                .unwrap_err()
+                .contains("twice")
+        );
+
+        let mut reserved = original.clone();
+        reserved.id = super::STABLE_CHANNEL.to_string();
+        spec.channels = vec![reserved];
+        assert!(super::validate_package_spec(&spec).is_err());
+
+        let mut colon = original.clone();
+        colon.id = "pr:1".to_string();
+        spec.channels = vec![colon];
+        assert!(
+            super::validate_package_spec(&spec)
+                .unwrap_err()
+                .contains("':'")
+        );
+
+        let mut two_sources = original;
+        two_sources.github_release = super::embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find_map(|spec| spec.github_release);
+        assert!(
+            two_sources.github_release.is_some(),
+            "some package uses a GitHub release"
+        );
+        spec.channels = vec![two_sources];
+        assert!(
+            super::validate_package_spec(&spec)
+                .unwrap_err()
+                .contains("multiple artifact sources"),
+            "a channel is held to the same one-source rule as the package"
+        );
+    }
+
+    #[test]
+    fn a_pull_request_channel_is_validated_on_its_own_fields() {
+        let osara = || {
+            super::embedded_package_manifest()
+                .packages
+                .into_iter()
+                .find(|spec| spec.id == super::PACKAGE_OSARA)
+                .expect("OSARA is in the manifest")
+        };
+        assert!(super::validate_package_spec(&osara()).is_ok());
+
+        // A second source on the pr channel must be caught, even though the
+        // channel can't be looked up without a pull request number.
+        let mut spec = osara();
+        spec.channels[0].http_artifact = reaper_manifest_spec().http_artifact;
+        assert!(spec.channels[0].http_artifact.is_some());
+        assert!(
+            super::validate_package_spec(&spec)
+                .unwrap_err()
+                .contains("multiple artifact sources")
+        );
+
+        let mut no_parameter = osara();
+        no_parameter.channels[0].parameter = None;
+        assert!(
+            super::validate_package_spec(&no_parameter)
+                .unwrap_err()
+                .contains("needs `parameter: pull_request`")
+        );
+
+        let mut on_the_package = osara();
+        on_the_package.github_actions_artifact =
+            on_the_package.channels[0].github_actions_artifact.clone();
+        assert!(super::validate_package_spec(&on_the_package).is_err());
+    }
+
+    #[test]
+    fn remembered_channels_come_from_the_receipt_and_only_while_still_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let receipt = |channel: &str| crate::receipt::PackageReceipt {
+            id: super::PACKAGE_REAPER.to_string(),
+            version: None,
+            variant: None,
+            channel: Some(channel.to_string()),
+            source_url: None,
+            source_sha256: None,
+            installed_files: Vec::new(),
+            installed_at: None,
+            rabbit_version: None,
+            architecture: None,
+        };
+        let save = |channel: &str| {
+            let mut packages = std::collections::BTreeMap::new();
+            packages.insert(super::PACKAGE_REAPER.to_string(), receipt(channel));
+            crate::receipt::save_install_state(
+                dir.path(),
+                &crate::receipt::InstallState {
+                    schema_version: 1,
+                    packages,
+                    declined_packages: Default::default(),
+                },
+            )
+            .unwrap();
+        };
+        let ids = vec![super::PACKAGE_REAPER.to_string()];
+
+        save("dev");
+        assert_eq!(
+            super::remembered_channels(dir.path(), &ids).get(super::PACKAGE_REAPER),
+            Some(&"dev".to_string())
+        );
+
+        save("retired-channel");
+        assert!(
+            super::remembered_channels(dir.path(), &ids).is_empty(),
+            "a channel the manifest no longer offers is not carried forward"
+        );
+    }
+    #[test]
+    fn osara_offers_a_pull_request_channel_that_takes_a_number() {
+        let osara = super::embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == super::PACKAGE_OSARA)
+            .expect("OSARA is in the manifest");
+        assert!(osara.offers_channel("pr:1454"));
+        for malformed in [
+            "pr", "pr:", "pr:abc", "pr:0", "pr:-3", "pr:01454", "pr:+1454",
+        ] {
+            assert!(
+                !osara.offers_channel(malformed),
+                "{malformed:?} must not be offered"
+            );
+        }
+
+        let on_pr = osara.on_channel(Some("pr:1454"));
+        let actions = on_pr
+            .github_actions_artifact
+            .as_ref()
+            .expect("the pr channel downloads a GitHub Actions artifact");
+        assert_eq!(
+            actions.pull_request,
+            Some(1454),
+            "the parameter reaches the source"
+        );
+        assert_eq!(on_pr.version_comparison, super::VersionComparison::Exact);
+        // The channel brings its own download, so it must not inherit the
+        // snapshot's version check or changelog: those describe a different
+        // build entirely.
+        assert!(
+            on_pr.version.is_none(),
+            "version comes from the artifact name"
+        );
+        assert!(
+            on_pr.whats_new.is_none(),
+            "the snapshot changelog would describe the wrong build"
+        );
+        assert!(
+            on_pr.http_artifact.is_none(),
+            "the snapshot download is replaced, not merged"
+        );
     }
 }

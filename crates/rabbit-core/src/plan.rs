@@ -17,6 +17,13 @@ pub struct AvailablePackage {
     /// them; the planner itself ignores this field.
     #[serde(default)]
     pub whats_new: Option<String>,
+    /// The channel this version was checked on (`dev`, `pr:1454`), or `None`
+    /// for stable. When it differs from the channel the installed copy came
+    /// from, the planner offers the switch even if the version alone would
+    /// say "keep" - going back from a development build to the stable one
+    /// is a downgrade, and without this it would never be offered.
+    #[serde(default)]
+    pub channel: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +56,30 @@ pub fn build_install_plan(
     desired_package_ids: &[String],
     available_packages: &[AvailablePackage],
 ) -> InstallPlan {
+    let installed_channels = target
+        .as_ref()
+        .map(|target| crate::receipt::installed_channels_at(&target.resource_path))
+        .unwrap_or_default();
+    build_install_plan_with_installed_channels(
+        target,
+        detections,
+        desired_package_ids,
+        available_packages,
+        &installed_channels,
+    )
+}
+
+/// [`build_install_plan`], told what channel each package was installed from
+/// instead of reading it from the target's receipts. For a caller whose
+/// detections came from a folder that is not `target`'s, such as
+/// `rabbit plan --resource-path` naming a folder no REAPER was found in.
+pub fn build_install_plan_with_installed_channels(
+    target: Option<Installation>,
+    detections: &[ComponentDetection],
+    desired_package_ids: &[String],
+    available_packages: &[AvailablePackage],
+    installed_channels: &crate::package::PackageChannels,
+) -> InstallPlan {
     let detections_by_id: BTreeMap<_, _> = detections
         .iter()
         .map(|detection| (detection.package_id.as_str(), detection))
@@ -57,7 +88,6 @@ pub fn build_install_plan(
         .iter()
         .map(|available| (available.package_id.as_str(), available))
         .collect();
-
     let mut actions = Vec::new();
     for package_id in desired_package_ids {
         let available = available_by_id.get(package_id.as_str()).copied();
@@ -71,15 +101,30 @@ pub fn build_install_plan(
             )
         };
         let available_version = available.and_then(|available| available.version.clone());
+        let available_channel = available.and_then(|available| available.channel.clone());
+        let installed_channel = installed_channels.get(package_id.as_str()).cloned();
+        // A switch between channels is offered as an update whatever the
+        // versions say. The case that needs it is the way back: a development
+        // build of REAPER is newer than the stable release it is based on, so
+        // an ordered comparison would call "go back to stable" a Keep and the
+        // switch would never happen.
+        let switching_channel =
+            installed && available_version.is_some() && installed_channel != available_channel;
 
         let (action, reason) = if !installed {
             (
                 PlanActionKind::Install,
                 "Package is not installed in the selected REAPER resource path.".to_string(),
             )
+        } else if switching_channel {
+            (
+                PlanActionKind::Update,
+                channel_switch_reason(installed_channel.as_deref(), available_channel.as_deref()),
+            )
         } else if let (Some(installed), Some(available)) = (&installed_version, &available_version)
         {
-            let comparison = crate::package::version_comparison_for(package_id);
+            let comparison =
+                crate::package::version_comparison_on(package_id, available_channel.as_deref());
             if crate::package::version_needs_update(installed, available, comparison) {
                 (
                     PlanActionKind::Update,
@@ -142,6 +187,18 @@ pub fn build_install_plan(
     }
 }
 
+/// The plan reason for moving a package between channels. `None` is stable.
+fn channel_switch_reason(from: Option<&str>, to: Option<&str>) -> String {
+    match (from, to) {
+        (Some(from), None) => {
+            format!("Installed from the {from} channel; switching back to the stable release.")
+        }
+        (None, Some(to)) => format!("Switching from the stable release to the {to} channel."),
+        (Some(from), Some(to)) => format!("Switching from the {from} channel to the {to} channel."),
+        (None, None) => "Switching channel.".to_string(),
+    }
+}
+
 fn target_reaper_state(target: Option<&Installation>) -> (bool, Option<Version>) {
     let Some(target) = target else {
         return (false, None);
@@ -196,6 +253,7 @@ mod tests {
             package_id: PACKAGE_OSARA.to_string(),
             version: Some(Version::parse("2024.2").unwrap()),
             whats_new: None,
+            channel: None,
         }];
         let desired = vec![PACKAGE_OSARA.to_string()];
 
@@ -224,6 +282,7 @@ mod tests {
             package_id: PACKAGE_REAPACK.to_string(),
             version: Some(Version::parse("1.2.6").unwrap()),
             whats_new: None,
+            channel: None,
         }];
         let desired = vec![PACKAGE_REAPACK.to_string()];
 
@@ -250,6 +309,7 @@ mod tests {
             package_id: PACKAGE_REAPER.to_string(),
             version: Some(Version::parse("7.70").unwrap()),
             whats_new: None,
+            channel: None,
         }];
 
         let plan = build_install_plan(Some(installation), &[], &desired, &available);
@@ -299,6 +359,7 @@ mod tests {
             package_id: PACKAGE_REAPER.to_string(),
             version: Some(Version::parse("7.70").unwrap()),
             whats_new: None,
+            channel: None,
         }];
 
         let plan = build_install_plan(Some(installation), &[], &desired, &available);
@@ -312,6 +373,101 @@ mod tests {
             plan.actions[0].available_version,
             Some(Version::parse("7.70").unwrap())
         );
+    }
+
+    /// A portable REAPER at `dir` reporting `installed`, whose receipt says it
+    /// came from `channel` (`None` = stable), planned against `available`
+    /// checked on `available_channel`.
+    fn plan_reaper_between_channels(
+        installed: &str,
+        channel: Option<&str>,
+        available: &str,
+        available_channel: Option<&str>,
+    ) -> super::PlanAction {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("reaper.exe");
+        fs::write(&app, b"stub").unwrap();
+        let mut packages = std::collections::BTreeMap::new();
+        packages.insert(
+            PACKAGE_REAPER.to_string(),
+            crate::receipt::PackageReceipt {
+                id: PACKAGE_REAPER.to_string(),
+                version: Some(Version::parse(installed).unwrap()),
+                variant: None,
+                channel: channel.map(str::to_string),
+                source_url: None,
+                source_sha256: None,
+                installed_files: Vec::new(),
+                installed_at: None,
+                rabbit_version: None,
+                architecture: None,
+            },
+        );
+        crate::receipt::save_install_state(
+            dir.path(),
+            &crate::receipt::InstallState {
+                schema_version: 1,
+                packages,
+                declined_packages: Default::default(),
+            },
+        )
+        .unwrap();
+        let plan = build_install_plan(
+            Some(fake_reaper_installation(
+                app,
+                dir.path().to_path_buf(),
+                Some(Version::parse(installed).unwrap()),
+            )),
+            &[],
+            &[PACKAGE_REAPER.to_string()],
+            &[AvailablePackage {
+                package_id: PACKAGE_REAPER.to_string(),
+                version: Some(Version::parse(available).unwrap()),
+                whats_new: None,
+                channel: available_channel.map(str::to_string),
+            }],
+        );
+        plan.actions.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn going_back_from_a_dev_build_to_stable_is_offered_even_though_it_is_older() {
+        // The development build is newer than the stable release it is based
+        // on, so an ordered comparison alone says "keep". Without the channel
+        // switch, a user leaving expert mode would never be taken back.
+        let action = plan_reaper_between_channels("7.80+dev0917", Some("dev"), "7.80", None);
+        assert_eq!(action.action, PlanActionKind::Update);
+        assert!(
+            action.reason.contains("back to the stable"),
+            "{}",
+            action.reason
+        );
+    }
+
+    #[test]
+    fn switching_from_stable_to_the_dev_channel_is_offered() {
+        let action = plan_reaper_between_channels("7.80", None, "7.80+dev0917", Some("dev"));
+        assert_eq!(action.action, PlanActionKind::Update);
+    }
+
+    #[test]
+    fn on_the_dev_channel_any_different_build_is_an_update_and_the_same_one_is_kept() {
+        // Exact comparison: December's +dev1230 must still be replaced by
+        // January's +dev0102, which ordering by the numbers alone gets wrong.
+        let wrapped =
+            plan_reaper_between_channels("7.85+dev1230", Some("dev"), "7.85+dev0102", Some("dev"));
+        assert_eq!(wrapped.action, PlanActionKind::Update);
+        let same =
+            plan_reaper_between_channels("7.80+dev0917", Some("dev"), "7.80+dev0917", Some("dev"));
+        assert_eq!(same.action, PlanActionKind::Keep);
+    }
+
+    #[test]
+    fn stable_to_stable_still_uses_the_ordered_comparison() {
+        let newer = plan_reaper_between_channels("7.79", None, "7.80", None);
+        assert_eq!(newer.action, PlanActionKind::Update);
+        let current = plan_reaper_between_channels("7.80", None, "7.80", None);
+        assert_eq!(current.action, PlanActionKind::Keep);
     }
 
     fn fake_reaper_installation(

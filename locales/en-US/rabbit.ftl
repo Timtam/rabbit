@@ -406,3 +406,32 @@ wizard-planned-runner-extract-archive-copy-osara = Extract archive and copy OSAR
 wizard-planned-runner-mount-disk-image = Mount disk image and run contained installer
 wizard-planned-runner-mount-disk-image-copy-app = Mount disk image and copy contained app bundle
 wizard-planned-runner-mount-disk-image-run-pkg = Mount disk image and run contained pkg installer
+
+# Expert mode and release channels. Expert mode is a hidden, documented
+# unlock (Ctrl+Shift+E / Cmd+Shift+E, or RABBIT_EXPERT=1) that offers pre-release
+# builds of REAPER and OSARA.
+package-channel-reaper-dev = Development builds from landoleet.org
+package-channel-osara-pr = Pull request test builds
+wizard-window-title-expert = { $title } – Expert mode
+wizard-expert-enable-title = Turn on expert mode?
+wizard-expert-enable-body = Expert mode lets you install pre-release builds: REAPER's development builds from landoleet.org, and test builds of OSARA pull requests. They are unsupported, can break REAPER or its accessibility, and are meant for testing only. Two build choices appear on this page, below the REAPER installation. Turn on expert mode?
+wizard-expert-disabled-title = Expert mode is off
+wizard-expert-disabled-body = Expert mode is off. Any package installed from a pre-release build goes back to its regular release the next time you install.
+wizard-expert-first-page-title = Expert mode
+wizard-expert-first-page-body = Expert mode can only be turned on or off on the first page, where it adds the build choices. Go back to the first page to change it.
+wizard-expert-busy-body = Expert mode can't be changed while RABBIT is installing or after it has finished.
+wizard-expert-reaper-builds-label = REAPER builds
+wizard-expert-reaper-builds-stable = Regular releases
+wizard-expert-osara-builds-label = OSARA builds
+wizard-expert-osara-builds-snapshot = Regular snapshots
+wizard-expert-osara-builds-loading = Looking for pull request builds…
+wizard-expert-osara-builds-unavailable = Regular snapshots (pull request builds could not be listed)
+wizard-expert-osara-builds-pr = Pull request { $number }: { $title }
+wizard-expert-osara-builds-pr-untitled = Pull request { $number }
+wizard-package-row-channel-suffix = { $row } ({ $channel })
+wizard-package-channel-dev = development build
+wizard-package-channel-dev-details = { $package } will be installed from its development builds: unsupported pre-release versions that can break at any time.
+wizard-package-channel-pr = test build of pull request { $number }
+wizard-package-channel-pr-details = { $package } will be installed from the test build of pull request { $number }: unreviewed, unsigned code that GitHub deletes after 90 days.
+wizard-package-channel-back = back to the regular release
+wizard-package-channel-back-details = { $package } is currently a pre-release build. This installation puts the regular release back.

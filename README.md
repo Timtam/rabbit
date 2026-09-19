@@ -202,6 +202,46 @@ Français (France) and Italiano (Italia). RABBIT auto-picks your OS language on
 first launch when a translation is available — regional variants fall back to
 the bundled one, so a Mexican Spanish (es-MX) system gets the Spanish UI.
 
+### Expert mode: pre-release builds
+
+The wizard has a hidden expert mode for people who test pre-release software.
+It installs builds that are unsupported and can break REAPER or its
+accessibility at any time. Keep it away from a setup you depend on.
+
+To turn it on, press **Ctrl+Shift+E** (**Cmd+Shift+E** on macOS) on the first
+page and confirm. To have it on from the start, launch RABBIT with the
+environment variable `RABBIT_EXPERT=1`:
+
+```
+$env:RABBIT_EXPERT=1; .\RABBIT.exe                      # Windows, PowerShell
+RABBIT_EXPERT=1 /Applications/Rabbit.app/Contents/MacOS/rabbit   # macOS
+```
+
+The window title then ends in "Expert mode", and two choices appear on the
+first page below the REAPER installation:
+
+- **REAPER builds**: regular releases, or the development builds from
+  [landoleet.org](https://www.landoleet.org/). RABBIT installs whatever
+  landoleet currently offers, whether that is a development build, a release
+  candidate or a release.
+- **OSARA builds**: regular snapshots, or the test build of an open OSARA
+  pull request. RABBIT fetches the list from GitHub when expert mode comes on,
+  with the newest pull request (the highest number) first.
+  These builds are unreviewed, unsigned code. GitHub deletes them after 90
+  days, and Windows security software is more likely to flag them (see
+  [below](#if-antivirus-software-blocks-an-install-windows)).
+
+On the Packages page, a package coming from a pre-release build says so in its
+row, for example "(development build)".
+
+Expert mode is never saved. It lasts until RABBIT closes, and pressing the
+same keys again on the first page turns it off. Leaving it has a consequence.
+The next install without expert mode takes every package that came from a
+pre-release build back to its regular release, and the row says "back to the
+regular release". The same thing happens to an OSARA test build once its pull
+request is merged or closed, or GitHub has deleted the build. The mode can only
+be changed on the first page, never while an install is running.
+
 ## Command-line usage
 
 The same `RABBIT.exe` / `RABBIT` executable also exposes a CLI when invoked with
@@ -289,6 +329,38 @@ RABBIT setup --resource-path "%APPDATA%\REAPER" --package langpack-es \
 knows if you mistype it. Unlike the wizard, the CLI never records a package
 you left out as "don't offer this again" — `--package` is a scope for this
 run, not a standing preference.
+
+### Pre-release builds
+
+The CLI needs no expert mode to install pre-release builds. Ask for a channel
+per package with `--package-channel`. It works with `latest`, `artifacts`,
+`download`, `plan`, `install-extension`, `apply-packages` and `setup`.
+
+```
+# REAPER's development build from landoleet.org:
+RABBIT install-extension --package reaper --resource-path C:\REAPER \
+     --package-channel reaper=dev --apply
+
+# The test build of OSARA pull request 1454:
+RABBIT install-extension --package osara --resource-path "%APPDATA%\REAPER" \
+     --package-channel osara=pr:1454 --apply
+
+# Back to the regular release:
+RABBIT apply-packages --resource-path C:\REAPER --package-channel reaper=stable --apply
+
+# See what's out on a channel without installing anything:
+RABBIT latest --package-channel reaper=dev
+```
+
+`RABBIT packages` lists each package's channels. Unlike the wizard outside
+expert mode, the CLI keeps a package on the channel it was last installed
+from until you pass `<package>=stable`, so a later `apply-packages` keeps a
+development REAPER on development builds. OSARA pull request builds come
+through [nightly.link](https://nightly.link/), because GitHub hands workflow
+builds only to signed-in users. When a pull request is merged or closed, or
+has no build left, RABBIT installs the regular snapshot and prints a warning
+saying so. It never counts a network failure as a missing build, so an outage
+can't quietly downgrade anything.
 
 ### Maintain
 
