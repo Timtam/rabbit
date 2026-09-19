@@ -130,17 +130,33 @@ pub fn resolve_latest_artifacts_on(
     architecture: Architecture,
     channels: &PackageChannels,
 ) -> Result<Vec<ArtifactDescriptor>> {
-    let mut artifacts = resolve_artifacts_with_specs(
-        package_ids,
-        platform,
-        architecture,
-        &package_specs_by_id_on(platform, channels),
-    )?;
-    for artifact in &mut artifacts {
-        artifact.channel = channels
-            .get(&artifact.package_id)
+    let on_channels = package_specs_by_id_on(platform, channels);
+    let mut artifacts = Vec::new();
+    for package_id in package_ids {
+        let channel = channels
+            .get(package_id)
             .filter(|channel| channel.as_str() != STABLE_CHANNEL)
             .cloned();
+        let ids = std::slice::from_ref(package_id);
+        match resolve_artifacts_with_specs(ids, platform, architecture, &on_channels) {
+            Ok(resolved) => artifacts.extend(resolved.into_iter().map(|mut artifact| {
+                artifact.channel = channel.clone();
+                artifact
+            })),
+            // The pull request's build has run out. That is the listing
+            // answering "nothing", not an outage, so the package goes back to
+            // its regular release - recorded as stable, so the receipt forgets
+            // the pull request. A real outage still fails below.
+            Err(RabbitError::PullRequestBuildGone { .. }) => {
+                artifacts.extend(resolve_artifacts_with_specs(
+                    ids,
+                    platform,
+                    architecture,
+                    &package_specs_by_id_on(platform, &PackageChannels::new()),
+                )?)
+            }
+            Err(error) => return Err(error),
+        }
     }
     Ok(artifacts)
 }
@@ -188,6 +204,25 @@ fn resolve_artifacts_with_specs(
                 hfs_listing,
                 platform,
             )?);
+            continue;
+        }
+        if let Some(actions) = spec.and_then(|spec| spec.github_actions_artifact.as_ref()) {
+            let (build, target) =
+                crate::actions_artifact::newest_build(&client, actions, package_id, platform)?;
+            artifacts.push(ArtifactDescriptor {
+                package_id: package_id.clone(),
+                version: Version::parse(&build.version).map_err(|_| RabbitError::RemoteData {
+                    url: crate::actions_artifact::download_url(actions, &build),
+                    message: format!("unreadable build version {:?}", build.version),
+                })?,
+                platform,
+                architecture: target.report_arch,
+                kind: github_artifact_kind(target.artifact_kind),
+                url: crate::actions_artifact::download_url(actions, &build),
+                // GitHub zips every artifact; the name says what is inside.
+                file_name: format!("{}.zip", build.artifact_name),
+                channel: None,
+            });
             continue;
         }
         return Err(RabbitError::NoArtifactFound {
@@ -247,6 +282,12 @@ pub fn expected_artifact_kind_on(
     }
     if let Some(hfs_listing) = spec.and_then(|spec| spec.hfs_listing.as_ref()) {
         return Ok(github_artifact_kind(hfs_listing.artifact_kind));
+    }
+    if let Some(target) = spec
+        .and_then(|spec| spec.github_actions_artifact.as_ref())
+        .and_then(|actions| crate::actions_artifact::target_for(actions, platform))
+    {
+        return Ok(github_artifact_kind(target.artifact_kind));
     }
     Err(RabbitError::NoArtifactFound {
         package_id: package_id.to_string(),
@@ -1085,6 +1126,18 @@ fn cached_artifact(
     path: PathBuf,
     reused_existing_file: bool,
 ) -> Result<CachedArtifact> {
+    // An installer that arrived zipped (GitHub zips every workflow artifact)
+    // is unwrapped here, once, so everything downstream runs an ordinary
+    // installer. No other package delivers an installer as a .zip.
+    let path = if matches!(descriptor.kind, ArtifactKind::Installer)
+        && path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+    {
+        crate::archive::extract_zipped_installer(&path)?
+    } else {
+        path
+    };
     let metadata = fs::metadata(&path).with_path(&path)?;
     let sha256 = sha256_file(&path)?;
 

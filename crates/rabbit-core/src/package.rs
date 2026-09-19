@@ -119,6 +119,8 @@ pub struct PackageSpec {
     /// Data-driven rejetto-HFS definition driving both version and download
     /// (JAWS-for-REAPER scripts). See [`HfsListingSpec`].
     pub hfs_listing: Option<HfsListingSpec>,
+    /// A GitHub Actions artifact. See [`GithubActionsArtifactSpec`].
+    pub github_actions_artifact: Option<GithubActionsArtifactSpec>,
     /// Alternative sources for this package's builds. See [`PackageChannel`].
     pub channels: Vec<PackageChannel>,
 }
@@ -221,6 +223,9 @@ pub struct EmbeddedPackageSpec {
     pub http_artifact: Option<HttpArtifactSpec>,
     #[serde(default)]
     pub hfs_listing: Option<HfsListingSpec>,
+    /// A GitHub Actions artifact. See [`GithubActionsArtifactSpec`].
+    #[serde(default)]
+    pub github_actions_artifact: Option<GithubActionsArtifactSpec>,
     /// Alternative sources for this package's builds. See [`PackageChannel`].
     #[serde(default)]
     pub channels: Vec<PackageChannel>,
@@ -592,6 +597,40 @@ pub enum VersionRule {
 /// same REAPER/SWS translation is published as `es_ES` (which loads the
 /// "REAPER Accesible español" OSARA translation) or `es_MX` (Team PMA's).
 /// Same download either way — only the installed name differs.
+/// A build published as a GitHub Actions workflow artifact - the test build
+/// OSARA's CI makes for every pull request.
+///
+/// Found through GitHub's public REST API, which lists a repository's
+/// artifacts without authentication, and downloaded through nightly.link,
+/// because GitHub's own artifact download needs a signed-in user. That is the
+/// same link OSARA's own pull-request bot posts for testers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubActionsArtifactSpec {
+    /// `owner/name`.
+    pub repo: String,
+    /// Download URL, with `{repo}` and `{id}` (the artifact id) filled in.
+    pub download_url: String,
+    pub targets: Vec<GithubActionsArtifactTarget>,
+    /// The pull request whose build to install. Filled in from the channel's
+    /// parameter (`pr:1454`) when the package is put on that channel; never
+    /// read from the manifest.
+    #[serde(skip)]
+    pub pull_request: Option<u32>,
+}
+
+/// One platform's artifact within a [`GithubActionsArtifactSpec`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubActionsArtifactTarget {
+    pub platform: SupportedPlatform,
+    /// Artifact names are `<name_prefix><version>`, where the version names
+    /// the pull request, the CI run and the commit: `pr1454-534,240c4663`.
+    pub name_prefix: String,
+    pub report_arch: Architecture,
+    /// The kind of file inside the downloaded zip. An `installer` arrives
+    /// zipped and is unwrapped before it runs.
+    pub artifact_kind: GithubArtifactKind,
+}
+
 /// The channel every package is on unless something says otherwise: builds
 /// exactly as the package's own manifest entry describes them.
 pub const STABLE_CHANNEL: &str = "stable";
@@ -641,6 +680,8 @@ pub struct PackageChannel {
     pub http_artifact: Option<HttpArtifactSpec>,
     #[serde(default)]
     pub hfs_listing: Option<HfsListingSpec>,
+    #[serde(default)]
+    pub github_actions_artifact: Option<GithubActionsArtifactSpec>,
 }
 
 /// The kind of value a parameterised channel takes after its colon.
@@ -681,7 +722,10 @@ impl PackageChannel {
     }
 
     fn sets_artifact_source(&self) -> bool {
-        self.github_release.is_some() || self.http_artifact.is_some() || self.hfs_listing.is_some()
+        self.github_release.is_some()
+            || self.http_artifact.is_some()
+            || self.hfs_listing.is_some()
+            || self.github_actions_artifact.is_some()
     }
 }
 
@@ -1024,6 +1068,10 @@ fn validate_resolvable_spec(spec: &EmbeddedPackageSpec) -> Result<(), String> {
         ("github_release", spec.github_release.is_some()),
         ("http_artifact", spec.http_artifact.is_some()),
         ("hfs_listing", spec.hfs_listing.is_some()),
+        (
+            "github_actions_artifact",
+            spec.github_actions_artifact.is_some(),
+        ),
     ];
     let set: Vec<&str> = sources
         .iter()
@@ -1289,6 +1337,7 @@ impl EmbeddedPackageSpec {
             github_release: self.github_release.clone(),
             http_artifact: self.http_artifact.clone(),
             hfs_listing: self.hfs_listing.clone(),
+            github_actions_artifact: self.github_actions_artifact.clone(),
             channels: self.channels.clone(),
         }
     }
@@ -1302,19 +1351,37 @@ impl EmbeddedPackageSpec {
             return self.clone();
         };
         let mut spec = self.clone();
-        if overlay.version.is_some() {
-            spec.version = overlay.version.clone();
-        }
         if let Some(comparison) = overlay.version_comparison {
             spec.version_comparison = comparison;
         }
-        if overlay.whats_new.is_some() {
-            spec.whats_new = overlay.whats_new.clone();
-        }
         if overlay.sets_artifact_source() {
+            // A channel that brings its own download also brings its own
+            // version and release notes, even if that means none. Inheriting
+            // them would describe the wrong build: OSARA's pull-request
+            // channel would report the snapshot's version and changelog for
+            // a pull request's test build.
             spec.github_release = overlay.github_release.clone();
             spec.http_artifact = overlay.http_artifact.clone();
             spec.hfs_listing = overlay.hfs_listing.clone();
+            spec.github_actions_artifact = overlay.github_actions_artifact.clone();
+            spec.version = overlay.version.clone();
+            spec.whats_new = overlay.whats_new.clone();
+        } else {
+            if overlay.version.is_some() {
+                spec.version = overlay.version.clone();
+            }
+            if overlay.whats_new.is_some() {
+                spec.whats_new = overlay.whats_new.clone();
+            }
+        }
+        // A parameterised channel hands its parameter to the source that
+        // needs it: `pr:1454` becomes the pull request to look up.
+        if let (Some(ChannelParameter::PullRequest), Some(value)) = (
+            overlay.parameter,
+            channel.and_then(|channel| split_channel(channel).1),
+        ) && let Some(actions) = spec.github_actions_artifact.as_mut()
+        {
+            actions.pull_request = value.parse().ok();
         }
         spec
     }
@@ -2112,6 +2179,48 @@ mod tests {
         assert!(
             super::remembered_channels(dir.path(), &ids).is_empty(),
             "a channel the manifest no longer offers is not carried forward"
+        );
+    }
+    #[test]
+    fn osara_offers_a_pull_request_channel_that_takes_a_number() {
+        let osara = super::embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == super::PACKAGE_OSARA)
+            .expect("OSARA is in the manifest");
+        assert!(osara.offers_channel("pr:1454"));
+        for malformed in ["pr", "pr:", "pr:abc", "pr:0", "pr:-3"] {
+            assert!(
+                !osara.offers_channel(malformed),
+                "{malformed:?} must not be offered"
+            );
+        }
+
+        let on_pr = osara.on_channel(Some("pr:1454"));
+        let actions = on_pr
+            .github_actions_artifact
+            .as_ref()
+            .expect("the pr channel downloads a GitHub Actions artifact");
+        assert_eq!(
+            actions.pull_request,
+            Some(1454),
+            "the parameter reaches the source"
+        );
+        assert_eq!(on_pr.version_comparison, super::VersionComparison::Exact);
+        // The channel brings its own download, so it must not inherit the
+        // snapshot's version check or changelog: those describe a different
+        // build entirely.
+        assert!(
+            on_pr.version.is_none(),
+            "version comes from the artifact name"
+        );
+        assert!(
+            on_pr.whats_new.is_none(),
+            "the snapshot changelog would describe the wrong build"
+        );
+        assert!(
+            on_pr.http_artifact.is_none(),
+            "the snapshot download is replaced, not merged"
         );
     }
 }

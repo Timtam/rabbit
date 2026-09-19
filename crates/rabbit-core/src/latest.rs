@@ -101,7 +101,8 @@ pub fn fetch_latest_versions_on(channels: &PackageChannels) -> Result<LatestVers
     for declared in embedded_package_manifest().packages {
         let channel = non_stable_channel(channels.get(&declared.id).map(String::as_str));
         let spec = declared.on_channel(channel.as_deref());
-        let Some(result) = resolve_manifest_version(&client, &spec) else {
+        let Some((result, channel)) = resolve_version_on_channel(&client, &declared, channel)
+        else {
             continue;
         };
         match result {
@@ -146,10 +147,42 @@ fn resolve_manifest_version(
             http_get_text(client, &url)
                 .and_then(|body| resolve_github_version(&body, &url, github_release)),
         )
+    } else if let Some(actions) = &spec.github_actions_artifact {
+        // A pull request's build is the same CI run on every platform, so
+        // the current one decides - it is the one being installed on.
+        let platform = crate::model::Platform::current().unwrap_or(crate::model::Platform::Windows);
+        Some(
+            crate::actions_artifact::newest_build(client, actions, &spec.id, platform).and_then(
+                |(build, _)| {
+                    Version::parse(&build.version).map_err(|_| RabbitError::RemoteData {
+                        url: crate::actions_artifact::download_url(actions, &build),
+                        message: format!("unreadable build version {:?}", build.version),
+                    })
+                },
+            ),
+        )
     } else {
         spec.hfs_listing
             .as_ref()
             .map(|hfs| resolve_hfs_listing_version(client, hfs))
+    }
+}
+
+/// [`resolve_manifest_version`] for `declared` on `channel`, falling back to
+/// the regular release when a pull request's build has run out. Returns the
+/// channel the version really came from - `None` after a fallback, which the
+/// planner then reads as "go back to stable".
+fn resolve_version_on_channel(
+    client: &Client,
+    declared: &crate::package::EmbeddedPackageSpec,
+    channel: Option<String>,
+) -> Option<(Result<Version>, Option<String>)> {
+    let result = resolve_manifest_version(client, &declared.on_channel(channel.as_deref()))?;
+    match result {
+        Err(RabbitError::PullRequestBuildGone { .. }) => {
+            resolve_manifest_version(client, declared).map(|stable| (stable, None))
+        }
+        other => Some((other, channel)),
     }
 }
 
@@ -193,6 +226,10 @@ pub fn fetch_latest_for_package(package_id: &str) -> Result<Version> {
 pub struct LatestPackageDetails {
     pub version: Version,
     pub whats_new: Option<String>,
+    /// The channel the version came from. `None` is stable - including when
+    /// a pull request's build had run out and the regular release was
+    /// checked instead.
+    pub channel: Option<String>,
 }
 
 /// Like [`fetch_latest_for_package`], but also resolves the package's
@@ -218,6 +255,21 @@ pub fn fetch_latest_details_for_package_on(
     installed: Option<&Version>,
     channel: Option<&str>,
 ) -> Result<LatestPackageDetails> {
+    let channel = non_stable_channel(channel);
+    match latest_details_on_channel(package_id, installed, channel.as_deref()) {
+        // A pull request's build ran out: check the regular release instead.
+        Err(RabbitError::PullRequestBuildGone { .. }) => {
+            latest_details_on_channel(package_id, installed, None)
+        }
+        other => other,
+    }
+}
+
+fn latest_details_on_channel(
+    package_id: &str,
+    installed: Option<&Version>,
+    channel: Option<&str>,
+) -> Result<LatestPackageDetails> {
     let manifest = embedded_package_manifest();
     let spec = manifest
         .packages
@@ -227,8 +279,9 @@ pub fn fetch_latest_details_for_package_on(
             url: String::new(),
             message: format!("no package named {package_id}"),
         })?
-        .on_channel(non_stable_channel(channel).as_deref());
+        .on_channel(channel);
     let spec = &spec;
+    let channel = channel.map(str::to_string);
     let client = build_http_client()?;
     // When the version rule and the What's-New rule read the same URL
     // (OSARA's update.json carries both the version and the commit feed),
@@ -249,7 +302,11 @@ pub fn fetch_latest_details_for_package_on(
         let body = http_get_text(&client, version_url)?;
         let version = resolve_json_version(&body, version_url, version_pointer)?;
         let whats_new = resolve_json_commits(&body, notes_url, notes_pointer, installed).ok();
-        return Ok(LatestPackageDetails { version, whats_new });
+        return Ok(LatestPackageDetails {
+            version,
+            whats_new,
+            channel,
+        });
     }
     // Every package resolves its version data-driven: a `version` VersionRule
     // (REAPER/OSARA/SWS/FFmpeg), a `github_release` block (Surge XT, ReaKontrol,
@@ -264,7 +321,11 @@ pub fn fetch_latest_details_for_package_on(
         .whats_new
         .as_ref()
         .and_then(|rule| resolve_whats_new_rule(&client, rule, installed).ok());
-    Ok(LatestPackageDetails { version, whats_new })
+    Ok(LatestPackageDetails {
+        version,
+        whats_new,
+        channel,
+    })
 }
 
 /// Resolve a data-driven [`WhatsNewRule`] into the rendered notes text shown
