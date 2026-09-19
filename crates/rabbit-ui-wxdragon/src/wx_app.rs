@@ -3157,6 +3157,7 @@ fn start_version_check(ui: VersionCheckUi) {
                                 package_id,
                                 version: Some(version),
                                 whats_new,
+                                channel: None,
                             });
                         }
                         Err(error) => {

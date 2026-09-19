@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 use crate::artifact::{
     ArtifactDescriptor, ArtifactKind, CachedArtifact, DownloadHandle, expected_artifact_kind,
-    resolve_latest_artifacts, spawn_download_pool,
+    resolve_latest_artifacts_on, spawn_download_pool,
 };
 use crate::cancel::CancelToken;
 use crate::detection::{
@@ -69,6 +69,13 @@ pub struct PackageOperationOptions {
     /// default variant".
     #[serde(default)]
     pub package_variants: std::collections::BTreeMap<String, String>,
+    /// The channel each package is on for this run; absent means stable. The
+    /// caller decides: the CLI passes what the receipts remember plus any
+    /// `--package-channel`, the wizard passes its expert-mode choices - and
+    /// nothing at all outside expert mode, which is what returns packages
+    /// to stable. See [`crate::package::PackageChannels`].
+    #[serde(default)]
+    pub package_channels: crate::package::PackageChannels,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -434,7 +441,12 @@ pub fn execute_package_operation_with_progress(
     progress: &ProgressReporter,
     cancel: &CancelToken,
 ) -> Result<PackageOperationReport> {
-    let artifacts = resolve_latest_artifacts(package_ids, platform, architecture)?;
+    let artifacts = resolve_latest_artifacts_on(
+        package_ids,
+        platform,
+        architecture,
+        &options.package_channels,
+    )?;
     let detections = detect_components(resource_path, platform)?;
     execute_resolved_package_operation_with_detections_and_progress(
         resource_path,
@@ -562,8 +574,14 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
                     platform_of(&artifact),
                     &options.package_variants,
                 );
+            // Likewise a channel switch. Going back from a development build
+            // to the stable release is a downgrade, so the version comparison
+            // reports Keep and the switch would never run.
+            let channel_switched = matches!(computed, PlanActionKind::Keep)
+                && receipt_channel(resource_path, &artifact.package_id) != artifact.channel;
             if matches!(computed, PlanActionKind::Keep)
                 && (variant_switched
+                    || channel_switched
                     || options
                         .force_reinstall_packages
                         .iter()
@@ -1087,12 +1105,26 @@ fn plan_action_for_artifact(
     if crate::package::version_needs_update(
         installed_version,
         &artifact.version,
-        crate::package::version_comparison_for(&artifact.package_id),
+        crate::package::version_comparison_on(&artifact.package_id, artifact.channel.as_deref()),
     ) {
         PlanActionKind::Update
     } else {
         PlanActionKind::Keep
     }
+}
+
+/// The channel the last RABBIT install of `package_id` recorded, raw (not
+/// filtered to channels the manifest still offers), `None` meaning stable.
+fn receipt_channel(resource_path: &Path, package_id: &str) -> Option<String> {
+    crate::receipt::load_install_state(resource_path)
+        .ok()
+        .flatten()
+        .and_then(|state| {
+            state
+                .packages
+                .get(package_id)
+                .and_then(|r| r.channel.clone())
+        })
 }
 
 fn skipped_current_item(
@@ -1111,7 +1143,7 @@ fn skipped_current_item(
     // not a version number, so their "kept" message must not talk about one
     // version being newer than another.
     let content_tracked = matches!(
-        crate::package::version_comparison_for(&artifact.package_id),
+        crate::package::version_comparison_on(&artifact.package_id, artifact.channel.as_deref()),
         crate::package::VersionComparison::Exact
     );
     PackageOperationItem {
@@ -1526,6 +1558,7 @@ fn upsert_unattended_package_receipt(
         resource_path,
         PackageReceiptParams {
             variant: None,
+            channel: artifact.channel.as_deref(),
             package_id: &artifact.package_id,
             version: Some(artifact.version.clone()),
             source_url: Some(artifact.url.clone()),
@@ -2221,6 +2254,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -2263,6 +2297,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -2296,6 +2331,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -2340,6 +2376,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -2450,6 +2487,7 @@ mod tests {
             kind: ArtifactKind::Archive,
             url: "https://github.com/jcsteh/osara/releases/download/snapshots/osara_2026.4.27.2160.89d559fc.zip".to_string(),
             file_name: "osara_2026.4.27.2160.89d559fc.zip".to_string(),
+            channel: None,
         };
 
         let plan =
@@ -2475,6 +2513,7 @@ mod tests {
             kind: ArtifactKind::DiskImage,
             url: "https://www.reaper.fm/files/7.x/reaper769_universal.dmg".to_string(),
             file_name: "reaper769_universal.dmg".to_string(),
+            channel: None,
         };
 
         let plan = super::planned_execution_for_artifact(
@@ -2506,6 +2545,7 @@ mod tests {
             kind: ArtifactKind::DiskImage,
             url: "https://www.reaper.fm/files/7.x/reaper769_universal.dmg".to_string(),
             file_name: "reaper769_universal.dmg".to_string(),
+            channel: None,
         };
 
         let plan = super::planned_execution_for_artifact(
@@ -2549,6 +2589,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -2601,6 +2642,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -2641,6 +2683,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -2684,6 +2727,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -2727,6 +2771,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -2782,6 +2827,7 @@ mod tests {
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -2863,6 +2909,7 @@ mod tests {
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -2917,6 +2964,92 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
+    fn leaving_the_dev_channel_reinstalls_stable_even_at_the_same_version() {
+        // The wizard outside expert mode passes no channels, which is how a
+        // package installed from a development build goes back to stable.
+        // The version alone can say "keep" (and for a dev build it usually
+        // says the installed one is NEWER), so the switch has to be promoted
+        // to a real reinstall - and the receipt has to forget the channel.
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let source_path = dir.path().join("reaper-installer.cmd");
+        std::fs::write(&source_path, reaper_mock_installer_script()).unwrap();
+        let resource_path = dir.path().join("PortableREAPER");
+        let options = PackageOperationOptions {
+            dry_run: false,
+            allow_reaper_running: false,
+            stage_unsupported: false,
+            replace_osara_keymap: false,
+            target_app_path: Some(resource_path.join("reaper.exe")),
+            lock_path: Some(dir.path().join("install.lock")),
+            force_reinstall_packages: Vec::new(),
+            package_variants: Default::default(),
+            package_channels: Default::default(),
+        };
+        let stable = artifact_with_url(
+            PACKAGE_REAPER,
+            ArtifactKind::Installer,
+            "reaper-installer.cmd",
+            &source_path.display().to_string(),
+        );
+        let mut dev = stable.clone();
+        dev.channel = Some("dev".to_string());
+        // Detect before every pass, exactly as execute_package_operation does.
+        // The plain execute_resolved_package_operation passes NO detections,
+        // which plans everything as a fresh install and would let this test
+        // pass without ever exercising the channel-switch promotion.
+        let run = |artifact: ArtifactDescriptor| {
+            let detections = detect_components(&resource_path, Platform::Windows).unwrap();
+            execute_resolved_package_operation_with_detections(
+                &resource_path,
+                vec![artifact],
+                &detections,
+                cache.path(),
+                &options,
+            )
+            .unwrap()
+        };
+        let receipt_channel_now = || {
+            load_install_state(&resource_path)
+                .unwrap()
+                .unwrap()
+                .packages
+                .get(PACKAGE_REAPER)
+                .unwrap()
+                .channel
+                .clone()
+        };
+
+        let first = run(dev);
+        assert_eq!(
+            first.items[0].status,
+            PackageOperationStatus::InstalledOrChecked
+        );
+        assert_eq!(receipt_channel_now(), Some("dev".to_string()));
+
+        let back = run(stable.clone());
+        assert_eq!(
+            back.items[0].status,
+            PackageOperationStatus::InstalledOrChecked,
+            "the channel switch must reinstall, not be skipped as current: {}",
+            back.items[0].message
+        );
+        assert_eq!(
+            receipt_channel_now(),
+            None,
+            "back on stable, nothing to remember"
+        );
+
+        let again = run(stable);
+        assert_eq!(
+            again.items[0].status,
+            PackageOperationStatus::SkippedCurrent,
+            "once back on stable, the same version is simply current again"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
     fn executes_reaper_windows_standard_installer_and_receipt_tracks_app_only() {
         let dir = tempdir().unwrap();
         let cache = tempdir().unwrap();
@@ -2948,6 +3081,7 @@ mod tests {
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -2992,6 +3126,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -3040,6 +3175,7 @@ mod tests {
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -3093,6 +3229,7 @@ mod tests {
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -3142,6 +3279,7 @@ mod tests {
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -3207,6 +3345,7 @@ mod tests {
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -3339,6 +3478,7 @@ mod tests {
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -3413,6 +3553,7 @@ mod tests {
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -3463,6 +3604,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -3541,6 +3683,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -3606,6 +3749,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -3697,6 +3841,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
         );
 
@@ -3748,6 +3893,7 @@ mod tests {
                 lock_path: Some(lock_path.clone()),
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
             &ProgressReporter::noop(),
             &cancel,
@@ -3836,6 +3982,7 @@ mod tests {
                 lock_path: Some(dir.path().join("install.lock")),
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
             },
             &progress,
             &cancel,
@@ -3899,6 +4046,7 @@ mod tests {
             kind,
             url: url.to_string(),
             file_name: file_name.to_string(),
+            channel: None,
         }
     }
 

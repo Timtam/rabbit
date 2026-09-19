@@ -156,5 +156,141 @@
         }
       }
     ]
-  }
+  },
+  "channels": [
+    {
+      "id": "dev",
+      "display_name_key": "package-channel-reaper-dev",
+      "expert": true,
+      "version": {
+        "html": {
+          "url": "https://www.landoleet.org/?C=M;O=D",
+          "pattern": "href=\"reaper([0-9])([0-9]{2})([^_\"/-]*)_x64-install\\.exe\"",
+          "format": "{1}.{2}{3}"
+        }
+      },
+      "version_comparison": "exact",
+      "whats_new": {
+        "text_changelog": {
+          "url": "https://www.landoleet.org/whatsnew.txt",
+          "section_start": "^v[0-9]"
+        }
+      },
+      "http_artifact": {
+        "targets": [
+          {
+            "platform": "windows",
+            "match_arches": [
+              "x86"
+            ],
+            "report_arch": "x86",
+            "artifact_kind": "installer",
+            "source": {
+              "scrape_href": {
+                "page_url": "https://www.landoleet.org/?C=M;O=D",
+                "base_url": "https://www.landoleet.org/",
+                "match": {
+                  "contains": [
+                    "-install.exe"
+                  ],
+                  "not_contains": [
+                    "_x64",
+                    "arm64ec"
+                  ],
+                  "ends_with": "-install.exe"
+                }
+              }
+            }
+          },
+          {
+            "platform": "windows",
+            "match_arches": [
+              "x64",
+              "universal",
+              "unknown"
+            ],
+            "report_arch": "x64",
+            "artifact_kind": "installer",
+            "source": {
+              "scrape_href": {
+                "page_url": "https://www.landoleet.org/?C=M;O=D",
+                "base_url": "https://www.landoleet.org/",
+                "match": {
+                  "contains": [
+                    "_x64-install.exe"
+                  ],
+                  "ends_with": "-install.exe"
+                }
+              }
+            }
+          },
+          {
+            "platform": "windows",
+            "match_arches": [
+              "arm64",
+              "arm64-ec"
+            ],
+            "report_arch": "arm64-ec",
+            "artifact_kind": "installer",
+            "source": {
+              "scrape_href": {
+                "page_url": "https://www.landoleet.org/?C=M;O=D",
+                "base_url": "https://www.landoleet.org/",
+                "match": {
+                  "contains": [
+                    "arm64ec"
+                  ],
+                  "ends_with": "-install.exe"
+                }
+              }
+            }
+          },
+          {
+            "platform": "macos",
+            "match_arches": [
+              "x86"
+            ],
+            "report_arch": "x86",
+            "artifact_kind": "disk_image",
+            "source": {
+              "scrape_href": {
+                "page_url": "https://www.landoleet.org/?C=M;O=D",
+                "base_url": "https://www.landoleet.org/",
+                "match": {
+                  "contains": [
+                    "_i386.dmg"
+                  ],
+                  "ends_with": "_i386.dmg"
+                }
+              }
+            }
+          },
+          {
+            "platform": "macos",
+            "match_arches": [
+              "x64",
+              "arm64",
+              "arm64-ec",
+              "universal",
+              "unknown"
+            ],
+            "report_arch": "universal",
+            "artifact_kind": "disk_image",
+            "source": {
+              "scrape_href": {
+                "page_url": "https://www.landoleet.org/?C=M;O=D",
+                "base_url": "https://www.landoleet.org/",
+                "match": {
+                  "contains": [
+                    "_universal.dmg"
+                  ],
+                  "ends_with": "_universal.dmg"
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
 }

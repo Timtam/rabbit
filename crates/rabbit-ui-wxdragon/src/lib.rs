@@ -348,6 +348,9 @@ pub struct WizardInstallOptions {
     /// [`WizardInstallRequest::reaper_language_package`].
     pub reaper_language_package: Option<String>,
     pub cache_dir: Option<PathBuf>,
+    /// Channel per package for this run; see
+    /// [`WizardInstallRequest::package_channels`].
+    pub package_channels: rabbit_core::package::PackageChannels,
 }
 
 impl Default for WizardInstallOptions {
@@ -360,6 +363,7 @@ impl Default for WizardInstallOptions {
             package_variants: std::collections::BTreeMap::new(),
             reaper_language_package: None,
             cache_dir: None,
+            package_channels: Default::default(),
         }
     }
 }
@@ -405,6 +409,10 @@ pub struct WizardInstallRequest {
     /// Opt-out-remembering packages the user ticked, clearing any refusal
     /// recorded earlier so a change of mind sticks.
     pub accepted_packages: Vec<String>,
+    /// The channel each package is installed from. Empty outside expert
+    /// mode, which is exactly what sends a package that came from a
+    /// development build back to stable.
+    pub package_channels: rabbit_core::package::PackageChannels,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1143,6 +1151,7 @@ pub fn install_request_from_target_and_rows(
         configuration_step_ids,
         declined_packages,
         accepted_packages,
+        package_channels: options.package_channels.clone(),
     })
 }
 
@@ -1906,6 +1915,7 @@ pub fn execute_wizard_install_with_progress(
             lock_path: None,
             force_reinstall_packages: request.force_reinstall_packages.clone(),
             package_variants: request.package_variants.clone(),
+            package_channels: request.package_channels.clone(),
             reaper_language_package: request.reaper_language_package.clone(),
             configuration_step_ids: request.configuration_step_ids.clone(),
         },
@@ -4749,6 +4759,7 @@ mod tests {
                 package_variants: Default::default(),
                 reaper_language_package: None,
                 cache_dir: Some(PathBuf::from("C:/cache")),
+                package_channels: Default::default(),
             },
         )
         .unwrap();
@@ -5145,6 +5156,7 @@ mod tests {
             package_id: PACKAGE_OSARA.to_string(),
             version: Some(Version::parse("2026.8.1.2278,857265da").unwrap()),
             whats_new: Some("• Fix the slider.\n• Logging improvements.".to_string()),
+            channel: None,
         }];
         let plan =
             super::wizard_package_plan_for_target_with_available(&model, Some(&target), &available)
@@ -5384,6 +5396,7 @@ mod tests {
                         kind: ArtifactKind::Installer,
                         url: "https://example.test/osara.exe".to_string(),
                         file_name: "osara.exe".to_string(),
+                        channel: None,
                     },
                     cached_artifact: None,
                     install_action: None,
@@ -5529,6 +5542,7 @@ mod tests {
                         kind: ArtifactKind::ExtensionBinary,
                         url: "https://example.test/reaper_reapack-x64.dll".to_string(),
                         file_name: "reaper_reapack-x64.dll".to_string(),
+                        channel: None,
                     },
                     cached_artifact: None,
                     install_action: None,
@@ -5616,6 +5630,7 @@ mod tests {
                         kind: ArtifactKind::Installer,
                         url: "https://example.test/osara.exe".to_string(),
                         file_name: "osara.exe".to_string(),
+                        channel: None,
                     },
                     cached_artifact: None,
                     install_action: None,
@@ -6033,6 +6048,7 @@ mod tests {
                 kind: ArtifactKind::Installer,
                 url: "https://example.test/osara.exe".to_string(),
                 file_name: "osara.exe".to_string(),
+                channel: None,
             },
             cached_artifact: None,
             install_action: None,
@@ -6109,6 +6125,7 @@ mod tests {
             configuration_step_ids: Vec::new(),
             declined_packages: Vec::new(),
             accepted_packages: Vec::new(),
+            package_channels: Default::default(),
         }
     }
 }

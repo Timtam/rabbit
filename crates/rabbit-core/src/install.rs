@@ -233,6 +233,7 @@ pub fn install_cached_artifacts_with_progress(
                 resource_path,
                 PackageReceiptParams {
                     variant: effective_variant.as_deref(),
+                    channel: artifact.descriptor.channel.as_deref(),
                     package_id: &artifact.descriptor.package_id,
                     version: Some(artifact.descriptor.version.clone()),
                     source_url: Some(artifact.descriptor.url.clone()),
@@ -803,6 +804,7 @@ mod tests {
                 source_url: None,
                 source_sha256: None,
                 variant: None,
+                channel: None,
                 installed_files: vec![InstalledFileReceipt {
                     // Relative, exactly as receipts store in-resource files.
                     path: PathBuf::from("LangPack").join("DE_(+SWS).ReaperLangPack"),
@@ -981,6 +983,7 @@ mod tests {
                 source_url: Some("https://example.test/old.dll".to_string()),
                 source_sha256: Some(sha256_file(&plugins.join("reaper_reapack-x64.dll")).unwrap()),
                 variant: None,
+                channel: None,
                 installed_files: vec![InstalledFileReceipt {
                     path: PathBuf::from("UserPlugins/reaper_reapack-x64.dll"),
                     sha256: None,
@@ -1159,6 +1162,7 @@ mod tests {
                 kind: ArtifactKind::ExtensionBinary,
                 url: format!("https://example.test/{file_name}"),
                 file_name: file_name.to_string(),
+                channel: None,
             },
             path,
             size: contents.len() as u64,
@@ -1201,6 +1205,7 @@ mod tests {
                 url: "https://example.test/reaKontrol_windows_2026.2.16.100.cafef00d.zip"
                     .to_string(),
                 file_name: "reaKontrol_windows_2026.2.16.100.cafef00d.zip".to_string(),
+                channel: None,
             },
             path: archive_path,
             size: archive_size,
@@ -1267,6 +1272,7 @@ mod tests {
                 kind: ArtifactKind::Archive,
                 url: "https://example.test/reaKontrol_mac_test.zip".to_string(),
                 file_name: "reaKontrol_mac_test.zip".to_string(),
+                channel: None,
             },
             path: archive_path,
             size: archive_size,
@@ -1311,6 +1317,7 @@ mod tests {
                 id: "osara".to_string(),
                 version: None,
                 variant: None,
+                channel: None,
                 source_url: None,
                 source_sha256: None,
                 installed_files: Vec::new(),

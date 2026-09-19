@@ -7,8 +7,8 @@ use std::io::Read;
 use crate::error::{RabbitError, Result};
 use crate::hfs::{HfsListEntry, fetch_file_list, parse_get_file_list_response};
 use crate::package::{
-    GithubReleaseSelector, GithubReleaseSpec, HfsListingSpec, VersionRule, VersionSource,
-    WhatsNewRule, embedded_package_manifest,
+    GithubReleaseSelector, GithubReleaseSpec, HfsListingSpec, PackageChannels, STABLE_CHANNEL,
+    VersionRule, VersionSource, WhatsNewRule, embedded_package_manifest,
 };
 use crate::plan::AvailablePackage;
 use crate::version::Version;
@@ -83,6 +83,14 @@ pub struct LatestVersionsReport {
 /// `Err` left is failing to construct the HTTP client itself, which is a
 /// local environment problem that would fail every provider identically.
 pub fn fetch_latest_versions() -> Result<LatestVersionsReport> {
+    fetch_latest_versions_on(&PackageChannels::new())
+}
+
+/// [`fetch_latest_versions`], with each package checked on the channel
+/// `channels` chooses for it. Each resulting [`AvailablePackage`] records the
+/// channel it was checked on, which is what lets the planner tell an update
+/// apart from a switch between channels.
+pub fn fetch_latest_versions_on(channels: &PackageChannels) -> Result<LatestVersionsReport> {
     let client = build_http_client()?;
     let mut packages = Vec::new();
     let mut failures = Vec::new();
@@ -90,7 +98,9 @@ pub fn fetch_latest_versions() -> Result<LatestVersionsReport> {
     // `version` rule (HTML / JSON / plain-text snowflakes), a `github_release`
     // block, or an `hfs_listing` block (JAWS). Per-package failure tolerance —
     // one unreachable upstream doesn't sink the rest.
-    for spec in embedded_package_manifest().packages {
+    for declared in embedded_package_manifest().packages {
+        let channel = non_stable_channel(channels.get(&declared.id).map(String::as_str));
+        let spec = declared.on_channel(channel.as_deref());
         let Some(result) = resolve_manifest_version(&client, &spec) else {
             continue;
         };
@@ -102,6 +112,7 @@ pub fn fetch_latest_versions() -> Result<LatestVersionsReport> {
                 package_id: spec.id.clone(),
                 version: Some(version),
                 whats_new: None,
+                channel,
             }),
             Err(error) => failures.push(LatestVersionFailure {
                 package_id: spec.id.clone(),
@@ -110,6 +121,14 @@ pub fn fetch_latest_versions() -> Result<LatestVersionsReport> {
         }
     }
     Ok(LatestVersionsReport { packages, failures })
+}
+
+/// `channel`, unless it is stable - which is represented as no channel at
+/// all, so every "is this stable?" check has exactly one form to handle.
+fn non_stable_channel(channel: Option<&str>) -> Option<String> {
+    channel
+        .filter(|channel| *channel != STABLE_CHANNEL)
+        .map(str::to_string)
 }
 
 /// Resolve a package's latest version from its manifest's data-driven source:
@@ -188,6 +207,17 @@ pub fn fetch_latest_details_for_package(
     package_id: &str,
     installed: Option<&Version>,
 ) -> Result<LatestPackageDetails> {
+    fetch_latest_details_for_package_on(package_id, installed, None)
+}
+
+/// [`fetch_latest_details_for_package`] on `channel` (`None` = stable): the
+/// channel's version rule and its own release notes - landoleet's
+/// whatsnew.txt for REAPER's development builds, say.
+pub fn fetch_latest_details_for_package_on(
+    package_id: &str,
+    installed: Option<&Version>,
+    channel: Option<&str>,
+) -> Result<LatestPackageDetails> {
     let manifest = embedded_package_manifest();
     let spec = manifest
         .packages
@@ -196,7 +226,9 @@ pub fn fetch_latest_details_for_package(
         .ok_or_else(|| RabbitError::RemoteData {
             url: String::new(),
             message: format!("no package named {package_id}"),
-        })?;
+        })?
+        .on_channel(non_stable_channel(channel).as_deref());
+    let spec = &spec;
     let client = build_http_client()?;
     // When the version rule and the What's-New rule read the same URL
     // (OSARA's update.json carries both the version and the commit feed),

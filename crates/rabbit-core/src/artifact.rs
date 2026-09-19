@@ -20,7 +20,8 @@ use crate::latest::{
 use crate::model::{Architecture, Platform};
 use crate::package::{
     AssetMatch, GithubArtifactKind, GithubReleaseSpec, HttpArtifactSource, HttpArtifactSpec,
-    HttpArtifactTarget, VersionRule, VersionSource, package_specs_by_id,
+    HttpArtifactTarget, PackageChannels, STABLE_CHANNEL, VersionRule, VersionSource,
+    package_specs_by_id_on,
 };
 use crate::progress::{ProgressEvent, ProgressReporter};
 use crate::version::Version;
@@ -95,6 +96,12 @@ pub struct ArtifactDescriptor {
     pub kind: ArtifactKind,
     pub url: String,
     pub file_name: String,
+    /// The channel this artifact was resolved on (`dev`, `pr:1454`), or
+    /// `None` for stable. It travels with the artifact so whichever install
+    /// path lands it can record the channel in the receipt without being
+    /// told separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,10 +118,42 @@ pub fn resolve_latest_artifacts(
     platform: Platform,
     architecture: Architecture,
 ) -> Result<Vec<ArtifactDescriptor>> {
+    resolve_latest_artifacts_on(package_ids, platform, architecture, &PackageChannels::new())
+}
+
+/// [`resolve_latest_artifacts`], with each package resolved on the channel
+/// `channels` chooses for it. Every returned artifact records that channel,
+/// so the receipt written when it is installed remembers where it came from.
+pub fn resolve_latest_artifacts_on(
+    package_ids: &[String],
+    platform: Platform,
+    architecture: Architecture,
+    channels: &PackageChannels,
+) -> Result<Vec<ArtifactDescriptor>> {
+    let mut artifacts = resolve_artifacts_with_specs(
+        package_ids,
+        platform,
+        architecture,
+        &package_specs_by_id_on(platform, channels),
+    )?;
+    for artifact in &mut artifacts {
+        artifact.channel = channels
+            .get(&artifact.package_id)
+            .filter(|channel| channel.as_str() != STABLE_CHANNEL)
+            .cloned();
+    }
+    Ok(artifacts)
+}
+
+fn resolve_artifacts_with_specs(
+    package_ids: &[String],
+    platform: Platform,
+    architecture: Architecture,
+    specs: &std::collections::BTreeMap<String, crate::package::PackageSpec>,
+) -> Result<Vec<ArtifactDescriptor>> {
     let client = http_client()?;
     let mut artifacts = Vec::new();
     let architecture = canonicalize_dispatch_arch(architecture);
-    let specs = package_specs_by_id(platform);
 
     for package_id in package_ids {
         // Data-driven packages resolve through the generic engines: a single
@@ -166,8 +205,27 @@ pub fn expected_artifact_kind(
     platform: Platform,
     architecture: Architecture,
 ) -> Result<ArtifactKind> {
+    expected_artifact_kind_on(package_id, platform, architecture, None)
+}
+
+/// [`expected_artifact_kind`] for `package_id` on `channel` (`None` = stable).
+/// A channel may fetch a different kind of file than stable does - OSARA's
+/// pull-request builds arrive zipped, for instance.
+pub fn expected_artifact_kind_on(
+    package_id: &str,
+    platform: Platform,
+    architecture: Architecture,
+    channel: Option<&str>,
+) -> Result<ArtifactKind> {
     let architecture = canonicalize_dispatch_arch(architecture);
-    let specs = package_specs_by_id(platform);
+    let channels: PackageChannels = channel
+        .map(|channel| {
+            [(package_id.to_string(), channel.to_string())]
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default();
+    let specs = package_specs_by_id_on(platform, &channels);
     let spec = specs.get(package_id);
     if let Some(github_release) = spec.and_then(|spec| spec.github_release.as_ref()) {
         let selector = select_github_selector(github_release, platform, architecture);
@@ -359,6 +417,7 @@ fn resolve_github_artifact_from_release_body(
         kind,
         url: download_url.to_string(),
         file_name: file_name.to_string(),
+        channel: None,
     })
 }
 
@@ -1114,6 +1173,7 @@ fn resolve_http_artifact(
                 kind,
                 url: url.clone(),
                 file_name,
+                channel: None,
             })
         }
         HttpArtifactSource::GithubReleaseMaxMajor {
@@ -1201,6 +1261,7 @@ fn resolve_github_max_major_from_body(
         kind,
         url: asset.url.clone(),
         file_name: asset.name.clone(),
+        channel: None,
     })
 }
 
@@ -1232,6 +1293,7 @@ fn resolve_hfs_artifact(
         kind: github_artifact_kind(spec.artifact_kind),
         url,
         file_name,
+        channel: None,
     })
 }
 
@@ -1258,6 +1320,7 @@ fn artifact_from_href(
         kind,
         url,
         file_name,
+        channel: None,
     })
 }
 
@@ -2057,6 +2120,132 @@ mod tests {
         assert_eq!(file_name_from_url(&url).unwrap(), "reaper776-install.exe");
     }
 
+    /// A synthetic Apache listing laid out like landoleet.org's: one build
+    /// set, every platform's file, plus the Linux tarballs, the language-pack
+    /// template and the changelog that must NOT be picked.
+    fn landoleet_listing(build: &str) -> String {
+        let names = [
+            "old/".to_string(),
+            format!("reaper{build}_win11_arm64ec_beta-install.exe"),
+            format!("reaper{build}_x64-install.exe"),
+            format!("reaper{build}-install.exe"),
+            format!("reaper{build}_universal.dmg"),
+            format!("reaper{build}_x86_64.dmg"),
+            format!("reaper{build}_i386.dmg"),
+            format!("reaper{build}_linux_x86_64.tar.xz"),
+            format!("reaper{build}_linux_aarch64.tar.xz"),
+            format!("reaper{build}.ReaperLangPack"),
+            "whatsnew.txt".to_string(),
+        ];
+        names
+            .iter()
+            .map(|name| {
+                format!(
+                    "<tr><td valign=\"top\"><img src=\"/icons/binary.gif\" alt=\"[   ]\"></td>\
+                     <td><a href=\"{name}\">{name}</a></td><td align=\"right\">2026-09-17 17:08  </td>\
+                     <td align=\"right\"> 16M</td></tr>\n"
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reaper_dev_channel_picks_the_right_landoleet_file_for_every_target() {
+        let reaper = crate::package::embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == crate::package::PACKAGE_REAPER)
+            .unwrap()
+            .on_channel(Some("dev"));
+        let body = landoleet_listing("780+dev0917");
+        let expected = [
+            (
+                SupportedPlatform::Windows,
+                Architecture::X86,
+                "reaper780+dev0917-install.exe",
+            ),
+            (
+                SupportedPlatform::Windows,
+                Architecture::X64,
+                "reaper780+dev0917_x64-install.exe",
+            ),
+            (
+                SupportedPlatform::Windows,
+                Architecture::Arm64Ec,
+                "reaper780+dev0917_win11_arm64ec_beta-install.exe",
+            ),
+            (
+                SupportedPlatform::Macos,
+                Architecture::X86,
+                "reaper780+dev0917_i386.dmg",
+            ),
+            (
+                SupportedPlatform::Macos,
+                Architecture::Universal,
+                "reaper780+dev0917_universal.dmg",
+            ),
+        ];
+        let targets = &reaper.http_artifact.as_ref().unwrap().targets;
+        assert_eq!(
+            targets.len(),
+            expected.len(),
+            "every stable target has a dev twin"
+        );
+        for (platform, arch, file) in expected {
+            let target = targets
+                .iter()
+                .find(|target| target.platform == platform && target.report_arch == arch)
+                .unwrap_or_else(|| panic!("no dev target for {platform:?}/{arch:?}"));
+            let HttpArtifactSource::ScrapeHref {
+                base_url,
+                href_match,
+                ..
+            } = &target.source
+            else {
+                panic!("the dev channel scrapes landoleet");
+            };
+            let href = find_href_with(&body, |href, _| href_match.matches(href))
+                .unwrap_or_else(|| panic!("nothing matched for {platform:?}/{arch:?}"));
+            assert_eq!(href, file, "{platform:?}/{arch:?}");
+            // The '+' in development build names must survive into the URL
+            // and the cached file name untouched.
+            let url = absolute_url(base_url, &href);
+            assert_eq!(url, format!("https://www.landoleet.org/{file}"));
+            assert_eq!(file_name_from_url(&url).unwrap(), file);
+        }
+    }
+
+    #[test]
+    fn reaper_dev_channel_reads_the_version_reaper_itself_reports() {
+        let reaper = crate::package::embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == crate::package::PACKAGE_REAPER)
+            .unwrap()
+            .on_channel(Some("dev"));
+        let Some(VersionRule::Html {
+            url,
+            pattern,
+            format,
+        }) = &reaper.version
+        else {
+            panic!("the dev channel reads its version from the landoleet listing");
+        };
+        // landoleet cycles through development builds, release candidates and
+        // releases. The first case is byte-for-byte the FileVersion a real
+        // reaper780+dev0917 reaper.exe reports (checked on Windows), which is
+        // what exact comparison against the installed copy relies on.
+        for (build, version) in [
+            ("780+dev0917", "7.80+dev0917"),
+            ("780rc2", "7.80rc2"),
+            ("781", "7.81"),
+        ] {
+            let body = landoleet_listing(build);
+            let parsed = crate::latest::resolve_html_version(&body, url, pattern, format).unwrap();
+            assert_eq!(parsed.raw(), version, "build {build}");
+        }
+    }
+
     #[test]
     fn select_http_target_matches_platform_and_arch() {
         let spec = HttpArtifactSpec {
@@ -2159,6 +2348,7 @@ mod tests {
             kind: ArtifactKind::Installer,
             url: source_path.display().to_string(),
             file_name: "osara-test.exe".to_string(),
+            channel: None,
         };
 
         let cached = download_artifacts(std::slice::from_ref(&artifact), cache_dir.path()).unwrap();
@@ -2211,6 +2401,7 @@ mod tests {
             kind: ArtifactKind::Installer,
             url: format!("http://{addr}/slow.bin"),
             file_name: "slow.bin".to_string(),
+            channel: None,
         };
         let fast = ArtifactDescriptor {
             package_id: "fast-package".to_string(),
@@ -2220,6 +2411,7 @@ mod tests {
             kind: ArtifactKind::Installer,
             url: fast_source.display().to_string(),
             file_name: "fast.bin".to_string(),
+            channel: None,
         };
 
         let cache_dir = tempdir().unwrap();
@@ -2266,6 +2458,7 @@ mod tests {
             kind: ArtifactKind::Installer,
             url: source_path.display().to_string(),
             file_name: "dup.bin".to_string(),
+            channel: None,
         };
 
         let cache_dir = tempdir().unwrap();
@@ -2312,6 +2505,7 @@ mod tests {
             kind: ArtifactKind::Installer,
             url: file_url_for_test(&source_path),
             file_name: "osara-test.exe".to_string(),
+            channel: None,
         };
 
         let cached = download_artifacts(&[artifact], cache_dir.path()).unwrap();
@@ -2332,6 +2526,7 @@ mod tests {
             kind: ArtifactKind::Installer,
             url: "http://example.test/osara-test.exe".to_string(),
             file_name: "osara-test.exe".to_string(),
+            channel: None,
         };
 
         let error = download_artifacts(&[artifact], cache_dir.path()).unwrap_err();

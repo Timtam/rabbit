@@ -40,6 +40,9 @@ pub struct SetupOptions {
     /// es_MX OSARA translation today).
     #[serde(default)]
     pub package_variants: std::collections::BTreeMap<String, String>,
+    /// See [`crate::operation::PackageOperationOptions::package_channels`].
+    #[serde(default)]
+    pub package_channels: crate::package::PackageChannels,
     /// Which language pack the "set REAPER's language" step should activate.
     /// Several packs can be installed side by side — REAPER keeps them all in
     /// `LangPack/` — but only one is active, so this is the user's single
@@ -150,6 +153,7 @@ pub fn execute_setup_operation_with_progress(
             lock_path: options.lock_path.clone(),
             force_reinstall_packages: options.force_reinstall_packages.clone(),
             package_variants: options.package_variants.clone(),
+            package_channels: options.package_channels.clone(),
         },
         progress,
         cancel,
@@ -233,6 +237,7 @@ pub fn execute_resolved_setup_operation_with_progress(
             lock_path: options.lock_path.clone(),
             force_reinstall_packages: options.force_reinstall_packages.clone(),
             package_variants: options.package_variants.clone(),
+            package_channels: options.package_channels.clone(),
         },
         progress,
         cancel,
@@ -414,6 +419,7 @@ mod tests {
                 kind: ArtifactKind::ExtensionBinary,
                 url: "https://example.test/x".to_string(),
                 file_name: "x".to_string(),
+                channel: None,
             },
             cached_artifact: None,
             install_action: None,
@@ -489,6 +495,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
                 reaper_language_package: None,
                 configuration_step_ids: Vec::new(),
             },
@@ -526,6 +533,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
                 reaper_language_package: None,
                 configuration_step_ids: Vec::new(),
             },
@@ -567,6 +575,7 @@ mod tests {
                 kind: ArtifactKind::Installer,
                 url: "https://example.test/reaper-install.exe".to_string(),
                 file_name: "reaper-install.exe".to_string(),
+                channel: None,
             }],
             cache.path(),
             &SetupOptions {
@@ -579,6 +588,7 @@ mod tests {
                 lock_path: None,
                 force_reinstall_packages: Vec::new(),
                 package_variants: Default::default(),
+                package_channels: Default::default(),
                 reaper_language_package: None,
                 configuration_step_ids: Vec::new(),
             },
@@ -619,6 +629,7 @@ mod tests {
             kind: ArtifactKind::ExtensionBinary,
             url: source.display().to_string(),
             file_name: "reaper_reapack-x64.dll".to_string(),
+            channel: None,
         }
     }
 }
