@@ -69,6 +69,12 @@ from this file and posts it as the GitHub release body.
 
 ### Changed
 
+- `RABBIT install-extension` no longer downloads anything without `--apply`.
+  It reported a dry run but fetched the artifact first, which is a change to
+  the machine that every other command makes only with `--apply`. It now
+  prints the preflight checks and the artifacts it would download and
+  install. `RABBIT download` still fetches on purpose.
+
 - RABBIT now builds on wxdragon 0.9.19, which brings wxWidgets 3.3.3 (up from
   3.3.2) under every window and control in the wizard. Nothing is meant to
   look or sound different, but every control now comes from a newer toolkit,
@@ -105,6 +111,25 @@ from this file and posts it as the GitHub release body.
   to choose.
 
 ### Fixed
+
+- A portable REAPER stopped being recognised once it had been opened, and
+  RABBIT then reinstalled it on the next run: a 17 MB download and an
+  installer, every time. RABBIT's receipt listed `reaper.ini` with its size,
+  REAPER rewrites that file whenever it runs, and the size check then failed.
+  REAPER installs nothing into `UserPlugins`, so it had no other way to be
+  found and read as missing. Two fixes: files whose contents belong to REAPER
+  and the user — `reaper.ini` and OSARA's `reaper-kb.ini` — are recorded
+  without a size and only checked for existence, and REAPER now has a
+  detector of its own that finds `reaper.exe` or `REAPER.app` and reads its
+  version. That one also recognises a portable REAPER that RABBIT never
+  installed.
+
+- An OSARA pull request build whose receipt was missing reported the wrong
+  version. RABBIT falls back to scanning the plug-in for its version string,
+  and the pattern only matched snapshot versions like `2026.8.9.2302`. The
+  binary also contains the help text "For example: 2024.3.6.1332,13560ef7",
+  so the scan found that instead and reported a build from 2024. RABBIT now
+  looks for the pull request form first.
 
 - Console windows no longer flash on screen while RABBIT works. RABBIT's
   release build owns no console of its own, so every console program it

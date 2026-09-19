@@ -30,6 +30,7 @@
     }
   },
   "detectors": [
+    "reaper_app",
     "file_version_metadata"
   ],
   "install_steps": [

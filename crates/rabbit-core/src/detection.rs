@@ -326,8 +326,48 @@ fn run_detector_probe(
         PackageDetector::SurgeVendorFiles => {
             detect_surge_xt_vendor_files(spec, platform, uninstall_display_version)
         }
+        PackageDetector::ReaperApp => detect_reaper_app(spec, platform, resource_path),
     };
     Ok(detection)
+}
+
+/// REAPER for the folder being examined: the portable install `resource_path`
+/// is the root of, or the standard install whose resource folder it is. The
+/// version comes from the executable, so this works whether or not RABBIT
+/// installed it and whatever REAPER has done to its own configuration since.
+fn detect_reaper_app(
+    spec: &PackageSpec,
+    platform: Platform,
+    resource_path: &Path,
+) -> Option<ComponentDetection> {
+    let installation = discover_portable_installation(platform, resource_path).or_else(|| {
+        default_standard_installation(platform)
+            .filter(|standard| standard.resource_path == resource_path)
+            .filter(|standard| standard.app_path.exists())
+    })?;
+    let files = vec![installation.app_path.clone()];
+    Some(match installation.version {
+        Some(version) => version_component(
+            spec,
+            version,
+            "reaper-app",
+            Confidence::High,
+            Vec::new(),
+            &files,
+        ),
+        // The app is there but would not say which version it is: still
+        // installed, and saying so beats reporting it missing.
+        None => ComponentDetection {
+            package_id: spec.id.clone(),
+            display_name: spec.display_name.clone(),
+            installed: true,
+            version: None,
+            detector: "reaper-app".to_string(),
+            confidence: Confidence::Medium,
+            files,
+            notes: vec!["Found REAPER, but it reported no version of its own.".to_string()],
+        },
+    })
 }
 
 /// Build an installed [`ComponentDetection`] from a recovered version.
@@ -1127,6 +1167,7 @@ mod tests {
     /// The binary-version-string regexes from the manifest, mirrored as
     /// literals so the scanner tests don't depend on the embedded JSON.
     const OSARA_SNAPSHOT_PATTERN: &str = r"(20[0-9]{2}(?:\.[0-9]+){2,})";
+    const OSARA_PULL_REQUEST_PATTERN: &str = r"(pr[0-9]+-[0-9]+,[0-9a-fA-F]+)";
     const SWS_PATTERN: &str = r"([0-9]+(?:\.[0-9]+){2,}) #[0-9a-fA-F]{6,}";
     const REAPACK_PATTERN: &str = r"ReaPack(?:/| v)([0-9]+(?:\.[0-9]+)+)";
 
@@ -1138,6 +1179,71 @@ mod tests {
         PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK,
         PACKAGE_SURGE_XT, PACKAGE_SWS, package_specs_by_id,
     };
+
+    /// REAPER puts nothing in UserPlugins, so before it had a detector of
+    /// its own it was only ever as visible as its receipt: a portable folder
+    /// RABBIT had not installed, or whose receipt no longer matched, read as
+    /// "REAPER is not installed" and got reinstalled on the next run.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn a_portable_reaper_is_detected_without_any_receipt() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("reaper.exe"), b"not a real executable").unwrap();
+        fs::write(
+            root.join("reaper.ini"),
+            b"[REAPER]
+",
+        )
+        .unwrap();
+
+        let detections = detect_components(root, Platform::Windows).unwrap();
+        let reaper = detections
+            .iter()
+            .find(|detection| detection.package_id == crate::package::PACKAGE_REAPER)
+            .expect("REAPER is in the manifest");
+        assert!(reaper.installed, "{reaper:?}");
+        assert_eq!(reaper.detector, "reaper-app");
+        assert_eq!(reaper.files, vec![root.join("reaper.exe")]);
+
+        // An empty folder still reports REAPER as missing.
+        let empty = tempdir().unwrap();
+        let detections = detect_components(empty.path(), Platform::Windows).unwrap();
+        let reaper = detections
+            .iter()
+            .find(|detection| detection.package_id == crate::package::PACKAGE_REAPER)
+            .unwrap();
+        assert!(!reaper.installed, "{reaper:?}");
+    }
+
+    /// A pull-request build's binary holds its own version *and*, further
+    /// on, the help text "For example: 2024.3.6.1332,13560ef7" — which looks
+    /// exactly like a snapshot version. Checked against the real
+    /// pr1454-534,240c4663 dll. The pull-request scan therefore runs first,
+    /// or a build with no receipt would report that example as its version.
+    #[test]
+    fn a_pull_request_build_reports_its_own_version_not_the_help_text() {
+        let binary = "…pr1454-534,240c4663…Copyright (C) 2014-2025 NV Access Limited             …This will be in the form: year.month.day.build,commit.              For example: 2024.3.6.1332,13560ef7.…";
+
+        assert_eq!(
+            scan(OSARA_PULL_REQUEST_PATTERN, binary).unwrap().raw(),
+            "pr1454-534,240c4663"
+        );
+        // The snapshot scan is what a pull-request build used to fall to.
+        assert_eq!(
+            scan(OSARA_SNAPSHOT_PATTERN, binary).unwrap().raw(),
+            "2024.3.6.1332",
+            "the snapshot pattern matches the help text, so it must run second"
+        );
+        // A regular snapshot build is unaffected: its own version comes
+        // before the help text, as in the installed dll.
+        let snapshot = "…2026.8.9.2302…For example: 2024.3.6.1332,13560ef7.…";
+        assert_eq!(
+            scan(OSARA_SNAPSHOT_PATTERN, snapshot).unwrap().raw(),
+            "2026.8.9.2302"
+        );
+        assert!(scan(OSARA_PULL_REQUEST_PATTERN, snapshot).is_none());
+    }
 
     #[test]
     fn package_scan_dir_follows_install_destination() {

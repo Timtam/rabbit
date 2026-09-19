@@ -843,6 +843,11 @@ pub enum PackageDetector {
     /// Surge XT: the Inno Setup uninstall `DisplayVersion` plus the system
     /// VST3 bundle's file metadata.
     SurgeVendorFiles,
+    /// REAPER itself: the `reaper.exe` / `REAPER.app` the resource path
+    /// belongs to, and the version it reports. REAPER installs no file into
+    /// `UserPlugins`, so without this it has no detector of its own and is
+    /// only ever as visible as its receipt.
+    ReaperApp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
