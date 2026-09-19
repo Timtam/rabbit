@@ -391,6 +391,7 @@ wizard-summary-planned-execution-title = Geplante unbeaufsichtigte Ausführung:
 wizard-summary-planned-execution-runner =   Ausführer: { $runner }
 wizard-summary-planned-execution-artifact =   Artefakt: { $artifact }
 wizard-summary-planned-execution-program =   Programm: { $program }
+wizard-summary-planned-execution-program-zipped =   Programm: das Installationsprogramm aus der ZIP-Datei, sobald sie heruntergeladen ist
 wizard-summary-planned-execution-arguments =   Argumente: { $arguments }
 wizard-summary-planned-execution-working-directory =   Arbeitsverzeichnis: { $path }
 wizard-summary-planned-execution-verify =   Prüfen: { $path }
