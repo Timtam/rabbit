@@ -31,15 +31,46 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Added
+
+- A hidden **expert mode** in the wizard, for people who test pre-release
+  software. Press **Ctrl+Shift+E** (**Cmd+Shift+E** on macOS) on the first
+  page, or launch RABBIT with `RABBIT_EXPERT=1`. After a warning that the
+  builds are unsupported, two choices appear below the REAPER installation:
+  - **REAPER builds**: regular releases, or the development builds from
+    landoleet.org.
+  - **OSARA builds**: regular snapshots, or the test build of an open OSARA
+    pull request, picked from a list fetched from GitHub.
+
+  The window title shows when expert mode is on, and each package row says
+  when it comes from a pre-release build. Expert mode is never saved and lasts until RABBIT closes. The next
+  install without it takes every package that came from a pre-release build
+  back to its regular release, and the row says so. The same happens when a
+  pull request build RABBIT installed has since been deleted by GitHub. A
+  network failure is never counted as a missing build, so an outage can't
+  downgrade anything. All five interface languages carry the new wording.
+- The CLI gets the same builds through `--package-channel`, with no unlock
+  needed. For example, `--package-channel reaper=dev` or
+  `--package-channel osara=pr:1454`, and `<package>=stable` goes back.
+  It works on `latest`, `artifacts`, `download`, `plan`, `install-extension`,
+  `apply-packages` and `setup`. A package stays on the channel it was last
+  installed from until told otherwise, and `RABBIT packages` lists each
+  package's channels. When a pull request has no build left, the CLI prints a
+  warning and installs the regular snapshot.
+- Install receipts now record which channel each package came from, so
+  RABBIT can tell a development REAPER from a regular one and knows when to
+  put the regular release back. A switch between channels reinstalls even
+  when both builds carry the same version number.
+
 ### Changed
 
 - RABBIT now builds on wxdragon 0.9.19, which brings wxWidgets 3.3.3 (up from
   3.3.2) under every window and control in the wizard. Nothing is meant to
   look or sound different, but every control now comes from a newer toolkit,
   so reports of anything that reads or behaves differently with a screen
-  reader are especially welcome. The upgrade is groundwork: it adds the
-  window-wide keyboard event that a planned keyboard shortcut needs to work
-  whichever control has focus.
+  reader are especially welcome. The upgrade also brings the window-wide
+  keyboard event that expert mode's shortcut relies on to work whichever
+  control has focus.
 
 - Closing the wizard while an install is running now stops the run instead of
   killing it. RABBIT asks first ("Stop the installation?", with **No** as the

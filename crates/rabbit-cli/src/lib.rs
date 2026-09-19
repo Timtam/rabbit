@@ -622,7 +622,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             json,
             package_channel,
         } => {
-            let latest = fetch_latest_versions_on(&parse_package_channels(&package_channel)?)?;
+            let channels = parse_package_channels(&package_channel)?;
+            let latest = fetch_latest_versions_on(&channels)?;
+            warn_channel_fallbacks(
+                &channels,
+                latest
+                    .packages
+                    .iter()
+                    .map(|package| (package.package_id.as_str(), package.channel.as_deref())),
+            );
             if json {
                 println!("{}", serde_json::to_string_pretty(&latest)?);
             } else {
@@ -647,12 +655,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
             let architecture = architecture.map_or_else(Architecture::current, Into::into);
             let packages = selected_package_ids(package, platform, None);
-            let artifacts = resolve_latest_artifacts_on(
-                &packages,
-                platform,
-                architecture,
-                &parse_package_channels(&package_channel)?,
-            )?;
+            let channels = parse_package_channels(&package_channel)?;
+            let artifacts =
+                resolve_latest_artifacts_on(&packages, platform, architecture, &channels)?;
+            warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
             if json {
                 println!("{}", serde_json::to_string_pretty(&artifacts)?);
             } else {
@@ -670,12 +676,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
             let architecture = architecture.map_or_else(Architecture::current, Into::into);
             let packages = selected_package_ids(package, platform, None);
-            let artifacts = resolve_latest_artifacts_on(
-                &packages,
-                platform,
-                architecture,
-                &parse_package_channels(&package_channel)?,
-            )?;
+            let channels = parse_package_channels(&package_channel)?;
+            let artifacts =
+                resolve_latest_artifacts_on(&packages, platform, architecture, &channels)?;
+            warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
             let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
             let cached = download_artifacts(&artifacts, &cache_dir)?;
             if json {
@@ -873,6 +877,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 effective_package_channels(Some(&resource_path), &package, &package_channel)?;
             let artifacts =
                 resolve_latest_artifacts_on(&package, platform, architecture, &channels)?;
+            warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
             let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
             let cached = download_artifacts(&artifacts, &cache_dir)?;
             let report = install_cached_artifacts(
@@ -921,6 +926,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let packages = selected_package_ids(package, platform, Some(&resource_path));
             ensure_reapack_donation_acknowledged(&packages, accept_reapack_donation_notice)?;
             let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
+            let channels =
+                effective_package_channels(Some(&resource_path), &packages, &package_channel)?;
             let report = execute_package_operation(
                 &resource_path,
                 &packages,
@@ -933,16 +940,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     stage_unsupported,
                     replace_osara_keymap: !preserve_osara_keymap,
                     package_variants: parse_package_variants(&package_variant)?,
-                    package_channels: effective_package_channels(
-                        Some(&resource_path),
-                        &packages,
-                        &package_channel,
-                    )?,
+                    package_channels: channels.clone(),
                     target_app_path,
                     lock_path: None,
                     force_reinstall_packages: Vec::new(),
                 },
             )?;
+            warn_channel_fallbacks(&channels, item_channels(&report.items));
             let report_path = selected_report_path(
                 Some(&resource_path),
                 report_path,
@@ -996,6 +1000,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &config_step,
                 &skip_config_step,
             );
+            let channels =
+                effective_package_channels(Some(&resource_path), &packages, &package_channel)?;
             let report = execute_setup_operation(
                 &resource_path,
                 &packages,
@@ -1009,11 +1015,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     stage_unsupported,
                     replace_osara_keymap: !preserve_osara_keymap,
                     package_variants: parse_package_variants(&package_variant)?,
-                    package_channels: effective_package_channels(
-                        Some(&resource_path),
-                        &packages,
-                        &package_channel,
-                    )?,
+                    package_channels: channels.clone(),
                     target_app_path,
                     lock_path: None,
                     force_reinstall_packages: Vec::new(),
@@ -1021,6 +1023,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     configuration_step_ids,
                 },
             )?;
+            warn_channel_fallbacks(&channels, item_channels(&report.package_operation.items));
             let report_path =
                 selected_report_path(Some(&resource_path), report_path, save_report, "setup")?;
             save_optional_report(report_path.as_deref(), &report)?;
@@ -1190,6 +1193,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     failure.package_id, failure.message
                 ));
             }
+            plan.notes.extend(channel_fallbacks(
+                &channels,
+                available
+                    .iter()
+                    .map(|package| (package.package_id.as_str(), package.channel.as_deref())),
+            ));
             let report_path = selected_report_path(
                 plan_report_resource_path.as_deref(),
                 report_path,
@@ -1707,6 +1716,54 @@ fn effective_package_channels(
     Ok(channels)
 }
 
+/// One line for each package that was asked for a channel but resolved to
+/// the regular release. Only a pull request whose test build is gone does
+/// that, and falling back is right, since an expired build should not fail
+/// the run. But someone who asked for `osara=pr:1454` has to hear that they
+/// are getting the snapshot instead.
+fn channel_fallbacks<'a>(
+    requested: &PackageChannels,
+    resolved: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+) -> Vec<String> {
+    resolved
+        .into_iter()
+        .filter_map(|(package_id, channel)| {
+            let wanted = requested.get(package_id)?;
+            (wanted != STABLE_CHANNEL && channel != Some(wanted.as_str())).then(|| {
+                format!(
+                    "{package_id}: no build found for {wanted}, so the regular release is used \
+                     instead (GitHub deletes pull request builds after 90 days)"
+                )
+            })
+        })
+        .collect()
+}
+
+fn artifact_channels(
+    artifacts: &[rabbit_core::artifact::ArtifactDescriptor],
+) -> impl Iterator<Item = (&str, Option<&str>)> {
+    artifacts
+        .iter()
+        .map(|artifact| (artifact.package_id.as_str(), artifact.channel.as_deref()))
+}
+
+fn item_channels(
+    items: &[rabbit_core::operation::PackageOperationItem],
+) -> impl Iterator<Item = (&str, Option<&str>)> {
+    items
+        .iter()
+        .map(|item| (item.package_id.as_str(), item.artifact.channel.as_deref()))
+}
+
+fn warn_channel_fallbacks<'a>(
+    requested: &PackageChannels,
+    resolved: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+) {
+    for line in channel_fallbacks(requested, resolved) {
+        eprintln!("warning: {line}");
+    }
+}
+
 /// Check `--reaper-language <package>` names a language pack we actually
 /// ship. Without this the value is looked up in the install receipts, finds
 /// nothing for a typo, and the run quietly leaves REAPER in English — the
@@ -2121,6 +2178,31 @@ mod tests {
     use clap::Parser;
 
     use super::{Cli, Command, DEFAULT_SELF_UPDATE_MANIFEST_URL, SelfUpdateCommand};
+
+    #[test]
+    fn a_channel_that_resolved_to_the_regular_release_is_reported() {
+        let requested: rabbit_core::package::PackageChannels = [
+            ("osara".to_string(), "pr:1".to_string()),
+            ("reaper".to_string(), "dev".to_string()),
+            ("sws".to_string(), "stable".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let lines = super::channel_fallbacks(
+            &requested,
+            [
+                ("osara", None),
+                ("reaper", Some("dev")),
+                ("sws", None),
+                ("reapack", None),
+            ],
+        );
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].starts_with("osara: no build found for pr:1"),
+            "{lines:?}"
+        );
+    }
 
     #[test]
     fn setup_command_parses_target_app_path() {

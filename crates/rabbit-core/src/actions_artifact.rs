@@ -163,6 +163,70 @@ pub fn pull_request_builds(
     Ok(builds)
 }
 
+/// A pull request that currently has a test build, as the wizard offers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestChoice {
+    pub number: u32,
+    /// The pull request's title, when GitHub's pull request listing could
+    /// be read; the choice falls back to the bare number otherwise.
+    pub title: Option<String>,
+}
+
+/// The pull requests of `package_id` that have a live test build for
+/// `platform`, newest first, with their titles. For the wizard's expert-mode
+/// build choice. Empty when the package offers no pull-request channel.
+pub fn pull_request_choices(
+    package_id: &str,
+    platform: Platform,
+) -> Result<Vec<PullRequestChoice>> {
+    let Some(spec) = crate::package::embedded_package_manifest()
+        .packages
+        .into_iter()
+        .find(|spec| spec.id == package_id)
+        .and_then(|spec| {
+            spec.channels
+                .into_iter()
+                .find_map(|channel| channel.github_actions_artifact)
+        })
+    else {
+        return Ok(Vec::new());
+    };
+    let builds = pull_request_builds(&spec, platform)?;
+    // Titles are a nicety: a failure here must not hide the builds.
+    let titles = crate::latest::build_http_client()
+        .and_then(|client| {
+            let url = format!(
+                "https://api.github.com/repos/{}/pulls?state=all&sort=updated&direction=desc&per_page=100",
+                spec.repo
+            );
+            crate::latest::http_get_text(&client, &url)
+        })
+        .map(|body| titles_in_listing(&body))
+        .unwrap_or_default();
+    Ok(builds
+        .into_iter()
+        .map(|build| PullRequestChoice {
+            number: build.pull_request,
+            title: titles.get(&build.pull_request).cloned(),
+        })
+        .collect())
+}
+
+/// Pull request number -> title, from GitHub's pull request listing.
+pub(crate) fn titles_in_listing(body: &str) -> std::collections::BTreeMap<u32, String> {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|listing| listing.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|pull| {
+            let number = u32::try_from(pull.get("number")?.as_u64()?).ok()?;
+            let title = pull.get("title")?.as_str()?.trim();
+            (!title.is_empty()).then(|| (number, title.to_string()))
+        })
+        .collect()
+}
+
 /// The newest live build of the pull request the spec was put on
 /// (`spec.pull_request`), with its target. `PullRequestBuildGone` when the
 /// listing was read but held nothing for it.
@@ -265,5 +329,22 @@ mod tests {
             download_url(&spec, &build),
             "https://nightly.link/jcsteh/osara/actions/artifacts/9888938295.zip"
         );
+    }
+    #[test]
+    fn pull_request_titles_are_read_best_effort() {
+        let titles = titles_in_listing(
+            r#"[{"number": 1454, "title": "Report the track's arm state"},
+                {"number": 1448, "title": "  "},
+                {"number": "oops"}]"#,
+        );
+        assert_eq!(
+            titles.get(&1454).map(String::as_str),
+            Some("Report the track's arm state")
+        );
+        assert!(
+            !titles.contains_key(&1448),
+            "a blank title falls back to the number"
+        );
+        assert!(titles_in_listing("not json").is_empty());
     }
 }
