@@ -66,6 +66,10 @@ from this file and posts it as the GitHub release body.
   requests an hour, which testers following OSARA pull request builds can
   run out of. With a personal access token set, the limit is 5,000. RABBIT
   already used the variable, but only CI knew about it.
+- On macOS, VoiceOver now hears what changes away from where the user is
+  standing: a dropdown appearing or going away below the **Packages** list
+  when a package is ticked, each package and configuration step as the
+  install reaches it, and the reason when the version check fails.
 
 ### Changed
 

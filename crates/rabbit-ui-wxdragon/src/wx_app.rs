@@ -52,6 +52,27 @@ fn with_ui_localizer<F: FnOnce(&Localizer)>(f: F) {
     });
 }
 
+/// Have the screen reader speak `text`. VoiceOver reads a control's new
+/// label or state only when the user moved there, so a change made from
+/// code (a status line, a row ticked through the model, a dropdown shown)
+/// goes unheard without this. macOS only for now: elsewhere it does nothing.
+#[cfg(target_os = "macos")]
+use crate::voiceover::Priority as AnnouncePriority;
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone, Copy)]
+enum AnnouncePriority {
+    Interrupt,
+    Polite,
+}
+
+fn announce(text: &str, priority: AnnouncePriority) {
+    #[cfg(target_os = "macos")]
+    crate::voiceover::announce(text, priority);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (text, priority);
+}
+
 fn install_ui_frame(frame: Frame) {
     UI_FRAME.with(|cell| {
         *cell.borrow_mut() = Some(frame);
@@ -1953,10 +1974,20 @@ fn apply_progress_event_to_ui(
     });
 
     widgets.progress_gauge.set_value(state.percentage());
+    // Only the start of each install or configuration step is spoken, and
+    // politely: download lines change several times a second and would bury
+    // everything else.
+    let spoken = matches!(
+        event,
+        ProgressEvent::InstallStarted { .. } | ProgressEvent::ConfigurationStarted { .. }
+    );
     if let Some(line) = status_line
         && !status_frozen
     {
         widgets.progress_status.set_label(&line);
+        if spoken {
+            announce(&line, AnnouncePriority::Polite);
+        }
     }
     // Hold the lock no longer than necessary — the TextCtrl call below
     // re-enters the wxWidgets event pump, which can run other queued
@@ -3768,6 +3799,9 @@ fn render_version_check_errors(ui: &VersionCheckUi, errors: &[(String, String)])
             )
             .value;
         ui.widgets.version_check_status.set_label(&status);
+        // Focus stays on the gauge, so nothing else tells a screen reader
+        // that the check stopped and the page now waits for Back or Close.
+        announce(&status, AnnouncePriority::Interrupt);
     });
 }
 
@@ -5953,25 +5987,28 @@ fn build_packages_page(
                 &data.configuration_rows.borrow(),
                 node.kind,
             );
-            if !toggle(data, node, !checked) {
+            let Some(choice_notes) = toggle(data, node, !checked) else {
                 return;
-            }
+            };
             // The row VoiceOver is on was rebuilt behind it, so it says
             // nothing on its own. Read back the state the row ended up in:
             // a group can stay unticked when some of its rows are disabled.
-            #[cfg(target_os = "macos")]
-            {
-                let now_checked = packages_tree_toggle_state(
-                    &data.rows.borrow(),
-                    &data.configuration_rows.borrow(),
-                    node.kind,
-                );
-                crate::voiceover::announce(if now_checked {
-                    &model_text.text.packages_row_checked
-                } else {
-                    &model_text.text.packages_row_unchecked
-                });
-            }
+            // One announcement, not two: a second would cut the first off.
+            let now_checked = packages_tree_toggle_state(
+                &data.rows.borrow(),
+                &data.configuration_rows.borrow(),
+                node.kind,
+            );
+            let state = if now_checked {
+                &model_text.text.packages_row_checked
+            } else {
+                &model_text.text.packages_row_unchecked
+            };
+            let message = std::iter::once(state.as_str())
+                .chain(choice_notes.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(". ");
+            announce(&message, AnnouncePriority::Interrupt);
         });
     }
 
@@ -6007,9 +6044,11 @@ struct PackagesSideWidgets {
 type PackagesSideWidgetsCell = Rc<RefCell<Option<PackagesSideWidgets>>>;
 
 /// Non-Windows: tick or untick one node of the packages tree, with every
-/// side effect, and report whether anything changed.
+/// side effect. `None` when nothing changed; otherwise one line for each
+/// dropdown below the list that the toggle showed or hid, for the caller
+/// to announce.
 #[cfg(not(target_os = "windows"))]
-type PackagesTreeToggle = Rc<dyn Fn(&PackageTreeData, &Node, bool) -> bool>;
+type PackagesTreeToggle = Rc<dyn Fn(&PackageTreeData, &Node, bool) -> Option<Vec<String>>>;
 
 /// Non-Windows: whether a node's checkbox reads as ticked. A group reads
 /// ticked only when every row it can change is selected: the toggle
@@ -6080,7 +6119,8 @@ fn build_packages_tree_model(
     // (a click, or VO+Space while interacting with the list) and the Space
     // key handler, which wx never routes through `set_value` on macOS.
     let toggle: PackagesTreeToggle = Rc::new(
-        move |data: &PackageTreeData, node: &Node, new_state: bool| -> bool {
+        move |data: &PackageTreeData, node: &Node, new_state: bool| -> Option<Vec<String>> {
+            let mut choice_notes = Vec::new();
             match node.kind {
                 NodeKind::PackagesGroup
                 | NodeKind::AdditionalSoftwareGroup
@@ -6106,11 +6146,9 @@ fn build_packages_tree_model(
                 }
                 NodeKind::Package(idx) => {
                     let mut rows = rows_for_set_value.borrow_mut();
-                    let Some(row) = rows.get_mut(idx) else {
-                        return false;
-                    };
+                    let row = rows.get_mut(idx)?;
                     if !row.available_for_target {
-                        return false;
+                        return None;
                     }
                     let _ = apply_checkbox_state_to_package_row(&wizard_model, row, new_state);
                 }
@@ -6124,11 +6162,9 @@ fn build_packages_tree_model(
                 }
                 NodeKind::Configuration(idx) => {
                     let mut cfg_rows = configuration_rows_for_set_value.borrow_mut();
-                    let Some(row) = cfg_rows.get_mut(idx) else {
-                        return false;
-                    };
+                    let row = cfg_rows.get_mut(idx)?;
                     if !row.available_for_target || row.already_applied {
-                        return false;
+                        return None;
                     }
                     row.selected = new_state;
                 }
@@ -6177,6 +6213,10 @@ fn build_packages_tree_model(
                 // never fires.
                 if let Some(widgets) = *side_widgets_for_set_value.borrow() {
                     let rows = rows_for_set_value.borrow();
+                    let shown_before = [
+                        widgets.language_choice.is_shown(),
+                        widgets.spanish_choice.is_shown(),
+                    ];
                     sync_osara_keymap_widgets(
                         &wizard_model_for_recompute,
                         &rows,
@@ -6185,6 +6225,21 @@ fn build_packages_tree_model(
                     );
                     sync_spanish_variant_widget(&rows, &widgets.spanish_choice);
                     sync_reaper_language_widget(&rows, &widgets.language_choice);
+                    let labels = [
+                        &wizard_model_for_recompute
+                            .text
+                            .packages_reaper_language_label,
+                        &wizard_model_for_recompute
+                            .text
+                            .packages_spanish_variant_label,
+                    ];
+                    let choices = [widgets.language_choice, widgets.spanish_choice];
+                    for ((choice, was_shown), label) in choices.iter().zip(shown_before).zip(labels)
+                    {
+                        if choice.is_shown() != was_shown {
+                            choice_notes.push(choice_shown_note(label, choice.is_shown()));
+                        }
+                    }
                 }
             }
 
@@ -6263,7 +6318,7 @@ fn build_packages_tree_model(
                 }
             }
 
-            true
+            Some(choice_notes)
         },
     );
     let toggle_for_model = Rc::clone(&toggle);
@@ -6399,7 +6454,18 @@ fn build_packages_tree_model(
                 let Some(node) = item else {
                     return false;
                 };
-                toggle_for_model(data, node, var.get_bool().unwrap_or(false))
+                let Some(choice_notes) =
+                    toggle_for_model(data, node, var.get_bool().unwrap_or(false))
+                else {
+                    return false;
+                };
+                // A click, or VO+Space: VoiceOver reads the checkbox itself,
+                // so only the dropdowns that came or went are left to say,
+                // after it.
+                if !choice_notes.is_empty() {
+                    announce(&choice_notes.join(". "), AnnouncePriority::Polite);
+                }
+                true
             },
         ),
         // is_enabled — gray out the checkbox + label of unavailable rows.
@@ -7106,6 +7172,21 @@ const SPANISH_VARIANT_LABEL_NAME: &str = "rabbit-spanish-variant-label";
 /// control and read out an empty combo box; hiding it removes it from the
 /// accessibility tree entirely, and it comes straight back when ticking a
 /// package makes the choice mean something again.
+/// What to tell a screen reader when a dropdown below the packages list comes
+/// or goes: it happens off to the side of the row the user just ticked.
+fn choice_shown_note(label: &str, shown: bool) -> String {
+    let key = if shown {
+        "wizard-packages-choice-shown"
+    } else {
+        "wizard-packages-choice-hidden"
+    };
+    let mut note = String::new();
+    with_ui_localizer(|localizer| {
+        note = localizer.format(key, &[("choice", label)]).value;
+    });
+    note
+}
+
 fn set_optional_choice_shown(choice: &Choice, label_name: &str, shown: bool) {
     if choice.is_shown() == shown {
         return;
