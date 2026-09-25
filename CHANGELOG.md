@@ -150,6 +150,9 @@ from this file and posts it as the GitHub release body.
   the ReaPack ones — still name it, since there it is the truth.
   (Reported by Scott Chesworth from Q&A.)
 
+- **Enter** on the **Review** page now starts the install, as the default
+  **Install** button promises. Focus lands on the page's read-only summary,
+  and that text box kept the key for itself.
 - The package list on the **Packages** page could go missing entirely
   unless the window was maximized. The page had grown — the OSARA key-map
   note, then the Spanish-variant and REAPER-language dropdowns — until the
