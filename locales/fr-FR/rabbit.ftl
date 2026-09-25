@@ -112,6 +112,10 @@ wizard-target-details = Chemin d'installation de REAPER : { $app_path }
 
 wizard-packages-heading = Choisissez les paquets
 wizard-packages-list-label = Paquets à installer ou à mettre à jour
+wizard-packages-row-checked = Coché
+wizard-packages-row-unchecked = Non coché
+wizard-packages-choice-shown = Nouveau choix sous la liste : { $choice }.
+wizard-packages-choice-hidden = Choix retiré : { $choice }.
 wizard-packages-tree-group-label = Paquets
 wizard-additional-software-tree-group-label = Logiciels supplémentaires
 wizard-language-tree-group-label = Packs de langue

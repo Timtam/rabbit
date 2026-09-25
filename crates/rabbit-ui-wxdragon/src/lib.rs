@@ -1,3 +1,5 @@
+#[cfg(all(feature = "gui", target_os = "macos"))]
+mod voiceover;
 #[cfg(feature = "gui")]
 mod wx_app;
 
@@ -119,6 +121,8 @@ pub struct WizardText {
     pub target_custom_portable_note: String,
     pub packages_heading: String,
     pub packages_list_label: String,
+    pub packages_row_checked: String,
+    pub packages_row_unchecked: String,
     pub packages_tree_group_label: String,
     pub additional_software_tree_group_label: String,
     pub language_tree_group_label: String,
@@ -783,6 +787,8 @@ fn wizard_text(localizer: &Localizer) -> WizardText {
         target_custom_portable_note: localizer.text("wizard-target-custom-portable-note").value,
         packages_heading: localizer.text("wizard-packages-heading").value,
         packages_list_label: localizer.text("wizard-packages-list-label").value,
+        packages_row_checked: localizer.text("wizard-packages-row-checked").value,
+        packages_row_unchecked: localizer.text("wizard-packages-row-unchecked").value,
         packages_tree_group_label: localizer.text("wizard-packages-tree-group-label").value,
         additional_software_tree_group_label: localizer
             .text("wizard-additional-software-tree-group-label")

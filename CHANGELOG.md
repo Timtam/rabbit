@@ -66,6 +66,10 @@ from this file and posts it as the GitHub release body.
   requests an hour, which testers following OSARA pull request builds can
   run out of. With a personal access token set, the limit is 5,000. RABBIT
   already used the variable, but only CI knew about it.
+- On macOS, VoiceOver now hears what changes away from where the user is
+  standing: a dropdown appearing or going away below the **Packages** list
+  when a package is ticked, each package and configuration step as the
+  install reaches it, and the reason when the version check fails.
 
 ### Changed
 
@@ -150,6 +154,11 @@ from this file and posts it as the GitHub release body.
   the ReaPack ones — still name it, since there it is the truth.
   (Reported by Scott Chesworth from Q&A.)
 
+- On macOS, **Space** now ticks and unticks rows in the **Packages** list,
+  and VoiceOver says whether the row is now checked. Before, only VO+Space
+  while interacting with the list changed a checkbox, so the list could not
+  be used from the keyboard alone
+  ([#28](https://github.com/Timtam/rabbit/issues/28)).
 - The package list on the **Packages** page could go missing entirely
   unless the window was maximized. The page had grown — the OSARA key-map
   note, then the Spanish-variant and REAPER-language dropdowns — until the
