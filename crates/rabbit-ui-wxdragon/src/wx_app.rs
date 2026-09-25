@@ -2390,7 +2390,9 @@ pub fn run() {
             let last_reaper_app_path = Arc::clone(&last_reaper_app_path);
             let last_resource_path = Arc::clone(&last_resource_path);
             let install_run = Arc::clone(&install_run);
-            install.on_click(move |_| {
+            let review_text = widgets.review_text;
+            let review_step = Arc::clone(&current_step);
+            let start_install = Rc::new(move || {
                 current_step.store(PROGRESS_STEP, Ordering::SeqCst);
                 update_navigation(
                     PROGRESS_STEP,
@@ -2861,6 +2863,11 @@ pub fn run() {
                     }));
                 });
             });
+            install.on_click({
+                let start_install = Rc::clone(&start_install);
+                move |_| start_install()
+            });
+            bind_review_enter_installs(&review_text, &install, &review_step, start_install);
         }
 
         let frame_for_close = frame;
@@ -7145,6 +7152,40 @@ fn bind_reapack_ack_navigation_updates(
         if current_step.load(Ordering::SeqCst) == REAPACK_ACK_STEP {
             next.enable(event.is_checked());
         }
+    });
+}
+
+/// Make Enter on the Review page's summary start the install, as the default
+/// Install button would.
+///
+/// The summary is a read-only multiline TextCtrl and holds focus on that
+/// page, and a multiline text box eats Enter (the NSTextView on macOS,
+/// DLGC_WANTALLKEYS on MSW) before the default button sees it: the same trap
+/// `bind_done_page_enter_closes` works around on the Done page. Guarded on
+/// the step and on Install being enabled, so Enter never starts anything the
+/// button itself would refuse.
+fn bind_review_enter_installs(
+    text: &TextCtrl,
+    install: &Button,
+    current_step: &Arc<AtomicUsize>,
+    start_install: Rc<dyn Fn()>,
+) {
+    let install = *install;
+    let current_step = Arc::clone(current_step);
+    text.on_key_down(move |event| {
+        let key_code = if let WindowEventData::Keyboard(kbd) = &event {
+            kbd.get_key_code()
+        } else {
+            None
+        };
+        if !matches!(key_code, Some(WXK_RETURN) | Some(WXK_NUMPAD_ENTER)) {
+            return;
+        }
+        if current_step.load(Ordering::SeqCst) != REVIEW_STEP || !install.is_enabled() {
+            return;
+        }
+        event.skip(false);
+        start_install();
     });
 }
 
