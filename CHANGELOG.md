@@ -150,6 +150,11 @@ from this file and posts it as the GitHub release body.
   the ReaPack ones — still name it, since there it is the truth.
   (Reported by Scott Chesworth from Q&A.)
 
+- On macOS, **Space** now ticks and unticks rows in the **Packages** list,
+  and VoiceOver says whether the row is now checked. Before, only VO+Space
+  while interacting with the list changed a checkbox, so the list could not
+  be used from the keyboard alone
+  ([#28](https://github.com/Timtam/rabbit/issues/28)).
 - The package list on the **Packages** page could go missing entirely
   unless the window was maximized. The page had grown — the OSARA key-map
   note, then the Spanish-variant and REAPER-language dropdowns — until the

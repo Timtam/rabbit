@@ -112,6 +112,8 @@ wizard-target-details = REAPER installation path: { $app_path }
 
 wizard-packages-heading = Choose packages
 wizard-packages-list-label = Packages to install or update
+wizard-packages-row-checked = Checked
+wizard-packages-row-unchecked = Unchecked
 wizard-packages-tree-group-label = Packages
 wizard-additional-software-tree-group-label = Additional software
 wizard-language-tree-group-label = Language packs
