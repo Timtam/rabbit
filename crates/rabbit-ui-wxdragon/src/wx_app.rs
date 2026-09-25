@@ -5694,7 +5694,7 @@ fn build_packages_page(
         model.text.configuration_tree_group_label.clone(),
     );
     let side_widgets: PackagesSideWidgetsCell = Rc::new(RefCell::new(None));
-    let dv_model = build_packages_tree_model(
+    let (dv_model, toggle) = build_packages_tree_model(
         tree_data,
         Rc::clone(&package_rows),
         Rc::clone(&configuration_rows),
@@ -5904,6 +5904,77 @@ fn build_packages_page(
         });
     }
 
+    // Space ticks the selected row. wx on macOS only toggles a checkbox cell
+    // on a click, which VoiceOver sends for VO+Space while interacting with
+    // the list; a plain Space reached no handler at all, so the list could
+    // not be ticked from the keyboard (issue #28).
+    {
+        let package_items = Rc::clone(&package_items);
+        let model_text = model.clone();
+        tree.on_key_down(move |event| {
+            let WindowEventData::Keyboard(kbd) = &event else {
+                return;
+            };
+            if kbd.get_key_code() != Some(WXK_SPACE)
+                || kbd.cmd_down()
+                || kbd.control_down()
+                || kbd.alt_down()
+                || kbd.shift_down()
+            {
+                return;
+            }
+            let Some(node_ptr) = tree.get_selection().and_then(|item| item.get_id::<Node>()) else {
+                return;
+            };
+            if node_ptr.is_null() {
+                return;
+            }
+            // Consume the key either way: the list has nothing else to do
+            // with Space, and letting it through beeps.
+            event.skip(false);
+            let Some(dv_model) = package_items.borrow().clone() else {
+                return;
+            };
+            // Only hold the userdata borrow long enough to take its address.
+            // The toggle notifies the view, which reads the model back through
+            // that same RefCell, so it must run with the borrow released.
+            let Some(data_ptr) = dv_model
+                .with_userdata_mut::<PackageTreeData, _>(|data| data as *const PackageTreeData)
+            else {
+                return;
+            };
+            // SAFETY: both pointers address heap storage owned by the model's
+            // userdata, which is only replaced by a rebuild, and no rebuild
+            // can run inside this synchronous handler. node_ptr came from
+            // that same userdata (see the on_selection_changed handler).
+            let (data, node) = unsafe { (&*data_ptr, &*node_ptr) };
+            let checked = packages_tree_toggle_state(
+                &data.rows.borrow(),
+                &data.configuration_rows.borrow(),
+                node.kind,
+            );
+            if !toggle(data, node, !checked) {
+                return;
+            }
+            // The row VoiceOver is on was rebuilt behind it, so it says
+            // nothing on its own. Read back the state the row ended up in:
+            // a group can stay unticked when some of its rows are disabled.
+            #[cfg(target_os = "macos")]
+            {
+                let now_checked = packages_tree_toggle_state(
+                    &data.rows.borrow(),
+                    &data.configuration_rows.borrow(),
+                    node.kind,
+                );
+                crate::voiceover::announce(if now_checked {
+                    &model_text.text.packages_row_checked
+                } else {
+                    &model_text.text.packages_row_unchecked
+                });
+            }
+        });
+    }
+
     page.set_sizer(sizer, true);
     (
         tree,
@@ -5935,6 +6006,47 @@ struct PackagesSideWidgets {
 #[cfg(not(target_os = "windows"))]
 type PackagesSideWidgetsCell = Rc<RefCell<Option<PackagesSideWidgets>>>;
 
+/// Non-Windows: tick or untick one node of the packages tree, with every
+/// side effect, and report whether anything changed.
+#[cfg(not(target_os = "windows"))]
+type PackagesTreeToggle = Rc<dyn Fn(&PackageTreeData, &Node, bool) -> bool>;
+
+/// Non-Windows: whether a node's checkbox reads as ticked. A group reads
+/// ticked only when every row it can change is selected: the toggle
+/// renderer has no third state, so a partly ticked group reads unticked.
+#[cfg(not(target_os = "windows"))]
+fn packages_tree_toggle_state(
+    rows: &[crate::PackageRow],
+    configuration_rows: &[crate::ConfigurationRow],
+    kind: NodeKind,
+) -> bool {
+    let category = match kind {
+        NodeKind::PackagesGroup => rabbit_core::package::PackageCategory::Core,
+        NodeKind::AdditionalSoftwareGroup => rabbit_core::package::PackageCategory::Additional,
+        NodeKind::LanguageGroup => rabbit_core::package::PackageCategory::Language,
+        NodeKind::Package(idx) => return rows.get(idx).is_some_and(|row| row.selected),
+        NodeKind::Configuration(idx) => {
+            return configuration_rows.get(idx).is_some_and(|row| row.selected);
+        }
+        NodeKind::ConfigurationGroup => {
+            // Already-applied rows are excluded, exactly as
+            // compute_configuration_group_tristate does on Windows: they are
+            // forced unselected and would otherwise pin the group to
+            // "unchecked" forever.
+            let mut changeable = configuration_rows
+                .iter()
+                .filter(|r| r.available_for_target && !r.already_applied)
+                .peekable();
+            return changeable.peek().is_some() && changeable.all(|r| r.selected);
+        }
+    };
+    let mut changeable = rows
+        .iter()
+        .filter(|r| r.category == category && r.available_for_target)
+        .peekable();
+    changeable.peek().is_some() && changeable.all(|r| r.selected)
+}
+
 /// Non-Windows: build the `CustomDataViewTreeModel` that backs the packages
 /// tree. The closures capture clones of `package_rows`, `package_items`
 /// (the self-referential model handle cell), `can_install`, and the wizard
@@ -5950,7 +6062,7 @@ fn build_packages_tree_model(
     side_widgets: PackagesSideWidgetsCell,
     can_install: Rc<Cell<bool>>,
     wizard_model: WizardModel,
-) -> CustomDataViewTreeModel {
+) -> (CustomDataViewTreeModel, PackagesTreeToggle) {
     type CompareFn = fn(&PackageTreeData, &Node, &Node, u32, bool) -> i32;
 
     let rows_for_get_value = Rc::clone(&rows);
@@ -5964,7 +6076,199 @@ fn build_packages_tree_model(
     let model_cell_for_set_value = Rc::clone(&model_cell);
     let side_widgets_for_set_value = Rc::clone(&side_widgets);
 
-    CustomDataViewTreeModel::new(
+    // Everything a checkbox toggle does, shared by the model's `set_value`
+    // (a click, or VO+Space while interacting with the list) and the Space
+    // key handler, which wx never routes through `set_value` on macOS.
+    let toggle: PackagesTreeToggle = Rc::new(
+        move |data: &PackageTreeData, node: &Node, new_state: bool| -> bool {
+            match node.kind {
+                NodeKind::PackagesGroup
+                | NodeKind::AdditionalSoftwareGroup
+                | NodeKind::LanguageGroup => {
+                    // Group toggle propagates to every available leaf in
+                    // this group's category; unavailable rows stay
+                    // untouched so the install plan never carries
+                    // something we can't honor.
+                    let category = match node.kind {
+                        NodeKind::AdditionalSoftwareGroup => {
+                            rabbit_core::package::PackageCategory::Additional
+                        }
+                        NodeKind::LanguageGroup => rabbit_core::package::PackageCategory::Language,
+                        _ => rabbit_core::package::PackageCategory::Core,
+                    };
+                    let mut rows = rows_for_set_value.borrow_mut();
+                    for row in rows.iter_mut() {
+                        if row.category == category && row.available_for_target {
+                            let _ =
+                                apply_checkbox_state_to_package_row(&wizard_model, row, new_state);
+                        }
+                    }
+                }
+                NodeKind::Package(idx) => {
+                    let mut rows = rows_for_set_value.borrow_mut();
+                    let Some(row) = rows.get_mut(idx) else {
+                        return false;
+                    };
+                    if !row.available_for_target {
+                        return false;
+                    }
+                    let _ = apply_checkbox_state_to_package_row(&wizard_model, row, new_state);
+                }
+                NodeKind::ConfigurationGroup => {
+                    let mut cfg_rows = configuration_rows_for_set_value.borrow_mut();
+                    for row in cfg_rows.iter_mut() {
+                        if row.available_for_target && !row.already_applied {
+                            row.selected = new_state;
+                        }
+                    }
+                }
+                NodeKind::Configuration(idx) => {
+                    let mut cfg_rows = configuration_rows_for_set_value.borrow_mut();
+                    let Some(row) = cfg_rows.get_mut(idx) else {
+                        return false;
+                    };
+                    if !row.available_for_target || row.already_applied {
+                        return false;
+                    }
+                    row.selected = new_state;
+                }
+            }
+
+            let any_install_or_update = rows_for_set_value.borrow().iter().any(|row| {
+                row.available_for_target
+                    && matches!(row.action, PlanActionKind::Install | PlanActionKind::Update)
+            });
+            can_install.set(any_install_or_update);
+
+            // Recompute configuration row availability whenever a
+            // package toggle could have flipped a dependency state.
+            let recomputed_configuration = matches!(
+                node.kind,
+                NodeKind::PackagesGroup
+                    | NodeKind::AdditionalSoftwareGroup
+                    | NodeKind::LanguageGroup
+                    | NodeKind::Package(_)
+            );
+            if recomputed_configuration {
+                if let Ok(localizer) =
+                    crate::localizer_from_options(&wizard_model_for_recompute.bootstrap_options)
+                {
+                    let package_rows_snapshot = rows_for_set_value.borrow();
+                    let mut cfg_rows = configuration_rows_for_recompute.borrow_mut();
+                    // None for the resource-path argument: a package
+                    // toggle can't change `reapack.ini`, so preserve
+                    // each row's existing `already_applied` flag.
+                    crate::recompute_configuration_row_availability(
+                        &localizer,
+                        &package_rows_snapshot,
+                        None,
+                        &mut cfg_rows,
+                    );
+                }
+
+                // Same tail as the Windows `refresh_after_packages_toggle`:
+                // ticking a package can change which OSARA keymap note
+                // applies, whether the Spanish variant picker is usable,
+                // and — because it owns the dropdown's *contents*, not
+                // just its enabled state — what the REAPER-language
+                // dropdown offers. Without this, toggling a row that is
+                // already selected (Space, or clicking its checkbox)
+                // leaves all three stale, because `on_selection_changed`
+                // never fires.
+                if let Some(widgets) = *side_widgets_for_set_value.borrow() {
+                    let rows = rows_for_set_value.borrow();
+                    sync_osara_keymap_widgets(
+                        &wizard_model_for_recompute,
+                        &rows,
+                        &widgets.osara_checkbox,
+                        &widgets.osara_note,
+                    );
+                    sync_spanish_variant_widget(&rows, &widgets.spanish_choice);
+                    sync_reaper_language_widget(&rows, &widgets.language_choice);
+                }
+            }
+
+            // Push the cell changes back into the view. SetValue's
+            // true return only auto-refreshes the (item, col) we set;
+            // we also need to refresh the row's label cell (the action
+            // text flips Install/Update/Keep) and the parent group's
+            // aggregate cell.
+            if let Some(model) = model_cell_for_set_value.borrow().as_ref() {
+                match node.kind {
+                    NodeKind::PackagesGroup => {
+                        let parent_ptr = data.packages_group_ptr();
+                        let leaf_ptrs = data
+                            .package_ptrs_in_category(rabbit_core::package::PackageCategory::Core);
+                        model.items_changed(&leaf_ptrs);
+                        model.item_value_changed(parent_ptr, PACKAGE_COL_TOGGLE);
+                    }
+                    NodeKind::AdditionalSoftwareGroup => {
+                        let parent_ptr = data.additional_software_group_ptr();
+                        let leaf_ptrs = data.package_ptrs_in_category(
+                            rabbit_core::package::PackageCategory::Additional,
+                        );
+                        model.items_changed(&leaf_ptrs);
+                        model.item_value_changed(parent_ptr, PACKAGE_COL_TOGGLE);
+                    }
+                    NodeKind::LanguageGroup => {
+                        let parent_ptr = data.language_group_ptr();
+                        let leaf_ptrs = data.package_ptrs_in_category(
+                            rabbit_core::package::PackageCategory::Language,
+                        );
+                        model.items_changed(&leaf_ptrs);
+                        model.item_value_changed(parent_ptr, PACKAGE_COL_TOGGLE);
+                    }
+                    NodeKind::Package(idx) => {
+                        let leaf_ptr = data.package_ptr(idx);
+                        model.item_value_changed(leaf_ptr, PACKAGE_COL_LABEL);
+                        // Refresh the aggregate cell of whichever group
+                        // this package hangs under.
+                        let category = data
+                            .rows
+                            .borrow()
+                            .get(idx)
+                            .map(|r| r.category)
+                            .unwrap_or_default();
+                        let parent_ptr = match category {
+                            rabbit_core::package::PackageCategory::Additional => {
+                                data.additional_software_group_ptr()
+                            }
+                            rabbit_core::package::PackageCategory::Language => {
+                                data.language_group_ptr()
+                            }
+                            rabbit_core::package::PackageCategory::Core => {
+                                data.packages_group_ptr()
+                            }
+                        };
+                        model.item_value_changed(parent_ptr, PACKAGE_COL_TOGGLE);
+                    }
+                    NodeKind::ConfigurationGroup => {
+                        let parent_ptr = data.configuration_group_ptr();
+                        let leaf_ptrs = data.all_configuration_ptrs();
+                        model.items_changed(&leaf_ptrs);
+                        model.item_value_changed(parent_ptr, PACKAGE_COL_TOGGLE);
+                    }
+                    NodeKind::Configuration(idx) => {
+                        let leaf_ptr = data.configuration_ptr(idx);
+                        model.item_value_changed(leaf_ptr, PACKAGE_COL_LABEL);
+                        model
+                            .item_value_changed(data.configuration_group_ptr(), PACKAGE_COL_TOGGLE);
+                    }
+                }
+
+                if recomputed_configuration {
+                    let cfg_leaf_ptrs = data.all_configuration_ptrs();
+                    model.items_changed(&cfg_leaf_ptrs);
+                    model.item_value_changed(data.configuration_group_ptr(), PACKAGE_COL_TOGGLE);
+                }
+            }
+
+            true
+        },
+    );
+    let toggle_for_model = Rc::clone(&toggle);
+
+    let dv_model = CustomDataViewTreeModel::new(
         data,
         // get_parent
         |data: &PackageTreeData, item: Option<&Node>| -> Option<*mut Node> {
@@ -6058,102 +6362,32 @@ fn build_packages_tree_model(
             let Some(node) = item else {
                 return Variant::from_string("");
             };
+            if col == PACKAGE_COL_TOGGLE {
+                return Variant::from_bool(packages_tree_toggle_state(
+                    &rows_for_get_value.borrow(),
+                    &configuration_rows_for_get_value.borrow(),
+                    node.kind,
+                ));
+            }
             match node.kind {
-                NodeKind::PackagesGroup => {
-                    if col == PACKAGE_COL_TOGGLE {
-                        // Aggregate state: true only if every available row
-                        // in this group's category is selected. The standard
-                        // toggle renderer can't show a tristate, so a
-                        // partially-selected group reads as unchecked.
-                        let rows = rows_for_get_value.borrow();
-                        let mut any_available = false;
-                        let all_checked = rows
-                            .iter()
-                            .filter(|r| {
-                                r.category == rabbit_core::package::PackageCategory::Core
-                                    && r.available_for_target
-                            })
-                            .inspect(|_| any_available = true)
-                            .all(|r| r.selected);
-                        Variant::from_bool(any_available && all_checked)
-                    } else {
-                        Variant::from_string(&data.packages_group_label)
-                    }
-                }
+                NodeKind::PackagesGroup => Variant::from_string(&data.packages_group_label),
                 NodeKind::AdditionalSoftwareGroup => {
-                    if col == PACKAGE_COL_TOGGLE {
-                        let rows = rows_for_get_value.borrow();
-                        let mut any_available = false;
-                        let all_checked = rows
-                            .iter()
-                            .filter(|r| {
-                                r.category == rabbit_core::package::PackageCategory::Additional
-                                    && r.available_for_target
-                            })
-                            .inspect(|_| any_available = true)
-                            .all(|r| r.selected);
-                        Variant::from_bool(any_available && all_checked)
-                    } else {
-                        Variant::from_string(&data.additional_software_group_label)
-                    }
+                    Variant::from_string(&data.additional_software_group_label)
                 }
-                NodeKind::LanguageGroup => {
-                    if col == PACKAGE_COL_TOGGLE {
-                        let rows = rows_for_get_value.borrow();
-                        let mut any_available = false;
-                        let all_checked = rows
-                            .iter()
-                            .filter(|r| {
-                                r.category == rabbit_core::package::PackageCategory::Language
-                                    && r.available_for_target
-                            })
-                            .inspect(|_| any_available = true)
-                            .all(|r| r.selected);
-                        Variant::from_bool(any_available && all_checked)
-                    } else {
-                        Variant::from_string(&data.language_group_label)
-                    }
-                }
-                NodeKind::Package(idx) => {
-                    let rows = rows_for_get_value.borrow();
-                    let Some(row) = rows.get(idx) else {
-                        return Variant::from_string("");
-                    };
-                    if col == PACKAGE_COL_TOGGLE {
-                        Variant::from_bool(row.selected)
-                    } else {
-                        Variant::from_string(&row.summary)
-                    }
-                }
+                NodeKind::LanguageGroup => Variant::from_string(&data.language_group_label),
                 NodeKind::ConfigurationGroup => {
-                    if col == PACKAGE_COL_TOGGLE {
-                        let cfg_rows = configuration_rows_for_get_value.borrow();
-                        let mut any_available = false;
-                        let all_checked = cfg_rows
-                            .iter()
-                            // already-applied rows are excluded, exactly as
-                            // compute_configuration_group_tristate does on
-                            // Windows: they are forced unselected and would
-                            // otherwise pin the group to "unchecked" forever.
-                            .filter(|r| r.available_for_target && !r.already_applied)
-                            .inspect(|_| any_available = true)
-                            .all(|r| r.selected);
-                        Variant::from_bool(any_available && all_checked)
-                    } else {
-                        Variant::from_string(&data.configuration_group_label)
-                    }
+                    Variant::from_string(&data.configuration_group_label)
                 }
-                NodeKind::Configuration(idx) => {
-                    let cfg_rows = configuration_rows_for_get_value.borrow();
-                    let Some(row) = cfg_rows.get(idx) else {
-                        return Variant::from_string("");
-                    };
-                    if col == PACKAGE_COL_TOGGLE {
-                        Variant::from_bool(row.selected)
-                    } else {
-                        Variant::from_string(&row.summary)
-                    }
-                }
+                NodeKind::Package(idx) => rows_for_get_value
+                    .borrow()
+                    .get(idx)
+                    .map(|row| Variant::from_string(&row.summary))
+                    .unwrap_or_else(|| Variant::from_string("")),
+                NodeKind::Configuration(idx) => configuration_rows_for_get_value
+                    .borrow()
+                    .get(idx)
+                    .map(|row| Variant::from_string(&row.summary))
+                    .unwrap_or_else(|| Variant::from_string("")),
             }
         },
         // set_value
@@ -6165,200 +6399,7 @@ fn build_packages_tree_model(
                 let Some(node) = item else {
                     return false;
                 };
-                let new_state = var.get_bool().unwrap_or(false);
-
-                match node.kind {
-                    NodeKind::PackagesGroup
-                    | NodeKind::AdditionalSoftwareGroup
-                    | NodeKind::LanguageGroup => {
-                        // Group toggle propagates to every available leaf in
-                        // this group's category; unavailable rows stay
-                        // untouched so the install plan never carries
-                        // something we can't honor.
-                        let category = match node.kind {
-                            NodeKind::AdditionalSoftwareGroup => {
-                                rabbit_core::package::PackageCategory::Additional
-                            }
-                            NodeKind::LanguageGroup => {
-                                rabbit_core::package::PackageCategory::Language
-                            }
-                            _ => rabbit_core::package::PackageCategory::Core,
-                        };
-                        let mut rows = rows_for_set_value.borrow_mut();
-                        for row in rows.iter_mut() {
-                            if row.category == category && row.available_for_target {
-                                let _ = apply_checkbox_state_to_package_row(
-                                    &wizard_model,
-                                    row,
-                                    new_state,
-                                );
-                            }
-                        }
-                    }
-                    NodeKind::Package(idx) => {
-                        let mut rows = rows_for_set_value.borrow_mut();
-                        let Some(row) = rows.get_mut(idx) else {
-                            return false;
-                        };
-                        if !row.available_for_target {
-                            return false;
-                        }
-                        let _ = apply_checkbox_state_to_package_row(&wizard_model, row, new_state);
-                    }
-                    NodeKind::ConfigurationGroup => {
-                        let mut cfg_rows = configuration_rows_for_set_value.borrow_mut();
-                        for row in cfg_rows.iter_mut() {
-                            if row.available_for_target && !row.already_applied {
-                                row.selected = new_state;
-                            }
-                        }
-                    }
-                    NodeKind::Configuration(idx) => {
-                        let mut cfg_rows = configuration_rows_for_set_value.borrow_mut();
-                        let Some(row) = cfg_rows.get_mut(idx) else {
-                            return false;
-                        };
-                        if !row.available_for_target || row.already_applied {
-                            return false;
-                        }
-                        row.selected = new_state;
-                    }
-                }
-
-                let any_install_or_update = rows_for_set_value.borrow().iter().any(|row| {
-                    row.available_for_target
-                        && matches!(row.action, PlanActionKind::Install | PlanActionKind::Update)
-                });
-                can_install.set(any_install_or_update);
-
-                // Recompute configuration row availability whenever a
-                // package toggle could have flipped a dependency state.
-                let recomputed_configuration = matches!(
-                    node.kind,
-                    NodeKind::PackagesGroup
-                        | NodeKind::AdditionalSoftwareGroup
-                        | NodeKind::LanguageGroup
-                        | NodeKind::Package(_)
-                );
-                if recomputed_configuration {
-                    if let Ok(localizer) =
-                        crate::localizer_from_options(&wizard_model_for_recompute.bootstrap_options)
-                    {
-                        let package_rows_snapshot = rows_for_set_value.borrow();
-                        let mut cfg_rows = configuration_rows_for_recompute.borrow_mut();
-                        // None for the resource-path argument: a package
-                        // toggle can't change `reapack.ini`, so preserve
-                        // each row's existing `already_applied` flag.
-                        crate::recompute_configuration_row_availability(
-                            &localizer,
-                            &package_rows_snapshot,
-                            None,
-                            &mut cfg_rows,
-                        );
-                    }
-
-                    // Same tail as the Windows `refresh_after_packages_toggle`:
-                    // ticking a package can change which OSARA keymap note
-                    // applies, whether the Spanish variant picker is usable,
-                    // and — because it owns the dropdown's *contents*, not
-                    // just its enabled state — what the REAPER-language
-                    // dropdown offers. Without this, toggling a row that is
-                    // already selected (Space, or clicking its checkbox)
-                    // leaves all three stale, because `on_selection_changed`
-                    // never fires.
-                    if let Some(widgets) = *side_widgets_for_set_value.borrow() {
-                        let rows = rows_for_set_value.borrow();
-                        sync_osara_keymap_widgets(
-                            &wizard_model_for_recompute,
-                            &rows,
-                            &widgets.osara_checkbox,
-                            &widgets.osara_note,
-                        );
-                        sync_spanish_variant_widget(&rows, &widgets.spanish_choice);
-                        sync_reaper_language_widget(&rows, &widgets.language_choice);
-                    }
-                }
-
-                // Push the cell changes back into the view. SetValue's
-                // true return only auto-refreshes the (item, col) we set;
-                // we also need to refresh the row's label cell (the action
-                // text flips Install/Update/Keep) and the parent group's
-                // aggregate cell.
-                if let Some(model) = model_cell_for_set_value.borrow().as_ref() {
-                    match node.kind {
-                        NodeKind::PackagesGroup => {
-                            let parent_ptr = data.packages_group_ptr();
-                            let leaf_ptrs = data.package_ptrs_in_category(
-                                rabbit_core::package::PackageCategory::Core,
-                            );
-                            model.items_changed(&leaf_ptrs);
-                            model.item_value_changed(parent_ptr, PACKAGE_COL_TOGGLE);
-                        }
-                        NodeKind::AdditionalSoftwareGroup => {
-                            let parent_ptr = data.additional_software_group_ptr();
-                            let leaf_ptrs = data.package_ptrs_in_category(
-                                rabbit_core::package::PackageCategory::Additional,
-                            );
-                            model.items_changed(&leaf_ptrs);
-                            model.item_value_changed(parent_ptr, PACKAGE_COL_TOGGLE);
-                        }
-                        NodeKind::LanguageGroup => {
-                            let parent_ptr = data.language_group_ptr();
-                            let leaf_ptrs = data.package_ptrs_in_category(
-                                rabbit_core::package::PackageCategory::Language,
-                            );
-                            model.items_changed(&leaf_ptrs);
-                            model.item_value_changed(parent_ptr, PACKAGE_COL_TOGGLE);
-                        }
-                        NodeKind::Package(idx) => {
-                            let leaf_ptr = data.package_ptr(idx);
-                            model.item_value_changed(leaf_ptr, PACKAGE_COL_LABEL);
-                            // Refresh the aggregate cell of whichever group
-                            // this package hangs under.
-                            let category = data
-                                .rows
-                                .borrow()
-                                .get(idx)
-                                .map(|r| r.category)
-                                .unwrap_or_default();
-                            let parent_ptr = match category {
-                                rabbit_core::package::PackageCategory::Additional => {
-                                    data.additional_software_group_ptr()
-                                }
-                                rabbit_core::package::PackageCategory::Language => {
-                                    data.language_group_ptr()
-                                }
-                                rabbit_core::package::PackageCategory::Core => {
-                                    data.packages_group_ptr()
-                                }
-                            };
-                            model.item_value_changed(parent_ptr, PACKAGE_COL_TOGGLE);
-                        }
-                        NodeKind::ConfigurationGroup => {
-                            let parent_ptr = data.configuration_group_ptr();
-                            let leaf_ptrs = data.all_configuration_ptrs();
-                            model.items_changed(&leaf_ptrs);
-                            model.item_value_changed(parent_ptr, PACKAGE_COL_TOGGLE);
-                        }
-                        NodeKind::Configuration(idx) => {
-                            let leaf_ptr = data.configuration_ptr(idx);
-                            model.item_value_changed(leaf_ptr, PACKAGE_COL_LABEL);
-                            model.item_value_changed(
-                                data.configuration_group_ptr(),
-                                PACKAGE_COL_TOGGLE,
-                            );
-                        }
-                    }
-
-                    if recomputed_configuration {
-                        let cfg_leaf_ptrs = data.all_configuration_ptrs();
-                        model.items_changed(&cfg_leaf_ptrs);
-                        model
-                            .item_value_changed(data.configuration_group_ptr(), PACKAGE_COL_TOGGLE);
-                    }
-                }
-
-                true
+                toggle_for_model(data, node, var.get_bool().unwrap_or(false))
             },
         ),
         // is_enabled — gray out the checkbox + label of unavailable rows.
@@ -6389,7 +6430,8 @@ fn build_packages_tree_model(
         // because the closure-based `Option<CMP>` pattern doesn't infer
         // without it.
         None::<CompareFn>,
-    )
+    );
+    (dv_model, toggle)
 }
 
 /// Non-Windows: expand both synthetic group nodes ("Packages" and
