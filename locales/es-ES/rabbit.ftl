@@ -231,8 +231,11 @@ wizard-progress-log-configuration-completed = se aplicó { $step }.
 
 wizard-done-heading = Hecho
 wizard-done-status-idle = Todavía no se ejecutó una instalación desde esta ventana.
-wizard-done-status-success = ¡RABBIT terminó de hacer su magia! Revisar los detalles acontinuación.
-wizard-done-status-error = La instalación ha fallado. Revisa el error acontinuación.
+wizard-done-status-success = ¡RABBIT terminó de hacer su magia! Revisa los detalles a continuación.
+wizard-done-status-error = La instalación ha fallado. Revisa el error a continuación.
+wizard-reaper-running-title = REAPER sigue abierto
+wizard-reaper-running-body = Cierra REAPER y vuelve a pulsar Instalar. RABBIT no puede actualizar REAPER ni sus extensiones mientras REAPER esté abierto.
+wizard-error-reaper-running = RABBIT se detuvo porque REAPER estaba abierto. Cierra REAPER y vuelve a ejecutar RABBIT.
 wizard-done-status-completed-with-errors = La instalación se completó con errores. Revisa los detalles a continuación.
 wizard-done-status-cancelled = Has detenido la instalación. La lista de abajo muestra lo que RABBIT terminó antes de pararse.
 wizard-done-status-no-packages = No se ha seleccionado ningún paquete para instalar o actualizar.

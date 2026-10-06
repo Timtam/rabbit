@@ -118,6 +118,9 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
             .text("wizard-done-status-completed-with-errors")
             .value,
         done_status_error: localizer.text("wizard-done-status-error").value,
+        reaper_running_title: localizer.text("wizard-reaper-running-title").value,
+        reaper_running_body: localizer.text("wizard-reaper-running-body").value,
+        error_reaper_running: localizer.text("wizard-error-reaper-running").value,
         done_status_cancelled: localizer.text("wizard-done-status-cancelled").value,
         done_status_no_packages: localizer.text("wizard-done-status-no-packages").value,
         done_show_details_label: localizer.text("wizard-done-show-details").value,

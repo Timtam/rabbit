@@ -84,6 +84,21 @@ pub(crate) fn with_ui_frame<F: FnOnce(&Frame)>(f: F) {
     });
 }
 
+/// A plain warning with an OK button, parented on the wizard window. Every
+/// screen reader reads a native message box when it opens.
+pub(crate) fn show_warning(title: &str, body: &str) {
+    with_ui_frame(|frame| {
+        let dialog = MessageDialog::builder(frame, body, title)
+            .with_style(
+                MessageDialogStyle::OK
+                    | MessageDialogStyle::IconWarning
+                    | MessageDialogStyle::Centre,
+            )
+            .build();
+        dialog.show_modal();
+    });
+}
+
 pub(crate) fn arm_post_install_hook(callback: impl FnOnce() + 'static) {
     POST_INSTALL_HOOK.with(|cell| {
         *cell.borrow_mut() = Some(Box::new(callback));
