@@ -54,6 +54,34 @@ pub struct RunningProcess {
     pub executable_path: Option<PathBuf>,
 }
 
+/// The name of the preflight check that fails while the target's REAPER is
+/// running. Its failure message starts with this name and a colon.
+pub const REAPER_PROCESS_CHECK: &str = "reaper-process";
+
+/// The running REAPER processes that would stop an install into
+/// `resource_path` (for the REAPER at `target_app_path`): exactly the ones
+/// the install's own preflight refuses to work around. Lets the wizard warn
+/// before it starts, while the user can still close REAPER and try again.
+pub fn running_reaper_for_target(
+    resource_path: &Path,
+    target_app_path: Option<&Path>,
+) -> Vec<RunningProcess> {
+    running_reaper_for_target_with_processes(
+        resource_path,
+        target_app_path,
+        &running_reaper_processes(Platform::current()),
+    )
+}
+
+fn running_reaper_for_target_with_processes(
+    resource_path: &Path,
+    target_app_path: Option<&Path>,
+    running_processes: &[RunningProcess],
+) -> Vec<RunningProcess> {
+    let target_app_path = effective_target_app_path(resource_path, target_app_path);
+    relevant_running_processes(resource_path, running_processes, target_app_path.as_deref())
+}
+
 pub fn run_install_preflight(resource_path: &Path, options: &PreflightOptions) -> PreflightReport {
     run_install_preflight_with_processes(
         resource_path,
@@ -67,10 +95,11 @@ pub fn run_install_preflight_with_processes(
     options: &PreflightOptions,
     running_processes: &[RunningProcess],
 ) -> PreflightReport {
-    let target_app_path =
-        effective_target_app_path(resource_path, options.target_app_path.as_deref());
-    let relevant_processes =
-        relevant_running_processes(resource_path, running_processes, target_app_path.as_deref());
+    let relevant_processes = running_reaper_for_target_with_processes(
+        resource_path,
+        options.target_app_path.as_deref(),
+        running_processes,
+    );
     let mut checks = vec![resource_path_check(resource_path, options.dry_run)];
     checks.push(reaper_process_check(
         &relevant_processes,
@@ -323,7 +352,7 @@ fn reaper_process_check(
 ) -> PreflightCheck {
     if running_processes.is_empty() {
         return PreflightCheck {
-            name: "reaper-process".to_string(),
+            name: REAPER_PROCESS_CHECK.to_string(),
             status: PreflightStatus::Pass,
             message: "No running REAPER process was detected.".to_string(),
         };
@@ -337,13 +366,13 @@ fn reaper_process_check(
 
     if allow_reaper_running {
         PreflightCheck {
-            name: "reaper-process".to_string(),
+            name: REAPER_PROCESS_CHECK.to_string(),
             status: PreflightStatus::Warn,
             message: format!("REAPER appears to be running: {process_list}."),
         }
     } else {
         PreflightCheck {
-            name: "reaper-process".to_string(),
+            name: REAPER_PROCESS_CHECK.to_string(),
             status: PreflightStatus::Fail,
             message: format!("Close REAPER before installing extensions: {process_list}."),
         }
@@ -626,6 +655,61 @@ mod tests {
                 .status,
             PreflightStatus::Warn
         );
+    }
+
+    /// The wizard checks for a running REAPER before it starts (issue #32)
+    /// with `running_reaper_for_target`. It must reach the same verdict as
+    /// the install's preflight, or the wizard would either block an install
+    /// that would have worked or let one start that is bound to fail.
+    #[test]
+    fn the_pre_install_check_agrees_with_the_preflight() {
+        let dir = tempdir().unwrap();
+        let target = PathBuf::from(r"C:\Portable\REAPER\reaper.exe");
+        let process = |path: Option<&str>| RunningProcess {
+            pid: "456".to_string(),
+            name: "reaper.exe".to_string(),
+            executable_path: path.map(PathBuf::from),
+        };
+        for (processes, blocks) in [
+            (vec![], false),
+            // the REAPER being installed into
+            (vec![process(Some(r"C:\Portable\REAPER\reaper.exe"))], true),
+            // another REAPER somewhere else
+            (
+                vec![process(Some(r"C:\Program Files\REAPER\reaper.exe"))],
+                false,
+            ),
+            // a REAPER whose path Windows would not reveal: fail safe
+            (vec![process(None)], true),
+        ] {
+            let found = super::running_reaper_for_target_with_processes(
+                dir.path(),
+                Some(&target),
+                &processes,
+            );
+            let report = run_install_preflight_with_processes(
+                dir.path(),
+                &PreflightOptions {
+                    dry_run: false,
+                    allow_reaper_running: false,
+                    target_app_path: Some(target.clone()),
+                },
+                &processes,
+            );
+            let preflight_blocks = report.checks.iter().any(|check| {
+                check.name == super::REAPER_PROCESS_CHECK && check.status == PreflightStatus::Fail
+            });
+            assert_eq!(!found.is_empty(), blocks, "{processes:?}");
+            assert_eq!(preflight_blocks, blocks, "{processes:?}");
+            if blocks {
+                assert!(
+                    report
+                        .failure_message()
+                        .starts_with(&format!("{}:", super::REAPER_PROCESS_CHECK)),
+                    "the wizard recognises this failure by that prefix"
+                );
+            }
+        }
     }
 
     #[test]

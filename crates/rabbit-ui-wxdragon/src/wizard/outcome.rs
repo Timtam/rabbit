@@ -179,6 +179,33 @@ pub fn summarize_wizard_error(
     }
 }
 
+/// Why an install failed, for the always-visible status field of the Done
+/// page. A running REAPER gets a plain, translated sentence: it is the
+/// common case, and the raw preflight text ("reaper-process: Close REAPER
+/// before installing extensions: reaper.exe (5096).") reads like a log
+/// line. Anything else is the error's own message, which beats the
+/// "Review the error below" with nothing below that issue #32 reported.
+pub fn wizard_error_reason(model: &WizardModel, error: &RabbitError) -> String {
+    let reaper_check = format!("{}:", rabbit_core::preflight::REAPER_PROCESS_CHECK);
+    match error {
+        RabbitError::PreflightFailed { message } if message.contains(&reaper_check) => {
+            // A preflight lists every check that failed, joined by "; ".
+            // Keep the others in view: closing REAPER would not fix them,
+            // and hiding them would just fail the next run too.
+            let others: Vec<&str> = message
+                .split("; ")
+                .filter(|part| !part.starts_with(&reaper_check))
+                .collect();
+            if others.is_empty() {
+                model.text.error_reaper_running.clone()
+            } else {
+                format!("{}\n{}", model.text.error_reaper_running, others.join("\n"))
+            }
+        }
+        other => other.to_string(),
+    }
+}
+
 pub fn wizard_outcome_report_from_error(
     model: &WizardModel,
     request: &WizardInstallRequest,
