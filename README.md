@@ -440,7 +440,7 @@ into the project.
 ## Development
 
 See [DESIGN.md](./DESIGN.md) for the full architecture and design rules. To
-build from source you need a recent stable Rust toolchain. The wxDragon GUI
+build from source you need Rust 1.99 or newer. The wxDragon GUI
 feature on Windows additionally needs the Visual Studio C++ build tools, an
 LLVM `libclang.dll` discoverable through `LIBCLANG_PATH`, and Ninja on
 `PATH`.

@@ -41,7 +41,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99
 
       # Intentionally NOT caching Rust dependencies on the release workflow:
       # release builds run once per tag and never benefit from a hot cache,
