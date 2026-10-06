@@ -79,6 +79,8 @@ pub struct WizardText {
     pub target_custom_portable_note: String,
     pub packages_heading: String,
     pub packages_list_label: String,
+    pub packages_row_checked: String,
+    pub packages_row_unchecked: String,
     pub packages_tree_group_label: String,
     pub additional_software_tree_group_label: String,
     pub language_tree_group_label: String,

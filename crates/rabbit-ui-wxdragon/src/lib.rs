@@ -1,6 +1,8 @@
 //! The RABBIT wizard: `wizard` holds the pages' data and decisions, `wx_app`
 //! renders them with wxWidgets.
 
+#[cfg(all(feature = "gui", target_os = "macos"))]
+mod voiceover;
 #[cfg(feature = "gui")]
 mod wx_app;
 
