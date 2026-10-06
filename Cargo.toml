@@ -12,7 +12,7 @@ resolver = "3"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
-version = "0.4.2"
+version = "0.4.3"
 
 [profile.release]
 # Optimize the user-facing binary for download size first, runtime second.

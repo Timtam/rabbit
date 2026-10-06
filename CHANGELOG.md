@@ -31,6 +31,8 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-10-06
+
 ### Added
 
 - A hidden **expert mode** in the wizard, for people who test pre-release
