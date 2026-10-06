@@ -3,6 +3,7 @@
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -348,6 +349,40 @@ pub(crate) fn bind_reapack_ack_navigation_updates(
         if current_step.load(Ordering::SeqCst) == REAPACK_ACK_STEP {
             next.enable(event.is_checked());
         }
+    });
+}
+
+/// Make Enter on the Review page's summary start the install, as the default
+/// Install button would.
+///
+/// The summary is a read-only multiline TextCtrl and holds focus on that
+/// page, and a multiline text box eats Enter (the NSTextView on macOS,
+/// DLGC_WANTALLKEYS on MSW) before the default button sees it: the same trap
+/// `bind_done_page_enter_closes` works around on the Done page. Guarded on
+/// the step and on Install being enabled, so Enter never starts anything the
+/// button itself would refuse.
+pub(crate) fn bind_review_enter_installs(
+    text: &TextCtrl,
+    install: &Button,
+    current_step: &Arc<AtomicUsize>,
+    start_install: Rc<dyn Fn()>,
+) {
+    let install = *install;
+    let current_step = Arc::clone(current_step);
+    text.on_key_down(move |event| {
+        let key_code = if let WindowEventData::Keyboard(kbd) = &event {
+            kbd.get_key_code()
+        } else {
+            None
+        };
+        if !matches!(key_code, Some(WXK_RETURN) | Some(WXK_NUMPAD_ENTER)) {
+            return;
+        }
+        if current_step.load(Ordering::SeqCst) != REVIEW_STEP || !install.is_enabled() {
+            return;
+        }
+        event.skip(false);
+        start_install();
     });
 }
 

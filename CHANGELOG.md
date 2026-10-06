@@ -165,6 +165,10 @@ from this file and posts it as the GitHub release body.
   the ReaPack ones — still name it, since there it is the truth.
   (Reported by Scott Chesworth from Q&A.)
 
+- **Enter** on the **Review** page now starts the install, as the default
+  **Install** button promises. Focus lands on the page's read-only summary,
+  and that text box kept the key for itself.
+
 - On macOS, **Space** now ticks and unticks rows in the **Packages** list,
   and VoiceOver says whether the row is now checked. Before, only VO+Space
   while interacting with the list changed a checkbox, so the list could not

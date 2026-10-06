@@ -58,11 +58,12 @@ use crate::wx_app::shell::{launch_reaper, open_resource_folder, seat_macos_apple
 use crate::wx_app::version_check::{VersionCheckUi, start_version_check};
 use crate::wx_app::widgets::{
     append_done_status, bind_done_page_enter_closes, bind_reapack_ack_navigation_updates,
-    bind_target_navigation_updates, can_launch_last_reaper_path, checked_package_indices,
-    clone_last_path, clone_last_resource_path, effective_can_install, osara_keymap_choice,
-    planned_reaper_launch_path_for_target, progress_details_for_start, reapack_ack_confirmed,
-    refresh_target_choice, refreshed_target_index, selected_target_row, set_last_path,
-    set_last_report, set_last_resource_path, step_status, target_is_valid, update_navigation,
+    bind_review_enter_installs, bind_target_navigation_updates, can_launch_last_reaper_path,
+    checked_package_indices, clone_last_path, clone_last_resource_path, effective_can_install,
+    osara_keymap_choice, planned_reaper_launch_path_for_target, progress_details_for_start,
+    reapack_ack_confirmed, refresh_target_choice, refreshed_target_index, selected_target_row,
+    set_last_path, set_last_report, set_last_resource_path, step_status, target_is_valid,
+    update_navigation,
 };
 
 pub(crate) const TARGET_STEP: usize = 0;
@@ -437,7 +438,9 @@ pub fn run() {
             let last_reaper_app_path = Arc::clone(&last_reaper_app_path);
             let last_resource_path = Arc::clone(&last_resource_path);
             let install_run = Arc::clone(&install_run);
-            install.on_click(move |_| {
+            let review_text = widgets.review_text;
+            let review_step = Arc::clone(&current_step);
+            let start_install = Rc::new(move || {
                 // Catch a running REAPER here, while the user can still do
                 // something about it. The install's preflight would refuse
                 // too, but only after the wizard has moved to its progress
@@ -939,6 +942,11 @@ pub fn run() {
                     }));
                 });
             });
+            install.on_click({
+                let start_install = Rc::clone(&start_install);
+                move |_| start_install()
+            });
+            bind_review_enter_installs(&review_text, &install, &review_step, start_install);
         }
 
         let frame_for_close = frame;
