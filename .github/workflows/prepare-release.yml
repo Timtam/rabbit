@@ -49,7 +49,7 @@ jobs:
           fi
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99
 
       - name: Install cargo-edit
         uses: taiki-e/install-action@v2

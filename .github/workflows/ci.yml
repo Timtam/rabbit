@@ -26,9 +26,11 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99
         with:
-          components: clippy
+          # A pinned toolchain installs only what is listed here; @stable
+          # used to borrow rustfmt from the runner's preinstalled Rust.
+          components: clippy, rustfmt
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -94,7 +96,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
