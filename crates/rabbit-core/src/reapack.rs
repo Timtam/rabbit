@@ -534,8 +534,10 @@ mod tests {
         let written = fs::read(&ini_path).unwrap();
         assert_eq!(&written[..2], &[0xFF, 0xFE], "UTF-16 LE BOM preserved");
         let units: Vec<u16> = written[2..]
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect();
         let decoded = String::from_utf16(&units).unwrap();
         assert!(decoded.contains(&format!("remote1={}|{}|1|2", TEST_REPO_NAME, TEST_REPO_URL)));
