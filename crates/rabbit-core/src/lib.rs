@@ -1,3 +1,4 @@
+pub mod actions_artifact;
 pub mod antivirus;
 pub mod arch_probe;
 pub mod archive;

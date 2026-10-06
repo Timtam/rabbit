@@ -53,6 +53,7 @@ fn builds_install_request_from_selected_rows() {
             package_variants: Default::default(),
             reaper_language_package: None,
             cache_dir: Some(PathBuf::from("C:/cache")),
+            package_channels: Default::default(),
         },
     )
     .unwrap();

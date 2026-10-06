@@ -31,7 +31,57 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Added
+
+- A hidden **expert mode** in the wizard, for people who test pre-release
+  software. Press **Ctrl+Shift+E** (**Cmd+Shift+E** on macOS) on the first
+  page, or launch RABBIT with `RABBIT_EXPERT=1`. After a warning that the
+  builds are unsupported, two choices appear below the REAPER installation:
+  - **REAPER builds**: regular releases, or the development builds from
+    landoleet.org.
+  - **OSARA builds**: regular snapshots, or the test build of an open OSARA
+    pull request, picked from a list fetched from GitHub.
+
+  The window title shows when expert mode is on, and each package row says
+  when it comes from a pre-release build. Expert mode is never saved and
+  lasts until RABBIT closes. The next install without it takes every package
+  that came from a pre-release build back to its regular release, and the
+  row says so. The same happens to an OSARA test build once its pull request
+  is merged or closed, or GitHub has deleted the build. A network failure is
+  never counted as a missing build, so an outage can't downgrade anything.
+  All five interface languages carry the new wording.
+- The CLI gets the same builds through `--package-channel`, with no unlock
+  needed. For example, `--package-channel reaper=dev` or
+  `--package-channel osara=pr:1454`, and `<package>=stable` goes back.
+  It works on `latest`, `artifacts`, `download`, `plan`, `install-extension`,
+  `apply-packages` and `setup`. A package stays on the channel it was last
+  installed from until told otherwise, and `RABBIT packages` lists each
+  package's channels. When a pull request is merged or closed, or has no
+  build left, the CLI prints a warning and installs the regular snapshot.
+- Install receipts now record which channel each package came from, so
+  RABBIT can tell a development REAPER from a regular one and knows when to
+  put the regular release back. A switch between channels reinstalls even
+  when both builds carry the same version number.
+- The README now explains `GITHUB_TOKEN`. Without it, GitHub allows 60 API
+  requests an hour, which testers following OSARA pull request builds can
+  run out of. With a personal access token set, the limit is 5,000. RABBIT
+  already used the variable, but only CI knew about it.
+
 ### Changed
+
+- `RABBIT install-extension` no longer downloads anything without `--apply`.
+  It reported a dry run but fetched the artifact first, which is a change to
+  the machine that every other command makes only with `--apply`. It now
+  prints the preflight checks and the artifacts it would download and
+  install. `RABBIT download` still fetches on purpose.
+
+- RABBIT now builds on wxdragon 0.9.19, which brings wxWidgets 3.3.3 (up from
+  3.3.2) under every window and control in the wizard. Nothing is meant to
+  look or sound different, but every control now comes from a newer toolkit,
+  so reports of anything that reads or behaves differently with a screen
+  reader are especially welcome. The upgrade also brings the window-wide
+  keyboard event that expert mode's shortcut relies on to work whichever
+  control has focus.
 
 - Closing the wizard while an install is running now stops the run instead of
   killing it. RABBIT asks first ("Stop the installation?", with **No** as the
@@ -62,6 +112,25 @@ from this file and posts it as the GitHub release body.
 
 ### Fixed
 
+- A portable REAPER stopped being recognised once it had been opened, and
+  RABBIT then reinstalled it on the next run: a 17 MB download and an
+  installer, every time. RABBIT's receipt listed `reaper.ini` with its size,
+  REAPER rewrites that file whenever it runs, and the size check then failed.
+  REAPER installs nothing into `UserPlugins`, so it had no other way to be
+  found and read as missing. Two fixes: files whose contents belong to REAPER
+  and the user — `reaper.ini` and OSARA's `reaper-kb.ini` — are recorded
+  without a size and only checked for existence, and REAPER now has a
+  detector of its own that finds `reaper.exe` or `REAPER.app` and reads its
+  version. That one also recognises a portable REAPER that RABBIT never
+  installed.
+
+- An OSARA pull request build whose receipt was missing reported the wrong
+  version. RABBIT falls back to scanning the plug-in for its version string,
+  and the pattern only matched snapshot versions like `2026.8.9.2302`. The
+  binary also contains the help text "For example: 2024.3.6.1332,13560ef7",
+  so the scan found that instead and reported a build from 2024. RABBIT now
+  looks for the pull request form first.
+
 - Console windows no longer flash on screen while RABBIT works. RABBIT's
   release build owns no console of its own, so every console program it
   launched got a brand new console window from Windows: a PowerShell window
@@ -91,6 +160,17 @@ from this file and posts it as the GitHub release body.
   JAWS and Narrator alike found no list to read. The wizard pages now
   scroll instead of clipping what does not fit, so every control keeps its
   size whatever the window size and the language of the interface.
+
+### Security
+
+- RABBIT no longer hands a `GITHUB_TOKEN` from its environment to the
+  programs it starts. That covers every installer that runs without admin
+  rights, OSARA's pull request builds included, the macOS admin shell that
+  runs installers, and REAPER when the wizard starts it. They used to inherit
+  the whole environment, token included. With expert mode, that can be code
+  nobody has reviewed yet, such as an OSARA pull request build or REAPER
+  running one. RABBIT only needs the token for its own requests to GitHub's
+  API.
 
 ## [0.4.2] - 2026-08-18
 

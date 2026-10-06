@@ -132,5 +132,6 @@ pub fn install_request_from_target_and_rows(
         configuration_step_ids,
         declined_packages,
         accepted_packages,
+        package_channels: options.package_channels.clone(),
     })
 }

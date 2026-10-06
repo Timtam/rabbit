@@ -15,7 +15,7 @@ use crate::{
     wizard_package_plan_for_target_with_available,
 };
 use rabbit_core::detection::detect_components;
-use rabbit_core::latest::fetch_latest_details_for_package;
+use rabbit_core::latest::fetch_latest_details_for_package_on;
 use rabbit_core::model::Platform;
 use rabbit_core::package::PACKAGE_REAPER;
 use rabbit_core::plan::AvailablePackage;
@@ -23,6 +23,9 @@ use rabbit_core::version::Version;
 use wxdragon::widgets::SimpleBook;
 
 use wxdragon::prelude::*;
+
+use crate::wx_app::expert_mode::RUN_AVAILABLE;
+use crate::wx_app::globals::VERSION_CHECK_GENERATION;
 
 use crate::wx_app::PACKAGES_STEP;
 use crate::wx_app::globals::{
@@ -50,6 +53,8 @@ pub(crate) struct VersionCheckUi {
     pub(crate) can_install: Rc<Cell<bool>>,
     pub(crate) review_can_install: Rc<Cell<bool>>,
     pub(crate) target: TargetRow,
+    /// Which builds to check each package on (empty outside expert mode).
+    pub(crate) channels: rabbit_core::package::PackageChannels,
     pub(crate) book: SimpleBook,
     pub(crate) step_label: StaticText,
     pub(crate) labels: Arc<Vec<String>>,
@@ -73,6 +78,7 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
     let target_resource_path = ui.target.path.clone();
     let target_platform = ui.model.platform;
     let target_reaper_version = ui.target.version.clone();
+    let channels = ui.channels.clone();
     ui.widgets
         .version_check_status
         .set_label(&ui.model.text.version_check_status_pending);
@@ -110,13 +116,14 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
                 ui.widgets.version_check_status.set_label(&line);
             });
             match outcome {
-                Ok((version_str, whats_new)) => {
+                Ok((version_str, whats_new, channel)) => {
                     match rabbit_core::version::Version::parse(&version_str) {
                         Ok(version) => {
                             accumulated.push(AvailablePackage {
                                 package_id,
                                 version: Some(version),
                                 whats_new,
+                                channel,
                             });
                         }
                         Err(error) => {
@@ -137,6 +144,7 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
             // the full error. Only a failure to build the plan itself keeps
             // the wizard on this page with the error log shown.
             {
+                RUN_AVAILABLE.with(|cell| *cell.borrow_mut() = Some(accumulated.clone()));
                 match wizard_package_plan_for_target_with_available(
                     &ui.model,
                     Some(&ui.target),
@@ -215,11 +223,14 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
     };
 
     install_version_check_dispatcher(Box::new(dispatcher));
+    let generation = VERSION_CHECK_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     spawn_version_check_worker(
         package_ids,
         target_resource_path,
         target_platform,
         target_reaper_version,
+        channels,
+        generation,
     );
 }
 
@@ -277,6 +288,8 @@ pub(crate) fn spawn_version_check_worker(
     resource_path: PathBuf,
     platform: Platform,
     target_reaper_version: Option<Version>,
+    channels: rabbit_core::package::PackageChannels,
+    generation: u64,
 ) {
     std::thread::spawn(move || {
         let mut installed_versions: HashMap<String, Version> =
@@ -313,12 +326,14 @@ pub(crate) fn spawn_version_check_worker(
                 .collect::<std::collections::VecDeque<_>>(),
         ));
         let installed_versions = std::sync::Arc::new(installed_versions);
+        let channels = std::sync::Arc::new(channels);
         let worker_count =
             VERSION_CHECK_CONCURRENCY.min(queue.lock().map(|q| q.len()).unwrap_or(1).max(1));
         let mut workers = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
             let queue = std::sync::Arc::clone(&queue);
             let installed_versions = std::sync::Arc::clone(&installed_versions);
+            let channels = std::sync::Arc::clone(&channels);
             workers.push(std::thread::spawn(move || {
                 loop {
                     // Scope the lock so it is never held across a fetch.
@@ -327,17 +342,29 @@ pub(crate) fn spawn_version_check_worker(
                         break;
                     };
                     let installed = installed_versions.get(&package_id);
-                    let outcome = match fetch_latest_details_for_package(&package_id, installed) {
-                        Ok(details) => Ok((details.version.to_string(), details.whats_new)),
+                    let channel = channels.get(&package_id).map(String::as_str);
+                    let outcome = match fetch_latest_details_for_package_on(
+                        &package_id,
+                        installed,
+                        channel,
+                    ) {
+                        Ok(details) => Ok((
+                            details.version.to_string(),
+                            details.whats_new,
+                            details.channel,
+                        )),
                         Err(error) => Err(error.to_string()),
                     };
 
                     let id_for_result = package_id.clone();
                     wxdragon::call_after(Box::new(move || {
-                        dispatch_version_check_event(VersionCheckEvent::Result {
-                            package_id: id_for_result,
-                            outcome,
-                        });
+                        dispatch_version_check_event(
+                            generation,
+                            VersionCheckEvent::Result {
+                                package_id: id_for_result,
+                                outcome,
+                            },
+                        );
                     }));
                 }
             }));
@@ -346,7 +373,7 @@ pub(crate) fn spawn_version_check_worker(
             let _ = worker.join();
         }
         wxdragon::call_after(Box::new(move || {
-            dispatch_version_check_event(VersionCheckEvent::Finished);
+            dispatch_version_check_event(generation, VersionCheckEvent::Finished);
         }));
     });
 }

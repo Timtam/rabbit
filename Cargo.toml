@@ -36,5 +36,11 @@ sysinfo = "0.33"
 tempfile = "3.10"
 thiserror = "1.0"
 unic-langid = "0.9"
-wxdragon = "0.9.15"
+# Pinned exactly: 0.9.19 is the first release with wxEVT_CHAR_HOOK (window-level
+# key handling, needed for the expert-mode chord), and 0.9.22 reworks DataView
+# ownership - the macOS package tree, which the Windows build never compiles.
+# wxdragon only asks for ^0.9.19 of wxdragon-sys and wxdragon-macros, so a
+# plain `cargo update` pulls them to 0.9.22 behind this pin. Cargo.lock holds
+# all three at 0.9.19; after any update, check they still match.
+wxdragon = "=0.9.19"
 zip = { version = "2", default-features = false, features = ["deflate"] }

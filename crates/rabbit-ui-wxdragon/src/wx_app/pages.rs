@@ -8,11 +8,16 @@ use wxdragon::widgets::SimpleBook;
 
 use wxdragon::prelude::*;
 
+use crate::wx_app::expert_mode::{
+    OSARA_BUILD_CHOICE, OSARA_BUILDS_LABEL_NAME, REAPER_BUILDS_LABEL_NAME, expert_mode,
+    seed_build_choices,
+};
 use crate::wx_app::packages_page::{PackagesStateCell, build_packages_page};
 use crate::wx_app::shell::{open_external_url, relaunch_with_locale};
 use crate::wx_app::widgets::{
-    WizardWidgets, configure_portable_folder, portable_choice_index, portable_target_details,
-    selected_target_details, target_details_for_index,
+    WizardWidgets, configure_portable_folder, portable_choice_index, portable_folder_path,
+    portable_target_details, selected_target_details, set_optional_choice_shown,
+    target_details_for_index,
 };
 use crate::wx_app::{
     DONE_STEP, PACKAGES_STEP, PROGRESS_STEP, REAPACK_ACK_STEP, REVIEW_STEP, TARGET_STEP,
@@ -61,7 +66,8 @@ pub(crate) fn add_pages(
     language_footer: Panel,
 ) -> WizardWidgets {
     let target_page = new_wizard_page(book);
-    let (target_choice, portable_folder, target_details) = build_target_page(&target_page, model);
+    let (target_choice, portable_folder, target_details, reaper_build_choice, osara_build_choice) =
+        build_target_page(&target_page, model);
     book.add_page(&target_page, &model.steps[TARGET_STEP].label, true, None);
 
     let version_check_page = new_wizard_page(book);
@@ -138,6 +144,8 @@ pub(crate) fn add_pages(
         target_choice,
         portable_folder,
         target_details,
+        reaper_build_choice,
+        osara_build_choice,
         version_check_status,
         version_check_gauge,
         version_check_error_heading,
@@ -165,7 +173,7 @@ pub(crate) fn add_pages(
 pub(crate) fn build_target_page(
     page: &WizardPage,
     model: &WizardModel,
-) -> (Choice, TextCtrl, TextCtrl) {
+) -> (Choice, TextCtrl, TextCtrl, Choice, Choice) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     add_heading(
         page,
@@ -250,15 +258,67 @@ pub(crate) fn build_target_page(
     details.set_name("rabbit-target-details");
     sizer.add(&details, 1, SizerFlag::All | SizerFlag::Expand, 6);
 
+    // Expert mode's build choices. Created after the target details, so they
+    // come last in the tab order, and hidden until expert mode is on.
+    add_label(
+        page,
+        &sizer,
+        &model.text.expert_reaper_builds_label,
+        REAPER_BUILDS_LABEL_NAME,
+    );
+    let reaper_build_choice = Choice::builder(page).build();
+    reaper_build_choice.set_name(&model.text.expert_reaper_builds_label);
+    reaper_build_choice.append(&model.text.expert_reaper_builds_stable);
+    reaper_build_choice.append(&model.text.expert_reaper_builds_dev);
+    reaper_build_choice.set_selection(0);
+    sizer.add(
+        &reaper_build_choice,
+        0,
+        SizerFlag::All | SizerFlag::Expand,
+        6,
+    );
+
+    add_label(
+        page,
+        &sizer,
+        &model.text.expert_osara_builds_label,
+        OSARA_BUILDS_LABEL_NAME,
+    );
+    let osara_build_choice = Choice::builder(page).build();
+    osara_build_choice.set_name(&model.text.expert_osara_builds_label);
+    osara_build_choice.append(&model.text.expert_osara_builds_snapshot);
+    osara_build_choice.set_selection(0);
+    sizer.add(
+        &osara_build_choice,
+        0,
+        SizerFlag::All | SizerFlag::Expand,
+        6,
+    );
+    OSARA_BUILD_CHOICE.set(Some(osara_build_choice));
+
     {
         let choice_model = model.clone();
         let choice_portable_folder = portable_folder;
         let choice_portable_browse = portable_folder_browse;
         let choice_details = details;
+        let choice_reaper_builds = reaper_build_choice;
         choice.on_selection_changed(move |event| {
             if let Some(index) = event.get_selection() {
                 let index = index as usize;
                 let portable_selected = index == portable_choice_index(&choice_model);
+                if expert_mode() {
+                    // Another REAPER may have been installed from other
+                    // builds: start the choices from its receipt.
+                    let target_path = if portable_selected {
+                        portable_folder_path(&choice_portable_folder)
+                    } else {
+                        choice_model
+                            .target_rows
+                            .get(index)
+                            .map(|row| row.path.clone())
+                    };
+                    seed_build_choices(target_path.as_deref(), &choice_reaper_builds);
+                }
                 configure_portable_folder(
                     &choice_portable_folder,
                     &choice_portable_browse,
@@ -280,6 +340,7 @@ pub(crate) fn build_target_page(
         let dir_details = details;
         let dir_portable_folder = portable_folder;
         let dir_portable_browse = portable_folder_browse;
+        let dir_reaper_builds = reaper_build_choice;
         // Fires both for keyboard input AND for `set_value` from the Browse
         // button below — wxTextCtrl::SetValue generates wxEVT_TEXT — so this
         // single handler handles typing and the picker dialog uniformly.
@@ -294,6 +355,15 @@ pub(crate) fn build_target_page(
                 configure_portable_folder(&dir_portable_folder, &dir_portable_browse, true);
             }
             dir_details.set_value(&portable_target_details(&model, &dir_portable_folder));
+            // A different folder is a different REAPER, possibly installed
+            // from other builds: start the choices from its receipt, as a
+            // change of target does.
+            if expert_mode() {
+                seed_build_choices(
+                    portable_folder_path(&dir_portable_folder).as_deref(),
+                    &dir_reaper_builds,
+                );
+            }
         });
     }
 
@@ -320,8 +390,16 @@ pub(crate) fn build_target_page(
     }
 
     page.set_sizer(sizer, true);
+    set_optional_choice_shown(&reaper_build_choice, REAPER_BUILDS_LABEL_NAME, false);
+    set_optional_choice_shown(&osara_build_choice, OSARA_BUILDS_LABEL_NAME, false);
     choice.set_focus();
-    (choice, portable_folder, details)
+    (
+        choice,
+        portable_folder,
+        details,
+        reaper_build_choice,
+        osara_build_choice,
+    )
 }
 
 /// Base id for the language popup menu's radio items. Item id at index `i`

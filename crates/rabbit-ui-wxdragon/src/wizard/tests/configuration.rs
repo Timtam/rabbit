@@ -109,6 +109,7 @@ fn a_declined_language_pack_stops_being_ticked_by_default() {
         &[],
         &host,
         &Default::default(),
+        &Default::default(),
     );
     assert!(
         suggested[0].selected,
@@ -127,6 +128,7 @@ fn a_declined_language_pack_stops_being_ticked_by_default() {
         &[],
         &host,
         &declined,
+        &Default::default(),
     );
     assert!(
         !remembered[0].selected,

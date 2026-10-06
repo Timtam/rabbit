@@ -186,6 +186,10 @@ fn model_from_plan_with_options(
         .as_deref()
         .map(rabbit_core::receipt::declined_packages)
         .unwrap_or_default();
+    let installed_channels = target_resource_path
+        .as_deref()
+        .map(rabbit_core::receipt::installed_channels_at)
+        .unwrap_or_default();
     let package_rows = package_rows(
         localizer,
         &text,
@@ -196,6 +200,7 @@ fn model_from_plan_with_options(
         &available_packages,
         &host,
         &declined,
+        &installed_channels,
     );
     let configuration_rows =
         configuration_rows(localizer, &package_rows, target_resource_path.as_deref());

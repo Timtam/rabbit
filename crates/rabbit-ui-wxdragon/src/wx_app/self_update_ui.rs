@@ -15,6 +15,8 @@ use rabbit_core::self_update::SelfUpdateCheckReport;
 
 use wxdragon::prelude::*;
 
+use crate::wx_app::expert_mode::expert_mode;
+
 use crate::wx_app::globals::{with_ui_frame, with_ui_localizer};
 use crate::wx_app::packages_page::{WXK_NUMPAD_ENTER, WXK_RETURN};
 use crate::wx_app::progress_ui::format_bytes_human;
@@ -337,7 +339,7 @@ pub(crate) fn start_self_update_apply(
                     self_update_status.set_status_text(&summary, 0);
                 });
                 if !report.replaced_files.is_empty() {
-                    match relaunch_rabbit_after_apply() {
+                    match relaunch_rabbit_after_apply(expert_mode()) {
                         Ok(pid) => {
                             let msg = format!(
                                 "{}: PID {}",

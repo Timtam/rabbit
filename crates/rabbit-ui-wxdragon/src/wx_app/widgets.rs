@@ -24,6 +24,9 @@ pub(crate) struct WizardWidgets {
     pub(crate) target_choice: Choice,
     pub(crate) portable_folder: TextCtrl,
     pub(crate) target_details: TextCtrl,
+    /// Expert mode's build choices on the target page; hidden otherwise.
+    pub(crate) reaper_build_choice: Choice,
+    pub(crate) osara_build_choice: Choice,
     pub(crate) version_check_status: StaticText,
     pub(crate) version_check_gauge: Gauge,
     pub(crate) version_check_error_heading: StaticText,

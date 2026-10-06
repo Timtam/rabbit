@@ -399,11 +399,24 @@ pub fn stage_self_update_with_progress(
 }
 
 pub fn relaunch_current_executable() -> Result<u32> {
+    relaunch_current_executable_with(&[])
+}
+
+/// [`relaunch_current_executable`], setting (`Some`) or removing (`None`)
+/// environment variables for the new process only.
+pub fn relaunch_current_executable_with(env_vars: &[(&str, Option<&str>)]) -> Result<u32> {
     let exe = env::current_exe().map_err(|source| RabbitError::Io {
         path: PathBuf::from("current_exe"),
         source,
     })?;
-    let child = std::process::Command::new(&exe)
+    let mut command = std::process::Command::new(&exe);
+    for (name, value) in env_vars {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    let child = command
         .spawn()
         .map_err(|source| RabbitError::Io { path: exe, source })?;
     Ok(child.id())

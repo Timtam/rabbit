@@ -1,6 +1,7 @@
 //! Renders a finished [`SetupReport`] into the done page's summary text.
 
-use rabbit_core::operation::PackageOperationStatus;
+use rabbit_core::localization::Localizer;
+use rabbit_core::operation::{PackageOperationStatus, PlannedExecutionKind, PlannedExecutionPlan};
 use rabbit_core::resource::ResourceInitActionKind;
 use rabbit_core::setup::SetupReport;
 
@@ -302,14 +303,7 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
                 &[("artifact", plan.artifact_location.clone())],
                 format!("  Artifact: {}", plan.artifact_location),
             ));
-            if let Some(program) = &plan.program {
-                detail_lines.push(format_localized_message(
-                    localizer.as_ref(),
-                    "wizard-summary-planned-execution-program",
-                    &[("program", program.clone())],
-                    format!("  Program: {program}"),
-                ));
-            }
+            detail_lines.extend(planned_execution_program_line(localizer.as_ref(), plan));
             if !plan.arguments.is_empty() {
                 let arguments = plan.arguments.join(" ");
                 detail_lines.push(format_localized_message(
@@ -439,5 +433,33 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
             ),
         ),
         detail_lines,
+    }
+}
+
+/// The summary's "Program" line for a planned execution. An installer that
+/// arrives zipped (an OSARA pull-request build) has no program to name until
+/// it is downloaded and unpacked, so the line says what will run instead of
+/// leaving the reader to wonder why it is missing. Other plans without a
+/// program (archives, disk images) get no line, as before.
+pub(crate) fn planned_execution_program_line(
+    localizer: Option<&Localizer>,
+    plan: &PlannedExecutionPlan,
+) -> Option<String> {
+    match &plan.program {
+        Some(program) => Some(format_localized_message(
+            localizer,
+            "wizard-summary-planned-execution-program",
+            &[("program", program.clone())],
+            format!("  Program: {program}"),
+        )),
+        None if plan.kind == PlannedExecutionKind::LaunchInstallerExecutable => {
+            Some(format_localized_message(
+                localizer,
+                "wizard-summary-planned-execution-program-zipped",
+                &[],
+                "  Program: the installer inside the .zip, once it is downloaded".to_string(),
+            ))
+        }
+        None => None,
     }
 }

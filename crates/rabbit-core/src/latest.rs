@@ -7,8 +7,8 @@ use std::io::Read;
 use crate::error::{RabbitError, Result};
 use crate::hfs::{HfsListEntry, fetch_file_list, parse_get_file_list_response};
 use crate::package::{
-    GithubReleaseSelector, GithubReleaseSpec, HfsListingSpec, VersionRule, VersionSource,
-    WhatsNewRule, embedded_package_manifest,
+    GithubReleaseSelector, GithubReleaseSpec, HfsListingSpec, PackageChannels, STABLE_CHANNEL,
+    VersionRule, VersionSource, WhatsNewRule, embedded_package_manifest,
 };
 use crate::plan::AvailablePackage;
 use crate::version::Version;
@@ -83,6 +83,14 @@ pub struct LatestVersionsReport {
 /// `Err` left is failing to construct the HTTP client itself, which is a
 /// local environment problem that would fail every provider identically.
 pub fn fetch_latest_versions() -> Result<LatestVersionsReport> {
+    fetch_latest_versions_on(&PackageChannels::new())
+}
+
+/// [`fetch_latest_versions`], with each package checked on the channel
+/// `channels` chooses for it. Each resulting [`AvailablePackage`] records the
+/// channel it was checked on, which is what lets the planner tell an update
+/// apart from a switch between channels.
+pub fn fetch_latest_versions_on(channels: &PackageChannels) -> Result<LatestVersionsReport> {
     let client = build_http_client()?;
     let mut packages = Vec::new();
     let mut failures = Vec::new();
@@ -90,8 +98,11 @@ pub fn fetch_latest_versions() -> Result<LatestVersionsReport> {
     // `version` rule (HTML / JSON / plain-text snowflakes), a `github_release`
     // block, or an `hfs_listing` block (JAWS). Per-package failure tolerance —
     // one unreachable upstream doesn't sink the rest.
-    for spec in embedded_package_manifest().packages {
-        let Some(result) = resolve_manifest_version(&client, &spec) else {
+    for declared in embedded_package_manifest().packages {
+        let channel = non_stable_channel(channels.get(&declared.id).map(String::as_str));
+        let spec = declared.on_channel(channel.as_deref());
+        let Some((result, channel)) = resolve_version_on_channel(&client, &declared, channel)
+        else {
             continue;
         };
         match result {
@@ -102,6 +113,7 @@ pub fn fetch_latest_versions() -> Result<LatestVersionsReport> {
                 package_id: spec.id.clone(),
                 version: Some(version),
                 whats_new: None,
+                channel,
             }),
             Err(error) => failures.push(LatestVersionFailure {
                 package_id: spec.id.clone(),
@@ -110,6 +122,14 @@ pub fn fetch_latest_versions() -> Result<LatestVersionsReport> {
         }
     }
     Ok(LatestVersionsReport { packages, failures })
+}
+
+/// `channel`, unless it is stable - which is represented as no channel at
+/// all, so every "is this stable?" check has exactly one form to handle.
+fn non_stable_channel(channel: Option<&str>) -> Option<String> {
+    channel
+        .filter(|channel| *channel != STABLE_CHANNEL)
+        .map(str::to_string)
 }
 
 /// Resolve a package's latest version from its manifest's data-driven source:
@@ -127,10 +147,42 @@ fn resolve_manifest_version(
             http_get_text(client, &url)
                 .and_then(|body| resolve_github_version(&body, &url, github_release)),
         )
+    } else if let Some(actions) = &spec.github_actions_artifact {
+        // A pull request's build is the same CI run on every platform, so
+        // the current one decides - it is the one being installed on.
+        let platform = crate::model::Platform::current().unwrap_or(crate::model::Platform::Windows);
+        Some(
+            crate::actions_artifact::newest_build(client, actions, &spec.id, platform).and_then(
+                |(build, _)| {
+                    Version::parse(&build.version).map_err(|_| RabbitError::RemoteData {
+                        url: crate::actions_artifact::download_url(actions, &build),
+                        message: format!("unreadable build version {:?}", build.version),
+                    })
+                },
+            ),
+        )
     } else {
         spec.hfs_listing
             .as_ref()
             .map(|hfs| resolve_hfs_listing_version(client, hfs))
+    }
+}
+
+/// [`resolve_manifest_version`] for `declared` on `channel`, falling back to
+/// the regular release when a pull request's build has run out. Returns the
+/// channel the version really came from - `None` after a fallback, which the
+/// planner then reads as "go back to stable".
+fn resolve_version_on_channel(
+    client: &Client,
+    declared: &crate::package::EmbeddedPackageSpec,
+    channel: Option<String>,
+) -> Option<(Result<Version>, Option<String>)> {
+    let result = resolve_manifest_version(client, &declared.on_channel(channel.as_deref()))?;
+    match result {
+        Err(RabbitError::PullRequestBuildGone { .. }) => {
+            resolve_manifest_version(client, declared).map(|stable| (stable, None))
+        }
+        other => Some((other, channel)),
     }
 }
 
@@ -174,6 +226,10 @@ pub fn fetch_latest_for_package(package_id: &str) -> Result<Version> {
 pub struct LatestPackageDetails {
     pub version: Version,
     pub whats_new: Option<String>,
+    /// The channel the version came from. `None` is stable - including when
+    /// a pull request's build had run out and the regular release was
+    /// checked instead.
+    pub channel: Option<String>,
 }
 
 /// Like [`fetch_latest_for_package`], but also resolves the package's
@@ -188,6 +244,32 @@ pub fn fetch_latest_details_for_package(
     package_id: &str,
     installed: Option<&Version>,
 ) -> Result<LatestPackageDetails> {
+    fetch_latest_details_for_package_on(package_id, installed, None)
+}
+
+/// [`fetch_latest_details_for_package`] on `channel` (`None` = stable): the
+/// channel's version rule and its own release notes - landoleet's
+/// whatsnew.txt for REAPER's development builds, say.
+pub fn fetch_latest_details_for_package_on(
+    package_id: &str,
+    installed: Option<&Version>,
+    channel: Option<&str>,
+) -> Result<LatestPackageDetails> {
+    let channel = non_stable_channel(channel);
+    match latest_details_on_channel(package_id, installed, channel.as_deref()) {
+        // A pull request's build ran out: check the regular release instead.
+        Err(RabbitError::PullRequestBuildGone { .. }) => {
+            latest_details_on_channel(package_id, installed, None)
+        }
+        other => other,
+    }
+}
+
+fn latest_details_on_channel(
+    package_id: &str,
+    installed: Option<&Version>,
+    channel: Option<&str>,
+) -> Result<LatestPackageDetails> {
     let manifest = embedded_package_manifest();
     let spec = manifest
         .packages
@@ -196,7 +278,10 @@ pub fn fetch_latest_details_for_package(
         .ok_or_else(|| RabbitError::RemoteData {
             url: String::new(),
             message: format!("no package named {package_id}"),
-        })?;
+        })?
+        .on_channel(channel);
+    let spec = &spec;
+    let channel = channel.map(str::to_string);
     let client = build_http_client()?;
     // When the version rule and the What's-New rule read the same URL
     // (OSARA's update.json carries both the version and the commit feed),
@@ -217,7 +302,11 @@ pub fn fetch_latest_details_for_package(
         let body = http_get_text(&client, version_url)?;
         let version = resolve_json_version(&body, version_url, version_pointer)?;
         let whats_new = resolve_json_commits(&body, notes_url, notes_pointer, installed).ok();
-        return Ok(LatestPackageDetails { version, whats_new });
+        return Ok(LatestPackageDetails {
+            version,
+            whats_new,
+            channel,
+        });
     }
     // Every package resolves its version data-driven: a `version` VersionRule
     // (REAPER/OSARA/SWS/FFmpeg), a `github_release` block (Surge XT, ReaKontrol,
@@ -232,7 +321,11 @@ pub fn fetch_latest_details_for_package(
         .whats_new
         .as_ref()
         .and_then(|rule| resolve_whats_new_rule(&client, rule, installed).ok());
-    Ok(LatestPackageDetails { version, whats_new })
+    Ok(LatestPackageDetails {
+        version,
+        whats_new,
+        channel,
+    })
 }
 
 /// Resolve a data-driven [`WhatsNewRule`] into the rendered notes text shown

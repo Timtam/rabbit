@@ -35,6 +35,7 @@ fn smoke_setup_options(target_app_path: PathBuf, lock_path: PathBuf) -> SetupOpt
         lock_path: Some(lock_path),
         force_reinstall_packages: Vec::new(),
         package_variants: Default::default(),
+        package_channels: Default::default(),
         configuration_step_ids: Vec::new(),
         reaper_language_package: None,
     }
@@ -50,6 +51,7 @@ fn smoke_package_options(lock_path: PathBuf) -> PackageOperationOptions {
         lock_path: Some(lock_path),
         force_reinstall_packages: Vec::new(),
         package_variants: Default::default(),
+        package_channels: Default::default(),
     }
 }
 

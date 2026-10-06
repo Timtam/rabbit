@@ -150,6 +150,22 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
             .text("wizard-close-during-self-update-title")
             .value,
         close_during_self_update_body: localizer.text("wizard-close-during-self-update-body").value,
+        expert_enable_title: localizer.text("wizard-expert-enable-title").value,
+        expert_enable_body: localizer.text("wizard-expert-enable-body").value,
+        expert_disabled_title: localizer.text("wizard-expert-disabled-title").value,
+        expert_disabled_body: localizer.text("wizard-expert-disabled-body").value,
+        expert_first_page_title: localizer.text("wizard-expert-first-page-title").value,
+        expert_first_page_body: localizer.text("wizard-expert-first-page-body").value,
+        expert_busy_body: localizer.text("wizard-expert-busy-body").value,
+        expert_reaper_builds_label: localizer.text("wizard-expert-reaper-builds-label").value,
+        expert_reaper_builds_stable: localizer.text("wizard-expert-reaper-builds-stable").value,
+        expert_reaper_builds_dev: localizer.text("package-channel-reaper-dev").value,
+        expert_osara_builds_label: localizer.text("wizard-expert-osara-builds-label").value,
+        expert_osara_builds_snapshot: localizer.text("wizard-expert-osara-builds-snapshot").value,
+        expert_osara_builds_loading: localizer.text("wizard-expert-osara-builds-loading").value,
+        expert_osara_builds_unavailable: localizer
+            .text("wizard-expert-osara-builds-unavailable")
+            .value,
     }
 }
 

@@ -65,6 +65,7 @@ pub fn execute_wizard_install_with_progress(
             lock_path: None,
             force_reinstall_packages: request.force_reinstall_packages.clone(),
             package_variants: request.package_variants.clone(),
+            package_channels: request.package_channels.clone(),
             reaper_language_package: request.reaper_language_package.clone(),
             configuration_step_ids: request.configuration_step_ids.clone(),
         },

@@ -166,5 +166,6 @@ pub(super) fn sample_install_request(resource_path: PathBuf) -> WizardInstallReq
         configuration_step_ids: Vec::new(),
         declined_packages: Vec::new(),
         accepted_packages: Vec::new(),
+        package_channels: Default::default(),
     }
 }

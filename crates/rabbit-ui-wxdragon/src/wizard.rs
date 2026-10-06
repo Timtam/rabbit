@@ -4,6 +4,7 @@
 
 mod bootstrap;
 mod configuration;
+mod expert_mode;
 mod install;
 mod labels;
 mod model;
@@ -21,6 +22,7 @@ mod tests;
 
 pub use bootstrap::*;
 pub use configuration::*;
+pub use expert_mode::*;
 pub use install::*;
 pub use model::*;
 pub use outcome::*;

@@ -150,6 +150,20 @@ pub struct WizardText {
     pub close_during_install_body: String,
     pub close_during_self_update_title: String,
     pub close_during_self_update_body: String,
+    pub expert_enable_title: String,
+    pub expert_enable_body: String,
+    pub expert_disabled_title: String,
+    pub expert_disabled_body: String,
+    pub expert_first_page_title: String,
+    pub expert_first_page_body: String,
+    pub expert_busy_body: String,
+    pub expert_reaper_builds_label: String,
+    pub expert_reaper_builds_stable: String,
+    pub expert_reaper_builds_dev: String,
+    pub expert_osara_builds_label: String,
+    pub expert_osara_builds_snapshot: String,
+    pub expert_osara_builds_loading: String,
+    pub expert_osara_builds_unavailable: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +242,10 @@ pub struct PackageRow {
     /// disabled on a portable REAPER target (the package installs to a fixed
     /// location outside any portable folder).
     pub requires_standard_install: bool,
+    /// The channel the available build is on; `None` is the regular release.
+    pub available_channel: Option<String>,
+    /// The channel the installed build came from, as its receipt recorded it.
+    pub installed_channel: Option<String>,
 }
 
 /// Wizard-side row for a single [`crate::configuration::ConfigurationStep`]
@@ -307,6 +325,9 @@ pub struct WizardInstallOptions {
     /// [`WizardInstallRequest::reaper_language_package`].
     pub reaper_language_package: Option<String>,
     pub cache_dir: Option<PathBuf>,
+    /// Channel per package for this run; see
+    /// [`WizardInstallRequest::package_channels`].
+    pub package_channels: rabbit_core::package::PackageChannels,
 }
 
 impl Default for WizardInstallOptions {
@@ -319,6 +340,7 @@ impl Default for WizardInstallOptions {
             package_variants: std::collections::BTreeMap::new(),
             reaper_language_package: None,
             cache_dir: None,
+            package_channels: Default::default(),
         }
     }
 }
@@ -364,6 +386,10 @@ pub struct WizardInstallRequest {
     /// Opt-out-remembering packages the user ticked, clearing any refusal
     /// recorded earlier so a change of mind sticks.
     pub accepted_packages: Vec<String>,
+    /// The channel each package is installed from. Empty outside expert
+    /// mode, which is exactly what sends a package that came from a
+    /// development build back to stable.
+    pub package_channels: rabbit_core::package::PackageChannels,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

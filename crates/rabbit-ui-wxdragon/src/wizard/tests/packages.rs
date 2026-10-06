@@ -191,6 +191,7 @@ fn a_declined_package_does_not_auto_tick_its_updates_either() {
         &[],
         &HostCapabilities::default(),
         &declined,
+        &Default::default(),
     );
     assert!(
         !rows[0].selected,
@@ -233,6 +234,7 @@ fn reakontrol_install_row_starts_ticked_when_komplete_kontrol_is_detected() {
         &[],
         &host,
         &Default::default(),
+        &Default::default(),
     );
     assert!(
         rows[0].selected,
@@ -257,6 +259,7 @@ fn reakontrol_install_row_starts_ticked_when_komplete_kontrol_is_detected() {
         }],
         &[],
         &HostCapabilities::default(),
+        &Default::default(),
         &Default::default(),
     );
     assert!(
@@ -533,6 +536,7 @@ fn whats_new_notes_render_in_the_package_details_pane() {
         package_id: PACKAGE_OSARA.to_string(),
         version: Some(Version::parse("2026.8.1.2278,857265da").unwrap()),
         whats_new: Some("• Fix the slider.\n• Logging improvements.".to_string()),
+        channel: None,
     }];
     let plan =
         wizard_package_plan_for_target_with_available(&model, Some(&target), &available).unwrap();
@@ -690,4 +694,152 @@ fn spanish_variant_dropdown_maps_each_position_to_a_manifest_variant() {
         fallback.get(VARIANT_CHOICE_PACKAGE_ID).map(String::as_str),
         Some(VARIANT_CHOICE_IDS[0])
     );
+}
+
+/// One REAPER row planned against `available` on `channel`, for a target
+/// whose REAPER was last installed from `installed_channel`.
+fn reaper_row(
+    action: PlanActionKind,
+    channel: Option<&str>,
+    installed_channel: Option<&str>,
+) -> PackageRow {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let text = wizard_text(&localizer);
+    let specs = builtin_package_specs(Platform::Windows);
+    let installed_channels: rabbit_core::package::PackageChannels = installed_channel
+        .map(|channel| {
+            [(PACKAGE_REAPER.to_string(), channel.to_string())]
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default();
+    package_rows(
+        &localizer,
+        &text,
+        Platform::Windows,
+        Architecture::X64,
+        &specs,
+        &[PlanAction {
+            package_id: PACKAGE_REAPER.to_string(),
+            action,
+            installed_version: Some(Version::parse("7.80").unwrap()),
+            available_version: Some(Version::parse("7.80+dev0918").unwrap()),
+            reason: "test".to_string(),
+        }],
+        &[AvailablePackage {
+            package_id: PACKAGE_REAPER.to_string(),
+            version: Some(Version::parse("7.80+dev0918").unwrap()),
+            whats_new: None,
+            channel: channel.map(str::to_string),
+        }],
+        &HostCapabilities::default(),
+        &Default::default(),
+        &installed_channels,
+    )
+    .remove(0)
+}
+
+#[test]
+fn a_development_build_says_so_in_the_row_itself() {
+    let row = reaper_row(PlanActionKind::Update, Some("dev"), None);
+    assert!(
+        row.summary.contains("(development build)"),
+        "{}",
+        row.summary
+    );
+    assert!(row.details.contains("unsupported"), "{}", row.details);
+}
+
+#[test]
+fn ticking_a_row_keeps_its_channel_tag() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let installation = fake_installation();
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        vec![installation.clone()],
+        Some(0),
+        InstallPlan {
+            target: Some(installation),
+            actions: Vec::new(),
+            notes: Vec::new(),
+        },
+    );
+    let mut row = reaper_row(PlanActionKind::Update, Some("dev"), None);
+    apply_checkbox_state_to_package_row(&model, &mut row, false).unwrap();
+    apply_checkbox_state_to_package_row(&model, &mut row, true).unwrap();
+    assert!(
+        row.summary.contains("(development build)"),
+        "{}",
+        row.summary
+    );
+
+    // The way back is only announced while the row actually takes it.
+    let mut back = reaper_row(PlanActionKind::Update, None, Some("dev"));
+    apply_checkbox_state_to_package_row(&model, &mut back, false).unwrap();
+    assert!(!back.summary.contains("back to"), "{}", back.summary);
+    apply_checkbox_state_to_package_row(&model, &mut back, true).unwrap();
+    assert!(back.summary.contains("back to"), "{}", back.summary);
+}
+
+#[test]
+fn a_row_that_installs_nothing_does_not_promise_an_install() {
+    // After installing a development build, the re-plan keeps REAPER.
+    // The tag still says which build it is, but "will be installed"
+    // would be false.
+    let row = reaper_row(PlanActionKind::Keep, Some("dev"), Some("dev"));
+    assert!(
+        row.summary.contains("(development build)"),
+        "{}",
+        row.summary
+    );
+    assert!(
+        !row.details.contains("will be installed"),
+        "{}",
+        row.details
+    );
+}
+
+#[test]
+fn a_pull_request_build_names_its_pull_request() {
+    let row = reaper_row(PlanActionKind::Update, Some("pr:1454"), None);
+    assert!(row.summary.contains("pull request 1454"), "{}", row.summary);
+    assert!(row.details.contains("90 days"), "{}", row.details);
+}
+
+#[test]
+fn going_back_to_the_regular_release_is_announced() {
+    // Leaving expert mode quietly takes a pre-release back to the regular
+    // release. The unlock dialog is long gone by then, so the row is the
+    // only place that can say why REAPER is being "updated" to an older
+    // version.
+    let row = reaper_row(PlanActionKind::Update, None, Some("dev"));
+    assert!(
+        row.summary.contains("back to the regular release"),
+        "{}",
+        row.summary
+    );
+    // ...but only when this run actually does something with it.
+    let kept = reaper_row(PlanActionKind::Keep, None, Some("dev"));
+    assert!(!kept.summary.contains("back to"), "{}", kept.summary);
+    // and an ordinary stable row carries no note at all.
+    let plain = reaper_row(PlanActionKind::Update, None, None);
+    assert!(!plain.summary.contains('('), "{}", plain.summary);
+}
+
+#[test]
+fn expert_mode_env_values_and_channels_outside_expert_mode() {
+    for on in ["1", "true", "YES", " on "] {
+        assert!(expert_mode_value_enabled(on), "{on:?}");
+    }
+    for off in ["", "0", "false", "no", "maybe"] {
+        assert!(!expert_mode_value_enabled(off), "{off:?}");
+    }
+    // Outside expert mode no channel is passed, whatever the choices
+    // say - which is what sends pre-release packages back to stable.
+    assert!(wizard_channels(false, Some("dev".into()), Some("pr:1".into())).is_empty());
+    let on = wizard_channels(true, Some("dev".into()), None);
+    assert_eq!(on.get(PACKAGE_REAPER).map(String::as_str), Some("dev"));
+    assert!(!on.contains_key(PACKAGE_OSARA));
 }

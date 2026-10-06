@@ -124,6 +124,9 @@ fn execute_program_plan(plan: &PlannedExecutionPlan) -> Result<()> {
     }
 
     let mut command = Command::new(program);
+    // Every package that is not elevated comes through here, OSARA's
+    // pull-request builds among them (OSARA never elevates).
+    rabbit_platform::process::without_rabbit_secrets(&mut command);
     // On Windows, `Command` quotes any argument containing a space when it
     // builds the command line — which breaks NSIS's `/D=<path>`, since NSIS
     // reads that out of the raw command line and needs it unquoted. A

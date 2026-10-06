@@ -2,6 +2,8 @@
 //! RABBIT in another language.
 
 use std::path::Path;
+
+use crate::wx_app::expert_mode::expert_mode;
 use std::process::Command;
 
 /// macOS: tell Cocoa what language this process is running in by setting the
@@ -51,7 +53,16 @@ pub(crate) fn relaunch_with_locale(locale: &str) {
             return;
         }
     };
-    match Command::new(&exe).env("RABBIT_LOCALE", locale).spawn() {
+    let mut command = Command::new(&exe);
+    command.env("RABBIT_LOCALE", locale);
+    // Expert mode is not saved anywhere, so a relaunch has to carry it -
+    // and must drop an inherited RABBIT_EXPERT if it was switched off.
+    if expert_mode() {
+        command.env(crate::EXPERT_MODE_ENV, "1");
+    } else {
+        command.env_remove(crate::EXPERT_MODE_ENV);
+    }
+    match command.spawn() {
         Ok(_) => std::process::exit(0),
         Err(error) => {
             eprintln!("could not relaunch RABBIT with locale {locale}: {error}");
@@ -111,10 +122,13 @@ pub(crate) fn open_resource_folder(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Start REAPER. It never gets RABBIT's GitHub token: it may be running an
+/// OSARA pull-request build. An app bundle started through `open` gets its
+/// environment from launchd, not from RABBIT, so it needs nothing removed.
 pub(crate) fn launch_reaper(path: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        Command::new(path).spawn()?;
+        rabbit_platform::process::without_rabbit_secrets(&mut Command::new(path)).spawn()?;
         Ok(())
     }
 
@@ -127,7 +141,7 @@ pub(crate) fn launch_reaper(path: &Path) -> std::io::Result<()> {
         {
             Command::new("open").arg(path).spawn()?;
         } else {
-            Command::new(path).spawn()?;
+            rabbit_platform::process::without_rabbit_secrets(&mut Command::new(path)).spawn()?;
         }
         Ok(())
     }

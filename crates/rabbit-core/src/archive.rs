@@ -357,6 +357,73 @@ const OSARA_KEYMAP_BASENAME: &str = "OSARA.ReaperKeyMap";
 const OSARA_LOCALE_PREFIX: &str = "locale/";
 const OSARA_LOCALE_EXTENSION: &str = ".po";
 
+/// The part of `entry_name` after `OSARAInstaller.app/Contents/Resources/`,
+/// wherever that folder sits. A snapshot zip has it at the root; a
+/// pull-request build is zipped again by GitHub, so it may sit one folder
+/// down. The match must start a path segment, so a folder merely *ending* in
+/// that name is not mistaken for it.
+fn osara_resources_suffix(entry_name: &str) -> Option<&str> {
+    let mut search_from = 0;
+    while let Some(relative) = entry_name[search_from..].find(OSARA_INSTALLER_RESOURCES_PREFIX) {
+        let at = search_from + relative;
+        if at == 0 || entry_name.as_bytes()[at - 1] == b'/' {
+            return Some(&entry_name[at + OSARA_INSTALLER_RESOURCES_PREFIX.len()..]);
+        }
+        search_from = at + 1;
+    }
+    None
+}
+
+/// Unwrap an installer that arrives inside a zip - which is how GitHub
+/// delivers every workflow artifact, including OSARA's pull-request builds.
+/// The zip must hold exactly one `.exe`; it is extracted next to the zip and
+/// its path returned, so the rest of the pipeline sees an ordinary installer.
+pub fn extract_zipped_installer(zip_path: &Path) -> Result<PathBuf> {
+    let file = fs::File::open(zip_path).with_path(zip_path)?;
+    let mut archive =
+        zip::ZipArchive::new(BufReader::new(file)).map_err(|source| RabbitError::ArchiveRead {
+            archive: zip_path.to_path_buf(),
+            message: source.to_string(),
+        })?;
+    let installers: Vec<usize> = (0..archive.len())
+        .filter(|index| {
+            archive.by_index(*index).is_ok_and(|entry| {
+                entry.is_file() && entry.name().to_ascii_lowercase().ends_with(".exe")
+            })
+        })
+        .collect();
+    let [index] = installers[..] else {
+        return Err(RabbitError::ArchiveRead {
+            archive: zip_path.to_path_buf(),
+            message: format!(
+                "expected exactly one installer (.exe) inside, found {}",
+                installers.len()
+            ),
+        });
+    };
+    let mut entry = archive
+        .by_index(index)
+        .map_err(|source| RabbitError::ArchiveRead {
+            archive: zip_path.to_path_buf(),
+            message: source.to_string(),
+        })?;
+    // Only the file name: never trust a path from inside an archive.
+    let name = Path::new(entry.name())
+        .file_name()
+        .map(|name| name.to_os_string())
+        .ok_or_else(|| RabbitError::ArchiveRead {
+            archive: zip_path.to_path_buf(),
+            message: "installer entry has no file name".to_string(),
+        })?;
+    let folder = zip_path.with_extension("unzipped");
+    fs::create_dir_all(&folder).with_path(&folder)?;
+    let target = folder.join(name);
+    let mut output = fs::File::create(&target).with_path(&target)?;
+    std::io::copy(&mut entry, &mut output).with_path(&target)?;
+    output.flush().with_path(&target)?;
+    Ok(target)
+}
+
 pub fn extract_osara_macos_assets(
     archive_path: &Path,
     resource_path: &Path,
@@ -387,7 +454,7 @@ pub fn extract_osara_macos_assets(
             continue;
         }
         let entry_name = entry.name().to_string();
-        let Some(suffix) = entry_name.strip_prefix(OSARA_INSTALLER_RESOURCES_PREFIX) else {
+        let Some(suffix) = osara_resources_suffix(&entry_name) else {
             continue;
         };
 
@@ -437,7 +504,7 @@ mod tests {
 
     use super::{
         extract_bin_directory_from_archive, extract_osara_macos_assets,
-        extract_user_plugin_from_archive,
+        extract_user_plugin_from_archive, extract_zipped_installer, osara_resources_suffix,
     };
     use crate::error::RabbitError;
     use crate::model::Platform;
@@ -589,6 +656,82 @@ mod tests {
         assert!(report.installed_files.contains(&fr_locale));
         assert!(!resource_path.join("copying.txt").exists());
         assert!(!resource_path.join("Contents").exists());
+    }
+
+    #[test]
+    fn finds_osara_resources_one_folder_down_but_not_in_a_lookalike_folder() {
+        // A pull-request build is zipped again by GitHub, so the installer
+        // folder may sit below the zip's root.
+        assert_eq!(
+            osara_resources_suffix("OSARAInstaller.app/Contents/Resources/reaper_osara.dylib"),
+            Some("reaper_osara.dylib")
+        );
+        assert_eq!(
+            osara_resources_suffix("mac/OSARAInstaller.app/Contents/Resources/OSARA.ReaperKeyMap"),
+            Some("OSARA.ReaperKeyMap")
+        );
+        assert_eq!(
+            osara_resources_suffix("NotOSARAInstaller.app/Contents/Resources/reaper_osara.dylib"),
+            None,
+            "the match must start a path segment"
+        );
+    }
+
+    #[test]
+    fn extracts_osara_assets_from_a_nested_pull_request_zip() {
+        let dir = tempdir().unwrap();
+        let archive_path = dir.path().join("osara_mac_pr1454-534,240c4663.zip");
+        write_test_archive(
+            &archive_path,
+            &[
+                (
+                    "mac/OSARAInstaller.app/Contents/Resources/reaper_osara.dylib",
+                    b"pr-plugin",
+                ),
+                (
+                    "mac/OSARAInstaller.app/Contents/Resources/OSARA.ReaperKeyMap",
+                    b"pr-keymap",
+                ),
+            ],
+        );
+        let resource_path = dir.path().join("REAPER");
+        extract_osara_macos_assets(&archive_path, &resource_path).unwrap();
+        assert_eq!(
+            std::fs::read(resource_path.join("UserPlugins").join("reaper_osara.dylib")).unwrap(),
+            b"pr-plugin"
+        );
+    }
+
+    #[test]
+    fn unwraps_a_zipped_installer_and_ignores_paths_inside_the_zip() {
+        let dir = tempdir().unwrap();
+        let zip_path = dir.path().join("osara_windows_pr1454-534,240c4663.zip");
+        // A path that tries to climb out of the cache: only the file name may
+        // be used.
+        write_test_archive(
+            &zip_path,
+            &[("../../escape/osara_pr1454-534,240c4663.exe", b"nsis")],
+        );
+        let installer = extract_zipped_installer(&zip_path).unwrap();
+        assert_eq!(
+            installer,
+            dir.path()
+                .join("osara_windows_pr1454-534,240c4663.unzipped")
+                .join("osara_pr1454-534,240c4663.exe")
+        );
+        assert_eq!(std::fs::read(&installer).unwrap(), b"nsis");
+        assert!(!dir.path().join("escape").exists());
+    }
+
+    #[test]
+    fn a_zip_without_exactly_one_installer_is_refused() {
+        let dir = tempdir().unwrap();
+        let none = dir.path().join("none.zip");
+        write_test_archive(&none, &[("readme.txt", b"no installer")]);
+        assert!(extract_zipped_installer(&none).is_err());
+        let two = dir.path().join("two.zip");
+        write_test_archive(&two, &[("a.exe", b"a"), ("b.exe", b"b")]);
+        assert!(extract_zipped_installer(&two).is_err());
     }
 
     #[test]

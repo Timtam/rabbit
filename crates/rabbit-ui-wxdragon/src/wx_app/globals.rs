@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rabbit_core::localization::Localizer;
 
@@ -82,7 +83,8 @@ pub(crate) enum VersionCheckEvent {
     /// What's-New notes, or an error message.
     Result {
         package_id: String,
-        outcome: std::result::Result<(String, Option<String>), String>,
+        /// (version, What's-New notes, the channel the version came from).
+        outcome: std::result::Result<(String, Option<String>, Option<String>), String>,
     },
     /// Worker has finished iterating all packages — the UI should rebuild the
     /// package list with the fetched data and re-enable interaction.
@@ -105,7 +107,21 @@ pub(crate) fn install_version_check_dispatcher(dispatcher: VersionCheckDispatche
     });
 }
 
-pub(crate) fn dispatch_version_check_event(event: VersionCheckEvent) {
+/// Which version check is current. Each check tags its events with the
+/// number it started under, and Back from the check's page moves the number
+/// on, so a check that was left behind can neither advance the wizard nor mix
+/// its results into the next one. It would carry the builds chosen before
+/// Back, and those may since have changed (or expert mode been turned off).
+pub(crate) static VERSION_CHECK_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn abandon_version_check() {
+    VERSION_CHECK_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+pub(crate) fn dispatch_version_check_event(generation: u64, event: VersionCheckEvent) {
+    if generation != VERSION_CHECK_GENERATION.load(Ordering::SeqCst) {
+        return;
+    }
     VERSION_CHECK_DISPATCHER.with(|cell| {
         if let Some(dispatcher) = cell.borrow_mut().as_mut() {
             dispatcher(event);

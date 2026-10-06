@@ -1,6 +1,7 @@
 //! The wxWidgets wizard shell: `run` builds the frame, wires every page's
 //! events, and hands the work to the modules beside it.
 mod close_guard;
+mod expert_mode;
 mod globals;
 mod packages_page;
 mod pages;
@@ -9,6 +10,12 @@ mod self_update_ui;
 mod shell;
 mod version_check;
 mod widgets;
+
+use expert_mode::{
+    EXPERT_MODE, RUN_AVAILABLE, RUN_CHANNELS, apply_expert_mode, bind_expert_mode_chord,
+    expert_mode, osara_build_channel, reaper_build_channel,
+};
+use globals::abandon_version_check;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -25,6 +32,7 @@ use crate::{
     refreshed_target_row, run_wizard_self_update_check, run_wizard_self_update_release_notes,
     save_wizard_outcome_report, selected_configuration_step_ids, wizard_outcome_report_from_error,
     wizard_outcome_report_from_success, wizard_package_plan_for_target,
+    wizard_package_plan_for_target_with_available,
 };
 use rabbit_core::localization::resolve_runtime_locale;
 use rabbit_core::progress::ProgressReporter;
@@ -94,6 +102,7 @@ pub fn run() {
             }
         };
 
+        EXPERT_MODE.store(crate::expert_mode_requested_by_env(), Ordering::SeqCst);
         let frame = Frame::builder()
             .with_title(&model.window_title)
             .with_size(Size::new(820, 680))
@@ -232,6 +241,11 @@ pub fn run() {
         // wherever the user happens to be standing.
         bind_done_page_enter_closes(&wizard_widgets.done_status, &frame, &current_step);
         bind_done_page_enter_closes(&wizard_widgets.done_details, &frame, &current_step);
+        bind_expert_mode_chord(&frame, &model, wizard_widgets, &current_step);
+        if expert_mode() {
+            // RABBIT_EXPERT=1: no confirmation, setting the variable was it.
+            apply_expert_mode(&model, &wizard_widgets);
+        }
 
         {
             let current_step = Arc::clone(&current_step);
@@ -251,6 +265,9 @@ pub fn run() {
                 //   currently-selected plan; otherwise PACKAGES_STEP, again to
                 //   skip the now-irrelevant ack page.
                 let current = current_step.load(Ordering::SeqCst);
+                if current == VERSION_CHECK_STEP {
+                    abandon_version_check();
+                }
                 let step = match current {
                     PACKAGES_STEP => TARGET_STEP,
                     REAPACK_ACK_STEP => {
@@ -319,7 +336,16 @@ pub fn run() {
                         // can't fire from a stale Review state, and let
                         // the worker thread do the heavy lifting.
                         review_can_install.set(false);
+                        // Fix the builds for this run now, so the version
+                        // check and the install can't disagree about them.
+                        let channels = crate::wizard_channels(
+                            expert_mode(),
+                            reaper_build_channel(&widgets),
+                            osara_build_channel(&widgets),
+                        );
+                        RUN_CHANNELS.with(|cell| *cell.borrow_mut() = channels.clone());
                         start_version_check(VersionCheckUi {
+                            channels,
                             widgets,
                             model: Arc::clone(&model),
                             package_rows: Rc::clone(&package_rows),
@@ -497,6 +523,7 @@ pub fn run() {
                                 .get(widgets.reaper_language_choice.get_selection().unwrap_or(0)
                                     as usize)
                                 .map(|(id, _)| id.clone()),
+                                package_channels: RUN_CHANNELS.with(|cell| cell.borrow().clone()),
                                 ..WizardInstallOptions::default()
                             },
                         )
@@ -583,9 +610,18 @@ pub fn run() {
                             return;
                         };
                         let refreshed_target = refreshed_target_row(&model, &target);
-                        let Ok(plan) =
-                            wizard_package_plan_for_target(&model, Some(&refreshed_target))
-                        else {
+                        // Plan against the versions this run installed from,
+                        // so a development build just installed reads as
+                        // current instead of as something to replace.
+                        let plan = match RUN_AVAILABLE.with(|cell| cell.borrow().clone()) {
+                            Some(available) => wizard_package_plan_for_target_with_available(
+                                &model,
+                                Some(&refreshed_target),
+                                &available,
+                            ),
+                            None => wizard_package_plan_for_target(&model, Some(&refreshed_target)),
+                        };
+                        let Ok(plan) = plan else {
                             return;
                         };
                         *package_rows.borrow_mut() = plan.package_rows;

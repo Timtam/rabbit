@@ -6,10 +6,11 @@ use rabbit_core::model::Platform;
 use rabbit_core::self_update::{
     ApplySelfUpdateOptions, DEFAULT_SELF_UPDATE_MANIFEST_URL, SelfUpdateApplyReport,
     SelfUpdateCheckReport, apply_self_update, check_self_update, default_self_update_staging_dir,
-    relaunch_current_executable, resolve_self_update_release_notes,
-    stage_self_update_with_progress,
+    resolve_self_update_release_notes, stage_self_update_with_progress,
 };
 use rabbit_core::{RabbitError, Result};
+
+use super::expert_mode::EXPERT_MODE_ENV;
 
 pub fn run_wizard_self_update_check() -> Result<SelfUpdateCheckReport> {
     let platform = Platform::current().ok_or(RabbitError::UnsupportedPlatform)?;
@@ -58,8 +59,13 @@ pub fn run_wizard_self_update_apply(
     )
 }
 
-pub fn relaunch_rabbit_after_apply() -> Result<u32> {
-    relaunch_current_executable()
+/// Relaunch RABBIT after a self-update, keeping expert mode as it was:
+/// nothing saves it, so the new process only has it if we pass it on.
+pub fn relaunch_rabbit_after_apply(expert_mode: bool) -> Result<u32> {
+    rabbit_core::self_update::relaunch_current_executable_with(&[(
+        EXPERT_MODE_ENV,
+        expert_mode.then_some("1"),
+    )])
 }
 
 pub fn format_self_update_check_summary(

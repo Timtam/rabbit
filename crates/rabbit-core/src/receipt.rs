@@ -55,6 +55,13 @@ pub struct PackageReceipt {
     /// for receipts written before variants existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
+    /// The channel this install came from - `dev` for REAPER's development
+    /// builds, `pr:1454` for an OSARA pull-request build. `None` means
+    /// stable, which is also what every receipt written before channels
+    /// existed reads as. Remembered so the CLI and the wizard's expert mode
+    /// keep a package on its channel between runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
     pub installed_files: Vec<InstalledFileReceipt>,
     pub installed_at: Option<String>,
     pub rabbit_version: Option<String>,
@@ -78,6 +85,24 @@ pub enum ReceiptVerification {
 
 pub fn receipt_path(resource_path: &Path) -> PathBuf {
     resource_path.join(RECEIPT_RELATIVE_PATH)
+}
+
+/// The channel each package at `resource_path` was last installed from, as
+/// its receipt recorded it. Read raw rather than filtered to the channels
+/// the manifest still offers: a package sitting on a channel that no longer
+/// exists has to be offered the way back to stable, not left stranded.
+pub fn installed_channels_at(resource_path: &Path) -> crate::package::PackageChannels {
+    load_install_state(resource_path)
+        .ok()
+        .flatten()
+        .map(|state| {
+            state
+                .packages
+                .into_iter()
+                .filter_map(|(id, receipt)| receipt.channel.map(|channel| (id, channel)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn load_install_state(resource_path: &Path) -> Result<Option<InstallState>> {
@@ -158,6 +183,8 @@ pub fn save_install_state(resource_path: &Path, state: &InstallState) -> Result<
 pub struct PackageReceiptParams<'a> {
     /// Variant id to remember; see [`PackageReceipt::variant`].
     pub variant: Option<&'a str>,
+    /// Channel to remember; see [`PackageReceipt::channel`]. `None` is stable.
+    pub channel: Option<&'a str>,
     pub package_id: &'a str,
     pub version: Option<Version>,
     pub source_url: Option<String>,
@@ -181,6 +208,7 @@ pub fn upsert_package_receipt(
         installed_at,
         architecture,
         variant,
+        channel,
     } = params;
     let mut installed_files = installed_paths
         .iter()
@@ -197,6 +225,11 @@ pub fn upsert_package_receipt(
             source_url,
             source_sha256,
             variant: variant.map(str::to_string),
+            // Stable is recorded as nothing at all, so a receipt only ever
+            // names a channel when there is one to remember.
+            channel: channel
+                .filter(|id| *id != crate::package::STABLE_CHANNEL)
+                .map(str::to_string),
             installed_files,
             installed_at,
             rabbit_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -244,6 +277,7 @@ pub fn verify_package_receipt(
 
         if let Some(expected_size) = file.size
             && metadata.is_file()
+            && !holds_user_content(&file.path)
             && metadata.len() != expected_size
         {
             matches = false;
@@ -256,6 +290,22 @@ pub fn verify_package_receipt(
     } else {
         Ok(ReceiptVerification::Mismatch(receipt.clone()))
     }
+}
+
+/// Files an install puts in place but whose contents belong to REAPER and
+/// the user from then on: `reaper.ini` is rewritten every time REAPER runs,
+/// and `reaper-kb.ini` every time a key binding changes. Their size says
+/// nothing about whether the package is still installed, so the receipt
+/// records them without one and the check only asks whether they still
+/// exist. Before this, a portable REAPER stopped matching its own receipt
+/// the first time it was opened, and RABBIT then read it as not installed
+/// and reinstalled it on the next run.
+fn holds_user_content(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("reaper.ini") || name.eq_ignore_ascii_case("reaper-kb.ini")
+        })
 }
 
 fn build_installed_file_receipt(
@@ -279,14 +329,112 @@ fn build_installed_file_receipt(
         })
         .unwrap_or_else(|_| absolute_path.clone());
 
+    let owned_by_rabbit = metadata.is_file() && !holds_user_content(&relative_or_absolute);
     Ok(InstalledFileReceipt {
         path: relative_or_absolute,
-        sha256: metadata
-            .is_file()
+        sha256: owned_by_rabbit
             .then(|| sha256_file(&absolute_path))
             .transpose()?,
-        size: metadata.is_file().then_some(metadata.len()),
+        size: owned_by_rabbit.then_some(metadata.len()),
     })
+}
+
+#[cfg(test)]
+mod tests_user_content {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{
+        InstallState, PackageReceipt, PackageReceiptParams, ReceiptVerification,
+        load_install_state, upsert_package_receipt, verify_package_receipt,
+    };
+    use crate::package::PACKAGE_REAPER;
+
+    /// REAPER rewrites reaper.ini whenever it runs. The receipt must survive
+    /// that, or RABBIT reads a portable REAPER it installed itself as gone
+    /// and reinstalls it on the next run.
+    #[test]
+    fn reaper_rewriting_its_own_ini_keeps_the_receipt_valid() {
+        let dir = tempdir().unwrap();
+        let resource_path = dir.path();
+        fs::write(resource_path.join("reaper.exe"), b"reaper binary").unwrap();
+        fs::write(
+            resource_path.join("reaper.ini"),
+            b"[REAPER]
+",
+        )
+        .unwrap();
+
+        let mut state = InstallState::default();
+        upsert_package_receipt(
+            &mut state,
+            resource_path,
+            PackageReceiptParams {
+                package_id: PACKAGE_REAPER,
+                version: Some(crate::version::Version::parse("7.80").unwrap()),
+                variant: None,
+                channel: None,
+                source_url: None,
+                source_sha256: None,
+                installed_paths: &[
+                    resource_path.join("reaper.exe"),
+                    resource_path.join("reaper.ini"),
+                ],
+                installed_at: None,
+                architecture: None,
+            },
+        )
+        .unwrap();
+        crate::receipt::save_install_state(resource_path, &state).unwrap();
+
+        let state = load_install_state(resource_path).unwrap();
+        let receipt: &PackageReceipt = state
+            .as_ref()
+            .unwrap()
+            .packages
+            .get(PACKAGE_REAPER)
+            .unwrap();
+        let ini = receipt
+            .installed_files
+            .iter()
+            .find(|file| file.path.ends_with("reaper.ini"))
+            .unwrap();
+        assert_eq!(ini.size, None, "reaper.ini is recorded without a size");
+        assert_eq!(ini.sha256, None);
+
+        // REAPER runs and rewrites its configuration.
+        fs::write(
+            resource_path.join("reaper.ini"),
+            b"[REAPER]
+last_project=demo.rpp
+",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            verify_package_receipt(resource_path, state.as_ref(), PACKAGE_REAPER).unwrap(),
+            ReceiptVerification::Verified(_)
+        ));
+
+        // A file RABBIT does own still has to match.
+        fs::write(
+            resource_path.join("reaper.exe"),
+            b"replaced by something else",
+        )
+        .unwrap();
+        assert!(matches!(
+            verify_package_receipt(resource_path, state.as_ref(), PACKAGE_REAPER).unwrap(),
+            ReceiptVerification::Mismatch(_)
+        ));
+
+        // And it must still be there at all.
+        fs::remove_file(resource_path.join("reaper.ini")).unwrap();
+        assert!(matches!(
+            verify_package_receipt(resource_path, state.as_ref(), PACKAGE_REAPER).unwrap(),
+            ReceiptVerification::Mismatch(_)
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -321,6 +469,7 @@ mod tests {
                 source_url: None,
                 source_sha256: None,
                 variant: None,
+                channel: None,
                 installed_files: vec![InstalledFileReceipt {
                     path: PathBuf::from("UserPlugins/reaper_osara64.dll"),
                     sha256: None,
@@ -371,6 +520,7 @@ mod tests {
                 id: "osara".to_string(),
                 version: None,
                 variant: None,
+                channel: None,
                 source_url: None,
                 source_sha256: None,
                 installed_files: Vec::new(),
@@ -435,6 +585,7 @@ mod tests {
                 id: "langpack-de".to_string(),
                 version: None,
                 variant: None,
+                channel: None,
                 source_url: None,
                 source_sha256: None,
                 installed_files: Vec::new(),

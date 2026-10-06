@@ -19,6 +19,45 @@ use super::support::*;
 use crate::wizard::*;
 
 #[test]
+fn the_summary_says_what_runs_for_an_installer_still_in_its_zip() {
+    let plan = |kind, program: Option<&str>| PlannedExecutionPlan {
+        kind,
+        artifact_location: "https://nightly.link/jcsteh/osara/actions/artifacts/1.zip".to_string(),
+        program: program.map(str::to_string),
+        arguments: Vec::new(),
+        working_directory: None,
+        verification_paths: Vec::new(),
+        requires_elevation: false,
+        freshness_paths: Vec::new(),
+    };
+    let english = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let german = Localizer::embedded("de-DE").unwrap();
+
+    let zipped = plan(PlannedExecutionKind::LaunchInstallerExecutable, None);
+    let line = planned_execution_program_line(Some(&english), &zipped).unwrap();
+    assert!(line.contains("the installer inside the .zip"), "{line}");
+    let line = planned_execution_program_line(Some(&german), &zipped).unwrap();
+    assert!(line.contains("ZIP-Datei"), "{line}");
+
+    let downloaded = plan(
+        PlannedExecutionKind::LaunchInstallerExecutable,
+        Some(r"C:\cache\osara.unzipped\osara.exe"),
+    );
+    let line = planned_execution_program_line(Some(&english), &downloaded).unwrap();
+    assert!(
+        line.contains(r"C:\cache\osara.unzipped\osara.exe"),
+        "{line}"
+    );
+
+    // A plan that never names a program still gets no line.
+    let archive = plan(PlannedExecutionKind::ExtractArchiveAndRunInstaller, None);
+    assert_eq!(
+        planned_execution_program_line(Some(&english), &archive),
+        None
+    );
+}
+
+#[test]
 fn setup_summary_includes_manual_instruction_notes() {
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
     let model = model_from_plan(
@@ -64,6 +103,7 @@ fn setup_summary_includes_manual_instruction_notes() {
                     kind: ArtifactKind::Installer,
                     url: "https://example.test/osara.exe".to_string(),
                     file_name: "osara.exe".to_string(),
+                    channel: None,
                 },
                 cached_artifact: None,
                 install_action: None,
@@ -212,6 +252,7 @@ fn setup_summary_includes_backup_paths_when_present() {
                     kind: ArtifactKind::ExtensionBinary,
                     url: "https://example.test/reaper_reapack-x64.dll".to_string(),
                     file_name: "reaper_reapack-x64.dll".to_string(),
+                    channel: None,
                 },
                 cached_artifact: None,
                 install_action: None,
@@ -299,6 +340,7 @@ fn setup_summary_includes_unattended_receipt_backup_paths() {
                     kind: ArtifactKind::Installer,
                     url: "https://example.test/osara.exe".to_string(),
                     file_name: "osara.exe".to_string(),
+                    channel: None,
                 },
                 cached_artifact: None,
                 install_action: None,
@@ -360,6 +402,7 @@ fn setup_summary_reports_failures_and_antivirus_hint() {
             kind: ArtifactKind::Installer,
             url: "https://example.test/osara.exe".to_string(),
             file_name: "osara.exe".to_string(),
+            channel: None,
         },
         cached_artifact: None,
         install_action: None,
