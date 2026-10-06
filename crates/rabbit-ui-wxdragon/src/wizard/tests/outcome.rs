@@ -8,6 +8,48 @@ use tempfile::tempdir;
 use super::support::*;
 use crate::wizard::*;
 
+/// Issue #32: the Done page said "Review the error below" with nothing
+/// below it. The reason now goes into the status field itself.
+#[test]
+fn a_failed_install_says_why_in_words() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        vec![fake_installation()],
+        Some(0),
+        InstallPlan {
+            target: None,
+            actions: Vec::new(),
+            notes: Vec::new(),
+        },
+    );
+    // The exact error the reporter's run produced.
+    let reaper_open = rabbit_core::RabbitError::PreflightFailed {
+        message: "reaper-process: Close REAPER before installing extensions: reaper.exe (5096)."
+            .to_string(),
+    };
+    assert_eq!(
+        wizard_error_reason(&model, &reaper_open),
+        "RABBIT stopped because REAPER was open. Close REAPER, then run RABBIT again."
+    );
+    // A second failed check stays in view: closing REAPER won't fix it.
+    let both = rabbit_core::RabbitError::PreflightFailed {
+        message: "resource-path: the folder is not writable.; reaper-process: Close REAPER before installing extensions: reaper.exe (5096)."
+            .to_string(),
+    };
+    assert_eq!(
+        wizard_error_reason(&model, &both),
+        "RABBIT stopped because REAPER was open. Close REAPER, then run RABBIT again.\nresource-path: the folder is not writable."
+    );
+    // Any other failure shows its own message rather than nothing.
+    let other = rabbit_core::RabbitError::PreflightFailed {
+        message: r"resource-path: C:\REAPER is not writable.".to_string(),
+    };
+    assert_eq!(wizard_error_reason(&model, &other), other.to_string());
+}
+
 #[test]
 fn wizard_error_summary_includes_selected_request_context() {
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();

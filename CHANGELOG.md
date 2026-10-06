@@ -112,6 +112,17 @@ from this file and posts it as the GitHub release body.
 
 ### Fixed
 
+- When an install failed, the result page said "Installation failed. Review
+  the error below." and then nothing: the reason sat in the details field,
+  hidden behind **Show details**, which starts unticked. The reason now
+  follows that line in the status field, which gets focus and is read out.
+  A REAPER that is still open, the usual cause, is described in plain words
+  in all five languages instead of as `preflight failed: reaper-process: …`.
+  It is also caught before anything starts: pressing **Install** while
+  REAPER is running now says to close it first and stays on the Review
+  page, so you can close REAPER and press Install again instead of
+  restarting RABBIT. (Reported by acerbt in #32.)
+
 - A portable REAPER stopped being recognised once it had been opened, and
   RABBIT then reinstalled it on the next run: a 17 MB download and an
   installer, every time. RABBIT's receipt listed `reaper.ini` with its size,

@@ -30,9 +30,9 @@ use crate::{
     install_request_from_target_and_rows, load_wizard_model, localizer_from_options,
     reapack_selected_for_install_or_update, recompute_configuration_row_availability,
     refreshed_target_row, run_wizard_self_update_check, run_wizard_self_update_release_notes,
-    save_wizard_outcome_report, selected_configuration_step_ids, wizard_outcome_report_from_error,
-    wizard_outcome_report_from_success, wizard_package_plan_for_target,
-    wizard_package_plan_for_target_with_available,
+    save_wizard_outcome_report, selected_configuration_step_ids, wizard_error_reason,
+    wizard_outcome_report_from_error, wizard_outcome_report_from_success,
+    wizard_package_plan_for_target, wizard_package_plan_for_target_with_available,
 };
 use rabbit_core::localization::resolve_runtime_locale;
 use rabbit_core::progress::ProgressReporter;
@@ -46,7 +46,7 @@ use crate::wx_app::close_guard::{
 };
 use crate::wx_app::globals::{
     arm_post_install_hook, fire_post_install_hook, install_ui_frame, install_ui_localizer,
-    with_ui_frame, with_ui_localizer,
+    show_warning, with_ui_frame, with_ui_localizer,
 };
 use crate::wx_app::packages_page::{
     PackagesStateCell, new_packages_state, refresh_package_checklist,
@@ -438,6 +438,24 @@ pub fn run() {
             let last_resource_path = Arc::clone(&last_resource_path);
             let install_run = Arc::clone(&install_run);
             install.on_click(move |_| {
+                // Catch a running REAPER here, while the user can still do
+                // something about it. The install's preflight would refuse
+                // too, but only after the wizard has moved to its progress
+                // page, and there is no way back from there (issue #32). The
+                // check is the preflight's own, so the two always agree.
+                if let Some(target) = selected_target_row(&model, &widgets)
+                    && !rabbit_core::preflight::running_reaper_for_target(
+                        &target.path,
+                        Some(&target.planned_app_path),
+                    )
+                    .is_empty()
+                {
+                    show_warning(
+                        &model.text.reaper_running_title,
+                        &model.text.reaper_running_body,
+                    );
+                    return;
+                }
                 current_step.store(PROGRESS_STEP, Ordering::SeqCst);
                 update_navigation(
                     PROGRESS_STEP,
@@ -537,7 +555,13 @@ pub fn run() {
                         // Done page: short reason on the always-visible
                         // status TextCtrl; full error text in the
                         // collapsible details below.
-                        widgets.done_status.set_value(&model.text.done_status_error);
+                        // The reason goes in the status field, which gets
+                        // focus and is read; the details below start hidden.
+                        widgets.done_status.set_value(&format!(
+                            "{}\n\n{}",
+                            model.text.done_status_error,
+                            wizard_error_reason(&model, &error)
+                        ));
                         widgets.done_details.set_value(&error.to_string());
                         widgets
                             .progress_details
@@ -862,7 +886,14 @@ pub fn run() {
                                 widgets
                                     .progress_status
                                     .set_label(&ui_model.text.done_status_error);
-                                widgets.done_status.set_value(&outcome_report.status_line);
+                                // The reason goes in the status field, which
+                                // gets focus and is read; the details below
+                                // start hidden behind "Show details".
+                                widgets.done_status.set_value(&format!(
+                                    "{}\n\n{}",
+                                    outcome_report.status_line,
+                                    wizard_error_reason(&ui_model, &error)
+                                ));
                                 widgets
                                     .done_details
                                     .set_value(&outcome_report.detail_lines.join("\n"));
