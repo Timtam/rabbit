@@ -1604,7 +1604,6 @@ fn invalid_file_url(input: &str) -> RabbitError {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
     use std::thread;
     use std::time::Duration;

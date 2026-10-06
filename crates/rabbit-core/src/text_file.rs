@@ -85,13 +85,11 @@ fn decode_bytes(bytes: Vec<u8>) -> DecodedTextFile {
 }
 
 fn decode_utf16(bytes: &[u8], unit_from_bytes: fn([u8; 2]) -> u16) -> String {
-    let mut units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| unit_from_bytes([pair[0], pair[1]]))
-        .collect();
+    let (pairs, rest) = bytes.as_chunks::<2>();
+    let mut units: Vec<u16> = pairs.iter().map(|pair| unit_from_bytes(*pair)).collect();
     // A trailing odd byte means the file is malformed UTF-16; keep the byte
     // as its own unit rather than silently dropping it.
-    if let Some(&last) = bytes.chunks_exact(2).remainder().first() {
+    if let Some(&last) = rest.first() {
         units.push(u16::from(last));
     }
     String::from_utf16_lossy(&units)
