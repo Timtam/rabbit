@@ -23,9 +23,26 @@ struct CfCallBacks {
 
 const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 const CF_NUMBER_CF_INDEX_TYPE: isize = 14;
-/// `NSAccessibilityPriorityHigh`: interrupts whatever VoiceOver is saying,
-/// which is what a direct answer to a key press should do.
-const NS_ACCESSIBILITY_PRIORITY_HIGH: isize = 90;
+
+/// How an announcement treats whatever VoiceOver is already saying.
+#[derive(Clone, Copy)]
+pub(crate) enum Priority {
+    /// `NSAccessibilityPriorityHigh`: cut in. For the direct answer to a key
+    /// press, which is stale by the time a queue would reach it.
+    Interrupt,
+    /// `NSAccessibilityPriorityMedium`: wait for current speech. For news the
+    /// user didn't ask for, such as the next step of a running install.
+    Polite,
+}
+
+impl Priority {
+    fn value(self) -> isize {
+        match self {
+            Priority::Interrupt => 90,
+            Priority::Polite => 50,
+        }
+    }
+}
 
 // SAFETY: AppKit and CoreFoundation are system frameworks that wxWidgets
 // already links; these declarations match their public C headers.
@@ -61,10 +78,11 @@ unsafe extern "C" {
 
 /// Have VoiceOver speak `text` now. Does nothing when VoiceOver is off:
 /// macOS drops the notification.
-pub(crate) fn announce(text: &str) {
+pub(crate) fn announce(text: &str, priority: Priority) {
     let Ok(text) = CString::new(text) else {
         return;
     };
+    let priority_value = priority.value();
     // SAFETY: every object created here is released before returning, and
     // the dictionary retains what it holds. NSApp is set by wxWidgets before
     // any window exists, so it is valid wherever a key event can arrive.
@@ -77,7 +95,7 @@ pub(crate) fn announce(text: &str) {
         let priority = CFNumberCreate(
             std::ptr::null(),
             CF_NUMBER_CF_INDEX_TYPE,
-            (&NS_ACCESSIBILITY_PRIORITY_HIGH as *const isize).cast(),
+            (&priority_value as *const isize).cast(),
         );
         if message.is_null() || priority.is_null() {
             for object in [message, priority] {

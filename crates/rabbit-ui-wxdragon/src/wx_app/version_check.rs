@@ -25,7 +25,7 @@ use wxdragon::widgets::SimpleBook;
 use wxdragon::prelude::*;
 
 use crate::wx_app::expert_mode::RUN_AVAILABLE;
-use crate::wx_app::globals::VERSION_CHECK_GENERATION;
+use crate::wx_app::globals::{AnnouncePriority, VERSION_CHECK_GENERATION, announce};
 
 use crate::wx_app::PACKAGES_STEP;
 use crate::wx_app::globals::{
@@ -267,6 +267,9 @@ pub(crate) fn render_version_check_errors(ui: &VersionCheckUi, errors: &[(String
             )
             .value;
         ui.widgets.version_check_status.set_label(&status);
+        // Focus stays on the gauge, so nothing else tells a screen reader
+        // that the check stopped and the page now waits for Back or Close.
+        announce(&status, AnnouncePriority::Interrupt);
     });
 }
 
