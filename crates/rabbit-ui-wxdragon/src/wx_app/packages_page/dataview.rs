@@ -6,8 +6,7 @@ use std::rc::Rc;
 
 use crate::{
     ConfigurationRow, OsaraKeymapChoice, PackageRow, WizardInstallOptions, WizardModel,
-    apply_checkbox_state_to_package_row, localizer_from_options, osara_keymap_note,
-    recompute_configuration_row_availability,
+    apply_checkbox_state_to_package_row,
 };
 use rabbit_core::plan::PlanActionKind;
 use wxdragon::widgets::dataview::{
@@ -18,13 +17,12 @@ use wxdragon::widgets::dataview::{
 
 use wxdragon::prelude::*;
 
-use super::{PackagesStateCell, PackagesView, WXK_NUMPAD_ENTER, WXK_RETURN, WXK_SPACE};
+use super::{PackagesStateCell, PackagesView, WXK_SPACE};
 
 use crate::wx_app::pages::{WizardPage, add_heading, add_label};
 use crate::wx_app::widgets::{
-    REAPER_LANGUAGE_LABEL_NAME, SPANISH_VARIANT_LABEL_NAME, WizardWidgets, osara_keymap_choice,
-    package_details, sync_osara_keymap_widgets, sync_reaper_language_widget,
-    sync_spanish_variant_widget,
+    REAPER_LANGUAGE_LABEL_NAME, SPANISH_VARIANT_LABEL_NAME, WizardWidgets, package_details,
+    sync_osara_keymap_widgets, sync_reaper_language_widget, sync_spanish_variant_widget,
 };
 
 /// Identifies a row in the non-Windows `CustomDataViewTreeModel`. `Package`
