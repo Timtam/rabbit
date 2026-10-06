@@ -19,6 +19,7 @@ use wxdragon::prelude::*;
 
 use super::{PackagesStateCell, PackagesView, WXK_SPACE};
 
+use crate::wx_app::globals::{AnnouncePriority, announce, with_ui_localizer};
 use crate::wx_app::pages::{WizardPage, add_heading, add_label};
 use crate::wx_app::widgets::{
     REAPER_LANGUAGE_LABEL_NAME, SPANISH_VARIANT_LABEL_NAME, WizardWidgets, package_details,
@@ -522,25 +523,28 @@ pub(crate) fn build_packages_page(
                 &data.configuration_rows.borrow(),
                 node.kind,
             );
-            if !toggle(data, node, !checked) {
+            let Some(choice_notes) = toggle(data, node, !checked) else {
                 return;
-            }
+            };
             // The row VoiceOver is on was rebuilt behind it, so it says
             // nothing on its own. Read back the state the row ended up in:
             // a group can stay unticked when some of its rows are disabled.
-            #[cfg(target_os = "macos")]
-            {
-                let now_checked = packages_tree_toggle_state(
-                    &data.rows.borrow(),
-                    &data.configuration_rows.borrow(),
-                    node.kind,
-                );
-                crate::voiceover::announce(if now_checked {
-                    &model_text.text.packages_row_checked
-                } else {
-                    &model_text.text.packages_row_unchecked
-                });
-            }
+            // One announcement, not two: a second would cut the first off.
+            let now_checked = packages_tree_toggle_state(
+                &data.rows.borrow(),
+                &data.configuration_rows.borrow(),
+                node.kind,
+            );
+            let state = if now_checked {
+                &model_text.text.packages_row_checked
+            } else {
+                &model_text.text.packages_row_unchecked
+            };
+            let message = std::iter::once(state.as_str())
+                .chain(choice_notes.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(". ");
+            announce(&message, AnnouncePriority::Interrupt);
         });
     }
 
@@ -574,8 +578,10 @@ pub(crate) struct PackagesSideWidgets {
 pub(crate) type PackagesSideWidgetsCell = Rc<RefCell<Option<PackagesSideWidgets>>>;
 
 /// Non-Windows: tick or untick one node of the packages tree, with every
-/// side effect, and report whether anything changed.
-type PackagesTreeToggle = Rc<dyn Fn(&PackageTreeData, &Node, bool) -> bool>;
+/// side effect. `None` when nothing changed; otherwise one line for each
+/// dropdown below the list that the toggle showed or hid, for the caller
+/// to announce.
+type PackagesTreeToggle = Rc<dyn Fn(&PackageTreeData, &Node, bool) -> Option<Vec<String>>>;
 
 /// Non-Windows: whether a node's checkbox reads as ticked. A group reads
 /// ticked only when every row it can change is selected: the toggle
@@ -612,6 +618,21 @@ fn packages_tree_toggle_state(
     changeable.peek().is_some() && changeable.all(|r| r.selected)
 }
 
+/// What to tell a screen reader when a dropdown below the packages list comes
+/// or goes: it happens off to the side of the row the user just ticked.
+fn choice_shown_note(label: &str, shown: bool) -> String {
+    let key = if shown {
+        "wizard-packages-choice-shown"
+    } else {
+        "wizard-packages-choice-hidden"
+    };
+    let mut note = String::new();
+    with_ui_localizer(|localizer| {
+        note = localizer.format(key, &[("choice", label)]).value;
+    });
+    note
+}
+
 /// Non-Windows: build the `CustomDataViewTreeModel` that backs the packages
 /// tree. The closures capture clones of `package_rows`, `package_items`
 /// (the self-referential model handle cell), `can_install`, and the wizard
@@ -644,7 +665,8 @@ pub(crate) fn build_packages_tree_model(
     // (a click, or VO+Space while interacting with the list) and the Space
     // key handler, which wx never routes through `set_value` on macOS.
     let toggle: PackagesTreeToggle = Rc::new(
-        move |data: &PackageTreeData, node: &Node, new_state: bool| -> bool {
+        move |data: &PackageTreeData, node: &Node, new_state: bool| -> Option<Vec<String>> {
+            let mut choice_notes = Vec::new();
             match node.kind {
                 NodeKind::PackagesGroup
                 | NodeKind::AdditionalSoftwareGroup
@@ -670,11 +692,9 @@ pub(crate) fn build_packages_tree_model(
                 }
                 NodeKind::Package(idx) => {
                     let mut rows = rows_for_set_value.borrow_mut();
-                    let Some(row) = rows.get_mut(idx) else {
-                        return false;
-                    };
+                    let row = rows.get_mut(idx)?;
                     if !row.available_for_target {
-                        return false;
+                        return None;
                     }
                     let _ = apply_checkbox_state_to_package_row(&wizard_model, row, new_state);
                 }
@@ -688,11 +708,9 @@ pub(crate) fn build_packages_tree_model(
                 }
                 NodeKind::Configuration(idx) => {
                     let mut cfg_rows = configuration_rows_for_set_value.borrow_mut();
-                    let Some(row) = cfg_rows.get_mut(idx) else {
-                        return false;
-                    };
+                    let row = cfg_rows.get_mut(idx)?;
                     if !row.available_for_target || row.already_applied {
-                        return false;
+                        return None;
                     }
                     row.selected = new_state;
                 }
@@ -741,6 +759,10 @@ pub(crate) fn build_packages_tree_model(
                 // never fires.
                 if let Some(widgets) = *side_widgets_for_set_value.borrow() {
                     let rows = rows_for_set_value.borrow();
+                    let shown_before = [
+                        widgets.language_choice.is_shown(),
+                        widgets.spanish_choice.is_shown(),
+                    ];
                     sync_osara_keymap_widgets(
                         &wizard_model_for_recompute,
                         &rows,
@@ -749,6 +771,21 @@ pub(crate) fn build_packages_tree_model(
                     );
                     sync_spanish_variant_widget(&rows, &widgets.spanish_choice);
                     sync_reaper_language_widget(&rows, &widgets.language_choice);
+                    let labels = [
+                        &wizard_model_for_recompute
+                            .text
+                            .packages_reaper_language_label,
+                        &wizard_model_for_recompute
+                            .text
+                            .packages_spanish_variant_label,
+                    ];
+                    let choices = [widgets.language_choice, widgets.spanish_choice];
+                    for ((choice, was_shown), label) in choices.iter().zip(shown_before).zip(labels)
+                    {
+                        if choice.is_shown() != was_shown {
+                            choice_notes.push(choice_shown_note(label, choice.is_shown()));
+                        }
+                    }
                 }
             }
 
@@ -827,7 +864,7 @@ pub(crate) fn build_packages_tree_model(
                 }
             }
 
-            true
+            Some(choice_notes)
         },
     );
     let toggle_for_model = Rc::clone(&toggle);
@@ -963,7 +1000,18 @@ pub(crate) fn build_packages_tree_model(
                 let Some(node) = item else {
                     return false;
                 };
-                toggle_for_model(data, node, var.get_bool().unwrap_or(false))
+                let Some(choice_notes) =
+                    toggle_for_model(data, node, var.get_bool().unwrap_or(false))
+                else {
+                    return false;
+                };
+                // A click, or VO+Space: VoiceOver reads the checkbox itself,
+                // so only the dropdowns that came or went are left to say,
+                // after it.
+                if !choice_notes.is_empty() {
+                    announce(&choice_notes.join(". "), AnnouncePriority::Polite);
+                }
+                true
             },
         ),
         // is_enabled — gray out the checkbox + label of unavailable rows.

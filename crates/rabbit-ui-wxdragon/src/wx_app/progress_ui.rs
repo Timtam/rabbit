@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use rabbit_core::localization::Localizer;
 use rabbit_core::progress::ProgressEvent;
 
-use crate::wx_app::globals::with_ui_localizer;
+use crate::wx_app::globals::{AnnouncePriority, announce, with_ui_localizer};
 use crate::wx_app::widgets::WizardWidgets;
 
 /// State carried across [`ProgressEvent`] notifications during a wizard
@@ -322,10 +322,20 @@ pub(crate) fn apply_progress_event_to_ui(
     });
 
     widgets.progress_gauge.set_value(state.percentage());
+    // Only the start of each install or configuration step is spoken, and
+    // politely: download lines change several times a second and would bury
+    // everything else.
+    let spoken = matches!(
+        event,
+        ProgressEvent::InstallStarted { .. } | ProgressEvent::ConfigurationStarted { .. }
+    );
     if let Some(line) = status_line
         && !status_frozen
     {
         widgets.progress_status.set_label(&line);
+        if spoken {
+            announce(&line, AnnouncePriority::Polite);
+        }
     }
     // Hold the lock no longer than necessary — the TextCtrl call below
     // re-enters the wxWidgets event pump, which can run other queued

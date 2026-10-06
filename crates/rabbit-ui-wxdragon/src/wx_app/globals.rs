@@ -49,6 +49,27 @@ pub(crate) fn with_ui_localizer<F: FnOnce(&Localizer)>(f: F) {
     });
 }
 
+/// Have the screen reader speak `text`. VoiceOver reads a control's new
+/// label or state only when the user moved there, so a change made from
+/// code (a status line, a row ticked through the model, a dropdown shown)
+/// goes unheard without this. macOS only for now: elsewhere it does nothing.
+#[cfg(target_os = "macos")]
+pub(crate) use crate::voiceover::Priority as AnnouncePriority;
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone, Copy)]
+pub(crate) enum AnnouncePriority {
+    Interrupt,
+    Polite,
+}
+
+pub(crate) fn announce(text: &str, priority: AnnouncePriority) {
+    #[cfg(target_os = "macos")]
+    crate::voiceover::announce(text, priority);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (text, priority);
+}
+
 pub(crate) fn install_ui_frame(frame: Frame) {
     UI_FRAME.with(|cell| {
         *cell.borrow_mut() = Some(frame);
