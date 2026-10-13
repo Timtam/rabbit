@@ -31,6 +31,8 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-10-13
+
 ### Changed
 
 - While an install is running, the **Close** button now says **Cancel**.
