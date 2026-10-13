@@ -31,6 +31,20 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Changed
+
+- While an install is running, the **Close** button now says **Cancel**.
+  It always stopped the install there (after asking) rather than closing
+  the wizard, and its name now says so. It reads **Close** again once the
+  install has finished.
+- The **Replace your current key map with latest OSARA key map** checkbox
+  is now ticked only when OSARA is being installed for the first time.
+  When OSARA is already installed and is being updated, it starts
+  unticked, so your key map, with any changes of your own, stays as it
+  is. OSARA's new **Merge OSARA key map** action (Extensions menu, OSARA)
+  adds OSARA's new key bindings to it without losing yours, and the note
+  under the checkbox now says so instead of leaving the update to you.
+
 ## [0.4.3] - 2026-10-06
 
 ### Added

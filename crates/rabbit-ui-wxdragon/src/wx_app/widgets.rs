@@ -541,6 +541,14 @@ pub(crate) fn update_navigation(
         _ => false,
     });
     install.enable(step == REVIEW_STEP && can_install);
+    // While an install runs, the close button stops it (after asking) rather
+    // than closing the wizard, so it says so. Only set when it changes: a
+    // screen reader may announce every relabel of the focused button.
+    if let Some(label) = crate::wx_app::globals::close_button_label(step == PROGRESS_STEP)
+        && close.get_label() != label
+    {
+        close.set_label(&label);
+    }
     // Make the step's primary action the window's default button so Enter
     // activates it regardless of which control holds focus (the standard
     // dialog convention on both macOS and Windows). A disabled default

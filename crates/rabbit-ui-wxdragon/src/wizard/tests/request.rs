@@ -143,6 +143,56 @@ fn review_preview_includes_osara_keymap_choice() {
     );
 }
 
+/// A new OSARA arrives with its own key map; an OSARA that is already there
+/// keeps the user's, since OSARA's "Merge OSARA key map" action adds its new
+/// bindings without throwing the user's own away.
+#[test]
+fn the_key_map_is_replaced_only_for_a_new_osara() {
+    let rows_for = |action: Option<PlanActionKind>| {
+        let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let installation = fake_installation();
+        model_from_plan(
+            &localizer,
+            Platform::Windows,
+            Architecture::X64,
+            vec![installation.clone()],
+            Some(0),
+            InstallPlan {
+                target: Some(installation),
+                actions: action
+                    .map(|action| PlanAction {
+                        package_id: PACKAGE_OSARA.to_string(),
+                        action,
+                        installed_version: None,
+                        available_version: Some(Version::parse("2026.10.5").unwrap()),
+                        reason: "test".to_string(),
+                    })
+                    .into_iter()
+                    .collect(),
+                notes: Vec::new(),
+            },
+        )
+        .package_rows
+    };
+    assert_eq!(
+        osara_keymap_default(&rows_for(Some(PlanActionKind::Install))),
+        OsaraKeymapChoice::ReplaceCurrent
+    );
+    assert_eq!(
+        osara_keymap_default(&rows_for(Some(PlanActionKind::Update))),
+        OsaraKeymapChoice::PreserveCurrent
+    );
+    assert_eq!(
+        osara_keymap_default(&rows_for(Some(PlanActionKind::Keep))),
+        OsaraKeymapChoice::PreserveCurrent
+    );
+    // OSARA not offered at all: nothing to decide, so the usual default.
+    assert_eq!(
+        osara_keymap_default(&rows_for(None)),
+        OsaraKeymapChoice::ReplaceCurrent
+    );
+}
+
 #[test]
 fn default_install_options_replace_osara_keymap() {
     assert_eq!(

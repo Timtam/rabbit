@@ -249,6 +249,11 @@ fn model_from_plan_with_options(
                 "wizard-button-close",
                 "wizard-button-close-mnemonic",
             ),
+            cancel_label: localized_wx_mnemonic_label(
+                localizer,
+                "wizard-button-cancel",
+                "wizard-button-cancel-mnemonic",
+            ),
             can_go_back: false,
             can_go_next: selected_target_index.is_some(),
             can_install,

@@ -134,6 +134,23 @@ pub fn reapack_selected_for_install_or_update(
         })
 }
 
+/// The OSARA key map choice a run starts from. A new OSARA replaces the key
+/// map, so it arrives with its own bindings. An OSARA that is already
+/// installed keeps the user's key map: OSARA's "Merge OSARA key map" action
+/// brings in its new bindings without losing the user's own, which a
+/// replace would throw away (it only keeps a backup).
+pub fn osara_keymap_default(package_rows: &[PackageRow]) -> OsaraKeymapChoice {
+    match package_rows
+        .iter()
+        .find(|row| row.package_id == PACKAGE_OSARA)
+    {
+        Some(row) if row.original_action != PlanActionKind::Install => {
+            OsaraKeymapChoice::PreserveCurrent
+        }
+        _ => OsaraKeymapChoice::ReplaceCurrent,
+    }
+}
+
 pub fn osara_keymap_note(
     model: &WizardModel,
     osara_selected: bool,

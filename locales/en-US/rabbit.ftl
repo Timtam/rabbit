@@ -75,6 +75,8 @@ wizard-button-install = Install
 wizard-button-install-mnemonic = I
 wizard-button-close = Close
 wizard-button-close-mnemonic = C
+wizard-button-cancel = Cancel
+wizard-button-cancel-mnemonic = C
 
 wizard-target-heading = Choose a task
 wizard-target-language-label = Language
@@ -171,7 +173,7 @@ wizard-packages-osara-keymap-replace-label = Replace your current key map with l
 packages-reaper-language-label = REAPER language after installation
 packages-spanish-variant-label = Spanish OSARA translation
 wizard-packages-osara-keymap-unavailable-note = Select OSARA to configure its key map behavior.
-wizard-packages-osara-keymap-preserve-note = For advanced users: your current key map will be preserved. Rabbit won't touch reaper-kb.ini, you will need to manage staying up to date with the latest OSARA key map additions manually.
+wizard-packages-osara-keymap-preserve-note = Your current key map stays as it is: RABBIT won't touch reaper-kb.ini. To add the new OSARA key bindings while keeping your own, run OSARA's "Merge OSARA key map" action afterwards (Extensions menu, OSARA).
 wizard-packages-osara-keymap-replace-note = Recommended for new through intermediate users: RABBIT will backup a copy of your current reaper-kb.ini file, then replace it with the latest version of the OSARA key map.
 wizard-package-details-handling-prefix = Handling
 wizard-package-handling-automatic = RABBIT can install this package directly.

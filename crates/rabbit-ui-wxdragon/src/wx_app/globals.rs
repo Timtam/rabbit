@@ -70,6 +70,30 @@ pub(crate) fn announce(text: &str, priority: AnnouncePriority) {
     let _ = (text, priority);
 }
 
+thread_local! {
+    /// The close button's two labels: "Close", and "Cancel" while an install
+    /// runs. Set once when the window is built; `update_navigation` picks one
+    /// on every step change, so no single transition can forget it.
+    static CLOSE_BUTTON_LABELS: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn install_close_button_labels(close: String, cancel: String) {
+    CLOSE_BUTTON_LABELS.with(|cell| *cell.borrow_mut() = Some((close, cancel)));
+}
+
+/// The close button's label for the current step: "Cancel" while installing.
+pub(crate) fn close_button_label(installing: bool) -> Option<String> {
+    CLOSE_BUTTON_LABELS.with(|cell| {
+        cell.borrow().as_ref().map(|(close, cancel)| {
+            if installing {
+                cancel.clone()
+            } else {
+                close.clone()
+            }
+        })
+    })
+}
+
 pub(crate) fn install_ui_frame(frame: Frame) {
     UI_FRAME.with(|cell| {
         *cell.borrow_mut() = Some(frame);

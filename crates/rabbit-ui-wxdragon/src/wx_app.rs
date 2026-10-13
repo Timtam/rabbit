@@ -113,6 +113,10 @@ pub fn run() {
         // controls (lists, detail panes, notes) that wrap to more lines in
         // longer translations, so shrinking below this clips bottom content.
         frame.set_min_size(Size::new(760, 600));
+        crate::wx_app::globals::install_close_button_labels(
+            model.controls.close_label.clone(),
+            model.controls.cancel_label.clone(),
+        );
         install_ui_frame(frame);
 
         let root_panel = Panel::builder(&frame).build();

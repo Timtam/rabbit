@@ -75,6 +75,8 @@ wizard-button-install = Instalar
 wizard-button-install-mnemonic = I
 wizard-button-close = Cerrar
 wizard-button-close-mnemonic = C
+wizard-button-cancel = Cancelar
+wizard-button-cancel-mnemonic = C
 
 wizard-target-heading = Selecciona una tarea
 wizard-target-language-label = Idioma
@@ -171,7 +173,7 @@ wizard-packages-osara-keymap-replace-label = Reemplazar el mapa de teclado actua
 packages-reaper-language-label = Idioma de REAPER tras la instalación
 packages-spanish-variant-label = Traducción de OSARA al español
 wizard-packages-osara-keymap-unavailable-note = Selecciona Osara para configurar el comportamiento de su mapa de teclado.
-wizard-packages-osara-keymap-preserve-note = Para usuarios avanzados: Tu mapa de teclado se conservará. Rabbit no modifica tu archivo reaper-kb.ini, debes estar al día con las adiciones al mapa de forma manual.
+wizard-packages-osara-keymap-preserve-note = Tu mapa de teclado actual se queda como está: RABBIT no toca reaper-kb.ini. Para añadir los nuevos atajos de OSARA conservando los tuyos, ejecuta después la acción de OSARA «Merge OSARA key map» (menú Extensiones, OSARA).
 wizard-packages-osara-keymap-replace-note = Recomendado para usuarios principiantes o intermedios: RABBIT ará una copia de tu archivo reaper-kb.ini, y reemplazará este archivo con una nueva copia del último mapa de teclado de Osara.
 wizard-package-details-handling-prefix = procesamiento
 wizard-package-handling-automatic = RABBIT puede instalar este paquete directamente.

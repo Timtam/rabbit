@@ -75,6 +75,8 @@ wizard-button-install = Installa
 wizard-button-install-mnemonic = I
 wizard-button-close = Chiudi
 wizard-button-close-mnemonic = C
+wizard-button-cancel = Annulla
+wizard-button-cancel-mnemonic = N
 
 wizard-target-heading = Scegli un'operazione
 wizard-target-language-label = Lingua
@@ -171,7 +173,7 @@ wizard-packages-osara-keymap-replace-label = Sostituisci la tua mappa dei tasti 
 packages-reaper-language-label = Lingua di REAPER dopo l'installazione
 packages-spanish-variant-label = Traduzione spagnola di OSARA
 wizard-packages-osara-keymap-unavailable-note = Seleziona OSARA per configurare il comportamento della sua mappa dei tasti.
-wizard-packages-osara-keymap-preserve-note = Per utenti avanzati: la tua mappa dei tasti attuale verrà conservata. RABBIT non modificherà reaper-kb.ini; dovrai gestire manualmente l'aggiornamento alle ultime aggiunte alla mappa dei tasti OSARA.
+wizard-packages-osara-keymap-preserve-note = La tua mappa dei tasti attuale resta com'è: RABBIT non tocca reaper-kb.ini. Per aggiungere le nuove scorciatoie di OSARA mantenendo le tue, esegui poi l'azione di OSARA «Merge OSARA key map» (menu Estensioni, OSARA).
 wizard-packages-osara-keymap-replace-note = Consigliato per utenti da principianti a intermedi: RABBIT eseguirà il backup di una copia del tuo file reaper-kb.ini attuale, quindi lo sostituirà con l'ultima versione della mappa dei tasti OSARA.
 wizard-package-details-handling-prefix = Gestione
 wizard-package-handling-automatic = RABBIT può installare questo pacchetto direttamente.
