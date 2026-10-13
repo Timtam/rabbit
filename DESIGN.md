@@ -51,11 +51,15 @@ questions they cannot reasonably answer.
   "installed, version unknown" where it is not reliable.
 - Prefer user-level installation paths for extensions so admin rights are not
   needed unless installing REAPER itself into a protected location.
-- Preserve user configuration by default where possible, but when OSARA is
-  selected RABBIT replaces the active key map with the OSARA key map after
-  backing up `reaper-kb.ini`. The Packages step shows an explicit checkbox so
-  the user sees and can opt out of the replacement; the CLI keeps the same
-  opt-out via `--preserve-osara-keymap`.
+- Preserve user configuration by default where possible. When OSARA is
+  selected, RABBIT replaces the active key map with the OSARA key map, after
+  backing up `reaper-kb.ini`, only when that loses nothing of the user's:
+  OSARA is new, or `reaper-kb.ini` still matches the installed OSARA key map
+  (`KeyMaps/OSARA.ReaperKeyMap`, compared before the update overwrites it).
+  Otherwise the key map stays and OSARA's "Merge OSARA key map" action brings
+  the new bindings in. The Packages step shows an explicit checkbox so the
+  user sees and can override the choice; the CLI does the same with
+  `--replace-osara-keymap` and `--preserve-osara-keymap`.
 - Make every user-visible string localizable from the beginning. Embedded
   locales today: en-US, de-DE, fr-FR and it-IT.
 - Build Windows and macOS artifacts automatically for every push in GitHub
@@ -578,10 +582,12 @@ user can finish the install by pressing Next a few times.
      dependency is satisfied and which isn't already applied.
    - OSARA key map: an explicit checkbox stays on the Packages page so the
      user sees and controls what RABBIT will do with `reaper-kb.ini`.
-     Default is replace-with-backup, matching the OSARA project's default.
-     The short note next to the checkbox explains both options in one
-     sentence each in the active locale. The CLI exposes the same opt-out
-     via `--preserve-osara-keymap`.
+     Default is replace-with-backup for a new OSARA and for a key map that
+     is still the installed OSARA key map (scripts, order and binding
+     comments aside), and keep for any other key map. The short note next
+     to the checkbox says which case applies in the active locale. The CLI
+     makes the same choice unless `--replace-osara-keymap` or
+     `--preserve-osara-keymap` is passed.
 
 4. ReaPack donation acknowledgement (only when ReaPack is being installed
    or updated this run)
@@ -818,8 +824,9 @@ strategies:
   - install unattended by either invoking a validated silent installer path or
     reproducing the upstream file layout directly into the selected REAPER
     resource path,
-  - manage the keymap behavior as a RABBIT choice with default replacement plus
-    backup, and an explicit preserve-current opt-out.
+  - manage the keymap behavior as a RABBIT choice: replacement plus backup
+    when it loses nothing of the user's, keep otherwise, and either one on
+    request.
 - SWS:
   - install unattended by placing the correct verified binary into
     `UserPlugins` for the selected REAPER architecture.

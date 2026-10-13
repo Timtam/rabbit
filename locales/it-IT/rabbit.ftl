@@ -175,6 +175,8 @@ packages-spanish-variant-label = Traduzione spagnola di OSARA
 wizard-packages-osara-keymap-unavailable-note = Seleziona OSARA per configurare il comportamento della sua mappa dei tasti.
 wizard-packages-osara-keymap-preserve-note = La tua mappa dei tasti attuale resta com'è: RABBIT non tocca reaper-kb.ini. Per aggiungere le nuove scorciatoie di OSARA mantenendo le tue, esegui poi l'azione di OSARA «Merge OSARA key map» (menu Estensioni, OSARA).
 wizard-packages-osara-keymap-replace-note = Consigliato per utenti da principianti a intermedi: RABBIT eseguirà il backup di una copia del tuo file reaper-kb.ini attuale, quindi lo sostituirà con l'ultima versione della mappa dei tasti OSARA.
+wizard-packages-osara-keymap-unchanged-note = La tua mappa dei tasti è quella di OSARA senza modifiche tue, quindi RABBIT ne farà un backup e la sostituirà con l'ultima mappa dei tasti OSARA. Gli script che hai installato restano nell'elenco delle azioni.
+wizard-packages-osara-keymap-default-keys-note = Stai usando le scorciatoie predefinite di REAPER invece della mappa dei tasti OSARA, quindi RABBIT le lascia come sono. Per passare alla mappa dei tasti OSARA, seleziona la casella qui sopra.
 wizard-package-details-handling-prefix = Gestione
 wizard-package-handling-automatic = RABBIT può installare questo pacchetto direttamente.
 wizard-package-handling-unattended = RABBIT può installare questo pacchetto in modo automatico, incluso l'avvio del suo programma di installazione quando necessario.
@@ -191,6 +193,8 @@ wizard-review-package-heading = Pacchetti selezionati
 wizard-review-osara-keymap-heading = Mappa dei tasti OSARA
 wizard-review-osara-keymap-preserve = Conserva la tua mappa dei tasti attuale.
 wizard-review-osara-keymap-replace = Esegui il backup della tua mappa dei tasti attuale, quindi sostituiscila con l'ultima di OSARA.
+wizard-review-osara-keymap-replace-unchanged = Esegui il backup della tua mappa dei tasti OSARA non modificata, quindi sostituiscila con l'ultima di OSARA.
+wizard-review-osara-keymap-keep-default-keys = Mantieni le scorciatoie predefinite di REAPER.
 wizard-review-notes-heading = Note
 wizard-review-preflight-prefix = Impossibile installare per ora
 
@@ -321,6 +325,7 @@ wizard-summary-backup-files-created = File di backup creati: { $count }
 wizard-summary-backup-file = File di backup: { $path }
 wizard-summary-receipt-backup = Backup della ricevuta: { $path }
 wizard-summary-backup-manifest = Manifesto del backup: { $path }
+wizard-summary-osara-keymap-merge-hint = La tua mappa dei tasti è stata mantenuta. Per aggiungerle le nuove scorciatoie di OSARA, avvia REAPER ed esegui l'azione di OSARA «Merge OSARA key map» (menu Estensioni, OSARA).
 wizard-summary-package-message = { $package }: { $message }
 # $action is one of the localized "action-*" labels (Install/Update/Keep).
 wizard-summary-package-plan-action =   Azione prevista: { $action }

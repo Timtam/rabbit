@@ -175,6 +175,8 @@ packages-spanish-variant-label = Spanische OSARA-Übersetzung
 wizard-packages-osara-keymap-unavailable-note = Wählen Sie OSARA aus, um das Verhalten der Tastenzuordnung zu konfigurieren.
 wizard-packages-osara-keymap-preserve-note = Ihre aktuelle Tastenzuordnung bleibt unverändert: RABBIT ändert die reaper-kb.ini nicht. Um die neuen OSARA-Tastenkürzel zu übernehmen und Ihre eigenen zu behalten, führen Sie anschließend die OSARA-Aktion „Merge OSARA key map“ aus (Menü „Erweiterungen“, OSARA).
 wizard-packages-osara-keymap-replace-note = RABBIT sichert die Datei reaper-kb.ini und ersetzt sie durch die OSARA-Tastenzuordnung. Dies ist die Standardeinstellung.
+wizard-packages-osara-keymap-unchanged-note = Ihre Tastenzuordnung ist die OSARA-Tastenzuordnung ohne eigene Änderungen. RABBIT sichert sie daher und ersetzt sie durch die neueste OSARA-Tastenzuordnung. Ihre installierten Skripte bleiben in der Aktionsliste.
+wizard-packages-osara-keymap-default-keys-note = Sie verwenden die Standard-Tastenkürzel von REAPER statt der OSARA-Tastenzuordnung, daher lässt RABBIT sie unverändert. Um zur OSARA-Tastenzuordnung zu wechseln, aktivieren Sie das Kontrollkästchen oben.
 wizard-package-details-handling-prefix = Behandlung
 wizard-package-handling-automatic = RABBIT kann dieses Paket direkt installieren.
 wizard-package-handling-unattended = RABBIT kann dieses Paket unbeaufsichtigt installieren und bei Bedarf das zugehörige Installationsprogramm starten.
@@ -191,6 +193,8 @@ wizard-review-package-heading = Ausgewählte Pakete
 wizard-review-osara-keymap-heading = OSARA-Tastenzuordnung
 wizard-review-osara-keymap-preserve = Aktuelle Tastenzuordnung beibehalten und die OSARA-Tastenzuordnung nicht anwenden.
 wizard-review-osara-keymap-replace = Aktuelle Tastenzuordnung nach Sicherung von reaper-kb.ini ersetzen.
+wizard-review-osara-keymap-replace-unchanged = Unveränderte OSARA-Tastenzuordnung sichern und durch die neueste von OSARA ersetzen.
+wizard-review-osara-keymap-keep-default-keys = Standard-Tastenkürzel von REAPER beibehalten.
 wizard-review-notes-heading = Hinweise
 wizard-review-preflight-prefix = Installation derzeit nicht möglich
 
@@ -321,6 +325,7 @@ wizard-summary-backup-files-created = Angelegte Sicherungsdateien: { $count }
 wizard-summary-backup-file = Sicherungsdatei: { $path }
 wizard-summary-receipt-backup = Beleg-Sicherung: { $path }
 wizard-summary-backup-manifest = Sicherungsmanifest: { $path }
+wizard-summary-osara-keymap-merge-hint = Ihre Tastenzuordnung wurde beibehalten. Um die neuen OSARA-Tastenkürzel hinzuzufügen, starten Sie REAPER und führen Sie die OSARA-Aktion „Merge OSARA key map“ aus (Menü „Erweiterungen“, OSARA).
 wizard-summary-package-message = { $package }: { $message }
 # $action is one of the localized "action-*" labels (Installieren/Aktualisieren/Beibehalten).
 wizard-summary-package-plan-action =   Plan-Aktion: { $action }

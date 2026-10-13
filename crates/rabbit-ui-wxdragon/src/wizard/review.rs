@@ -4,12 +4,13 @@
 use rabbit_core::artifact::expected_artifact_kind;
 use rabbit_core::localization::Localizer;
 use rabbit_core::operation::preview_manual_instruction;
+use rabbit_core::osara_keymap::OsaraKeymapState;
 use rabbit_core::plan::PlanActionKind;
 use rabbit_core::resource::{ResourceInitOptions, initialize_resource_path};
 use rabbit_core::setup::setup_requires_extension_support;
 
 use super::model::{OsaraKeymapChoice, PackageRow, TargetRow, WizardModel, WizardReviewPreview};
-use super::packages::{osara_selected_for_rows, package_ids_for_rows};
+use super::packages::{osara_keymap_review_line, osara_selected_for_rows, package_ids_for_rows};
 
 pub fn review_lines_for_indices(
     model: &WizardModel,
@@ -80,6 +81,7 @@ pub fn build_review_preview_for_package_rows(
     package_rows: &[PackageRow],
     notes: &[String],
     osara_keymap_choice: OsaraKeymapChoice,
+    osara_keymap: OsaraKeymapState,
 ) -> WizardReviewPreview {
     let Some(target) = target else {
         return WizardReviewPreview {
@@ -141,10 +143,11 @@ pub fn build_review_preview_for_package_rows(
     if osara_selected_for_rows(package_rows, selected_package_indices) {
         lines.push(String::new());
         lines.push(model.text.review_osara_keymap_heading.clone());
-        lines.push(match osara_keymap_choice {
-            OsaraKeymapChoice::PreserveCurrent => model.text.review_osara_keymap_preserve.clone(),
-            OsaraKeymapChoice::ReplaceCurrent => model.text.review_osara_keymap_replace.clone(),
-        });
+        lines.push(osara_keymap_review_line(
+            model,
+            osara_keymap_choice,
+            osara_keymap,
+        ));
     }
 
     if !notes.is_empty() {

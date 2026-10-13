@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rabbit_core::localization::Localizer;
+use rabbit_core::osara_keymap::OsaraKeymapState;
 
 use wxdragon::prelude::*;
 
@@ -75,6 +76,22 @@ thread_local! {
     /// runs. Set once when the window is built; `update_navigation` picks one
     /// on every step change, so no single transition can forget it.
     static CLOSE_BUTTON_LABELS: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+}
+
+thread_local! {
+    /// How the target's key map compared with its OSARA key map when the
+    /// package list was last built. The key map note and review line say
+    /// why the checkbox started where it did.
+    static OSARA_KEYMAP_STATE: std::cell::Cell<OsaraKeymapState> =
+        const { std::cell::Cell::new(OsaraKeymapState::Unknown) };
+}
+
+pub(crate) fn set_osara_keymap_state(state: OsaraKeymapState) {
+    OSARA_KEYMAP_STATE.with(|cell| cell.set(state));
+}
+
+pub(crate) fn osara_keymap_state() -> OsaraKeymapState {
+    OSARA_KEYMAP_STATE.with(std::cell::Cell::get)
 }
 
 pub(crate) fn install_close_button_labels(close: String, cancel: String) {

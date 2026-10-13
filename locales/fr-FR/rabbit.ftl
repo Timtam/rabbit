@@ -175,6 +175,8 @@ packages-spanish-variant-label = Traduction espagnole d'OSARA
 wizard-packages-osara-keymap-unavailable-note = Sélectionnez OSARA pour configurer le comportement de ses raccourcis clavier.
 wizard-packages-osara-keymap-preserve-note = Vos raccourcis clavier actuels restent tels quels : RABBIT ne modifie pas reaper-kb.ini. Pour ajouter les nouveaux raccourcis d'OSARA tout en conservant les vôtres, lancez ensuite l'action d'OSARA « Merge OSARA key map » (menu Extensions, OSARA).
 wizard-packages-osara-keymap-replace-note = Recommandé pour les utilisateurs débutants à intermédiaires : RABBIT sauvegardera une copie de votre fichier reaper-kb.ini actuel, puis le remplacera par la dernière version des raccourcis clavier OSARA.
+wizard-packages-osara-keymap-unchanged-note = Vos raccourcis clavier sont ceux d'OSARA, sans modification de votre part : RABBIT va donc les sauvegarder et les remplacer par les derniers raccourcis clavier d'OSARA. Vos scripts installés restent dans la liste des actions.
+wizard-packages-osara-keymap-default-keys-note = Vous utilisez les raccourcis clavier par défaut de REAPER plutôt que ceux d'OSARA : RABBIT les laisse tels quels. Pour passer aux raccourcis clavier d'OSARA, cochez la case ci-dessus.
 wizard-package-details-handling-prefix = Prise en charge
 wizard-package-handling-automatic = RABBIT peut installer ce paquet directement.
 wizard-package-handling-unattended = RABBIT peut installer ce paquet sans intervention, y compris en lançant son programme d'installation lorsque c'est nécessaire.
@@ -191,6 +193,8 @@ wizard-review-package-heading = Paquets sélectionnés
 wizard-review-osara-keymap-heading = Raccourcis clavier OSARA
 wizard-review-osara-keymap-preserve = Conserver vos raccourcis clavier actuels.
 wizard-review-osara-keymap-replace = Sauvegarder vos raccourcis clavier actuels, puis les remplacer par les derniers d'OSARA.
+wizard-review-osara-keymap-replace-unchanged = Sauvegarder vos raccourcis clavier OSARA non modifiés, puis les remplacer par les derniers d'OSARA.
+wizard-review-osara-keymap-keep-default-keys = Conserver les raccourcis clavier par défaut de REAPER.
 wizard-review-notes-heading = Remarques
 wizard-review-preflight-prefix = Installation impossible pour le moment
 
@@ -321,6 +325,7 @@ wizard-summary-backup-files-created = Fichiers de sauvegarde créés : { $count 
 wizard-summary-backup-file = Fichier de sauvegarde : { $path }
 wizard-summary-receipt-backup = Sauvegarde du reçu : { $path }
 wizard-summary-backup-manifest = Manifeste de sauvegarde : { $path }
+wizard-summary-osara-keymap-merge-hint = Vos raccourcis clavier ont été conservés. Pour y ajouter les nouveaux raccourcis d'OSARA, démarrez REAPER et lancez l'action d'OSARA « Merge OSARA key map » (menu Extensions, OSARA).
 wizard-summary-package-message = { $package } : { $message }
 # $action is one of the localized "action-*" labels (Install/Update/Keep).
 wizard-summary-package-plan-action =   Action prévue : { $action }

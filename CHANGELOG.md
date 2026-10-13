@@ -38,12 +38,27 @@ from this file and posts it as the GitHub release body.
   the wizard, and its name now says so. It reads **Close** again once the
   install has finished.
 - The **Replace your current key map with latest OSARA key map** checkbox
-  is now ticked only when OSARA is being installed for the first time.
-  When OSARA is already installed and is being updated, it starts
-  unticked, so your key map, with any changes of your own, stays as it
-  is. OSARA's new **Merge OSARA key map** action (Extensions menu, OSARA)
-  adds OSARA's new key bindings to it without losing yours, and the note
-  under the checkbox now says so instead of leaving the update to you.
+  now starts from a look at your key map. RABBIT compares `reaper-kb.ini`
+  with the key map of the OSARA you have installed. If OSARA is new, or
+  your key map is still OSARA's own with no changes of yours, the box is
+  ticked and the new OSARA key map replaces it, as before. If your key map
+  has changes of your own, or you use REAPER's default keys, the box starts
+  unticked and your keys stay as they are. The note under the checkbox,
+  the review page and the Done page say which case applies. For a key map
+  with your own changes they point to OSARA's new **Merge OSARA key map**
+  action (Extensions menu, OSARA), which adds OSARA's new key bindings
+  without losing yours. Scripts that ReaPack registered don't count as
+  changes of your own, since a replacement keeps them.
+- The command line makes the same choice when neither
+  `--preserve-osara-keymap` nor the new `--replace-osara-keymap` is passed,
+  and says which it made and why. Before, it always replaced the key map
+  unless told otherwise.
+
+### Fixed
+
+- Replacing the key map no longer adds another copy of the script lines
+  OSARA's key map registers itself. Each replacement used to leave one
+  more copy of each in `reaper-kb.ini`.
 
 ## [0.4.3] - 2026-10-06
 

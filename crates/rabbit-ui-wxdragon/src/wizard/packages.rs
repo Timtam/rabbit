@@ -8,6 +8,7 @@ use rabbit_core::detection::detect_components;
 use rabbit_core::localization::Localizer;
 use rabbit_core::model::{Architecture, Platform};
 use rabbit_core::operation::{PackageAutomationSupport, package_automation_support};
+use rabbit_core::osara_keymap::{OsaraKeymapState, replace_by_default};
 use rabbit_core::package::{
     HostCapabilities, PACKAGE_OSARA, PackageSpec, builtin_package_specs, detect_host_capabilities,
     host_supports_package,
@@ -135,36 +136,69 @@ pub fn reapack_selected_for_install_or_update(
 }
 
 /// The OSARA key map choice a run starts from. A new OSARA replaces the key
-/// map, so it arrives with its own bindings. An OSARA that is already
-/// installed keeps the user's key map: OSARA's "Merge OSARA key map" action
-/// brings in its new bindings without losing the user's own, which a
-/// replace would throw away (it only keeps a backup).
-pub fn osara_keymap_default(package_rows: &[PackageRow]) -> OsaraKeymapChoice {
-    match package_rows
+/// map, so it arrives with its own bindings, and so does an OSARA whose key
+/// map is still OSARA's own: nothing of the user's is lost. Any other key
+/// map stays. OSARA's "Merge OSARA key map" action brings the new bindings
+/// into one with the user's own changes, which a replace would throw away
+/// (it only keeps a backup). See [`replace_by_default`].
+pub fn osara_keymap_default(
+    package_rows: &[PackageRow],
+    keymap: OsaraKeymapState,
+) -> OsaraKeymapChoice {
+    let osara_installed = package_rows
         .iter()
         .find(|row| row.package_id == PACKAGE_OSARA)
-    {
-        Some(row) if row.original_action != PlanActionKind::Install => {
-            OsaraKeymapChoice::PreserveCurrent
-        }
-        _ => OsaraKeymapChoice::ReplaceCurrent,
+        .is_some_and(|row| row.original_action != PlanActionKind::Install);
+    if replace_by_default(osara_installed, keymap) {
+        OsaraKeymapChoice::ReplaceCurrent
+    } else {
+        OsaraKeymapChoice::PreserveCurrent
     }
 }
 
+/// The note under the key map checkbox: what the choice does, in the words
+/// that fit the target's key map.
 pub fn osara_keymap_note(
     model: &WizardModel,
     osara_selected: bool,
     choice: OsaraKeymapChoice,
+    keymap: OsaraKeymapState,
 ) -> String {
     if !osara_selected {
         return model.text.packages_osara_keymap_unavailable_note.clone();
     }
 
-    match choice {
-        OsaraKeymapChoice::PreserveCurrent => {
+    match (choice, keymap) {
+        (OsaraKeymapChoice::ReplaceCurrent, OsaraKeymapState::UnchangedOsara) => {
+            model.text.packages_osara_keymap_unchanged_note.clone()
+        }
+        (OsaraKeymapChoice::ReplaceCurrent, _) => {
+            model.text.packages_osara_keymap_replace_note.clone()
+        }
+        (OsaraKeymapChoice::PreserveCurrent, OsaraKeymapState::DefaultKeys) => {
+            model.text.packages_osara_keymap_default_keys_note.clone()
+        }
+        (OsaraKeymapChoice::PreserveCurrent, _) => {
             model.text.packages_osara_keymap_preserve_note.clone()
         }
-        OsaraKeymapChoice::ReplaceCurrent => model.text.packages_osara_keymap_replace_note.clone(),
+    }
+}
+
+/// The key map line on the review page and in the run's details.
+pub fn osara_keymap_review_line(
+    model: &WizardModel,
+    choice: OsaraKeymapChoice,
+    keymap: OsaraKeymapState,
+) -> String {
+    match (choice, keymap) {
+        (OsaraKeymapChoice::ReplaceCurrent, OsaraKeymapState::UnchangedOsara) => {
+            model.text.review_osara_keymap_replace_unchanged.clone()
+        }
+        (OsaraKeymapChoice::ReplaceCurrent, _) => model.text.review_osara_keymap_replace.clone(),
+        (OsaraKeymapChoice::PreserveCurrent, OsaraKeymapState::DefaultKeys) => {
+            model.text.review_osara_keymap_keep_default_keys.clone()
+        }
+        (OsaraKeymapChoice::PreserveCurrent, _) => model.text.review_osara_keymap_preserve.clone(),
     }
 }
 

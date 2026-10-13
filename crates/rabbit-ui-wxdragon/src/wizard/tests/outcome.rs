@@ -8,6 +8,117 @@ use tempfile::tempdir;
 use super::support::*;
 use crate::wizard::*;
 
+/// A run that installed OSARA but kept a key map with the user's own
+/// changes ends by pointing at OSARA's merge action. A kept key map that
+/// already matches the new OSARA one, or REAPER's default keys, gets no
+/// such line, and neither does a run that replaced the key map.
+#[test]
+fn the_done_page_points_at_the_merge_action_only_when_there_is_something_to_merge() {
+    use rabbit_core::artifact::{ArtifactDescriptor, ArtifactKind};
+    use rabbit_core::operation::{PackageOperationItem, PackageOperationStatus};
+    use rabbit_core::package::PACKAGE_OSARA;
+    use rabbit_core::plan::PlanActionKind;
+    use rabbit_core::version::Version;
+
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        vec![fake_installation()],
+        Some(0),
+        InstallPlan {
+            target: None,
+            actions: Vec::new(),
+            notes: Vec::new(),
+        },
+    );
+    let osara_map = "KEY 1 65 40001 0\r\n";
+    let dir = tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("KeyMaps")).unwrap();
+    std::fs::write(
+        dir.path().join("KeyMaps").join("OSARA.ReaperKeyMap"),
+        osara_map,
+    )
+    .unwrap();
+    let report_for = |status, plan_action| {
+        let mut report = empty_setup_report(dir.path().to_path_buf());
+        report.dry_run = false;
+        report.package_operation.dry_run = false;
+        report.package_operation.items.push(PackageOperationItem {
+            package_id: PACKAGE_OSARA.to_string(),
+            plan_action,
+            status,
+            artifact: ArtifactDescriptor {
+                package_id: PACKAGE_OSARA.to_string(),
+                version: Version::parse("2026.10.5").unwrap(),
+                platform: Platform::Windows,
+                architecture: Architecture::X64,
+                kind: ArtifactKind::Installer,
+                url: "https://example.test/osara.exe".to_string(),
+                file_name: "osara.exe".to_string(),
+                channel: None,
+            },
+            cached_artifact: None,
+            install_action: None,
+            backup_paths: Vec::new(),
+            backup_manifest_path: None,
+            planned_execution: None,
+            manual_instruction: None,
+            message: String::new(),
+            message_code: rabbit_core::operation::PackageOperationMessage::UnattendedInstalled,
+        });
+        report
+    };
+    let mut request = sample_install_request(dir.path().to_path_buf());
+    let merge_hint = |request: &WizardInstallRequest, report| {
+        wizard_outcome_report_from_success(&model, request, &report)
+            .detail_lines
+            .iter()
+            .any(|line| line.contains("Merge OSARA key map"))
+    };
+    let updated = || {
+        report_for(
+            PackageOperationStatus::InstalledOrChecked,
+            PlanActionKind::Update,
+        )
+    };
+
+    std::fs::write(dir.path().join("reaper-kb.ini"), "KEY 1 65 40002 0\r\n").unwrap();
+    request.osara_keymap_choice = OsaraKeymapChoice::PreserveCurrent;
+    assert!(merge_hint(&request, updated()));
+    assert!(merge_hint(
+        &request,
+        report_for(
+            PackageOperationStatus::InstalledOrChecked,
+            PlanActionKind::Install
+        )
+    ));
+    // OSARA wasn't installed this run, so there is nothing new to merge.
+    assert!(!merge_hint(
+        &request,
+        report_for(PackageOperationStatus::SkippedCurrent, PlanActionKind::Keep)
+    ));
+    assert!(!merge_hint(
+        &request,
+        report_for(PackageOperationStatus::Failed, PlanActionKind::Update)
+    ));
+    // A dry run changed nothing.
+    let mut dry = updated();
+    dry.dry_run = true;
+    assert!(!merge_hint(&request, dry));
+    // The kept key map already is the new OSARA one.
+    std::fs::write(dir.path().join("reaper-kb.ini"), osara_map).unwrap();
+    assert!(!merge_hint(&request, updated()));
+    // REAPER's default keys, kept by choice.
+    std::fs::remove_file(dir.path().join("reaper-kb.ini")).unwrap();
+    assert!(!merge_hint(&request, updated()));
+    // The key map was replaced.
+    std::fs::write(dir.path().join("reaper-kb.ini"), "KEY 1 65 40002 0\r\n").unwrap();
+    request.osara_keymap_choice = OsaraKeymapChoice::ReplaceCurrent;
+    assert!(!merge_hint(&request, updated()));
+}
+
 /// Issue #32: the Done page said "Review the error below" with nothing
 /// below it. The reason now goes into the status field itself.
 #[test]

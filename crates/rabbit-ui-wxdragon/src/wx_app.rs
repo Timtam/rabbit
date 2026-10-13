@@ -383,6 +383,7 @@ pub fn run() {
                             &rows,
                             &notes,
                             osara_keymap_choice(&widgets.osara_keymap_replace),
+                            crate::wx_app::globals::osara_keymap_state(),
                         );
                         review_can_install.set(review_preview.can_install);
                         widgets
@@ -671,6 +672,13 @@ pub fn run() {
                         }
                         can_install.set(plan.can_install);
                         review_can_install.set(false);
+                        // The run may have replaced the key map or brought a
+                        // new OSARA key map: compare again for a next run.
+                        crate::wx_app::widgets::reset_osara_keymap_choice(
+                            &refreshed_target.path,
+                            &package_rows.borrow(),
+                            &widgets.osara_keymap_replace,
+                        );
                         refresh_package_checklist(
                             &widgets.package_checklist,
                             &package_items,

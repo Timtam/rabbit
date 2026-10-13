@@ -183,12 +183,14 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
                         ui.widgets
                             .spanish_variant_choice
                             .set_selection(crate::spanish_variant_selection(&ui.target.path));
-                        // Replace the key map for a new OSARA, keep it for an
-                        // update: OSARA's own merge action handles that case.
-                        ui.widgets.osara_keymap_replace.set_value(matches!(
-                            crate::osara_keymap_default(&ui.package_rows.borrow()),
-                            crate::OsaraKeymapChoice::ReplaceCurrent
-                        ));
+                        // Replace the key map when that loses nothing of the
+                        // user's, keep it otherwise: OSARA's own merge action
+                        // brings the new bindings into a key map with changes.
+                        crate::wx_app::widgets::reset_osara_keymap_choice(
+                            &ui.target.path,
+                            &ui.package_rows.borrow(),
+                            &ui.widgets.osara_keymap_replace,
+                        );
                         crate::wx_app::widgets::sync_osara_keymap_widgets(
                             &ui.model,
                             &ui.package_rows.borrow(),

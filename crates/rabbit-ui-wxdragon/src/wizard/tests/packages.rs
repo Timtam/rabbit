@@ -640,7 +640,12 @@ fn osara_keymap_note_defaults_to_unavailable_when_osara_is_not_selected() {
         },
     );
 
-    let note = osara_keymap_note(&model, false, OsaraKeymapChoice::PreserveCurrent);
+    let note = osara_keymap_note(
+        &model,
+        false,
+        OsaraKeymapChoice::PreserveCurrent,
+        rabbit_core::osara_keymap::OsaraKeymapState::OwnChanges,
+    );
 
     assert!(note.contains("Select OSARA"));
 }

@@ -175,6 +175,8 @@ packages-spanish-variant-label = Spanish OSARA translation
 wizard-packages-osara-keymap-unavailable-note = Select OSARA to configure its key map behavior.
 wizard-packages-osara-keymap-preserve-note = Your current key map stays as it is: RABBIT won't touch reaper-kb.ini. To add the new OSARA key bindings while keeping your own, run OSARA's "Merge OSARA key map" action afterwards (Extensions menu, OSARA).
 wizard-packages-osara-keymap-replace-note = Recommended for new through intermediate users: RABBIT will backup a copy of your current reaper-kb.ini file, then replace it with the latest version of the OSARA key map.
+wizard-packages-osara-keymap-unchanged-note = Your key map is the OSARA key map with no changes of your own, so RABBIT will back it up and replace it with the latest OSARA key map. Your installed scripts stay in the action list.
+wizard-packages-osara-keymap-default-keys-note = You're using REAPER's default key bindings rather than the OSARA key map, so RABBIT leaves them as they are. To switch to the OSARA key map, tick the box above.
 wizard-package-details-handling-prefix = Handling
 wizard-package-handling-automatic = RABBIT can install this package directly.
 wizard-package-handling-unattended = RABBIT can install this package unattended, including launching its installer when required.
@@ -191,6 +193,8 @@ wizard-review-package-heading = Selected packages
 wizard-review-osara-keymap-heading = OSARA key map
 wizard-review-osara-keymap-preserve = Preserve your current key map.
 wizard-review-osara-keymap-replace = Backup your current key map then replace with the latest from OSARA.
+wizard-review-osara-keymap-replace-unchanged = Back up your unchanged OSARA key map, then replace it with the latest from OSARA.
+wizard-review-osara-keymap-keep-default-keys = Keep REAPER's default key bindings.
 wizard-review-notes-heading = Notes
 wizard-review-preflight-prefix = Cannot install yet
 
@@ -321,6 +325,7 @@ wizard-summary-backup-files-created = Backup files created: { $count }
 wizard-summary-backup-file = Backup file: { $path }
 wizard-summary-receipt-backup = Receipt backup: { $path }
 wizard-summary-backup-manifest = Backup manifest: { $path }
+wizard-summary-osara-keymap-merge-hint = Your key map was kept. To add the new OSARA key bindings to it, start REAPER and run OSARA's "Merge OSARA key map" action (Extensions menu, OSARA).
 wizard-summary-package-message = { $package }: { $message }
 # $action is one of the localized "action-*" labels (Install/Update/Keep).
 wizard-summary-package-plan-action =   Plan action: { $action }

@@ -85,6 +85,12 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         packages_osara_keymap_replace_note: localizer
             .text("wizard-packages-osara-keymap-replace-note")
             .value,
+        packages_osara_keymap_unchanged_note: localizer
+            .text("wizard-packages-osara-keymap-unchanged-note")
+            .value,
+        packages_osara_keymap_default_keys_note: localizer
+            .text("wizard-packages-osara-keymap-default-keys-note")
+            .value,
         package_details_handling_prefix: localizer
             .text("wizard-package-details-handling-prefix")
             .value,
@@ -99,6 +105,12 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         review_osara_keymap_heading: localizer.text("wizard-review-osara-keymap-heading").value,
         review_osara_keymap_preserve: localizer.text("wizard-review-osara-keymap-preserve").value,
         review_osara_keymap_replace: localizer.text("wizard-review-osara-keymap-replace").value,
+        review_osara_keymap_replace_unchanged: localizer
+            .text("wizard-review-osara-keymap-replace-unchanged")
+            .value,
+        review_osara_keymap_keep_default_keys: localizer
+            .text("wizard-review-osara-keymap-keep-default-keys")
+            .value,
         review_notes_heading: localizer.text("wizard-review-notes-heading").value,
         review_preflight_prefix: localizer.text("wizard-review-preflight-prefix").value,
         review_no_target: localizer.text("wizard-review-no-target").value,

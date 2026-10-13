@@ -104,6 +104,10 @@ pub struct WizardText {
     pub packages_osara_keymap_unavailable_note: String,
     pub packages_osara_keymap_preserve_note: String,
     pub packages_osara_keymap_replace_note: String,
+    /// The replace note when the key map is still OSARA's own.
+    pub packages_osara_keymap_unchanged_note: String,
+    /// The keep note when the target uses REAPER's default keys.
+    pub packages_osara_keymap_default_keys_note: String,
     pub package_details_handling_prefix: String,
     pub package_handling_automatic: String,
     pub package_handling_unattended: String,
@@ -116,6 +120,8 @@ pub struct WizardText {
     pub review_osara_keymap_heading: String,
     pub review_osara_keymap_preserve: String,
     pub review_osara_keymap_replace: String,
+    pub review_osara_keymap_replace_unchanged: String,
+    pub review_osara_keymap_keep_default_keys: String,
     pub review_notes_heading: String,
     pub review_preflight_prefix: String,
     pub review_no_target: String,

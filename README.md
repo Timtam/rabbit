@@ -291,8 +291,10 @@ The CLI is dry-run by default; pass `--apply` to actually make changes.
 record of what was installed, and `--json` prints the result as JSON for
 scripting. A few other flags are worth knowing: `--allow-reaper-running`
 proceeds even though REAPER is open (files it holds open may fail to be
-replaced), `--preserve-osara-keymap` keeps your current OSARA key map
-instead of taking OSARA's current default, and `--stage-unsupported`
+replaced), `--preserve-osara-keymap` and `--replace-osara-keymap` decide
+what happens to your key map when OSARA is installed (without either,
+RABBIT replaces it only when OSARA is new or the key map is still OSARA's
+own, as the wizard does), and `--stage-unsupported`
 downloads the packages RABBIT can't install automatically and leaves them
 in the cache for you to run yourself instead of skipping them. Every flag
 is documented in `RABBIT <command> --help`.
