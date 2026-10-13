@@ -71,11 +71,12 @@ fn the_done_page_points_at_the_merge_action_only_when_there_is_something_to_merg
         report
     };
     let mut request = sample_install_request(dir.path().to_path_buf());
+    // In the status line the Done page shows and reads out, not only in the
+    // details behind "Show details".
     let merge_hint = |request: &WizardInstallRequest, report| {
         wizard_outcome_report_from_success(&model, request, &report)
-            .detail_lines
-            .iter()
-            .any(|line| line.contains("Merge OSARA key map"))
+            .status_line
+            .contains("Merge OSARA key map")
     };
     let updated = || {
         report_for(

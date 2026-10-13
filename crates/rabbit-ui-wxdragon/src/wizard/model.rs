@@ -312,7 +312,7 @@ pub struct WizardControls {
     pub install_label: String,
     pub close_label: String,
     /// The close button's label while an install runs, when it stops the
-    /// install instead of closing the wizard.
+    /// install (after asking) before closing RABBIT.
     pub cancel_label: String,
     pub can_go_back: bool,
     pub can_go_next: bool,

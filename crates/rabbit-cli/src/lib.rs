@@ -1910,8 +1910,8 @@ fn osara_keymap_note(default: &OsaraKeymapDefault) -> String {
                  replace it.";
     match (default.replace, default.osara_installed, default.state) {
         (true, false, _) => {
-            "OSARA is new here, so the OSARA key map replaces reaper-kb.ini, after a backup. \
-             Pass --preserve-osara-keymap to keep your key map."
+            "OSARA is new here, so the OSARA key map becomes your key map, after a backup of \
+             any reaper-kb.ini. Pass --preserve-osara-keymap to keep your current keys."
                 .to_string()
         }
         (true, true, _) => {

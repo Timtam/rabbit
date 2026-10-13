@@ -26,10 +26,14 @@ pub fn wizard_outcome_report_from_success(
     report: &SetupReport,
 ) -> WizardOutcomeReport {
     let summary = summarize_setup_report(model, report);
-    let mut detail_lines = summary.detail_lines;
+    let mut status_line = summary.status_line;
     if osara_keymap_needs_merge(request, report) {
+        // In the status line, which the Done page shows and reads out, not
+        // in the details behind "Show details": it is the one thing left
+        // for the user to do.
         let localizer = localizer_from_options(&model.bootstrap_options).ok();
-        detail_lines.push(format_localized_message(
+        status_line.push_str("\n\n");
+        status_line.push_str(&format_localized_message(
             localizer.as_ref(),
             "wizard-summary-osara-keymap-merge-hint",
             &[],
@@ -60,8 +64,8 @@ pub fn wizard_outcome_report_from_success(
         stage_unsupported: request.stage_unsupported,
         cache_dir: request.cache_dir.clone(),
         osara_keymap_choice: request.osara_keymap_choice,
-        status_line: summary.status_line,
-        detail_lines,
+        status_line,
+        detail_lines: summary.detail_lines,
         error_message: None,
         setup_report: Some(report.clone()),
     }

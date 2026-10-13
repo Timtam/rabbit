@@ -34,20 +34,20 @@ from this file and posts it as the GitHub release body.
 ### Changed
 
 - While an install is running, the **Close** button now says **Cancel**.
-  It always stopped the install there (after asking) rather than closing
-  the wizard, and its name now says so. It reads **Close** again once the
-  install has finished.
+  Pressing it there asks first, then stops the install after the step it
+  is on and closes RABBIT. It reads **Close** again once the install has
+  finished.
 - The **Replace your current key map with latest OSARA key map** checkbox
   now starts from a look at your key map. RABBIT compares `reaper-kb.ini`
   with the key map of the OSARA you have installed. If OSARA is new, or
   your key map is still OSARA's own with no changes of yours, the box is
   ticked and the new OSARA key map replaces it, as before. If your key map
   has changes of your own, or you use REAPER's default keys, the box starts
-  unticked and your keys stay as they are. The note under the checkbox,
-  the review page and the Done page say which case applies. For a key map
-  with your own changes they point to OSARA's new **Merge OSARA key map**
-  action (Extensions menu, OSARA), which adds OSARA's new key bindings
-  without losing yours. Scripts that ReaPack registered don't count as
+  unticked and your keys stay as they are. The note under the checkbox and
+  the review page say which case applies. For a key map with your own
+  changes, the note and the Done page point to OSARA's new **Merge OSARA
+  key map** action (Extensions menu, OSARA), which adds OSARA's new key
+  bindings without losing yours. Scripts that ReaPack registered don't count as
   changes of your own, since a replacement keeps them.
 - The command line makes the same choice when neither
   `--preserve-osara-keymap` nor the new `--replace-osara-keymap` is passed,

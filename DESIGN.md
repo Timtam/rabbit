@@ -1058,8 +1058,10 @@ Extension files:
 - If REAPER is running, stop before changing extension files and ask the user to
   close it.
 - When OSARA is selected, back up `reaper-kb.ini` and replace it with the OSARA
-  key map by default unless the user explicitly asks to preserve the current key
-  map instead.
+  key map by default only when OSARA is new or `reaper-kb.ini` still matches the
+  installed OSARA key map; otherwise keep it, and point at OSARA's "Merge OSARA
+  key map" action. The user can override either way with the Packages checkbox
+  or `--replace-osara-keymap` / `--preserve-osara-keymap`.
 - Do not overwrite or delete user-created `reaKontrol/fxMaps` content during a
   ReaKontrol install or update.
 - Back up every overwritten file under `RABBIT/backups/<timestamp>/`.
