@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use rabbit_core::localization::{DEFAULT_LOCALE, Localizer};
 use rabbit_core::model::{Architecture, Platform};
+use rabbit_core::osara_keymap::OsaraKeymapState;
 use rabbit_core::package::{PACKAGE_OSARA, PACKAGE_REAPACK};
 use rabbit_core::plan::{InstallPlan, PlanAction, PlanActionKind};
 use rabbit_core::version::Version;
@@ -126,6 +127,7 @@ fn review_preview_includes_osara_keymap_choice() {
         &model.package_rows,
         &model.notes,
         OsaraKeymapChoice::ReplaceCurrent,
+        OsaraKeymapState::OwnChanges,
     );
 
     assert!(preview.lines.iter().any(|line| line == "OSARA key map"));
@@ -141,6 +143,121 @@ fn review_preview_includes_osara_keymap_choice() {
             .iter()
             .any(|line| line == "Manual attention expected")
     );
+}
+
+/// A new OSARA arrives with its own key map, and so does an installed one
+/// whose key map is still OSARA's own. Any other key map stays: OSARA's
+/// "Merge OSARA key map" action adds the new bindings without throwing the
+/// user's own away.
+#[test]
+fn the_key_map_is_replaced_only_when_nothing_of_the_users_is_lost() {
+    let rows_for = |action: Option<PlanActionKind>| {
+        let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let installation = fake_installation();
+        model_from_plan(
+            &localizer,
+            Platform::Windows,
+            Architecture::X64,
+            vec![installation.clone()],
+            Some(0),
+            InstallPlan {
+                target: Some(installation),
+                actions: action
+                    .map(|action| PlanAction {
+                        package_id: PACKAGE_OSARA.to_string(),
+                        action,
+                        installed_version: None,
+                        available_version: Some(Version::parse("2026.10.5").unwrap()),
+                        reason: "test".to_string(),
+                    })
+                    .into_iter()
+                    .collect(),
+                notes: Vec::new(),
+            },
+        )
+        .package_rows
+    };
+    use OsaraKeymapChoice::{PreserveCurrent, ReplaceCurrent};
+    use OsaraKeymapState::*;
+    let all = [DefaultKeys, UnchangedOsara, OwnChanges, Unknown];
+    for keymap in all {
+        // A new OSARA, or none offered at all: the usual default.
+        assert_eq!(
+            osara_keymap_default(&rows_for(Some(PlanActionKind::Install)), keymap),
+            ReplaceCurrent,
+            "{keymap:?}"
+        );
+        assert_eq!(
+            osara_keymap_default(&rows_for(None), keymap),
+            ReplaceCurrent,
+            "{keymap:?}"
+        );
+    }
+    for action in [PlanActionKind::Update, PlanActionKind::Keep] {
+        let rows = rows_for(Some(action));
+        assert_eq!(osara_keymap_default(&rows, UnchangedOsara), ReplaceCurrent);
+        assert_eq!(osara_keymap_default(&rows, OwnChanges), PreserveCurrent);
+        assert_eq!(osara_keymap_default(&rows, Unknown), PreserveCurrent);
+        assert_eq!(osara_keymap_default(&rows, DefaultKeys), PreserveCurrent);
+    }
+}
+
+/// The note and the review line say why the checkbox starts where it does.
+#[test]
+fn the_key_map_texts_follow_the_choice_and_the_key_map() {
+    use OsaraKeymapChoice::{PreserveCurrent, ReplaceCurrent};
+    use OsaraKeymapState::*;
+    let (_, model) = langpack_model(PlanActionKind::Install);
+    let text = &model.text;
+    let note = |choice, keymap| osara_keymap_note(&model, true, choice, keymap);
+    let line = |choice, keymap| osara_keymap_review_line(&model, choice, keymap);
+
+    assert_eq!(
+        note(ReplaceCurrent, UnchangedOsara),
+        text.packages_osara_keymap_unchanged_note
+    );
+    assert_eq!(
+        line(ReplaceCurrent, UnchangedOsara),
+        text.review_osara_keymap_replace_unchanged
+    );
+    assert_eq!(
+        note(PreserveCurrent, DefaultKeys),
+        text.packages_osara_keymap_default_keys_note
+    );
+    assert_eq!(
+        line(PreserveCurrent, DefaultKeys),
+        text.review_osara_keymap_keep_default_keys
+    );
+    for keymap in [DefaultKeys, OwnChanges, Unknown] {
+        assert_eq!(
+            note(ReplaceCurrent, keymap),
+            text.packages_osara_keymap_replace_note
+        );
+        assert_eq!(
+            line(ReplaceCurrent, keymap),
+            text.review_osara_keymap_replace
+        );
+    }
+    for keymap in [UnchangedOsara, OwnChanges, Unknown] {
+        assert_eq!(
+            note(PreserveCurrent, keymap),
+            text.packages_osara_keymap_preserve_note
+        );
+        assert_eq!(
+            line(PreserveCurrent, keymap),
+            text.review_osara_keymap_preserve
+        );
+    }
+    assert!(note(PreserveCurrent, OwnChanges).contains("Merge OSARA key map"));
+    // Not one of these is empty or a missing-key placeholder.
+    for text in [
+        &text.packages_osara_keymap_unchanged_note,
+        &text.packages_osara_keymap_default_keys_note,
+        &text.review_osara_keymap_replace_unchanged,
+        &text.review_osara_keymap_keep_default_keys,
+    ] {
+        assert!(text.contains("REAPER") || text.contains("OSARA"), "{text}");
+    }
 }
 
 #[test]

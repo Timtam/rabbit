@@ -18,6 +18,7 @@ pub mod lock;
 pub mod metadata;
 pub mod model;
 pub mod operation;
+pub mod osara_keymap;
 pub mod package;
 pub mod plan;
 pub mod portable;

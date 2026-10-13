@@ -3,7 +3,10 @@
 
 use std::path::PathBuf;
 
+use rabbit_core::operation::PackageOperationStatus;
+use rabbit_core::osara_keymap::{OsaraKeymapState, osara_keymap_state};
 use rabbit_core::package::PACKAGE_OSARA;
+use rabbit_core::plan::PlanActionKind;
 use rabbit_core::report::{default_report_path, save_json_and_text_reports};
 use rabbit_core::setup::SetupReport;
 use rabbit_core::{RabbitError, Result};
@@ -14,7 +17,7 @@ use super::model::{
     OsaraKeymapChoice, WizardInstallRequest, WizardInstallSummary, WizardModel,
     WizardOutcomeReport, WizardOutcomeStatus,
 };
-use super::packages::package_display_name;
+use super::packages::{osara_keymap_review_line, package_display_name};
 use super::summary::summarize_setup_report;
 
 pub fn wizard_outcome_report_from_success(
@@ -23,6 +26,22 @@ pub fn wizard_outcome_report_from_success(
     report: &SetupReport,
 ) -> WizardOutcomeReport {
     let summary = summarize_setup_report(model, report);
+    let mut status_line = summary.status_line;
+    if osara_keymap_needs_merge(request, report) {
+        // In the status line, which the Done page shows and reads out, not
+        // in the details behind "Show details": it is the one thing left
+        // for the user to do.
+        let localizer = localizer_from_options(&model.bootstrap_options).ok();
+        status_line.push_str("\n\n");
+        status_line.push_str(&format_localized_message(
+            localizer.as_ref(),
+            "wizard-summary-osara-keymap-merge-hint",
+            &[],
+            "Your key map was kept. To add the new OSARA key bindings to it, start REAPER and \
+             run OSARA's \"Merge OSARA key map\" action (Extensions menu, OSARA)."
+                .to_string(),
+        ));
+    }
     WizardOutcomeReport {
         // Cancellation outranks a package failure in the heading: "you
         // stopped it" explains the half-finished run, where "finished with
@@ -45,11 +64,30 @@ pub fn wizard_outcome_report_from_success(
         stage_unsupported: request.stage_unsupported,
         cache_dir: request.cache_dir.clone(),
         osara_keymap_choice: request.osara_keymap_choice,
-        status_line: summary.status_line,
+        status_line,
         detail_lines: summary.detail_lines,
         error_message: None,
         setup_report: Some(report.clone()),
     }
+}
+
+/// Whether the run installed OSARA but kept a key map that the new OSARA
+/// key map doesn't match, so the user should merge the new bindings in.
+/// Compared after the install, against the OSARA key map it brought: a key
+/// map of REAPER's default keys stays as the user chose, and one that
+/// already matches has nothing to merge.
+fn osara_keymap_needs_merge(request: &WizardInstallRequest, report: &SetupReport) -> bool {
+    request.osara_keymap_choice == OsaraKeymapChoice::PreserveCurrent
+        && !report.dry_run
+        && report.package_operation.items.iter().any(|item| {
+            item.package_id == PACKAGE_OSARA
+                && item.status == PackageOperationStatus::InstalledOrChecked
+                && matches!(
+                    item.plan_action,
+                    PlanActionKind::Install | PlanActionKind::Update
+                )
+        })
+        && osara_keymap_state(&report.resource_path) == OsaraKeymapState::OwnChanges
 }
 
 pub fn summarize_wizard_error(
@@ -144,10 +182,11 @@ pub fn summarize_wizard_error(
         .any(|package_id| package_id == PACKAGE_OSARA)
     {
         detail_lines.push(model.text.review_osara_keymap_heading.clone());
-        detail_lines.push(match request.osara_keymap_choice {
-            OsaraKeymapChoice::PreserveCurrent => model.text.review_osara_keymap_preserve.clone(),
-            OsaraKeymapChoice::ReplaceCurrent => model.text.review_osara_keymap_replace.clone(),
-        });
+        detail_lines.push(osara_keymap_review_line(
+            model,
+            request.osara_keymap_choice,
+            OsaraKeymapState::Unknown,
+        ));
     }
 
     detail_lines.push(format_localized_message(

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::artifact::ArtifactKind;
 use crate::error::{IoPathContext, RabbitError, Result};
 use crate::model::Platform;
+use crate::osara_keymap::script_key;
 use crate::package::PACKAGE_OSARA;
 use crate::reapack::extract_scr_lines;
 use crate::text_file::{read_text_file_lossless, write_text_file_lossless};
@@ -232,7 +233,22 @@ pub(super) fn apply_osara_keymap_replacement(
         // carry ANSI-code-page bytes on Windows, which a strict UTF-8 read
         // rejects (same failure shape as issue #7's reapack.ini).
         let existing = read_text_file_lossless(&current_keymap)?.text;
-        preserved_scr_lines = extract_scr_lines(&existing);
+        // OSARA's key map registers OSARA's own scripts, so those come back
+        // with it. Re-adding the old copies too would leave one more of each
+        // after every replacement, so keep only scripts the new key map
+        // doesn't register, each once (per section: one script can be
+        // registered in several).
+        let owned_key = |(section, id): (&str, &str)| (section.to_string(), id.to_string());
+        let mut registered = read_text_file_lossless(&replacement_source)?
+            .text
+            .lines()
+            .filter_map(script_key)
+            .map(owned_key)
+            .collect::<std::collections::HashSet<_>>();
+        preserved_scr_lines = extract_scr_lines(&existing)
+            .into_iter()
+            .filter(|line| script_key(line).is_none_or(|key| registered.insert(owned_key(key))))
+            .collect();
 
         let (backup_path, backup_manifest_path) = backup_file_for_unattended_change(
             resource_path,
@@ -323,6 +339,38 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&report.backup_paths[0]).unwrap(),
             existing
+        );
+    }
+
+    #[test]
+    fn scripts_the_osara_key_map_registers_are_not_added_twice() {
+        // Each replacement used to re-add the old copies of OSARA's own
+        // script lines next to the fresh ones from OSARA's key map.
+        let dir = tempdir().unwrap();
+        let resource_path = dir.path();
+        seed_osara_replacement_source(
+            resource_path,
+            "KEY 1 65 40001 0\r\nSCR 4 0 RSosara \"Custom: OSARA new.lua\" osara.lua\r\n",
+        );
+        fs::write(
+            resource_path.join("reaper-kb.ini"),
+            "SCR 4 0 RSosara \"Custom: OSARA old.lua\" osara.lua\r\n\
+             SCR 4 0 RSmine \"Custom: mine.lua\" mine.lua\r\n\
+             SCR 4 0 RSosara \"Custom: OSARA old.lua\" osara.lua\r\n\
+             SCR 4 0 RSmine \"Custom: mine.lua\" mine.lua\r\n\
+             SCR 4 32060 RSosara \"Custom: OSARA old.lua\" osara.lua\r\n",
+        )
+        .unwrap();
+
+        apply_osara_keymap_replacement(resource_path).unwrap();
+
+        // The same script registered in another section stays.
+        assert_eq!(
+            fs::read_to_string(resource_path.join("reaper-kb.ini")).unwrap(),
+            "KEY 1 65 40001 0\r\n\
+             SCR 4 0 RSosara \"Custom: OSARA new.lua\" osara.lua\r\n\
+             SCR 4 0 RSmine \"Custom: mine.lua\" mine.lua\r\n\
+             SCR 4 32060 RSosara \"Custom: OSARA old.lua\" osara.lua\r\n"
         );
     }
 

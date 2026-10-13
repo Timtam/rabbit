@@ -13,14 +13,17 @@ use rabbit_core::localization::{
 };
 use rabbit_core::model::{Architecture, Platform};
 use rabbit_core::operation::{
-    PackageOperationOptions, PackageOperationReport, PlannedExecutionKind,
-    execute_package_operation,
+    PackageOperationItem, PackageOperationOptions, PackageOperationReport, PackageOperationStatus,
+    PlannedExecutionKind, execute_package_operation,
 };
-use rabbit_core::package::{PackageChannels, STABLE_CHANNEL, remembered_channels};
+use rabbit_core::osara_keymap::{OsaraKeymapDefault, OsaraKeymapState, osara_keymap_default};
+use rabbit_core::package::{PACKAGE_OSARA, PackageChannels, STABLE_CHANNEL, remembered_channels};
 use rabbit_core::package::{
     builtin_package_specs, default_desired_package_ids, embedded_package_manifest,
 };
-use rabbit_core::plan::{AvailablePackage, build_install_plan_with_installed_channels};
+use rabbit_core::plan::{
+    AvailablePackage, PlanActionKind, build_install_plan_with_installed_channels,
+};
 use rabbit_core::portable::{PortabilityCheckStatus, PortabilityReport, check_portable_runtime};
 use rabbit_core::preflight::{PreflightOptions, PreflightReport, run_install_preflight};
 use rabbit_core::report::{default_report_path, save_json_and_text_reports};
@@ -326,10 +329,18 @@ enum Command {
         /// skipping them.
         #[arg(long)]
         stage_unsupported: bool,
-        /// Keep OSARA's current key map instead of replacing it with OSARA's
-        /// current default.
-        #[arg(long)]
+        /// Keep your current key map (reaper-kb.ini). OSARA's "Merge OSARA
+        /// key map" action can add the new OSARA key bindings to it later.
+        /// By default RABBIT keeps it when OSARA is already installed and the
+        /// key map differs from the installed OSARA key map.
+        #[arg(long, conflicts_with = "replace_osara_keymap")]
         preserve_osara_keymap: bool,
+        /// Replace your key map (reaper-kb.ini) with OSARA's, after backing
+        /// it up. By default RABBIT does that when OSARA is new, or when the
+        /// key map is still the installed OSARA key map with no changes of
+        /// your own.
+        #[arg(long)]
+        replace_osara_keymap: bool,
         /// Pick a package flavour, e.g. `--package-variant langpack-es=pma`
         /// to install Team PMA's Spanish translation (es_MX) instead of the
         /// default REAPER Accesible español (es_ES). Repeatable.
@@ -399,10 +410,18 @@ enum Command {
         /// skipping them.
         #[arg(long)]
         stage_unsupported: bool,
-        /// Keep OSARA's current key map instead of replacing it with OSARA's
-        /// current default.
-        #[arg(long)]
+        /// Keep your current key map (reaper-kb.ini). OSARA's "Merge OSARA
+        /// key map" action can add the new OSARA key bindings to it later.
+        /// By default RABBIT keeps it when OSARA is already installed and the
+        /// key map differs from the installed OSARA key map.
+        #[arg(long, conflicts_with = "replace_osara_keymap")]
         preserve_osara_keymap: bool,
+        /// Replace your key map (reaper-kb.ini) with OSARA's, after backing
+        /// it up. By default RABBIT does that when OSARA is new, or when the
+        /// key map is still the installed OSARA key map with no changes of
+        /// your own.
+        #[arg(long)]
+        replace_osara_keymap: bool,
         /// Pick a package flavour, e.g. `--package-variant langpack-es=pma`
         /// to install Team PMA's Spanish translation (es_MX) instead of the
         /// default REAPER Accesible español (es_ES). Repeatable.
@@ -955,6 +974,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             allow_reaper_running,
             stage_unsupported,
             preserve_osara_keymap,
+            replace_osara_keymap,
             package_variant,
             accept_reapack_donation_notice,
             report_path,
@@ -970,6 +990,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
             let channels =
                 effective_package_channels(Some(&resource_path), &packages, &package_channel)?;
+            let keymap = osara_keymap_choice(
+                &resource_path,
+                platform,
+                replace_osara_keymap,
+                preserve_osara_keymap,
+            );
             let report = execute_package_operation(
                 &resource_path,
                 &packages,
@@ -980,7 +1006,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     dry_run: !apply,
                     allow_reaper_running,
                     stage_unsupported,
-                    replace_osara_keymap: !preserve_osara_keymap,
+                    replace_osara_keymap: keymap.replace,
                     package_variants: parse_package_variants(&package_variant)?,
                     package_channels: channels.clone(),
                     target_app_path,
@@ -989,6 +1015,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 },
             )?;
             warn_channel_fallbacks(&channels, item_channels(&report.items));
+            explain_osara_keymap_choice(&keymap, &report.items);
             let report_path = selected_report_path(
                 Some(&resource_path),
                 report_path,
@@ -1019,6 +1046,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             allow_reaper_running,
             stage_unsupported,
             preserve_osara_keymap,
+            replace_osara_keymap,
             package_variant,
             package_channel,
             accept_reapack_donation_notice,
@@ -1044,6 +1072,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
             let channels =
                 effective_package_channels(Some(&resource_path), &packages, &package_channel)?;
+            let keymap = osara_keymap_choice(
+                &resource_path,
+                platform,
+                replace_osara_keymap,
+                preserve_osara_keymap,
+            );
             let report = execute_setup_operation(
                 &resource_path,
                 &packages,
@@ -1055,7 +1089,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     portable,
                     allow_reaper_running,
                     stage_unsupported,
-                    replace_osara_keymap: !preserve_osara_keymap,
+                    replace_osara_keymap: keymap.replace,
                     package_variants: parse_package_variants(&package_variant)?,
                     package_channels: channels.clone(),
                     target_app_path,
@@ -1066,6 +1100,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 },
             )?;
             warn_channel_fallbacks(&channels, item_channels(&report.package_operation.items));
+            explain_osara_keymap_choice(&keymap, &report.package_operation.items);
             let report_path =
                 selected_report_path(Some(&resource_path), report_path, save_report, "setup")?;
             save_optional_report(report_path.as_deref(), &report)?;
@@ -1819,6 +1854,87 @@ fn item_channels(
         .map(|item| (item.package_id.as_str(), item.artifact.channel.as_deref()))
 }
 
+/// The OSARA key map choice for a run: what the user asked for, or else
+/// what fits the target's key map, as the wizard picks it.
+fn osara_keymap_choice(
+    resource_path: &Path,
+    platform: Platform,
+    replace: bool,
+    preserve: bool,
+) -> OsaraKeymapRunChoice {
+    if replace || preserve {
+        return OsaraKeymapRunChoice {
+            replace,
+            automatic: None,
+        };
+    }
+    let default = osara_keymap_default(resource_path, platform);
+    OsaraKeymapRunChoice {
+        replace: default.replace,
+        automatic: Some(default),
+    }
+}
+
+struct OsaraKeymapRunChoice {
+    replace: bool,
+    /// Why, when RABBIT chose rather than the user.
+    automatic: Option<OsaraKeymapDefault>,
+}
+
+/// Say what RABBIT chose for the key map and why, when it chose and the run
+/// installs OSARA. On stderr, like the other notes, so `--json` stays JSON.
+fn explain_osara_keymap_choice(choice: &OsaraKeymapRunChoice, items: &[PackageOperationItem]) {
+    let Some(default) = &choice.automatic else {
+        return;
+    };
+    let installs_osara = items.iter().any(|item| {
+        item.package_id == PACKAGE_OSARA
+            && matches!(
+                item.plan_action,
+                PlanActionKind::Install | PlanActionKind::Update
+            )
+            && matches!(
+                item.status,
+                PackageOperationStatus::InstalledOrChecked
+                    | PackageOperationStatus::PlannedUnattended
+            )
+    });
+    if installs_osara {
+        eprintln!("note: {}", osara_keymap_note(default));
+    }
+}
+
+fn osara_keymap_note(default: &OsaraKeymapDefault) -> String {
+    let merge = "To add the new OSARA key bindings to it, run OSARA's \"Merge OSARA key map\" \
+                 action in REAPER (Extensions menu, OSARA), or pass --replace-osara-keymap to \
+                 replace it.";
+    match (default.replace, default.osara_installed, default.state) {
+        (true, false, _) => {
+            "OSARA is new here, so the OSARA key map becomes your key map, after a backup of \
+             any reaper-kb.ini. Pass --preserve-osara-keymap to keep your current keys."
+                .to_string()
+        }
+        (true, true, _) => {
+            "reaper-kb.ini is the installed OSARA key map with no changes of your own, so the \
+             new OSARA key map replaces it, after a backup. Registered scripts stay. Pass \
+             --preserve-osara-keymap to keep it."
+                .to_string()
+        }
+        (false, _, OsaraKeymapState::DefaultKeys) => {
+            "You use REAPER's default key bindings rather than the OSARA key map, so they stay. \
+             Pass --replace-osara-keymap to switch to the OSARA key map."
+                .to_string()
+        }
+        (false, _, OsaraKeymapState::Unknown) => format!(
+            "RABBIT couldn't compare reaper-kb.ini with the installed OSARA key map, so it \
+             stays as it is. {merge}"
+        ),
+        (false, _, _) => {
+            format!("reaper-kb.ini has changes of your own, so it stays as it is. {merge}")
+        }
+    }
+}
+
 fn warn_channel_fallbacks<'a>(
     requested: &PackageChannels,
     resolved: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
@@ -2372,6 +2488,81 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_key_map_flags_force_either_way_but_not_both() {
+        for command in ["setup", "apply-packages"] {
+            let cli = Cli::try_parse_from([
+                "rabbit",
+                command,
+                "--resource-path",
+                "C:\\REAPER",
+                "--replace-osara-keymap",
+            ])
+            .unwrap();
+            match cli.command {
+                Command::Setup {
+                    replace_osara_keymap,
+                    preserve_osara_keymap,
+                    ..
+                }
+                | Command::ApplyPackages {
+                    replace_osara_keymap,
+                    preserve_osara_keymap,
+                    ..
+                } => assert!(replace_osara_keymap && !preserve_osara_keymap),
+                other => panic!("unexpected command: {other:?}"),
+            }
+            assert!(
+                Cli::try_parse_from([
+                    "rabbit",
+                    command,
+                    "--resource-path",
+                    "C:\\REAPER",
+                    "--replace-osara-keymap",
+                    "--preserve-osara-keymap",
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn without_a_flag_the_key_map_choice_fits_the_target() {
+        use rabbit_core::osara_keymap::OsaraKeymapState;
+        let dir = tempfile::tempdir().unwrap();
+        let platform = rabbit_core::model::Platform::Windows;
+
+        let forced = super::osara_keymap_choice(dir.path(), platform, false, true);
+        assert!(!forced.replace && forced.automatic.is_none());
+        let forced = super::osara_keymap_choice(dir.path(), platform, true, false);
+        assert!(forced.replace && forced.automatic.is_none());
+
+        // No OSARA here yet: its key map comes along, and RABBIT says why.
+        let chosen = super::osara_keymap_choice(dir.path(), platform, false, false);
+        assert!(chosen.replace);
+        let default = chosen.automatic.unwrap();
+        assert!(!default.osara_installed);
+        assert_eq!(default.state, OsaraKeymapState::DefaultKeys);
+        assert!(super::osara_keymap_note(&default).contains("--preserve-osara-keymap"));
+    }
+
+    #[test]
+    fn the_key_map_note_says_what_to_do_about_a_kept_key_map() {
+        use rabbit_core::osara_keymap::{OsaraKeymapDefault, OsaraKeymapState};
+        let note = |state| {
+            super::osara_keymap_note(&OsaraKeymapDefault {
+                osara_installed: true,
+                state,
+                replace: rabbit_core::osara_keymap::replace_by_default(true, state),
+            })
+        };
+        assert!(note(OsaraKeymapState::UnchangedOsara).contains("no changes of your own"));
+        assert!(note(OsaraKeymapState::OwnChanges).contains("Merge OSARA key map"));
+        assert!(note(OsaraKeymapState::Unknown).contains("Merge OSARA key map"));
+        let defaults = note(OsaraKeymapState::DefaultKeys);
+        assert!(defaults.contains("default key bindings") && !defaults.contains("Merge"));
     }
 
     #[test]

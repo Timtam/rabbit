@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rabbit_core::localization::Localizer;
+use rabbit_core::osara_keymap::OsaraKeymapState;
 
 use wxdragon::prelude::*;
 
@@ -68,6 +69,46 @@ pub(crate) fn announce(text: &str, priority: AnnouncePriority) {
     crate::voiceover::announce(text, priority);
     #[cfg(not(target_os = "macos"))]
     let _ = (text, priority);
+}
+
+thread_local! {
+    /// The close button's two labels: "Close", and "Cancel" while an install
+    /// runs. Set once when the window is built; `update_navigation` picks one
+    /// on every step change, so no single transition can forget it.
+    static CLOSE_BUTTON_LABELS: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+}
+
+thread_local! {
+    /// How the target's key map compared with its OSARA key map when the
+    /// package list was last built. The key map note and review line say
+    /// why the checkbox started where it did.
+    static OSARA_KEYMAP_STATE: std::cell::Cell<OsaraKeymapState> =
+        const { std::cell::Cell::new(OsaraKeymapState::Unknown) };
+}
+
+pub(crate) fn set_osara_keymap_state(state: OsaraKeymapState) {
+    OSARA_KEYMAP_STATE.with(|cell| cell.set(state));
+}
+
+pub(crate) fn osara_keymap_state() -> OsaraKeymapState {
+    OSARA_KEYMAP_STATE.with(std::cell::Cell::get)
+}
+
+pub(crate) fn install_close_button_labels(close: String, cancel: String) {
+    CLOSE_BUTTON_LABELS.with(|cell| *cell.borrow_mut() = Some((close, cancel)));
+}
+
+/// The close button's label for the current step: "Cancel" while installing.
+pub(crate) fn close_button_label(installing: bool) -> Option<String> {
+    CLOSE_BUTTON_LABELS.with(|cell| {
+        cell.borrow().as_ref().map(|(close, cancel)| {
+            if installing {
+                cancel.clone()
+            } else {
+                close.clone()
+            }
+        })
+    })
 }
 
 pub(crate) fn install_ui_frame(frame: Frame) {

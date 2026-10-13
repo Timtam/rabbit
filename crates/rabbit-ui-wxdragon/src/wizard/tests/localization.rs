@@ -133,6 +133,7 @@ fn wizard_command_labels_include_native_mnemonics() {
         assert_eq!(model.controls.next_label, "Next");
         assert_eq!(model.controls.install_label, "Install");
         assert_eq!(model.controls.close_label, "Close");
+        assert_eq!(model.controls.cancel_label, "Cancel");
         assert_eq!(
             model.text.done_launch_reaper_label,
             "Open REAPER and close RABBIT"
@@ -146,6 +147,7 @@ fn wizard_command_labels_include_native_mnemonics() {
         assert_eq!(model.controls.next_label, "&Next");
         assert_eq!(model.controls.install_label, "&Install");
         assert_eq!(model.controls.close_label, "&Close");
+        assert_eq!(model.controls.cancel_label, "&Cancel");
         assert_eq!(
             model.text.done_launch_reaper_label,
             "&Open REAPER and close RABBIT"

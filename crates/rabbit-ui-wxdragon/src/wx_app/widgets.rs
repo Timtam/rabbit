@@ -118,10 +118,11 @@ pub(crate) fn progress_details_for_start(
 
     if osara_selected_for_rows(package_rows, selected_package_indices) {
         lines.push(model.text.review_osara_keymap_heading.clone());
-        lines.push(match osara_keymap_choice {
-            OsaraKeymapChoice::PreserveCurrent => model.text.review_osara_keymap_preserve.clone(),
-            OsaraKeymapChoice::ReplaceCurrent => model.text.review_osara_keymap_replace.clone(),
-        });
+        lines.push(crate::osara_keymap_review_line(
+            model,
+            osara_keymap_choice,
+            crate::wx_app::globals::osara_keymap_state(),
+        ));
     }
 
     if let Some(cache_dir) = cache_dir {
@@ -284,6 +285,22 @@ pub(crate) fn set_optional_choice_shown(choice: &Choice, label_name: &str, shown
     page.layout();
 }
 
+/// Compare the target's key map with its OSARA key map and start the key
+/// map checkbox from the choice that fits, as every fresh package list
+/// does. Callers then sync the note with [`sync_osara_keymap_widgets`].
+pub(crate) fn reset_osara_keymap_choice(
+    resource_path: &Path,
+    rows: &[crate::PackageRow],
+    checkbox: &CheckBox,
+) {
+    let keymap = rabbit_core::osara_keymap::osara_keymap_state(resource_path);
+    crate::wx_app::globals::set_osara_keymap_state(keymap);
+    checkbox.set_value(matches!(
+        crate::osara_keymap_default(rows, keymap),
+        OsaraKeymapChoice::ReplaceCurrent
+    ));
+}
+
 pub(crate) fn sync_osara_keymap_widgets(
     model: &WizardModel,
     rows: &[crate::PackageRow],
@@ -298,6 +315,7 @@ pub(crate) fn sync_osara_keymap_widgets(
         model,
         osara_selected,
         osara_keymap_choice(checkbox),
+        crate::wx_app::globals::osara_keymap_state(),
     ));
     note.enable(osara_selected);
     note.set_can_focus(osara_selected);
@@ -541,6 +559,14 @@ pub(crate) fn update_navigation(
         _ => false,
     });
     install.enable(step == REVIEW_STEP && can_install);
+    // While an install runs, the close button first stops it (after asking),
+    // so it says Cancel. Only set when it changes: a screen reader may
+    // announce every relabel of the focused button.
+    if let Some(label) = crate::wx_app::globals::close_button_label(step == PROGRESS_STEP)
+        && close.get_label() != label
+    {
+        close.set_label(&label);
+    }
     // Make the step's primary action the window's default button so Enter
     // activates it regardless of which control holds focus (the standard
     // dialog convention on both macOS and Windows). A disabled default
