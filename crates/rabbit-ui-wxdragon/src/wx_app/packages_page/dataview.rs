@@ -217,8 +217,9 @@ pub(crate) const PACKAGE_COL_LABEL: u32 = 1;
 /// Non-Windows: build the Packages page using a wxDataViewCtrl driven by a
 /// `CustomDataViewTreeModel`. The model exposes a synthetic Packages group
 /// + one leaf per `PackageRow`; column 0 is a Bool toggle, column 1 is the
-/// row label (the column with the expander triangle). The model's
-/// `set_value` callback owns all the toggle side effects.
+/// row label. wx makes the first column it is given, the toggle, the one
+/// with the expander triangle. The model's `set_value` callback owns all
+/// the toggle side effects.
 pub(crate) fn build_packages_page(
     page: &WizardPage,
     model: &WizardModel,
@@ -282,13 +283,13 @@ pub(crate) fn build_packages_page(
     );
     let toggle_column = DataViewColumn::new(
         "",
-        &toggle_renderer,
+        toggle_renderer,
         PACKAGE_COL_TOGGLE as usize,
         28,
         DataViewAlign::Center,
         DataViewColumnFlags::DefaultNone,
     );
-    tree.append_column(&toggle_column);
+    tree.append_column(toggle_column);
 
     let text_renderer = DataViewTextRenderer::new(
         VariantType::String,
@@ -297,14 +298,20 @@ pub(crate) fn build_packages_page(
     );
     let text_column = DataViewColumn::new(
         "",
-        &text_renderer,
+        text_renderer,
         PACKAGE_COL_LABEL as usize,
         -1,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
-    tree.append_column(&text_column);
+    tree.append_column(text_column);
 
+    // wx shows only a container row's first column by default, so the group
+    // rows (Packages, Additional software, ...) showed a checkbox with no
+    // label, and VoiceOver read them as an unlabelled checkbox. The label
+    // column has to be switched on for containers too. Before associating
+    // the model: switching it later rebuilds the view and collapses groups.
+    dv_model.set_container_columns(true);
     tree.associate_model(&dv_model);
 
     expand_packages_group(&tree, &dv_model);

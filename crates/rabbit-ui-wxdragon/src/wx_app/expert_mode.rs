@@ -78,7 +78,6 @@ pub(crate) fn apply_window_title(model: &WizardModel) {
 /// Ask before turning expert mode on. No is the default, so a stray Enter
 /// never unlocks pre-release builds.
 pub(crate) fn confirm_expert_mode(model: &WizardModel) -> bool {
-    let no_default = MessageDialogStyle::from_bits_retain(wxdragon::ffi::WXD_NO_DEFAULT);
     let mut confirmed = false;
     with_ui_frame(|frame| {
         let dialog = MessageDialog::builder(
@@ -90,7 +89,7 @@ pub(crate) fn confirm_expert_mode(model: &WizardModel) -> bool {
             MessageDialogStyle::YesNo
                 | MessageDialogStyle::IconWarning
                 | MessageDialogStyle::Centre
-                | no_default,
+                | MessageDialogStyle::NoDefault,
         )
         .build();
         confirmed = dialog.show_modal() == ID_YES;

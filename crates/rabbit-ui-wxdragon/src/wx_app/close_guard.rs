@@ -1,6 +1,7 @@
 //! Decides what closing the window means while an install is running, and
 //! asks the user when the answer is "stop the install".
 
+use std::cell::RefCell;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -85,10 +86,45 @@ impl InstallRunState {
     }
 }
 
+thread_local! {
+    /// The close question or notice waiting for the next turn of the event
+    /// loop. A thread-local because it captures widgets, which can't ride in
+    /// `call_after`'s `Send` closure. See [`defer_close_dialog`].
+    static PENDING_CLOSE_DIALOG: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
+/// True from the moment a close request queues a question or notice until
+/// the user has dismissed it.
+static CLOSE_DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// Show a close question or notice once the close handler has returned.
+///
+/// A dialog shown from inside the handler runs a nested event loop, and a
+/// second close request arriving there (Cmd+Q again, the Dock's Quit, a
+/// Windows logoff) re-enters the handler. wxdragon skips a re-entered
+/// handler and leaves the event to wxWidgets' default, which destroys the
+/// window: mid-install, or in the middle of a self-update's file swap. So
+/// the handler only vetoes and queues the dialog, and while it is open
+/// further close requests are vetoed without a second one.
+pub(crate) fn defer_close_dialog(show: impl FnOnce() + 'static) {
+    CLOSE_DIALOG_OPEN.store(true, Ordering::SeqCst);
+    PENDING_CLOSE_DIALOG.with(|cell| *cell.borrow_mut() = Some(Box::new(show)));
+    wxdragon::call_after(Box::new(|| {
+        let show = PENDING_CLOSE_DIALOG.with(|cell| cell.borrow_mut().take());
+        if let Some(show) = show {
+            show();
+        }
+        CLOSE_DIALOG_OPEN.store(false, Ordering::SeqCst);
+    }));
+}
+
 /// What closing the window should do right now.
 pub(crate) enum CloseVerdict {
     /// Nothing is running: destroy the window.
     Allow,
+    /// An earlier close request's question or notice is still on screen, and
+    /// it answers this one too.
+    DialogOpen,
     /// An install is running and the user has not been asked yet.
     Ask,
     /// An install is running and the user already said "stop": the worker
@@ -116,6 +152,9 @@ pub(crate) fn announce_stopping(widgets: &WizardWidgets, model: &WizardModel) {
 }
 
 pub(crate) fn close_verdict(install_run: &InstallRunState) -> CloseVerdict {
+    if CLOSE_DIALOG_OPEN.load(Ordering::SeqCst) {
+        return CloseVerdict::DialogOpen;
+    }
     if SELF_UPDATE_APPLYING.load(Ordering::SeqCst) {
         return CloseVerdict::SelfUpdateInProgress;
     }
@@ -134,10 +173,8 @@ pub(crate) fn close_verdict(install_run: &InstallRunState) -> CloseVerdict {
 /// `wxNO_DEFAULT` puts the focused button on **No**: this dialog appears
 /// over work the user asked for, so a stray Enter or Space — from a screen
 /// reader user tabbing around the progress page, say — must not be what
-/// stops their REAPER install halfway. wxdragon's `MessageDialogStyle`
-/// doesn't name the flag, so it comes from the raw wx constant.
+/// stops their REAPER install halfway.
 pub(crate) fn confirm_stop_install(model: &WizardModel) -> bool {
-    let no_default = MessageDialogStyle::from_bits_retain(wxdragon::ffi::WXD_NO_DEFAULT);
     let mut confirmed = false;
     with_ui_frame(|frame| {
         let dialog = MessageDialog::builder(
@@ -149,7 +186,7 @@ pub(crate) fn confirm_stop_install(model: &WizardModel) -> bool {
             MessageDialogStyle::YesNo
                 | MessageDialogStyle::IconWarning
                 | MessageDialogStyle::Centre
-                | no_default,
+                | MessageDialogStyle::NoDefault,
         )
         .build();
         confirmed = dialog.show_modal() == ID_YES;
