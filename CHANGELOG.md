@@ -31,6 +31,13 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Added
+
+- Brazilian Portuguese (pt-BR) UI translation. The language picker now lists
+  Português (Brasil), it ships in the macOS app bundle, and OS-language
+  auto-detection on first launch covers Portuguese locales (any `pt-*`, which
+  map to pt-BR).
+
 ## [0.4.4] - 2026-10-13
 
 ### Changed
