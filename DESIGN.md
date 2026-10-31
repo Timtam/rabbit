@@ -61,7 +61,7 @@ questions they cannot reasonably answer.
   user sees and can override the choice; the CLI does the same with
   `--replace-osara-keymap` and `--preserve-osara-keymap`.
 - Make every user-visible string localizable from the beginning. Embedded
-  locales today: en-US, de-DE, fr-FR and it-IT.
+  locales today: en-US, de-DE, fr-FR, it-IT and pt-BR.
 - Build Windows and macOS artifacts automatically for every push in GitHub
   Actions so every commit can be tested from real binaries. Artifacts are the
   raw single-file binaries; no zipping.
@@ -1125,6 +1125,7 @@ locales/
   de-DE/
   fr-FR/
   it-IT/
+  pt-BR/
 docs/
   architecture/
 tests/

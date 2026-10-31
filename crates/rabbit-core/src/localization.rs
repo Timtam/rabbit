@@ -15,7 +15,8 @@ const DE_DE_LOCALE_SOURCE: &str = include_str!("../../../locales/de-DE/rabbit.ft
 const ES_ES_LOCALE_SOURCE: &str = include_str!("../../../locales/es-ES/rabbit.ftl");
 const FR_FR_LOCALE_SOURCE: &str = include_str!("../../../locales/fr-FR/rabbit.ftl");
 const IT_IT_LOCALE_SOURCE: &str = include_str!("../../../locales/it-IT/rabbit.ftl");
-const EMBEDDED_LOCALES: &[&str] = &[DEFAULT_LOCALE, "de-DE", "es-ES", "fr-FR", "it-IT"];
+const PT_BR_LOCALE_SOURCE: &str = include_str!("../../../locales/pt-BR/rabbit.ftl");
+const EMBEDDED_LOCALES: &[&str] = &[DEFAULT_LOCALE, "de-DE", "es-ES", "fr-FR", "it-IT", "pt-BR"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalizedText {
@@ -233,6 +234,7 @@ pub fn embedded_locale_source(locale: &str) -> Option<&'static str> {
         "es-ES" => Some(ES_ES_LOCALE_SOURCE),
         "fr-FR" => Some(FR_FR_LOCALE_SOURCE),
         "it-IT" => Some(IT_IT_LOCALE_SOURCE),
+        "pt-BR" => Some(PT_BR_LOCALE_SOURCE),
         _ => None,
     }
 }
@@ -341,7 +343,7 @@ mod tests {
     fn exposes_embedded_default_locale_source() {
         assert_eq!(
             embedded_locales(),
-            &[DEFAULT_LOCALE, "de-DE", "es-ES", "fr-FR", "it-IT"]
+            &[DEFAULT_LOCALE, "de-DE", "es-ES", "fr-FR", "it-IT", "pt-BR"]
         );
         // Every advertised locale must actually carry an embedded source.
         for &locale in embedded_locales() {
@@ -544,6 +546,18 @@ mod tests {
     }
 
     #[test]
+    fn loads_embedded_brazilian_portuguese_messages() {
+        let localizer = Localizer::embedded("pt-BR").unwrap();
+
+        let message = localizer.text("wizard-button-back");
+
+        assert_eq!(message.value, "Voltar");
+        assert_eq!(message.locale, "pt-BR");
+        assert!(!message.fallback_used);
+        assert!(!message.missing);
+    }
+
+    #[test]
     fn formats_messages_with_arguments() {
         let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
 
@@ -641,6 +655,8 @@ mod tests {
         assert_eq!(match_embedded_locale("fr-CA"), Some("fr-FR".to_string()));
         // Mexican Spanish maps to es-ES (the embedded Spanish variant).
         assert_eq!(match_embedded_locale("es-MX"), Some("es-ES".to_string()));
+        // European Portuguese maps to pt-BR (the embedded Portuguese variant).
+        assert_eq!(match_embedded_locale("pt-PT"), Some("pt-BR".to_string()));
         // A locale RABBIT does not ship has no match.
         assert_eq!(match_embedded_locale("ja-JP"), None);
         assert_eq!(match_embedded_locale(""), None);
@@ -663,7 +679,8 @@ mod tests {
                 DEFAULT_LOCALE.to_string(),
                 "es-ES".to_string(),
                 "fr-FR".to_string(),
-                "it-IT".to_string()
+                "it-IT".to_string(),
+                "pt-BR".to_string()
             ]
         );
     }

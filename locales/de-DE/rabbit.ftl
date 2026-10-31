@@ -86,6 +86,7 @@ wizard-locale-name-de-DE = Deutsch (Deutschland)
 wizard-locale-name-es-ES = Spanisch (Spanien)
 wizard-locale-name-fr-FR = Französisch (Frankreich)
 wizard-locale-name-it-IT = Italienisch (Italien)
+wizard-locale-name-pt-BR = Portugiesisch (Brasilien)
 wizard-target-choice-label = Installationsziel
 wizard-target-details-label = Zieldetails
 wizard-target-empty = Es ist kein REAPER-Installationsziel ausgewählt.
