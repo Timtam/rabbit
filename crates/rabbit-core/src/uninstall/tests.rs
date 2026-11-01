@@ -27,14 +27,14 @@ const SUMMARY: &str = r#""summary": { "removes_key": "test-removes", "keeps_key"
 
 /// A temporary folder holding a resource folder `REAPER` and roots that
 /// know it and a CLAP folder `CLAP` beside it.
-struct Fixture {
-    dir: TempDir,
-    resource: PathBuf,
-    roots: UninstallRoots,
+pub(super) struct Fixture {
+    pub(super) dir: TempDir,
+    pub(super) resource: PathBuf,
+    pub(super) roots: UninstallRoots,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let dir = tempdir().unwrap();
         let resource = dir.path().join("REAPER");
         fs::create_dir_all(&resource).unwrap();
@@ -49,7 +49,7 @@ impl Fixture {
 
     /// Write `relative`, with `/` between its components, inside the
     /// resource folder.
-    fn file(&self, relative: &str) -> PathBuf {
+    pub(super) fn file(&self, relative: &str) -> PathBuf {
         let path = relative
             .split('/')
             .fold(self.resource.clone(), |path, component| {
@@ -87,7 +87,7 @@ impl Fixture {
     }
 }
 
-fn write(path: &Path, contents: &[u8]) -> PathBuf {
+pub(super) fn write(path: &Path, contents: &[u8]) -> PathBuf {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, contents).unwrap();
     path.to_path_buf()
@@ -97,7 +97,7 @@ fn write(path: &Path, contents: &[u8]) -> PathBuf {
 /// `.clap`, for one that installs into the CLAP folder), with
 /// `extra` spliced in among its fields. It must pass the manifest's own
 /// validation, like every shipped manifest.
-fn spec(id: &str, extra: &str, uninstall: &str) -> PackageSpec {
+pub(super) fn spec(id: &str, extra: &str, uninstall: &str) -> PackageSpec {
     let source = format!(
         r#"{{
             "id": "{id}",
@@ -121,18 +121,18 @@ fn spec(id: &str, extra: &str, uninstall: &str) -> PackageSpec {
 }
 
 /// An uninstall block with one Windows `remove_files` plan holding `fields`.
-fn remove_files(fields: &str) -> String {
+pub(super) fn remove_files(fields: &str) -> String {
     remove_files_with("", fields)
 }
 
 /// [`remove_files`] with `top` among the block's own fields.
-fn remove_files_with(top: &str, fields: &str) -> String {
+pub(super) fn remove_files_with(top: &str, fields: &str) -> String {
     format!(
         r#"{{ {top} "plans": [{{ "platform": "windows", "strategy": "remove_files", {SUMMARY}, {fields} }}] }}"#
     )
 }
 
-fn detection(id: &str, installed: bool) -> ComponentDetection {
+pub(super) fn detection(id: &str, installed: bool) -> ComponentDetection {
     ComponentDetection {
         package_id: id.to_string(),
         display_name: id.to_string(),
@@ -147,7 +147,7 @@ fn detection(id: &str, installed: bool) -> ComponentDetection {
 
 /// The detections for `installed` packages, plus ReaPack as not installed,
 /// so ReaPack's records hold no sway unless a test says so.
-fn installed(ids: &[&str]) -> Vec<ComponentDetection> {
+pub(super) fn installed(ids: &[&str]) -> Vec<ComponentDetection> {
     let mut detections: Vec<ComponentDetection> =
         ids.iter().map(|id| detection(id, true)).collect();
     if !ids.contains(&PACKAGE_REAPACK) {
@@ -1172,7 +1172,7 @@ fn every_shipped_manifest_plans() {
 
 // The uninstall preflight.
 
-fn running(pid: &str, name: &str, exe: &Path) -> RunningProcess {
+pub(super) fn running(pid: &str, name: &str, exe: &Path) -> RunningProcess {
     RunningProcess {
         pid: pid.to_string(),
         name: name.to_string(),

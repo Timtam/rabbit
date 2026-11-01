@@ -1,4 +1,4 @@
-//! Progress-event plumbing for the install pipeline.
+//! Progress-event plumbing for the install and uninstall pipelines.
 //!
 //! The setup pipeline is normally silent until its final [`SetupReport`] is
 //! returned: callers see a finished result, not the per-package boundaries
@@ -36,9 +36,10 @@
 
 use std::sync::Arc;
 
-/// A single progress signal emitted by the install pipeline. The variants
-/// cover the three observable phases of an install (download, install,
-/// configuration) plus per-byte progress within a download.
+/// A single progress signal emitted by the install or uninstall pipeline.
+/// The variants cover the three observable phases of an install (download,
+/// install, configuration) plus per-byte progress within a download, and the
+/// removal of each package in an uninstall.
 ///
 /// Events carry only the package / step identity, not an "n of N" count.
 /// UIs already know how many packages they queued (from the install plan)
@@ -84,6 +85,16 @@ pub enum ProgressEvent {
     /// A configuration step finished. As with `InstallCompleted`, errors
     /// short-circuit instead of firing this variant.
     ConfigurationCompleted { step_id: String },
+    /// An uninstall is about to remove this package. Uninstalls run one
+    /// package at a time and download nothing, so their events never
+    /// interleave.
+    RemoveStarted { package_id: String },
+    /// The uninstall is done with this package. It fires after every
+    /// `RemoveStarted`, also when the removal failed or a check stopped it,
+    /// so a progress page never waits on a package that is over.
+    /// `removed` says whether the package's files are gone; the report says
+    /// the rest.
+    RemoveCompleted { package_id: String, removed: bool },
 }
 
 /// A `Send + Sync` handle to the user-supplied progress callback. Cheap

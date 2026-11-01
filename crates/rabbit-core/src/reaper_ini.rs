@@ -6,9 +6,10 @@
 //! only the line it must, and writes back in the original encoding with the
 //! original line endings.
 //!
-//! Today the only edit is selecting a language pack, which REAPER stores as
+//! The only edits are selecting a language pack, which REAPER stores as
 //! `langpack=<file name>` under `[REAPER]` (verified against real installs;
-//! `<>` is REAPER's "no language pack" sentinel).
+//! `<>` is REAPER's "no language pack" sentinel), and setting it back to
+//! `<>` when an uninstall removed the selected pack.
 
 use std::fs;
 use std::path::Path;
@@ -100,6 +101,50 @@ pub fn lang_pack_setting(resource_path: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
     let decoded = read_text_file_lossless(&ini_path)?;
+    Ok(raw_lang_pack(&decoded.text).map(str::to_string))
+}
+
+/// Set `langpack=` back to `<>`, REAPER's "no language pack", when it names
+/// one of `file_names`: language pack files an uninstall just removed.
+/// Returns the value it replaced, exactly as written, or `None` when it
+/// changed nothing because the file or the line is missing or names another
+/// pack. Leaving REAPER pointed at a pack that is gone would be untested
+/// ground; another pack the user picked is theirs.
+///
+/// Lossless like [`select_lang_pack`]: only that one line changes. On
+/// Windows, whose file names ignore case, `ignore_case` should be set.
+pub fn clear_lang_pack_if_selected(
+    resource_path: &Path,
+    file_names: &[String],
+    ignore_case: bool,
+) -> Result<Option<String>> {
+    let ini_path = resource_path.join(REAPER_INI_RELATIVE_PATH);
+    if !ini_path.is_file() {
+        return Ok(None);
+    }
+    let decoded = read_text_file_lossless(&ini_path)?;
+    let Some(current) = current_lang_pack(&decoded.text) else {
+        return Ok(None);
+    };
+    let removed = file_names.iter().any(|name| {
+        if ignore_case {
+            name.to_lowercase() == current.to_lowercase()
+        } else {
+            *name == current
+        }
+    });
+    if !removed {
+        return Ok(None);
+    }
+    let newline = if decoded.text.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let Some((text, _)) = rewrite_with_lang_pack(&decoded.text, LANGPACK_NONE, newline) else {
+        return Ok(None);
+    };
+    write_text_file_lossless(&ini_path, &text, decoded.encoding)?;
     Ok(raw_lang_pack(&decoded.text).map(str::to_string))
 }
 
@@ -301,6 +346,54 @@ mod tests {
 
         std::fs::write(&ini, "[other]\r\nlangpack=nope\r\n[REAPER]\r\nother=1\r\n").unwrap();
         assert_eq!(lang_pack_setting(resource).unwrap(), None, "no line");
+    }
+
+    /// After an uninstall, REAPER is set back to no language pack only when
+    /// its setting names a pack file that was removed, and only that line
+    /// changes.
+    #[test]
+    fn clears_the_language_only_when_it_names_a_removed_pack() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path();
+        let ini = resource.join(REAPER_INI_RELATIVE_PATH);
+        let removed = vec!["de_DE.ReaperLangPack".to_string()];
+        assert_eq!(
+            clear_lang_pack_if_selected(resource, &removed, true).unwrap(),
+            None,
+            "no reaper.ini"
+        );
+
+        let original = "[REAPER]\r\nwnd_state=1\r\nlangpack=DE_de.reaperlangpack\r\nlast=x\r\n";
+        std::fs::write(&ini, original).unwrap();
+        assert_eq!(
+            clear_lang_pack_if_selected(resource, &removed, false).unwrap(),
+            None,
+            "case counts where file names do"
+        );
+        assert_eq!(std::fs::read_to_string(&ini).unwrap(), original);
+
+        assert_eq!(
+            clear_lang_pack_if_selected(resource, &removed, true)
+                .unwrap()
+                .as_deref(),
+            Some("DE_de.reaperlangpack")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ini).unwrap(),
+            "[REAPER]\r\nwnd_state=1\r\nlangpack=<>\r\nlast=x\r\n"
+        );
+
+        // Another pack the user picked stays, and so does "none".
+        std::fs::write(&ini, "[REAPER]\nlangpack=Deutsch.ReaperLangPack\n").unwrap();
+        assert_eq!(
+            clear_lang_pack_if_selected(resource, &removed, true).unwrap(),
+            None
+        );
+        std::fs::write(&ini, "[REAPER]\nlangpack=<>\n").unwrap();
+        assert_eq!(
+            clear_lang_pack_if_selected(resource, &["<>".to_string()], true).unwrap(),
+            None
+        );
     }
 
     #[test]

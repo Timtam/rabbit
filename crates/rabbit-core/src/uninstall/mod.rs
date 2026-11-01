@@ -20,12 +20,18 @@
 //! Building a plan reads only whether files exist and how big they are. It
 //! never hashes them: the wizard builds its rows on the UI thread, and
 //! hashing FFmpeg's 250 MB there used to stall it for seconds. Hashes are
-//! checked right before each file moves.
+//! checked right before each file moves, by [`execute_uninstall`] on the
+//! worker thread.
 //!
-//! Nothing here removes anything yet.
+//! Removed files move into a backup set, so every removal can be undone one
+//! package at a time.
 
+pub mod execute;
+#[cfg(test)]
+mod execute_tests;
 pub mod paths;
 pub mod plan;
+mod post;
 pub mod preflight;
 #[cfg(test)]
 mod tests;
@@ -38,13 +44,16 @@ use crate::model::{InstallationKind, Platform};
 use crate::package::uninstall::{
     UninstallBackup, UninstallPostStep, UninstallStrategy, UninstallSummary,
 };
+use crate::preflight::{PreflightCheck, PreflightReport};
+use crate::report::{SavedReportPaths, default_report_path, save_json_and_text_reports};
 use crate::version::Version;
 
+pub use execute::execute_uninstall;
 pub use paths::{PathRefusal, RemovalGuard, UninstallRoots, check_removal};
 pub use plan::{UninstallPlanInput, build_uninstall_plan};
 pub use preflight::{
-    ANY_REAPER_PROCESS_CHECK, PROGRAMS_RUNNING_CHECK, UninstallPreflightOptions,
-    run_uninstall_preflight, run_uninstall_preflight_with_processes,
+    ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, BACKUP_SPACE_MARGIN, PROGRAMS_RUNNING_CHECK,
+    UninstallPreflightOptions, run_uninstall_preflight, run_uninstall_preflight_with_processes,
 };
 
 /// The note key a package without any plan for this target shows, the same
@@ -304,6 +313,299 @@ pub enum UninstallNote {
     OrphanedFromReaPack { reapack_packages: Vec<String> },
     /// The plan's `note_key`: a note on what stays behind.
     Manifest { note_key: String },
+}
+
+/// What to uninstall, and how.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UninstallRequest {
+    pub resource_path: PathBuf,
+    pub platform: Platform,
+    /// The packages to remove. The engine puts them in removal order itself.
+    pub package_ids: Vec<String>,
+    /// "Also remove settings": each package's `kept_user_data` moves into
+    /// the backup set too. Off unless the user asks for it.
+    pub remove_settings: bool,
+    /// Change nothing: plan, check and hash, and report what would happen.
+    pub dry_run: bool,
+    /// The target's REAPER, when the caller knows it better than detection.
+    pub target_app_path: Option<PathBuf>,
+    /// A standard or a portable REAPER. `None` works it out: the standard
+    /// resource folder is the standard target, any other folder a portable
+    /// one, which can't remove packages that serve the whole computer.
+    pub target: Option<InstallationKind>,
+}
+
+/// How uninstalling one package went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UninstallStatus {
+    /// Its files are gone, into the backup set.
+    Removed,
+    /// Removed, but detection still finds some of it afterwards.
+    RemovedWithLeftovers,
+    /// Removed; some files go at the next restart. Only a vendor uninstaller
+    /// leaves that, and none runs yet.
+    RemovedPendingRestart,
+    /// A dry run: this is what would be removed.
+    WouldRemove,
+    /// Not installed, so there was nothing to do.
+    NotInstalled,
+    /// RABBIT won't remove it, or a check stopped it before anything of it
+    /// changed.
+    Blocked,
+    /// Removing it went wrong. Whatever had moved was put back.
+    Failed,
+    /// The user stopped the run before this package.
+    Cancelled,
+    /// An earlier package stopped the run before this one.
+    NotReached,
+}
+
+impl UninstallStatus {
+    /// The package's files are gone.
+    pub fn is_removed(self) -> bool {
+        matches!(
+            self,
+            Self::Removed | Self::RemovedWithLeftovers | Self::RemovedPendingRestart
+        )
+    }
+}
+
+/// What an uninstall run did, or in a dry run would do.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UninstallReport {
+    pub resource_path: PathBuf,
+    pub platform: Platform,
+    pub target: InstallationKind,
+    pub dry_run: bool,
+    pub remove_settings: bool,
+    pub preflight: PreflightReport,
+    /// The backup set the removed files went into, when anything did.
+    pub backup_set_id: Option<String>,
+    pub backup_set_path: Option<PathBuf>,
+    /// One item per requested package, in the order they were removed.
+    pub items: Vec<UninstallReportItem>,
+    /// The plan the run carried out, built from fresh detection once the
+    /// run held the lock.
+    pub plan: UninstallPlan,
+    /// Where the run saved this report, when it saved it.
+    #[serde(skip)]
+    pub saved_report: Option<SavedReportPaths>,
+}
+
+impl UninstallReport {
+    pub fn item(&self, package_id: &str) -> Option<&UninstallReportItem> {
+        self.items.iter().find(|item| item.package_id == package_id)
+    }
+
+    /// Some package's files are gone.
+    pub fn changed_anything(&self) -> bool {
+        self.items.iter().any(|item| item.status.is_removed())
+    }
+
+    /// A requested package was blocked and nothing was removed: the run
+    /// changed nothing. The CLI exits with 2.
+    pub fn blocked_before_changes(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.status == UninstallStatus::Blocked)
+            && !self.changed_anything()
+            && !self.items.iter().any(|item| {
+                matches!(
+                    item.status,
+                    UninstallStatus::Failed | UninstallStatus::Cancelled
+                )
+            })
+    }
+
+    /// A package failed or was stopped, or the run stopped after it had
+    /// already removed something. The CLI exits with 1.
+    pub fn has_failures(&self) -> bool {
+        self.items.iter().any(|item| {
+            matches!(
+                item.status,
+                UninstallStatus::Failed | UninstallStatus::Cancelled
+            )
+        }) || (self.changed_anything()
+            && self.items.iter().any(|item| {
+                matches!(
+                    item.status,
+                    UninstallStatus::Blocked | UninstallStatus::NotReached
+                )
+            }))
+    }
+
+    /// The user stopped the run before every package was reached.
+    pub fn was_cancelled(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.status == UninstallStatus::Cancelled)
+    }
+
+    /// Packages were removed, but something needs the user's attention:
+    /// leftovers, or a step after the removal that didn't work.
+    pub fn finished_with_problems(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| !item.problems.is_empty() || !item.leftovers.is_empty())
+    }
+}
+
+/// Save `report` as `RABBIT/logs/uninstall-unix-<time>.json` and `.txt`.
+pub fn save_uninstall_report(report: &UninstallReport) -> crate::Result<SavedReportPaths> {
+    save_json_and_text_reports(
+        &default_report_path(&report.resource_path, "uninstall"),
+        report,
+    )
+}
+
+/// How uninstalling one package went.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UninstallReportItem {
+    pub package_id: String,
+    pub display_name: String,
+    pub status: UninstallStatus,
+    /// What is gone from its place, into the backup set; in a dry run, what
+    /// would be.
+    pub removed: Vec<RemovedFile>,
+    /// What the plan listed but the run kept, and why.
+    pub kept: Vec<KeptFile>,
+    /// Folders removed because the removal left them empty.
+    pub removed_dirs: Vec<PathBuf>,
+    /// After a failure: files moved back where they were.
+    pub put_back: Vec<PathBuf>,
+    /// After a failure: files that couldn't be moved back. They are still
+    /// in the backup set, and a restore brings them back.
+    pub left_in_backup: Vec<PathBuf>,
+    /// What detection still finds of the package after the run.
+    pub leftovers: Vec<PathBuf>,
+    /// Steps after the removal that didn't work. The package is removed
+    /// all the same.
+    pub problems: Vec<UninstallProblem>,
+    /// English, for the CLI and the saved report. A UI in another language
+    /// goes by `message_code`.
+    pub message: String,
+    pub message_code: UninstallMessage,
+}
+
+/// A file the run removed into the backup set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovedFile {
+    pub path: PathBuf,
+    pub reason: RemovalReason,
+    pub size: u64,
+    /// The receipt recorded another hash. Only files the manifest names go
+    /// even then, such as a newer plug-in copied in by hand.
+    pub changed_since_install: bool,
+    /// Where it is in the backup set. `None` in a dry run.
+    pub backup_path: Option<PathBuf>,
+}
+
+/// A file the plan listed that the run kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptFile {
+    pub path: PathBuf,
+    pub reason: KeptFileReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KeptFileReason {
+    /// Only RABBIT's receipt names it, and it changed since RABBIT installed
+    /// it, so it is most likely the user's own now.
+    ChangedSinceInstall,
+    /// A settings folder holding a symbolic link or junction, which RABBIT
+    /// never follows. The whole folder stays.
+    HoldsLink,
+}
+
+/// Something after the removal that didn't work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "kebab-case")]
+pub enum UninstallProblem {
+    /// REAPER's language setting still names the language pack that was
+    /// removed.
+    LanguageResetFailed { error: String },
+}
+
+impl UninstallProblem {
+    /// English, for the CLI and the saved report.
+    pub fn message(&self) -> String {
+        match self {
+            Self::LanguageResetFailed { error } => format!(
+                "RABBIT couldn't set REAPER back to no language pack ({error}). Choose a \
+                 language in REAPER's preferences."
+            ),
+        }
+    }
+}
+
+/// What happened to a package, for a UI to put in its own language. The
+/// English form is the item's `message`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "kebab-case")]
+pub enum UninstallMessage {
+    /// Removed. `backup_set_id` is the set its files went into.
+    Removed {
+        backup_set_id: Option<String>,
+    },
+    WouldRemove,
+    NotInstalled,
+    /// No package with this id is offered on this platform.
+    UnknownPackage,
+    /// The plan says RABBIT won't remove it; `removability` says why.
+    NotRemovable {
+        removability: Removability,
+    },
+    /// The removal needs a step this version can't carry out yet: a vendor
+    /// uninstaller, administrator rights, or a whole folder going to the
+    /// Trash. None of these can be undone from a backup.
+    NotYetSupported,
+    /// Checks failed for this package: REAPER or a program it names is
+    /// running, the resource folder isn't writable, or the backup lacks
+    /// room.
+    ChecksFailed {
+        checks: Vec<PreflightCheck>,
+    },
+    /// Other requested packages are blocked, so the run removed nothing.
+    OtherPackageBlocked {
+        package_ids: Vec<String>,
+    },
+    Cancelled,
+    /// The run stopped at `package_id`, before this package.
+    RunStopped {
+        package_id: String,
+    },
+    /// The guard refused a path right before it moved.
+    PathRefused {
+        path: PathBuf,
+        refusal: PathRefusal,
+    },
+    /// A file couldn't be read to check its hash, or a settings folder
+    /// couldn't be listed.
+    Unreadable {
+        path: PathBuf,
+        error: String,
+    },
+    MoveFailed {
+        path: PathBuf,
+        error: String,
+    },
+    /// Copied to the backup's drive, but the original couldn't be deleted,
+    /// most often because another program has it open.
+    FileInUse {
+        path: PathBuf,
+        error: String,
+    },
+    /// The backup set couldn't be written.
+    BackupFailed {
+        error: String,
+    },
+    /// The receipt couldn't be saved after the files moved, so they were
+    /// put back.
+    ReceiptSaveFailed {
+        error: String,
+    },
 }
 
 /// The part of `path` below the resource folder, with `/` between

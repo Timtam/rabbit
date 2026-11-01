@@ -213,7 +213,10 @@ fn effective_target_app_path(
         .or_else(|| detected_standard_app_path(resource_path))
 }
 
-fn portable_target_app_path(resource_path: &Path, platform: Option<Platform>) -> Option<PathBuf> {
+pub(crate) fn portable_target_app_path(
+    resource_path: &Path,
+    platform: Option<Platform>,
+) -> Option<PathBuf> {
     match platform {
         Some(Platform::Windows) => {
             let app_path = resource_path.join("reaper.exe");

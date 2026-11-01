@@ -22,6 +22,7 @@ pub mod paths;
 pub mod process;
 pub mod registry;
 pub mod signature;
+pub mod volume;
 
 pub use arch::is_running_under_rosetta;
 pub use defender::{DefenderExclusionOutcome, ensure_path_excluded};
@@ -48,3 +49,4 @@ pub use registry::{
     read_uninstall_display_version, read_uninstall_install_location, read_uninstall_value,
 };
 pub use signature::{SignatureVerdict, verify_executable_signature};
+pub use volume::{available_space, same_volume};

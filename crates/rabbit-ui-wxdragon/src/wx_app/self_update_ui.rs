@@ -567,10 +567,12 @@ pub(crate) fn update_self_update_progress_window(event: &ProgressEvent) {
                             .value,
                     );
                 }
-                // Configuration steps belong to package installs; RABBIT's
-                // own update never emits them.
+                // Configuration steps belong to package installs and
+                // removals to uninstalls; RABBIT's own update emits neither.
                 ProgressEvent::ConfigurationStarted { .. }
-                | ProgressEvent::ConfigurationCompleted { .. } => {}
+                | ProgressEvent::ConfigurationCompleted { .. }
+                | ProgressEvent::RemoveStarted { .. }
+                | ProgressEvent::RemoveCompleted { .. } => {}
             }
         });
     });

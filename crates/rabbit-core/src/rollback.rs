@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{IoPathContext, JsonPathContext, RabbitError, Result};
 use crate::hash::sha256_file;
 use crate::preflight::{PreflightOptions, PreflightReport, run_install_preflight};
-use crate::receipt::{RECEIPT_RELATIVE_PATH, receipt_path};
+use crate::receipt::{PackageReceipt, RECEIPT_RELATIVE_PATH, receipt_path};
 
 pub const BACKUP_MANIFEST_FILE: &str = "backup-manifest.json";
 
@@ -50,6 +52,29 @@ pub struct BackupManifest {
     pub reason: String,
     pub files: Vec<BackupManifestFile>,
     pub receipt_backup_path: Option<PathBuf>,
+    /// The packages an uninstall removed into this set, by id. Empty, and
+    /// left out of the file, for every other kind of set.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub packages: BTreeMap<String, BackupPackageRecord>,
+}
+
+/// What an uninstall set records about one package it removed, so a later
+/// restore of just that package can put it back properly.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupPackageRecord {
+    /// The package's receipt entry from just before the uninstall. A restore
+    /// merges it back into the receipt instead of copying the whole receipt
+    /// file, which has moved on since. `None` when RABBIT had no receipt for
+    /// the copy it removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<PackageReceipt>,
+    /// The `langpack=` value under `[REAPER]` in `reaper.ini` that the
+    /// uninstall replaced with `<>`, because it named a language pack file
+    /// the uninstall removed. `reaper.ini` itself never goes into a set:
+    /// restoring a whole copy would undo every REAPER setting changed since,
+    /// so a restore puts back only this one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub langpack_before: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +108,53 @@ pub enum BackupEntryState {
     /// done.
     #[default]
     Done,
+}
+
+/// A file's size and SHA-256, when the caller has just read them and the
+/// writer needn't read the file again. FFmpeg's DLLs are 250 MB together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileDigest {
+    pub size: u64,
+    pub sha256: String,
+}
+
+impl FileDigest {
+    pub fn of(path: &Path) -> Result<Self> {
+        Ok(Self {
+            size: fs::metadata(path).with_path(path)?.len(),
+            sha256: sha256_file(path)?,
+        })
+    }
+}
+
+/// A file [`BackupSetWriter::move_file`] moved into a set, with what
+/// [`BackupSetWriter::put_back`] needs to move it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MovedFile {
+    pub original: PathBuf,
+    pub backup_path: PathBuf,
+    pub size: u64,
+    pub sha256: String,
+    /// It went to another volume as a checked copy rather than a rename, so
+    /// it comes back the same way.
+    pub copied: bool,
+}
+
+/// Why [`BackupSetWriter::move_file`] didn't move a file. Either way the
+/// file is still where it was and the set doesn't claim it.
+#[derive(Debug, thiserror::Error)]
+pub enum MoveFileError {
+    #[error(transparent)]
+    NotMoved(RabbitError),
+    /// The file was copied to the set's volume and the copy checked, but the
+    /// original couldn't be deleted, most often because another program has
+    /// it open. The copy was removed again.
+    #[error("{} is in use by another program: {source}", path.display())]
+    InUse {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,8 +198,13 @@ pub enum RestoreBackupActionKind {
 
 /// Writes one backup set under `RABBIT/backups/<id>/`, keeping its manifest
 /// up to date after every step. Installs, the unattended installers' key map
-/// and receipt backups, and restore itself all write their sets through it,
-/// so every set has the same layout and every set can be restored.
+/// and receipt backups, restore itself and uninstall all write their sets
+/// through it, so every set has the same layout and every set can be
+/// restored.
+///
+/// Installs and restore copy files in and leave the originals alone.
+/// Uninstall moves them in (see [`BackupSetWriter::move_file`]) and can move
+/// them back while its run still goes on.
 ///
 /// Files inside the resource folder keep their relative path in the set.
 /// Files outside it (app2clap's CLAP folder) go under
@@ -181,6 +258,7 @@ impl BackupSetWriter {
                 reason: reason.to_string(),
                 files: Vec::new(),
                 receipt_backup_path: None,
+                packages: BTreeMap::new(),
             },
             planning,
             started: false,
@@ -195,6 +273,20 @@ impl BackupSetWriter {
 
     pub fn manifest_path(&self) -> PathBuf {
         self.set_path.join(BACKUP_MANIFEST_FILE)
+    }
+
+    /// The set's id: the name of its folder, which is the id asked for or,
+    /// when a set already had that, `<id>-2` and so on.
+    pub fn set_id(&self) -> String {
+        self.set_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Whether anything has been written yet.
+    pub fn is_started(&self) -> bool {
+        self.started
     }
 
     /// Copy `original` into the set and return where the copy is. The
@@ -240,27 +332,210 @@ impl BackupSetWriter {
         Ok(Some(backup_path))
     }
 
+    /// Move `original` into the set and say where it went. Uninstall's way
+    /// in: the file leaves its place, and the set is the only copy.
+    ///
+    /// The entry is saved as pending before the file moves and marked done
+    /// after, as for a copy. On the same volume the move is a rename. With
+    /// `across_volumes`, or when the rename finds the set on another volume
+    /// after all, the file is copied, the copy is checked against `digest`,
+    /// and only then is the original deleted. Checking free space for that
+    /// copy is the caller's job, before the run starts.
+    ///
+    /// `digest` is the size and hash the caller just read; `None` reads them
+    /// here. When the move fails, the file is still where it was and the
+    /// entry is taken out again.
+    pub fn move_file(
+        &mut self,
+        package_id: Option<&str>,
+        original: &Path,
+        digest: Option<FileDigest>,
+        across_volumes: bool,
+    ) -> std::result::Result<MovedFile, MoveFileError> {
+        let digest = match digest {
+            Some(digest) => digest,
+            None if self.planning => FileDigest {
+                size: 0,
+                sha256: String::new(),
+            },
+            None => FileDigest::of(original).map_err(MoveFileError::NotMoved)?,
+        };
+        let index = self
+            .begin_known_entry(package_id, original, digest.clone())
+            .map_err(MoveFileError::NotMoved)?;
+        let backup_path = self.manifest.files[index].backup_path.clone();
+        let mut moved = MovedFile {
+            original: original.to_path_buf(),
+            backup_path,
+            size: digest.size,
+            sha256: digest.sha256,
+            copied: false,
+        };
+        if self.planning {
+            return Ok(moved);
+        }
+        match relocate_into_set(original, &moved.backup_path, &moved.sha256, across_volumes) {
+            Ok(copied) => moved.copied = copied,
+            Err(error) => {
+                let _ = self.drop_entry(index);
+                return Err(error);
+            }
+        }
+        // A failed save leaves the entry pending on disk. Restore still
+        // trusts a pending entry whose copy is whole, so the file stays
+        // recoverable and the move counts as done.
+        let _ = self.finish_entry(index);
+        Ok(moved)
+    }
+
+    /// Move a file [`Self::move_file`] moved back to where it was, and take
+    /// its entry out of the set. Refuses when something is at the original
+    /// path again, rather than replacing it.
+    ///
+    /// The entry goes back to pending first: should RABBIT stop halfway, a
+    /// whole copy in the set is still restored, and a copy that already went
+    /// home is skipped. When moving back fails, the entry is done again and
+    /// the set still holds the file.
+    pub fn put_back(&mut self, moved: &MovedFile) -> Result<()> {
+        if self.planning {
+            return Ok(());
+        }
+        let index = self
+            .manifest
+            .files
+            .iter()
+            .position(|entry| entry.backup_path == moved.backup_path)
+            .ok_or_else(|| RabbitError::BackupNotFound(moved.backup_path.clone()))?;
+        if fs::symlink_metadata(&moved.original).is_ok() {
+            return Err(RabbitError::BackupRestoreRefused {
+                path: moved.original.clone(),
+                reason: "something is at this path again, and RABBIT never replaces it".to_string(),
+            });
+        }
+        self.manifest.files[index].state = BackupEntryState::Pending;
+        self.save()?;
+        match move_back(moved) {
+            Ok(()) => {
+                let _ = self.drop_entry(index);
+                remove_empty_parents(&moved.backup_path, &self.set_path);
+                Ok(())
+            }
+            Err(error) => {
+                self.manifest.files[index].state = BackupEntryState::Done;
+                let _ = self.save();
+                Err(error)
+            }
+        }
+    }
+
+    /// Record that an uninstall is removing `package_id` into this set, with
+    /// what a restore of just that package needs. Saved before any of the
+    /// package's files move.
+    pub fn record_package(&mut self, package_id: &str, record: BackupPackageRecord) -> Result<()> {
+        if self.planning {
+            return Ok(());
+        }
+        self.start()?;
+        self.manifest
+            .packages
+            .insert(package_id.to_string(), record);
+        let saved = self.save();
+        if saved.is_err() {
+            // Not on disk, so not in the set: the package's files won't move.
+            self.manifest.packages.remove(package_id);
+        }
+        saved
+    }
+
+    /// Record the `langpack=` value the uninstall of `package_id` is about
+    /// to replace, or forget it again with `None`. Saved before
+    /// `reaper.ini` changes, so the value is never lost.
+    pub fn set_langpack_before(&mut self, package_id: &str, value: Option<String>) -> Result<()> {
+        if self.planning {
+            return Ok(());
+        }
+        let Some(record) = self.manifest.packages.get_mut(package_id) else {
+            return Ok(());
+        };
+        record.langpack_before = value;
+        self.save()
+    }
+
+    /// Forget a package recorded with [`Self::record_package`], after its
+    /// files were put back: the set no longer holds it.
+    pub fn forget_package(&mut self, package_id: &str) -> Result<()> {
+        if self.planning || self.manifest.packages.remove(package_id).is_none() {
+            return Ok(());
+        }
+        self.save()
+    }
+
+    /// Remove the set again when it holds nothing: every file was put back
+    /// and every package forgotten. Returns whether no set is left, which is
+    /// also the case when nothing was ever written. Best effort; a set that
+    /// can't be removed is merely empty.
+    pub fn discard_if_empty(&mut self) -> bool {
+        if !self.started || self.planning {
+            return true;
+        }
+        if !self.manifest.files.is_empty()
+            || !self.manifest.packages.is_empty()
+            || self.manifest.receipt_backup_path.is_some()
+        {
+            return false;
+        }
+        let _ = fs::remove_file(self.manifest_path());
+        remove_empty_dirs(&self.set_path);
+        !self.set_path.exists()
+    }
+
+    /// Take the entry at `index` out of the manifest, with the origin note
+    /// of an outside file, after its file went back or never left.
+    fn drop_entry(&mut self, index: usize) -> Result<()> {
+        let entry = self.manifest.files.remove(index);
+        if entry.original_path.is_absolute()
+            && let Some(name) = entry.backup_path.file_name()
+        {
+            let mut note = name.to_os_string();
+            note.push(ORIGIN_SIDECAR_SUFFIX);
+            let _ = fs::remove_file(entry.backup_path.with_file_name(note));
+            remove_empty_parents(&entry.backup_path, &self.set_path);
+        }
+        self.save()
+    }
+
     /// Record `original` as pending, saved to disk before anything is
     /// copied, and write the origin note for an outside file. Returns the
     /// entry's index.
     fn begin_entry(&mut self, package_id: Option<&str>, original: &Path) -> Result<usize> {
         // Read the original first: one that can't be read leaves no set.
-        let (size, sha256) = if self.planning {
-            (0, String::new())
+        let digest = if self.planning {
+            FileDigest {
+                size: 0,
+                sha256: String::new(),
+            }
         } else {
-            (
-                fs::metadata(original).with_path(original)?.len(),
-                sha256_file(original)?,
-            )
+            FileDigest::of(original)?
         };
+        self.begin_known_entry(package_id, original, digest)
+    }
+
+    /// [`Self::begin_entry`] for a file whose size and hash the caller
+    /// already read.
+    fn begin_known_entry(
+        &mut self,
+        package_id: Option<&str>,
+        original: &Path,
+        digest: FileDigest,
+    ) -> Result<usize> {
         self.start()?;
         let slot = self.slot_for(original)?;
         self.manifest.files.push(BackupManifestFile {
             package_id: package_id.map(ToString::to_string),
             original_path: slot.original_path.clone(),
             backup_path: slot.backup_path,
-            size,
-            sha256,
+            size: digest.size,
+            sha256: digest.sha256,
             state: BackupEntryState::Pending,
         });
         if !self.planning {
@@ -355,6 +630,124 @@ struct BackupSlot {
     backup_path: PathBuf,
     /// For an outside file, the note that holds its absolute path.
     origin_note: Option<PathBuf>,
+}
+
+/// Move `original` to `backup_path`, a fresh path in a set. Returns whether
+/// it went as a checked copy (to another volume) rather than a rename.
+fn relocate_into_set(
+    original: &Path,
+    backup_path: &Path,
+    sha256: &str,
+    across_volumes: bool,
+) -> std::result::Result<bool, MoveFileError> {
+    if let Some(parent) = backup_path.parent() {
+        fs::create_dir_all(parent)
+            .with_path(parent)
+            .map_err(MoveFileError::NotMoved)?;
+    }
+    // A rename would replace whatever is there; a set never loses a file
+    // it already holds.
+    if fs::symlink_metadata(backup_path).is_ok() {
+        return Err(MoveFileError::NotMoved(RabbitError::BackupRestoreRefused {
+            path: backup_path.to_path_buf(),
+            reason: "the backup set already holds a file at this path".to_string(),
+        }));
+    }
+    if !across_volumes {
+        match fs::rename(original, backup_path) {
+            Ok(()) => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {}
+            Err(error) => {
+                return Err(MoveFileError::NotMoved(crate::error::io_error_at(
+                    original.to_path_buf(),
+                    error,
+                )));
+            }
+        }
+    }
+    copy_checked(original, backup_path, sha256).map_err(MoveFileError::NotMoved)?;
+    if let Err(source) = fs::remove_file(original) {
+        let _ = fs::remove_file(backup_path);
+        return Err(MoveFileError::InUse {
+            path: original.to_path_buf(),
+            source,
+        });
+    }
+    Ok(true)
+}
+
+/// Move a file back from a set to where it was, the way it came.
+fn move_back(moved: &MovedFile) -> Result<()> {
+    if let Some(parent) = moved.original.parent() {
+        fs::create_dir_all(parent).with_path(parent)?;
+    }
+    if !moved.copied {
+        match fs::rename(&moved.backup_path, &moved.original) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {}
+            Err(error) => return Err(crate::error::io_error_at(moved.original.clone(), error)),
+        }
+    }
+    // Copied under a temporary name and renamed into place, so a copy that
+    // breaks off never leaves half a file where the real one belongs.
+    let staged = temporary_restore_path(&moved.original);
+    copy_checked(&moved.backup_path, &staged, &moved.sha256)?;
+    fs::rename(&staged, &moved.original).map_err(|error| {
+        let _ = fs::remove_file(&staged);
+        crate::error::io_error_at(moved.original.clone(), error)
+    })?;
+    let _ = fs::remove_file(&moved.backup_path);
+    Ok(())
+}
+
+/// Copy `from` to `to` and check the copy's hash. A copy that fails or
+/// doesn't match is removed again.
+fn copy_checked(from: &Path, to: &Path, sha256: &str) -> Result<()> {
+    if let Err(error) = fs::copy(from, to) {
+        let _ = fs::remove_file(to);
+        return Err(crate::error::io_error_at(to.to_path_buf(), error));
+    }
+    let copied = match sha256_file(to) {
+        Ok(copied) => copied,
+        Err(error) => {
+            let _ = fs::remove_file(to);
+            return Err(error);
+        }
+    };
+    if copied != sha256 {
+        let _ = fs::remove_file(to);
+        return Err(RabbitError::HashMismatch {
+            path: to.to_path_buf(),
+            expected: sha256.to_string(),
+            actual: copied,
+        });
+    }
+    Ok(())
+}
+
+/// Remove the folders between `path` and `stop_at` that are empty, nearest
+/// first, leaving `stop_at` itself.
+fn remove_empty_parents(path: &Path, stop_at: &Path) {
+    let mut current = path.parent();
+    while let Some(folder) = current {
+        if folder == stop_at || !folder.starts_with(stop_at) || fs::remove_dir(folder).is_err() {
+            break;
+        }
+        current = folder.parent();
+    }
+}
+
+/// Remove `folder` and every folder inside it that holds nothing but empty
+/// folders. Files are never removed.
+fn remove_empty_dirs(folder: &Path) {
+    if let Ok(entries) = fs::read_dir(folder) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                remove_empty_dirs(&entry.path());
+            }
+        }
+    }
+    let _ = fs::remove_dir(folder);
 }
 
 pub fn list_backup_sets(resource_path: &Path) -> Result<Vec<BackupSet>> {
@@ -1038,9 +1431,9 @@ mod tests {
 
     use super::{
         BACKUP_MANIFEST_FILE, BackupEntryState, BackupManifest, BackupManifestFile,
-        BackupSetWriter, RestoreBackupActionKind, RestoreBackupOptions, list_backup_sets,
-        load_backup_manifest, relative_within, restore_backup_set, restore_backup_set_within,
-        save_backup_manifest,
+        BackupPackageRecord, BackupSetWriter, RestoreBackupActionKind, RestoreBackupOptions,
+        list_backup_sets, load_backup_manifest, relative_within, restore_backup_set,
+        restore_backup_set_within, save_backup_manifest,
     };
     use crate::error::RabbitError;
     use crate::hash::sha256_file;
@@ -1081,6 +1474,7 @@ mod tests {
                 reason: reason.to_string(),
                 files,
                 receipt_backup_path: None,
+                packages: Default::default(),
             },
         )
         .unwrap();
@@ -1110,6 +1504,7 @@ mod tests {
                     state: BackupEntryState::Done,
                 }],
                 receipt_backup_path: None,
+                packages: Default::default(),
             },
         )
         .unwrap();
@@ -1727,6 +2122,75 @@ mod tests {
         assert_eq!(fs::read(&keymap).unwrap(), b"own keymap");
         assert_eq!(report.actions.len(), 1);
         assert_eq!(report.skipped_targets, vec![keymap]);
+    }
+
+    /// Uninstall's way in: a file moves into the set, by rename or, from
+    /// another volume, as a checked copy, and can move back while the run
+    /// goes on. A file that went back leaves no entry and no origin note, and
+    /// a set that ends up holding nothing goes away.
+    #[test]
+    fn moved_files_can_go_back_and_an_empty_set_goes_away() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let inside = resource.join("UserPlugins").join("reaper_demo.dll");
+        let outside = dir.path().join("CLAP").join("demo.clap");
+        write(&inside, b"demo");
+        write(&outside, b"clap");
+
+        let mut writer = BackupSetWriter::new(&resource, "uninstall-unix-1", "uninstall");
+        writer
+            .record_package("demo", BackupPackageRecord::default())
+            .unwrap();
+        let renamed = writer
+            .move_file(Some("demo"), &inside, None, false)
+            .unwrap();
+        let copied = writer
+            .move_file(Some("demo"), &outside, None, true)
+            .unwrap();
+        let set = resource.join("RABBIT/backups/uninstall-unix-1");
+        assert!(!renamed.copied && copied.copied);
+        assert!(!inside.exists() && !outside.exists());
+        assert_eq!(renamed.backup_path, set.join("UserPlugins/reaper_demo.dll"));
+        assert_eq!(fs::read(&copied.backup_path).unwrap(), b"clap");
+        assert!(set.join("external/1/demo.clap.rabbit-origin").is_file());
+        let manifest = load_backup_manifest(&set).unwrap().unwrap();
+        assert_eq!(manifest.files.len(), 2);
+        assert!(
+            manifest
+                .files
+                .iter()
+                .all(|file| file.state == BackupEntryState::Done)
+        );
+        assert!(manifest.packages.contains_key("demo"));
+
+        // Something new at the original path is never replaced.
+        write(&inside, b"new");
+        assert!(writer.put_back(&renamed).is_err());
+        assert_eq!(fs::read(&inside).unwrap(), b"new");
+        assert_eq!(
+            load_backup_manifest(&set).unwrap().unwrap().files[0].state,
+            BackupEntryState::Done,
+            "the set still holds the file"
+        );
+        fs::remove_file(&inside).unwrap();
+
+        writer.put_back(&copied).unwrap();
+        writer.put_back(&renamed).unwrap();
+        assert_eq!(fs::read(&inside).unwrap(), b"demo");
+        assert_eq!(fs::read(&outside).unwrap(), b"clap");
+        assert!(!set.join("external").exists());
+        assert!(
+            load_backup_manifest(&set)
+                .unwrap()
+                .unwrap()
+                .files
+                .is_empty()
+        );
+
+        assert!(!writer.discard_if_empty(), "the package is still recorded");
+        writer.forget_package("demo").unwrap();
+        assert!(writer.discard_if_empty());
+        assert!(!set.exists());
     }
 
     /// Two sets asked for in the same second get separate folders, so the

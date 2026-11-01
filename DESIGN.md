@@ -798,9 +798,10 @@ plan start with a token such as `{resource}`, `{clap_dir}` or
 manifest loads: every supported platform and target has a plan and every
 plan is reachable, each strategy has the fields it needs, removals that need
 administrator rights never go into the user's backups, and no path may reach
-into `{resource}/RABBIT`. Nothing runs these plans yet, so every package
-says `not_supported` for now; `rabbit packages` prints each package's plan
-per platform and target.
+into `{resource}/RABBIT`. The engine that carries out `remove_files` plans
+is in place (see Safety Behavior), but nothing starts it yet and every
+package still says `not_supported`; `rabbit packages` prints each package's
+plan per platform and target.
 
 Every package ships a `display_description_key` that resolves to a one- or
 two-sentence localized description of what the package is and why a user
@@ -1120,6 +1121,22 @@ Extension files:
   `RABBIT/backups/<id>` part. Restore puts each file back at its recorded
   path, refuses any path outside the resource folder and the outside folders
   RABBIT installs into, and takes the install lock.
+- Uninstall removes only regular files a RABBIT receipt lists with a hash and
+  files the package manifest names. `reaper.ini`, `reaper-kb.ini` and
+  everything in `{resource}/RABBIT` always stay, and every path passes a guard
+  against links, `..` and whole folders, once when the plan is built and again
+  right before it moves. Each file is hashed right before it moves: a file
+  only the receipt names that changed since RABBIT installed it stays and is
+  reported. Files move into one backup set per run, by rename on the same
+  drive, or from another drive as a copy that is checked before the original
+  is deleted, after a free-space check. The target's REAPER must be closed,
+  and every REAPER for packages that serve the whole computer; those checks
+  run again before each package. One requested package that can't be removed
+  makes the whole run change nothing. When a package's removal fails, its
+  files go back and its receipt entry stays; when it works, the entry goes
+  and the package joins `declined_packages`. The set records each package's
+  receipt entry, and the `langpack=` value REAPER had when the removal set it
+  back to no language pack, never a copy of `reaper.ini`.
 - Keep a machine-readable operation report and a plain text report.
 - Treat non-writable targets as a planning error before downloading anything.
 - Do not request elevation unless the selected REAPER app install target

@@ -1214,6 +1214,7 @@ dependencies = [
 name = "rabbit-platform"
 version = "0.4.4"
 dependencies = [
+ "libc",
  "plist",
  "serde",
  "sys-locale",
