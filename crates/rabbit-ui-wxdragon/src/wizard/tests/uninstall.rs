@@ -1426,7 +1426,13 @@ fn no_package_the_wizard_can_remove_yet_asks_a_question() {
             "langpack-fr",
         ];
         if platform == Platform::Windows {
-            phase_one.extend(["ffmpeg", "app2clap"]);
+            phase_one.push("ffmpeg");
+            // app2clap lives in Windows' own CLAP folder, which only a
+            // Windows machine can name; planning for Windows elsewhere
+            // rightly blocks it.
+            if cfg!(windows) {
+                phase_one.push("app2clap");
+            }
         }
         for id in phase_one {
             assert!(
