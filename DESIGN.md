@@ -552,9 +552,14 @@ user can finish the install by pressing Next a few times.
 
 2. Version check
    - A dedicated progress page with a progress bar, one status line ("Checking
-     OSARA…") and a hidden error region that only appears if a fetch failed.
-   - On success the wizard auto-advances to the package list. On failure the
-     page surfaces the error lines and lets the user go back or quit.
+     OSARA…") and a hidden error region that only appears if the package plan
+     can't be built.
+   - When the checks finish, the wizard moves on to the package list by
+     itself, even if some of them failed. A package whose check failed gets a
+     row that can't be ticked, with a short reason, and Review carries a note
+     with the full error; every other package installs or updates as usual.
+     Only a failure to build the package plan at all keeps the wizard on this
+     page, with the error lines shown, so the user can go back or quit.
 
 3. Packages
    - Tree view with two top-level groups: **Packages** and
@@ -627,9 +632,10 @@ user can finish the install by pressing Next a few times.
 
 7. Done
    - One sentence summarizing success or failure.
-   - Buttons: Launch REAPER, Open resource folder, Save report. The
-     signature-verification counts, lock-file paths, and similar diagnostics
-     stay in the saved report.
+   - Buttons: Launch REAPER and Open resource folder. There is no Save
+     report button: every run saves its report under `<resource>/RABBIT/logs/`
+     by itself. The signature-verification counts, lock-file paths, and
+     similar diagnostics stay in that saved report.
 
 Streamlining rules (apply when adding new wizard text):
 
@@ -768,10 +774,28 @@ PackageSpec {
   artifact_provider,
   detectors,
   install_steps,
-  uninstall_steps,
+  uninstall,
   backup_policy
 }
 ```
+
+Every package also carries a required `uninstall` block saying what removing
+it means. It holds a list of plans, and the first plan matching the platform
+and the target (`standard` or `portable`) wins. Each plan picks one strategy:
+`remove_files` (RABBIT moves the package's own files into a backup set),
+`vendor_uninstaller` (RABBIT runs the vendor's uninstaller silently and checks
+the result), `manual` (RABBIT changes nothing and explains how to remove it by
+hand) or `not_supported` (RABBIT changes nothing and says why). Paths in a
+plan start with a token such as `{resource}`, `{clap_dir}` or
+`{program_files}`, or, in macOS plans only, are absolute paths below
+`/Applications`, `/Library/Application Support` or a
+`/Library/Audio/Plug-Ins` format folder. The rules are checked when the
+manifest loads: every supported platform and target has a plan and every
+plan is reachable, each strategy has the fields it needs, removals that need
+administrator rights never go into the user's backups, and no path may reach
+into `{resource}/RABBIT`. Nothing runs these plans yet, so every package
+says `not_supported` for now; `rabbit packages` prints each package's plan
+per platform and target.
 
 Every package ships a `display_description_key` that resolves to a one- or
 two-sentence localized description of what the package is and why a user

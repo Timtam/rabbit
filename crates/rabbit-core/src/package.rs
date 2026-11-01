@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{Architecture, Platform};
 
+pub mod uninstall;
+
+use uninstall::UninstallSpec;
+
 pub const PACKAGE_REAPER: &str = "reaper";
 pub const PACKAGE_OSARA: &str = "osara";
 pub const PACKAGE_SWS: &str = "sws";
@@ -102,7 +106,10 @@ pub struct PackageSpec {
     pub version_comparison: VersionComparison,
     pub detectors: Vec<PackageDetector>,
     pub install_steps: Vec<InstallStep>,
-    pub uninstall_steps: Vec<UninstallStep>,
+    /// How the package comes off again; see [`EmbeddedPackageSpec::uninstall`].
+    /// Holds the plans for every platform, like `http_artifact` holds every
+    /// platform's download.
+    pub uninstall: UninstallSpec,
     pub backup_policy: BackupPolicy,
     pub user_plugin_prefixes: Vec<String>,
     pub user_plugin_suffixes: Vec<String>,
@@ -209,8 +216,10 @@ pub struct EmbeddedPackageSpec {
     pub detectors: Vec<PackageDetector>,
     #[serde(default)]
     pub install_steps: Vec<InstallStep>,
-    #[serde(default)]
-    pub uninstall_steps: Vec<UninstallStep>,
+    /// What uninstalling the package means on each platform and target: see
+    /// [`UninstallSpec`]. Required, with no default, so every package states
+    /// it, even if only as `not_supported`.
+    pub uninstall: UninstallSpec,
     #[serde(default)]
     pub backup_policy: BackupPolicy,
     pub user_plugin_prefixes: Vec<String>,
@@ -859,14 +868,6 @@ pub enum InstallStep {
     InstallReapackPackage,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UninstallStep {
-    RemoveUserPluginBinary,
-    RemoveKeymap,
-    RemoveReapackPackage,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupPolicy {
@@ -1041,9 +1042,13 @@ pub fn embedded_package_manifest() -> PackageManifest {
 /// Rules: a package declares its download via at most ONE of `github_release`
 /// / `http_artifact` / `hfs_listing`; and every `github_release` asset must
 /// resolve an artifact kind from its own `artifact_kind` or the spec-wide
-/// fallback (so the resolver never has to guess a kind).
+/// fallback (so the resolver never has to guess a kind). The uninstall block
+/// has rules of its own, in [`uninstall`].
 pub fn validate_package_spec(spec: &EmbeddedPackageSpec) -> Result<(), String> {
     validate_resolvable_spec(spec)?;
+    // Channels change where a build comes from, never how it comes off, so
+    // the uninstall block is checked once, on the package itself.
+    uninstall::validate_uninstall_spec(spec)?;
     // Pull-request builds need a pull request number, which only a channel
     // parameter supplies. On the package itself it could never resolve.
     if spec.github_actions_artifact.is_some() {
@@ -1363,7 +1368,7 @@ impl EmbeddedPackageSpec {
             version_comparison: self.version_comparison,
             detectors: self.detectors.clone(),
             install_steps: self.install_steps.clone(),
-            uninstall_steps: self.uninstall_steps.clone(),
+            uninstall: self.uninstall.clone(),
             backup_policy: self.backup_policy,
             user_plugin_prefixes: self.user_plugin_prefixes.clone(),
             user_plugin_suffixes: self.user_plugin_suffixes.for_platform(platform),
@@ -1470,10 +1475,14 @@ impl PackageSpec {
 
 impl SupportedPlatform {
     pub fn matches_platform(self, platform: Platform) -> bool {
-        matches!(
-            (self, platform),
-            (Self::Windows, Platform::Windows) | (Self::Macos, Platform::MacOs)
-        )
+        self.platform() == platform
+    }
+
+    pub fn platform(self) -> Platform {
+        match self {
+            Self::Windows => Platform::Windows,
+            Self::Macos => Platform::MacOs,
+        }
     }
 }
 
@@ -1935,6 +1944,9 @@ mod tests {
                 "recommended": false,
                 "user_plugin_prefixes": [],
                 "user_plugin_suffixes": { "windows": [], "macos": [] },
+                "uninstall": {
+                    "plans": [{ "strategy": "not_supported", "note_key": "uninstall-not-yet" }]
+                },
                 "whats_new": {
                     "text_changelog": {
                         "url": "https://example.com/whatsnew.txt",
@@ -2038,7 +2050,16 @@ mod tests {
                     "version": { "html": { "url": "https://example.test/", "pattern": "v([0-9.]+)" } },
                     "detectors": ["user_plugin_file"],
                     "install_steps": ["copy_user_plugin_binary"],
-                    "uninstall_steps": ["remove_user_plugin_binary"],
+                    "uninstall": {
+                        "plans": [{
+                            "strategy": "remove_files",
+                            "summary": {
+                                "removes_key": "uninstall-summary-example-removes",
+                                "keeps_key": "uninstall-summary-example-keeps"
+                            },
+                            "remove": { "receipt_files": true, "matching_user_plugins": true }
+                        }]
+                    },
                     "backup_policy": "backup_overwritten_files",
                     "user_plugin_prefixes": ["reaper_example"],
                     "user_plugin_suffixes": {
@@ -2073,6 +2094,9 @@ mod tests {
                     "user_plugin_suffixes": {
                         "windows": [".dll"],
                         "macos": [".dylib"]
+                    },
+                    "uninstall": {
+                        "plans": [{ "strategy": "not_supported", "note_key": "uninstall-not-yet" }]
                     }
                 }]
             }"#,
@@ -2084,6 +2108,31 @@ mod tests {
         assert!(!package.required);
         assert_eq!(package.backup_policy, BackupPolicy::None);
         assert!(package.supports_platform(Platform::MacOs));
+        assert!(!package.uninstall.requires_receipt);
+        assert!(validate_package_spec(package).is_ok());
+    }
+
+    /// Every package has to say how it comes off, even if only that RABBIT
+    /// can't do it yet, so a manifest without an uninstall block doesn't
+    /// load at all.
+    #[test]
+    fn a_manifest_without_an_uninstall_block_is_refused() {
+        let error = parse_embedded_package_spec(
+            r#"{
+                "id": "no-uninstall",
+                "display_name": "No uninstall",
+                "display_name_key": "package-no-uninstall",
+                "display_description_key": "package-no-uninstall-description",
+                "recommended": false,
+                "user_plugin_prefixes": [],
+                "user_plugin_suffixes": { "windows": [], "macos": [] }
+            }"#,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("uninstall"),
+            "expected the error to name the missing block, got {error}"
+        );
     }
     fn reaper_manifest_spec() -> super::EmbeddedPackageSpec {
         super::embedded_package_manifest()

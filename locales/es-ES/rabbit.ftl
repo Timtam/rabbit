@@ -36,6 +36,10 @@ package-langpack-es-description = Traduce la interfaz de REAPER al español, inc
 package-langpack-de-description = Traduce la interfaz de REAPER al alemán, incluida la extensión SWS. Mantenido por MrData y publicado en el Stash de REAPER: RABBIT descarga la versión actual y la instala como de_DE.ReaperLangPack. Después de instalarlo, selecciona el idioma en las preferencias de REAPER (o deja que RABBIT lo haga por ti).
 package-langpack-fr-description = Traduce la interfaz de REAPER al francés, incluida la extensión SWS. Mantenido por Lee Julien y Pierre-Marie Curt para ReaperAccessible, la comunidad francesa de usuarios de lectores de pantalla, y publicado en su repositorio de ReaPack: RABBIT descarga la versión actual y la instala como fr_CA.ReaperLangPack. OSARA lee ese nombre de archivo para elegir su propia traducción al francés: la fr_CA está casi completa, mientras que la fr_FR todavía deja alrededor de un tercio de los mensajes en inglés; el paquete en sí es el mismo francés estándar en ambos casos. Después de instalarlo, selecciona el idioma en las preferencias de REAPER (o deja que RABBIT lo haga por ti).
 
+# Notes named by the uninstall plans in the package manifests. Every package's
+# plan points here until RABBIT learns to uninstall it.
+uninstall-not-yet = RABBIT todavía no puede desinstalar este paquete.
+
 # $reason is one of the localized "wizard-package-row-unavailable-*" strings
 # explaining *why* the row is unavailable. Appended to the row's main summary
 # in the package CheckListBox.
