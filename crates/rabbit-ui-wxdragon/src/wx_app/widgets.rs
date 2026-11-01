@@ -8,8 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    OsaraKeymapChoice, PackageRow, TargetRow, WizardModel, WizardOutcomeReport,
-    custom_portable_target_row, osara_keymap_note, osara_selected_for_rows, refreshed_target_row,
+    OsaraKeymapChoice, PackageRow, TargetRow, WizardMode, WizardModel, WizardOutcomeReport,
+    WizardUninstallList, custom_portable_target_row, osara_keymap_note, osara_selected_for_rows,
+    refreshed_target_row, uninstall_settings_note,
 };
 use wxdragon::widgets::SimpleBook;
 
@@ -49,7 +50,12 @@ pub(crate) struct WizardWidgets {
     pub(crate) spanish_variant_choice: Choice,
     pub(crate) uninstall_list: UninstallView,
     pub(crate) uninstall_details: TextCtrl,
+    /// "Also remove settings" under the Uninstall list, and its note.
+    pub(crate) uninstall_remove_settings: CheckBox,
+    pub(crate) uninstall_settings_note: TextCtrl,
     pub(crate) reapack_ack_confirm: CheckBox,
+    /// Review's heading, which names the mode.
+    pub(crate) review_heading: StaticText,
     pub(crate) review_text: TextCtrl,
     pub(crate) progress_status: StaticText,
     pub(crate) progress_gauge: Gauge,
@@ -214,11 +220,47 @@ pub(crate) fn osara_keymap_choice(checkbox: &CheckBox) -> OsaraKeymapChoice {
     }
 }
 
-pub(crate) fn effective_can_install(
+/// Whether the run button may start the run of `mode`; see
+/// [`WizardMode::run_button_enabled`].
+pub(crate) fn effective_run_enabled(
+    mode: &Cell<WizardMode>,
     plan_can_install: &Cell<bool>,
     review_can_install: &Cell<bool>,
+    review_can_uninstall: &Cell<bool>,
 ) -> bool {
-    plan_can_install.get() && review_can_install.get()
+    mode.get().run_button_enabled(
+        plan_can_install.get(),
+        review_can_install.get(),
+        review_can_uninstall.get(),
+    )
+}
+
+/// Bring "Also remove settings" in line with the Uninstall list's ticks, as
+/// the key map checkbox follows OSARA: it can be ticked, and reached with
+/// Tab, only while a ticked package has settings RABBIT may remove, and its
+/// note says what it would remove. It is unticked whenever it stops
+/// applying, so it never sits ticked out of reach, waiting for the next
+/// package ticked. Every toggle of the list calls this, on both platforms.
+pub(crate) fn sync_uninstall_settings_widgets(
+    list: &WizardUninstallList,
+    checkbox: &CheckBox,
+    note: &TextCtrl,
+) {
+    let available = list.settings_option_available();
+    if !available && checkbox.get_value() {
+        checkbox.set_value(false);
+    }
+    checkbox.enable(available);
+    checkbox.set_can_focus(available);
+    let mut text = String::new();
+    crate::wx_app::globals::with_ui_localizer(|localizer| {
+        text = uninstall_settings_note(localizer, list);
+    });
+    if note.get_value() != text {
+        note.set_value(&text);
+    }
+    note.enable(available);
+    note.set_can_focus(available);
 }
 
 /// Enable the Spanish OSARA-translation choice only while the Spanish
@@ -417,21 +459,27 @@ pub(crate) fn bind_reapack_ack_navigation_updates(
 /// Make Enter on the Review page's summary start the install, as the default
 /// Install button would.
 ///
-/// The summary is a read-only multiline TextCtrl. RABBIT never focuses it on
-/// purpose, but focus can reach it, for example when a screen reader user
-/// tabs in to read it, and a multiline text box eats Enter (the NSTextView on
-/// macOS, DLGC_WANTALLKEYS on MSW) before the default button sees it: the
-/// same trap `bind_done_page_enter_closes` works around on the Done page.
-/// Guarded on the step and on Install being enabled, so Enter never starts
-/// anything the button itself would refuse.
+/// The summary is a read-only multiline TextCtrl. In install mode RABBIT
+/// never focuses it on purpose, but focus can reach it, for example when a
+/// screen reader user tabs in to read it, and a multiline text box eats Enter
+/// (the NSTextView on macOS, DLGC_WANTALLKEYS on MSW) before the default
+/// button sees it: the same trap `bind_done_page_enter_closes` works around on
+/// the Done page. Guarded on the step and on Install being enabled, so Enter
+/// never starts anything the button itself would refuse.
+///
+/// Never in uninstall mode: Review focuses the summary there, and Enter must
+/// not start a removal (see [`WizardMode::enter_starts_run`]). The key then
+/// does what it does in any read-only text box.
 pub(crate) fn bind_review_enter_installs(
     text: &TextCtrl,
     install: &Button,
     current_step: &Arc<AtomicUsize>,
+    mode: &Rc<Cell<WizardMode>>,
     start_install: Rc<dyn Fn()>,
 ) {
     let install = *install;
     let current_step = Arc::clone(current_step);
+    let mode = Rc::clone(mode);
     text.on_key_down(move |event| {
         let key_code = if let WindowEventData::Keyboard(kbd) = &event {
             kbd.get_key_code()
@@ -441,7 +489,10 @@ pub(crate) fn bind_review_enter_installs(
         if !matches!(key_code, Some(WXK_RETURN) | Some(WXK_NUMPAD_ENTER)) {
             return;
         }
-        if current_step.load(Ordering::SeqCst) != REVIEW_STEP || !install.is_enabled() {
+        if current_step.load(Ordering::SeqCst) != REVIEW_STEP
+            || !mode.get().enter_starts_run()
+            || !install.is_enabled()
+        {
             return;
         }
         event.skip(false);
@@ -587,7 +638,8 @@ pub(crate) fn update_navigation(
     install: &Button,
     close: &Button,
     language_footer: &Panel,
-    can_install: bool,
+    mode: WizardMode,
+    run_enabled: bool,
     target_valid: bool,
     reapack_ack_confirmed: bool,
 ) {
@@ -603,7 +655,15 @@ pub(crate) fn update_navigation(
         REAPACK_ACK_STEP => reapack_ack_confirmed,
         _ => false,
     });
-    install.enable(step == REVIEW_STEP && can_install);
+    install.enable(step == REVIEW_STEP && run_enabled);
+    // The run button says what the run does: Install, or Uninstall in
+    // uninstall mode. Only set when it changes, for the same reason as the
+    // close button below.
+    if let Some(label) = crate::wx_app::globals::run_button_label(mode)
+        && install.get_label() != label
+    {
+        install.set_label(&label);
+    }
     // While an install runs, the close button first stops it (after asking),
     // so it says Cancel. Only set when it changes: a screen reader may
     // announce every relabel of the focused button.
@@ -621,8 +681,10 @@ pub(crate) fn update_navigation(
     // and Next is disabled, which used to leave Enter a dead key). Progress
     // deliberately keeps the *disabled* Next as its default: Enter must
     // never tear the window down while the install worker is running.
+    // Review in uninstall mode does the same, so no Enter press ever starts
+    // a removal.
     match step {
-        REVIEW_STEP => install.set_default(),
+        REVIEW_STEP if mode.enter_starts_run() => install.set_default(),
         DONE_STEP => close.set_default(),
         _ => next.set_default(),
     }

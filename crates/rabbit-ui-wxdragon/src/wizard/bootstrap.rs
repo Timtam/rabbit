@@ -244,6 +244,11 @@ fn model_from_plan_with_options(
                 "wizard-button-install",
                 "wizard-button-install-mnemonic",
             ),
+            uninstall_label: localized_wx_mnemonic_label(
+                localizer,
+                "wizard-button-uninstall",
+                "wizard-button-uninstall-mnemonic",
+            ),
             close_label: localized_wx_mnemonic_label(
                 localizer,
                 "wizard-button-close",

@@ -125,6 +125,8 @@ wizard-button-next = Weiter
 wizard-button-next-mnemonic = W
 wizard-button-install = Installieren
 wizard-button-install-mnemonic = I
+wizard-button-uninstall = Deinstallieren
+wizard-button-uninstall-mnemonic = D
 wizard-button-close = Schließen
 wizard-button-close-mnemonic = S
 wizard-button-cancel = Abbrechen
@@ -222,9 +224,25 @@ wizard-uninstall-empty-details = Keines der Programme, die RABBIT deinstallieren
 # Stands in for the Uninstall list when RABBIT's records for the REAPER can't
 # be read. $error is the error message.
 wizard-uninstall-unreadable = RABBIT konnte seine Einträge zu diesem REAPER nicht lesen ({ $error }) und kann deshalb nicht auflisten, was es deinstallieren könnte.
-# Shown when Next is pressed on the Uninstall tab of a build that can't
-# uninstall from the wizard yet. Keep "rabbit uninstall", "--package sws"
-# and "--apply" exactly as they are.
+# The Uninstall tab's "Also remove settings" option: a heading, the checkbox
+# and a read-only note below it. The checkbox can be ticked only while a
+# ticked package has settings RABBIT can remove.
+wizard-uninstall-settings-heading = Einstellungen
+wizard-uninstall-remove-settings = Auch die Einstellungen entfernen
+wizard-uninstall-settings-note-none-ticked = Wählen Sie ein Paket aus, um zu sehen, welche seiner Einstellungen RABBIT entfernen kann. Ohne diese Option bleiben Einstellungen erhalten.
+wizard-uninstall-settings-note-none-removable = Keines der ausgewählten Pakete hat Einstellungen, die RABBIT entfernen kann.
+# $settings is one line per ticked package, each a
+# wizard-uninstall-settings-package line.
+wizard-uninstall-settings-note-removes = Mit dieser Option entfernt RABBIT auch diese Einstellungen. Sie kommen mit dem Rest in die Sicherung, aus der sie sich also wiederherstellen lassen.
+    { $settings }
+# $package is the localized package name, and $settings a comma-separated list
+# of what goes, such as "your grooves, SWS settings".
+wizard-uninstall-settings-package = { $package }: { $settings }
+# Shown when Uninstall is pressed on the Review page of a build that can't
+# uninstall from the wizard yet. Keep "rabbit uninstall" and "--apply"
+# exactly as they are. $command is a complete example command for the
+# REAPER folder and the ticked packages, e.g.
+# rabbit uninstall --resource-path "C:\Users\...\REAPER" --package sws
 wizard-uninstall-not-ready-title = Deinstallieren im Assistenten ist noch nicht fertig
 wizard-uninstall-not-ready-body = Diese Testversion von RABBIT kann im Assistenten noch nicht deinstallieren, deshalb wurde nichts geändert. Um jetzt zu deinstallieren, schließen Sie RABBIT und verwenden Sie rabbit uninstall in der Befehlszeile: { $command } zeigt zum Beispiel, was entfernt würde, und mit --apply wird es entfernt.
 
@@ -312,6 +330,30 @@ wizard-review-no-package = Kein Paket ausgewählt.
 # $package is the localized package display name and $action is the localized planned action.
 wizard-review-package = { $package }: { $action }
 
+# Review in uninstall mode. The heading names the mode, so it is the first
+# thing read.
+wizard-review-uninstall-heading = Bereit zum Deinstallieren
+wizard-review-uninstall-packages = Zu deinstallierende Pakete
+wizard-review-uninstall-no-package = Zum Deinstallieren ist nichts ausgewählt.
+# One line per package. $package is the localized package name, $removes the
+# sentence on what goes, and $stays the one on what stays, or
+# wizard-review-uninstall-settings-removed.
+wizard-review-uninstall-package = { $package }: { $removes } { $stays }
+# Replaces the sentence on what stays when "Also remove settings" is ticked.
+# $settings is a comma-separated list of what goes, such as "your grooves, SWS
+# settings".
+wizard-review-uninstall-settings-removed = Die Einstellungen werden ebenfalls entfernt und kommen in die Sicherung: { $settings }.
+wizard-review-uninstall-close-programs-note = Schließen Sie vorher andere Musikprogramme.
+# What is ticked on the tab that isn't running stays ticked, but isn't part of
+# this run. $packages is a comma-separated list of package names.
+wizard-review-inactive-tab-note-install = Was Sie auf der Registerkarte „Installieren oder aktualisieren“ ausgewählt haben, gehört nicht zu diesem Durchlauf: { $packages }.
+wizard-review-inactive-tab-note-uninstall = Was Sie auf der Registerkarte „Deinstallieren“ ausgewählt haben, gehört nicht zu diesem Durchlauf: { $packages }.
+wizard-review-uninstall-reinstall-hint = Sie können diese Pakete später auf der Registerkarte „Installieren oder aktualisieren“ wieder installieren.
+# Why the Uninstall button is disabled. $reason is a sentence, such as
+# wizard-review-uninstall-not-writable.
+wizard-review-uninstall-blocked = Deinstallieren derzeit nicht möglich: { $reason }
+wizard-review-uninstall-not-writable = RABBIT kann nicht in den Ordner dieses REAPER schreiben.
+
 wizard-progress-heading = Installationsfortschritt
 wizard-progress-status-idle = Bereit zur Installation.
 wizard-progress-status-running = Ausgewählte Pakete werden installiert. Dies kann mehrere Minuten dauern.
@@ -374,6 +416,14 @@ wizard-self-update-status-checking = Suche nach RABBIT-Aktualisierungen…
 # button is the focused one, so a stray Enter never ends a running install.
 wizard-close-during-install-title = Installation anhalten?
 wizard-close-during-install-body = RABBIT installiert gerade. Wenn Sie jetzt anhalten, beendet RABBIT den begonnenen Schritt, behält das bereits Installierte, räumt Angefangenes auf und schließt sich dann. Pakete, die noch nicht an der Reihe waren, bleiben nicht installiert. Installation anhalten?
+
+# Asked before an uninstall that a backup can't undo, or that a package's
+# manifest asks to confirm. The No button is the focused one, so Enter never
+# starts it.
+wizard-confirm-uninstall-title = Die ausgewählten Pakete deinstallieren?
+# $package is the localized package name.
+wizard-confirm-uninstall-unbacked = Eine Sicherung kann { $package } nicht zurückholen. Um es wieder zu haben, installieren Sie es erneut.
+wizard-confirm-uninstall-question = Jetzt deinstallieren?
 
 # Shown instead when the user closes the window while RABBIT is replacing its
 # own files. Not a question: that swap has no safe interruption point.

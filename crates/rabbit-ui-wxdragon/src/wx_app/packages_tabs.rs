@@ -1,6 +1,6 @@
 //! The Packages page's two tabs, Install or update and Uninstall: building
-//! the notebook, where focus goes when the page opens, what Next does on the
-//! Uninstall tab, and switching tabs from the keyboard on macOS.
+//! the notebook, where focus goes when the page opens, which run Next
+//! starts, and switching tabs from the keyboard on macOS.
 //!
 //! The notebook is a native tab control, SysTabControl32 on Windows and
 //! NSTabView on macOS, so screen readers present it as tabs. Its selection is
@@ -15,10 +15,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use wxdragon::prelude::*;
 
-use crate::{WizardModel, WizardUninstallList};
+use crate::{WizardMode, WizardModel, WizardUninstallList};
 
 use crate::wx_app::PACKAGES_STEP;
-use crate::wx_app::globals::{AnnouncePriority, announce, show_information, with_ui_localizer};
+use crate::wx_app::globals::{AnnouncePriority, announce};
 use crate::wx_app::packages_page::{
     PackagesStateCell, PackagesView, UninstallStateCell, UninstallView, build_packages_page,
     build_uninstall_tab, focus_packages_list_top, reset_packages_list_caret_on_focus,
@@ -26,8 +26,8 @@ use crate::wx_app::packages_page::{
 use crate::wx_app::pages::{WizardPage, add_heading};
 use crate::wx_app::widgets::{INSTALL_TAB_NAME, UNINSTALL_TAB_NAME, WizardWidgets};
 
-pub(crate) const INSTALL_TAB: usize = 0;
-pub(crate) const UNINSTALL_TAB: usize = 1;
+pub(crate) const INSTALL_TAB: usize = crate::PACKAGES_INSTALL_TAB;
+pub(crate) const UNINSTALL_TAB: usize = crate::PACKAGES_UNINSTALL_TAB;
 
 /// `wx/defs.h`: `WXK_TAB = 9`, the ASCII value.
 const WXK_TAB: i32 = 9;
@@ -44,6 +44,8 @@ pub(crate) struct PackagesPageWidgets {
     pub(crate) reaper_language_choice: Choice,
     pub(crate) uninstall_list: UninstallView,
     pub(crate) uninstall_details: TextCtrl,
+    pub(crate) uninstall_remove_settings: CheckBox,
+    pub(crate) uninstall_settings_note: TextCtrl,
 }
 
 /// Everything the Packages page's lists share with the rest of the wizard.
@@ -100,12 +102,13 @@ pub(crate) fn build_packages_tabs(
     let uninstall_tab = Panel::builder(&notebook).build();
     uninstall_tab.set_name(UNINSTALL_TAB_NAME);
     uninstall_tab.set_label(&model.text.packages_tab_uninstall);
-    let (uninstall_list, uninstall_details) = build_uninstall_tab(
-        &uninstall_tab,
-        model,
-        state.uninstall_list,
-        state.uninstall_items,
-    );
+    let (uninstall_list, uninstall_details, uninstall_remove_settings, uninstall_settings_note) =
+        build_uninstall_tab(
+            &uninstall_tab,
+            model,
+            state.uninstall_list,
+            state.uninstall_items,
+        );
 
     notebook.add_page(&install_tab, &model.text.packages_tab_install, true, None);
     notebook.add_page(
@@ -130,24 +133,22 @@ pub(crate) fn build_packages_tabs(
         reaper_language_choice,
         uninstall_list,
         uninstall_details,
+        uninstall_remove_settings,
+        uninstall_settings_note,
     }
 }
 
-/// Whether the Uninstall tab is showing. The tab showing when Next is
-/// pressed decides what the run does; install and uninstall never mix.
-pub(crate) fn uninstall_tab_selected(widgets: &WizardWidgets) -> bool {
-    widgets.packages_notebook.selection() == UNINSTALL_TAB as i32
+/// The run Next on the Packages page starts: the tab showing decides it.
+/// Install and uninstall never mix.
+pub(crate) fn selected_wizard_mode(widgets: &WizardWidgets) -> WizardMode {
+    WizardMode::for_packages_tab(widgets.packages_notebook.selection())
 }
 
-/// What Next does on the Uninstall tab while the wizard can't uninstall
-/// yet: say so, point to the command line, and stay on the page. Nothing is
-/// started, and focus goes back to Next when the message closes.
-pub(crate) fn show_uninstall_not_ready(model: &WizardModel, resource_path: &std::path::Path) {
-    let mut body = String::new();
-    with_ui_localizer(|localizer| {
-        body = crate::uninstall_not_ready_body(localizer, resource_path);
-    });
-    show_information(&model.text.uninstall_not_ready_title, &body);
+/// Focus the Uninstall list, on the row it was on, for Back from Review in
+/// uninstall mode. Focus would otherwise stay on Back, outside the wizard
+/// page, and the tab and its caret are left as they were.
+pub(crate) fn focus_uninstall_list(widgets: &WizardWidgets) {
+    widgets.uninstall_list.set_focus();
 }
 
 /// Land on the Packages page after the version check, once it is the page

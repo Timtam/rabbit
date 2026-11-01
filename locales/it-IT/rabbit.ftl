@@ -125,6 +125,8 @@ wizard-button-next = Avanti
 wizard-button-next-mnemonic = A
 wizard-button-install = Installa
 wizard-button-install-mnemonic = I
+wizard-button-uninstall = Disinstalla
+wizard-button-uninstall-mnemonic = D
 wizard-button-close = Chiudi
 wizard-button-close-mnemonic = C
 wizard-button-cancel = Annulla
@@ -222,9 +224,25 @@ wizard-uninstall-empty-details = In questo REAPER non è installato nessuno dei 
 # Stands in for the Uninstall list when RABBIT's records for the REAPER can't
 # be read. $error is the error message.
 wizard-uninstall-unreadable = RABBIT non ha potuto leggere i suoi registri per questo REAPER ({ $error }), quindi non può elencare cosa potrebbe disinstallare.
-# Shown when Next is pressed on the Uninstall tab of a build that can't
-# uninstall from the wizard yet. Keep "rabbit uninstall", "--package sws"
-# and "--apply" exactly as they are.
+# The Uninstall tab's "Also remove settings" option: a heading, the checkbox
+# and a read-only note below it. The checkbox can be ticked only while a
+# ticked package has settings RABBIT can remove.
+wizard-uninstall-settings-heading = Impostazioni
+wizard-uninstall-remove-settings = Rimuovi anche le impostazioni
+wizard-uninstall-settings-note-none-ticked = Seleziona un pacchetto per vedere quali delle sue impostazioni RABBIT può rimuovere. Se non selezioni questa opzione, le impostazioni restano.
+wizard-uninstall-settings-note-none-removable = Nessuno dei pacchetti selezionati ha impostazioni che RABBIT possa rimuovere.
+# $settings is one line per ticked package, each a
+# wizard-uninstall-settings-package line.
+wizard-uninstall-settings-note-removes = Con questa opzione selezionata, RABBIT rimuove anche queste impostazioni. Finiscono nel backup insieme al resto, quindi il backup può recuperarle.
+    { $settings }
+# $package is the localized package name, and $settings a comma-separated list
+# of what goes, such as "your grooves, SWS settings".
+wizard-uninstall-settings-package = { $package }: { $settings }
+# Shown when Uninstall is pressed on the Review page of a build that can't
+# uninstall from the wizard yet. Keep "rabbit uninstall" and "--apply"
+# exactly as they are. $command is a complete example command for the
+# REAPER folder and the ticked packages, e.g.
+# rabbit uninstall --resource-path "C:\Users\...\REAPER" --package sws
 wizard-uninstall-not-ready-title = La disinstallazione dalla procedura guidata non è ancora pronta
 wizard-uninstall-not-ready-body = Questa versione di prova di RABBIT non può ancora disinstallare dalla procedura guidata, quindi non è stato modificato niente. Per disinstallare ora, chiudi RABBIT e usa rabbit uninstall dalla riga di comando: per esempio, { $command } mostra cosa verrebbe rimosso, e aggiungendo --apply lo rimuove.
 
@@ -312,6 +330,30 @@ wizard-review-no-package = Nessun pacchetto selezionato.
 # $package is the localized package display name and $action is the localized planned action.
 wizard-review-package = { $package }: { $action }
 
+# Review in uninstall mode. The heading names the mode, so it is the first
+# thing read.
+wizard-review-uninstall-heading = Pronto per disinstallare
+wizard-review-uninstall-packages = Pacchetti da disinstallare
+wizard-review-uninstall-no-package = Non è selezionato niente da disinstallare.
+# One line per package. $package is the localized package name, $removes the
+# sentence on what goes, and $stays the one on what stays, or
+# wizard-review-uninstall-settings-removed.
+wizard-review-uninstall-package = { $package }: { $removes } { $stays }
+# Replaces the sentence on what stays when "Also remove settings" is ticked.
+# $settings is a comma-separated list of what goes, such as "your grooves, SWS
+# settings".
+wizard-review-uninstall-settings-removed = Anche le sue impostazioni vengono rimosse e finiscono nel backup: { $settings }.
+wizard-review-uninstall-close-programs-note = Prima chiudi gli altri programmi musicali.
+# What is ticked on the tab that isn't running stays ticked, but isn't part of
+# this run. $packages is a comma-separated list of package names.
+wizard-review-inactive-tab-note-install = Ciò che hai selezionato nella scheda «Installa o aggiorna» non fa parte di questa operazione: { $packages }.
+wizard-review-inactive-tab-note-uninstall = Ciò che hai selezionato nella scheda «Disinstalla» non fa parte di questa operazione: { $packages }.
+wizard-review-uninstall-reinstall-hint = Potrai reinstallarli più avanti dalla scheda «Installa o aggiorna».
+# Why the Uninstall button is disabled. $reason is a sentence, such as
+# wizard-review-uninstall-not-writable.
+wizard-review-uninstall-blocked = Impossibile disinstallare per ora: { $reason }
+wizard-review-uninstall-not-writable = RABBIT non può scrivere nella cartella di questo REAPER.
+
 wizard-progress-heading = Avanzamento dell'installazione
 wizard-progress-status-idle = Pronto per l'installazione.
 wizard-progress-status-running = Installazione dei pacchetti selezionati. Potrebbe richiedere alcuni minuti.
@@ -374,6 +416,14 @@ wizard-self-update-status-checking = Ricerca di aggiornamenti di RABBIT…
 # button is the focused one, so a stray Enter never ends a running install.
 wizard-close-during-install-title = Interrompere l'installazione?
 wizard-close-during-install-body = RABBIT sta installando. Se interrompi adesso, RABBIT completa il passaggio iniziato, mantiene ciò che è già installato, ripulisce quello che ha iniziato e poi si chiude. I pacchetti che non ha ancora raggiunto restano non installati. Vuoi interrompere l'installazione?
+
+# Asked before an uninstall that a backup can't undo, or that a package's
+# manifest asks to confirm. The No button is the focused one, so Enter never
+# starts it.
+wizard-confirm-uninstall-title = Disinstallare i pacchetti selezionati?
+# $package is the localized package name.
+wizard-confirm-uninstall-unbacked = Un backup non può recuperare { $package }. Per riaverlo, dovrai reinstallarlo.
+wizard-confirm-uninstall-question = Disinstallare adesso?
 
 # Shown instead when the user closes the window while RABBIT is replacing its
 # own files. Not a question: that swap has no safe interruption point.

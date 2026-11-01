@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{
-    ConfigurationRow, PackageRow, TargetRow, WizardModel, WizardUninstallList,
+    ConfigurationRow, PackageRow, TargetRow, WizardMode, WizardModel, WizardUninstallList,
     apply_version_check_failures_to_rows, localized_package_display_name, localizer_from_options,
     recompute_configuration_row_availability, uninstall_list_for_target,
     wizard_desired_package_ids, wizard_package_plan_for_target_with_available,
@@ -38,7 +38,7 @@ use crate::wx_app::packages_page::{
 };
 use crate::wx_app::packages_tabs::arrive_on_packages_page;
 use crate::wx_app::widgets::{
-    WizardWidgets, effective_can_install, reapack_ack_confirmed, update_navigation,
+    WizardWidgets, effective_run_enabled, reapack_ack_confirmed, update_navigation,
 };
 
 /// Captures everything the version-check dispatcher needs to drive the
@@ -54,6 +54,10 @@ pub(crate) struct VersionCheckUi {
     pub(crate) package_items: PackagesStateCell,
     pub(crate) can_install: Rc<Cell<bool>>,
     pub(crate) review_can_install: Rc<Cell<bool>>,
+    /// The run's mode and the Uninstall button's run flag, both reset for
+    /// the fresh lists.
+    pub(crate) wizard_mode: Rc<Cell<WizardMode>>,
+    pub(crate) review_can_uninstall: Rc<Cell<bool>>,
     /// The Uninstall tab's rows and list state, rebuilt from the same
     /// detection as the package rows.
     pub(crate) uninstall_list: Rc<RefCell<WizardUninstallList>>,
@@ -190,6 +194,11 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
                         }
                         ui.can_install.set(plan.can_install);
                         ui.review_can_install.set(false);
+                        ui.review_can_uninstall.set(false);
+                        // The page opens on the Install tab, and Next decides
+                        // the mode again, so the disabled run button
+                        // shouldn't keep a label from an earlier pass.
+                        ui.wizard_mode.set(WizardMode::Install);
                         // Show the Spanish variant the target already has
                         // installed, so a Team PMA user isn't presented with
                         // an unticked box that would switch them back.
@@ -234,7 +243,13 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
                             &ui.install,
                             &ui.close,
                             &ui.widgets.language_footer,
-                            effective_can_install(&ui.can_install, &ui.review_can_install),
+                            ui.wizard_mode.get(),
+                            effective_run_enabled(
+                                &ui.wizard_mode,
+                                &ui.can_install,
+                                &ui.review_can_install,
+                                &ui.review_can_uninstall,
+                            ),
                             true,
                             reapack_ack_confirmed(&ui.widgets),
                         );

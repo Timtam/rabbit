@@ -5,8 +5,13 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use wxdragon::prelude::*;
 #[cfg(target_os = "windows")]
 use wxdragon::widgets::treectrl::TreeCtrl;
+
+use crate::wx_app::pages::add_label;
+use crate::wx_app::widgets::sync_uninstall_settings_widgets;
+use crate::{WizardModel, WizardUninstallList};
 
 #[cfg(not(target_os = "windows"))]
 use wxdragon::widgets::dataview::{CustomDataViewTreeModel, DataViewCtrl};
@@ -54,6 +59,62 @@ pub(crate) const WXK_SPACE: i32 = 32;
 /// Redeclared here for the same reason as `WXK_SPACE` above.
 pub(crate) const WXK_RETURN: i32 = 13;
 pub(crate) const WXK_NUMPAD_ENTER: i32 = 370;
+
+/// The widgets below the Uninstall list that follow its ticks. Both list
+/// modules hand them to their toggle handling, so a tick on either platform
+/// updates the same things.
+#[derive(Clone, Copy)]
+pub(crate) struct UninstallSideWidgets {
+    pub(crate) details: TextCtrl,
+    pub(crate) remove_settings: CheckBox,
+    pub(crate) settings_note: TextCtrl,
+}
+
+impl UninstallSideWidgets {
+    /// Bring the settings option in line with `list`'s ticks.
+    pub(crate) fn sync_settings(&self, list: &WizardUninstallList) {
+        sync_uninstall_settings_widgets(list, &self.remove_settings, &self.settings_note);
+    }
+}
+
+/// Build "Also remove settings" below the Uninstall list's details: a
+/// heading, the checkbox, unticked, and a read-only note saying what it
+/// would remove. Like the key map checkbox on the other tab, it is always
+/// there, and disabled and out of the Tab order while it can't apply,
+/// rather than hidden: a control that comes and goes is harder to find
+/// again than one that says why it can't be used.
+pub(crate) fn build_uninstall_settings(
+    page: &Panel,
+    sizer: &BoxSizer,
+    model: &WizardModel,
+    list: &WizardUninstallList,
+) -> (CheckBox, TextCtrl) {
+    add_label(
+        page,
+        sizer,
+        &model.text.uninstall_settings_heading,
+        "rabbit-uninstall-settings-heading",
+    );
+    let label = &model.text.uninstall_remove_settings_label;
+    let remove_settings = CheckBox::builder(page).with_label(label).build();
+    // Name and label both, as for the key map checkbox: on Windows the
+    // accessible name follows the wx name, and the builder's label doesn't
+    // reliably stick.
+    remove_settings.set_name(label);
+    remove_settings.set_label(label);
+    remove_settings.add_style(WindowStyle::TabStop);
+    remove_settings.set_value(false);
+    sizer.add(&remove_settings, 0, SizerFlag::All | SizerFlag::Expand, 6);
+
+    let note = TextCtrl::builder(page)
+        .with_style(TextCtrlStyle::MultiLine | TextCtrlStyle::ReadOnly | TextCtrlStyle::WordWrap)
+        .with_size(Size::new(-1, 80))
+        .build();
+    note.set_name("rabbit-uninstall-settings-note");
+    sizer.add(&note, 0, SizerFlag::All | SizerFlag::Expand, 6);
+    sync_uninstall_settings_widgets(list, &remove_settings, &note);
+    (remove_settings, note)
+}
 
 /// Per-platform state handle that the orchestrator (run, button click
 /// handlers, post-install hook, version-check dispatcher) holds onto and

@@ -22,11 +22,11 @@ use wxdragon::widgets::dataview::{
 
 use crate::{WizardModel, WizardText, WizardUninstallList, apply_uninstall_checkbox};
 
-use super::WXK_SPACE;
+use super::{UninstallSideWidgets, WXK_SPACE, build_uninstall_settings};
 
 use crate::wx_app::globals::{AnnouncePriority, announce};
 use crate::wx_app::pages::add_label;
-use crate::wx_app::widgets::WizardWidgets;
+use crate::wx_app::widgets::{WizardWidgets, sync_uninstall_settings_widgets};
 
 /// The Uninstall tab's list widget.
 pub(crate) type UninstallView = DataViewCtrl;
@@ -140,17 +140,23 @@ fn initial_details(model: &WizardModel, list: &WizardUninstallList) -> String {
 }
 
 /// Tick or untick a row, with every side effect: the row's text, the view,
-/// and the details when it is the selected row. `false` when nothing could
-/// change, because the row can't be ticked. Shared by the model's
-/// `set_value` (a click, or VO+Space while interacting with the list) and
-/// the Space handler, which wx never routes through `set_value` on macOS,
-/// so the two can't drift apart.
+/// the details when it is the selected row, and the settings option, as
+/// the Windows tree's toggle does. `false` when nothing could change,
+/// because the row can't be ticked. Shared by the model's `set_value` (a
+/// click, or VO+Space while interacting with the list) and the Space
+/// handler, which wx never routes through `set_value` on macOS, so the two
+/// can't drift apart.
 type UninstallToggle = Rc<dyn Fn(&UninstallTreeData, usize, bool) -> bool>;
+
+/// The widgets below the list. They are created after it, because creation
+/// order is tab order, so they reach the toggle through this cell once they
+/// exist, as the install list's do.
+type UninstallSideCell = Rc<Cell<Option<UninstallSideWidgets>>>;
 
 fn new_uninstall_toggle(
     tree: DataViewCtrl,
     model_cell: UninstallStateCell,
-    details: Rc<Cell<Option<TextCtrl>>>,
+    side: UninstallSideCell,
 ) -> UninstallToggle {
     Rc::new(
         move |data: &UninstallTreeData, index: usize, checked: bool| -> bool {
@@ -178,13 +184,17 @@ fn new_uninstall_toggle(
                 model.item_value_changed(row_ptr, UNINSTALL_COL_LABEL);
                 model.item_value_changed(row_ptr, UNINSTALL_COL_TOGGLE);
             }
+            let Some(side) = side.get() else {
+                return true;
+            };
             let is_selected = tree
                 .get_selection()
                 .and_then(|item| item.get_id::<UninstallNode>())
                 .is_some_and(|selected| std::ptr::eq(selected, row_ptr));
-            if is_selected && let Some(details) = details.get() {
-                details.set_value(&row_details);
+            if is_selected {
+                side.details.set_value(&row_details);
             }
+            side.sync_settings(&data.list.borrow());
             true
         },
     )
@@ -317,15 +327,16 @@ fn expand_uninstall_groups(tree: &DataViewCtrl, model: &CustomDataViewTreeModel)
     }
 }
 
-/// Non-Windows: build the Uninstall tab: the label naming the tab, the list
-/// and a read-only details text. Ticking a row only changes its text and
-/// the details; nothing acts on the ticks yet.
+/// Non-Windows: build the Uninstall tab: the label naming the tab, the
+/// list, a read-only details text and "Also remove settings". Ticking a row
+/// changes its text, the details and the settings option; the run reads the
+/// ticks when it starts.
 pub(crate) fn build_uninstall_tab(
     page: &Panel,
     model: &WizardModel,
     list: Rc<RefCell<WizardUninstallList>>,
     items: UninstallStateCell,
-) -> (UninstallView, TextCtrl) {
+) -> (UninstallView, TextCtrl, CheckBox, TextCtrl) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     // Created right before the list: wxWidgets 3.3.4 gives the list its
     // VoiceOver name from the label shown just before it, and it names the
@@ -345,8 +356,8 @@ pub(crate) fn build_uninstall_tab(
     // out of the accessibility tree.
     tree.set_min_size(Size::new(-1, 160));
 
-    let details_cell: Rc<Cell<Option<TextCtrl>>> = Rc::new(Cell::new(None));
-    let toggle = new_uninstall_toggle(tree, Rc::clone(&items), Rc::clone(&details_cell));
+    let side_cell: UninstallSideCell = Rc::new(Cell::new(None));
+    let toggle = new_uninstall_toggle(tree, Rc::clone(&items), Rc::clone(&side_cell));
     let row_count = list.borrow().rows.len();
     let data = UninstallTreeData {
         list: Rc::clone(&list),
@@ -409,7 +420,14 @@ pub(crate) fn build_uninstall_tab(
         .build();
     details.set_name("rabbit-uninstall-details");
     sizer.add(&details, 0, SizerFlag::All | SizerFlag::Expand, 6);
-    details_cell.set(Some(details));
+
+    let (remove_settings, settings_note) =
+        build_uninstall_settings(page, &sizer, model, &list.borrow());
+    side_cell.set(Some(UninstallSideWidgets {
+        details,
+        remove_settings,
+        settings_note,
+    }));
 
     {
         let list = Rc::clone(&list);
@@ -521,13 +539,14 @@ pub(crate) fn build_uninstall_tab(
     }
 
     page.set_sizer(sizer, true);
-    (tree, details)
+    (tree, details, remove_settings, settings_note)
 }
 
 /// Non-Windows: rebuild the Uninstall list after the rows were replaced, as
 /// the version check does before the Packages page shows. The model and its
 /// association stay; it gets fresh nodes and tells the view everything
-/// changed. Never selects a row: see `focus_packages_list_top` for why
+/// changed, and the settings option starts over with the fresh, unticked
+/// rows. Never selects a row: see `focus_packages_list_top` for why
 /// `select_row` crashes on this kind of model.
 pub(crate) fn rebuild_uninstall_list_widgets(
     widgets: &WizardWidgets,
@@ -547,4 +566,9 @@ pub(crate) fn rebuild_uninstall_list_widgets(
     widgets
         .uninstall_details
         .set_value(&initial_details(model, list));
+    sync_uninstall_settings_widgets(
+        list,
+        &widgets.uninstall_remove_settings,
+        &widgets.uninstall_settings_note,
+    );
 }

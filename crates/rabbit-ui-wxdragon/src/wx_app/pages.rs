@@ -102,6 +102,8 @@ pub(crate) fn add_pages(
         reaper_language_choice,
         uninstall_list,
         uninstall_details,
+        uninstall_remove_settings,
+        uninstall_settings_note,
     } = build_packages_tabs(
         &packages_page,
         model,
@@ -132,7 +134,7 @@ pub(crate) fn add_pages(
     );
 
     let review_page = new_wizard_page(book);
-    let review_text = build_review_page(&review_page, model);
+    let (review_heading, review_text) = build_review_page(&review_page, model);
     book.add_page(&review_page, &model.steps[REVIEW_STEP].label, false, None);
 
     let progress_page = new_wizard_page(book);
@@ -169,7 +171,10 @@ pub(crate) fn add_pages(
         reaper_language_choice,
         uninstall_list,
         uninstall_details,
+        uninstall_remove_settings,
+        uninstall_settings_note,
         reapack_ack_confirm,
+        review_heading,
         review_text,
         progress_status,
         progress_gauge,
@@ -622,9 +627,11 @@ pub(crate) fn build_reapack_ack_page(page: &WizardPage, model: &WizardModel) -> 
     (donate_link, confirm)
 }
 
-pub(crate) fn build_review_page(page: &WizardPage, model: &WizardModel) -> TextCtrl {
+/// Build the Review page: its heading, which the Next handler changes to
+/// name the mode, and the summary text.
+pub(crate) fn build_review_page(page: &WizardPage, model: &WizardModel) -> (StaticText, TextCtrl) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
-    add_heading(
+    let heading = add_heading(
         page,
         &sizer,
         &model.text.review_heading,
@@ -637,7 +644,7 @@ pub(crate) fn build_review_page(page: &WizardPage, model: &WizardModel) -> TextC
     review.set_name("rabbit-review-text");
     sizer.add(&review, 1, SizerFlag::All | SizerFlag::Expand, 6);
     page.set_sizer(sizer, true);
-    review
+    (heading, review)
 }
 
 pub(crate) fn build_progress_page(
@@ -765,10 +772,18 @@ pub(crate) fn build_done_page(
     (status, details, launch_reaper, open_resource)
 }
 
-pub(crate) fn add_heading<W: WxWidget>(page: &W, sizer: &BoxSizer, label: &str, name: &str) {
+/// Add a page heading. Returned for the pages whose heading changes with
+/// what the page is doing.
+pub(crate) fn add_heading<W: WxWidget>(
+    page: &W,
+    sizer: &BoxSizer,
+    label: &str,
+    name: &str,
+) -> StaticText {
     let heading = StaticText::builder(page).with_label(label).build();
     heading.set_name(name);
     sizer.add(&heading, 0, SizerFlag::All | SizerFlag::Expand, 6);
+    heading
 }
 
 pub(crate) fn add_label<W: WxWidget>(page: &W, sizer: &BoxSizer, label: &str, name: &str) {

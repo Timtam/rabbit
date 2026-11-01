@@ -63,8 +63,12 @@ from this file and posts it as the GitHub release body.
   "Install or update, tab, 1 of 2" first; press Tab to reach the package
   list, which works as before. The **Uninstall** tab lists what is installed
   in the chosen REAPER, whether RABBIT can remove it, and if not, why, with
-  nothing ticked. Uninstalling from there doesn't work yet: Next on that tab
-  says so and points to `rabbit uninstall`. Switch tabs with Ctrl+Tab or
+  nothing ticked, and an **Also remove settings** option, unticked, for the
+  ticked packages that have settings RABBIT can remove. Next on that tab
+  goes to a Review that says what each package loses and keeps; Enter never
+  starts an uninstall there. Uninstalling itself doesn't work yet: the
+  **Uninstall** button says so and names the `rabbit uninstall` command
+  for what you ticked. Switch tabs with Ctrl+Tab or
   Ctrl+Page Down on Windows, and with Ctrl+Tab or VoiceOver's tab navigation
   on macOS.
 - A package you uninstalled, or turned down in the wizard, is no longer

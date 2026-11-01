@@ -1,12 +1,16 @@
 //! The Uninstall tab: one row for each package installed in the selected
 //! REAPER, saying whether RABBIT can remove it, and how ticking a row
-//! changes it.
+//! changes it. Also what an uninstall run looks like before it starts: the
+//! wizard's mode, the run button, Review's text, the "Also remove settings"
+//! option and the question asked before a removal a backup can't undo.
 //!
 //! The rows come from the uninstall plan `rabbit-core` builds, the plan
 //! `rabbit components` and the dry run of `rabbit uninstall` read. Building
 //! it only asks which files exist and how big they are, and never reads a
 //! file's contents, so the UI thread can afford it: the version check's
 //! handler builds the rows from the detection it has just run.
+
+use std::path::Path;
 
 use rabbit_core::Result;
 use rabbit_core::localization::Localizer;
@@ -22,6 +26,70 @@ use super::bootstrap::localizer_from_options;
 use super::labels::version_text;
 use super::model::{TargetRow, WizardModel, WizardText};
 use super::packages::localized_package_display_name;
+
+/// The Packages page's tabs, in the notebook's order.
+pub const PACKAGES_INSTALL_TAB: usize = 0;
+pub const PACKAGES_UNINSTALL_TAB: usize = 1;
+
+/// What the run does. The Packages tab showing when Next is pressed decides
+/// it, and it stays fixed through Review, Progress and Done: install and
+/// uninstall never mix in one run, and the ticks on the other tab are kept
+/// but left out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WizardMode {
+    #[default]
+    Install,
+    Uninstall,
+}
+
+impl WizardMode {
+    /// The mode for the Packages tab at `selection`, the notebook's
+    /// selection. Anything but the Uninstall tab, no selection included,
+    /// means install, the tab the page opens on.
+    pub fn for_packages_tab(selection: i32) -> Self {
+        if usize::try_from(selection) == Ok(PACKAGES_UNINSTALL_TAB) {
+            Self::Uninstall
+        } else {
+            Self::Install
+        }
+    }
+
+    /// Whether the ReaPack donation page is part of the run, on the way to
+    /// Review and on the way back. Only an install or update of ReaPack
+    /// goes through it. Ticks on the Install tab survive while the
+    /// Uninstall tab runs, so without the mode an uninstall would land on
+    /// an install-only page.
+    pub fn shows_reapack_acknowledgement(self, reapack_ticked_for_install: bool) -> bool {
+        self == Self::Install && reapack_ticked_for_install
+    }
+
+    /// Whether Enter starts the run on Review: the run button is the
+    /// default button, and Enter in the Review text presses it. Never for
+    /// an uninstall, so that it can't be two Enter presses away from most
+    /// controls on the Packages page; there the disabled Next stays the
+    /// default, as on Progress. The mnemonic and Tab, then Space, still work.
+    pub fn enter_starts_run(self) -> bool {
+        self == Self::Install
+    }
+
+    /// Whether the run button is enabled on Review. An install needs
+    /// something to install or update and a Review without blockers. An
+    /// uninstall has its own flag, from its own Review: the install plan's
+    /// flag is false exactly when everything is installed and current, or
+    /// every version check failed, and neither says anything about what can
+    /// be removed.
+    pub fn run_button_enabled(
+        self,
+        plan_can_install: bool,
+        review_can_install: bool,
+        review_can_uninstall: bool,
+    ) -> bool {
+        match self {
+            Self::Install => plan_can_install && review_can_install,
+            Self::Uninstall => review_can_uninstall,
+        }
+    }
+}
 
 /// One installed package on the Uninstall tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +113,10 @@ pub struct UninstallRow {
     /// The details text: the label again, then why the row can't be ticked,
     /// or what uninstalling removes, what stays and what to look out for.
     pub details: String,
+    /// What "Also remove settings" would take as well, in a few words each,
+    /// such as "your grooves". Empty when the row can't be ticked or the
+    /// package has no settings RABBIT may remove.
+    pub settings: Vec<String>,
     /// The label while unticked and while ticked. Ticking only swaps them,
     /// so it needs neither the plan nor a localizer.
     pub(crate) keep_summary: String,
@@ -63,9 +135,30 @@ pub struct WizardUninstallList {
     /// the target: without the receipt it can't tell its files from the
     /// user's. `None` with no rows means nothing it knows is installed.
     pub unreadable: Option<String>,
+    /// The plan the rows were built from, for what Review and the question
+    /// before starting need beyond a row's text. `None` without rows.
+    pub plan: Option<UninstallPlan>,
 }
 
 impl WizardUninstallList {
+    /// The ticked rows, in list order.
+    pub fn ticked_rows(&self) -> impl Iterator<Item = &UninstallRow> {
+        self.rows.iter().filter(|row| row.selected)
+    }
+
+    pub fn ticked_package_ids(&self) -> Vec<String> {
+        self.ticked_rows()
+            .map(|row| row.package_id.clone())
+            .collect()
+    }
+
+    /// Whether "Also remove settings" would remove anything: a ticked
+    /// package has settings RABBIT may remove. The checkbox can be ticked,
+    /// and reached with Tab, only then.
+    pub fn settings_option_available(&self) -> bool {
+        self.ticked_rows().any(|row| !row.settings.is_empty())
+    }
+
     /// The label and the details text of the row, without a checkbox, that
     /// stands in for an empty list. `None` while there are rows.
     pub fn placeholder(&self, text: &WizardText) -> Option<(String, String)> {
@@ -135,6 +228,7 @@ pub fn uninstall_list_for_target(
                     )
                     .value,
             ),
+            plan: None,
         },
     }
 }
@@ -154,6 +248,7 @@ pub fn uninstall_list_from_plan(
             .map(|item| uninstall_row(localizer, specs, item))
             .collect(),
         unreadable: None,
+        plan: Some(plan.clone()),
     }
 }
 
@@ -226,6 +321,11 @@ fn uninstall_row(
         can_tick,
         selected: false,
         unavailability_reason,
+        settings: if can_tick {
+            removable_settings(localizer, item)
+        } else {
+            Vec::new()
+        },
         details: details_text(&keep_summary, &explanation),
         summary: keep_summary.clone(),
         display_name,
@@ -330,15 +430,7 @@ fn refusal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
 /// those belong to the report.
 fn removal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &str) -> String {
     let text = |key: &str| localizer.text(key).value;
-    let format = |key: &str, args: &[(&str, &str)]| localizer.format(key, args).value;
-    let mut lines: Vec<String> = item
-        .warnings
-        .iter()
-        .filter_map(|warning| match warning {
-            UninstallWarning::Always { message_key, .. } => Some(text(message_key)),
-            _ => None,
-        })
-        .collect();
+    let mut lines = always_warning_lines(localizer, item);
     if let Some(summary) = &item.summary {
         lines.push(text(&summary.removes_key));
     }
@@ -346,11 +438,33 @@ fn removal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
     if let Some(summary) = &item.summary {
         lines.push(text(&summary.keeps_key));
     }
-    for warning in &item.warnings {
-        match warning {
-            UninstallWarning::Always { .. } => {}
+    lines.extend(other_warning_lines(localizer, item, name));
+    lines.extend(note_lines(localizer, item, name));
+    lines.join("\n")
+}
+
+/// The warnings the manifest says always to show, such as OSARA's that
+/// REAPER stops speaking. They come before anything else, on the row and on
+/// Review.
+fn always_warning_lines(localizer: &Localizer, item: &UninstallPlanItem) -> Vec<String> {
+    item.warnings
+        .iter()
+        .filter_map(|warning| match warning {
+            UninstallWarning::Always { message_key, .. } => Some(localizer.text(message_key).value),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every other warning, one sentence each.
+fn other_warning_lines(localizer: &Localizer, item: &UninstallPlanItem, name: &str) -> Vec<String> {
+    let format = |key: &str, args: &[(&str, &str)]| localizer.format(key, args).value;
+    item.warnings
+        .iter()
+        .filter_map(|warning| match warning {
+            UninstallWarning::Always { .. } => None,
             UninstallWarning::OtherPackageInstalled { message_key, .. } => {
-                lines.push(text(message_key));
+                Some(localizer.text(message_key).value)
             }
             UninstallWarning::DependentsStay { package_ids } => {
                 let packages = package_ids
@@ -358,27 +472,33 @@ fn removal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
                     .map(|id| localized_package_display_name(localizer, id))
                     .collect::<Vec<_>>()
                     .join(", ");
-                lines.push(format(
+                Some(format(
                     "wizard-uninstall-details-dependents-stay",
                     &[("package", name), ("packages", packages.as_str())],
-                ));
+                ))
             }
-            UninstallWarning::MachineWide => lines.push(format(
+            UninstallWarning::MachineWide => Some(format(
                 "wizard-uninstall-details-machine-wide",
                 &[("package", name)],
             )),
-            UninstallWarning::ReaPackStillManages { reapack_packages } => lines.push(format(
+            UninstallWarning::ReaPackStillManages { reapack_packages } => Some(format(
                 "wizard-uninstall-details-reapack-owned-extensions",
                 &[("packages", reapack_packages.join(", ").as_str())],
             )),
-            UninstallWarning::ReaPackRecordsUnreadable { reason } => lines.push(format(
+            UninstallWarning::ReaPackRecordsUnreadable { reason } => Some(format(
                 "wizard-uninstall-details-reapack-records-unreadable",
                 &[("reason", reason.as_str())],
             )),
-        }
-    }
-    for note in &item.notes {
-        lines.push(match note {
+        })
+        .collect()
+}
+
+/// The neutral notes on how the package comes off, one sentence each.
+fn note_lines(localizer: &Localizer, item: &UninstallPlanItem, name: &str) -> Vec<String> {
+    let format = |key: &str, args: &[(&str, &str)]| localizer.format(key, args).value;
+    item.notes
+        .iter()
+        .map(|note| match note {
             UninstallNote::NoReceipt => format(
                 "wizard-uninstall-details-no-receipt-note",
                 &[("package", name)],
@@ -387,28 +507,363 @@ fn removal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
                 "wizard-uninstall-details-reapack-orphan",
                 &[("package", name)],
             ),
-            UninstallNote::Manifest { note_key } => text(note_key),
-        });
-    }
-    lines.join("\n")
+            UninstallNote::Manifest { note_key } => localizer.text(note_key).value,
+        })
+        .collect()
 }
 
-/// The command line the "can't uninstall from the wizard yet" dialog
-/// suggests, for the REAPER folder the wizard is on. `--resource-path` is
-/// required, so a command without it would fail as typed.
-pub fn uninstall_cli_example(resource_path: &std::path::Path) -> String {
-    format!(
-        "rabbit uninstall --resource-path \"{}\" --package sws",
-        resource_path.display()
+/// What "Also remove settings" would take for `item`, in the manifest's
+/// own few words, each said once: several of SWS's files are all "SWS
+/// settings". Only data the plan found and may remove counts; a key map,
+/// REAPER's own configuration and a whole folder never do.
+fn removable_settings(localizer: &Localizer, item: &UninstallPlanItem) -> Vec<String> {
+    let mut settings: Vec<String> = Vec::new();
+    for kept in item.kept.iter().filter(|kept| kept.removable_with_settings) {
+        let description = match &kept.note_key {
+            Some(key) => localizer.text(key).value,
+            None => kept
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| kept.path.display().to_string()),
+        };
+        if !settings.contains(&description) {
+            settings.push(description);
+        }
+    }
+    settings
+}
+
+/// The read-only note under "Also remove settings": what it would remove
+/// for the packages ticked now, or why it can't be ticked.
+pub fn uninstall_settings_note(localizer: &Localizer, list: &WizardUninstallList) -> String {
+    if list.ticked_rows().next().is_none() {
+        return localizer
+            .text("wizard-uninstall-settings-note-none-ticked")
+            .value;
+    }
+    let lines: Vec<String> = list
+        .ticked_rows()
+        .filter(|row| !row.settings.is_empty())
+        .map(|row| {
+            localizer
+                .format(
+                    "wizard-uninstall-settings-package",
+                    &[
+                        ("package", row.display_name.as_str()),
+                        ("settings", row.settings.join(", ").as_str()),
+                    ],
+                )
+                .value
+        })
+        .collect();
+    if lines.is_empty() {
+        return localizer
+            .text("wizard-uninstall-settings-note-none-removable")
+            .value;
+    }
+    localizer
+        .format(
+            "wizard-uninstall-settings-note-removes",
+            &[("settings", lines.join("\n").as_str())],
+        )
+        .value
+}
+
+/// What Review shows before an uninstall, and whether the Uninstall button
+/// may start it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WizardUninstallReviewPreview {
+    pub lines: Vec<String>,
+    /// A target RABBIT can write to, and at least one row ticked. Only rows
+    /// RABBIT can remove can be ticked, so nothing ticked is blocked.
+    pub can_uninstall: bool,
+}
+
+/// Review's text for uninstalling what is ticked in `list` from `target`,
+/// in plain sentences and without file lists, counts or backup paths, which
+/// belong to the details and the report:
+/// 1. the target folder;
+/// 2. one line per package, with what goes and what stays, or, with "Also
+///    remove settings" ticked, which of its settings go too;
+/// 3. the warnings, those the manifests always show first, and the notes;
+/// 4. "close other music programs" for a package that serves all of them;
+/// 5. the ticks on the Install tab, which this run leaves out
+///    (`install_tab_ticked`, their package names);
+/// 6. that the packages can be installed again;
+/// 7. why the Uninstall button stays disabled, if it does.
+pub fn build_uninstall_review_preview(
+    localizer: &Localizer,
+    target: Option<&TargetRow>,
+    list: &WizardUninstallList,
+    remove_settings: bool,
+    install_tab_ticked: &[String],
+) -> WizardUninstallReviewPreview {
+    let text = |key: &str| localizer.text(key).value;
+    let format = |key: &str, args: &[(&str, &str)]| localizer.format(key, args).value;
+    let Some(target) = target else {
+        return WizardUninstallReviewPreview {
+            lines: vec![text("wizard-review-no-target")],
+            can_uninstall: false,
+        };
+    };
+    let mut lines = vec![
+        format(
+            "wizard-review-target",
+            &[("path", target.path.display().to_string().as_str())],
+        ),
+        String::new(),
+        text("wizard-review-uninstall-packages"),
+    ];
+    let ticked: Vec<(&UninstallRow, Option<&UninstallPlanItem>)> = list
+        .ticked_rows()
+        .map(|row| {
+            let item = list
+                .plan
+                .as_ref()
+                .and_then(|plan| plan.item(&row.package_id));
+            (row, item)
+        })
+        .collect();
+    if ticked.is_empty() {
+        lines.push(text("wizard-review-uninstall-no-package"));
+    }
+    for (row, item) in &ticked {
+        let summary = item.and_then(|item| item.summary.as_ref());
+        let Some(summary) = summary else {
+            // Every plan that removes something has its two sentences; the
+            // row's own label is the fallback if one ever hasn't.
+            lines.push(row.uninstall_summary.clone());
+            continue;
+        };
+        let stays = if remove_settings && !row.settings.is_empty() {
+            format(
+                "wizard-review-uninstall-settings-removed",
+                &[("settings", row.settings.join(", ").as_str())],
+            )
+        } else {
+            text(&summary.keeps_key)
+        };
+        lines.push(format(
+            "wizard-review-uninstall-package",
+            &[
+                ("package", row.display_name.as_str()),
+                ("removes", text(&summary.removes_key).as_str()),
+                ("stays", stays.as_str()),
+            ],
+        ));
+    }
+
+    let planned: Vec<(&UninstallRow, &UninstallPlanItem)> = ticked
+        .iter()
+        .filter_map(|(row, item)| item.map(|item| (*row, item)))
+        .collect();
+    let mut notes: Vec<String> = Vec::new();
+    let mut add_note = |note: String| {
+        if !notes.contains(&note) {
+            notes.push(note);
+        }
+    };
+    for (_, item) in &planned {
+        always_warning_lines(localizer, item)
+            .into_iter()
+            .for_each(&mut add_note);
+    }
+    for (row, item) in &planned {
+        other_warning_lines(localizer, item, &row.display_name)
+            .into_iter()
+            .chain(note_lines(localizer, item, &row.display_name))
+            .for_each(&mut add_note);
+    }
+    let machine_wide = planned
+        .iter()
+        .any(|(_, item)| item.warnings.contains(&UninstallWarning::MachineWide));
+    if machine_wide {
+        add_note(text("wizard-review-uninstall-close-programs-note"));
+    }
+    if let Some(note) = inactive_tab_note(localizer, WizardMode::Uninstall, install_tab_ticked) {
+        add_note(note);
+    }
+    if !ticked.is_empty() {
+        add_note(text("wizard-review-uninstall-reinstall-hint"));
+    }
+    if !notes.is_empty() {
+        lines.push(String::new());
+        lines.push(text("wizard-review-notes-heading"));
+        lines.extend(notes);
+    }
+
+    // The Target page only moves on for a target RABBIT can write to, so
+    // this is a last line of defence, said plainly rather than left to a
+    // failure halfway through.
+    if !target.writable {
+        lines.push(String::new());
+        lines.push(format(
+            "wizard-review-uninstall-blocked",
+            &[(
+                "reason",
+                text("wizard-review-uninstall-not-writable").as_str(),
+            )],
+        ));
+    }
+
+    WizardUninstallReviewPreview {
+        lines,
+        can_uninstall: target.writable && !ticked.is_empty(),
+    }
+}
+
+/// The note Review adds about the tab that isn't running: what is ticked
+/// there stays ticked but isn't part of this run. A tab can change behind
+/// the user's back, by Page Down on a checkbox on Windows, so Review says
+/// so. `other_tab_ticked` are the package names ticked there; `None` when
+/// there are none.
+pub fn inactive_tab_note(
+    localizer: &Localizer,
+    mode: WizardMode,
+    other_tab_ticked: &[String],
+) -> Option<String> {
+    if other_tab_ticked.is_empty() {
+        return None;
+    }
+    let key = match mode {
+        WizardMode::Install => "wizard-review-inactive-tab-note-uninstall",
+        WizardMode::Uninstall => "wizard-review-inactive-tab-note-install",
+    };
+    Some(
+        localizer
+            .format(key, &[("packages", other_tab_ticked.join(", ").as_str())])
+            .value,
     )
 }
 
-/// The dialog's text, with the example command for `resource_path`.
-pub fn uninstall_not_ready_body(
-    localizer: &rabbit_core::localization::Localizer,
-    resource_path: &std::path::Path,
+/// Why RABBIT asks once more before an uninstall starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UninstallConfirmReason {
+    /// A backup can't undo the package's removal: a vendor uninstaller, a
+    /// removal that needs administrator rights, or a whole folder going.
+    Unbacked { package_id: String },
+    /// The manifest's `always_warn` entry asks for the question, such as
+    /// OSARA's warning that REAPER stops speaking.
+    Warning {
+        package_id: String,
+        message_key: String,
+    },
+}
+
+/// The reasons to ask before uninstalling `package_ids`, in manifest order.
+/// Empty for a run of file removals that all go into a backup and that no
+/// manifest asks about, which is every package RABBIT can remove so far:
+/// the question is for the packages later versions add, and they only add
+/// data for it.
+pub fn uninstall_confirm_reasons(
+    plan: &UninstallPlan,
+    package_ids: &[String],
+) -> Vec<UninstallConfirmReason> {
+    let mut reasons = Vec::new();
+    for item in plan
+        .items
+        .iter()
+        .filter(|item| package_ids.contains(&item.package_id))
+    {
+        for warning in &item.warnings {
+            if let UninstallWarning::Always {
+                message_key,
+                confirm: true,
+            } = warning
+            {
+                reasons.push(UninstallConfirmReason::Warning {
+                    package_id: item.package_id.clone(),
+                    message_key: message_key.clone(),
+                });
+            }
+        }
+        if item.unbacked {
+            reasons.push(UninstallConfirmReason::Unbacked {
+                package_id: item.package_id.clone(),
+            });
+        }
+    }
+    reasons
+}
+
+/// The text of the Yes/No question asked before uninstalling `package_ids`:
+/// one plain sentence per reason, then "Uninstall now?". `None` when the
+/// run needs no question. The plan's own `confirm` flag counts too, so a
+/// reason the wizard has no sentence for yet still asks.
+pub fn uninstall_confirmation_body(
+    localizer: &Localizer,
+    plan: &UninstallPlan,
+    package_ids: &[String],
+) -> Option<String> {
+    let reasons = uninstall_confirm_reasons(plan, package_ids);
+    let flagged = plan
+        .items
+        .iter()
+        .any(|item| item.confirm && package_ids.contains(&item.package_id));
+    if reasons.is_empty() && !flagged {
+        return None;
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for reason in &reasons {
+        let line = match reason {
+            UninstallConfirmReason::Unbacked { package_id } => {
+                let name = localized_package_display_name(localizer, package_id);
+                localizer
+                    .format(
+                        "wizard-confirm-uninstall-unbacked",
+                        &[("package", name.as_str())],
+                    )
+                    .value
+            }
+            UninstallConfirmReason::Warning { message_key, .. } => {
+                localizer.text(message_key).value
+            }
+        };
+        if !lines.contains(&line) {
+            lines.push(line);
+        }
+    }
+    lines.push(localizer.text("wizard-confirm-uninstall-question").value);
+    Some(lines.join("\n\n"))
+}
+
+/// The command line the "can't uninstall from the wizard yet" message
+/// suggests: the REAPER folder the wizard is on and the packages ticked,
+/// with `--remove-settings` when that was ticked too, so it does what the
+/// wizard was asked to. `--resource-path` and `--package` are required, so
+/// a command without them would fail as typed.
+pub fn uninstall_cli_example(
+    resource_path: &Path,
+    package_ids: &[String],
+    remove_settings: bool,
 ) -> String {
-    let command = uninstall_cli_example(resource_path);
+    let mut command = format!(
+        "rabbit uninstall --resource-path \"{}\"",
+        resource_path.display()
+    );
+    if package_ids.is_empty() {
+        command.push_str(" --package sws");
+    }
+    for package_id in package_ids {
+        command.push_str(" --package ");
+        command.push_str(package_id);
+    }
+    if remove_settings {
+        command.push_str(" --remove-settings");
+    }
+    command
+}
+
+/// The message's text, with the example command for `resource_path` and
+/// the ticked packages.
+pub fn uninstall_not_ready_body(
+    localizer: &Localizer,
+    resource_path: &Path,
+    package_ids: &[String],
+    remove_settings: bool,
+) -> String {
+    let command = uninstall_cli_example(resource_path, package_ids, remove_settings);
     localizer
         .format(
             "wizard-uninstall-not-ready-body",

@@ -88,7 +88,12 @@ pub struct WizardText {
     /// details text.
     pub uninstall_empty: String,
     pub uninstall_empty_details: String,
-    /// What Next on the Uninstall tab says while the wizard can't uninstall.
+    /// The "Also remove settings" option on the Uninstall tab: its heading
+    /// and the checkbox's label. The note below it depends on the ticks, so
+    /// it is built as they change.
+    pub uninstall_settings_heading: String,
+    pub uninstall_remove_settings_label: String,
+    /// What the Uninstall button says while the wizard can't uninstall.
     pub uninstall_not_ready_title: String,
     pub packages_row_checked: String,
     pub packages_row_unchecked: String,
@@ -126,6 +131,12 @@ pub struct WizardText {
     pub package_handling_manual: String,
     pub package_handling_unavailable: String,
     pub review_heading: String,
+    /// Review's heading in uninstall mode, so the mode is the first thing
+    /// read.
+    pub review_uninstall_heading: String,
+    /// The title of the question asked before an uninstall a backup can't
+    /// undo.
+    pub confirm_uninstall_title: String,
     pub review_target_prefix: String,
     pub review_package_heading: String,
     pub review_osara_keymap_heading: String,
@@ -321,6 +332,8 @@ pub struct WizardControls {
     pub back_label: String,
     pub next_label: String,
     pub install_label: String,
+    /// The run button's label in uninstall mode, with its own mnemonic.
+    pub uninstall_label: String,
     pub close_label: String,
     /// The close button's label while an install runs, when it stops the
     /// install (after asking) before closing RABBIT.

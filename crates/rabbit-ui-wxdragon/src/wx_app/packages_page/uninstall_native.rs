@@ -19,12 +19,12 @@ use wxdragon::widgets::treectrl::{TreeCtrl, TreeItemId};
 
 use crate::{WizardModel, WizardUninstallList, apply_uninstall_checkbox};
 
-use super::WXK_SPACE;
 use super::native::{build_checkbox_tree, native_tree_handle};
 use super::native_tree_checkboxes;
+use super::{UninstallSideWidgets, WXK_SPACE, build_uninstall_settings};
 
 use crate::wx_app::pages::add_label;
-use crate::wx_app::widgets::WizardWidgets;
+use crate::wx_app::widgets::{WizardWidgets, sync_uninstall_settings_widgets};
 
 /// The Uninstall tab's list widget.
 pub(crate) type UninstallView = TreeCtrl;
@@ -163,15 +163,16 @@ fn populate_uninstall_tree(
     *items.borrow_mut() = fresh;
 }
 
-/// Windows: build the Uninstall tab: the label naming the tab, the list and
-/// a read-only details text. Ticking a row only changes its text and the
-/// details; nothing acts on the ticks yet.
+/// Windows: build the Uninstall tab: the label naming the tab, the list, a
+/// read-only details text and "Also remove settings". Ticking a row changes
+/// its text, the details and the settings option; the run reads the ticks
+/// when it starts.
 pub(crate) fn build_uninstall_tab(
     page: &Panel,
     model: &WizardModel,
     list: Rc<RefCell<WizardUninstallList>>,
     items: UninstallStateCell,
-) -> (UninstallView, TextCtrl) {
+) -> (UninstallView, TextCtrl, CheckBox, TextCtrl) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     // Created right before the tree: that is the label NVDA and JAWS read
     // when focus lands in the list, and it names the tab.
@@ -198,6 +199,14 @@ pub(crate) fn build_uninstall_tab(
         .build();
     details.set_name("rabbit-uninstall-details");
     sizer.add(&details, 0, SizerFlag::All | SizerFlag::Expand, 6);
+
+    let (remove_settings, settings_note) =
+        build_uninstall_settings(page, &sizer, model, &list.borrow());
+    let side = UninstallSideWidgets {
+        details,
+        remove_settings,
+        settings_note,
+    };
 
     {
         let items = Rc::clone(&items);
@@ -233,7 +242,7 @@ pub(crate) fn build_uninstall_tab(
         let list = Rc::clone(&list);
         tree.bind_internal(EventType::TREE_STATE_IMAGE_CLICK, move |event| {
             if let Some(item) = TreeEventData::new(event).get_item() {
-                reconcile_toggle(&tree, &items, &list, &details, &item);
+                reconcile_toggle(&tree, &items, &list, &side, &item);
             }
         });
     }
@@ -291,13 +300,13 @@ pub(crate) fn build_uninstall_tab(
                 return;
             }
             if let Some(focused) = tree.get_selection() {
-                reconcile_toggle(&tree, &items, &list, &details, &focused);
+                reconcile_toggle(&tree, &items, &list, &side, &focused);
             }
         });
     }
 
     page.set_sizer(sizer, true);
-    (tree, details)
+    (tree, details, remove_settings, settings_note)
 }
 
 fn is_space_key(event: &WindowEventData) -> bool {
@@ -315,15 +324,16 @@ fn can_toggle(node: Option<UninstallNode>, list: &WizardUninstallList) -> bool {
 }
 
 /// Bring a row in line with the checkbox the native control just flipped:
-/// its text, and the details when it is the selected row. A row that can't
-/// be ticked, a heading or the placeholder goes back to how it was.
-/// Applying the same state twice changes nothing, so a toggle that reaches
-/// both the click and the key handler is harmless.
+/// its text, the details when it is the selected row, and the settings
+/// option. A row that can't be ticked, a heading or the placeholder goes
+/// back to how it was. Applying the same state twice changes nothing, so a
+/// toggle that reaches both the click and the key handler is harmless. The
+/// DataView's `set_value` on macOS does the same things.
 fn reconcile_toggle(
     tree: &TreeCtrl,
     items: &UninstallStateCell,
     list: &Rc<RefCell<WizardUninstallList>>,
-    details: &TextCtrl,
+    side: &UninstallSideWidgets,
     item: &TreeItemId,
 ) {
     let hwnd = tree.get_handle();
@@ -347,8 +357,9 @@ fn reconcile_toggle(
                 native_tree_handle(&selection) == native_tree_handle(item)
             });
             if is_selected {
-                details.set_value(&row_details);
+                side.details.set_value(&row_details);
             }
+            side.sync_settings(&list.borrow());
         }
         Some(UninstallNode::NotAChoice) => native_tree_checkboxes::clear_check_state(hwnd, item),
         None => {}
@@ -356,7 +367,8 @@ fn reconcile_toggle(
 }
 
 /// Windows: rebuild the Uninstall list from fresh rows, as the version check
-/// does before the Packages page shows. The tab selection is left alone.
+/// does before the Packages page shows. The tab selection is left alone;
+/// the settings option starts over with the fresh, unticked rows.
 pub(crate) fn rebuild_uninstall_list_widgets(
     widgets: &WizardWidgets,
     items: &UninstallStateCell,
@@ -367,4 +379,9 @@ pub(crate) fn rebuild_uninstall_list_widgets(
     widgets
         .uninstall_details
         .set_value(&initial_details(model, list));
+    sync_uninstall_settings_widgets(
+        list,
+        &widgets.uninstall_remove_settings,
+        &widgets.uninstall_settings_note,
+    );
 }

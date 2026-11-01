@@ -125,6 +125,8 @@ wizard-button-next = Next
 wizard-button-next-mnemonic = N
 wizard-button-install = Install
 wizard-button-install-mnemonic = I
+wizard-button-uninstall = Uninstall
+wizard-button-uninstall-mnemonic = U
 wizard-button-close = Close
 wizard-button-close-mnemonic = C
 wizard-button-cancel = Cancel
@@ -222,10 +224,24 @@ wizard-uninstall-empty-details = None of the software RABBIT knows how to uninst
 # Stands in for the Uninstall list when RABBIT's records for the REAPER can't
 # be read. $error is the error message.
 wizard-uninstall-unreadable = RABBIT couldn't read its records for this REAPER ({ $error }), so it can't list what it could uninstall.
-# Shown when Next is pressed on the Uninstall tab of a build that can't
+# The Uninstall tab's "Also remove settings" option: a heading, the checkbox
+# and a read-only note below it. The checkbox can be ticked only while a
+# ticked package has settings RABBIT can remove.
+wizard-uninstall-settings-heading = Settings
+wizard-uninstall-remove-settings = Also remove settings
+wizard-uninstall-settings-note-none-ticked = Tick a package to see which of its settings RABBIT can remove. Unless you tick this option, settings stay.
+wizard-uninstall-settings-note-none-removable = None of the ticked packages has settings RABBIT can remove.
+# $settings is one line per ticked package, each a
+# wizard-uninstall-settings-package line.
+wizard-uninstall-settings-note-removes = With this ticked, RABBIT also removes these settings. They go into the backup with the rest, so the backup can bring them back.
+    { $settings }
+# $package is the localized package name, and $settings a comma-separated list
+# of what goes, such as "your grooves, SWS settings".
+wizard-uninstall-settings-package = { $package }: { $settings }
+# Shown when Uninstall is pressed on the Review page of a build that can't
 # uninstall from the wizard yet. Keep "rabbit uninstall" and "--apply"
 # exactly as they are. $command is a complete example command for the
-# REAPER folder the wizard is on, e.g.
+# REAPER folder and the ticked packages, e.g.
 # rabbit uninstall --resource-path "C:\Users\...\REAPER" --package sws
 wizard-uninstall-not-ready-title = Uninstalling from the wizard isn't ready yet
 wizard-uninstall-not-ready-body = This test build of RABBIT can't uninstall from the wizard yet, so nothing was changed. To uninstall now, close RABBIT and use rabbit uninstall on the command line: for example, { $command } shows what would go, and adding --apply removes it.
@@ -314,6 +330,30 @@ wizard-review-no-package = No package selected.
 # $package is the localized package display name and $action is the localized planned action.
 wizard-review-package = { $package }: { $action }
 
+# Review in uninstall mode. The heading names the mode, so it is the first
+# thing read.
+wizard-review-uninstall-heading = Ready to uninstall
+wizard-review-uninstall-packages = Packages to uninstall
+wizard-review-uninstall-no-package = Nothing is ticked to uninstall.
+# One line per package. $package is the localized package name, $removes the
+# sentence on what goes, and $stays the one on what stays, or
+# wizard-review-uninstall-settings-removed.
+wizard-review-uninstall-package = { $package }: { $removes } { $stays }
+# Replaces the sentence on what stays when "Also remove settings" is ticked.
+# $settings is a comma-separated list of what goes, such as "your grooves, SWS
+# settings".
+wizard-review-uninstall-settings-removed = Its settings go too, into the backup: { $settings }.
+wizard-review-uninstall-close-programs-note = Close other music programs first.
+# What is ticked on the tab that isn't running stays ticked, but isn't part of
+# this run. $packages is a comma-separated list of package names.
+wizard-review-inactive-tab-note-install = What you ticked on the Install or update tab isn't part of this run: { $packages }.
+wizard-review-inactive-tab-note-uninstall = What you ticked on the Uninstall tab isn't part of this run: { $packages }.
+wizard-review-uninstall-reinstall-hint = You can install these again later from the Install or update tab.
+# Why the Uninstall button is disabled. $reason is a sentence, such as
+# wizard-review-uninstall-not-writable.
+wizard-review-uninstall-blocked = Can't uninstall yet: { $reason }
+wizard-review-uninstall-not-writable = RABBIT can't write to this REAPER's folder.
+
 wizard-progress-heading = Installation progress
 wizard-progress-status-idle = Ready to install.
 wizard-progress-status-running = Installing selected packages. This might take a few minutes.
@@ -376,6 +416,14 @@ wizard-self-update-status-checking = Checking for RABBIT updates…
 # button is the focused one, so a stray Enter never ends a running install.
 wizard-close-during-install-title = Stop the installation?
 wizard-close-during-install-body = RABBIT is installing. If you stop now, RABBIT finishes the step it started, keeps what is already installed, cleans up what it started, and then closes. Packages it has not reached yet stay uninstalled. Stop the installation?
+
+# Asked before an uninstall that a backup can't undo, or that a package's
+# manifest asks to confirm. The No button is the focused one, so Enter never
+# starts it.
+wizard-confirm-uninstall-title = Uninstall the ticked packages?
+# $package is the localized package name.
+wizard-confirm-uninstall-unbacked = A backup can't bring { $package } back. To have it again, you install it again.
+wizard-confirm-uninstall-question = Uninstall now?
 
 # Shown instead when the user closes the window while RABBIT is replacing its
 # own files. Not a question: that swap has no safe interruption point.

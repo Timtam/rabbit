@@ -125,6 +125,8 @@ wizard-button-next = Siguiente
 wizard-button-next-mnemonic = S
 wizard-button-install = Instalar
 wizard-button-install-mnemonic = I
+wizard-button-uninstall = Desinstalar
+wizard-button-uninstall-mnemonic = D
 wizard-button-close = Cerrar
 wizard-button-close-mnemonic = C
 wizard-button-cancel = Cancelar
@@ -222,9 +224,25 @@ wizard-uninstall-empty-details = No hay instalado en este REAPER nada del softwa
 # Stands in for the Uninstall list when RABBIT's records for the REAPER can't
 # be read. $error is the error message.
 wizard-uninstall-unreadable = RABBIT no pudo leer sus registros de este REAPER ({ $error }), así que no puede mostrar qué podría desinstalar.
-# Shown when Next is pressed on the Uninstall tab of a build that can't
-# uninstall from the wizard yet. Keep "rabbit uninstall", "--package sws"
-# and "--apply" exactly as they are.
+# The Uninstall tab's "Also remove settings" option: a heading, the checkbox
+# and a read-only note below it. The checkbox can be ticked only while a
+# ticked package has settings RABBIT can remove.
+wizard-uninstall-settings-heading = Configuración
+wizard-uninstall-remove-settings = Quitar también la configuración
+wizard-uninstall-settings-note-none-ticked = Marca un paquete para ver qué parte de su configuración puede quitar RABBIT. Si no marcas esta opción, la configuración se conserva.
+wizard-uninstall-settings-note-none-removable = Ninguno de los paquetes marcados tiene configuración que RABBIT pueda quitar.
+# $settings is one line per ticked package, each a
+# wizard-uninstall-settings-package line.
+wizard-uninstall-settings-note-removes = Con esta opción marcada, RABBIT también quita esta configuración. Va a la copia de seguridad con todo lo demás, así que la copia puede recuperarla.
+    { $settings }
+# $package is the localized package name, and $settings a comma-separated list
+# of what goes, such as "your grooves, SWS settings".
+wizard-uninstall-settings-package = { $package }: { $settings }
+# Shown when Uninstall is pressed on the Review page of a build that can't
+# uninstall from the wizard yet. Keep "rabbit uninstall" and "--apply"
+# exactly as they are. $command is a complete example command for the
+# REAPER folder and the ticked packages, e.g.
+# rabbit uninstall --resource-path "C:\Users\...\REAPER" --package sws
 wizard-uninstall-not-ready-title = Desinstalar desde el asistente todavía no está listo
 wizard-uninstall-not-ready-body = Esta versión de prueba de RABBIT todavía no puede desinstalar desde el asistente, así que no se ha cambiado nada. Para desinstalar ahora, cierra RABBIT y usa rabbit uninstall en la línea de comandos: por ejemplo, { $command } muestra lo que se quitaría, y al añadir --apply se quita.
 
@@ -312,6 +330,30 @@ wizard-review-no-package = No hay un paquete seleccionado.
 # $package is the localized package display name and $action is the localized planned action.
 wizard-review-package = { $package }: { $action }
 
+# Review in uninstall mode. The heading names the mode, so it is the first
+# thing read.
+wizard-review-uninstall-heading = Listo para desinstalar
+wizard-review-uninstall-packages = Paquetes que se van a desinstalar
+wizard-review-uninstall-no-package = No hay nada marcado para desinstalar.
+# One line per package. $package is the localized package name, $removes the
+# sentence on what goes, and $stays the one on what stays, or
+# wizard-review-uninstall-settings-removed.
+wizard-review-uninstall-package = { $package }: { $removes } { $stays }
+# Replaces the sentence on what stays when "Also remove settings" is ticked.
+# $settings is a comma-separated list of what goes, such as "your grooves, SWS
+# settings".
+wizard-review-uninstall-settings-removed = Su configuración también se quita y va a la copia de seguridad: { $settings }.
+wizard-review-uninstall-close-programs-note = Cierra antes los demás programas de música.
+# What is ticked on the tab that isn't running stays ticked, but isn't part of
+# this run. $packages is a comma-separated list of package names.
+wizard-review-inactive-tab-note-install = Lo que has marcado en la pestaña «Instalar o actualizar» no forma parte de esta operación: { $packages }.
+wizard-review-inactive-tab-note-uninstall = Lo que has marcado en la pestaña «Desinstalar» no forma parte de esta operación: { $packages }.
+wizard-review-uninstall-reinstall-hint = Puedes volver a instalarlos más adelante desde la pestaña «Instalar o actualizar».
+# Why the Uninstall button is disabled. $reason is a sentence, such as
+# wizard-review-uninstall-not-writable.
+wizard-review-uninstall-blocked = Todavía no se puede desinstalar: { $reason }
+wizard-review-uninstall-not-writable = RABBIT no puede escribir en la carpeta de este REAPER.
+
 wizard-progress-heading = Progreso de la instalación
 wizard-progress-status-idle = Listo para instalar.
 wizard-progress-status-running = Instalando paquetes seleccionados. Esto puede tardar unos minutos.
@@ -374,6 +416,14 @@ wizard-self-update-status-checking = Comprobando actualizaciones de RABBIT…
 # button is the focused one, so a stray Enter never ends a running install.
 wizard-close-during-install-title = ¿Detener la instalación?
 wizard-close-during-install-body = RABBIT está instalando. Si lo detienes ahora, RABBIT termina el paso que empezó, conserva lo que ya está instalado, limpia lo que empezó y luego se cierra. Los paquetes a los que todavía no ha llegado se quedan sin instalar. ¿Quieres detener la instalación?
+
+# Asked before an uninstall that a backup can't undo, or that a package's
+# manifest asks to confirm. The No button is the focused one, so Enter never
+# starts it.
+wizard-confirm-uninstall-title = ¿Desinstalar los paquetes marcados?
+# $package is the localized package name.
+wizard-confirm-uninstall-unbacked = Una copia de seguridad no puede recuperar { $package }. Para tenerlo de nuevo, tendrás que volver a instalarlo.
+wizard-confirm-uninstall-question = ¿Desinstalar ahora?
 
 # Shown instead when the user closes the window while RABBIT is replacing its
 # own files. Not a question: that swap has no safe interruption point.
