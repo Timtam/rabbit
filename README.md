@@ -187,17 +187,41 @@ Launch the downloaded executable. The wizard walks you through:
    packages.
 3. **Pick the packages** you want installed or updated, plus any
    *configuration* steps (e.g. adding the REAPER Accessibility ReaPack
-   repository). Sensible defaults are already checked.
+   repository). Sensible defaults are already checked. The page has two
+   tabs, **Install or update** and **Uninstall**, and opens with focus on the
+   tabs: press Tab to reach the list.
 4. **Review and install.** RABBIT downloads, verifies, and installs everything
    without further prompts.
 
 When it finishes, you can launch REAPER straight from the wizard or open the
 saved report.
 
-To uninstall instead, switch to the **Uninstall** tab on the package page
-(Ctrl+Tab), tick what should go, and press **Uninstall** on the review page.
-Removed files move into a backup rather than being deleted, and the last page
-says how to get a package back.
+### Uninstalling from the wizard
+
+To remove packages instead, switch to the **Uninstall** tab on the package
+page, tick what should go, and press Next. Nothing is ticked to begin with.
+
+- **Switching tabs:** on Windows, Ctrl+Tab or Ctrl+Page Down from the tabs or
+  anything on them, and Ctrl+Shift+Tab or Ctrl+Page Up to go back; the arrow
+  keys work while the tabs have focus. On macOS, Ctrl+Tab and Ctrl+Shift+Tab
+  anywhere on the page, or VoiceOver's own navigation of the tab group.
+- **What RABBIT can remove:** SWS, ReaPack, ReaKontrol, FFmpeg and app2clap
+  (both Windows only) and the language packs. Every other installed package
+  is listed too, with the reason it can't be ticked.
+- **What is kept:** your settings, such as SWS's grooves, ReaPack's
+  repositories and ReaKontrol's FX maps, unless you tick **Also remove
+  settings** below the list. `reaper.ini`, `reaper-kb.ini`, your key maps and
+  everything ReaPack installed always stay. Everything that goes, settings
+  removed with that option included, moves into a backup set under
+  `RABBIT\backups` rather than being deleted.
+- **Starting it:** the review page says what each package loses and keeps.
+  Enter doesn't start an uninstall there; press **Uninstall**. REAPER must be
+  closed, and for app2clap every REAPER on the computer.
+- **Getting a package back:** start RABBIT again and tick it on the **Install
+  or update** tab, which no longer ticks a package you removed by itself. To
+  put back the very files that went instead, **Show details** on the last
+  page lists a `rabbit restore-backup` command for each package (see
+  [Uninstall](#uninstall) under command-line usage).
 
 ### Switching the language
 

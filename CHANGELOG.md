@@ -33,6 +33,27 @@ from this file and posts it as the GitHub release body.
 
 ### Added
 
+- The wizard can now uninstall: the **Packages** page has an **Uninstall**
+  tab beside **Install or update**. The page opens on **Install or update**
+  with focus on the tabs, so screen readers read "Install or update, tab, 1
+  of 2" first; press Tab to reach the package list, which works as before.
+  Switch tabs with Ctrl+Tab or Ctrl+Page Down on Windows, and with Ctrl+Tab
+  or VoiceOver's tab navigation on macOS. The **Uninstall** tab lists what
+  is installed in the chosen REAPER, with nothing ticked. RABBIT can remove
+  SWS, ReaPack, ReaKontrol, FFmpeg, app2clap and the language packs, and a
+  row it can't tick says why. Your settings stay unless you tick **Also
+  remove settings**. Next goes to a Review that says what each package
+  loses and keeps. Enter never starts an uninstall there: press
+  **Uninstall** to go ahead. If REAPER is open, RABBIT asks you to close it
+  first; for app2clap, every REAPER on the computer. Removed files move
+  into a backup rather than being deleted. The progress page names each
+  package as it goes and says whether it went, and closing RABBIT during an
+  uninstall asks first, then stops after the package it is on. The Done
+  page says what went, why anything stayed, and how to get a package back:
+  run RABBIT again and tick it on **Install or update**, where it is no
+  longer ticked by itself. **Show details** lists the files, the backup
+  they went into, and the `rabbit restore-backup` command that brings each
+  package back.
 - `rabbit uninstall` removes SWS, ReaPack, ReaKontrol, FFmpeg, app2clap and
   the language packs. Name each package with `--package`. Without `--apply`
   it only lists what would go, what stays and what would stop it, and with
@@ -57,26 +78,6 @@ from this file and posts it as the GitHub release body.
 
 ### Changed
 
-- The wizard's **Packages** page now has two tabs, **Install or update** and
-  **Uninstall**, the start of uninstalling from the wizard. The page opens on
-  **Install or update** with focus on the tabs, so screen readers read
-  "Install or update, tab, 1 of 2" first; press Tab to reach the package
-  list, which works as before. The **Uninstall** tab lists what is installed
-  in the chosen REAPER, whether RABBIT can remove it, and if not, why, with
-  nothing ticked, and an **Also remove settings** option, unticked, for the
-  ticked packages that have settings RABBIT can remove. Next on that tab
-  goes to a Review that says what each package loses and keeps; Enter never
-  starts an uninstall there. Press **Uninstall** on Review to remove what you
-  ticked. If REAPER is open, RABBIT asks you to close it first; for app2clap,
-  every REAPER on the computer. The progress page says each package as it
-  goes and whether it went, and VoiceOver reads both. Closing RABBIT during
-  an uninstall asks first, then stops after the package it is on. The Done
-  page says what went, why anything stayed, and how to get a package back:
-  run RABBIT again and tick it on **Install or update**, where it is no
-  longer ticked by itself. **Show details** lists the files, the backup they
-  went into, and the `rabbit restore-backup` command that brings each
-  package back. Switch tabs with Ctrl+Tab or Ctrl+Page Down on Windows, and
-  with Ctrl+Tab or VoiceOver's tab navigation on macOS.
 - When another copy of RABBIT is already installing into the same REAPER,
   the Done page now says so in plain words, in your language, instead of
   naming a lock file and a process number.

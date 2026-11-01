@@ -954,6 +954,53 @@ fn the_settings_option_needs_a_ticked_package_with_settings() {
 }
 
 #[test]
+fn voiceover_hears_only_when_the_settings_option_comes_or_goes() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let note = |was_available: bool, list: &WizardUninstallList| {
+        uninstall_settings_availability_note(&localizer, was_available, list)
+    };
+    let mut list = list_for(vec![
+        sws_with_settings(),
+        item("ffmpeg", Removability::Removable),
+        UninstallPlanItem {
+            kept: vec![kept(
+                "C:/REAPER/ReaKontrol/fxMaps",
+                "uninstall-kept-reakontrol-fx-maps",
+                true,
+            )],
+            ..item("reakontrol", Removability::Removable)
+        },
+    ]);
+
+    // A package without settings changes the note, not the option.
+    tick(&mut list, "ffmpeg");
+    assert_eq!(note(false, &list), None);
+
+    tick(&mut list, "sws");
+    assert_eq!(
+        note(false, &list).as_deref(),
+        Some("Now available below the list: Also remove settings.")
+    );
+
+    // A second package with settings only adds to the note.
+    tick(&mut list, "reakontrol");
+    assert_eq!(note(true, &list), None);
+
+    for package_id in ["sws", "reakontrol"] {
+        let row = list
+            .rows
+            .iter_mut()
+            .find(|row| row.package_id == package_id)
+            .unwrap();
+        apply_uninstall_checkbox(row, false);
+    }
+    assert_eq!(
+        note(true, &list).as_deref(),
+        Some("No longer available: Also remove settings.")
+    );
+}
+
+#[test]
 fn with_settings_ticked_review_says_they_go_instead_of_that_they_stay() {
     let mut list = list_for(vec![
         sws_with_settings(),
@@ -1228,11 +1275,15 @@ fn review_and_the_settings_note_read_in_every_locale() {
                 item("ffmpeg", Removability::Removable),
             ]),
         );
-        let mut texts = vec![uninstall_settings_note(&localizer, &list)];
+        let mut texts = vec![
+            uninstall_settings_note(&localizer, &list),
+            uninstall_settings_availability_note(&localizer, true, &list).unwrap(),
+        ];
         tick(&mut list, "ffmpeg");
         texts.push(uninstall_settings_note(&localizer, &list));
         tick(&mut list, "sws");
         texts.push(uninstall_settings_note(&localizer, &list));
+        texts.push(uninstall_settings_availability_note(&localizer, false, &list).unwrap());
         for (writable, remove_settings) in [(true, false), (false, true)] {
             let preview = build_uninstall_review_preview(
                 &localizer,

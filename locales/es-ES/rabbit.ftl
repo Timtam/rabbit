@@ -238,6 +238,12 @@ wizard-uninstall-settings-note-removes = Con esta opción marcada, RABBIT tambi�
 # $package is the localized package name, and $settings a comma-separated list
 # of what goes, such as "your grooves, SWS settings".
 wizard-uninstall-settings-package = { $package }: { $settings }
+# Said by VoiceOver on macOS when a tick in the Uninstall list makes "Also
+# remove settings" usable or unusable: that happens below the list, away from
+# the row being ticked. $option is the checkbox's name, as
+# wizard-uninstall-remove-settings reads.
+wizard-uninstall-settings-available = Ahora disponible debajo de la lista: { $option }.
+wizard-uninstall-settings-unavailable = Ya no está disponible: { $option }.
 
 # $package is the localized package name the configuration step depends on.
 wizard-configuration-row-unavailable = No está disponible: Se requiere instalar { $package }.
@@ -377,6 +383,8 @@ wizard-progress-status-removing = desinstalando { $package }…
 wizard-progress-status-configuring = Aplicando configuración: { $step }
 
 # Running log lines appended to the progress details text control.
+# $package is the localized package display name and $step the localized
+# configuration step name.
 wizard-progress-log-download-started = Descargando { $package }…
 wizard-progress-log-download-completed = se descargó { $package }.
 wizard-progress-log-install-started = instalando { $package }…

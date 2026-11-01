@@ -568,6 +568,29 @@ pub fn uninstall_settings_note(localizer: &Localizer, list: &WizardUninstallList
         .value
 }
 
+/// What VoiceOver is told when a tick in the Uninstall list makes "Also
+/// remove settings" usable or unusable. That happens below the list, away
+/// from the row the user is on, so nothing would say it otherwise. `None`
+/// while the option stays as it was: its note changing with every tick
+/// would only talk over the row.
+pub fn uninstall_settings_availability_note(
+    localizer: &Localizer,
+    was_available: bool,
+    list: &WizardUninstallList,
+) -> Option<String> {
+    let available = list.settings_option_available();
+    if available == was_available {
+        return None;
+    }
+    let key = if available {
+        "wizard-uninstall-settings-available"
+    } else {
+        "wizard-uninstall-settings-unavailable"
+    };
+    let option = localizer.text("wizard-uninstall-remove-settings").value;
+    Some(localizer.format(key, &[("option", option.as_str())]).value)
+}
+
 /// What Review shows before an uninstall, and whether the Uninstall button
 /// may start it.
 #[derive(Debug, Clone, PartialEq, Eq)]

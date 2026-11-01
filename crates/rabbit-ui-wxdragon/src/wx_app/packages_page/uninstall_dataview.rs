@@ -141,12 +141,14 @@ fn initial_details(model: &WizardModel, list: &WizardUninstallList) -> String {
 
 /// Tick or untick a row, with every side effect: the row's text, the view,
 /// the details when it is the selected row, and the settings option, as
-/// the Windows tree's toggle does. `false` when nothing could change,
-/// because the row can't be ticked. Shared by the model's `set_value` (a
-/// click, or VO+Space while interacting with the list) and the Space
-/// handler, which wx never routes through `set_value` on macOS, so the two
-/// can't drift apart.
-type UninstallToggle = Rc<dyn Fn(&UninstallTreeData, usize, bool) -> bool>;
+/// the Windows tree's toggle does. `None` when nothing could change,
+/// because the row can't be ticked; otherwise what the caller should tell
+/// VoiceOver beyond the checkbox, which is the settings option coming or
+/// going, if it did. Shared by the model's `set_value` (a click, or
+/// VO+Space while interacting with the list) and the Space handler, which
+/// wx never routes through `set_value` on macOS, so the two can't drift
+/// apart.
+type UninstallToggle = Rc<dyn Fn(&UninstallTreeData, usize, bool) -> Option<Vec<String>>>;
 
 /// The widgets below the list. They are created after it, because creation
 /// order is tab order, so they reach the toggle through this cell once they
@@ -159,9 +161,9 @@ fn new_uninstall_toggle(
     side: UninstallSideCell,
 ) -> UninstallToggle {
     Rc::new(
-        move |data: &UninstallTreeData, index: usize, checked: bool| -> bool {
+        move |data: &UninstallTreeData, index: usize, checked: bool| -> Option<Vec<String>> {
             // Let the list go before notifying the view, which reads it back.
-            let updated = data
+            let row_details = data
                 .list
                 .borrow_mut()
                 .rows
@@ -170,12 +172,9 @@ fn new_uninstall_toggle(
                 .map(|row| {
                     apply_uninstall_checkbox(row, checked);
                     row.details.clone()
-                });
-            let Some(row_details) = updated else {
-                return false;
-            };
+                })?;
             if index >= data.row_nodes.len() {
-                return false;
+                return None;
             }
             let row_ptr = data.row_ptr(index);
             if let Some(model) = model_cell.borrow().as_ref() {
@@ -185,7 +184,7 @@ fn new_uninstall_toggle(
                 model.item_value_changed(row_ptr, UNINSTALL_COL_TOGGLE);
             }
             let Some(side) = side.get() else {
-                return true;
+                return Some(Vec::new());
             };
             let is_selected = tree
                 .get_selection()
@@ -194,8 +193,11 @@ fn new_uninstall_toggle(
             if is_selected {
                 side.details.set_value(&row_details);
             }
-            side.sync_settings(&data.list.borrow());
-            true
+            Some(
+                side.sync_settings(&data.list.borrow())
+                    .into_iter()
+                    .collect(),
+            )
         },
     )
 }
@@ -285,8 +287,16 @@ fn build_uninstall_tree_model(
                 let Some(UninstallNodeKind::Row(index)) = item.map(|node| node.kind) else {
                     return false;
                 };
-                // A click, or VO+Space: VoiceOver reads the checkbox itself.
-                toggle(data, index, var.get_bool().unwrap_or(false))
+                let Some(notes) = toggle(data, index, var.get_bool().unwrap_or(false)) else {
+                    return false;
+                };
+                // A click, or VO+Space: VoiceOver reads the checkbox itself,
+                // so only the settings option coming or going is left to
+                // say, after it.
+                if !notes.is_empty() {
+                    announce(&notes.join(" "), AnnouncePriority::Polite);
+                }
+                true
             },
         ),
         // is_enabled: a row that can't be ticked is drawn, and exposed, as
@@ -518,11 +528,13 @@ pub(crate) fn build_uninstall_tab(
                 .rows
                 .get(index)
                 .is_some_and(|row| row.selected);
-            if !toggle(data, index, !checked) {
+            let Some(notes) = toggle(data, index, !checked) else {
                 return;
-            }
+            };
             // The row VoiceOver is on changed behind it, so it says nothing
-            // on its own: say the state the row ended up in.
+            // on its own: say the state the row ended up in, then the
+            // settings option if it came or went. One announcement, not
+            // two: a second would cut the first off.
             let now_checked = data
                 .list
                 .borrow()
@@ -534,7 +546,11 @@ pub(crate) fn build_uninstall_tab(
             } else {
                 &model_text.packages_row_unchecked
             };
-            announce(state, AnnouncePriority::Interrupt);
+            let message = std::iter::once(state.as_str())
+                .chain(notes.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(". ");
+            announce(&message, AnnouncePriority::Interrupt);
         });
     }
 

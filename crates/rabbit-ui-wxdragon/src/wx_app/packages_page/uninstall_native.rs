@@ -328,7 +328,8 @@ fn can_toggle(node: Option<UninstallNode>, list: &WizardUninstallList) -> bool {
 /// option. A row that can't be ticked, a heading or the placeholder goes
 /// back to how it was. Applying the same state twice changes nothing, so a
 /// toggle that reaches both the click and the key handler is harmless. The
-/// DataView's `set_value` on macOS does the same things.
+/// DataView's `set_value` on macOS does the same things, and also tells
+/// VoiceOver when the settings option comes or goes.
 fn reconcile_toggle(
     tree: &TreeCtrl,
     items: &UninstallStateCell,
@@ -359,7 +360,10 @@ fn reconcile_toggle(
             if is_selected {
                 side.details.set_value(&row_details);
             }
-            side.sync_settings(&list.borrow());
+            // The DataView announces what this returns. Windows has no
+            // announce(); there the checkbox says whether it can be ticked
+            // once Tab reaches it.
+            let _ = side.sync_settings(&list.borrow());
         }
         Some(UninstallNode::NotAChoice) => native_tree_checkboxes::clear_check_state(hwnd, item),
         None => {}

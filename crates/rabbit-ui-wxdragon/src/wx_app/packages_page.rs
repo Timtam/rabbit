@@ -9,9 +9,10 @@ use wxdragon::prelude::*;
 #[cfg(target_os = "windows")]
 use wxdragon::widgets::treectrl::TreeCtrl;
 
+use crate::wx_app::globals::with_ui_localizer;
 use crate::wx_app::pages::add_label;
 use crate::wx_app::widgets::sync_uninstall_settings_widgets;
-use crate::{WizardModel, WizardUninstallList};
+use crate::{WizardModel, WizardUninstallList, uninstall_settings_availability_note};
 
 #[cfg(not(target_os = "windows"))]
 use wxdragon::widgets::dataview::{CustomDataViewTreeModel, DataViewCtrl};
@@ -71,9 +72,19 @@ pub(crate) struct UninstallSideWidgets {
 }
 
 impl UninstallSideWidgets {
-    /// Bring the settings option in line with `list`'s ticks.
-    pub(crate) fn sync_settings(&self, list: &WizardUninstallList) {
+    /// Bring the settings option in line with `list`'s ticks. Returns what
+    /// to tell VoiceOver when the tick made the option usable or unusable,
+    /// which nothing else says: it happens below the list.
+    pub(crate) fn sync_settings(&self, list: &WizardUninstallList) -> Option<String> {
+        // Only the sync enables or disables the checkbox, so its state is
+        // what the option was before this tick.
+        let was_available = self.remove_settings.is_enabled();
         sync_uninstall_settings_widgets(list, &self.remove_settings, &self.settings_note);
+        let mut note = None;
+        with_ui_localizer(|localizer| {
+            note = uninstall_settings_availability_note(localizer, was_available, list);
+        });
+        note
     }
 }
 
