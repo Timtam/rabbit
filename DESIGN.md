@@ -735,12 +735,17 @@ RABBIT's own changes: what each configuration step found or changed
 (`applied_configuration`: the ReaPack repository and whether RABBIT added it,
 or the `langpack=` value the language step replaced). A package the user
 removes through RABBIT goes into `declined_packages`, the same set that holds
-the packages they left unticked, so it isn't ticked again on the next run.
-Only the user's own verdict takes it out again (ticking it in the wizard,
-which today sends that verdict for `remember_opt_out` packages only and has
-to cover every package once uninstall ships); installing it through
-`--package` does not, because that is a scope for one run, not a standing
-preference. These fields are optional and left out when
+the packages they left unticked. Both readers honour the set for every
+package: the wizard doesn't tick a package listed there, and `apply-packages`
+and `setup` without `--package` leave it out and say so. Leaving a row
+unticked only records a "no" for packages that set `remember_opt_out`, so an
+optional package skipped once still has its updates offered. Only the user's
+own verdict takes a package out of the set again: ticking it in the wizard,
+naming it with `--package` in a CLI run that installs (`setup`,
+`apply-packages` or `install-extension`), or restoring it with
+`restore-backup --package`. An install that comes without a verdict, such as
+a package the CLI picked from its default list, leaves the set alone. These
+fields are optional and left out when
 empty, so older RABBIT versions still read the file. OSARA's key map is always
 kept when OSARA is removed, so the receipt doesn't track a key map backup.
 
@@ -798,8 +803,8 @@ plan start with a token such as `{resource}`, `{clap_dir}` or
 manifest loads: every supported platform and target has a plan and every
 plan is reachable, each strategy has the fields it needs, removals that need
 administrator rights never go into the user's backups, and no path may reach
-into `{resource}/RABBIT`. The engine that carries out `remove_files` plans
-is in place (see Safety Behavior), but nothing starts it yet. SWS, ReaPack,
+into `{resource}/RABBIT`. `rabbit uninstall` carries out `remove_files`
+plans (see Safety Behavior); the wizard gets its own way in later. SWS, ReaPack,
 ReaKontrol, FFmpeg, app2clap and the language packs have `remove_files`
 plans. FFmpeg and the language packs set `requires_receipt`, because a copy
 RABBIT has no receipt for is most likely the user's own; the others name
@@ -807,7 +812,8 @@ their files, so a copy without a receipt can go too, unless ReaPack still
 manages it. The JAWS scripts, and a portable REAPER on Windows, have
 `manual` plans whose note holds the instructions. REAPER otherwise, OSARA
 and Surge XT still say `not_supported`. `rabbit packages` prints each
-package's plan per platform and target.
+package's plan per platform and target, and `rabbit components` says for
+each package whether RABBIT can uninstall it, and if not, why.
 
 Every package ships a `display_description_key` that resolves to a one- or
 two-sentence localized description of what the package is and why a user
@@ -1127,6 +1133,15 @@ Extension files:
   `RABBIT/backups/<id>` part. Restore puts each file back at its recorded
   path, refuses any path outside the resource folder and the outside folders
   RABBIT installs into, and takes the install lock.
+- Restoring a set an uninstall wrote never copies a receipt file back: the
+  receipt has moved on since. Each package's recorded entry is merged into
+  the current receipt instead, the package comes off `declined_packages`,
+  and the `langpack=` value its uninstall replaced goes back, but only while
+  `reaper.ini` still says `<>`. `restore-backup --package` does this for one
+  package of the set. A package installed again since its uninstall is
+  refused, with nothing changed, because its newer receipt entry describes
+  newer files; so is `--package` for a set an install wrote, which records
+  no receipt entry per package.
 - Uninstall removes only regular files a RABBIT receipt lists with a hash and
   files the package manifest names. `reaper.ini`, `reaper-kb.ini` and
   everything in `{resource}/RABBIT` always stay, and every path passes a guard
@@ -1143,10 +1158,20 @@ Extension files:
   and the package joins `declined_packages`. The set records each package's
   receipt entry, and the `langpack=` value REAPER had when the removal set it
   back to no language pack, never a copy of `reaper.ini`.
+- `rabbit uninstall` only shows what it would do unless given `--apply`, and
+  needs every package named with `--package`; there is no "remove
+  everything". Its dry run runs the same checks, a running REAPER included,
+  so it says what `--apply` would say. It has no `--allow-reaper-running`,
+  unlike every command that installs: a running REAPER holds its extensions'
+  files open and writes `reaper.ini` again when it closes. Its exit code is 2
+  when a package asked for can't be uninstalled and nothing changed, 1 when a
+  removal failed or was stopped, and 0 otherwise, packages that aren't
+  installed included. Package settings stay unless `--remove-settings` is
+  given; then they move into the same backup set.
 - Keep a machine-readable operation report and a plain text report.
 - Treat non-writable targets as a planning error before downloading anything.
 - Do not request elevation unless the selected REAPER app install target
-  requires it.
+  requires it, or a selected vendor uninstaller or machine-wide removal does.
 - Do not delete unknown files during update. Only remove files listed in a RABBIT
   receipt or explicitly owned by the package manifest.
 - Closing the window during an install stops the run; it does not abandon it.

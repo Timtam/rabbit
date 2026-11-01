@@ -17,6 +17,7 @@ use super::{
     UninstallReport, UninstallRequest, UninstallStatus,
 };
 use crate::cancel::CancelToken;
+use crate::error::RabbitError;
 use crate::hash::sha256_file;
 use crate::model::{ComponentDetection, InstallationKind, Platform};
 use crate::package::{PACKAGE_SWS, PackageSpec, builtin_package_specs};
@@ -27,7 +28,7 @@ use crate::receipt::{
 };
 use crate::rollback::{
     BACKUP_MANIFEST_FILE, BackupEntryState, BackupManifest, RestoreBackupOptions,
-    restore_backup_set,
+    RestoreBackupReport, restore_backup_set,
 };
 
 /// Volumes as a test wants them: one volume for everything, or the backup
@@ -359,18 +360,23 @@ fn removed_files_move_into_a_backup_set_and_the_receipt_forgets_the_package() {
             .starts_with(fixture.resource.join("RABBIT").join("logs"))
     );
 
-    // A set written by moving restores like any other.
+    // A set written by moving restores like any other. The receipt entry
+    // the set recorded goes back into the receipt, and the package is no
+    // longer remembered as removed.
     restore_backup_set(
         &fixture.resource,
         &set_id,
         &RestoreBackupOptions {
             dry_run: false,
             allow_reaper_running: true,
+            ..Default::default()
         },
     )
     .unwrap();
     assert_eq!(fs::read(&plugin).unwrap(), b"file contents");
     assert_eq!(fs::read(&script).unwrap(), b"file contents");
+    let receipt = load_install_state(&fixture.resource).unwrap().unwrap();
+    assert_eq!(receipt, state);
 }
 
 /// A file only the receipt names that changed since RABBIT installed it is
@@ -1015,4 +1021,196 @@ fn the_shipped_plans_for_sws_and_a_language_pack_carry_out() {
         assert!(receipt.declined_packages.contains(id));
     }
     assert_eq!(manifest(&report).files.len(), 4);
+}
+
+/// What a restore of `package_id` alone, from the set `set_id`, says or does.
+fn restore_package(
+    fixture: &Fixture,
+    set_id: &str,
+    package_id: &str,
+    dry_run: bool,
+) -> crate::Result<RestoreBackupReport> {
+    restore_backup_set(
+        &fixture.resource,
+        set_id,
+        &RestoreBackupOptions {
+            dry_run,
+            allow_reaper_running: true,
+            package_id: Some(package_id.to_string()),
+        },
+    )
+}
+
+/// Restoring one package from an uninstall set brings back its files and
+/// nothing else. Its receipt entry goes back into the receipt as it is now,
+/// rather than the whole file going back to how it was, and the package
+/// comes off `declined_packages`.
+#[test]
+fn restoring_one_package_merges_its_receipt_entry_back() {
+    let fixture = Fixture::new();
+    let demo = fixture.file("UserPlugins/reaper_demo.dll");
+    let other = fixture.file("UserPlugins/reaper_other.dll");
+    let state = save_receipt(
+        &fixture,
+        &[
+            ("demo", &["UserPlugins/reaper_demo.dll"]),
+            ("other", &["UserPlugins/reaper_other.dll"]),
+        ],
+    );
+    let harness = Harness::new(
+        &fixture,
+        vec![demo_spec("demo"), demo_spec("other")],
+        &["demo", "other"],
+    );
+    let report = harness.apply(&["demo", "other"]);
+    assert!(report.changed_anything() && !report.has_failures());
+    let set_id = report.backup_set_id.clone().unwrap();
+
+    // The receipt moves on after the uninstall: another package arrives.
+    let mut later = load_install_state(&fixture.resource).unwrap().unwrap();
+    later.packages.insert(
+        "later".to_string(),
+        PackageReceipt {
+            id: "later".to_string(),
+            ..state.packages["demo"].clone()
+        },
+    );
+    save_install_state(&fixture.resource, &later).unwrap();
+
+    let preview = restore_package(&fixture, &set_id, "demo", true).unwrap();
+    assert_eq!(preview.actions.len(), 1);
+    assert_eq!(preview.actions[0].target_path, demo);
+    assert_eq!(preview.packages.len(), 1);
+    assert!(preview.packages[0].receipt_merged);
+    assert!(!demo.exists(), "a dry run restores nothing");
+    assert_eq!(
+        load_install_state(&fixture.resource).unwrap().unwrap(),
+        later
+    );
+
+    let restored = restore_package(&fixture, &set_id, "demo", false).unwrap();
+    assert_eq!(restored.package_id.as_deref(), Some("demo"));
+    assert_eq!(fs::read(&demo).unwrap(), b"file contents");
+    assert!(!other.exists(), "only the package asked for comes back");
+    let receipt = load_install_state(&fixture.resource).unwrap().unwrap();
+    assert_eq!(receipt.packages.get("demo"), state.packages.get("demo"));
+    assert!(
+        receipt.packages.contains_key("later"),
+        "the receipt is merged into, not replaced"
+    );
+    assert!(!receipt.packages.contains_key("other"));
+    assert!(!receipt.declined_packages.contains("demo"));
+    assert!(receipt.declined_packages.contains("other"));
+
+    // A second restore would put the old copy under a receipt entry that
+    // now describes the files in place.
+    let again = restore_package(&fixture, &set_id, "demo", true).unwrap_err();
+    assert!(
+        matches!(&again, RabbitError::PackageRestoreRefused { package_id, .. } if package_id == "demo"),
+        "{again}"
+    );
+    // So would the whole set, which holds demo too; it says how to restore
+    // the rest, and restores nothing.
+    let whole = restore_backup_set(
+        &fixture.resource,
+        &set_id,
+        &RestoreBackupOptions {
+            dry_run: false,
+            allow_reaper_running: true,
+            package_id: None,
+        },
+    )
+    .unwrap_err();
+    assert!(whole.to_string().contains("--package"), "{whole}");
+    assert!(!other.exists());
+    // A package the set doesn't hold is refused, naming the ones it does.
+    let unknown = restore_package(&fixture, &set_id, "nosuch", true).unwrap_err();
+    assert!(unknown.to_string().contains("demo, other"), "{unknown}");
+
+    restore_package(&fixture, &set_id, "other", false).unwrap();
+    assert!(other.is_file());
+    let receipt = load_install_state(&fixture.resource).unwrap().unwrap();
+    assert_eq!(receipt.packages.get("other"), state.packages.get("other"));
+    assert!(receipt.declined_packages.is_empty());
+}
+
+/// A package RABBIT had no receipt for comes back without one, and still
+/// comes off `declined_packages`.
+#[test]
+fn restoring_a_package_without_a_receipt_only_clears_the_refusal() {
+    let fixture = Fixture::new();
+    let plugin = fixture.file("UserPlugins/reaper_demo.dll");
+    let report = Harness::new(&fixture, vec![demo_spec("demo")], &["demo"]).apply(&["demo"]);
+    assert_eq!(status(&report, "demo"), UninstallStatus::Removed);
+    let set_id = report.backup_set_id.clone().unwrap();
+    assert!(manifest(&report).packages["demo"].receipt.is_none());
+
+    let restored = restore_package(&fixture, &set_id, "demo", false).unwrap();
+    assert!(!restored.packages[0].receipt_merged);
+    assert!(plugin.is_file());
+    let receipt = load_install_state(&fixture.resource).unwrap().unwrap();
+    assert!(!receipt.packages.contains_key("demo"));
+    assert!(!receipt.declined_packages.contains("demo"));
+}
+
+fn langpack_spec() -> PackageSpec {
+    spec(
+        "langpack-demo",
+        r#""install_destination": "lang_pack","#,
+        &remove_files_with(
+            r#""requires_receipt": true,"#,
+            r#""remove": { "receipt_files": true },
+               "post": [ { "reset_reaper_langpack_if_selected": {} } ]"#,
+        ),
+    )
+}
+
+/// Restoring a language pack puts REAPER's language back to it, but only
+/// while REAPER still uses no language pack: one chosen since is the
+/// user's.
+#[test]
+fn restoring_a_language_pack_puts_its_language_back_while_none_was_chosen() {
+    let selected = "[REAPER]\r\nwnd_state=1\r\nlangpack=de_DE.ReaperLangPack\r\n";
+    let uninstall = |fixture: &Fixture| {
+        fixture.file("LangPack/de_DE.ReaperLangPack");
+        save_receipt(
+            fixture,
+            &[("langpack-demo", &["LangPack/de_DE.ReaperLangPack"])],
+        );
+        let ini = write(&fixture.resource.join("reaper.ini"), selected.as_bytes());
+        let report = Harness::new(fixture, vec![langpack_spec()], &["langpack-demo"])
+            .apply(&["langpack-demo"]);
+        assert_eq!(
+            fs::read_to_string(&ini).unwrap(),
+            "[REAPER]\r\nwnd_state=1\r\nlangpack=<>\r\n"
+        );
+        (ini, report.backup_set_id.unwrap())
+    };
+
+    let fixture = Fixture::new();
+    let (ini, set_id) = uninstall(&fixture);
+    let preview = restore_package(&fixture, &set_id, "langpack-demo", true).unwrap();
+    assert_eq!(
+        preview.packages[0].langpack_before.as_deref(),
+        Some("de_DE.ReaperLangPack")
+    );
+    assert!(preview.packages[0].langpack_restored);
+    assert_eq!(
+        fs::read_to_string(&ini).unwrap(),
+        "[REAPER]\r\nwnd_state=1\r\nlangpack=<>\r\n"
+    );
+    let restored = restore_package(&fixture, &set_id, "langpack-demo", false).unwrap();
+    assert!(restored.packages[0].langpack_restored);
+    assert!(restored.packages[0].langpack_error.is_none());
+    assert_eq!(fs::read_to_string(&ini).unwrap(), selected);
+    assert!(at(&fixture, "LangPack/de_DE.ReaperLangPack").is_file());
+
+    let fixture = Fixture::new();
+    let (ini, set_id) = uninstall(&fixture);
+    let chosen = "[REAPER]\r\nwnd_state=1\r\nlangpack=fr_CA.ReaperLangPack\r\n";
+    fs::write(&ini, chosen).unwrap();
+    let restored = restore_package(&fixture, &set_id, "langpack-demo", false).unwrap();
+    assert!(!restored.packages[0].langpack_restored);
+    assert_eq!(fs::read_to_string(&ini).unwrap(), chosen);
+    assert!(at(&fixture, "LangPack/de_DE.ReaperLangPack").is_file());
 }

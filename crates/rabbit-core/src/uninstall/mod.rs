@@ -50,7 +50,7 @@ use crate::preflight::{PreflightCheck, PreflightReport};
 use crate::report::{SavedReportPaths, default_report_path, save_json_and_text_reports};
 use crate::version::Version;
 
-pub use execute::execute_uninstall;
+pub use execute::{execute_uninstall, plan_uninstall_at};
 pub use paths::{PathRefusal, RemovalGuard, UninstallRoots, check_removal};
 pub use plan::{UninstallPlanInput, build_uninstall_plan};
 pub use preflight::{
@@ -186,6 +186,51 @@ impl Removability {
     /// state makes `--apply` change nothing.
     pub fn is_blocked(&self) -> bool {
         !self.is_removable() && *self != Self::NotInstalled
+    }
+
+    /// Why RABBIT won't remove the package called `name`, in English, for
+    /// the CLI and the saved report. A UI in another language goes by the
+    /// variant.
+    pub fn message(&self, name: &str) -> String {
+        match self {
+            Self::ManagedByReaPack {
+                path,
+                reapack_package,
+            } => format!(
+                "ReaPack manages {name}: it installed {} as {reapack_package}. Uninstall it in \
+                 ReaPack instead.",
+                path.display()
+            ),
+            Self::ReaPackCheckFailed { path, reason } => format!(
+                "RABBIT couldn't check ReaPack's records for {} ({reason}), so it leaves {name} \
+                 alone.",
+                path.display()
+            ),
+            Self::NeedsStandardTarget => format!(
+                "{name} serves every REAPER on this computer, so RABBIT removes it only from \
+                 the standard REAPER, not from a portable one."
+            ),
+            Self::NoReceipt => format!(
+                "RABBIT didn't install this copy of {name}, so it is most likely your own, and \
+                 RABBIT leaves it alone."
+            ),
+            Self::NoTrustedUninstaller => {
+                format!("RABBIT found no uninstaller for {name} it can trust.")
+            }
+            Self::Manual { .. } => {
+                format!("RABBIT can't remove {name} by itself; it has to be removed by hand.")
+            }
+            Self::NotSupported { .. } => format!("RABBIT can't uninstall {name} yet."),
+            Self::UnsafePath { path, refusal } => format!(
+                "RABBIT won't remove {}, because {refusal}. It leaves {name} alone rather than \
+                 remove only part of it.",
+                path.display()
+            ),
+            Self::NotInstalled => format!("{name} isn't installed."),
+            Self::Removable | Self::RemovableOrphanedFromReaPack => {
+                format!("RABBIT can remove {name}.")
+            }
+        }
     }
 }
 

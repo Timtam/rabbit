@@ -397,8 +397,8 @@ pub struct WizardInstallRequest {
     /// verdict; reading it as a refusal would eventually turn RABBIT's own
     /// successful install into a "no".
     pub declined_packages: Vec<String>,
-    /// Opt-out-remembering packages the user ticked, clearing any refusal
-    /// recorded earlier so a change of mind sticks.
+    /// Every package the user ticked, clearing any refusal recorded
+    /// earlier, an uninstall's included, so a change of mind sticks.
     pub accepted_packages: Vec<String>,
     /// The channel each package is installed from. Empty outside expert
     /// mode, which is exactly what sends a package that came from a

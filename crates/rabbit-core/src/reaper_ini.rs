@@ -8,8 +8,9 @@
 //!
 //! The only edits are selecting a language pack, which REAPER stores as
 //! `langpack=<file name>` under `[REAPER]` (verified against real installs;
-//! `<>` is REAPER's "no language pack" sentinel), and setting it back to
-//! `<>` when an uninstall removed the selected pack.
+//! `<>` is REAPER's "no language pack" sentinel), setting it back to `<>`
+//! when an uninstall removed the selected pack, and putting the old value
+//! back when that pack is restored.
 
 use std::fs;
 use std::path::Path;
@@ -146,6 +147,33 @@ pub fn clear_lang_pack_if_selected(
     };
     write_text_file_lossless(&ini_path, &text, decoded.encoding)?;
     Ok(raw_lang_pack(&decoded.text).map(str::to_string))
+}
+
+/// Put `value` back as the `langpack=` value, but only while the line still
+/// says `<>`: the value an uninstall replaced, put back by a restore of that
+/// package. Returns whether it wrote anything. A language chosen since, or a
+/// line or file that is gone, is the user's doing and stays.
+///
+/// Lossless like [`select_lang_pack`]: only that one line changes.
+pub fn restore_lang_pack_if_cleared(resource_path: &Path, value: &str) -> Result<bool> {
+    let ini_path = resource_path.join(REAPER_INI_RELATIVE_PATH);
+    if !ini_path.is_file() {
+        return Ok(false);
+    }
+    let decoded = read_text_file_lossless(&ini_path)?;
+    if raw_lang_pack(&decoded.text) != Some(LANGPACK_NONE) {
+        return Ok(false);
+    }
+    let newline = if decoded.text.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let Some((text, _)) = rewrite_with_lang_pack(&decoded.text, value, newline) else {
+        return Ok(false);
+    };
+    write_text_file_lossless(&ini_path, &text, decoded.encoding)?;
+    Ok(true)
 }
 
 /// Pure form of [`selected_lang_pack`], over already-decoded text.
@@ -394,6 +422,49 @@ mod tests {
             clear_lang_pack_if_selected(resource, &["<>".to_string()], true).unwrap(),
             None
         );
+    }
+
+    /// A restore puts the value back only while REAPER still says "no
+    /// language pack": a language chosen since is the user's.
+    #[test]
+    fn restores_the_language_only_while_it_says_none() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path();
+        let ini = resource.join(REAPER_INI_RELATIVE_PATH);
+        assert!(!restore_lang_pack_if_cleared(resource, "de_DE.ReaperLangPack").unwrap());
+        assert!(!ini.exists(), "no reaper.ini is created");
+
+        std::fs::write(
+            &ini,
+            "[REAPER]
+wnd_state=1
+langpack=<>
+last=x
+",
+        )
+        .unwrap();
+        assert!(restore_lang_pack_if_cleared(resource, "de_DE.ReaperLangPack").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&ini).unwrap(),
+            "[REAPER]
+wnd_state=1
+langpack=de_DE.ReaperLangPack
+last=x
+"
+        );
+
+        for kept in [
+            "[REAPER]
+langpack=fr_CA.ReaperLangPack
+",
+            "[REAPER]
+wnd_state=1
+",
+        ] {
+            std::fs::write(&ini, kept).unwrap();
+            assert!(!restore_lang_pack_if_cleared(resource, "de_DE.ReaperLangPack").unwrap());
+            assert_eq!(std::fs::read_to_string(&ini).unwrap(), kept);
+        }
     }
 
     #[test]

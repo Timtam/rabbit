@@ -80,7 +80,12 @@ pub fn execute_uninstall(
     progress: &ProgressReporter,
     cancel: &CancelToken,
 ) -> Result<UninstallReport> {
-    let (target, target_app_path) = target_of(request);
+    let (target, target_app_path) = target_of(
+        request.platform,
+        &request.resource_path,
+        request.target_app_path.as_deref(),
+        request.target,
+    );
     let roots = UninstallRoots::for_target(
         request.platform,
         &request.resource_path,
@@ -123,26 +128,55 @@ pub(crate) struct UninstallEnvironment<'a> {
     pub volumes: &'a dyn VolumeProbe,
 }
 
-/// Whether the request's resource folder belongs to the standard REAPER or a
-/// portable one, and where the target's REAPER app is.
-fn target_of(request: &UninstallRequest) -> (InstallationKind, Option<PathBuf>) {
-    let standard = default_standard_installation(request.platform).filter(|installation| {
+/// The uninstall plan for every package at `resource_path`, built from
+/// `detections` and the receipt the way [`execute_uninstall`] builds it,
+/// for a listing of what RABBIT could uninstall there. Reads which files
+/// exist and how big they are; hashes nothing and changes nothing.
+pub fn plan_uninstall_at(
+    resource_path: &Path,
+    platform: Platform,
+    detections: &[ComponentDetection],
+) -> Result<UninstallPlan> {
+    let (target, target_app_path) = target_of(platform, resource_path, None, None);
+    let roots = UninstallRoots::for_target(platform, resource_path, target_app_path.as_deref());
+    let state = load_install_state(resource_path)?;
+    Ok(build_uninstall_plan(&UninstallPlanInput {
+        roots: &roots,
+        platform,
+        target,
+        specs: &builtin_package_specs(platform),
+        detections,
+        state: state.as_ref(),
+        remove_settings: false,
+    }))
+}
+
+/// Whether `resource_path` belongs to the standard REAPER or a portable one,
+/// unless `target` says, and where the target's REAPER app is, unless
+/// `target_app_path` says.
+fn target_of(
+    platform: Platform,
+    resource_path: &Path,
+    target_app_path: Option<&Path>,
+    target: Option<InstallationKind>,
+) -> (InstallationKind, Option<PathBuf>) {
+    let standard = default_standard_installation(platform).filter(|installation| {
         same_ignoring_case(
             &absolute(&installation.resource_path),
-            &absolute(&request.resource_path),
+            &absolute(resource_path),
         )
     });
-    let target = request.target.unwrap_or(if standard.is_some() {
+    let target = target.unwrap_or(if standard.is_some() {
         InstallationKind::Standard
     } else {
         InstallationKind::Portable
     });
-    let app_path = request.target_app_path.clone().or_else(|| match target {
-        InstallationKind::Standard => standard.map(|installation| installation.app_path),
-        InstallationKind::Portable => {
-            portable_target_app_path(&request.resource_path, Some(request.platform))
-        }
-    });
+    let app_path = target_app_path
+        .map(Path::to_path_buf)
+        .or_else(|| match target {
+            InstallationKind::Standard => standard.map(|installation| installation.app_path),
+            InstallationKind::Portable => portable_target_app_path(resource_path, Some(platform)),
+        });
     (target, app_path)
 }
 
@@ -866,9 +900,7 @@ fn english_message(item: &UninstallReportItem) -> String {
         UninstallMessage::UnknownPackage => {
             format!("RABBIT knows no package called {name} on this computer.")
         }
-        UninstallMessage::NotRemovable { removability } => {
-            not_removable_message(name, removability)
-        }
+        UninstallMessage::NotRemovable { removability } => removability.message(name),
         UninstallMessage::NotYetSupported => format!(
             "This version of RABBIT can't remove {name} yet: it takes a step a backup can't \
              undo."
@@ -970,47 +1002,6 @@ fn english_message(item: &UninstallReportItem) -> String {
         message.push_str(&problem.message());
     }
     message
-}
-
-fn not_removable_message(name: &str, removability: &Removability) -> String {
-    match removability {
-        Removability::ManagedByReaPack {
-            path,
-            reapack_package,
-        } => format!(
-            "ReaPack manages {name}: it installed {} as {reapack_package}. Uninstall it in \
-             ReaPack instead.",
-            path.display()
-        ),
-        Removability::ReaPackCheckFailed { path, reason } => format!(
-            "RABBIT couldn't check ReaPack's records for {} ({reason}), so it leaves {name} \
-             alone.",
-            path.display()
-        ),
-        Removability::NeedsStandardTarget => format!(
-            "{name} serves every REAPER on this computer, so RABBIT removes it only from the \
-             standard REAPER, not from a portable one."
-        ),
-        Removability::NoReceipt => format!(
-            "RABBIT didn't install this copy of {name}, so it is most likely your own, and \
-             RABBIT leaves it alone."
-        ),
-        Removability::NoTrustedUninstaller => {
-            format!("RABBIT found no uninstaller for {name} it can trust.")
-        }
-        Removability::Manual { .. } => {
-            format!("RABBIT can't remove {name} by itself; it has to be removed by hand.")
-        }
-        Removability::NotSupported { .. } => format!("RABBIT can't uninstall {name} yet."),
-        Removability::UnsafePath { path, refusal } => format!(
-            "RABBIT won't remove {}, because {refusal}. It leaves {name} alone rather than \
-             remove only part of it.",
-            path.display()
-        ),
-        Removability::Removable
-        | Removability::RemovableOrphanedFromReaPack
-        | Removability::NotInstalled => format!("RABBIT can remove {name}."),
-    }
 }
 
 fn path_list(paths: &[PathBuf]) -> String {

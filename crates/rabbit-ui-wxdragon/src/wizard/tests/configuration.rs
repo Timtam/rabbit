@@ -63,8 +63,8 @@ fn only_rows_that_offered_something_record_a_verdict() {
 
     assert_eq!(
         request.accepted_packages,
-        vec!["langpack-fr".to_string()],
-        "a ticked pack is a yes"
+        vec!["langpack-fr".to_string(), PACKAGE_OSARA.to_string()],
+        "a ticked row is a yes, whatever the package"
     );
     assert_eq!(
         request.declined_packages,
@@ -78,6 +78,68 @@ fn only_rows_that_offered_something_record_a_verdict() {
             .any(|id| id == "langpack-es"),
         "an installed, up-to-date pack sits unticked because there is \
          nothing to do — that is not a refusal"
+    );
+}
+
+#[test]
+fn a_tick_clears_any_refusal_but_only_remembering_packages_record_one() {
+    // An uninstall records a "no" for any package, so ticking any package
+    // must be able to take it back: someone who removed SWS and ticks it
+    // again wants its updates from then on. Leaving a row unticked still
+    // only counts as a "no" for packages that remember one; otherwise
+    // skipping FFmpeg once would hide its updates for good.
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let installation = fake_installation();
+    let action = |id: &str, kind| PlanAction {
+        package_id: id.to_string(),
+        action: kind,
+        installed_version: None,
+        available_version: None,
+        reason: "test".to_string(),
+    };
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        vec![installation.clone()],
+        Some(0),
+        InstallPlan {
+            target: Some(installation),
+            actions: vec![
+                action("sws", PlanActionKind::Install),
+                action("ffmpeg", PlanActionKind::Install),
+                action("langpack-de", PlanActionKind::Update),
+                action(PACKAGE_OSARA, PlanActionKind::Install),
+                action(PACKAGE_REAPACK, PlanActionKind::Keep),
+            ],
+            notes: Vec::new(),
+        },
+    );
+    let index_of = |id: &str| {
+        model
+            .package_rows
+            .iter()
+            .position(|row| row.package_id == id)
+            .unwrap_or_else(|| panic!("row for {id} should exist"))
+    };
+
+    // OSARA ticked, and ReaPack ticked for a reinstall; the rest unticked.
+    let request = install_request_from_target(
+        &model,
+        &model.target_rows[0],
+        &[index_of(PACKAGE_OSARA), index_of(PACKAGE_REAPACK)],
+        WizardInstallOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        request.accepted_packages,
+        vec![PACKAGE_OSARA.to_string(), PACKAGE_REAPACK.to_string()]
+    );
+    assert_eq!(
+        request.declined_packages,
+        vec!["langpack-de".to_string()],
+        "SWS and FFmpeg left unticked once are not a standing no"
     );
 }
 

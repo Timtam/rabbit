@@ -29,18 +29,19 @@ pub struct InstallState {
     /// uninstall, for any package (see [`remove_package_receipt`]). Removing
     /// a package is as clear a "no" as leaving it unticked, and one set for
     /// both means a recommended package doesn't come back ticked on the very
-    /// next run after you removed it. The readers (the wizard's default
-    /// ticks and the CLI's default package list) still honour the set only
-    /// for packages that set `remember_opt_out`; uninstall widens them to
-    /// every package when it ships.
+    /// next run after you removed it. The readers honour the set for every
+    /// package: the wizard doesn't tick a package listed here, and the CLI
+    /// leaves it out of its default package list.
+    ///
+    /// Leaving an optional package unticked once only counts as a "no" for
+    /// `remember_opt_out` packages, though. Otherwise someone who skipped
+    /// FFmpeg one day would never have its updates offered again.
     ///
     /// Only the user's own verdict takes a package out again: ticking it in
-    /// the wizard (see [`record_package_opt_outs`]). Today the wizard only
-    /// sends that verdict for `remember_opt_out` packages, so a removed SWS
-    /// would stay in the set even after you ticked and installed it again;
-    /// uninstall must widen the wizard's accepted packages to every package
-    /// together with the readers. Installing does not clear it (see
-    /// [`upsert_package_receipt`]).
+    /// the wizard (see [`record_package_opt_outs`]), naming it with the
+    /// CLI's `--package` in a run that installs, or restoring it from the
+    /// backup set its uninstall wrote (see [`merge_package_receipt`]).
+    /// Installing alone does not clear it (see [`upsert_package_receipt`]).
     ///
     /// Left out of the file entirely when empty, and read with
     /// `#[serde(default)]`, so receipts written by older RABBITs still load
@@ -301,12 +302,11 @@ pub struct PackageReceiptParams<'a> {
 /// it.
 ///
 /// This leaves `declined_packages` alone. That set only ever changes on the
-/// user's own verdict, which the wizard gives through
-/// [`record_package_opt_outs`] when a row is ticked (today for
-/// `remember_opt_out` packages only). An install that comes without a
-/// verdict must not clear it: the CLI's `--package` is a scope for one run,
-/// not a standing preference, so `rabbit setup --package langpack-de` must
-/// not forget that the wizard was told no.
+/// user's own verdict, which the callers give through
+/// [`record_package_opt_outs`]: the wizard for a ticked row, the CLI for a
+/// package named with `--package`. An install that comes without a verdict
+/// must not clear it, such as a package the CLI picked from its default
+/// list.
 pub fn upsert_package_receipt(
     state: &mut InstallState,
     resource_path: &Path,
@@ -363,6 +363,29 @@ pub fn remove_package_receipt(
 ) -> Option<PackageReceipt> {
     state.declined_packages.insert(package_id.to_string());
     state.packages.remove(package_id)
+}
+
+/// Put back the receipt entry an uninstall took out, from the backup set it
+/// wrote, and take the package off `declined_packages`: restoring a package
+/// is as clear a "yes" as ticking it. `entry` is `None` when RABBIT had no
+/// receipt for the copy it removed; the refusal goes all the same.
+///
+/// Returns `false`, and changes nothing, when the receipt already has an
+/// entry for the package. It was installed again since, and that newer
+/// entry describes the files on disk.
+pub fn merge_package_receipt(
+    state: &mut InstallState,
+    package_id: &str,
+    entry: Option<PackageReceipt>,
+) -> bool {
+    if state.packages.contains_key(package_id) {
+        return false;
+    }
+    state.declined_packages.remove(package_id);
+    if let Some(entry) = entry {
+        state.packages.insert(package_id.to_string(), entry);
+    }
+    true
 }
 
 /// "Does this package's on-disk install still match the receipt?"
@@ -756,8 +779,8 @@ mod tests_uninstall_records {
     use super::{
         AppliedConfiguration, AppliedConfigurationOutcome, InstallState, PackageReceiptParams,
         RECEIPT_RELATIVE_PATH, ReapackRepository, declined_packages, load_install_state,
-        record_applied_configuration, record_package_opt_outs, remove_package_receipt,
-        save_install_state, upsert_package_receipt,
+        merge_package_receipt, record_applied_configuration, record_package_opt_outs,
+        remove_package_receipt, save_install_state, upsert_package_receipt,
     };
     use crate::package::{PACKAGE_OSARA, PACKAGE_SWS};
 
@@ -840,8 +863,8 @@ mod tests_uninstall_records {
     }
 
     /// Installing a removed package again doesn't clear the refusal by
-    /// itself: the CLI's `--package` is a scope for one run. Ticking it in
-    /// the wizard is the user's verdict, and that clears it.
+    /// itself. The user's verdict does: ticking it in the wizard, or naming
+    /// it with the CLI's `--package`, both of which record it here.
     #[test]
     fn only_ticking_a_removed_package_clears_the_refusal() {
         let dir = tempdir().unwrap();
@@ -863,6 +886,42 @@ mod tests_uninstall_records {
             state.declined_packages.contains(PACKAGE_OSARA),
             "only the package ticked again is cleared"
         );
+    }
+
+    /// Restoring a removed package puts its entry back and takes it off the
+    /// refusals, without disturbing anything else; a package installed
+    /// again since keeps its newer entry.
+    #[test]
+    fn merging_a_restored_entry_back_clears_the_refusal() {
+        let mut state = InstallState::default();
+        install(&mut state, PACKAGE_SWS);
+        install(&mut state, PACKAGE_OSARA);
+        let entry = remove_package_receipt(&mut state, PACKAGE_SWS);
+        remove_package_receipt(&mut state, "langpack-de");
+
+        assert!(merge_package_receipt(
+            &mut state,
+            PACKAGE_SWS,
+            entry.clone()
+        ));
+        assert_eq!(state.packages.get(PACKAGE_SWS), entry.as_ref());
+        assert!(!state.declined_packages.contains(PACKAGE_SWS));
+        assert!(state.packages.contains_key(PACKAGE_OSARA));
+        assert!(state.declined_packages.contains("langpack-de"));
+
+        // No entry to merge: only the refusal goes.
+        assert!(merge_package_receipt(&mut state, "langpack-de", None));
+        assert!(!state.packages.contains_key("langpack-de"));
+        assert!(state.declined_packages.is_empty());
+
+        // Installed again since: the newer entry stays, and so does any
+        // refusal recorded alongside it.
+        let mut older = entry.unwrap();
+        older.version = Some(crate::version::Version::parse("2.0").unwrap());
+        state.declined_packages.insert(PACKAGE_SWS.to_string());
+        assert!(!merge_package_receipt(&mut state, PACKAGE_SWS, Some(older)));
+        assert_eq!(state.packages[PACKAGE_SWS].version, None);
+        assert!(state.declined_packages.contains(PACKAGE_SWS));
     }
 
     /// A receipt from before these fields existed still loads, and one with

@@ -5,13 +5,14 @@ use rabbit_core::artifact::{
     ArtifactDescriptor, CachedArtifact, default_cache_dir, download_artifacts,
     resolve_latest_artifacts_on,
 };
+use rabbit_core::cancel::CancelToken;
 use rabbit_core::detection::{DiscoveryOptions, detect_components, discover_installations};
 use rabbit_core::install::{InstallOptions, InstallReport, install_cached_artifacts};
 use rabbit_core::latest::fetch_latest_versions_on;
 use rabbit_core::localization::{
     DEFAULT_LOCALE, LocalizedText, Localizer, available_locales, resolve_runtime_locale,
 };
-use rabbit_core::model::{Architecture, InstallationKind, Platform};
+use rabbit_core::model::{Architecture, ComponentDetection, InstallationKind, Platform};
 use rabbit_core::operation::{
     PackageOperationItem, PackageOperationOptions, PackageOperationReport, PackageOperationStatus,
     PlannedExecutionKind, execute_package_operation,
@@ -29,11 +30,14 @@ use rabbit_core::plan::{
     AvailablePackage, PlanActionKind, build_install_plan_with_installed_channels,
 };
 use rabbit_core::portable::{PortabilityCheckStatus, PortabilityReport, check_portable_runtime};
-use rabbit_core::preflight::{PreflightOptions, PreflightReport, run_install_preflight};
+use rabbit_core::preflight::{
+    PreflightOptions, PreflightReport, PreflightStatus, run_install_preflight,
+};
+use rabbit_core::progress::ProgressReporter;
 use rabbit_core::report::{default_report_path, save_json_and_text_reports};
 use rabbit_core::resource::{ResourceInitActionKind, ResourceInitReport, initialize_resource_path};
 use rabbit_core::rollback::{
-    BackupSet, RestoreBackupActionKind, RestoreBackupOptions, RestoreBackupReport,
+    BackupSet, RestoreBackupActionKind, RestoreBackupOptions, RestoreBackupReport, RestoredPackage,
     list_backup_sets, restore_backup_set,
 };
 use rabbit_core::self_update::{
@@ -43,6 +47,11 @@ use rabbit_core::self_update::{
     resolve_self_update_release_notes, stage_self_update,
 };
 use rabbit_core::setup::{SetupOptions, SetupReport, execute_setup_operation};
+use rabbit_core::uninstall::{
+    KeptFileReason, KeptReason, Removability, RemovalReason, UninstallMessage, UninstallNote,
+    UninstallPlan, UninstallPlanItem, UninstallReport, UninstallReportItem, UninstallRequest,
+    UninstallStatus, UninstallWarning, execute_uninstall, plan_uninstall_at,
+};
 use serde::Serialize;
 
 #[derive(Debug, Parser)]
@@ -222,6 +231,14 @@ enum Command {
         /// Which backup set to roll back to, as listed by `backups`.
         #[arg(long)]
         backup_id: String,
+        /// Restore only this package, from a backup set an uninstall wrote.
+        /// Its files come back, its entry goes back into RABBIT's receipt,
+        /// it comes off the list of packages you uninstalled or turned
+        /// down, and REAPER's language is set back if the uninstall reset it
+        /// and no language was chosen since. Refused when the package was
+        /// installed again after the uninstall.
+        #[arg(long)]
+        package: Option<String>,
         /// Actually make the changes. Without it the command is a dry run
         /// that only reports what it would do.
         #[arg(long)]
@@ -253,7 +270,8 @@ enum Command {
         #[arg(long)]
         target_app_path: Option<PathBuf>,
         /// Package id to install, repeatable. Required — use `apply-packages`
-        /// to install everything that needs it.
+        /// to install everything that needs it. Naming a package you
+        /// uninstalled or turned down takes it off that list.
         #[arg(long, required = true)]
         package: Vec<String>,
         /// Install for this architecture instead of the one detected for the
@@ -309,7 +327,9 @@ enum Command {
         #[arg(long)]
         target_app_path: Option<PathBuf>,
         /// Package id to act on, repeatable. Defaults to every package that
-        /// needs installing or updating.
+        /// needs installing or updating, except the ones you uninstalled or
+        /// turned down. Naming one of those installs it and takes it off
+        /// that list.
         #[arg(long)]
         package: Vec<String>,
         /// Install for this architecture instead of the one detected for the
@@ -390,7 +410,8 @@ enum Command {
         #[arg(long)]
         portable: bool,
         /// Package id to install, repeatable. Defaults to the recommended set
-        /// for this host.
+        /// for this host, except the packages you uninstalled or turned
+        /// down. Naming one of those installs it and takes it off that list.
         #[arg(long)]
         package: Vec<String>,
         /// Install for this architecture instead of the one detected for the
@@ -469,6 +490,45 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Uninstall packages. Without --apply it only shows what it would do.
+    #[command(after_help = UNINSTALL_AFTER_HELP)]
+    Uninstall {
+        /// REAPER's resource folder — the one holding `reaper.ini`. Usually
+        /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
+        /// Support/REAPER` on macOS; for a portable install it is the REAPER
+        /// folder itself.
+        #[arg(long)]
+        resource_path: PathBuf,
+        /// Path to REAPER itself (`reaper.exe`, or `REAPER.app` on macOS)
+        /// when it is not in the usual place for the given resource folder.
+        #[arg(long)]
+        target_app_path: Option<PathBuf>,
+        /// Package id to uninstall, repeatable. Required: there is no
+        /// "uninstall everything". `components` says which packages RABBIT
+        /// can uninstall.
+        #[arg(long, required = true)]
+        package: Vec<String>,
+        /// Also remove each package's settings, such as SWS's S&M.ini and
+        /// your grooves. They go into the same backup set as its files, so
+        /// `restore-backup` brings them back. Without it, settings stay.
+        #[arg(long)]
+        remove_settings: bool,
+        /// Actually uninstall. Without it the command is a dry run that only
+        /// reports what it would do. With it, nothing changes at all when
+        /// any package asked for can't be uninstalled.
+        #[arg(long)]
+        apply: bool,
+        /// Write the JSON run report to exactly this path.
+        #[arg(long)]
+        report_path: Option<PathBuf>,
+        /// Save a JSON run report under the resource folder's `RABBIT`
+        /// directory. A run with --apply always saves one there.
+        #[arg(long)]
+        save_report: bool,
+        /// Print the result as JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
     Locales {
         /// Directory holding the `.ftl` translation files.
         #[arg(long, default_value = "locales")]
@@ -540,6 +600,24 @@ enum Command {
         save_report: bool,
     },
 }
+
+/// Shown below `rabbit uninstall --help`. Every other command that changes
+/// files has `--allow-reaper-running`; this says why uninstall doesn't.
+const UNINSTALL_AFTER_HELP: &str = "\
+REAPER must be closed. For REAPER on Windows, Surge XT, app2clap and the JAWS \
+scripts, every REAPER on the computer must be closed.
+
+There is no --allow-reaper-running, unlike the commands that install: a \
+running REAPER holds its extensions' files open, so they can't be moved, and \
+it writes reaper.ini again when it closes, which would undo RABBIT setting \
+REAPER's language back.
+
+Removed files move into a backup set. `rabbit restore-backup --backup-id <id> \
+--package <id> --apply` brings one package back.
+
+Exit codes: 0 when every package asked for was removed or isn't installed; 2 \
+when one of them can't be uninstalled, and then nothing changes; 1 when a \
+removal failed or was stopped.";
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum OutputFormat {
@@ -615,7 +693,28 @@ impl From<CliArchitecture> for Architecture {
 /// Parse the process argv via clap and dispatch to the matching subcommand.
 /// Used by the merged `rabbit` binary when it sees CLI arguments.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    run_with(Cli::parse())
+    run_args(std::env::args_os().collect())
+}
+
+/// The stack of the thread the CLI runs on. Debug builds give every
+/// temporary its own stack slot, and clap builds every command's flags in
+/// one generated function: parsing alone took more than the 1 MB Windows
+/// gives the main thread once `uninstall` arrived. Release builds need a
+/// fraction of this; reserving it costs nothing until it is used.
+const CLI_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+/// Parse `args` and run the command on a thread with [`CLI_STACK_SIZE`] of
+/// stack, so neither the parser nor a command depends on how much the
+/// main thread happens to have.
+fn run_args(args: Vec<std::ffi::OsString>) -> Result<(), Box<dyn std::error::Error>> {
+    let outcome = std::thread::Builder::new()
+        .name("rabbit-cli".to_string())
+        .stack_size(CLI_STACK_SIZE)
+        .spawn(move || run_with(Cli::parse_from(args)).map_err(|error| error.to_string()))?
+        .join()
+        // A panic carries on as if it had happened on the calling thread.
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    outcome.map_err(Into::into)
 }
 
 /// Each command runs in a function of its own. As arms of one match, a
@@ -637,6 +736,7 @@ fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         command @ Command::InstallExtension { .. } => run_install_extension(command),
         command @ Command::ApplyPackages { .. } => run_apply_packages(command),
         command @ Command::Setup { .. } => run_setup(command),
+        command @ Command::Uninstall { .. } => run_uninstall(command),
         command @ Command::Locales { .. } => run_locales(command),
         command @ Command::Localize { .. } => run_localize(command),
         command @ Command::PortableCheck { .. } => run_portable_check(command),
@@ -672,12 +772,52 @@ fn run_components(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     };
     let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
     let components = detect_components(&resource_path, platform)?;
+    // What RABBIT could uninstall here. A receipt that can't be read only
+    // costs these lines; detection has already said what is installed.
+    let plan = plan_uninstall_at(&resource_path, platform, &components).ok();
     if json {
-        println!("{}", serde_json::to_string_pretty(&components)?);
+        let listed: Vec<ComponentListing<'_>> = components
+            .iter()
+            .map(|component| ComponentListing {
+                component,
+                uninstall: plan
+                    .as_ref()
+                    .and_then(|plan| plan.item(&component.package_id))
+                    .map(UninstallAbility::of),
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&listed)?);
     } else {
-        print_components(&components);
+        print_components(&components, plan.as_ref());
     }
     Ok(())
+}
+
+/// One package in `components --json`: its detection as it always was, and
+/// whether RABBIT can uninstall it.
+#[derive(Debug, Serialize)]
+struct ComponentListing<'a> {
+    #[serde(flatten)]
+    component: &'a ComponentDetection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uninstall: Option<UninstallAbility>,
+}
+
+/// Whether RABBIT can uninstall a package right now, and if not, why.
+#[derive(Debug, Serialize)]
+struct UninstallAbility {
+    /// `rabbit uninstall --package <id> --apply` would remove it.
+    can_uninstall: bool,
+    removability: Removability,
+}
+
+impl UninstallAbility {
+    fn of(item: &UninstallPlanItem) -> Self {
+        Self {
+            can_uninstall: item.removability.is_removable() && !item.unbacked,
+            removability: item.removability.clone(),
+        }
+    }
 }
 
 fn run_latest(command: Command) -> Result<(), Box<dyn std::error::Error>> {
@@ -725,7 +865,7 @@ fn run_artifacts(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     };
     let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
     let architecture = architecture.map_or_else(Architecture::current, Into::into);
-    let packages = selected_package_ids(package, platform, None);
+    let packages = select_packages(package, None).package_ids;
     let channels = parse_package_channels(&package_channel)?;
     let artifacts = resolve_latest_artifacts_on(&packages, platform, architecture, &channels)?;
     warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
@@ -750,7 +890,7 @@ fn run_download(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     };
     let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
     let architecture = architecture.map_or_else(Architecture::current, Into::into);
-    let packages = selected_package_ids(package, platform, None);
+    let packages = select_packages(package, None).package_ids;
     let channels = parse_package_channels(&package_channel)?;
     let artifacts = resolve_latest_artifacts_on(&packages, platform, architecture, &channels)?;
     warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
@@ -929,6 +1069,7 @@ fn run_restore_backup(command: Command) -> Result<(), Box<dyn std::error::Error>
     let Command::RestoreBackup {
         resource_path,
         backup_id,
+        package,
         apply,
         allow_reaper_running,
         report_path,
@@ -944,6 +1085,7 @@ fn run_restore_backup(command: Command) -> Result<(), Box<dyn std::error::Error>
         &RestoreBackupOptions {
             dry_run: !apply,
             allow_reaper_running,
+            package_id: package.map(|id| id.trim().to_string()),
         },
     )?;
     let report_path = selected_report_path(
@@ -1023,6 +1165,7 @@ fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Err
                  or use `rabbit download` to fetch without installing."
             );
         }
+        forget_refusals_of_named(&resource_path, &package, false);
         return Ok(());
     }
     let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
@@ -1037,6 +1180,7 @@ fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Err
             package_variants: Default::default(),
         },
     )?;
+    forget_refusals_of_named(&resource_path, &package, true);
     let report_path = selected_report_path(
         Some(&resource_path),
         report_path,
@@ -1076,7 +1220,9 @@ fn run_apply_packages(command: Command) -> Result<(), Box<dyn std::error::Error>
     };
     let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
     let architecture = architecture.map_or_else(Architecture::current, Into::into);
-    let packages = selected_package_ids(package, platform, Some(&resource_path));
+    let selection = select_packages(package, Some(&resource_path));
+    note_skipped_packages(&selection, platform);
+    let packages = selection.package_ids.clone();
     ensure_reapack_donation_acknowledged(&packages, accept_reapack_donation_notice)?;
     let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
     let channels = effective_package_channels(Some(&resource_path), &packages, &package_channel)?;
@@ -1106,6 +1252,9 @@ fn run_apply_packages(command: Command) -> Result<(), Box<dyn std::error::Error>
     )?;
     warn_channel_fallbacks(&channels, item_channels(&report.items));
     explain_osara_keymap_choice(&keymap, &report.items);
+    if selection.named {
+        forget_refusals_of_named(&resource_path, &packages, apply);
+    }
     let report_path = selected_report_path(
         Some(&resource_path),
         report_path,
@@ -1155,7 +1304,9 @@ fn run_setup(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     };
     let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
     let architecture = architecture.map_or_else(Architecture::current, Into::into);
-    let packages = selected_package_ids(package, platform, Some(&resource_path));
+    let selection = select_packages(package, Some(&resource_path));
+    note_skipped_packages(&selection, platform);
+    let packages = selection.package_ids.clone();
     ensure_reapack_donation_acknowledged(&packages, accept_reapack_donation_notice)?;
     let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
     let configuration_step_ids = resolve_configuration_step_ids(
@@ -1195,6 +1346,9 @@ fn run_setup(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     warn_channel_fallbacks(&channels, item_channels(&report.package_operation.items));
     explain_osara_keymap_choice(&keymap, &report.package_operation.items);
+    if selection.named {
+        forget_refusals_of_named(&resource_path, &packages, apply);
+    }
     let report_path =
         selected_report_path(Some(&resource_path), report_path, save_report, "setup")?;
     save_optional_report(report_path.as_deref(), &report)?;
@@ -1207,6 +1361,133 @@ fn run_setup(command: Command) -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn run_uninstall(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::Uninstall {
+        resource_path,
+        target_app_path,
+        package,
+        remove_settings,
+        apply,
+        report_path,
+        save_report,
+        json,
+    } = command
+    else {
+        unreachable!("dispatched as Command::Uninstall");
+    };
+    let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
+    let package_ids = validate_uninstall_packages(&package, platform)?;
+    let report = uninstall_report(
+        &UninstallRequest {
+            resource_path: resource_path.clone(),
+            platform,
+            package_ids,
+            remove_settings,
+            dry_run: !apply,
+            target_app_path,
+            target: None,
+        },
+        &CancelToken::new(),
+    )?;
+    // A run with --apply saved its report under RABBIT/logs by itself;
+    // `--save-report` only adds one where that didn't happen, such as a dry
+    // run.
+    let report_path = if report.saved_report.is_some() && report_path.is_none() {
+        None
+    } else {
+        selected_report_path(Some(&resource_path), report_path, save_report, "uninstall")?
+    };
+    save_optional_report(report_path.as_deref(), &report)?;
+    if let Some(saved) = &report.saved_report {
+        eprintln!("Report saved (JSON): {}", saved.json_path.display());
+        eprintln!("Report saved (text): {}", saved.text_path.display());
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_uninstall_report(&report, cli_localizer().as_ref());
+    }
+    let code = uninstall_exit_code(&report);
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+/// Carry out (or with `dry_run`, only plan) an uninstall, and narrow the
+/// report's plan to the packages asked for: the plan covers every package
+/// on the target, and the output is about these.
+fn uninstall_report(
+    request: &UninstallRequest,
+    cancel: &CancelToken,
+) -> Result<UninstallReport, Box<dyn std::error::Error>> {
+    let mut report = execute_uninstall(request, &ProgressReporter::noop(), cancel)?;
+    report
+        .plan
+        .items
+        .retain(|item| request.package_ids.contains(&item.package_id));
+    Ok(report)
+}
+
+/// The `--package` ids for `uninstall`, each once, in the order given. An id
+/// no package on this platform has is refused before anything runs, so a
+/// typo can't pass for "nothing to remove".
+fn validate_uninstall_packages(
+    ids: &[String],
+    platform: Platform,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let offered: Vec<String> = builtin_package_specs(platform)
+        .into_iter()
+        .map(|spec| spec.id)
+        .collect();
+    let mut packages: Vec<String> = Vec::new();
+    for id in ids {
+        let id = id.trim();
+        if !offered.iter().any(|known| known == id) {
+            let elsewhere = embedded_package_manifest()
+                .packages
+                .iter()
+                .any(|spec| spec.id == id);
+            return Err(if elsewhere {
+                format!(
+                    "package {id:?} isn't offered on {}, so there is nothing of it to uninstall",
+                    platform_name(platform)
+                )
+            } else {
+                format!(
+                    "--package names unknown package {id:?} (available: {})",
+                    offered.join(", ")
+                )
+            }
+            .into());
+        }
+        if !packages.iter().any(|known| known == id) {
+            packages.push(id.to_string());
+        }
+    }
+    Ok(packages)
+}
+
+/// The exit code for an uninstall run. The same table serves the dry run
+/// and `--apply`:
+/// - 1: a package failed or was stopped, or the run stopped after it had
+///   already removed something;
+/// - 2: a package asked for can't be uninstalled, and nothing changed;
+/// - 0: everything else, including packages that aren't installed (so a
+///   script can run twice) and removals that left something behind.
+///
+/// A hard error before any change, such as another RABBIT holding the
+/// lock, is returned as `Err` before this is asked.
+fn uninstall_exit_code(report: &UninstallReport) -> i32 {
+    if report.has_failures() {
+        1
+    } else if report.blocked_before_changes() {
+        2
+    } else {
+        0
+    }
 }
 
 fn run_locales(command: Command) -> Result<(), Box<dyn std::error::Error>> {
@@ -1442,38 +1723,100 @@ fn parse_localization_args(args: Vec<String>) -> rabbit_core::Result<Vec<(String
         .collect()
 }
 
+/// The packages an operation acts on.
+struct PackageSelection {
+    package_ids: Vec<String>,
+    /// The user named them with `--package`.
+    named: bool,
+    /// Packages the default list left out, because the user uninstalled
+    /// them or turned them down.
+    skipped: Vec<String>,
+}
+
 /// The packages an operation should act on.
 ///
 /// An explicit `--package` list is taken as given — it is the user telling
 /// us exactly what they want, and second-guessing it would be worse than
 /// useless. Only the implicit default set is filtered against the packages
-/// this install remembers the user declining, so a refusal recorded in the
-/// wizard isn't undone by a later bare `rabbit setup`. Only packages whose
-/// spec sets `remember_opt_out` can be declined at all.
-fn selected_package_ids(
-    package_ids: Vec<String>,
-    platform: Platform,
-    resource_path: Option<&Path>,
-) -> Vec<String> {
+/// this install remembers the user uninstalling or turning down, every one
+/// of them, so neither a refusal recorded in the wizard nor an uninstall is
+/// undone by a later bare `rabbit setup`.
+fn select_packages(package_ids: Vec<String>, resource_path: Option<&Path>) -> PackageSelection {
     if !package_ids.is_empty() {
-        return package_ids;
+        return PackageSelection {
+            package_ids,
+            named: true,
+            skipped: Vec::new(),
+        };
     }
-    let declined = match resource_path {
-        Some(path) => rabbit_core::receipt::declined_packages(path),
-        None => return default_desired_package_ids(),
-    };
-    if declined.is_empty() {
-        return default_desired_package_ids();
-    }
-    let remembers_opt_out: std::collections::BTreeSet<String> = builtin_package_specs(platform)
+    let declined = resource_path
+        .map(rabbit_core::receipt::declined_packages)
+        .unwrap_or_default();
+    let (skipped, package_ids) = default_desired_package_ids()
         .into_iter()
-        .filter(|spec| spec.remember_opt_out)
-        .map(|spec| spec.id)
+        .partition(|id| declined.contains(id));
+    PackageSelection {
+        package_ids,
+        named: false,
+        skipped,
+    }
+}
+
+/// Say which packages the default list left out, and how to get each one
+/// back. On stderr, like the other notes, so `--json` stays JSON.
+fn note_skipped_packages(selection: &PackageSelection, platform: Platform) {
+    let specs = builtin_package_specs(platform);
+    for id in &selection.skipped {
+        let name = specs
+            .iter()
+            .find(|spec| spec.id == *id)
+            .map_or(id.as_str(), |spec| spec.display_name.as_str());
+        eprintln!(
+            "note: skipping {name}: you uninstalled it or turned it down. Pass --package {id} \
+             to install it."
+        );
+    }
+}
+
+/// A package named with `--package` is the user saying they want it, so a
+/// run that installs takes it off the packages they uninstalled or turned
+/// down, and later runs offer it again. That holds even when its install
+/// fails: the answer was still yes. A dry run only says it would.
+fn forget_refusals_of_named(resource_path: &Path, package_ids: &[String], apply: bool) {
+    let declined = rabbit_core::receipt::declined_packages(resource_path);
+    let named: Vec<String> = package_ids
+        .iter()
+        .filter(|id| declined.contains(*id))
+        .cloned()
         .collect();
-    default_desired_package_ids()
-        .into_iter()
-        .filter(|id| !(remembers_opt_out.contains(id) && declined.contains(id)))
-        .collect()
+    if named.is_empty() {
+        return;
+    }
+    if !apply {
+        for id in &named {
+            eprintln!(
+                "note: {id} is on the list of packages you uninstalled or turned down. With \
+                 --apply, naming it takes it off, so later runs offer it again."
+            );
+        }
+        return;
+    }
+    match rabbit_core::receipt::record_package_opt_outs(resource_path, &[], &named) {
+        Ok(()) => {
+            for id in &named {
+                eprintln!(
+                    "note: {id} is no longer on the list of packages you uninstalled or turned \
+                     down."
+                );
+            }
+        }
+        // A preference is never worth failing a finished install over.
+        Err(error) => eprintln!(
+            "warning: could not take {} off the list of packages you uninstalled or turned \
+             down: {error}",
+            named.join(", ")
+        ),
+    }
 }
 
 /// Pick the configuration steps the CLI should run.
@@ -1667,10 +2010,13 @@ fn print_installations(installations: &[rabbit_core::model::Installation]) {
     }
 }
 
-fn print_components(components: &[rabbit_core::model::ComponentDetection]) {
+fn print_components(components: &[ComponentDetection], plan: Option<&UninstallPlan>) {
     for component in components {
         println!("{}", component.display_name);
         println!("  Installed: {}", yes_no(component.installed));
+        if let Some(item) = plan.and_then(|plan| plan.item(&component.package_id)) {
+            println!("  Uninstall: {}", uninstall_ability_text(item));
+        }
         println!(
             "  Version: {}",
             component
@@ -1690,6 +2036,26 @@ fn print_components(components: &[rabbit_core::model::ComponentDetection]) {
             println!("  Note: {note}");
         }
         println!();
+    }
+}
+
+/// Whether RABBIT can uninstall a package, and if not, why, for one line of
+/// `rabbit components`.
+fn uninstall_ability_text(item: &UninstallPlanItem) -> String {
+    let name = &item.display_name;
+    match &item.removability {
+        Removability::NotInstalled => "nothing to remove, it isn't installed".to_string(),
+        removability if removability.is_removable() && item.unbacked => {
+            format!("not yet: removing {name} takes a step a backup can't undo")
+        }
+        removability if removability.is_removable() => {
+            format!("yes, with rabbit uninstall --package {}", item.package_id)
+        }
+        Removability::Manual { .. } => format!(
+            "by hand only; rabbit uninstall --package {} says how",
+            item.package_id
+        ),
+        removability => format!("no. {}", removability.message(name)),
     }
 }
 
@@ -1824,6 +2190,49 @@ fn print_restore_backup_report(report: &RestoreBackupReport) {
             "  Skipped: {} (its backup never finished, so the file was never changed)",
             target.display()
         );
+    }
+    if let Some(package_id) = &report.package_id {
+        println!("Package: {package_id}");
+    }
+    for package in &report.packages {
+        print_restored_package(package, report.dry_run);
+    }
+}
+
+/// What a restore did for a package from an uninstall set, besides putting
+/// its files back.
+fn print_restored_package(package: &RestoredPackage, dry_run: bool) {
+    let (back, off) = if dry_run {
+        ("would go back", "would come off")
+    } else {
+        ("went back", "came off")
+    };
+    println!("{}", package.package_id);
+    if package.receipt_merged {
+        println!(
+            "  Its entry in RABBIT's receipt {back}, and it {off} the list of packages you \
+             uninstalled or turned down."
+        );
+    } else {
+        println!(
+            "  It {off} the list of packages you uninstalled or turned down. RABBIT had no \
+             receipt for this copy, so it has none now either."
+        );
+    }
+    let Some(value) = &package.langpack_before else {
+        return;
+    };
+    match (&package.langpack_error, package.langpack_restored) {
+        (Some(error), _) => println!(
+            "  REAPER's language could not be set back to {value} ({error}). Choose it in \
+             REAPER's preferences."
+        ),
+        (None, true) if dry_run => println!("  REAPER's language would be set back to {value}."),
+        (None, true) => println!("  REAPER's language is set back to {value}."),
+        (None, false) => println!(
+            "  REAPER's language stays as it is: one was chosen since the uninstall, so RABBIT \
+             doesn't set it back to {value}."
+        ),
     }
 }
 
@@ -2182,14 +2591,29 @@ fn print_setup_report(report: &SetupReport) {
     print_package_operation_report(&report.package_operation);
 }
 
-fn print_package_specs(packages: &[rabbit_core::package::PackageSpec]) {
-    // Build a localizer from the embedded resources so package descriptions
-    // come out in the user's chosen language (RABBIT_LOCALE / OS default /
-    // en-US fallback). Falling back to the default keeps the listing usable
-    // even on hosts where a Fluent file is missing.
-    let localizer = Localizer::embedded(&resolve_runtime_locale())
+/// The embedded translations in the user's language (RABBIT_LOCALE, the
+/// system's, en-US as the fallback), for the text that comes from the
+/// package manifests: descriptions, uninstall notes and instructions. The
+/// CLI's own text stays English. Falling back to the default keeps the
+/// output usable even on hosts where a Fluent file is missing; with no
+/// locale at all, the keys are shown.
+fn cli_localizer() -> Option<Localizer> {
+    Localizer::embedded(&resolve_runtime_locale())
         .or_else(|_| Localizer::embedded(DEFAULT_LOCALE))
-        .ok();
+        .ok()
+}
+
+/// The text of `key` in the user's language, or the key itself when there
+/// is none.
+fn localized_text(localizer: Option<&Localizer>, key: &str) -> String {
+    localizer
+        .map(|localizer| localizer.text(key))
+        .filter(|text| !text.missing)
+        .map_or_else(|| key.to_string(), |text| text.value)
+}
+
+fn print_package_specs(packages: &[rabbit_core::package::PackageSpec]) {
+    let localizer = cli_localizer();
     for package in packages {
         println!("{}", package.id);
         println!("  Display name: {}", package.display_name);
@@ -2348,6 +2772,291 @@ fn string_names(values: &[String]) -> String {
         "(none)".to_string()
     } else {
         values.join(", ")
+    }
+}
+
+/// The uninstall plan or report as text, in the layout of the README's
+/// example: the preflight, then one block per package with what goes, what
+/// stays, warnings and notes, then what to do next.
+fn print_uninstall_report(report: &UninstallReport, localizer: Option<&Localizer>) {
+    let resource = report.resource_path.display();
+    if report.dry_run {
+        println!("Uninstall plan for {resource} (dry run, nothing changed)");
+    } else {
+        println!("Uninstall from {resource}");
+    }
+    if report.target == InstallationKind::Portable {
+        println!("This is a portable REAPER.");
+    }
+    if report.remove_settings {
+        println!("Settings go too (--remove-settings).");
+    }
+    println!();
+    println!("Preflight");
+    for check in &report.preflight.checks {
+        let status = match check.status {
+            PreflightStatus::Pass => "pass",
+            PreflightStatus::Warn => "warn",
+            PreflightStatus::Fail => "fail",
+        };
+        println!("  {status:<8} {}", check.message);
+    }
+    for item in &report.items {
+        println!();
+        print_uninstall_item(report, item, localizer);
+    }
+
+    println!();
+    let blocked: Vec<&str> = report
+        .items
+        .iter()
+        .filter(|item| item.status == UninstallStatus::Blocked)
+        .map(|item| item.package_id.as_str())
+        .collect();
+    if report.dry_run {
+        if !blocked.is_empty() {
+            println!(
+                "Blocked: {}. Nothing would change with --apply until {} left out.",
+                blocked.join(", "),
+                if blocked.len() == 1 {
+                    "it is"
+                } else {
+                    "they are"
+                }
+            );
+        } else if report
+            .items
+            .iter()
+            .any(|item| item.status == UninstallStatus::WouldRemove)
+        {
+            println!("Dry run: nothing changed. Pass --apply to uninstall.");
+        } else {
+            println!("Nothing to uninstall.");
+        }
+        return;
+    }
+    if let Some(set_id) = &report.backup_set_id {
+        println!("The removed files are in the backup set {set_id}. To put a package back:");
+        println!(
+            "  rabbit restore-backup --resource-path \"{resource}\" --backup-id {set_id} \
+             --package <id> --apply"
+        );
+    } else if report.blocked_before_changes() {
+        println!(
+            "Nothing changed, because RABBIT can't uninstall {}.",
+            blocked.join(", ")
+        );
+    }
+}
+
+fn print_uninstall_item(
+    report: &UninstallReport,
+    item: &UninstallReportItem,
+    localizer: Option<&Localizer>,
+) {
+    let plan = report.plan.item(&item.package_id);
+    let name = match plan.and_then(|plan| plan.installed_version.as_ref()) {
+        Some(version) => format!("{} {version}", item.display_name),
+        None => item.display_name.clone(),
+    };
+    // A package to remove by hand gets the instructions, in the user's
+    // language, right here rather than a pointer elsewhere.
+    if let UninstallMessage::NotRemovable { removability } = &item.message_code {
+        match removability {
+            Removability::Manual { note_key } => {
+                println!("{name}: can't uninstall automatically.");
+                for line in localized_text(localizer, note_key).lines() {
+                    println!("  {line}");
+                }
+                return;
+            }
+            Removability::NotSupported { note_key } => {
+                println!("{name}: {}", localized_text(localizer, note_key));
+                return;
+            }
+            _ => {}
+        }
+    }
+    let heading = match item.status {
+        UninstallStatus::WouldRemove => format!(
+            "will uninstall. RABBIT moves its files into a backup set; {}.",
+            if plan.is_some_and(|plan| plan.requires_elevation) {
+                "it needs a permission prompt"
+            } else {
+                "no permission prompt"
+            }
+        ),
+        UninstallStatus::Removed => "removed.".to_string(),
+        UninstallStatus::RemovedWithLeftovers => {
+            "removed, but RABBIT still finds some of it.".to_string()
+        }
+        UninstallStatus::RemovedPendingRestart => {
+            "removed; the rest goes at the next restart.".to_string()
+        }
+        UninstallStatus::NotInstalled => {
+            "not installed, so there is nothing to remove.".to_string()
+        }
+        UninstallStatus::Blocked => format!("blocked. {}", item.message),
+        UninstallStatus::Failed => format!("failed. {}", item.message),
+        UninstallStatus::Cancelled => format!("stopped. {}", item.message),
+        UninstallStatus::NotReached => format!("not reached. {}", item.message),
+    };
+    println!("{name}: {heading}");
+    let would = item.status == UninstallStatus::WouldRemove;
+    if !would && !item.status.is_removed() {
+        return;
+    }
+
+    let shown = |path: &Path| display_path(&report.resource_path, path);
+    let detail = |label: &str, text: &str| println!("  {label:<8} {text}");
+    for file in &item.removed {
+        let label = match (file.reason == RemovalReason::Setting, would) {
+            (true, true) => "remove setting",
+            (true, false) => "removed setting",
+            (false, true) => "remove",
+            (false, false) => "removed",
+        };
+        let changed = if file.changed_since_install {
+            " (changed since RABBIT installed it)"
+        } else {
+            ""
+        };
+        detail(label, &format!("{}{changed}", shown(&file.path)));
+    }
+    for dir in &item.removed_dirs {
+        detail("removed", &format!("{} (an empty folder)", shown(dir)));
+    }
+    let keep = if would { "keep" } else { "kept" };
+    for kept in &item.kept {
+        let why = match kept.reason {
+            KeptFileReason::ChangedSinceInstall => "changed since RABBIT installed it",
+            KeptFileReason::HoldsLink => "holds a link, which RABBIT never follows",
+        };
+        detail(keep, &format!("{} ({why})", shown(&kept.path)));
+    }
+    if let Some(plan) = plan {
+        for kept in plan
+            .kept
+            .iter()
+            .filter(|kept| kept.exists && kept.reason != KeptReason::RabbitFolder)
+        {
+            let note = match &kept.note_key {
+                Some(key) => localized_text(localizer, key),
+                None => kept_reason_text(kept.reason).to_string(),
+            };
+            detail(keep, &format!("{} ({note})", shown(&kept.path)));
+        }
+        if !report.remove_settings && plan.kept.iter().any(|kept| kept.removable_with_settings) {
+            detail(
+                "note",
+                "Pass --remove-settings to remove the settings too. They go into the same \
+                 backup set, so a restore brings them back.",
+            );
+        }
+        for warning in &plan.warnings {
+            detail(
+                "warning",
+                &uninstall_warning_text(warning, &item.display_name, localizer),
+            );
+        }
+        for note in &plan.notes {
+            detail(
+                "note",
+                &uninstall_note_text(note, &item.display_name, localizer),
+            );
+        }
+    }
+    for path in &item.leftovers {
+        detail("leftover", &shown(path));
+    }
+    for problem in &item.problems {
+        detail("problem", &problem.message());
+    }
+}
+
+/// `path` relative to the resource folder when it is inside it, the way the
+/// user knows it from REAPER; anything else in full.
+fn display_path(resource: &Path, path: &Path) -> String {
+    path.strip_prefix(resource)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .map_or_else(
+            || path.display().to_string(),
+            |relative| relative.display().to_string(),
+        )
+}
+
+/// Why something stays, when its manifest gives no note of its own.
+fn kept_reason_text(reason: KeptReason) -> &'static str {
+    match reason {
+        KeptReason::UserData => "your data",
+        KeptReason::FolderRoot => "a folder other things share",
+        KeptReason::ReaperConfiguration => "REAPER's own settings",
+        KeptReason::KeyMap => "a key map",
+        KeptReason::KeepList => "always kept",
+        KeptReason::RabbitFolder => "RABBIT's own folder",
+        KeptReason::OutsideResourceFolder => {
+            "RABBIT's receipt lists it, but it is outside the REAPER folder and the package \
+             doesn't name it"
+        }
+    }
+}
+
+fn uninstall_warning_text(
+    warning: &UninstallWarning,
+    name: &str,
+    localizer: Option<&Localizer>,
+) -> String {
+    match warning {
+        UninstallWarning::Always { message_key, .. }
+        | UninstallWarning::OtherPackageInstalled { message_key, .. } => {
+            localized_text(localizer, message_key)
+        }
+        UninstallWarning::DependentsStay { package_ids } => format!(
+            "These packages install on top of {name} and stay: {}. They may not work without it.",
+            package_ids.join(", ")
+        ),
+        UninstallWarning::MachineWide => format!(
+            "{name} serves every REAPER and every other program on this computer, so they all \
+             lose it."
+        ),
+        UninstallWarning::ReaPackStillManages { reapack_packages } => format!(
+            "ReaPack installed these, and they stay without updates once it is gone: {}.",
+            reapack_packages.join(", ")
+        ),
+        UninstallWarning::ReaPackRecordsUnreadable { reason } => format!(
+            "RABBIT couldn't read ReaPack's records to say what it still manages ({reason})."
+        ),
+    }
+}
+
+fn uninstall_note_text(note: &UninstallNote, name: &str, localizer: Option<&Localizer>) -> String {
+    match note {
+        UninstallNote::NoReceipt => {
+            format!(
+                "RABBIT didn't install this copy. It removes the files {name} is known to install."
+            )
+        }
+        UninstallNote::OrphanedFromReaPack { reapack_packages } => {
+            let installed_as = if reapack_packages.is_empty() {
+                String::new()
+            } else {
+                format!(" as {}", reapack_packages.join(", "))
+            };
+            format!(
+                "ReaPack once installed this copy{installed_as}. ReaPack is gone, so RABBIT \
+                 removes it; ReaPack's records stay."
+            )
+        }
+        UninstallNote::Manifest { note_key } => localized_text(localizer, note_key),
+    }
+}
+
+/// How the CLI names a platform in its own text.
+fn platform_name(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Windows => "Windows",
+        Platform::MacOs => "macOS",
     }
 }
 
@@ -2563,6 +3272,15 @@ mod tests {
             .join()
             .expect("the command must not overflow its stack")
             .unwrap();
+    }
+
+    /// In a debug build, clap's parser alone takes more than the 1 MB of
+    /// stack Windows gives the main thread, so the CLI runs on a thread of
+    /// its own. Parse and run a command the whole way through it.
+    #[test]
+    fn the_cli_thread_has_room_to_parse_and_run_a_command() {
+        let args = ["rabbit", "packages", "--json"].map(std::ffi::OsString::from);
+        super::run_args(args.to_vec()).unwrap();
     }
 
     #[test]
@@ -2901,40 +3619,75 @@ mod tests {
         );
         assert!(explicit.iter().any(|id| id == language_step));
     }
-    /// A refusal recorded in the wizard must survive a later bare
-    /// `rabbit setup` — but an explicit `--package` is the user telling us
-    /// exactly what they want and always wins.
+    /// A package the user uninstalled or turned down stays out of a later
+    /// bare `rabbit setup`, whichever package it is, and the run says so.
+    /// An explicit `--package` is the user telling us exactly what they want
+    /// and always wins.
     #[test]
-    fn the_default_package_set_honours_a_recorded_refusal() {
+    fn the_default_package_set_honours_every_recorded_refusal() {
+        use rabbit_core::package::PACKAGE_SWS;
         let dir = tempfile::tempdir().unwrap();
-        let platform = rabbit_core::model::Platform::Windows;
 
-        // Baseline: language packs are not in the default set anyway, so
-        // pick a package that IS, and pin the rule on it by declining it.
-        let baseline = super::selected_package_ids(Vec::new(), platform, Some(dir.path()));
-        assert!(!baseline.is_empty(), "there is a default package set");
+        let baseline = super::select_packages(Vec::new(), Some(dir.path()));
+        assert!(!baseline.named && baseline.skipped.is_empty());
+        assert!(
+            baseline.package_ids.iter().any(|id| id == PACKAGE_SWS),
+            "SWS is in the default set, and doesn't remember an opt-out of its own"
+        );
 
+        // A removed SWS lands in the same set as a refused language pack.
+        // langpack-de isn't in the default set to begin with, so declining it
+        // skips nothing.
         rabbit_core::receipt::record_package_opt_outs(
             dir.path(),
-            &["langpack-de".to_string()],
+            &[PACKAGE_SWS.to_string(), "langpack-de".to_string()],
             &[],
         )
         .unwrap();
-
-        // langpack-de is not in the default set to begin with, so the set is
-        // unchanged — the point here is that declining never *adds* anything
-        // and never disturbs the rest.
-        let after = super::selected_package_ids(Vec::new(), platform, Some(dir.path()));
-        assert_eq!(baseline, after);
-        assert!(!after.iter().any(|id| id == "langpack-de"));
+        let after = super::select_packages(Vec::new(), Some(dir.path()));
+        assert_eq!(after.skipped, vec![PACKAGE_SWS.to_string()]);
+        let mut expected = baseline.package_ids.clone();
+        expected.retain(|id| id != PACKAGE_SWS);
+        assert_eq!(after.package_ids, expected);
 
         // An explicit request wins over a recorded refusal.
-        let explicit = super::selected_package_ids(
-            vec!["langpack-de".to_string()],
-            platform,
+        let explicit = super::select_packages(
+            vec![PACKAGE_SWS.to_string(), "langpack-de".to_string()],
             Some(dir.path()),
         );
-        assert_eq!(explicit, vec!["langpack-de".to_string()]);
+        assert!(explicit.named && explicit.skipped.is_empty());
+        assert_eq!(
+            explicit.package_ids,
+            vec![PACKAGE_SWS.to_string(), "langpack-de".to_string()]
+        );
+        // Without a resource folder there is nothing to remember.
+        let nowhere = super::select_packages(Vec::new(), None);
+        assert_eq!(nowhere.package_ids, baseline.package_ids);
+    }
+
+    /// Naming a package is the user's verdict: a run that installs takes
+    /// it off the refusals, a dry run only says it would, and packages not
+    /// named keep theirs.
+    #[test]
+    fn naming_a_package_clears_its_refusal_once_a_run_installs() {
+        use rabbit_core::package::PACKAGE_SWS;
+        let dir = tempfile::tempdir().unwrap();
+        rabbit_core::receipt::record_package_opt_outs(
+            dir.path(),
+            &[PACKAGE_SWS.to_string(), "langpack-de".to_string()],
+            &[],
+        )
+        .unwrap();
+        let named = vec![PACKAGE_SWS.to_string(), "osara".to_string()];
+
+        super::forget_refusals_of_named(dir.path(), &named, false);
+        let declined = rabbit_core::receipt::declined_packages(dir.path());
+        assert!(declined.contains(PACKAGE_SWS), "a dry run changes nothing");
+
+        super::forget_refusals_of_named(dir.path(), &named, true);
+        let declined = rabbit_core::receipt::declined_packages(dir.path());
+        assert!(!declined.contains(PACKAGE_SWS));
+        assert!(declined.contains("langpack-de"), "{declined:?}");
     }
     /// Every flag has to explain itself. The README's advice for anything
     /// not covered by its examples is "run `RABBIT --help`", which is only
@@ -3066,5 +3819,378 @@ mod tests {
         assert_eq!(lines[1], "      1. Close REAPER.");
         assert!(lines.len() > 3);
         assert!(lines[1..].iter().all(|line| line.starts_with("      ")));
+    }
+
+    #[test]
+    fn uninstall_parses_its_flags_and_needs_a_package() {
+        use clap::CommandFactory;
+
+        let cli = Cli::try_parse_from([
+            "rabbit",
+            "uninstall",
+            "--resource-path",
+            "C:\\REAPER",
+            "--target-app-path",
+            "C:\\REAPER\\reaper.exe",
+            "--package",
+            "sws",
+            "--package",
+            "reapack",
+            "--remove-settings",
+            "--apply",
+            "--report-path",
+            "C:\\report.json",
+            "--save-report",
+            "--json",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Uninstall {
+                resource_path,
+                target_app_path,
+                package,
+                remove_settings,
+                apply,
+                report_path,
+                save_report,
+                json,
+            } => {
+                assert_eq!(resource_path, PathBuf::from("C:\\REAPER"));
+                assert_eq!(
+                    target_app_path,
+                    Some(PathBuf::from("C:\\REAPER\\reaper.exe"))
+                );
+                assert_eq!(package, vec!["sws".to_string(), "reapack".to_string()]);
+                assert!(remove_settings && apply && save_report && json);
+                assert_eq!(report_path, Some(PathBuf::from("C:\\report.json")));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        // A dry run unless told otherwise, with settings kept.
+        let cli = Cli::try_parse_from([
+            "rabbit",
+            "uninstall",
+            "--resource-path",
+            "C:\\REAPER",
+            "--package",
+            "sws",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Uninstall {
+                apply: false,
+                remove_settings: false,
+                ..
+            }
+        ));
+
+        // There is no "remove everything".
+        assert!(
+            Cli::try_parse_from(["rabbit", "uninstall", "--resource-path", "C:\\REAPER"]).is_err()
+        );
+        // And no way to run it with REAPER open; the help says why.
+        let error = Cli::try_parse_from([
+            "rabbit",
+            "uninstall",
+            "--resource-path",
+            "C:\\REAPER",
+            "--package",
+            "sws",
+            "--allow-reaper-running",
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        let help = Cli::command()
+            .find_subcommand("uninstall")
+            .and_then(|command| command.get_after_help().map(ToString::to_string))
+            .unwrap();
+        assert!(
+            help.contains("There is no --allow-reaper-running"),
+            "{help}"
+        );
+        assert!(help.contains("every REAPER on the computer must be closed"));
+    }
+
+    #[test]
+    fn restore_backup_parses_one_package() {
+        let cli = Cli::try_parse_from([
+            "rabbit",
+            "restore-backup",
+            "--resource-path",
+            "C:\\REAPER",
+            "--backup-id",
+            "uninstall-unix-1",
+            "--package",
+            "sws",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::RestoreBackup {
+                backup_id, package, ..
+            } => {
+                assert_eq!(backup_id, "uninstall-unix-1");
+                assert_eq!(package.as_deref(), Some("sws"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    /// A typo must not pass for "nothing to remove": an id no package on
+    /// this platform has stops the command before anything runs.
+    #[test]
+    fn uninstall_package_ids_are_checked_up_front() {
+        use rabbit_core::model::Platform;
+
+        let ids = |ids: &[&str]| ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            super::validate_uninstall_packages(
+                &ids(&["sws", " sws ", "reapack"]),
+                Platform::Windows
+            )
+            .unwrap(),
+            ids(&["sws", "reapack"])
+        );
+        let unknown = super::validate_uninstall_packages(&ids(&["swss"]), Platform::Windows)
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("unknown package \"swss\""), "{unknown}");
+        assert!(
+            unknown.contains("sws, "),
+            "the error lists what there is: {unknown}"
+        );
+        let elsewhere = super::validate_uninstall_packages(&ids(&["ffmpeg"]), Platform::MacOs)
+            .unwrap_err()
+            .to_string();
+        assert!(elsewhere.contains("isn't offered on macOS"), "{elsewhere}");
+    }
+
+    /// A portable REAPER in a temporary folder with SWS and OSARA in it, as
+    /// this platform names their plug-ins.
+    struct FakeReaper {
+        _dir: tempfile::TempDir,
+        resource: PathBuf,
+        sws: PathBuf,
+    }
+
+    impl FakeReaper {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let resource = dir.path().join("REAPER");
+            let suffix = if cfg!(windows) { "-x64.dll" } else { ".dylib" };
+            let plugins = resource.join("UserPlugins");
+            std::fs::create_dir_all(&plugins).unwrap();
+            let sws = plugins.join(format!("reaper_sws{suffix}"));
+            std::fs::write(&sws, b"SWS").unwrap();
+            std::fs::write(plugins.join(format!("reaper_osara{suffix}")), b"OSARA").unwrap();
+            std::fs::write(resource.join("S&M.ini"), b"[settings]").unwrap();
+            Self {
+                _dir: dir,
+                resource,
+                sws,
+            }
+        }
+
+        fn request(&self, ids: &[&str], apply: bool) -> rabbit_core::uninstall::UninstallRequest {
+            rabbit_core::uninstall::UninstallRequest {
+                resource_path: self.resource.clone(),
+                platform: rabbit_core::model::Platform::current().unwrap(),
+                package_ids: ids.iter().map(ToString::to_string).collect(),
+                remove_settings: false,
+                dry_run: !apply,
+                target_app_path: None,
+                target: None,
+            }
+        }
+
+        fn run(&self, ids: &[&str], apply: bool) -> rabbit_core::uninstall::UninstallReport {
+            super::uninstall_report(
+                &self.request(ids, apply),
+                &rabbit_core::cancel::CancelToken::new(),
+            )
+            .unwrap()
+        }
+
+        fn receipt(&self) -> rabbit_core::receipt::InstallState {
+            rabbit_core::receipt::load_install_state(&self.resource)
+                .unwrap()
+                .unwrap_or_default()
+        }
+    }
+
+    /// One exit-code table for the dry run and `--apply`: 0 when every
+    /// package can go or isn't there, 2 when one can't and nothing changed,
+    /// 1 when a run that had started stopped.
+    #[test]
+    fn uninstall_exit_codes_follow_the_table() {
+        let reaper = FakeReaper::new();
+
+        let preview = reaper.run(&["sws"], false);
+        assert_eq!(super::uninstall_exit_code(&preview), 0);
+        assert!(reaper.sws.is_file(), "a dry run changes nothing");
+
+        // Not installed: nothing to do, so a script can run twice.
+        assert_eq!(
+            super::uninstall_exit_code(&reaper.run(&["reakontrol"], false)),
+            0
+        );
+        assert_eq!(
+            super::uninstall_exit_code(&reaper.run(&["reakontrol"], true)),
+            0
+        );
+
+        // OSARA can't be uninstalled yet, so asking for it with SWS blocks
+        // both, in the dry run and with --apply alike.
+        assert_eq!(
+            super::uninstall_exit_code(&reaper.run(&["sws", "osara"], false)),
+            2
+        );
+        let blocked = reaper.run(&["sws", "osara"], true);
+        assert_eq!(super::uninstall_exit_code(&blocked), 2);
+        assert!(reaper.sws.is_file(), "a blocked run changes nothing");
+        assert!(blocked.backup_set_id.is_none());
+
+        let removed = reaper.run(&["sws"], true);
+        assert_eq!(super::uninstall_exit_code(&removed), 0, "{removed:#?}");
+        assert!(!reaper.sws.exists());
+        assert!(reaper.receipt().declined_packages.contains("sws"));
+
+        // Stopped before SWS could go: the run asked for didn't happen.
+        std::fs::write(&reaper.sws, b"SWS again").unwrap();
+        let cancel = rabbit_core::cancel::CancelToken::new();
+        cancel.cancel();
+        let stopped = super::uninstall_report(&reaper.request(&["sws"], true), &cancel).unwrap();
+        assert_eq!(super::uninstall_exit_code(&stopped), 1);
+        assert!(reaper.sws.is_file());
+    }
+
+    /// `--json` prints the report: the preflight, one item per package with
+    /// its status and message code, and the plan for just those packages,
+    /// with the keys of anything a UI would put in its own language.
+    #[test]
+    fn uninstall_json_carries_the_plan_and_the_message_codes() {
+        let reaper = FakeReaper::new();
+        let report = reaper.run(&["sws", "osara"], false);
+        let json = serde_json::to_value(&report).unwrap();
+
+        assert_eq!(json["dry_run"], true);
+        assert_eq!(json["target"], "portable");
+        assert!(
+            json["preflight"]["checks"]
+                .as_array()
+                .is_some_and(|checks| !checks.is_empty())
+        );
+        let items = json["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        let item = |id: &str| {
+            items
+                .iter()
+                .find(|item| item["package_id"] == id)
+                .unwrap_or_else(|| panic!("no item for {id}: {json:#}"))
+        };
+        assert_eq!(item("sws")["status"], "would-remove");
+        assert_eq!(item("sws")["message_code"]["code"], "would-remove");
+        let removed = item("sws")["removed"].as_array().unwrap();
+        assert!(
+            removed.iter().any(|file| file["path"].as_str().is_some_and(
+                |path| path.ends_with(reaper.sws.file_name().unwrap().to_str().unwrap())
+            )),
+            "{removed:#?}"
+        );
+        assert_eq!(item("osara")["status"], "blocked");
+        assert_eq!(item("osara")["message_code"]["code"], "not-removable");
+        assert_eq!(
+            item("osara")["message_code"]["removability"],
+            serde_json::json!({ "kind": "not-supported", "note_key": "uninstall-not-yet" })
+        );
+
+        let planned: Vec<&str> = json["plan"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["package_id"].as_str())
+            .collect();
+        assert_eq!(planned.len(), 2, "only the packages asked for: {planned:?}");
+        let sws_plan = json["plan"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["package_id"] == "sws")
+            .unwrap();
+        assert!(
+            sws_plan["kept"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|kept| kept["note_key"] == "uninstall-kept-sws-settings"),
+            "{sws_plan:#}"
+        );
+    }
+
+    /// Uninstall SWS through the CLI's own path, then put just SWS back with
+    /// `restore-backup --package`: its files return, its receipt entry is
+    /// merged into the receipt as it is now, and it is no longer remembered
+    /// as removed.
+    #[test]
+    fn restore_backup_brings_one_uninstalled_package_back() {
+        use rabbit_core::receipt::{InstalledFileReceipt, PackageReceipt, save_install_state};
+
+        let reaper = FakeReaper::new();
+        let mut state = rabbit_core::receipt::InstallState::default();
+        let entry = PackageReceipt {
+            id: "sws".to_string(),
+            version: None,
+            variant: None,
+            channel: None,
+            source_url: None,
+            source_sha256: None,
+            installed_files: vec![InstalledFileReceipt {
+                path: reaper
+                    .sws
+                    .strip_prefix(&reaper.resource)
+                    .unwrap()
+                    .to_path_buf(),
+                sha256: Some(rabbit_core::hash::sha256_file(&reaper.sws).unwrap()),
+                size: Some(3),
+            }],
+            installed_at: None,
+            rabbit_version: None,
+            architecture: None,
+        };
+        state.packages.insert("sws".to_string(), entry.clone());
+        state.declined_packages.insert("langpack-de".to_string());
+        save_install_state(&reaper.resource, &state).unwrap();
+
+        let removed = reaper.run(&["sws"], true);
+        assert_eq!(super::uninstall_exit_code(&removed), 0);
+        let set_id = removed.backup_set_id.clone().unwrap();
+        assert!(!reaper.sws.exists());
+        assert!(!reaper.receipt().packages.contains_key("sws"));
+
+        let resource = reaper.resource.to_string_lossy().into_owned();
+        let restore = Cli::try_parse_from([
+            "rabbit",
+            "restore-backup",
+            "--resource-path",
+            resource.as_str(),
+            "--backup-id",
+            set_id.as_str(),
+            "--package",
+            "sws",
+            "--apply",
+            "--allow-reaper-running",
+            "--json",
+        ])
+        .unwrap();
+        super::run_with(restore).unwrap();
+
+        assert_eq!(std::fs::read(&reaper.sws).unwrap(), b"SWS");
+        let receipt = reaper.receipt();
+        assert_eq!(receipt.packages.get("sws"), Some(&entry));
+        assert!(!receipt.declined_packages.contains("sws"));
+        assert!(
+            receipt.declined_packages.contains("langpack-de"),
+            "the receipt is merged into, not replaced"
+        );
     }
 }
