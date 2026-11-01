@@ -8,26 +8,30 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
-use super::execute::{UNINSTALL_BACKUP_REASON, UninstallEnvironment, execute_uninstall_in};
+use super::execute::{
+    SurveyedDigest, UNINSTALL_BACKUP_REASON, UninstallEnvironment, execute_uninstall_in,
+};
 use super::preflight::VolumeProbe;
 use super::tests::{Fixture, installed, remove_files, remove_files_with, running, spec, write};
 use super::{
-    BACKUP_SPACE_CHECK, KeptFileReason, RemovalReason, UninstallMessage, UninstallProblem,
-    UninstallReport, UninstallRequest, UninstallStatus,
+    BACKUP_SPACE_CHECK, KeptFile, KeptFileReason, KeptReason, RemovalReason, UninstallMessage,
+    UninstallProblem, UninstallReport, UninstallRequest, UninstallStatus,
 };
 use crate::cancel::CancelToken;
 use crate::error::RabbitError;
-use crate::hash::sha256_file;
+use crate::hash::{sha256_bytes, sha256_file};
 use crate::model::{ComponentDetection, InstallationKind, Platform};
-use crate::package::{PACKAGE_SWS, PackageSpec, builtin_package_specs};
+use crate::package::{PACKAGE_REAPACK, PACKAGE_SWS, PackageSpec, builtin_package_specs};
 use crate::preflight::RunningProcess;
 use crate::progress::{ProgressEvent, ProgressReporter};
+use crate::reapack::write_test_registry;
 use crate::receipt::{
     InstallState, InstalledFileReceipt, PackageReceipt, load_install_state, save_install_state,
 };
 use crate::rollback::{
-    BACKUP_MANIFEST_FILE, BackupEntryState, BackupManifest, RestoreBackupOptions,
+    BACKUP_MANIFEST_FILE, BackupEntryState, BackupManifest, FileDigest, RestoreBackupOptions,
     RestoreBackupReport, restore_backup_set,
 };
 
@@ -229,6 +233,11 @@ fn recorded_events() -> (ProgressReporter, Arc<Mutex<Vec<ProgressEvent>>>) {
 /// Windows refuses to move a file another program opened without sharing
 /// deletion; Unix lets anyone move an open file, so a folder that can't be
 /// written stands in.
+///
+/// Never a file in UserPlugins: on macOS a real run first checks that it can
+/// write there, so a read-only UserPlugins would block the run before the
+/// move a test is about. Checked on every platform, so a test that breaks
+/// the rule fails here too rather than only on macOS.
 struct Held {
     #[cfg(windows)]
     _file: fs::File,
@@ -237,6 +246,12 @@ struct Held {
 }
 
 fn hold(path: &Path) -> Held {
+    assert_ne!(
+        path.parent().and_then(Path::file_name),
+        Some(std::ffi::OsStr::new("UserPlugins")),
+        "hold a file outside UserPlugins: {}",
+        path.display()
+    );
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
@@ -483,7 +498,8 @@ fn a_failed_move_puts_back_what_already_moved() {
 #[test]
 fn a_file_in_use_on_another_volume_stays_where_it_was() {
     let fixture = Fixture::new();
-    let plugin = fixture.file("UserPlugins/reaper_demo.dll");
+    let script = fixture.file("Scripts/demo.py");
+    save_receipt(&fixture, &[("demo", &["Scripts/demo.py"])]);
     let harness = Harness {
         volumes: Volumes {
             same: false,
@@ -492,26 +508,26 @@ fn a_file_in_use_on_another_volume_stays_where_it_was() {
         ..Harness::new(&fixture, vec![demo_spec("demo")], &["demo"])
     };
 
-    let held = hold(&plugin);
+    let held = hold(&script);
     let report = harness.apply(&["demo"]);
     drop(held);
 
     let demo = report.item("demo").unwrap();
     assert_eq!(demo.status, UninstallStatus::Failed);
     assert!(
-        matches!(&demo.message_code, UninstallMessage::FileInUse { path, .. } if *path == plugin),
+        matches!(&demo.message_code, UninstallMessage::FileInUse { path, .. } if *path == script),
         "{:?}",
         demo.message_code
     );
     assert!(demo.message.contains("in use by another program"));
-    assert_eq!(fs::read(&plugin).unwrap(), b"file contents");
+    assert_eq!(fs::read(&script).unwrap(), b"file contents");
     assert_eq!(report.backup_set_id, None);
 
     // Not held, the same file moves as a checked copy.
     let report = harness.apply(&["demo"]);
     let demo = report.item("demo").unwrap();
     assert_eq!(demo.status, UninstallStatus::Removed, "{}", demo.message);
-    assert!(!plugin.exists());
+    assert!(!script.exists());
     assert_eq!(
         fs::read(demo.removed[0].backup_path.as_ref().unwrap()).unwrap(),
         b"file contents"
@@ -1103,12 +1119,28 @@ fn restoring_one_package_merges_its_receipt_entry_back() {
     assert!(!receipt.declined_packages.contains("demo"));
     assert!(receipt.declined_packages.contains("other"));
 
-    // A second restore would put the old copy under a receipt entry that
-    // now describes the files in place.
-    let again = restore_package(&fixture, &set_id, "demo", true).unwrap_err();
+    // Restoring it again finds the entry this set put back: the same copy,
+    // so its files come back once more and the entry stays as it is.
+    let again = restore_package(&fixture, &set_id, "demo", false).unwrap();
+    assert!(!again.packages[0].receipt_merged);
+    assert!(again.packages[0].receipt_already_current);
+    assert_eq!(fs::read(&demo).unwrap(), b"file contents");
+
+    // Installed again since, demo has an entry this set never recorded.
+    // Putting the old copy under it would leave a receipt wrong about both.
+    let mut reinstalled = load_install_state(&fixture.resource).unwrap().unwrap();
+    reinstalled.packages.get_mut("demo").unwrap().installed_at = Some("later".to_string());
+    save_install_state(&fixture.resource, &reinstalled).unwrap();
+    let refused = restore_package(&fixture, &set_id, "demo", true).unwrap_err();
     assert!(
-        matches!(&again, RabbitError::PackageRestoreRefused { package_id, .. } if package_id == "demo"),
-        "{again}"
+        matches!(&refused, RabbitError::PackageRestoreRefused { package_id, .. } if package_id == "demo"),
+        "{refused}"
+    );
+    assert!(
+        refused
+            .to_string()
+            .contains("rabbit uninstall --package demo --apply"),
+        "{refused}"
     );
     // So would the whole set, which holds demo too; it says how to restore
     // the rest, and restores nothing.
@@ -1132,7 +1164,72 @@ fn restoring_one_package_merges_its_receipt_entry_back() {
     assert!(other.is_file());
     let receipt = load_install_state(&fixture.resource).unwrap().unwrap();
     assert_eq!(receipt.packages.get("other"), state.packages.get("other"));
+    assert_eq!(
+        receipt.packages.get("demo"),
+        reinstalled.packages.get("demo")
+    );
     assert!(receipt.declined_packages.is_empty());
+}
+
+/// RABBIT ended in the middle of an uninstall: the files had moved into the
+/// set, which recorded the package, but the receipt was never saved and
+/// still lists it. Restoring brings the files back and leaves that entry as
+/// it is, for one package and for the whole set.
+#[test]
+fn an_uninstall_that_never_reached_the_receipt_restores() {
+    let fixture = Fixture::new();
+    let demo = fixture.file("UserPlugins/reaper_demo.dll");
+    let other = fixture.file("UserPlugins/reaper_other.dll");
+    let state = save_receipt(
+        &fixture,
+        &[
+            ("demo", &["UserPlugins/reaper_demo.dll"]),
+            ("other", &["UserPlugins/reaper_other.dll"]),
+        ],
+    );
+    let harness = Harness::new(
+        &fixture,
+        vec![demo_spec("demo"), demo_spec("other")],
+        &["demo", "other"],
+    );
+    let report = harness.apply(&["demo", "other"]);
+    assert!(report.changed_anything() && !report.has_failures());
+    let set_id = report.backup_set_id.clone().unwrap();
+    // What a kill between the moves and the receipt save leaves behind.
+    save_install_state(&fixture.resource, &state).unwrap();
+    assert!(!demo.exists() && !other.exists());
+
+    let restored = restore_package(&fixture, &set_id, "demo", false).unwrap();
+    assert!(restored.packages[0].receipt_already_current);
+    assert!(!restored.packages[0].receipt_merged);
+    assert_eq!(fs::read(&demo).unwrap(), b"file contents");
+    assert_eq!(
+        load_install_state(&fixture.resource).unwrap().unwrap(),
+        state
+    );
+
+    let whole = restore_backup_set(
+        &fixture.resource,
+        &set_id,
+        &RestoreBackupOptions {
+            dry_run: false,
+            allow_reaper_running: true,
+            package_id: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(whole.packages.len(), 2);
+    assert!(
+        whole
+            .packages
+            .iter()
+            .all(|package| package.receipt_already_current)
+    );
+    assert!(demo.is_file() && other.is_file());
+    assert_eq!(
+        load_install_state(&fixture.resource).unwrap().unwrap(),
+        state
+    );
 }
 
 /// A package RABBIT had no receipt for comes back without one, and still
@@ -1214,4 +1311,277 @@ fn restoring_a_language_pack_puts_its_language_back_while_none_was_chosen() {
     assert!(!restored.packages[0].langpack_restored);
     assert_eq!(fs::read_to_string(&ini).unwrap(), chosen);
     assert!(at(&fixture, "LangPack/de_DE.ReaperLangPack").is_file());
+}
+
+/// Make `path` impossible to read until the guard goes. Windows refuses to
+/// open a file another program opened without sharing it; on Unix a file
+/// without read permission stands in. Outside UserPlugins, for the reason
+/// [`hold`] gives.
+struct Unreadable {
+    #[cfg(windows)]
+    _file: fs::File,
+    #[cfg(unix)]
+    path: PathBuf,
+}
+
+fn unreadable(path: &Path) -> Unreadable {
+    #[cfg(windows)]
+    let guard = {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        Unreadable {
+            _file: fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(path)
+                .unwrap(),
+        }
+    };
+    #[cfg(unix)]
+    let guard = {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+        Unreadable {
+            path: path.to_path_buf(),
+        }
+    };
+    assert!(sha256_file(path).is_err(), "{} is readable", path.display());
+    guard
+}
+
+#[cfg(unix)]
+impl Drop for Unreadable {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o644));
+    }
+}
+
+/// A file that can't be read blocks the whole run before anything moves,
+/// as the dry run says it would, even when it belongs to the last package:
+/// the packages before it aren't removed first.
+#[test]
+fn a_file_that_cant_be_read_blocks_the_whole_run_before_anything_moves() {
+    let fixture = Fixture::new();
+    let first = fixture.file("UserPlugins/reaper_first.dll");
+    let second = fixture.file("Scripts/second.py");
+    let state = save_receipt(
+        &fixture,
+        &[
+            ("first", &["UserPlugins/reaper_first.dll"]),
+            ("second", &["Scripts/second.py"]),
+        ],
+    );
+    let harness = Harness::new(
+        &fixture,
+        vec![demo_spec("first"), demo_spec("second")],
+        &["first", "second"],
+    );
+
+    let locked = unreadable(&second);
+    let dry_run = harness.dry_run(&["first", "second"]);
+    let report = harness.apply(&["first", "second"]);
+    drop(locked);
+
+    for report in [&dry_run, &report] {
+        let item = report.item("second").unwrap();
+        assert_eq!(item.status, UninstallStatus::Blocked, "{}", item.message);
+        assert!(
+            matches!(&item.message_code, UninstallMessage::Unreadable { path, .. } if *path == second),
+            "{:?}",
+            item.message_code
+        );
+        assert!(report.blocked_before_changes());
+        assert!(!report.has_failures());
+    }
+    assert_eq!(status(&dry_run, "first"), UninstallStatus::WouldRemove);
+    let item = report.item("first").unwrap();
+    assert_eq!(item.status, UninstallStatus::NotReached);
+    assert_eq!(
+        item.message_code,
+        UninstallMessage::OtherPackageBlocked {
+            package_ids: vec!["second".to_string()]
+        }
+    );
+    assert!(item.removed.is_empty());
+    assert!(first.is_file() && second.is_file());
+    assert_eq!(report.backup_set_id, None);
+    assert_eq!(
+        load_install_state(&fixture.resource).unwrap().unwrap(),
+        state
+    );
+}
+
+/// The move uses the hash read before the run only for a file that can't
+/// have changed since. One written again in between is read again, so the
+/// backup set records the bytes it really holds and a restore accepts them.
+#[test]
+fn a_file_changed_after_the_read_before_the_run_is_hashed_again() {
+    let fixture = Fixture::new();
+    let plugin = fixture.file("UserPlugins/reaper_demo.dll");
+    let rewritten = plugin.clone();
+    let progress = ProgressReporter::new(move |event| {
+        if matches!(event, ProgressEvent::RemoveStarted { .. }) {
+            // The same size, so only a fresh read can tell.
+            fs::write(&rewritten, b"FILE CONTENTS").unwrap();
+        }
+    });
+    let harness = Harness {
+        progress,
+        ..Harness::new(&fixture, vec![demo_spec("demo")], &["demo"])
+    };
+
+    let report = harness.apply(&["demo"]);
+
+    assert_eq!(status(&report, "demo"), UninstallStatus::Removed);
+    assert_eq!(
+        manifest(&report).files[0].sha256,
+        sha256_bytes(b"FILE CONTENTS")
+    );
+    restore_backup_set(
+        &fixture.resource,
+        report.backup_set_id.as_deref().unwrap(),
+        &RestoreBackupOptions {
+            dry_run: false,
+            allow_reaper_running: true,
+            package_id: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(fs::read(&plugin).unwrap(), b"FILE CONTENTS");
+}
+
+/// When the hash read before a run may be used again for the move: only for
+/// a file last changed well before that read, and only while its size and
+/// modification time are still the same. That is what spares FFmpeg's
+/// 250 MB a second read.
+#[test]
+fn a_hash_read_before_the_run_is_used_again_only_for_a_settled_file() {
+    let fixture = Fixture::new();
+    let path = fixture.file("UserPlugins/reaper_demo.dll");
+    let digest = FileDigest::of(&path).unwrap();
+    let now = SystemTime::now();
+
+    // Written moments ago: a change within the same timestamp step could
+    // hide, so it is read again.
+    let fresh = fs::metadata(&path).unwrap();
+    assert!(SurveyedDigest::new(&fresh, now, digest.clone()).is_none());
+
+    let an_hour_ago = now - Duration::from_secs(3600);
+    let set_modified = |time: SystemTime| {
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(time)
+            .unwrap();
+    };
+    set_modified(an_hour_ago);
+    let settled = fs::metadata(&path).unwrap();
+    let surveyed = SurveyedDigest::new(&settled, now, digest).expect("a settled file");
+    assert!(surveyed.still_matches(&path));
+
+    set_modified(now);
+    assert!(!surveyed.still_matches(&path), "touched since");
+    fs::write(&path, b"longer contents").unwrap();
+    set_modified(an_hour_ago);
+    assert!(!surveyed.still_matches(&path), "another size");
+    fs::remove_file(&path).unwrap();
+    assert!(!surveyed.still_matches(&path), "gone");
+}
+
+/// While ReaPack is installed, everything it installed stays, even among a
+/// package's own settings: a settings file is kept when the plan is built,
+/// a file in a settings folder when the folder's files move. The rest of
+/// the settings go. Once ReaPack is gone, its records hold nothing back.
+#[test]
+fn settings_reapack_installed_stay_while_reapack_does() {
+    let specs = || {
+        vec![spec(
+            "demo",
+            "",
+            &remove_files(
+                r#""remove": { "matching_user_plugins": true },
+                   "kept_user_data": [
+                       { "path": "{resource}/Demo.ini", "note_key": "test-settings" },
+                       { "path": "{resource}/DemoData", "note_key": "test-data" }
+                   ]"#,
+            ),
+        )]
+    };
+    let setup = || {
+        let fixture = Fixture::new();
+        fixture.file("UserPlugins/reaper_demo.dll");
+        fixture.file("Demo.ini");
+        fixture.file("DemoData/presets/one.preset");
+        fixture.file("DemoData/Swing/swing.rgt");
+        write_test_registry(
+            &fixture.resource,
+            &[(
+                "Swing grooves",
+                "1.0",
+                &["Demo.ini", "DemoData/Swing/swing.rgt"],
+            )],
+        );
+        fixture
+    };
+
+    let fixture = setup();
+    let settings = at(&fixture, "Demo.ini");
+    let preset = at(&fixture, "DemoData/presets/one.preset");
+    let groove = at(&fixture, "DemoData/Swing/swing.rgt");
+    let harness = Harness::new(&fixture, specs(), &["demo", PACKAGE_REAPACK]);
+    let request = UninstallRequest {
+        remove_settings: true,
+        ..harness.request(&["demo"])
+    };
+    let dry_run = harness.run(&UninstallRequest {
+        dry_run: true,
+        ..request.clone()
+    });
+    let report = harness.run(&request);
+    for (report, status) in [
+        (&dry_run, UninstallStatus::WouldRemove),
+        (&report, UninstallStatus::Removed),
+    ] {
+        let demo = report.item("demo").unwrap();
+        assert_eq!(demo.status, status, "{}", demo.message);
+        assert_eq!(
+            demo.kept,
+            vec![KeptFile {
+                path: groove.clone(),
+                reason: KeptFileReason::InstalledByReaPack,
+            }]
+        );
+        assert!(
+            demo.message.contains("because ReaPack installed them"),
+            "{}",
+            demo.message
+        );
+        let planned = report.plan.item("demo").unwrap();
+        let kept = planned
+            .kept
+            .iter()
+            .find(|kept| kept.path == settings)
+            .expect("Demo.ini is listed as kept");
+        assert_eq!(kept.reason, KeptReason::InstalledByReaPack);
+        assert!(!kept.removable_with_settings);
+        assert!(!planned.files.iter().any(|file| file.path == settings));
+    }
+    assert!(settings.is_file() && groove.is_file());
+    assert!(!preset.exists());
+
+    let fixture = setup();
+    let harness = Harness::new(&fixture, specs(), &["demo"]);
+    let report = harness.run(&UninstallRequest {
+        remove_settings: true,
+        ..harness.request(&["demo"])
+    });
+    let demo = report.item("demo").unwrap();
+    assert_eq!(demo.status, UninstallStatus::Removed, "{}", demo.message);
+    assert!(demo.kept.is_empty());
+    assert!(!at(&fixture, "Demo.ini").exists());
+    assert!(!fixture.resource.join("DemoData").exists());
 }

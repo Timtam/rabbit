@@ -415,8 +415,9 @@ pub fn remove_package_receipt(
 /// receipt for the copy it removed; the refusal goes all the same.
 ///
 /// Returns `false`, and changes nothing, when the receipt already has an
-/// entry for the package. It was installed again since, and that newer
-/// entry describes the files on disk.
+/// entry for the package: it was installed again since, and that newer
+/// entry describes the files on disk, or the entry never left. Telling the
+/// two apart is the caller's job.
 pub fn merge_package_receipt(
     state: &mut InstallState,
     package_id: &str,

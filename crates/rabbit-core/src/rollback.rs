@@ -197,9 +197,15 @@ pub struct RestoreBackupReport {
 pub struct RestoredPackage {
     pub package_id: String,
     /// The receipt entry the uninstall saved went back into the receipt.
-    /// `false` when RABBIT had no receipt for the copy it removed. Either
-    /// way the package is off `declined_packages`.
+    /// `false` when RABBIT had no receipt for the copy it removed, and when
+    /// the entry was still there. Either way the package is off
+    /// `declined_packages`.
     pub receipt_merged: bool,
+    /// The receipt still held the very entry the uninstall saved, so there
+    /// was nothing to merge: the uninstall stopped before it got as far as
+    /// the receipt, or an earlier restore from this set put the entry back.
+    #[serde(default)]
+    pub receipt_already_current: bool,
     /// The `langpack=` value the uninstall replaced with `<>`, if it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub langpack_before: Option<String>,
@@ -858,8 +864,9 @@ pub fn restore_backup_set(
 /// A set an uninstall wrote records each package it removed. Its files come
 /// back like any set's, but the receipt doesn't: the uninstall never copied
 /// the receipt file, which has moved on since anyway. Each package's own
-/// entry is merged back into the current receipt instead, the package comes
-/// off `declined_packages`, and REAPER's language goes back if the
+/// entry is merged back into the current receipt instead (unless it is
+/// still there, from an uninstall that never got that far), the package
+/// comes off `declined_packages`, and REAPER's language goes back if the
 /// uninstall reset it. With `options.package_id`, only that package comes
 /// back.
 fn restore_backup_set_within(
@@ -901,18 +908,28 @@ fn restore_backup_set_within(
     // entry describing newer files. Putting the old files under it would
     // leave a receipt that is wrong about both, so that stops the restore
     // before anything changes, like a refused file.
+    //
+    // An entry that is still the one the set recorded is no reinstall. The
+    // uninstall stopped before it reached the receipt: RABBIT was ended in
+    // the middle of the package, or a failed package's files couldn't all be
+    // moved back. Or an earlier restore from this set merged the entry back
+    // already. Either way the set's files are the ones the entry describes,
+    // and the write-ahead manifest exists so that they can come back.
     let state = if packages.is_empty() {
         None
     } else {
         let state = load_install_state(resource_path)?.unwrap_or_default();
-        if let Some((package_id, _)) = packages
-            .iter()
-            .find(|(package_id, _)| state.packages.contains_key(package_id))
-        {
-            let mut reason = "it was installed again after this uninstall, and a restore would \
-                              mix this older copy with the one in place. Uninstall it first to \
-                              go back to this copy."
-                .to_string();
+        if let Some((package_id, _)) = packages.iter().find(|(package_id, record)| {
+            state
+                .packages
+                .get(package_id)
+                .is_some_and(|current| record.receipt.as_ref() != Some(current))
+        }) {
+            let mut reason = format!(
+                "RABBIT's receipt describes another copy of it, installed after this uninstall, \
+                 and a restore would mix the two. To go back to this copy, uninstall that one \
+                 first (rabbit uninstall --package {package_id} --apply), then restore again."
+            );
             if options.package_id.is_none() {
                 reason.push_str(
                     " The set's other packages can be restored one at a time with --package.",
@@ -1039,6 +1056,10 @@ fn packages_to_restore(
 /// Merge each restored package's receipt entry back into `state`, take it
 /// off `declined_packages`, save, and put back the `langpack=` value its
 /// uninstall replaced. A dry run says what it would do and writes nothing.
+///
+/// The caller has refused any package whose current entry differs from the
+/// one its set recorded, so an entry still in `state` is that same one and
+/// stays as it is.
 fn restore_package_records(
     resource_path: &Path,
     packages: &[(String, BackupPackageRecord)],
@@ -1047,12 +1068,16 @@ fn restore_package_records(
 ) -> Result<Vec<RestoredPackage>> {
     let mut restored: Vec<RestoredPackage> = packages
         .iter()
-        .map(|(package_id, record)| RestoredPackage {
-            package_id: package_id.clone(),
-            receipt_merged: record.receipt.is_some(),
-            langpack_before: record.langpack_before.clone(),
-            langpack_restored: false,
-            langpack_error: None,
+        .map(|(package_id, record)| {
+            let already_current = state.packages.contains_key(package_id);
+            RestoredPackage {
+                package_id: package_id.clone(),
+                receipt_merged: record.receipt.is_some() && !already_current,
+                receipt_already_current: already_current,
+                langpack_before: record.langpack_before.clone(),
+                langpack_restored: false,
+                langpack_error: None,
+            }
         })
         .collect();
     if dry_run {
@@ -1070,7 +1095,12 @@ fn restore_package_records(
     }
 
     for (package_id, record) in packages {
-        merge_package_receipt(&mut state, package_id, record.receipt.clone());
+        // Restoring is the user's yes to the package, so it comes off
+        // declined_packages even when its entry never left and there was
+        // nothing to merge.
+        if !merge_package_receipt(&mut state, package_id, record.receipt.clone()) {
+            state.declined_packages.remove(package_id);
+        }
     }
     save_install_state(resource_path, &state)?;
     // The package is back either way. A language that couldn't be put back

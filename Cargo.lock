@@ -1181,6 +1181,7 @@ version = "0.4.4"
 dependencies = [
  "clap",
  "rabbit-core",
+ "rabbit-platform",
  "serde",
  "serde_json",
  "tempfile",

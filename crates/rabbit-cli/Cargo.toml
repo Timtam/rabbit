@@ -8,6 +8,9 @@ license.workspace = true
 [dependencies]
 clap.workspace = true
 rabbit-core = { path = "../rabbit-core" }
+# Ctrl+C during `uninstall --apply`, caught so the run stops between
+# packages.
+rabbit-platform = { path = "../rabbit-platform" }
 serde.workspace = true
 serde_json.workspace = true
 

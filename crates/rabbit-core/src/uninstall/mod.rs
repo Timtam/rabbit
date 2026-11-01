@@ -157,7 +157,10 @@ pub enum Removability {
         path: PathBuf,
         reason: String,
     },
-    /// A machine-wide package, which a portable target can't remove.
+    /// A machine-wide package on a portable target. Its plan removes
+    /// something, which only a run against the standard REAPER may do. A
+    /// machine-wide package whose plan removes nothing reports that plan's
+    /// verdict on every target instead.
     NeedsStandardTarget,
     /// The manifest only allows removing copies RABBIT installed, and there
     /// is no receipt: this copy is most likely the user's own.
@@ -319,6 +322,11 @@ pub enum KeptReason {
     /// manifest path covers it. A receipt is a file anyone can edit, so it
     /// can't point RABBIT somewhere on its own.
     OutsideResourceFolder,
+    /// One of the package's settings files, but ReaPack's records list it,
+    /// or couldn't be read to say. ReaPack is installed and keeps track of
+    /// what it installed, so the file stays even with "Also remove
+    /// settings".
+    InstalledByReaPack,
 }
 
 /// Something to tell the user before they decide.
@@ -564,6 +572,11 @@ pub enum KeptFileReason {
     /// A settings folder holding a symbolic link or junction, which RABBIT
     /// never follows. The whole folder stays.
     HoldsLink,
+    /// Found in a settings folder, but ReaPack's records list it, or
+    /// couldn't be read to say. ReaPack is installed and keeps track of what
+    /// it installed, and moving the file behind its back would leave its
+    /// records wrong.
+    InstalledByReaPack,
 }
 
 /// Something after the removal that didn't work.

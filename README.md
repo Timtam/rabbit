@@ -406,7 +406,8 @@ RABBIT uninstall --resource-path "%APPDATA%\REAPER" --package sws \
 - **What stays:** your settings, such as SWS's grooves and `S&M.ini`,
   ReaPack's repositories and its list of what it installed, and ReaKontrol's
   FX maps. Add `--remove-settings` to remove those too. `reaper.ini`,
-  `reaper-kb.ini`, your key maps and everything ReaPack installed always stay.
+  `reaper-kb.ini`, your key maps and everything ReaPack installed always stay,
+  even files ReaPack installed among a package's settings.
 - **Nothing is deleted for good.** Removed files move into a backup set under
   `RABBIT\backups`, and so do settings removed with `--remove-settings`. The
   run saves a report under `RABBIT\logs`. If REAPER used the language pack you
@@ -418,9 +419,12 @@ RABBIT uninstall --resource-path "%APPDATA%\REAPER" --package sws \
   so they can't be moved, and it writes `reaper.ini` again when it closes,
   which would undo the language reset. The dry run checks this too.
 - **All or nothing up front.** If any package you named can't be uninstalled,
-  `--apply` changes nothing at all and says why. For the JAWS scripts and a
-  portable REAPER, which RABBIT can't remove, it prints how to remove them by
-  hand.
+  or one of its files can't be read, `--apply` changes nothing at all and
+  says why. For the JAWS scripts (whichever REAPER you name) and a portable
+  REAPER, which RABBIT can't remove, it prints how to remove them by hand.
+- **Ctrl+C stops between packages.** The package being removed finishes, and
+  the rest stay installed. Press Ctrl+C again to stop at once; the files
+  already moved stay in the backup set, where `restore-backup` finds them.
 - **Removed packages stay removed.** The wizard no longer ticks them, and
   `apply-packages` and `setup` skip them with a note. Name one with
   `--package` to install it again.
@@ -447,7 +451,8 @@ RABBIT restore-backup --resource-path "%APPDATA%\REAPER" \
 Its files come back, its settings too if `--remove-settings` removed them. It
 goes back into RABBIT's receipt and is no longer skipped, and REAPER's language
 goes back to it if the uninstall changed that and you haven't picked another
-language since. Without `--package`, every package in the set comes back. Two
+language since. Without `--package`, every package in the set comes back. An
+uninstall that stopped partway through a package restores the same way. Two
 limits: a package you installed again after uninstalling it can't be restored
 from the old set, because the newer copy is in the way (uninstall it first);
 and a removal that a backup can't hold, such as one by a vendor's own

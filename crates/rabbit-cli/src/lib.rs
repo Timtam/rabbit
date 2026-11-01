@@ -236,7 +236,8 @@ enum Command {
         /// it comes off the list of packages you uninstalled or turned
         /// down, and REAPER's language is set back if the uninstall reset it
         /// and no language was chosen since. Refused when the package was
-        /// installed again after the uninstall.
+        /// installed again after the uninstall. An uninstall that stopped
+        /// partway through a package restores too.
         #[arg(long)]
         package: Option<String>,
         /// Actually make the changes. Without it the command is a dry run
@@ -1379,6 +1380,19 @@ fn run_uninstall(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     };
     let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
     let package_ids = validate_uninstall_packages(&package, platform)?;
+    // Ended in the middle of a package, an uninstall leaves its files in the
+    // backup set and the receipt still listing them; restore-backup can put
+    // that right, but stopping between packages leaves nothing to put right.
+    // So with --apply the first Ctrl+C asks the run to stop at the next
+    // package, and a second one ends RABBIT as usual. A dry run changes
+    // nothing, so Ctrl+C keeps its usual meaning there, as it does when it
+    // can't be caught.
+    let ctrl_c = apply
+        .then(|| rabbit_platform::catch_ctrl_c(UNINSTALL_CTRL_C_NOTICE).ok())
+        .flatten();
+    let cancel = ctrl_c.as_ref().map_or_else(CancelToken::new, |guard| {
+        CancelToken::watching(guard.flag())
+    });
     let report = uninstall_report(
         &UninstallRequest {
             resource_path: resource_path.clone(),
@@ -1389,8 +1403,9 @@ fn run_uninstall(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             target_app_path,
             target: None,
         },
-        &CancelToken::new(),
+        &cancel,
     )?;
+    drop(ctrl_c);
     // A run with --apply saved its report under RABBIT/logs by itself;
     // `--save-report` only adds one where that didn't happen, such as a dry
     // run.
@@ -1415,6 +1430,11 @@ fn run_uninstall(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+/// What the first Ctrl+C during `uninstall --apply` prints. The run reads the
+/// request before each package.
+const UNINSTALL_CTRL_C_NOTICE: &str =
+    "\nStopping after the package being removed now. Press Ctrl+C again to stop at once.\n";
 
 /// Carry out (or with `dry_run`, only plan) an uninstall, and narrow the
 /// report's plan to the packages asked for: the plan covers every package
@@ -2213,6 +2233,18 @@ fn print_restored_package(package: &RestoredPackage, dry_run: bool) {
             "  Its entry in RABBIT's receipt {back}, and it {off} the list of packages you \
              uninstalled or turned down."
         );
+    } else if package.receipt_already_current {
+        // The uninstall stopped before it reached the receipt, or an earlier
+        // restore from this set put the entry back.
+        let (files, list) = if dry_run {
+            ("would come back", "would be")
+        } else {
+            ("came back", "is")
+        };
+        println!(
+            "  RABBIT's receipt still had its entry, so only its files {files}. It {list} off \
+             the list of packages you uninstalled or turned down."
+        );
     } else {
         println!(
             "  It {off} the list of packages you uninstalled or turned down. RABBIT had no \
@@ -2931,6 +2963,7 @@ fn print_uninstall_item(
         let why = match kept.reason {
             KeptFileReason::ChangedSinceInstall => "changed since RABBIT installed it",
             KeptFileReason::HoldsLink => "holds a link, which RABBIT never follows",
+            KeptFileReason::InstalledByReaPack => REAPACK_KEEPS_TRACK,
         };
         detail(keep, &format!("{} ({why})", shown(&kept.path)));
     }
@@ -2940,9 +2973,13 @@ fn print_uninstall_item(
             .iter()
             .filter(|kept| kept.exists && kept.reason != KeptReason::RabbitFolder)
         {
+            // A file ReaPack installed may be among the package's settings;
+            // the manifest's note on them doesn't say why this one stays.
             let note = match &kept.note_key {
-                Some(key) => localized_text(localizer, key),
-                None => kept_reason_text(kept.reason).to_string(),
+                Some(key) if kept.reason != KeptReason::InstalledByReaPack => {
+                    localized_text(localizer, key)
+                }
+                _ => kept_reason_text(kept.reason).to_string(),
             };
             detail(keep, &format!("{} ({note})", shown(&kept.path)));
         }
@@ -2986,6 +3023,9 @@ fn display_path(resource: &Path, path: &Path) -> String {
         )
 }
 
+/// Why a file ReaPack installed stays while ReaPack does.
+const REAPACK_KEEPS_TRACK: &str = "installed with ReaPack, which keeps track of it";
+
 /// Why something stays, when its manifest gives no note of its own.
 fn kept_reason_text(reason: KeptReason) -> &'static str {
     match reason {
@@ -2995,6 +3035,7 @@ fn kept_reason_text(reason: KeptReason) -> &'static str {
         KeptReason::KeyMap => "a key map",
         KeptReason::KeepList => "always kept",
         KeptReason::RabbitFolder => "RABBIT's own folder",
+        KeptReason::InstalledByReaPack => REAPACK_KEEPS_TRACK,
         KeptReason::OutsideResourceFolder => {
             "RABBIT's receipt lists it, but it is outside the REAPER folder and the package \
              doesn't name it"

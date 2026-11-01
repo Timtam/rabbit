@@ -51,13 +51,7 @@ pub struct UninstallPlanInput<'a> {
 /// which files exist and how big they are, and ReaPack's records; hashes
 /// nothing and changes nothing.
 pub fn build_uninstall_plan(input: &UninstallPlanInput<'_>) -> UninstallPlan {
-    // Without a detection for ReaPack, RABBIT can't tell that it is gone, so
-    // it counts as installed and its records keep their hold.
-    let reapack_installed = input
-        .detections
-        .iter()
-        .find(|detection| detection.package_id == PACKAGE_REAPACK)
-        .is_none_or(|detection| detection.installed);
+    let reapack_installed = reapack_counts_as_installed(input.detections);
     let items = input
         .specs
         .iter()
@@ -71,6 +65,22 @@ pub fn build_uninstall_plan(input: &UninstallPlanInput<'_>) -> UninstallPlan {
         remove_settings: input.remove_settings,
         items,
     }
+}
+
+/// Whether ReaPack's records have their hold: while ReaPack is installed,
+/// nothing it installed may go behind its back. Without a detection for
+/// ReaPack, RABBIT can't tell that it is gone, so it counts as installed.
+pub(super) fn reapack_counts_as_installed(detections: &[ComponentDetection]) -> bool {
+    detections
+        .iter()
+        .find(|detection| detection.package_id == PACKAGE_REAPACK)
+        .is_none_or(|detection| detection.installed)
+}
+
+/// Whether ReaPack's records claim `path`, failing closed: a file RABBIT
+/// couldn't check counts as ReaPack's.
+pub(super) fn installed_by_reapack(roots: &UninstallRoots, path: &Path) -> bool {
+    reapack_ownership(&roots.resource, path) != ReapackOwnership::NotOwned
 }
 
 fn is_installed(input: &UninstallPlanInput<'_>, package_id: &str) -> bool {
@@ -92,14 +102,31 @@ fn plan_item(
     let receipt = input.state.and_then(|state| state.packages.get(&spec.id));
     // A machine-wide package serves every REAPER on the computer, so a
     // portable target can't remove it: the standard REAPER would lose it
-    // too. Manifests needn't even have a plan for that case.
-    let needs_standard_target =
-        spec.requires_standard_install && input.target == InstallationKind::Portable;
-    let plan = if needs_standard_target {
-        None
-    } else {
-        spec.uninstall.plan_for(input.platform, input.target)
-    };
+    // too. Manifests needn't even have a plan for that case; the standard
+    // REAPER's plan says what removing the package means. Only a plan that
+    // removes something is out of reach here. One that removes nothing,
+    // manual or not_supported, holds whatever the target: the JAWS DLLs'
+    // manual steps are the same from a portable REAPER, and Surge XT can't
+    // be uninstalled from the standard REAPER either.
+    let (plan, needs_standard_target) =
+        if spec.requires_standard_install && input.target == InstallationKind::Portable {
+            match spec
+                .uninstall
+                .plan_for(input.platform, InstallationKind::Standard)
+            {
+                Some(plan)
+                    if matches!(
+                        plan.strategy,
+                        UninstallStrategy::RemoveFiles | UninstallStrategy::VendorUninstaller
+                    ) =>
+                {
+                    (None, true)
+                }
+                plan => (plan, false),
+            }
+        } else {
+            (spec.uninstall.plan_for(input.platform, input.target), false)
+        };
     let strategy = plan.map(|plan| plan.strategy);
     let changes_something = matches!(
         strategy,
@@ -198,6 +225,7 @@ fn plan_item(
     let planner = PackagePlanner {
         roots: input.roots,
         remove_settings: input.remove_settings,
+        reapack_installed,
         spec,
         plan,
         receipt,
@@ -229,8 +257,8 @@ fn plan_item(
         }
     };
     // Only now is the package known to be removable, so only now may "Also
-    // remove settings" take its data. ReaPack's records aren't asked about
-    // the settings: they are the user's, never something ReaPack installed.
+    // remove settings" take its data. A settings file ReaPack installed
+    // stays, like everything ReaPack installed; see `user_data`.
     let (settings, user_data) = planner.user_data(input.remove_settings);
     item.kept = user_data;
     item.kept.extend(collected.kept);
@@ -346,6 +374,9 @@ struct Collected {
 struct PackagePlanner<'p> {
     roots: &'p UninstallRoots,
     remove_settings: bool,
+    /// ReaPack's records have their hold, so no settings file they claim
+    /// may go.
+    reapack_installed: bool,
     spec: &'p PackageSpec,
     plan: &'p UninstallPlanSpec,
     receipt: Option<&'p PackageReceipt>,
@@ -448,7 +479,7 @@ impl PackagePlanner<'_> {
                 // configuration, key maps, anything the plan keeps, and
                 // RABBIT's folder. The manifests leave them out of
                 // kept_user_data; this holds even if one doesn't.
-                let reason = if resolved.is_root {
+                let mut reason = if resolved.is_root {
                     KeptReason::FolderRoot
                 } else if is_in_rabbit_folder(self.roots, &resolved.path) {
                     KeptReason::RabbitFolder
@@ -461,9 +492,21 @@ impl PackagePlanner<'_> {
                 } else {
                     KeptReason::UserData
                 };
-                let removable = reason == KeptReason::UserData
+                let mut removable = reason == KeptReason::UserData
                     && metadata.is_some()
                     && check_removal(self.roots, &resolved.path, &resolved.guard).is_ok();
+                // Everything ReaPack installed stays while ReaPack does, even
+                // inside the package's own data: ReaPack data packages can
+                // install there, and its records would go out of date. A
+                // folder's files are asked about one by one as they move.
+                if removable
+                    && self.reapack_installed
+                    && metadata.as_ref().is_some_and(fs::Metadata::is_file)
+                    && installed_by_reapack(self.roots, &resolved.path)
+                {
+                    reason = KeptReason::InstalledByReaPack;
+                    removable = false;
+                }
                 if removable && take_settings {
                     let is_dir = metadata.as_ref().is_some_and(fs::Metadata::is_dir);
                     settings.push(PlannedRemoval {

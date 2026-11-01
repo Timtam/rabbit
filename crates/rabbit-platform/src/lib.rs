@@ -11,6 +11,7 @@
 //! `None` so callers don't have to spread `cfg(windows)` everywhere.
 
 pub mod arch;
+pub mod ctrl_c;
 pub mod defender;
 pub mod disk_image;
 pub mod elevation;
@@ -25,6 +26,7 @@ pub mod signature;
 pub mod volume;
 
 pub use arch::is_running_under_rosetta;
+pub use ctrl_c::{CtrlCGuard, catch_ctrl_c};
 pub use defender::{DefenderExclusionOutcome, ensure_path_excluded};
 pub use disk_image::{
     DiskImageError, MountedDiskImage, copy_directory_recursive, find_app_bundle_in_directory,

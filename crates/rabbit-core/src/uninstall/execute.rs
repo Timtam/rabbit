@@ -1,16 +1,19 @@
 //! Carrying out an uninstall: the `remove_files` engine.
 //!
 //! [`execute_uninstall`] takes the install lock, builds the plan again from
-//! fresh detection, and runs the uninstall preflight. If any requested
-//! package is blocked at that point, nothing changes at all. Otherwise it
-//! removes the packages one at a time, every package before the packages it
-//! depends on, each one like this:
+//! fresh detection, and runs the uninstall preflight. Then it reads every
+//! file it would remove, as the dry run does: the guard checks each path
+//! and each file is hashed. If any requested package is blocked at that
+//! point, a file that can't be read included, nothing changes at all.
+//! Otherwise it removes the packages one at a time, every package before the
+//! packages it depends on, each one like this:
 //!
 //! 1. Check the cancel token, and check again that nothing the package needs
 //!    closed has started since.
 //! 2. Record the package's receipt entry in the run's backup set.
-//! 3. For each file: run the guard again, hash it, and move it into the
-//!    backup set. A file only the receipt names that changed since RABBIT
+//! 3. For each file: run the guard again and move it into the backup set,
+//!    with the hash read before the run when the file can't have changed
+//!    since. A file only the receipt names that changed since RABBIT
 //!    installed it stays; one the manifest names goes all the same.
 //! 4. Remove the folders the plan says to remove once empty.
 //! 5. Take the package out of the receipt and add it to `declined_packages`,
@@ -26,11 +29,11 @@
 //! restored from the backup set on its own.
 
 use std::cmp::Reverse;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cancel::CancelToken;
 use crate::detection::{default_standard_installation, detect_components};
@@ -51,7 +54,9 @@ use crate::receipt::{
 use crate::rollback::{BackupPackageRecord, BackupSetWriter, FileDigest, MoveFileError, MovedFile};
 
 use super::paths::{UninstallRoots, absolute, same_ignoring_case};
-use super::plan::{UninstallPlanInput, build_uninstall_plan};
+use super::plan::{
+    UninstallPlanInput, build_uninstall_plan, installed_by_reapack, reapack_counts_as_installed,
+};
 use super::post::reset_reaper_langpack_if_selected;
 use super::preflight::{
     ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, PROGRAMS_RUNNING_CHECK, SystemVolumes,
@@ -66,6 +71,15 @@ use super::{
 
 /// The reason an uninstall's backup set records.
 pub const UNINSTALL_BACKUP_REASON: &str = "uninstall";
+
+/// How much older than the read before the run a file's modification time
+/// must be for that read's hash to be used again when the file moves.
+/// File systems store the time in steps, two seconds on FAT, so a file
+/// written again within one step of being read could keep its old time and
+/// size. A file last changed well before the read can't hide a change that
+/// way. FFmpeg's 250 MB, written when it was installed, always qualifies; a
+/// file written moments ago is simply read again.
+const DIGEST_REUSE_MARGIN: Duration = Duration::from_secs(5);
 
 /// Uninstall `request.package_ids` from the REAPER at
 /// `request.resource_path`, or with `request.dry_run` only say what would
@@ -199,6 +213,7 @@ pub(crate) fn execute_uninstall_in(
     };
 
     let detections = (environment.detect)()?;
+    let reapack_installed = reapack_counts_as_installed(&detections);
     let state = load_install_state(&resource)?;
     let plan = build_uninstall_plan(&UninstallPlanInput {
         roots: environment.roots,
@@ -341,7 +356,8 @@ pub(crate) fn execute_uninstall_in(
     let mut outcomes: Vec<UninstallReportItem> = Vec::new();
     if request.dry_run {
         for plan_item in to_remove {
-            outcomes.push(survey(plan_item, environment, &backup_folder));
+            let (item, _) = survey(plan_item, environment, &backup_folder, reapack_installed);
+            outcomes.push(item);
         }
     } else if !blocked.is_empty() {
         for plan_item in to_remove {
@@ -354,46 +370,35 @@ pub(crate) fn execute_uninstall_in(
             ));
         }
     } else if !to_remove.is_empty() {
-        let mut run = RemovalRun {
-            plan: &plan,
+        match survey_before_removal(
+            &to_remove,
             environment,
-            request,
-            backup_folder: &backup_folder,
-            backups: BackupSetWriter::new(&resource, &uninstall_set_id(), UNINSTALL_BACKUP_REASON),
-            state: state.unwrap_or_default(),
-            progress,
-        };
-        let mut stopped: Option<UninstallMessage> = None;
-        for plan_item in to_remove {
-            let item = match &stopped {
-                Some(UninstallMessage::Cancelled) => new_item(
-                    plan_item,
-                    UninstallStatus::Cancelled,
-                    UninstallMessage::Cancelled,
-                ),
-                Some(stop) => new_item(plan_item, UninstallStatus::NotReached, stop.clone()),
-                None if cancel.is_cancelled() => {
-                    stopped = Some(UninstallMessage::Cancelled);
-                    new_item(
-                        plan_item,
-                        UninstallStatus::Cancelled,
-                        UninstallMessage::Cancelled,
-                    )
+            &backup_folder,
+            reapack_installed,
+            cancel,
+        ) {
+            Err(items) => outcomes = items,
+            Ok(digests) => {
+                let mut run = RemovalRun {
+                    plan: &plan,
+                    environment,
+                    request,
+                    backup_folder: &backup_folder,
+                    backups: BackupSetWriter::new(
+                        &resource,
+                        &uninstall_set_id(),
+                        UNINSTALL_BACKUP_REASON,
+                    ),
+                    state: state.unwrap_or_default(),
+                    digests,
+                    reapack_installed,
+                    progress,
+                };
+                outcomes = run.remove_all(&to_remove, cancel);
+                if !run.backups.discard_if_empty() {
+                    backup_set = Some((run.backups.set_id(), run.backups.path().to_path_buf()));
                 }
-                None => {
-                    let item = run.remove(plan_item);
-                    if item.status == UninstallStatus::Blocked {
-                        stopped = Some(UninstallMessage::RunStopped {
-                            package_id: plan_item.package_id.clone(),
-                        });
-                    }
-                    item
-                }
-            };
-            outcomes.push(item);
-        }
-        if !run.backups.discard_if_empty() {
-            backup_set = Some((run.backups.set_id(), run.backups.path().to_path_buf()));
+            }
         }
     }
 
@@ -446,10 +451,54 @@ struct RemovalRun<'a> {
     /// The receipt as this run keeps it: loaded once, and saved after each
     /// package.
     state: InstallState,
+    /// What the read before the run found, for the moves to use again.
+    digests: Digests,
+    reapack_installed: bool,
     progress: &'a ProgressReporter,
 }
 
 impl RemovalRun<'_> {
+    /// Remove `to_remove` in order, reading the cancel token before each
+    /// package. After a stop, or a package a check blocks, the rest stay as
+    /// they are.
+    fn remove_all(
+        &mut self,
+        to_remove: &[&UninstallPlanItem],
+        cancel: &CancelToken,
+    ) -> Vec<UninstallReportItem> {
+        let mut stopped: Option<UninstallMessage> = None;
+        let mut outcomes = Vec::new();
+        for plan_item in to_remove.iter().copied() {
+            let item = match &stopped {
+                Some(UninstallMessage::Cancelled) => new_item(
+                    plan_item,
+                    UninstallStatus::Cancelled,
+                    UninstallMessage::Cancelled,
+                ),
+                Some(stop) => new_item(plan_item, UninstallStatus::NotReached, stop.clone()),
+                None if cancel.is_cancelled() => {
+                    stopped = Some(UninstallMessage::Cancelled);
+                    new_item(
+                        plan_item,
+                        UninstallStatus::Cancelled,
+                        UninstallMessage::Cancelled,
+                    )
+                }
+                None => {
+                    let item = self.remove(plan_item);
+                    if item.status == UninstallStatus::Blocked {
+                        stopped = Some(UninstallMessage::RunStopped {
+                            package_id: plan_item.package_id.clone(),
+                        });
+                    }
+                    item
+                }
+            };
+            outcomes.push(item);
+        }
+        outcomes
+    }
+
     /// Remove one package, from the last process check to the post helpers.
     fn remove(&mut self, plan_item: &UninstallPlanItem) -> UninstallReportItem {
         let id = plan_item.package_id.clone();
@@ -505,6 +554,8 @@ impl RemovalRun<'_> {
             self.environment,
             self.backup_folder,
             Some(&mut self.backups),
+            &mut self.digests,
+            self.reapack_installed,
         );
         let mut outcome = removal.remove_files();
         if outcome.is_ok() {
@@ -578,17 +629,114 @@ fn save_receipt_without(
 }
 
 /// What a dry run reports for a package it would remove: the exact files,
-/// hashed as the real run would, and those the real run would keep.
+/// hashed as the real run would, and those the real run would keep. Also
+/// the hashes it read, for the real run to use again.
 fn survey(
     plan_item: &UninstallPlanItem,
     environment: &UninstallEnvironment<'_>,
     backup_folder: &Path,
-) -> UninstallReportItem {
-    let mut removal = PackageRemoval::new(plan_item, environment, backup_folder, None);
-    match removal.remove_files() {
+    reapack_installed: bool,
+) -> (UninstallReportItem, Digests) {
+    let mut digests = Digests::new();
+    let mut removal = PackageRemoval::new(
+        plan_item,
+        environment,
+        backup_folder,
+        None,
+        &mut digests,
+        reapack_installed,
+    );
+    let item = match removal.remove_files() {
         Ok(()) => removal.into_item(UninstallStatus::WouldRemove, UninstallMessage::WouldRemove),
-        // The real run would fail here before removing anything for good.
+        // The real run would stop here; see `survey_before_removal`.
         Err(code) => removal.into_item(UninstallStatus::Blocked, code),
+    };
+    (item, digests)
+}
+
+/// Before a real run moves anything, read every file of every package the
+/// way the dry run does. A path the guard refuses, or a file or settings
+/// folder that can't be read, then blocks the whole run with nothing
+/// changed, just as the dry run said. Found only while removing, it would
+/// stop the run after the packages before it were already gone.
+///
+/// Returns the hashes read, which the moves use again (see
+/// [`DIGEST_REUSE_MARGIN`]), or the report items for a blocked run: the
+/// packages that failed the read are Blocked and the others NotReached.
+fn survey_before_removal(
+    to_remove: &[&UninstallPlanItem],
+    environment: &UninstallEnvironment<'_>,
+    backup_folder: &Path,
+    reapack_installed: bool,
+    cancel: &CancelToken,
+) -> std::result::Result<Digests, Vec<UninstallReportItem>> {
+    let mut digests = Digests::new();
+    let mut blocked: Vec<(String, UninstallMessage)> = Vec::new();
+    for plan_item in to_remove {
+        // The removal loop turns a stop into Cancelled items before it
+        // touches anything; reading the rest first would only delay that.
+        if cancel.is_cancelled() {
+            break;
+        }
+        let (item, found) = survey(plan_item, environment, backup_folder, reapack_installed);
+        if item.status == UninstallStatus::Blocked {
+            blocked.push((item.package_id, item.message_code));
+        }
+        digests.extend(found);
+    }
+    if blocked.is_empty() {
+        return Ok(digests);
+    }
+    let package_ids: Vec<String> = blocked.iter().map(|(id, _)| id.clone()).collect();
+    Err(to_remove
+        .iter()
+        .map(
+            |plan_item| match blocked.iter().find(|(id, _)| *id == plan_item.package_id) {
+                Some((_, code)) => new_item(plan_item, UninstallStatus::Blocked, code.clone()),
+                None => new_item(
+                    plan_item,
+                    UninstallStatus::NotReached,
+                    UninstallMessage::OtherPackageBlocked {
+                        package_ids: package_ids.clone(),
+                    },
+                ),
+            },
+        )
+        .collect())
+}
+
+/// What the read before a run found about one file: its size and hash, and
+/// the modification time it had just before it was read.
+pub(super) struct SurveyedDigest {
+    digest: FileDigest,
+    modified: SystemTime,
+}
+
+/// The files the read before a run hashed, by path.
+type Digests = HashMap<PathBuf, SurveyedDigest>;
+
+impl SurveyedDigest {
+    /// Keep `digest` for later only when the file, as `before` describes it
+    /// just before it was read at `read_at`, was last changed at least
+    /// [`DIGEST_REUSE_MARGIN`] earlier and still had the size read.
+    pub(super) fn new(
+        before: &fs::Metadata,
+        read_at: SystemTime,
+        digest: FileDigest,
+    ) -> Option<Self> {
+        let modified = before.modified().ok()?;
+        let settled = read_at
+            .duration_since(modified)
+            .is_ok_and(|age| age >= DIGEST_REUSE_MARGIN);
+        (settled && before.len() == digest.size).then_some(Self { digest, modified })
+    }
+
+    /// The file at `path` still has the size and modification time it had
+    /// when it was read, so it holds the bytes that were hashed then.
+    pub(super) fn still_matches(&self, path: &Path) -> bool {
+        fs::metadata(path).is_ok_and(|now| {
+            now.len() == self.digest.size && now.modified().ok() == Some(self.modified)
+        })
     }
 }
 
@@ -601,6 +749,10 @@ struct PackageRemoval<'a> {
     backup_folder: &'a Path,
     /// `None` in a dry run: nothing moves, the files are only listed.
     backups: Option<&'a mut BackupSetWriter>,
+    /// Without `backups`, where the hashes read go; with them, where the
+    /// moves find them again.
+    digests: &'a mut Digests,
+    reapack_installed: bool,
     moved: Vec<MovedFile>,
     removed: Vec<RemovedFile>,
     kept: Vec<KeptFile>,
@@ -613,6 +765,8 @@ impl<'a> PackageRemoval<'a> {
         environment: &'a UninstallEnvironment<'a>,
         backup_folder: &'a Path,
         backups: Option<&'a mut BackupSetWriter>,
+        digests: &'a mut Digests,
+        reapack_installed: bool,
     ) -> Self {
         Self {
             item,
@@ -620,6 +774,8 @@ impl<'a> PackageRemoval<'a> {
             volumes: environment.volumes,
             backup_folder,
             backups,
+            digests,
+            reapack_installed,
             moved: Vec::new(),
             removed: Vec::new(),
             kept: Vec::new(),
@@ -659,10 +815,7 @@ impl<'a> PackageRemoval<'a> {
         reason: RemovalReason,
         receipt_sha256: Option<&str>,
     ) -> std::result::Result<(), UninstallMessage> {
-        let digest = FileDigest::of(path).map_err(|error| UninstallMessage::Unreadable {
-            path: path.to_path_buf(),
-            error: error.to_string(),
-        })?;
+        let digest = self.digest_of(path)?;
         let changed =
             receipt_sha256.is_some_and(|expected| !expected.eq_ignore_ascii_case(&digest.sha256));
         // Only RABBIT's receipt vouches for this file, and it isn't the file
@@ -706,9 +859,37 @@ impl<'a> PackageRemoval<'a> {
         Ok(())
     }
 
+    /// `path`'s size and hash. Moving a file uses what the read before the
+    /// run found when the file can't have changed since, so FFmpeg's 250 MB
+    /// is hashed once, not twice. The read itself hashes the file and keeps
+    /// the answer.
+    fn digest_of(&mut self, path: &Path) -> std::result::Result<FileDigest, UninstallMessage> {
+        let unreadable = |error: String| UninstallMessage::Unreadable {
+            path: path.to_path_buf(),
+            error,
+        };
+        if self.backups.is_some() {
+            if let Some(surveyed) = self.digests.remove(path)
+                && surveyed.still_matches(path)
+            {
+                return Ok(surveyed.digest);
+            }
+            return FileDigest::of(path).map_err(|error| unreadable(error.to_string()));
+        }
+        let before = fs::metadata(path).map_err(|error| unreadable(error.to_string()))?;
+        let read_at = SystemTime::now();
+        let digest = FileDigest::of(path).map_err(|error| unreadable(error.to_string()))?;
+        if let Some(surveyed) = SurveyedDigest::new(&before, read_at, digest.clone()) {
+            self.digests.insert(path.to_path_buf(), surveyed);
+        }
+        Ok(digest)
+    }
+
     /// A settings folder goes file by file, so the backup set lists each
     /// file and a restore can put each one back. A folder holding a link
-    /// stays whole: RABBIT never follows one.
+    /// stays whole: RABBIT never follows one. While ReaPack is installed, a
+    /// file its records claim stays: a ReaPack data package can install into
+    /// a folder a manifest lists as the package's settings.
     fn remove_folder(
         &mut self,
         folder: &Path,
@@ -733,6 +914,13 @@ impl<'a> PackageRemoval<'a> {
             }
         }
         for file in &files {
+            if self.reapack_installed && installed_by_reapack(self.roots, file) {
+                self.kept.push(KeptFile {
+                    path: file.clone(),
+                    reason: KeptFileReason::InstalledByReaPack,
+                });
+                continue;
+            }
             self.remove_file(file, reason, None)?;
         }
         if self.backups.is_some() {
@@ -989,6 +1177,23 @@ fn english_message(item: &UninstallReportItem) -> String {
             " These settings folders stay whole, because they hold a link RABBIT never \
              follows: {}.",
             path_list(&linked)
+        ));
+    }
+    let reapack: Vec<PathBuf> = item
+        .kept
+        .iter()
+        .filter(|kept| kept.reason == KeptFileReason::InstalledByReaPack)
+        .map(|kept| kept.path.clone())
+        .collect();
+    if !reapack.is_empty() {
+        let verb = if item.status == UninstallStatus::WouldRemove {
+            "would stay"
+        } else {
+            "stayed"
+        };
+        message.push_str(&format!(
+            " These files {verb}, because ReaPack installed them and keeps track of them: {}.",
+            path_list(&reapack)
         ));
     }
     if !item.leftovers.is_empty() {

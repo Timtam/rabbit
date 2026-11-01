@@ -568,6 +568,61 @@ fn execute_operation_with_process_scan(
     cancel: &CancelToken,
     running_reaper: &dyn Fn() -> Vec<RunningProcess>,
 ) -> Result<PackageOperationReport> {
+    execute_operation_with(
+        resource_path,
+        artifacts,
+        detections,
+        cache_dir,
+        options,
+        progress,
+        cancel,
+        running_reaper,
+        &manifest_snapshot_source,
+    )
+}
+
+/// The folders an install snapshot lists, and what their path tokens stand
+/// for on the target.
+type SnapshotFolders = (Vec<UninstallPath>, UninstallRoots);
+
+/// Where the install snapshot of an artifact's package looks, given the
+/// artifact, the resource folder and the target's REAPER. `None` for a
+/// package whose manifest names no folders under `uninstall.install_snapshot`.
+type SnapshotSource<'a> =
+    dyn Fn(&ArtifactDescriptor, &Path, Option<&Path>) -> Option<SnapshotFolders> + 'a;
+
+/// The snapshot source every real run uses: the package's manifest, and
+/// this computer's folders.
+fn manifest_snapshot_source(
+    artifact: &ArtifactDescriptor,
+    resource_path: &Path,
+    target_app_path: Option<&Path>,
+) -> Option<SnapshotFolders> {
+    let roots = install_snapshot_roots(&artifact.package_id, artifact.platform);
+    if roots.is_empty() {
+        return None;
+    }
+    let paths = UninstallRoots::for_target(artifact.platform, resource_path, target_app_path);
+    Some((roots, paths))
+}
+
+/// [`execute_operation_with_process_scan`] with the install snapshot's
+/// source passed in as well. Only the JAWS scripts declare snapshot
+/// folders, and their real installer and `%APPDATA%` are out of a test's
+/// reach, so a test gives a stand-in package folders of its own to check
+/// that the pipeline lists them before the installer and records the result.
+#[allow(clippy::too_many_arguments)] // The public entry point's, plus two probes.
+fn execute_operation_with(
+    resource_path: &Path,
+    artifacts: Vec<ArtifactDescriptor>,
+    detections: &[ComponentDetection],
+    cache_dir: &Path,
+    options: &PackageOperationOptions,
+    progress: &ProgressReporter,
+    cancel: &CancelToken,
+    running_reaper: &dyn Fn() -> Vec<RunningProcess>,
+    snapshot_source: &SnapshotSource<'_>,
+) -> Result<PackageOperationReport> {
     ensure_resource_path_ready(resource_path, options.dry_run)?;
 
     let _install_lock = if options.dry_run {
@@ -823,6 +878,7 @@ fn execute_operation_with_process_scan(
                 resource_path,
                 options.target_app_path.as_deref(),
                 unattended_state.as_ref(),
+                snapshot_source,
             );
             // The unattended runner (vendor installer, archive extractor,
             // dmg mount + copy) is the work the user is waiting on for
@@ -1598,18 +1654,16 @@ fn executed_unattended_item(
 /// `uninstall.install_snapshot`, right before its installer runs. `None` for
 /// the packages that name none, which is all but the JAWS scripts. `state`
 /// is the receipt as this run holds it, whose earlier record of the
-/// package's files the snapshot brings up to date.
+/// package's files the snapshot brings up to date. `source` says where to
+/// look; see [`manifest_snapshot_source`].
 fn take_install_snapshot(
     artifact: &ArtifactDescriptor,
     resource_path: &Path,
     target_app_path: Option<&Path>,
     state: Option<&InstallState>,
+    source: &SnapshotSource<'_>,
 ) -> Option<InstallSnapshot> {
-    let roots = install_snapshot_roots(&artifact.package_id, artifact.platform);
-    if roots.is_empty() {
-        return None;
-    }
-    let paths = UninstallRoots::for_target(artifact.platform, resource_path, target_app_path);
+    let (roots, paths) = source(artifact, resource_path, target_app_path)?;
     let recorded = state
         .and_then(|state| state.packages.get(&artifact.package_id))
         .map(|receipt| receipt.vendor_added_files.as_slice())
@@ -2246,10 +2300,12 @@ mod tests {
     use super::{
         PackageAutomationSupport, PackageOperationMessage, PackageOperationOptions,
         PackageOperationStatus, PlannedArtifact, PlannedAutomationKind, PlannedExecutionKind,
-        backup_file_for_unattended_change, dependency_ordered, execute_operation_with_process_scan,
-        execute_resolved_package_operation, execute_resolved_package_operation_with_detections,
+        backup_file_for_unattended_change, dependency_ordered, execute_operation_with,
+        execute_operation_with_process_scan, execute_resolved_package_operation,
+        execute_resolved_package_operation_with_detections,
         execute_resolved_package_operation_with_detections_and_progress, first_failed_dependency,
-        plan_action_for_artifact, take_install_snapshot, upsert_unattended_package_receipt,
+        manifest_snapshot_source, plan_action_for_artifact, take_install_snapshot,
+        upsert_unattended_package_receipt,
     };
     use crate::artifact::{ArtifactDescriptor, ArtifactKind, CachedArtifact};
     use crate::cancel::CancelToken;
@@ -4359,7 +4415,16 @@ mod tests {
         };
         // SWS declares no snapshot folders, so the real pipeline takes none
         // for it and lists nothing.
-        assert!(take_install_snapshot(&artifact, &resource_path, None, None).is_none());
+        assert!(
+            take_install_snapshot(
+                &artifact,
+                &resource_path,
+                None,
+                None,
+                &manifest_snapshot_source
+            )
+            .is_none()
+        );
 
         let paths = UninstallRoots {
             appdata: Some(dir.path().to_path_buf()),
@@ -4399,6 +4464,91 @@ mod tests {
         )
         .unwrap();
         assert_eq!(state.packages[PACKAGE_SWS].vendor_added_files, expected);
+    }
+
+    /// The pipeline lists a package's snapshot folders right before its
+    /// installer runs, and the receipt it saves records what the installer
+    /// added there. The test above checks the receipt step on its own; this
+    /// one fails if the listing moved after the installer, or its result
+    /// never reached the receipt. SWS stands in for the JAWS scripts again:
+    /// the test gives it a snapshot folder under a temporary `{appdata}`, and
+    /// its fake installer writes a file there.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_pipeline_records_what_the_installer_added_to_its_snapshot_folders() {
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let appdata = dir.path().join("AppData");
+        let settings = appdata.join("Settings");
+        fs::create_dir_all(&settings).unwrap();
+        fs::write(settings.join("untouched.jcf"), b"mine").unwrap();
+        let added = settings.join("added.jss");
+        let source_path = dir.path().join("sws-installer.cmd");
+        let installer = sws_mock_installer_script().replace(
+            "exit /b 0",
+            &format!("> \"{}\" echo added\r\nexit /b 0", added.display()),
+        );
+        fs::write(&source_path, installer).unwrap();
+        let resource_path = dir.path().join("PortableREAPER");
+        let snapshot_source = |artifact: &ArtifactDescriptor,
+                               resource: &std::path::Path,
+                               _app: Option<&std::path::Path>| {
+            (artifact.package_id == PACKAGE_SWS).then(|| {
+                (
+                    vec![UninstallPath::new("{appdata}/Settings")],
+                    UninstallRoots {
+                        appdata: Some(appdata.clone()),
+                        ..UninstallRoots::new(resource)
+                    },
+                )
+            })
+        };
+
+        let report = execute_operation_with(
+            &resource_path,
+            vec![artifact_with_url(
+                PACKAGE_SWS,
+                ArtifactKind::Installer,
+                "sws-installer.cmd",
+                &source_path.display().to_string(),
+            )],
+            &[],
+            cache.path(),
+            &PackageOperationOptions {
+                dry_run: false,
+                allow_reaper_running: false,
+                stage_unsupported: false,
+                replace_osara_keymap: false,
+                target_app_path: Some(resource_path.join("reaper.exe")),
+                lock_path: Some(dir.path().join("install.lock")),
+                force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
+                package_channels: Default::default(),
+            },
+            &ProgressReporter::noop(),
+            &CancelToken::new(),
+            &Vec::new,
+            &snapshot_source,
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.items[0].status,
+            PackageOperationStatus::InstalledOrChecked,
+            "{}",
+            report.items[0].message
+        );
+        let contents = fs::read(&added).unwrap();
+        let state = load_install_state(&resource_path).unwrap().unwrap();
+        assert_eq!(
+            state.packages[PACKAGE_SWS].vendor_added_files,
+            vec![VendorAddedFile {
+                path: added.clone(),
+                sha256: sha256_bytes(&contents),
+                size: contents.len() as u64,
+                existed_before: false,
+            }]
+        );
     }
 
     fn artifact(package_id: &str, kind: ArtifactKind, file_name: &str) -> ArtifactDescriptor {

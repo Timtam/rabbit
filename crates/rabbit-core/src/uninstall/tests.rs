@@ -717,6 +717,52 @@ fn machine_wide_packages_need_a_standard_target() {
     );
 }
 
+/// "Removes it only from the standard REAPER" would promise a removal no
+/// target offers when the package's plan removes nothing. Such a plan holds
+/// on a portable target too, note and all.
+#[test]
+fn a_machine_wide_package_without_a_removal_says_why_on_every_target() {
+    let fixture = Fixture::new();
+    let specs = [
+        spec(
+            "by-hand",
+            r#""requires_standard_install": true,"#,
+            r#"{ "plans": [{ "strategy": "manual", "note_key": "test-by-hand" }] }"#,
+        ),
+        spec(
+            "later",
+            r#""requires_standard_install": true,"#,
+            r#"{ "plans": [{ "strategy": "not_supported", "note_key": "uninstall-not-yet" }] }"#,
+        ),
+    ];
+    for target in [InstallationKind::Standard, InstallationKind::Portable] {
+        let plan = fixture.plan_with(
+            &specs,
+            &installed(&["by-hand", "later"]),
+            None,
+            target,
+            false,
+        );
+        let by_hand = item(&plan, "by-hand");
+        assert_eq!(
+            by_hand.removability,
+            Removability::Manual {
+                note_key: "test-by-hand".to_string()
+            },
+            "{target:?}"
+        );
+        assert_eq!(by_hand.strategy, Some(UninstallStrategy::Manual));
+        assert!(by_hand.warnings.contains(&UninstallWarning::MachineWide));
+        assert_eq!(
+            item(&plan, "later").removability,
+            Removability::NotSupported {
+                note_key: UNINSTALL_NOT_YET_KEY.to_string()
+            },
+            "{target:?}"
+        );
+    }
+}
+
 #[test]
 fn manual_and_not_supported_plans_say_why() {
     let fixture = Fixture::new();
@@ -1160,7 +1206,19 @@ fn every_shipped_manifest_plans() {
                     .uninstall
                     .plan_for(platform, target)
                     .is_some_and(|plan| plan.strategy == UninstallStrategy::RemoveFiles);
-                if spec.requires_standard_install && target == InstallationKind::Portable {
+                let standard_removes = spec
+                    .uninstall
+                    .plan_for(platform, InstallationKind::Standard)
+                    .is_some_and(|plan| {
+                        matches!(
+                            plan.strategy,
+                            UninstallStrategy::RemoveFiles | UninstallStrategy::VendorUninstaller
+                        )
+                    });
+                if spec.requires_standard_install
+                    && target == InstallationKind::Portable
+                    && standard_removes
+                {
                     assert_eq!(item.removability, Removability::NeedsStandardTarget);
                 } else if removes_files && !spec.uninstall.requires_receipt {
                     assert!(

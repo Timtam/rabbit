@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use super::tests::{Fixture, detection, installed, write};
 use super::{
-    KeptReason, Removability, RemovalReason, UninstallNote, UninstallPlan, UninstallPlanInput,
-    UninstallPlanItem, UninstallWarning, build_uninstall_plan,
+    KeptReason, Removability, RemovalReason, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan,
+    UninstallPlanInput, UninstallPlanItem, UninstallWarning, build_uninstall_plan,
 };
 use crate::detection::detect_component_with_probes;
 use crate::model::{ComponentDetection, InstallationKind, Platform};
@@ -222,16 +222,18 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
             Platform::Windows,
             InstallationKind::Portable,
             // The JAWS scripts, Surge XT and app2clap serve the whole
-            // computer, so a portable target has no plan for them at all.
+            // computer, so a portable target can't remove them. Only
+            // app2clap has a removal it can't reach; the other two keep the
+            // standard REAPER's plan, which removes nothing.
             &[
                 (PACKAGE_REAPER, manual),
                 (PACKAGE_OSARA, not_supported),
                 (PACKAGE_SWS, remove_files),
                 (PACKAGE_REAPACK, remove_files),
                 (PACKAGE_REAKONTROL, remove_files),
-                (PACKAGE_JAWS_SCRIPTS, None),
+                (PACKAGE_JAWS_SCRIPTS, manual),
                 (PACKAGE_FFMPEG, remove_files),
-                (PACKAGE_SURGE_XT, None),
+                (PACKAGE_SURGE_XT, not_supported),
                 (PACKAGE_APP2CLAP, None),
                 (LANGPACK_ES, remove_files),
                 (LANGPACK_DE, remove_files),
@@ -239,32 +241,20 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
             ],
         ),
     ];
-    let macos = |surge_xt| {
-        [
-            (PACKAGE_REAPER, not_supported),
-            (PACKAGE_OSARA, not_supported),
-            (PACKAGE_SWS, remove_files),
-            (PACKAGE_REAPACK, remove_files),
-            (PACKAGE_REAKONTROL, remove_files),
-            (PACKAGE_SURGE_XT, surge_xt),
-            (LANGPACK_ES, remove_files),
-            (LANGPACK_DE, remove_files),
-            (LANGPACK_FR, remove_files),
-        ]
-    };
-    let macos_standard = macos(not_supported);
-    let macos_portable = macos(None);
+    let macos = [
+        (PACKAGE_REAPER, not_supported),
+        (PACKAGE_OSARA, not_supported),
+        (PACKAGE_SWS, remove_files),
+        (PACKAGE_REAPACK, remove_files),
+        (PACKAGE_REAKONTROL, remove_files),
+        (PACKAGE_SURGE_XT, not_supported),
+        (LANGPACK_ES, remove_files),
+        (LANGPACK_DE, remove_files),
+        (LANGPACK_FR, remove_files),
+    ];
     let cases = cases.iter().copied().chain([
-        (
-            Platform::MacOs,
-            InstallationKind::Standard,
-            &macos_standard[..],
-        ),
-        (
-            Platform::MacOs,
-            InstallationKind::Portable,
-            &macos_portable[..],
-        ),
+        (Platform::MacOs, InstallationKind::Standard, &macos[..]),
+        (Platform::MacOs, InstallationKind::Portable, &macos[..]),
     ]);
 
     let fixture = Fixture::new();
@@ -302,6 +292,26 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
         Removability::Manual {
             note_key: "uninstall-manual-reaper-portable".to_string()
         }
+    );
+    // The JAWS DLLs are in the standard REAPER's folder whatever the target,
+    // so a portable target shows the same steps, rather than sending the
+    // user to a standard REAPER that can't remove them either. Surge XT
+    // says it can't be uninstalled yet, as it does everywhere.
+    assert_eq!(
+        item(&plan, PACKAGE_JAWS_SCRIPTS).removability,
+        Removability::Manual {
+            note_key: "uninstall-manual-jaws-scripts".to_string()
+        }
+    );
+    assert_eq!(
+        item(&plan, PACKAGE_SURGE_XT).removability,
+        Removability::NotSupported {
+            note_key: UNINSTALL_NOT_YET_KEY.to_string()
+        }
+    );
+    assert_eq!(
+        item(&plan, PACKAGE_APP2CLAP).removability,
+        Removability::NeedsStandardTarget
     );
 }
 
