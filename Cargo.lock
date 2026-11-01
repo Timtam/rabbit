@@ -1206,6 +1206,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "unic-langid",
+ "webpki-root-certs",
  "zip",
 ]
 

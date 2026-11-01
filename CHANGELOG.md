@@ -39,11 +39,12 @@ from this file and posts it as the GitHub release body.
   context menus with VO+Shift+M.
 - RABBIT now checks download servers' certificates against the system's own
   trust store (the Windows certificate store, the macOS keychain) instead
-  of a list built into RABBIT. Downloads now work behind antivirus HTTPS
-  scanning and company proxies that add their own certificate, and a
-  revoked certificate is refused. On a network that blocks certificate
-  revocation checks, the first connection to a server can take up to about
-  10 seconds longer.
+  of a list built into RABBIT, which stays as a fallback on Windows.
+  Downloads now work with antivirus HTTPS scanning and on networks that
+  inspect HTTPS traffic with their own certificate, and a revoked
+  certificate is refused. On a network that blocks certificate revocation
+  checks, the first connection to a server can take up to about 10 seconds
+  longer.
 
 ### Fixed
 

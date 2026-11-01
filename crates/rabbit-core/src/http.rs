@@ -23,7 +23,21 @@ pub(crate) fn client_builder() -> ClientBuilder {
         // process, and reqwest uses that one.
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
-    reqwest::blocking::Client::builder()
+    let builder = reqwest::blocking::Client::builder();
+    // Certificates are checked against the system's trust store. A Windows
+    // PC with automatic root certificate updates turned off can lack a root
+    // a download host needs, which the Mozilla roots RABBIT used to bundle
+    // covered. Hand those over as extra roots: Windows falls back to them
+    // only when it can't build a trusted chain itself, so roots that
+    // antivirus or company software put in the store still come first.
+    // macOS ships these roots already.
+    #[cfg(windows)]
+    let builder = builder.tls_certs_merge(
+        webpki_root_certs::TLS_SERVER_ROOT_CERTS
+            .iter()
+            .filter_map(|der| reqwest::Certificate::from_der(der).ok()),
+    );
+    builder
 }
 
 /// If the request targets `api.github.com` and a `GITHUB_TOKEN` is exported

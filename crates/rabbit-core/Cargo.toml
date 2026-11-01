@@ -45,6 +45,11 @@ zip.workspace = true
 # out of the shipped binary.
 sevenz-rust2 = { version = "0.24", default-features = false, features = ["util", "compress"] }
 
+# Windows-only: Mozilla's roots as the fallback when Windows can't build a
+# trusted chain from its own store (see `http::client_builder`).
+[target.'cfg(windows)'.dependencies]
+webpki-root-certs = "1"
+
 # macOS-only: renamex_np(RENAME_SWAP) for the atomic app-bundle exchange in
 # the self-updater.
 [target.'cfg(target_os = "macos")'.dependencies]
