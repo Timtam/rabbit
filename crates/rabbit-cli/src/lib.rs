@@ -2292,8 +2292,11 @@ fn describe_uninstall_plan(plan: &UninstallPlanSpec, localizer: Option<&Localize
         let note = localizer
             .map(|localizer| localizer.text(key))
             .filter(|text| !text.missing);
+        // Instructions for removing a package by hand run over several
+        // lines; each goes below the plan's line, indented under it, so the
+        // listing still reads one package and one target at a time.
         match note {
-            Some(note) => line.push_str(&format!(": {}", note.value)),
+            Some(note) => line.push_str(&format!(": {}", note.value.replace('\n', "\n      "))),
             None => line.push_str(&format!(": {key}")),
         }
     }
@@ -3052,5 +3055,16 @@ mod tests {
             super::describe_uninstall_plan(&elevated, None),
             "remove_files (elevation required, backup none)"
         );
+        // Manual instructions keep their lines, indented under the plan's.
+        let manual = plan(
+            r#"{ "platform": "windows", "strategy": "manual",
+                 "note_key": "uninstall-manual-jaws-scripts" }"#,
+        );
+        let described = super::describe_uninstall_plan(&manual, Some(&english));
+        let lines: Vec<&str> = described.lines().collect();
+        assert!(lines[0].starts_with("manual: RABBIT can't remove the JAWS scripts yet."));
+        assert_eq!(lines[1], "      1. Close REAPER.");
+        assert!(lines.len() > 3);
+        assert!(lines[1..].iter().all(|line| line.starts_with("      ")));
     }
 }

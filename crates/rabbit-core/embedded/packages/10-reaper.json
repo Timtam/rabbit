@@ -39,6 +39,12 @@
   "uninstall": {
     "plans": [
       {
+        "platform": "windows",
+        "target": "portable",
+        "strategy": "manual",
+        "note_key": "uninstall-manual-reaper-portable"
+      },
+      {
         "strategy": "not_supported",
         "note_key": "uninstall-not-yet"
       }

@@ -50,10 +50,98 @@
     "copy_user_plugin_binary"
   ],
   "uninstall": {
+    "reapack_owned": "block",
+    "warn_when_installed": [
+      {
+        "package": "osara",
+        "message_key": "uninstall-warning-sws-osara-keymap"
+      },
+      {
+        "package": "reapack",
+        "message_key": "uninstall-warning-sws-reapack-scripts"
+      }
+    ],
     "plans": [
       {
-        "strategy": "not_supported",
-        "note_key": "uninstall-not-yet"
+        "platform": "windows",
+        "strategy": "remove_files",
+        "summary": {
+          "removes_key": "uninstall-summary-sws-removes",
+          "keeps_key": "uninstall-summary-sws-keeps"
+        },
+        "remove": {
+          "receipt_files": true,
+          "matching_user_plugins": true,
+          "paths": [
+            "{resource}/Scripts/sws_python.py",
+            "{resource}/Scripts/sws_python32.py",
+            "{resource}/Scripts/sws_python64.py"
+          ]
+        },
+        "kept_user_data": [
+          {
+            "path": "{resource}/Data/Grooves",
+            "note_key": "uninstall-kept-sws-grooves"
+          },
+          {
+            "path": "{resource}/S&M.ini",
+            "note_key": "uninstall-kept-sws-settings"
+          },
+          {
+            "path": "{resource}/S&M_Cyclactions.ini",
+            "note_key": "uninstall-kept-sws-cycle-actions"
+          },
+          {
+            "path": "{resource}/sws-autocoloricon.ini",
+            "note_key": "uninstall-kept-sws-settings"
+          },
+          {
+            "path": "{resource}/SWS-RenamePresets.txt",
+            "note_key": "uninstall-kept-sws-settings"
+          },
+          {
+            "path": "{resource}/BR.ini",
+            "note_key": "uninstall-kept-sws-settings"
+          }
+        ]
+      },
+      {
+        "platform": "macos",
+        "strategy": "remove_files",
+        "summary": {
+          "removes_key": "uninstall-summary-sws-removes",
+          "keeps_key": "uninstall-summary-sws-keeps"
+        },
+        "remove": {
+          "receipt_files": true,
+          "matching_user_plugins": true
+        },
+        "kept_user_data": [
+          {
+            "path": "{resource}/Data/Grooves",
+            "note_key": "uninstall-kept-sws-grooves"
+          },
+          {
+            "path": "{resource}/S&M.ini",
+            "note_key": "uninstall-kept-sws-settings"
+          },
+          {
+            "path": "{resource}/S&M_Cyclactions.ini",
+            "note_key": "uninstall-kept-sws-cycle-actions"
+          },
+          {
+            "path": "{resource}/sws-autocoloricon.ini",
+            "note_key": "uninstall-kept-sws-settings"
+          },
+          {
+            "path": "{resource}/SWS-RenamePresets.txt",
+            "note_key": "uninstall-kept-sws-settings"
+          },
+          {
+            "path": "{resource}/BR.ini",
+            "note_key": "uninstall-kept-sws-settings"
+          }
+        ]
       }
     ]
   },

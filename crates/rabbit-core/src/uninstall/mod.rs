@@ -29,6 +29,8 @@
 pub mod execute;
 #[cfg(test)]
 mod execute_tests;
+#[cfg(test)]
+mod manifest_tests;
 pub mod paths;
 pub mod plan;
 mod post;

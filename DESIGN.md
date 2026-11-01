@@ -799,9 +799,15 @@ manifest loads: every supported platform and target has a plan and every
 plan is reachable, each strategy has the fields it needs, removals that need
 administrator rights never go into the user's backups, and no path may reach
 into `{resource}/RABBIT`. The engine that carries out `remove_files` plans
-is in place (see Safety Behavior), but nothing starts it yet and every
-package still says `not_supported`; `rabbit packages` prints each package's
-plan per platform and target.
+is in place (see Safety Behavior), but nothing starts it yet. SWS, ReaPack,
+ReaKontrol, FFmpeg, app2clap and the language packs have `remove_files`
+plans. FFmpeg and the language packs set `requires_receipt`, because a copy
+RABBIT has no receipt for is most likely the user's own; the others name
+their files, so a copy without a receipt can go too, unless ReaPack still
+manages it. The JAWS scripts, and a portable REAPER on Windows, have
+`manual` plans whose note holds the instructions. REAPER otherwise, OSARA
+and Surge XT still say `not_supported`. `rabbit packages` prints each
+package's plan per platform and target.
 
 Every package ships a `display_description_key` that resolves to a one- or
 two-sentence localized description of what the package is and why a user

@@ -91,10 +91,29 @@
     "copy_user_plugin_binary"
   ],
   "uninstall": {
+    "reapack_owned": "ignore",
     "plans": [
       {
-        "strategy": "not_supported",
-        "note_key": "uninstall-not-yet"
+        "strategy": "remove_files",
+        "summary": {
+          "removes_key": "uninstall-summary-reapack-removes",
+          "keeps_key": "uninstall-summary-reapack-keeps"
+        },
+        "remove": {
+          "receipt_files": true,
+          "matching_user_plugins": true
+        },
+        "kept_user_data": [
+          {
+            "path": "{resource}/reapack.ini",
+            "note_key": "uninstall-kept-reapack-settings"
+          },
+          {
+            "path": "{resource}/ReaPack",
+            "note_key": "uninstall-kept-reapack-data"
+          }
+        ],
+        "note_key": "uninstall-note-reapack-packages-stay"
       }
     ]
   },

@@ -36,9 +36,56 @@ package-langpack-es-description = Traduce la interfaz de REAPER al español, inc
 package-langpack-de-description = Traduce la interfaz de REAPER al alemán, incluida la extensión SWS. Mantenido por MrData y publicado en el Stash de REAPER: RABBIT descarga la versión actual y la instala como de_DE.ReaperLangPack. Después de instalarlo, selecciona el idioma en las preferencias de REAPER (o deja que RABBIT lo haga por ti).
 package-langpack-fr-description = Traduce la interfaz de REAPER al francés, incluida la extensión SWS. Mantenido por Lee Julien y Pierre-Marie Curt para ReaperAccessible, la comunidad francesa de usuarios de lectores de pantalla, y publicado en su repositorio de ReaPack: RABBIT descarga la versión actual y la instala como fr_CA.ReaperLangPack. OSARA lee ese nombre de archivo para elegir su propia traducción al francés: la fr_CA está casi completa, mientras que la fr_FR todavía deja alrededor de un tercio de los mensajes en inglés; el paquete en sí es el mismo francés estándar en ambos casos. Después de instalarlo, selecciona el idioma en las preferencias de REAPER (o deja que RABBIT lo haga por ti).
 
-# Notes named by the uninstall plans in the package manifests. Every package's
-# plan points here until RABBIT learns to uninstall it.
+# Text named by the uninstall plans in the package manifests.
+#
+# The note for a package RABBIT can't uninstall yet.
 uninstall-not-yet = RABBIT todavía no puede desinstalar este paquete.
+
+# The two sentences Review shows for a package about to be uninstalled: what
+# goes, and what stays. With "Also remove settings" ticked, another sentence
+# replaces the one about what stays.
+uninstall-summary-sws-removes = Elimina la extensión SWS.
+uninstall-summary-sws-keeps = Tus grooves y tu configuración de SWS, como tus acciones cíclicas, se conservan.
+uninstall-summary-reapack-removes = Elimina la extensión ReaPack.
+uninstall-summary-reapack-keeps = Tu configuración y tus repositorios de ReaPack se conservan, igual que la lista de lo que ReaPack instaló.
+uninstall-summary-reakontrol-removes = Elimina la extensión ReaKontrol.
+uninstall-summary-reakontrol-keeps = Tus mapas de FX se conservan, y RABBIT no toca tu software de Native Instruments.
+uninstall-summary-ffmpeg-removes = Elimina los archivos de FFmpeg que RABBIT instaló en UserPlugins. Después, REAPER ya no puede usar FFmpeg para abrir o renderizar archivos multimedia.
+uninstall-summary-ffmpeg-keeps = Los archivos de FFmpeg de los que RABBIT no tiene registro se conservan, como los que dejaron versiones anteriores.
+uninstall-summary-app2clap-removes = Elimina app2clap de tu carpeta CLAP. Lo pierden todos los programas en los que usas plugins CLAP, no solo REAPER.
+uninstall-summary-app2clap-keeps = La carpeta CLAP y los demás plugins que contiene se conservan.
+uninstall-summary-langpack-removes = Elimina el paquete de idioma que instaló RABBIT. Si REAPER lo usa, RABBIT vuelve a poner REAPER en inglés.
+uninstall-summary-langpack-keeps = Los paquetes de idioma que añadiste tú se conservan.
+
+# A short description of a file or folder that stays, shown next to its path,
+# for example "Data\Grooves (your grooves)". Start in lower case where the
+# language allows.
+uninstall-kept-sws-grooves = tus grooves
+uninstall-kept-sws-settings = configuración de SWS
+uninstall-kept-sws-cycle-actions = tus acciones cíclicas
+uninstall-kept-reapack-settings = configuración de ReaPack y tus repositorios
+uninstall-kept-reapack-data = la lista de lo que ReaPack instaló y su caché de descargas
+uninstall-kept-reakontrol-fx-maps = tus mapas de FX
+uninstall-kept-app2clap-clap-folder = la carpeta CLAP, que comparten otros plugins
+
+# Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
+uninstall-warning-sws-osara-keymap = Si usas el mapa de teclado de OSARA, algunos de sus atajos ejecutan acciones de SWS. Esos atajos dejan de funcionar hasta que vuelvas a instalar SWS.
+uninstall-warning-sws-reapack-scripts = Muchos scripts de REAPER, entre ellos scripts de accesibilidad, necesitan SWS. Los scripts que instalaste con ReaPack pueden dejar de funcionar.
+
+# A note on what stays behind after ReaPack is uninstalled.
+uninstall-note-reapack-packages-stay = Los scripts y extensiones que instalaste con ReaPack se conservan, pero ya nada los mantiene al día.
+
+# How to remove a package by hand where RABBIT doesn't, shown line by line.
+# Keep file names, folder paths and %APPDATA% exactly as they are.
+uninstall-manual-jaws-scripts = RABBIT todavía no puede quitar los scripts de JAWS. Para quitarlos a mano:
+    1. Cierra REAPER.
+    2. Borra Reaper_ComAccess32.dll y Reaper_ComAccess64.dll de %APPDATA%\REAPER\UserPlugins.
+    Los archivos de los scripts se quedan en la carpeta de configuración de JAWS, %APPDATA%\Freedom Scientific\JAWS. Algunos guardan tus propios cambios, como tus asignaciones de teclas.
+uninstall-manual-reaper-portable = RABBIT no quita un REAPER portable: los archivos de REAPER y los tuyos comparten su carpeta. Para quitarlo a mano:
+    1. Cierra REAPER.
+    2. Copia fuera de la carpeta del REAPER portable todo lo que quieras conservar, como los proyectos que guardaste allí, tus mapas de teclado y tu configuración.
+    3. Borra la carpeta del REAPER portable.
+    Las copias de seguridad que RABBIT hizo para este REAPER también están en esa carpeta, en RABBIT\backups, y se borran con ella.
 
 # $reason is one of the localized "wizard-package-row-unavailable-*" strings
 # explaining *why* the row is unavailable. Appended to the row's main summary

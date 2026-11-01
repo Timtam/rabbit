@@ -4,8 +4,8 @@
 //! Facts about a package live in its manifest, and that includes how it comes
 //! off again: which files are RABBIT's to remove, what always stays, whether a
 //! vendor uninstaller does the work, or why RABBIT can't do it at all. One
-//! generic engine will carry these plans out. Nothing runs them yet, and until
-//! a package's turn comes its plans say `not_supported`.
+//! generic engine carries these plans out, in [`crate::uninstall`]. Packages
+//! whose turn hasn't come yet say `not_supported`.
 //!
 //! The rules here run from [`super::validate_package_spec`] when the embedded
 //! manifest is loaded, like the rest of the manifest's validation, so a plan

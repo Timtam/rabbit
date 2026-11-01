@@ -19,7 +19,7 @@ use super::{
 use crate::cancel::CancelToken;
 use crate::hash::sha256_file;
 use crate::model::{ComponentDetection, InstallationKind, Platform};
-use crate::package::PackageSpec;
+use crate::package::{PACKAGE_SWS, PackageSpec, builtin_package_specs};
 use crate::preflight::RunningProcess;
 use crate::progress::{ProgressEvent, ProgressReporter};
 use crate::receipt::{
@@ -963,4 +963,56 @@ fn settings_move_into_the_set_only_when_asked() {
     assert_eq!(demo.kept.len(), 1);
     assert_eq!(demo.kept[0].reason, KeptFileReason::HoldsLink);
     assert!(preset.is_file() && outside.is_file());
+}
+
+/// The shipped plans carried out, not only planned: SWS and the German
+/// language pack come off, the grooves, the settings and a pack placed by
+/// hand stay, REAPER goes back to no language pack, and both packages are
+/// remembered as removed.
+#[test]
+fn the_shipped_plans_for_sws_and_a_language_pack_carry_out() {
+    let fixture = Fixture::new();
+    let plugin = fixture.file("UserPlugins/reaper_sws-x64.dll");
+    let bridge = fixture.file("Scripts/sws_python.py");
+    let bridge64 = fixture.file("Scripts/sws_python64.py");
+    let groove = fixture.file("Data/Grooves/Swing.rgt");
+    let settings = fixture.file("S&M.ini");
+    let pack = fixture.file("LangPack/de_DE.ReaperLangPack");
+    let by_hand = fixture.file("LangPack/Deutsch.ReaperLangPack");
+    let ini = write(
+        &fixture.resource.join("reaper.ini"),
+        b"[REAPER]\r\nlangpack=de_DE.ReaperLangPack\r\n",
+    );
+    save_receipt(
+        &fixture,
+        &[
+            (
+                PACKAGE_SWS,
+                &["UserPlugins/reaper_sws-x64.dll", "Scripts/sws_python.py"],
+            ),
+            ("langpack-de", &["LangPack/de_DE.ReaperLangPack"]),
+        ],
+    );
+    let ids = [PACKAGE_SWS, "langpack-de"];
+    let harness = Harness::new(&fixture, builtin_package_specs(Platform::Windows), &ids);
+
+    let report = harness.apply(&ids);
+
+    for id in ids {
+        let item = report.item(id).unwrap();
+        assert_eq!(item.status, UninstallStatus::Removed, "{}", item.message);
+        assert!(item.problems.is_empty(), "{:?}", item.problems);
+    }
+    assert!(!plugin.exists() && !bridge.exists() && !bridge64.exists() && !pack.exists());
+    assert!(groove.is_file() && settings.is_file() && by_hand.is_file());
+    assert_eq!(
+        fs::read_to_string(&ini).unwrap(),
+        "[REAPER]\r\nlangpack=<>\r\n"
+    );
+    let receipt = load_install_state(&fixture.resource).unwrap().unwrap();
+    for id in ids {
+        assert!(!receipt.packages.contains_key(id));
+        assert!(receipt.declined_packages.contains(id));
+    }
+    assert_eq!(manifest(&report).files.len(), 4);
 }

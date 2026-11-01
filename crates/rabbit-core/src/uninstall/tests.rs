@@ -1117,8 +1117,9 @@ fn packages_without_a_dependency_between_them_keep_manifest_order() {
 }
 
 /// Every shipped manifest plans on both platforms and both targets without
-/// tripping over anything. Until a package's turn comes, an installed one
-/// says it can't be uninstalled yet.
+/// tripping over anything. With nothing on disk, a package whose plan
+/// removes files is removable unless it needs a receipt; every other
+/// installed package says why RABBIT won't remove it.
 #[test]
 fn every_shipped_manifest_plans() {
     let fixture = Fixture::new();
@@ -1154,8 +1155,19 @@ fn every_shipped_manifest_plans() {
                 remove_settings: true,
             });
             for (item, spec) in everything.items.iter().zip(&specs) {
+                let removes_files = spec
+                    .uninstall
+                    .plan_for(platform, target)
+                    .is_some_and(|plan| plan.strategy == UninstallStrategy::RemoveFiles);
                 if spec.requires_standard_install && target == InstallationKind::Portable {
                     assert_eq!(item.removability, Removability::NeedsStandardTarget);
+                } else if removes_files && !spec.uninstall.requires_receipt {
+                    assert!(
+                        item.removability.is_removable(),
+                        "{}: {:?}",
+                        item.package_id,
+                        item.removability
+                    );
                 } else {
                     assert!(
                         item.removability.is_blocked(),

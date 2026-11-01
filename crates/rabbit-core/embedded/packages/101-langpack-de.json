@@ -37,10 +37,22 @@
     "copy_user_plugin_binary"
   ],
   "uninstall": {
+    "requires_receipt": true,
     "plans": [
       {
-        "strategy": "not_supported",
-        "note_key": "uninstall-not-yet"
+        "strategy": "remove_files",
+        "summary": {
+          "removes_key": "uninstall-summary-langpack-removes",
+          "keeps_key": "uninstall-summary-langpack-keeps"
+        },
+        "remove": {
+          "receipt_files": true
+        },
+        "post": [
+          {
+            "reset_reaper_langpack_if_selected": {}
+          }
+        ]
       }
     ]
   },

@@ -35,8 +35,9 @@
   "uninstall": {
     "plans": [
       {
-        "strategy": "not_supported",
-        "note_key": "uninstall-not-yet"
+        "platform": "windows",
+        "strategy": "manual",
+        "note_key": "uninstall-manual-jaws-scripts"
       }
     ]
   },
