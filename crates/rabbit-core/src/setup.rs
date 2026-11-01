@@ -18,6 +18,7 @@ use crate::operation::{
 };
 use crate::package::PACKAGE_REAPER;
 use crate::progress::{ProgressEvent, ProgressReporter};
+use crate::receipt::record_applied_configuration;
 use crate::resource::{ResourceInitOptions, ResourceInitReport, initialize_resource_path};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,12 +368,15 @@ fn run_configuration_steps(
         progress.report(ProgressEvent::ConfigurationStarted {
             step_id: step.id.clone(),
         });
-        reports.push(apply_configuration_step(
-            resource_path,
-            step,
-            context,
-            dry_run,
-        )?);
+        let report = apply_configuration_step(resource_path, step, context, dry_run)?;
+        // Remember what the step did, so a later uninstall can undo exactly
+        // that. Saved after each step rather than once at the end, so a step
+        // that fails later can't lose the record of one that already changed
+        // REAPER's files. A dry run records nothing.
+        if let Some(applied) = &report.applied_configuration {
+            record_applied_configuration(resource_path, &step.id, applied.clone())?;
+        }
+        reports.push(report);
         progress.report(ProgressEvent::ConfigurationCompleted {
             step_id: step.id.clone(),
         });
@@ -617,6 +621,54 @@ mod tests {
                 .unwrap()
                 .verification_paths,
             vec![app_path]
+        );
+    }
+
+    /// The steps that ran are remembered in the receipt, so a later
+    /// uninstall knows what RABBIT changed. A later run that finds the
+    /// repository already there keeps the record that RABBIT added it.
+    #[test]
+    fn configuration_steps_that_ran_are_recorded_in_the_receipt() {
+        use super::run_configuration_steps;
+        use crate::cancel::CancelToken;
+        use crate::configuration::CONFIG_REAPER_ACCESSIBILITY_REPACK_REMOTE;
+        use crate::progress::ProgressReporter;
+        use crate::receipt::{AppliedConfigurationOutcome, load_install_state};
+        use std::collections::BTreeSet;
+
+        let dir = tempdir().unwrap();
+        let selected = vec![CONFIG_REAPER_ACCESSIBILITY_REPACK_REMOTE.to_string()];
+        let reapack: BTreeSet<String> = [PACKAGE_REAPACK.to_string()].into();
+        let run = |dry_run| {
+            run_configuration_steps(
+                dir.path(),
+                &selected,
+                &reapack,
+                &Default::default(),
+                dry_run,
+                &ProgressReporter::noop(),
+                &CancelToken::new(),
+            )
+            .unwrap()
+        };
+
+        run(true);
+        assert!(
+            load_install_state(dir.path()).unwrap().is_none(),
+            "a dry run records nothing"
+        );
+
+        run(false);
+        run(false);
+        let state = load_install_state(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            state.applied_configuration.keys().collect::<Vec<_>>(),
+            vec![CONFIG_REAPER_ACCESSIBILITY_REPACK_REMOTE],
+            "only the step that ran is recorded"
+        );
+        assert_eq!(
+            state.applied_configuration[CONFIG_REAPER_ACCESSIBILITY_REPACK_REMOTE].outcome,
+            AppliedConfigurationOutcome::Added
         );
     }
 

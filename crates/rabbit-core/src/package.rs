@@ -1570,6 +1570,7 @@ mod tests {
                 installed_at: None,
                 rabbit_version: None,
                 architecture: None,
+                keymap_backup_id: None,
             },
         );
         save_install_state(resource, &state).unwrap();
@@ -2236,6 +2237,7 @@ mod tests {
             installed_at: None,
             rabbit_version: None,
             architecture: None,
+            keymap_backup_id: None,
         };
         let save = |channel: &str| {
             let mut packages = std::collections::BTreeMap::new();
@@ -2246,6 +2248,8 @@ mod tests {
                     schema_version: 1,
                     packages,
                     declined_packages: Default::default(),
+                    removed_packages: Default::default(),
+                    applied_configuration: Default::default(),
                 },
             )
             .unwrap();

@@ -718,6 +718,15 @@ architecture. This is authoritative only for files RABBIT installed. If the user
 later changes files manually, RABBIT should show that the receipt and disk state
 do not match.
 
+The receipt also records what a later uninstall needs in order to undo only
+RABBIT's own changes: the packages the user removed through RABBIT
+(`removed_packages`), what each configuration step found or changed
+(`applied_configuration`: the ReaPack repository and whether RABBIT added it,
+or the `langpack=` value the language step replaced), and, on OSARA's entry,
+the backup set holding the key map from before OSARA's first install
+(`keymap_backup_id`, never set by an update). All of these are optional and
+left out when empty, so older RABBIT versions still read the file.
+
 ## Package Model
 
 Use a manifest-driven package system so future packages can be added without

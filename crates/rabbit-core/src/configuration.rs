@@ -18,7 +18,10 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 use crate::package::{PACKAGE_REAPACK, PackageKind, embedded_package_manifest};
 use crate::reapack::{RemoteUpsertOutcome, is_remote_configured, upsert_remote};
-use crate::reaper_ini::{LangPackSelectionOutcome, select_lang_pack, selected_lang_pack};
+use crate::reaper_ini::{
+    LangPackSelectionOutcome, lang_pack_setting, select_lang_pack, selected_lang_pack,
+};
+use crate::receipt::{AppliedConfiguration, AppliedConfigurationOutcome, ReapackRepository};
 
 /// Stable id for the "configure REAPER Accessibility ReaPack remote"
 /// step. Used by callers (CLI, wizard) to identify the step across
@@ -143,6 +146,12 @@ pub struct ConfigurationStepReport {
     pub message: String,
     #[serde(default)]
     pub message_code: ConfigurationMessage,
+    /// What the step found or changed, for the receipt's
+    /// [`InstallState::applied_configuration`](crate::receipt::InstallState::applied_configuration).
+    /// Set only when the step ran for real: never for a dry run or a step
+    /// that was skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_configuration: Option<AppliedConfiguration>,
 }
 
 /// Structured message variants for [`ConfigurationStepReport`]. The
@@ -370,12 +379,26 @@ pub fn apply_configuration_step(
             status: ConfigurationStatus::DryRun,
             message,
             message_code,
+            applied_configuration: None,
         });
     }
 
     match &step.kind {
         ConfigurationStepKind::AddReapackRemote { name, url } => {
             let outcome = upsert_remote(resource_path, name, url)?;
+            let applied_configuration = AppliedConfiguration {
+                outcome: if outcome == RemoteUpsertOutcome::AlreadyPresent {
+                    AppliedConfigurationOutcome::AlreadyPresent
+                } else {
+                    AppliedConfigurationOutcome::Added
+                },
+                reapack_repository: Some(ReapackRepository {
+                    name: name.clone(),
+                    url: url.clone(),
+                }),
+                langpack: None,
+                langpack_before: None,
+            };
             let (message, message_code) = match outcome {
                 RemoteUpsertOutcome::AlreadyPresent => (
                     format!(
@@ -408,6 +431,7 @@ pub fn apply_configuration_step(
                 status: ConfigurationStatus::Applied,
                 message,
                 message_code,
+                applied_configuration: Some(applied_configuration),
             })
         }
         ConfigurationStepKind::SetReaperLanguage => {
@@ -427,10 +451,25 @@ pub fn apply_configuration_step(
                         step_id: step.id.clone(),
                         dep_id: step.requires_packages.join(", "),
                     },
+                    applied_configuration: None,
                 });
             };
             let file_name = &file_name;
+            // Read before the switch, exactly as written, so a later
+            // uninstall can put back the language REAPER had.
+            let langpack_before = lang_pack_setting(resource_path)?;
             let outcome = select_lang_pack(resource_path, file_name)?;
+            let changed = outcome != LangPackSelectionOutcome::AlreadySelected;
+            let applied_configuration = AppliedConfiguration {
+                outcome: if changed {
+                    AppliedConfigurationOutcome::Added
+                } else {
+                    AppliedConfigurationOutcome::AlreadyPresent
+                },
+                reapack_repository: None,
+                langpack: Some(file_name.clone()),
+                langpack_before: langpack_before.filter(|_| changed),
+            };
             let (message, message_code) = match outcome {
                 LangPackSelectionOutcome::AlreadySelected => (
                     format!("REAPER is already set to use {file_name}."),
@@ -452,6 +491,7 @@ pub fn apply_configuration_step(
                 status: ConfigurationStatus::Applied,
                 message,
                 message_code,
+                applied_configuration: Some(applied_configuration),
             })
         }
     }
@@ -531,6 +571,7 @@ pub fn skipped_step_report(
         status,
         message,
         message_code,
+        applied_configuration: None,
     }
 }
 
@@ -711,5 +752,115 @@ mod tests {
         // already-configured state so reports stay accurate.
         assert_eq!(second.status, ConfigurationStatus::Applied);
         assert!(second.message.contains("already configured"));
+    }
+
+    /// The repository step says which repository it is about and whether
+    /// RABBIT added it, for the receipt.
+    #[test]
+    fn the_repository_step_records_whether_rabbit_added_it() {
+        let dir = tempdir().unwrap();
+        let steps = builtin_configuration_steps();
+        let step = steps
+            .iter()
+            .find(|s| s.id == CONFIG_REAPER_ACCESSIBILITY_REPACK_REMOTE)
+            .unwrap();
+        let repository = Some(ReapackRepository {
+            name: REAPER_ACCESSIBILITY_REPACK_NAME.to_string(),
+            url: REAPER_ACCESSIBILITY_REPACK_URL.to_string(),
+        });
+
+        let first = apply_configuration_step(dir.path(), step, &Default::default(), false).unwrap();
+        let first = first.applied_configuration.unwrap();
+        assert_eq!(first.outcome, AppliedConfigurationOutcome::Added);
+        assert_eq!(first.reapack_repository, repository);
+        assert_eq!(first.langpack_before, None);
+
+        let second =
+            apply_configuration_step(dir.path(), step, &Default::default(), false).unwrap();
+        let second = second.applied_configuration.unwrap();
+        assert_eq!(second.outcome, AppliedConfigurationOutcome::AlreadyPresent);
+        assert_eq!(second.reapack_repository, repository);
+
+        // A dry run changes nothing, so it has nothing to record.
+        let dry = apply_configuration_step(dir.path(), step, &Default::default(), true).unwrap();
+        assert_eq!(dry.applied_configuration, None);
+    }
+
+    /// A language pack receipt for `langpack-de`, so the language step has a
+    /// file to select.
+    fn language_pack_receipt(resource_path: &Path) {
+        let mut state = crate::receipt::InstallState::default();
+        state.packages.insert(
+            "langpack-de".to_string(),
+            crate::receipt::PackageReceipt {
+                id: "langpack-de".to_string(),
+                version: None,
+                source_url: None,
+                source_sha256: None,
+                variant: None,
+                channel: None,
+                installed_files: vec![crate::receipt::InstalledFileReceipt {
+                    path: std::path::PathBuf::from("LangPack").join("DE_(+SWS).ReaperLangPack"),
+                    sha256: None,
+                    size: None,
+                }],
+                installed_at: None,
+                rabbit_version: None,
+                architecture: None,
+                keymap_backup_id: None,
+            },
+        );
+        crate::receipt::save_install_state(resource_path, &state).unwrap();
+    }
+
+    /// The language step records the `langpack=` value it replaced, exactly
+    /// as it was, so a later uninstall can put REAPER's language back.
+    #[test]
+    fn the_language_step_records_the_value_it_replaced() {
+        let dir = tempdir().unwrap();
+        language_pack_receipt(dir.path());
+        std::fs::write(dir.path().join("reaper.ini"), "[REAPER]\r\nlangpack=<>\r\n").unwrap();
+        let step = lang_pack_steps().pop().unwrap();
+        let context = ConfigurationContext {
+            reaper_language_package: Some("langpack-de"),
+        };
+
+        let first = apply_configuration_step(dir.path(), &step, &context, false).unwrap();
+        assert_eq!(
+            first.applied_configuration,
+            Some(AppliedConfiguration {
+                outcome: AppliedConfigurationOutcome::Added,
+                reapack_repository: None,
+                langpack: Some("DE_(+SWS).ReaperLangPack".to_string()),
+                langpack_before: Some("<>".to_string()),
+            })
+        );
+
+        // Already selected: nothing changed, so there is no earlier value.
+        let second = apply_configuration_step(dir.path(), &step, &context, false).unwrap();
+        let second = second.applied_configuration.unwrap();
+        assert_eq!(second.outcome, AppliedConfigurationOutcome::AlreadyPresent);
+        assert_eq!(second.langpack_before, None);
+    }
+
+    /// No `reaper.ini` (or no `langpack=` line) before: the record says
+    /// RABBIT set the language, with no earlier value.
+    #[test]
+    fn the_language_step_records_no_earlier_value_when_there_was_none() {
+        let dir = tempdir().unwrap();
+        language_pack_receipt(dir.path());
+        let step = lang_pack_steps().pop().unwrap();
+        let context = ConfigurationContext {
+            reaper_language_package: Some("langpack-de"),
+        };
+
+        let report = apply_configuration_step(dir.path(), &step, &context, false).unwrap();
+        let applied = report.applied_configuration.unwrap();
+        assert_eq!(applied.outcome, AppliedConfigurationOutcome::Added);
+        assert_eq!(
+            applied.langpack.as_deref(),
+            Some("DE_(+SWS).ReaperLangPack")
+        );
+        assert_eq!(applied.langpack_before, None);
     }
 }

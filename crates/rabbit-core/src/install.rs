@@ -253,6 +253,7 @@ pub fn install_cached_artifacts_with_progress(
                     installed_paths: &artifact_target_paths,
                     installed_at: Some(install_timestamp()),
                     architecture: Some(artifact.descriptor.architecture),
+                    keymap_backup_id: None,
                 },
             )?;
             remove_superseded_own_files(&previous_paths, &artifact_target_paths);
@@ -743,6 +744,7 @@ mod tests {
                 installed_at: None,
                 rabbit_version: None,
                 architecture: None,
+                keymap_backup_id: None,
             },
         );
 
@@ -913,6 +915,7 @@ mod tests {
                 installed_at: Some("unix-old".to_string()),
                 rabbit_version: Some("0.1.0".to_string()),
                 architecture: Some(Architecture::X64),
+                keymap_backup_id: None,
             },
         );
         save_install_state(
@@ -921,6 +924,8 @@ mod tests {
                 schema_version: 1,
                 packages,
                 declined_packages: Default::default(),
+                removed_packages: Default::default(),
+                applied_configuration: Default::default(),
             },
         )
         .unwrap();
@@ -1245,6 +1250,7 @@ mod tests {
                 installed_at: None,
                 rabbit_version: None,
                 architecture: None,
+                keymap_backup_id: None,
             },
         );
         save_install_state(dir.path(), &state).unwrap();

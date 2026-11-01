@@ -88,8 +88,30 @@ pub fn selected_lang_pack(resource_path: &Path) -> Result<Option<String>> {
     Ok(current_lang_pack(&decoded.text))
 }
 
+/// The `langpack=` value under `[REAPER]` exactly as written, `<>` and an
+/// empty value included. `None` when the file or the line is missing.
+///
+/// [`selected_lang_pack`] answers "which pack is active", where `<>` and no
+/// line at all both mean none. This keeps the difference, so the value can
+/// be recorded and later put back as it was.
+pub fn lang_pack_setting(resource_path: &Path) -> Result<Option<String>> {
+    let ini_path = resource_path.join(REAPER_INI_RELATIVE_PATH);
+    if !ini_path.is_file() {
+        return Ok(None);
+    }
+    let decoded = read_text_file_lossless(&ini_path)?;
+    Ok(raw_lang_pack(&decoded.text).map(str::to_string))
+}
+
 /// Pure form of [`selected_lang_pack`], over already-decoded text.
 fn current_lang_pack(text: &str) -> Option<String> {
+    raw_lang_pack(text)
+        .filter(|value| !value.is_empty() && *value != LANGPACK_NONE)
+        .map(str::to_string)
+}
+
+/// The first `langpack=` value under `[REAPER]`, as written.
+fn raw_lang_pack(text: &str) -> Option<&str> {
     let mut in_reaper_section = false;
     for line in text.lines() {
         let trimmed = line.trim();
@@ -101,11 +123,7 @@ fn current_lang_pack(text: &str) -> Option<String> {
             continue;
         }
         if let Some(value) = lang_pack_value(trimmed) {
-            return if value.is_empty() || value == LANGPACK_NONE {
-                None
-            } else {
-                Some(value.to_string())
-            };
+            return Some(value);
         }
     }
     None
@@ -260,6 +278,29 @@ mod tests {
         assert_eq!(current_lang_pack("[REAPER]\r\nother=1\r\n"), None);
         // A langpack key outside [REAPER] must not be read as the selection.
         assert_eq!(current_lang_pack("[other]\r\nlangpack=nope\r\n"), None);
+    }
+
+    /// The setting as written keeps what `selected_lang_pack` folds into
+    /// "none": REAPER's `<>` and a missing line are different things to put
+    /// back.
+    #[test]
+    fn reads_the_setting_exactly_as_written() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path();
+        let ini = resource.join(REAPER_INI_RELATIVE_PATH);
+        assert_eq!(lang_pack_setting(resource).unwrap(), None, "no reaper.ini");
+
+        std::fs::write(&ini, "[REAPER]\r\nlangpack=<>\r\n").unwrap();
+        assert_eq!(lang_pack_setting(resource).unwrap().as_deref(), Some("<>"));
+
+        std::fs::write(&ini, "[REAPER]\r\nlangpack=DE_(+SWS).ReaperLangPack\r\n").unwrap();
+        assert_eq!(
+            lang_pack_setting(resource).unwrap().as_deref(),
+            Some("DE_(+SWS).ReaperLangPack")
+        );
+
+        std::fs::write(&ini, "[other]\r\nlangpack=nope\r\n[REAPER]\r\nother=1\r\n").unwrap();
+        assert_eq!(lang_pack_setting(resource).unwrap(), None, "no line");
     }
 
     #[test]
