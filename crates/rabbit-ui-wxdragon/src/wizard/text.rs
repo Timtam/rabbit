@@ -49,7 +49,6 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         uninstall_empty: localizer.text("wizard-uninstall-empty").value,
         uninstall_empty_details: localizer.text("wizard-uninstall-empty-details").value,
         uninstall_not_ready_title: localizer.text("wizard-uninstall-not-ready-title").value,
-        uninstall_not_ready_body: localizer.text("wizard-uninstall-not-ready-body").value,
         packages_row_checked: localizer.text("wizard-packages-row-checked").value,
         packages_row_unchecked: localizer.text("wizard-packages-row-unchecked").value,
         packages_tree_group_label: localizer.text("wizard-packages-tree-group-label").value,

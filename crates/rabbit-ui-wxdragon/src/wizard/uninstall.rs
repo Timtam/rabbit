@@ -392,3 +392,27 @@ fn removal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
     }
     lines.join("\n")
 }
+
+/// The command line the "can't uninstall from the wizard yet" dialog
+/// suggests, for the REAPER folder the wizard is on. `--resource-path` is
+/// required, so a command without it would fail as typed.
+pub fn uninstall_cli_example(resource_path: &std::path::Path) -> String {
+    format!(
+        "rabbit uninstall --resource-path \"{}\" --package sws",
+        resource_path.display()
+    )
+}
+
+/// The dialog's text, with the example command for `resource_path`.
+pub fn uninstall_not_ready_body(
+    localizer: &rabbit_core::localization::Localizer,
+    resource_path: &std::path::Path,
+) -> String {
+    let command = uninstall_cli_example(resource_path);
+    localizer
+        .format(
+            "wizard-uninstall-not-ready-body",
+            &[("command", command.as_str())],
+        )
+        .value
+}

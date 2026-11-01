@@ -18,7 +18,7 @@ use wxdragon::prelude::*;
 use crate::{WizardModel, WizardUninstallList};
 
 use crate::wx_app::PACKAGES_STEP;
-use crate::wx_app::globals::{AnnouncePriority, announce, show_information};
+use crate::wx_app::globals::{AnnouncePriority, announce, show_information, with_ui_localizer};
 use crate::wx_app::packages_page::{
     PackagesStateCell, PackagesView, UninstallStateCell, UninstallView, build_packages_page,
     build_uninstall_tab, focus_packages_list_top, reset_packages_list_caret,
@@ -142,11 +142,12 @@ pub(crate) fn uninstall_tab_selected(widgets: &WizardWidgets) -> bool {
 /// What Next does on the Uninstall tab while the wizard can't uninstall
 /// yet: say so, point to the command line, and stay on the page. Nothing is
 /// started, and focus goes back to Next when the message closes.
-pub(crate) fn show_uninstall_not_ready(model: &WizardModel) {
-    show_information(
-        &model.text.uninstall_not_ready_title,
-        &model.text.uninstall_not_ready_body,
-    );
+pub(crate) fn show_uninstall_not_ready(model: &WizardModel, resource_path: &std::path::Path) {
+    let mut body = String::new();
+    with_ui_localizer(|localizer| {
+        body = crate::uninstall_not_ready_body(localizer, resource_path);
+    });
+    show_information(&model.text.uninstall_not_ready_title, &body);
 }
 
 /// Land on the Packages page after the version check, once it is the page

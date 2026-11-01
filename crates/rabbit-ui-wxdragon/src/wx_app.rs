@@ -392,7 +392,10 @@ pub fn run() {
                         // the wizard isn't built yet: say so and stay, rather
                         // than start anything.
                         if uninstall_tab_selected(&widgets) {
-                            show_uninstall_not_ready(&model);
+                            let resource_path = selected_target_row(&model, &widgets)
+                                .map(|target| target.path)
+                                .unwrap_or_default();
+                            show_uninstall_not_ready(&model, &resource_path);
                             return;
                         }
                         let selected_target = selected_target_row(&model, &widgets);

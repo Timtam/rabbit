@@ -226,7 +226,7 @@ wizard-uninstall-unreadable = RABBIT no pudo leer sus registros de este REAPER (
 # uninstall from the wizard yet. Keep "rabbit uninstall", "--package sws"
 # and "--apply" exactly as they are.
 wizard-uninstall-not-ready-title = Desinstalar desde el asistente todavía no está listo
-wizard-uninstall-not-ready-body = Esta versión de prueba de RABBIT todavía no puede desinstalar desde el asistente, así que no se ha cambiado nada. Para desinstalar ahora, cierra RABBIT y usa rabbit uninstall en la línea de comandos: por ejemplo, rabbit uninstall --package sws muestra lo que se quitaría, y al añadir --apply se quita.
+wizard-uninstall-not-ready-body = Esta versión de prueba de RABBIT todavía no puede desinstalar desde el asistente, así que no se ha cambiado nada. Para desinstalar ahora, cierra RABBIT y usa rabbit uninstall en la línea de comandos: por ejemplo, { $command } muestra lo que se quitaría, y al añadir --apply se quita.
 
 # $package is the localized package name the configuration step depends on.
 wizard-configuration-row-unavailable = No está disponible: Se requiere instalar { $package }.

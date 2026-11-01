@@ -90,7 +90,6 @@ pub struct WizardText {
     pub uninstall_empty_details: String,
     /// What Next on the Uninstall tab says while the wizard can't uninstall.
     pub uninstall_not_ready_title: String,
-    pub uninstall_not_ready_body: String,
     pub packages_row_checked: String,
     pub packages_row_unchecked: String,
     pub packages_tree_group_label: String,

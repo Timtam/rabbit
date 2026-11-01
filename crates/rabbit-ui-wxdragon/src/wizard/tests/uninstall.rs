@@ -480,7 +480,6 @@ fn rows_build_in_every_locale_without_missing_text() {
             &text.uninstall_empty,
             &text.uninstall_empty_details,
             &text.uninstall_not_ready_title,
-            &text.uninstall_not_ready_body,
         ] {
             assert!(
                 !label.is_empty() && !label.starts_with("wizard-"),
@@ -503,9 +502,18 @@ fn the_wizard_plan_hands_over_its_detections() {
     let plan = wizard_package_plan_for_target_with_available(&model, Some(&target), &[]).unwrap();
 
     // Packages that serve the whole computer are detected outside the
-    // target, so only the shape is checked: one detection per package.
+    // target, so only the shape is checked: one detection per package. A
+    // missing one would drop that package from the Uninstall tab.
     let specs = builtin_package_specs(model.platform);
-    assert!(!plan.detections.is_empty());
+    let mut detected: Vec<_> = plan
+        .detections
+        .iter()
+        .map(|detection| detection.package_id.as_str())
+        .collect();
+    detected.sort_unstable();
+    let mut expected: Vec<_> = specs.iter().map(|spec| spec.id.as_str()).collect();
+    expected.sort_unstable();
+    assert_eq!(detected, expected);
     assert!(
         plan.detections
             .iter()
@@ -517,4 +525,20 @@ fn the_wizard_plan_hands_over_its_detections() {
             .filter(|detection| detection.package_id == "langpack-de")
             .all(|detection| !detection.installed)
     );
+}
+
+/// The dialog's example must run as typed: `--resource-path` is required.
+#[test]
+fn the_not_ready_dialog_names_a_command_that_runs() {
+    let resource = std::path::Path::new(r"C:\Users\Test\AppData\Roaming\REAPER");
+    for locale in ["en-US", "de-DE", "es-ES", "fr-FR", "it-IT"] {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let body = uninstall_not_ready_body(&localizer, resource);
+        assert!(
+            body.contains(r#"rabbit uninstall --resource-path "C:\Users\Test\AppData\Roaming\REAPER" --package sws"#),
+            "{locale}: {body}"
+        );
+        assert!(body.contains("--apply"), "{locale}: {body}");
+        assert!(!body.contains('{'), "{locale}: {body}");
+    }
 }

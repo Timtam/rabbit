@@ -223,10 +223,12 @@ wizard-uninstall-empty-details = None of the software RABBIT knows how to uninst
 # be read. $error is the error message.
 wizard-uninstall-unreadable = RABBIT couldn't read its records for this REAPER ({ $error }), so it can't list what it could uninstall.
 # Shown when Next is pressed on the Uninstall tab of a build that can't
-# uninstall from the wizard yet. Keep "rabbit uninstall", "--package sws"
-# and "--apply" exactly as they are.
+# uninstall from the wizard yet. Keep "rabbit uninstall" and "--apply"
+# exactly as they are. $command is a complete example command for the
+# REAPER folder the wizard is on, e.g.
+# rabbit uninstall --resource-path "C:\Users\...\REAPER" --package sws
 wizard-uninstall-not-ready-title = Uninstalling from the wizard isn't ready yet
-wizard-uninstall-not-ready-body = This test build of RABBIT can't uninstall from the wizard yet, so nothing was changed. To uninstall now, close RABBIT and use rabbit uninstall on the command line: for example, rabbit uninstall --package sws shows what would go, and adding --apply removes it.
+wizard-uninstall-not-ready-body = This test build of RABBIT can't uninstall from the wizard yet, so nothing was changed. To uninstall now, close RABBIT and use rabbit uninstall on the command line: for example, { $command } shows what would go, and adding --apply removes it.
 
 # $package is the localized package name the configuration step depends on.
 wizard-configuration-row-unavailable = Unavailable: requires { $package } to be installed.
