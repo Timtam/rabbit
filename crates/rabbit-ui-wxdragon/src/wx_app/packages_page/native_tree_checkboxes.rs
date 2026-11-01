@@ -338,6 +338,19 @@ pub fn set_check_state(hwnd: *mut c_void, item: &TreeItemId, checked: bool) {
 /// given tree item. Used both for leaf rows (only `Checked` /
 /// `Unchecked`) and the synthetic Packages group (any of the three).
 pub fn set_check_state_tri(hwnd: *mut c_void, item: &TreeItemId, state: TriState) {
+    set_state_image_index(hwnd, item, state.state_image_index());
+}
+
+/// Take the checkbox off a row: state image index 0 means "no state image",
+/// so the row draws no box, and the accessibility layer reports neither
+/// checked nor unchecked. For rows that are headings or notes rather than
+/// choices, such as the Uninstall list's groups: a heading with a box
+/// would take one Space to tick every row below it.
+pub fn clear_check_state(hwnd: *mut c_void, item: &TreeItemId) {
+    set_state_image_index(hwnd, item, 0);
+}
+
+fn set_state_image_index(hwnd: *mut c_void, item: &TreeItemId, index: u32) {
     if hwnd.is_null() {
         return;
     }
@@ -345,7 +358,7 @@ pub fn set_check_state_tri(hwnd: *mut c_void, item: &TreeItemId, state: TriState
     if h_item.is_null() {
         return;
     }
-    let state_value = state.state_image_index() << 12;
+    let state_value = index << 12;
     let mut tvi = Tvitemw {
         mask: TVIF_STATE | TVIF_HANDLE,
         h_item,

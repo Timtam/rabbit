@@ -279,6 +279,7 @@ pub fn wizard_package_plan_for_target_with_available(
         package_rows,
         notes: plan.notes,
         can_install,
+        detections,
     })
 }
 
@@ -297,6 +298,7 @@ fn mark_row_unavailable(localizer: &Localizer, row: &mut PackageRow, reason_key:
     let reason = localizer.text(reason_key).value;
     row.available_for_target = false;
     row.selected = false;
+    row.default_selected = false;
     row.action = PlanActionKind::Keep;
     row.action_label = action_label(localizer, PlanActionKind::Keep);
     let summary = package_row_summary(localizer, row);
@@ -633,6 +635,7 @@ pub(crate) fn package_rows(
                 display_name: display_name.clone(),
                 description: description.clone(),
                 selected: initially_selected,
+                default_selected: initially_selected,
                 installed_version,
                 available_version,
                 action: initial_action,

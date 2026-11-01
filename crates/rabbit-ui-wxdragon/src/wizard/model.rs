@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use rabbit_core::localization::DEFAULT_LOCALE;
-use rabbit_core::model::{Architecture, Platform};
+use rabbit_core::model::{Architecture, ComponentDetection, Platform};
 use rabbit_core::plan::{AvailablePackage, PlanActionKind};
 use rabbit_core::setup::SetupReport;
 use rabbit_core::version::Version;
@@ -78,7 +78,21 @@ pub struct WizardText {
     pub target_custom_portable_writable_label: String,
     pub target_custom_portable_note: String,
     pub packages_heading: String,
+    /// The Packages page's two tabs.
+    pub packages_tab_install: String,
+    pub packages_tab_uninstall: String,
     pub packages_list_label: String,
+    /// The label right before the Uninstall tab's list, naming the tab.
+    pub uninstall_list_label: String,
+    /// The one row, without a checkbox, of an empty Uninstall list, and its
+    /// details text.
+    pub uninstall_empty: String,
+    pub uninstall_empty_details: String,
+    /// The "Also remove settings" option on the Uninstall tab: its heading
+    /// and the checkbox's label. The note below it depends on the ticks, so
+    /// it is built as they change.
+    pub uninstall_settings_heading: String,
+    pub uninstall_remove_settings_label: String,
     pub packages_row_checked: String,
     pub packages_row_unchecked: String,
     pub packages_tree_group_label: String,
@@ -115,6 +129,12 @@ pub struct WizardText {
     pub package_handling_manual: String,
     pub package_handling_unavailable: String,
     pub review_heading: String,
+    /// Review's heading in uninstall mode, so the mode is the first thing
+    /// read.
+    pub review_uninstall_heading: String,
+    /// The title of the question asked before an uninstall a backup can't
+    /// undo.
+    pub confirm_uninstall_title: String,
     pub review_target_prefix: String,
     pub review_package_heading: String,
     pub review_osara_keymap_heading: String,
@@ -137,6 +157,12 @@ pub struct WizardText {
     pub progress_details_idle: String,
     pub progress_details_starting: String,
     pub progress_details_cache_prefix: String,
+    /// The progress page's heading and first status line while an
+    /// uninstall runs, and what the status line says once the user asked
+    /// to stop one: a removal stops after the package, not the step.
+    pub progress_uninstall_heading: String,
+    pub progress_status_uninstall_running: String,
+    pub progress_status_uninstall_cancelling: String,
     pub done_heading: String,
     pub done_status: String,
     pub done_status_success: String,
@@ -145,6 +171,9 @@ pub struct WizardText {
     pub reaper_running_title: String,
     pub reaper_running_body: String,
     pub error_reaper_running: String,
+    /// Why a run failed when another RABBIT holds the target's install
+    /// lock, installing or uninstalling there.
+    pub error_lock_held: String,
     pub done_status_cancelled: String,
     pub done_status_no_packages: String,
     pub done_show_details_label: String,
@@ -159,6 +188,9 @@ pub struct WizardText {
     pub self_update_status_checking: String,
     pub close_during_install_title: String,
     pub close_during_install_body: String,
+    /// The same question while an uninstall runs.
+    pub close_during_uninstall_title: String,
+    pub close_during_uninstall_body: String,
     pub close_during_self_update_title: String,
     pub close_during_self_update_body: String,
     pub expert_enable_title: String,
@@ -221,6 +253,11 @@ pub struct PackageRow {
     pub display_name: String,
     pub description: String,
     pub selected: bool,
+    /// The tick RABBIT gave the row before the user saw it: updates and
+    /// recommended packages start ticked. `selected` differing from it is
+    /// the user's doing, which is what Review's note about ticks an
+    /// uninstall leaves out names; see `install_tab_ticks_left_out`.
+    pub default_selected: bool,
     pub summary: String,
     pub details: String,
     pub installed_version: String,
@@ -278,6 +315,11 @@ pub struct ConfigurationRow {
     /// the step's `recommended` flag intersected with the row's
     /// `available_for_target`.
     pub selected: bool,
+    /// The tick the row had when the Install or update tab opened, as
+    /// [`PackageRow::default_selected`]. These rows outlive a version
+    /// check, which ticks recommended steps it makes available, so the
+    /// version check takes this again; see `remember_default_ticks`.
+    pub default_selected: bool,
     /// Row label as rendered in the tree. For configuration rows the
     /// summary is just `display_name` today; kept as a separate field
     /// so the wizard's tree-refresh helpers can stay symmetric with
@@ -310,6 +352,8 @@ pub struct WizardControls {
     pub back_label: String,
     pub next_label: String,
     pub install_label: String,
+    /// The run button's label in uninstall mode, with its own mnemonic.
+    pub uninstall_label: String,
     pub close_label: String,
     /// The close button's label while an install runs, when it stops the
     /// install (after asking) before closing RABBIT.
@@ -417,6 +461,10 @@ pub struct WizardPackagePlan {
     pub package_rows: Vec<PackageRow>,
     pub notes: Vec<String>,
     pub can_install: bool,
+    /// What detection found at the target while building the plan. The
+    /// Uninstall tab's rows are built from it, so detection, which takes a
+    /// second or two, doesn't run twice.
+    pub detections: Vec<ComponentDetection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

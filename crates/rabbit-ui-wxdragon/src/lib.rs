@@ -2,6 +2,8 @@
 //! renders them with wxWidgets.
 
 #[cfg(all(feature = "gui", target_os = "macos"))]
+mod macos_keyboard;
+#[cfg(all(feature = "gui", target_os = "macos"))]
 mod voiceover;
 #[cfg(feature = "gui")]
 mod wx_app;

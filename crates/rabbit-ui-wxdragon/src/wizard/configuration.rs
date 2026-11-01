@@ -73,11 +73,13 @@ pub fn configuration_rows(
                 format!("{summary}\n\n{description}")
             };
 
+            let selected = dependency_satisfied && !already_applied && step.recommended;
             ConfigurationRow {
                 step_id: step.id.clone(),
                 display_name,
                 description,
-                selected: dependency_satisfied && !already_applied && step.recommended,
+                selected,
+                default_selected: selected,
                 summary,
                 details,
                 available_for_target: dependency_satisfied,

@@ -4,10 +4,12 @@ mod close_guard;
 mod expert_mode;
 mod globals;
 mod packages_page;
+mod packages_tabs;
 mod pages;
 mod progress_ui;
 mod self_update_ui;
 mod shell;
+mod uninstall_run;
 mod version_check;
 mod widgets;
 
@@ -25,13 +27,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    UiBootstrapOptions, WizardInstallOptions, WizardOutcomeReport,
-    build_review_preview_for_package_rows, execute_wizard_install_with_progress,
-    install_request_from_target_and_rows, load_wizard_model, localizer_from_options,
+    ProgressUiState, UiBootstrapOptions, WizardInstallOptions, WizardMode, WizardOutcomeReport,
+    WizardUninstallList, build_review_preview_for_package_rows, build_uninstall_review_preview,
+    execute_wizard_install_with_progress, inactive_tab_note, install_request_from_target_and_rows,
+    install_tab_ticks_left_out, load_wizard_model, localizer_from_options,
     reapack_selected_for_install_or_update, recompute_configuration_row_availability,
     refreshed_target_row, run_wizard_self_update_check, run_wizard_self_update_release_notes,
-    save_wizard_outcome_report, selected_configuration_step_ids, wizard_error_reason,
-    wizard_outcome_report_from_error, wizard_outcome_report_from_success,
+    save_wizard_outcome_report, selected_configuration_step_ids, uninstall_list_for_target,
+    wizard_error_reason, wizard_outcome_report_from_error, wizard_outcome_report_from_success,
     wizard_package_plan_for_target, wizard_package_plan_for_target_with_available,
 };
 use rabbit_core::localization::resolve_runtime_locale;
@@ -45,25 +48,30 @@ use crate::wx_app::close_guard::{
     defer_close_dialog, show_close_blocked_by_self_update,
 };
 use crate::wx_app::globals::{
-    arm_post_install_hook, fire_post_install_hook, install_ui_frame, install_ui_localizer,
-    show_warning, with_ui_frame, with_ui_localizer,
+    arm_post_install_hook, fire_post_install_hook, install_run_button_labels, install_ui_frame,
+    install_ui_localizer, show_warning, with_ui_frame, with_ui_localizer,
 };
 use crate::wx_app::packages_page::{
-    PackagesStateCell, new_packages_state, refresh_package_checklist,
+    PackagesStateCell, new_packages_state, new_uninstall_state, rebuild_uninstall_list_widgets,
+    refresh_package_checklist,
+};
+use crate::wx_app::packages_tabs::{
+    bind_packages_tab_switching, focus_uninstall_list, selected_wizard_mode,
 };
 use crate::wx_app::pages::{add_pages, build_language_footer};
-use crate::wx_app::progress_ui::{ProgressUiState, apply_progress_event_to_ui};
+use crate::wx_app::progress_ui::apply_progress_event_to_ui;
 use crate::wx_app::self_update_ui::{SelfUpdateUiState, render_self_update_status};
 use crate::wx_app::shell::{launch_reaper, open_resource_folder, seat_macos_apple_languages};
+use crate::wx_app::uninstall_run::{UninstallNavigation, UninstallRunUi, start_uninstall};
 use crate::wx_app::version_check::{VersionCheckUi, start_version_check};
 use crate::wx_app::widgets::{
     append_done_status, bind_done_page_enter_closes, bind_reapack_ack_navigation_updates,
     bind_review_enter_installs, bind_target_navigation_updates, can_launch_last_reaper_path,
-    checked_package_indices, clone_last_path, clone_last_resource_path, effective_can_install,
+    checked_package_indices, clone_last_path, clone_last_resource_path, effective_run_enabled,
     osara_keymap_choice, planned_reaper_launch_path_for_target, progress_details_for_start,
     reapack_ack_confirmed, refresh_target_choice, refreshed_target_index, selected_target_row,
-    set_last_path, set_last_report, set_last_resource_path, step_status, target_is_valid,
-    update_navigation,
+    set_heading, set_last_path, set_last_report, set_last_resource_path, step_status,
+    target_is_valid, update_navigation,
 };
 
 pub(crate) const TARGET_STEP: usize = 0;
@@ -117,6 +125,10 @@ pub fn run() {
             model.controls.close_label.clone(),
             model.controls.cancel_label.clone(),
         );
+        install_run_button_labels(
+            model.controls.install_label.clone(),
+            model.controls.uninstall_label.clone(),
+        );
         install_ui_frame(frame);
 
         let root_panel = Panel::builder(&frame).build();
@@ -148,8 +160,18 @@ pub fn run() {
         // `rebuild_packages_tree_model` on subsequent rebuilds (deferred
         // version-check finish, post-install rescan).
         let package_items: PackagesStateCell = new_packages_state();
+        // The Uninstall tab's rows, rebuilt with the package rows from the
+        // same detection, and its list's per-platform state.
+        let uninstall_list = Rc::new(RefCell::new(WizardUninstallList::default()));
+        let uninstall_items = new_uninstall_state();
         let can_install = Rc::new(Cell::new(model.controls.can_install));
         let review_can_install = Rc::new(Cell::new(false));
+        // What the run does, decided by the Packages tab showing when Next
+        // is pressed there and fixed from then on, and whether Review found
+        // something to uninstall: the Uninstall button's own run flag, which
+        // doesn't depend on the install plan.
+        let wizard_mode = Rc::new(Cell::new(WizardMode::Install));
+        let review_can_uninstall = Rc::new(Cell::new(false));
         let last_report = Arc::new(Mutex::new(None::<WizardOutcomeReport>));
         let last_reaper_app_path = Arc::new(Mutex::new(None::<PathBuf>));
         let last_resource_path = Arc::new(Mutex::new(None::<PathBuf>));
@@ -206,6 +228,8 @@ pub fn run() {
             Rc::clone(&configuration_rows),
             Rc::clone(&package_items),
             Rc::clone(&can_install),
+            Rc::clone(&uninstall_list),
+            Rc::clone(&uninstall_items),
             self_update_status,
             language_footer,
         );
@@ -234,7 +258,13 @@ pub fn run() {
             &install,
             &close,
             &language_footer,
-            effective_can_install(&can_install, &review_can_install),
+            wizard_mode.get(),
+            effective_run_enabled(
+                &wizard_mode,
+                &can_install,
+                &review_can_install,
+                &review_can_uninstall,
+            ),
             target_is_valid(&model, &wizard_widgets),
             reapack_ack_confirmed(&wizard_widgets),
         );
@@ -247,6 +277,13 @@ pub fn run() {
         bind_done_page_enter_closes(&wizard_widgets.done_status, &frame, &current_step);
         bind_done_page_enter_closes(&wizard_widgets.done_details, &frame, &current_step);
         bind_expert_mode_chord(&frame, &model, wizard_widgets, &current_step);
+        bind_packages_tab_switching(
+            &frame,
+            &model,
+            wizard_widgets,
+            &uninstall_list,
+            &current_step,
+        );
         if expert_mode() {
             // RABBIT_EXPERT=1: no confirmation, setting the variable was it.
             apply_expert_mode(&model, &wizard_widgets);
@@ -259,6 +296,8 @@ pub fn run() {
             let widgets = wizard_widgets;
             let can_install = Rc::clone(&can_install);
             let review_can_install = Rc::clone(&review_can_install);
+            let wizard_mode = Rc::clone(&wizard_mode);
+            let review_can_uninstall = Rc::clone(&review_can_uninstall);
             let back_package_rows = Rc::clone(&package_rows);
             back.on_click(move |_| {
                 // Custom Back routing:
@@ -268,7 +307,9 @@ pub fn run() {
                 //   acknowledgement (going back resets the explicit consent).
                 // - REVIEW_STEP → REAPACK_ACK_STEP if ReaPack is in the
                 //   currently-selected plan; otherwise PACKAGES_STEP, again to
-                //   skip the now-irrelevant ack page.
+                //   skip the now-irrelevant ack page. An uninstall always goes
+                //   back to PACKAGES_STEP: the install ticks it leaves out may
+                //   well include ReaPack.
                 let current = current_step.load(Ordering::SeqCst);
                 if current == VERSION_CHECK_STEP {
                     abandon_version_check();
@@ -282,7 +323,9 @@ pub fn run() {
                     REVIEW_STEP => {
                         let rows = back_package_rows.borrow();
                         let checked = checked_package_indices(&rows);
-                        if reapack_selected_for_install_or_update(&rows, &checked) {
+                        if wizard_mode.get().shows_reapack_acknowledgement(
+                            reapack_selected_for_install_or_update(&rows, &checked),
+                        ) {
                             REAPACK_ACK_STEP
                         } else {
                             PACKAGES_STEP
@@ -301,10 +344,22 @@ pub fn run() {
                     &install,
                     &close,
                     &widgets.language_footer,
-                    effective_can_install(&can_install, &review_can_install),
+                    wizard_mode.get(),
+                    effective_run_enabled(
+                        &wizard_mode,
+                        &can_install,
+                        &review_can_install,
+                        &review_can_uninstall,
+                    ),
                     target_is_valid(&model, &widgets),
                     reapack_ack_confirmed(&widgets),
                 );
+                if current == REVIEW_STEP && wizard_mode.get() == WizardMode::Uninstall {
+                    // Back sits outside the wizard page, so focus would stay
+                    // on it. The Uninstall tab is still the one showing; put
+                    // the user back in its list, on the row they left.
+                    focus_uninstall_list(&widgets);
+                }
             });
         }
 
@@ -319,6 +374,10 @@ pub fn run() {
             let configuration_rows = Rc::clone(&configuration_rows);
             let can_install = Rc::clone(&can_install);
             let review_can_install = Rc::clone(&review_can_install);
+            let uninstall_list = Rc::clone(&uninstall_list);
+            let uninstall_items = Rc::clone(&uninstall_items);
+            let wizard_mode = Rc::clone(&wizard_mode);
+            let review_can_uninstall = Rc::clone(&review_can_uninstall);
             next.on_click(move |_| {
                 let step = match current_step.load(Ordering::SeqCst) {
                     TARGET_STEP => {
@@ -341,6 +400,7 @@ pub fn run() {
                         // can't fire from a stale Review state, and let
                         // the worker thread do the heavy lifting.
                         review_can_install.set(false);
+                        review_can_uninstall.set(false);
                         // Fix the builds for this run now, so the version
                         // check and the install can't disagree about them.
                         let channels = crate::wizard_channels(
@@ -359,6 +419,10 @@ pub fn run() {
                             package_items: Rc::clone(&package_items),
                             can_install: Rc::clone(&can_install),
                             review_can_install: Rc::clone(&review_can_install),
+                            wizard_mode: Rc::clone(&wizard_mode),
+                            review_can_uninstall: Rc::clone(&review_can_uninstall),
+                            uninstall_list: Rc::clone(&uninstall_list),
+                            uninstall_items: Rc::clone(&uninstall_items),
                             target: selected_target,
                             book,
                             step_label,
@@ -372,30 +436,90 @@ pub fn run() {
                         VERSION_CHECK_STEP
                     }
                     PACKAGES_STEP => {
+                        // The tab showing decides the run, and the run stays
+                        // what it is until Next is pressed here again.
+                        let mode = selected_wizard_mode(&widgets);
+                        wizard_mode.set(mode);
+                        let review_heading = match mode {
+                            WizardMode::Install => &model.text.review_heading,
+                            WizardMode::Uninstall => &model.text.review_uninstall_heading,
+                        };
+                        if widgets.review_heading.get_label() != *review_heading {
+                            widgets.review_heading.set_label(review_heading);
+                        }
                         let selected_target = selected_target_row(&model, &widgets);
                         let rows = package_rows.borrow();
-                        let notes = package_notes.borrow();
                         let checked = checked_package_indices(&rows);
-                        let review_preview = build_review_preview_for_package_rows(
-                            &model,
-                            selected_target.as_ref(),
-                            &checked,
-                            &rows,
-                            &notes,
-                            osara_keymap_choice(&widgets.osara_keymap_replace),
-                            crate::wx_app::globals::osara_keymap_state(),
-                        );
-                        review_can_install.set(review_preview.can_install);
-                        widgets
-                            .review_text
-                            .set_value(&review_preview.lines.join("\n"));
-                        // Route through the ReaPack donation acknowledgement
-                        // page when the user has ReaPack in the install/update
-                        // plan; everyone else goes straight to Review.
-                        if reapack_selected_for_install_or_update(&rows, &checked) {
-                            REAPACK_ACK_STEP
-                        } else {
+                        if mode == WizardMode::Uninstall {
+                            // Only what the user ticked there: RABBIT's own
+                            // ticks, such as every update, say nothing about
+                            // what they meant to run.
+                            let install_ticked =
+                                install_tab_ticks_left_out(&rows, &configuration_rows.borrow());
+                            let list = uninstall_list.borrow();
+                            let remove_settings = list.settings_option_available()
+                                && widgets.uninstall_remove_settings.get_value();
+                            let mut review_preview = None;
+                            with_ui_localizer(|localizer| {
+                                review_preview = Some(build_uninstall_review_preview(
+                                    localizer,
+                                    selected_target.as_ref(),
+                                    &list,
+                                    remove_settings,
+                                    &install_ticked,
+                                ));
+                            });
+                            let Some(review_preview) = review_preview else {
+                                return;
+                            };
+                            review_can_uninstall.set(review_preview.can_uninstall);
+                            widgets
+                                .review_text
+                                .set_value(&review_preview.lines.join("\n"));
+                            // Never through the ReaPack donation page: that
+                            // is about installing ReaPack.
                             REVIEW_STEP
+                        } else {
+                            let notes = package_notes.borrow();
+                            let mut review_preview = build_review_preview_for_package_rows(
+                                &model,
+                                selected_target.as_ref(),
+                                &checked,
+                                &rows,
+                                &notes,
+                                osara_keymap_choice(&widgets.osara_keymap_replace),
+                                crate::wx_app::globals::osara_keymap_state(),
+                            );
+                            // Ticks on the Uninstall tab stay, but this run
+                            // leaves them out, and Review says so.
+                            let uninstall_ticked: Vec<String> = uninstall_list
+                                .borrow()
+                                .ticked_rows()
+                                .map(|row| row.display_name.clone())
+                                .collect();
+                            with_ui_localizer(|localizer| {
+                                if let Some(note) =
+                                    inactive_tab_note(localizer, mode, &uninstall_ticked)
+                                {
+                                    review_preview.lines.push(String::new());
+                                    review_preview.lines.push(note);
+                                }
+                            });
+                            review_can_install.set(review_preview.can_install);
+                            widgets
+                                .review_text
+                                .set_value(&review_preview.lines.join("\n"));
+                            // Route through the ReaPack donation
+                            // acknowledgement page when the user has ReaPack
+                            // in the install/update plan; everyone else goes
+                            // straight to Review.
+                            if mode.shows_reapack_acknowledgement(
+                                reapack_selected_for_install_or_update(&rows, &checked),
+                            ) {
+                                REAPACK_ACK_STEP
+                            } else {
+                                REVIEW_STEP
+                            }
                         }
                     }
                     REAPACK_ACK_STEP => REVIEW_STEP,
@@ -413,10 +537,24 @@ pub fn run() {
                     &install,
                     &close,
                     &widgets.language_footer,
-                    effective_can_install(&can_install, &review_can_install),
+                    wizard_mode.get(),
+                    effective_run_enabled(
+                        &wizard_mode,
+                        &can_install,
+                        &review_can_install,
+                        &review_can_uninstall,
+                    ),
                     target_is_valid(&model, &widgets),
                     reapack_ack_confirmed(&widgets),
                 );
+                if step == REVIEW_STEP && wizard_mode.get() == WizardMode::Uninstall {
+                    // An uninstall is never one key press away, so Review has
+                    // no default button. Focus goes to the summary instead,
+                    // which the heading naming the mode introduces, so the
+                    // screen reader reads what would happen; Enter there
+                    // starts nothing.
+                    widgets.review_text.set_focus();
+                }
                 if step == VERSION_CHECK_STEP {
                     // Pull the screen reader onto the progress bar so the
                     // user hears that a check is running. Without this,
@@ -443,9 +581,145 @@ pub fn run() {
             let last_reaper_app_path = Arc::clone(&last_reaper_app_path);
             let last_resource_path = Arc::clone(&last_resource_path);
             let install_run = Arc::clone(&install_run);
+            let uninstall_list = Rc::clone(&uninstall_list);
+            let uninstall_items = Rc::clone(&uninstall_items);
+            let wizard_mode = Rc::clone(&wizard_mode);
+            let review_can_uninstall = Rc::clone(&review_can_uninstall);
+            // Rebuilds both Packages tabs from fresh detection after a run,
+            // an install or an uninstall. The run arms it as the post-run
+            // hook, which holds this UI-thread `Rc<RefCell>` state so the
+            // worker's `call_after` completion can refresh it without
+            // smuggling non-Send references across threads. It re-detects
+            // the selected target, plans against the fresh receipts, and
+            // rebuilds the cached state and both lists in place, never the
+            // tab selection or focus. After an uninstall the Install tab
+            // offers what went again, unticked, because the run recorded it
+            // as declined.
+            let rescan_after_run: Rc<dyn Fn()> = {
+                let model = Arc::clone(&model);
+                let package_rows = Rc::clone(&package_rows);
+                let package_notes = Rc::clone(&package_notes);
+                let package_items = Rc::clone(&package_items);
+                let configuration_rows = Rc::clone(&configuration_rows);
+                let can_install = Rc::clone(&can_install);
+                let review_can_install = Rc::clone(&review_can_install);
+                let review_can_uninstall = Rc::clone(&review_can_uninstall);
+                let last_reaper_app_path = Arc::clone(&last_reaper_app_path);
+                let last_resource_path = Arc::clone(&last_resource_path);
+                let uninstall_list = Rc::clone(&uninstall_list);
+                let uninstall_items = Rc::clone(&uninstall_items);
+                Rc::new(move || {
+                    let Some(target) = selected_target_row(&model, &widgets) else {
+                        return;
+                    };
+                    let refreshed_target = refreshed_target_row(&model, &target);
+                    // Plan against the versions this run installed from,
+                    // so a development build just installed reads as
+                    // current instead of as something to replace.
+                    let plan = match RUN_AVAILABLE.with(|cell| cell.borrow().clone()) {
+                        Some(available) => wizard_package_plan_for_target_with_available(
+                            &model,
+                            Some(&refreshed_target),
+                            &available,
+                        ),
+                        None => wizard_package_plan_for_target(&model, Some(&refreshed_target)),
+                    };
+                    let Ok(plan) = plan else {
+                        return;
+                    };
+                    // The Uninstall list from the same fresh detection.
+                    // Rebuilt in place; the tab selection stays.
+                    *uninstall_list.borrow_mut() =
+                        uninstall_list_for_target(&model, &refreshed_target, &plan.detections);
+                    rebuild_uninstall_list_widgets(
+                        &widgets,
+                        &uninstall_items,
+                        &model,
+                        &uninstall_list.borrow(),
+                    );
+                    *package_rows.borrow_mut() = plan.package_rows;
+                    *package_notes.borrow_mut() = plan.notes;
+                    // Recompute configuration row availability against
+                    // the freshly-rebuilt package plan (e.g. ReaPack
+                    // just got installed → REAPER Accessibility step
+                    // becomes available).
+                    if let Ok(localizer) = localizer_from_options(&model.bootstrap_options) {
+                        recompute_configuration_row_availability(
+                            &localizer,
+                            &package_rows.borrow(),
+                            Some(&refreshed_target.path),
+                            &mut configuration_rows.borrow_mut(),
+                        );
+                    }
+                    can_install.set(plan.can_install);
+                    review_can_install.set(false);
+                    review_can_uninstall.set(false);
+                    // The run may have replaced the key map or brought a
+                    // new OSARA key map: compare again for a next run.
+                    crate::wx_app::widgets::reset_osara_keymap_choice(
+                        &refreshed_target.path,
+                        &package_rows.borrow(),
+                        &widgets.osara_keymap_replace,
+                    );
+                    refresh_package_checklist(
+                        &widgets.package_checklist,
+                        &package_items,
+                        &widgets.package_details,
+                        &widgets.osara_keymap_replace,
+                        &widgets.osara_keymap_note,
+                        &widgets.spanish_variant_choice,
+                        &widgets.reaper_language_choice,
+                        &model,
+                        &package_rows.borrow(),
+                        &configuration_rows.borrow(),
+                    );
+                    refresh_target_choice(
+                        &model,
+                        &widgets.target_choice,
+                        refreshed_target_index(&model, &widgets),
+                        &refreshed_target,
+                    );
+                    widgets.target_details.set_value(&refreshed_target.details);
+                    set_last_path(
+                        &last_reaper_app_path,
+                        Some(planned_reaper_launch_path_for_target(&refreshed_target)),
+                    );
+                    set_last_resource_path(
+                        &last_resource_path,
+                        Some(refreshed_target.path.clone()),
+                    );
+                })
+            };
+            let uninstall_run_ui = UninstallRunUi {
+                navigation: UninstallNavigation {
+                    model: Arc::clone(&model),
+                    widgets,
+                    book,
+                    step_label,
+                    labels: Arc::clone(&labels),
+                    back,
+                    next,
+                    install,
+                    close,
+                    current_step: Arc::clone(&current_step),
+                    last_reaper_app_path: Arc::clone(&last_reaper_app_path),
+                    last_resource_path: Arc::clone(&last_resource_path),
+                },
+                uninstall_list: Rc::clone(&uninstall_list),
+                install_run: Arc::clone(&install_run),
+                rescan: Rc::clone(&rescan_after_run),
+            };
             let review_text = widgets.review_text;
             let review_step = Arc::clone(&current_step);
+            let review_mode = Rc::clone(&wizard_mode);
             let start_install = Rc::new(move || {
+                // The run button runs what Review shows, so an uninstall
+                // goes its own way from here and none of the install below
+                // applies to it.
+                if wizard_mode.get() == WizardMode::Uninstall {
+                    start_uninstall(&uninstall_run_ui);
+                    return;
+                }
                 // Catch a running REAPER here, while the user can still do
                 // something about it. The install's preflight would refuse
                 // too, but only after the wizard has moved to its progress
@@ -475,7 +749,13 @@ pub fn run() {
                     &install,
                     &close,
                     &widgets.language_footer,
-                    effective_can_install(&can_install, &review_can_install),
+                    wizard_mode.get(),
+                    effective_run_enabled(
+                        &wizard_mode,
+                        &can_install,
+                        &review_can_install,
+                        &review_can_uninstall,
+                    ),
                     target_is_valid(&model, &widgets),
                     reapack_ack_confirmed(&widgets),
                 );
@@ -484,6 +764,7 @@ pub fn run() {
                 install.enable(false);
                 widgets.done_launch_reaper.enable(false);
                 widgets.done_open_resource.enable(false);
+                set_heading(&widgets.progress_heading, &model.text.progress_heading);
                 widgets
                     .progress_status
                     .set_label(&model.text.progress_status_running);
@@ -591,7 +872,13 @@ pub fn run() {
                             &install,
                             &close,
                             &widgets.language_footer,
-                            effective_can_install(&can_install, &review_can_install),
+                            wizard_mode.get(),
+                            effective_run_enabled(
+                                &wizard_mode,
+                                &can_install,
+                                &review_can_install,
+                                &review_can_uninstall,
+                            ),
                             target_is_valid(&model, &widgets),
                             reapack_ack_confirmed(&widgets),
                         );
@@ -616,97 +903,13 @@ pub fn run() {
                     ));
                 drop(rows);
 
-                // Arm the post-install rescan hook. The hook captures the
-                // UI-thread `Rc<RefCell>` shared state so the call_after
-                // success arm can refresh it without smuggling non-Send
-                // references across threads. The hook closure runs on the
-                // UI thread; it re-detects the selected target, runs the
-                // offline package plan against the now-fresh receipts, and
-                // updates both the cached state and the on-screen package
-                // list — so navigating Back from the Done page (or
-                // re-opening the Packages step via Rescan) shows the
-                // post-install version without the user having to click
-                // anything.
+                // Arm the post-run rescan (`rescan_after_run`), which the
+                // completion below fires once the install has written its
+                // receipts, so navigating Back from Done shows the new
+                // versions without the user having to do anything.
                 {
-                    let model = Arc::clone(&model);
-                    let package_rows = Rc::clone(&package_rows);
-                    let package_notes = Rc::clone(&package_notes);
-                    let package_items = Rc::clone(&package_items);
-                    let configuration_rows = Rc::clone(&configuration_rows);
-                    let can_install = Rc::clone(&can_install);
-                    let review_can_install = Rc::clone(&review_can_install);
-                    let last_reaper_app_path = Arc::clone(&last_reaper_app_path);
-                    let last_resource_path = Arc::clone(&last_resource_path);
-                    arm_post_install_hook(move || {
-                        let Some(target) = selected_target_row(&model, &widgets) else {
-                            return;
-                        };
-                        let refreshed_target = refreshed_target_row(&model, &target);
-                        // Plan against the versions this run installed from,
-                        // so a development build just installed reads as
-                        // current instead of as something to replace.
-                        let plan = match RUN_AVAILABLE.with(|cell| cell.borrow().clone()) {
-                            Some(available) => wizard_package_plan_for_target_with_available(
-                                &model,
-                                Some(&refreshed_target),
-                                &available,
-                            ),
-                            None => wizard_package_plan_for_target(&model, Some(&refreshed_target)),
-                        };
-                        let Ok(plan) = plan else {
-                            return;
-                        };
-                        *package_rows.borrow_mut() = plan.package_rows;
-                        *package_notes.borrow_mut() = plan.notes;
-                        // Recompute configuration row availability against
-                        // the freshly-rebuilt package plan (e.g. ReaPack
-                        // just got installed → REAPER Accessibility step
-                        // becomes available).
-                        if let Ok(localizer) = localizer_from_options(&model.bootstrap_options) {
-                            recompute_configuration_row_availability(
-                                &localizer,
-                                &package_rows.borrow(),
-                                Some(&refreshed_target.path),
-                                &mut configuration_rows.borrow_mut(),
-                            );
-                        }
-                        can_install.set(plan.can_install);
-                        review_can_install.set(false);
-                        // The run may have replaced the key map or brought a
-                        // new OSARA key map: compare again for a next run.
-                        crate::wx_app::widgets::reset_osara_keymap_choice(
-                            &refreshed_target.path,
-                            &package_rows.borrow(),
-                            &widgets.osara_keymap_replace,
-                        );
-                        refresh_package_checklist(
-                            &widgets.package_checklist,
-                            &package_items,
-                            &widgets.package_details,
-                            &widgets.osara_keymap_replace,
-                            &widgets.osara_keymap_note,
-                            &widgets.spanish_variant_choice,
-                            &widgets.reaper_language_choice,
-                            &model,
-                            &package_rows.borrow(),
-                            &configuration_rows.borrow(),
-                        );
-                        refresh_target_choice(
-                            &model,
-                            &widgets.target_choice,
-                            refreshed_target_index(&model, &widgets),
-                            &refreshed_target,
-                        );
-                        widgets.target_details.set_value(&refreshed_target.details);
-                        set_last_path(
-                            &last_reaper_app_path,
-                            Some(planned_reaper_launch_path_for_target(&refreshed_target)),
-                        );
-                        set_last_resource_path(
-                            &last_resource_path,
-                            Some(refreshed_target.path.clone()),
-                        );
-                    });
+                    let rescan = Rc::clone(&rescan_after_run);
+                    arm_post_install_hook(move || rescan());
                 }
 
                 let ui_model = Arc::clone(&model);
@@ -715,7 +918,13 @@ pub fn run() {
                 let ui_last_report = Arc::clone(&last_report);
                 let ui_last_reaper_app_path = Arc::clone(&last_reaper_app_path);
                 let ui_last_resource_path = Arc::clone(&last_resource_path);
-                let can_install = effective_can_install(&can_install, &review_can_install);
+                let run_mode = wizard_mode.get();
+                let can_install = effective_run_enabled(
+                    &wizard_mode,
+                    &can_install,
+                    &review_can_install,
+                    &review_can_uninstall,
+                );
                 let request_for_report = request.clone();
 
                 // Build progress lookup maps + the per-install UI state now,
@@ -754,6 +963,7 @@ pub fn run() {
                 drop(rows_for_progress);
 
                 let progress_state = Arc::new(Mutex::new(ProgressUiState::new(
+                    WizardMode::Install,
                     request.package_ids.len(),
                     request.configuration_step_ids.len(),
                 )));
@@ -796,7 +1006,7 @@ pub fn run() {
                     }));
                 });
 
-                let cancel = install_run.begin();
+                let cancel = install_run.begin(WizardMode::Install);
                 let install_run_for_worker = Arc::clone(&install_run);
                 std::thread::spawn(move || {
                     let result = execute_wizard_install_with_progress(request, &progress, &cancel);
@@ -931,6 +1141,7 @@ pub fn run() {
                             &install,
                             &close,
                             &widgets.language_footer,
+                            run_mode,
                             can_install,
                             target_is_valid(&ui_model, &widgets),
                             reapack_ack_confirmed(&widgets),
@@ -958,7 +1169,13 @@ pub fn run() {
                 let start_install = Rc::clone(&start_install);
                 move |_| start_install()
             });
-            bind_review_enter_installs(&review_text, &install, &review_step, start_install);
+            bind_review_enter_installs(
+                &review_text,
+                &install,
+                &review_step,
+                &review_mode,
+                start_install,
+            );
         }
 
         let frame_for_close = frame;
@@ -995,7 +1212,7 @@ pub fn run() {
                     CloseVerdict::AlreadyStopping => {
                         // A second press while the first stop is still
                         // unwinding. Re-announce rather than re-ask.
-                        announce_stopping(&widgets, &model_for_close);
+                        announce_stopping(&widgets, &model_for_close, install_run.mode());
                     }
                     CloseVerdict::Ask => {
                         let model = Arc::clone(&model_for_close);
@@ -1004,7 +1221,9 @@ pub fn run() {
                             // The install may have finished before this turn
                             // of the event loop came round, and then there is
                             // nothing to ask about.
-                            if install_run.is_running() && !confirm_stop_install(&model) {
+                            if install_run.is_running()
+                                && !confirm_stop_install(&model, install_run.mode())
+                            {
                                 return;
                             }
                             if !install_run.request_stop_and_close() {
@@ -1022,7 +1241,7 @@ pub fn run() {
                             // The button that raised the question is now the
                             // wrong thing to press again.
                             close_button.enable(false);
-                            announce_stopping(&widgets, &model);
+                            announce_stopping(&widgets, &model, install_run.mode());
                         });
                     }
                 }

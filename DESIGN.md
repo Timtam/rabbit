@@ -524,7 +524,21 @@ CLI and UI expectations:
 ## Accessibility Rules
 
 - Use native controls only: buttons, check boxes, radio buttons, list views,
-  tree views, text fields, progress controls, and standard dialogs.
+  tree views, tab controls, text fields, progress controls, and standard
+  dialogs.
+- A tab control is wxNotebook: SysTabControl32 on Windows, NSTabView on
+  macOS, which screen readers present as tabs. Its keyboard path: on
+  Windows, Ctrl+Tab and Ctrl+Shift+Tab or Ctrl+Page Down and Ctrl+Page Up
+  from inside it, and the arrow keys on its tab strip; on macOS, physical
+  Ctrl+Tab and Ctrl+Shift+Tab, which RABBIT reads itself because wxWidgets
+  takes Command for Control there, and VoiceOver's own navigation of the
+  tab group. After a switch on macOS, focus moves into the new tab and
+  RABBIT announces the tab's name. Two Windows quirks of the native control
+  are documented rather than worked around: Ctrl+Tab does nothing from the
+  wizard's buttons, which sit outside the tab control, and plain Page Up or
+  Page Down on a checkbox or button inside a tab switches tabs. That switch
+  moves focus into the new tab's list, whose label names the tab, and
+  Review names the mode and the ticks the run leaves out.
 - Avoid custom drawing, canvas controls, owner-drawn lists, and grid controls in
   the main workflow.
 - Every control needs an accessible name, role, state, keyboard focus, and
@@ -560,8 +574,35 @@ user can finish the install by pressing Next a few times.
      with the full error; every other package installs or updates as usual.
      Only a failure to build the package plan at all keeps the wizard on this
      page, with the error lines shown, so the user can go back or quit.
+     Failed checks only ever affect installs: the Uninstall tab's rows never
+     depend on them.
 
 3. Packages
+   - Two tabs, **Install or update** and **Uninstall**. The page opens on
+     Install or update with focus on the tab strip, so screen readers read
+     the tab and its position first, and Tab moves into the package list.
+     Where macOS can't focus the tab strip (an NSTabView takes focus only
+     with Full Keyboard Access), focus goes to the install list and RABBIT
+     announces the tab's name instead. RABBIT changes the tab selection by
+     itself only on this arrival, once the page shows: wxOSX moves focus
+     into a tab on every selection change, even on a hidden page, so the
+     rebuild after a run leaves it alone. The tab showing when Next is
+     pressed decides what the run does; install and uninstall never mix.
+     The Uninstall tab lists every installed package under the same groups,
+     with headings that can't be ticked, nothing ticked by default, and rows
+     RABBIT can't remove shown but impossible to tick, saying why. An empty
+     list says so in its details text. On Windows the sentence is also a row
+     without a checkbox; macOS shows no row, because a row there has either
+     a checkbox or a disclosure triangle, and says the sentence with the
+     tab's name instead. Its rows come from the detection the version check
+     already ran, which asks only which files exist and how big they are.
+     Below its list, an unticked **Also remove settings** checkbox with a
+     note on what it would remove works like the OSARA key map checkbox:
+     disabled and out of the Tab order until a ticked package has settings
+     RABBIT may remove, and unticked again when none has. On macOS,
+     VoiceOver is told when a tick makes the option available or not, since
+     that happens away from the row. Everything below describes the Install
+     or update tab.
    - Tree view with two top-level groups: **Packages** and
      **Configuration**. Packages contains REAPER, OSARA, SWS, ReaPack,
      ReaKontrol, FFmpeg (Windows only), JAWS scripts (Windows only), and
@@ -625,10 +666,37 @@ user can finish the install by pressing Next a few times.
      will be replaced. No backup-file paths, no admin-prompt enumeration, no
      planned-execution metadata in the GUI summary; all of that is still
      written to the saved report and exposed by the CLI.
+   - In uninstall mode the heading says "Ready to uninstall", and the
+     summary has one line per package with what goes and what stays (or,
+     with Also remove settings ticked, which settings go too), the
+     warnings, a note naming what is ticked on the other tab and left out
+     (on the Install or update tab, only ticks RABBIT didn't set itself,
+     such as an update it ticked by default), and that the packages can be
+     installed again. The Uninstall button is enabled whenever something
+     removable is ticked, whatever the install plan says. Uninstalling is
+     never one key press away: focus goes to the summary, there is no
+     default button, and Enter starts nothing. A run with a step a backup
+     can't undo, or a package whose manifest asks for it, gets a Yes/No
+     question with No focused first. Back returns to the Uninstall tab's
+     list, never to the ReaPack donation page.
 
-6. Install/update progress
+6. Progress
    - Single progress bar plus one current-step line. A "Show details" toggle
      reveals the underlying log for users who want it; collapsed by default.
+   - Before an uninstall starts, the Uninstall button refuses with a message
+     while something the uninstall preflight needs closed is running: the
+     target's REAPER, every REAPER for a package any REAPER can load (such
+     as app2clap), and the programs a package's plan names. It uses the
+     engine's own process checks, so the two agree, and there is no way to
+     go ahead anyway.
+   - In uninstall mode the heading says "Uninstalling", focus moves to the
+     gauge, and the gauge counts one step per package, so it never parks
+     halfway. The status line names each package as its removal starts and
+     says whether it went; both are spoken on macOS. Which progress events
+     are spoken is decided by one exhaustive match, so a new event can't be
+     added without that decision. Closing the window asks "Stop
+     uninstalling?" with No focused, and the run stops after the package it
+     is on.
 
 7. Done
    - One sentence summarizing success or failure.
@@ -636,6 +704,16 @@ user can finish the install by pressing Next a few times.
      report button: every run saves its report under `<resource>/RABBIT/logs/`
      by itself. The signature-verification counts, lock-file paths, and
      similar diagnostics stay in that saved report.
+   - After an uninstall the status names the packages that went, says why
+     any stayed (in the user's language for REAPER or another RABBIT being
+     open, a file in use and too little room for the backup; otherwise the
+     engine's own sentence), and that a package comes back by ticking it on
+     the Install or update tab in a new run. Show details lists the files
+     removed, kept and left over, the backup set, and one `rabbit
+     restore-backup` command per removed package. The saved report is the
+     engine's `uninstall-<time>` report, which the details point to; the
+     wizard writes one of its own only for a run the engine refused before
+     it began. Both tabs are then rebuilt from fresh detection.
 
 Streamlining rules (apply when adding new wizard text):
 
@@ -1207,15 +1285,16 @@ Extension files:
   requires it, or a selected vendor uninstaller or machine-wide removal does.
 - Do not delete unknown files during update. Only remove files listed in a RABBIT
   receipt or explicitly owned by the package manifest.
-- Closing the window during an install stops the run; it does not abandon it.
-  Ask first, with **No** as the focused button, then let the pipeline stop at
-  its next package boundary so every guard unwinds the way it does on a clean
-  finish: the install lock is released, extraction temp dirs are removed, and
-  the run writes a report saying which packages landed and which were never
-  reached. Whatever step is running when the user confirms runs to completion
-  — an elevated vendor installer has no halfway point to return to — so the
-  wizard says it is finishing that step rather than pretending the stop is
-  instant.
+- Closing the window during an install or an uninstall stops the run; it
+  does not abandon it. Ask first, with **No** as the focused button, then
+  let the pipeline stop at its next package boundary so every guard unwinds
+  the way it does on a clean finish: the install lock is released,
+  extraction temp dirs are removed, and the run writes a report saying which
+  packages landed and which were never reached. Whatever step is running
+  when the user confirms runs to completion — an elevated vendor installer
+  has no halfway point to return to, and an uninstall finishes the package
+  it started — so the wizard says it is finishing that step rather than
+  pretending the stop is instant.
 - Refuse to close at all while RABBIT is replacing its own program files.
   That swap has no unwind path, so there is no answer that makes quitting
   safe; say so instead of offering a choice that cannot be honoured.

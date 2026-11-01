@@ -12,7 +12,8 @@ use crate::wx_app::expert_mode::{
     OSARA_BUILD_CHOICE, OSARA_BUILDS_LABEL_NAME, REAPER_BUILDS_LABEL_NAME, expert_mode,
     seed_build_choices,
 };
-use crate::wx_app::packages_page::{PackagesStateCell, build_packages_page};
+use crate::wx_app::packages_page::{PackagesStateCell, UninstallStateCell};
+use crate::wx_app::packages_tabs::{PackagesPageState, PackagesPageWidgets, build_packages_tabs};
 use crate::wx_app::shell::{open_external_url, relaunch_with_locale};
 use crate::wx_app::widgets::{
     WizardWidgets, configure_portable_folder, portable_choice_index, portable_folder_path,
@@ -62,6 +63,8 @@ pub(crate) fn add_pages(
     configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
     package_items: PackagesStateCell,
     can_install: Rc<Cell<bool>>,
+    uninstall_list: Rc<RefCell<crate::WizardUninstallList>>,
+    uninstall_items: UninstallStateCell,
     self_update_status: StatusBar,
     language_footer: Panel,
 ) -> WizardWidgets {
@@ -89,20 +92,29 @@ pub(crate) fn add_pages(
     );
 
     let packages_page = new_wizard_page(book);
-    let (
+    let PackagesPageWidgets {
+        notebook: packages_notebook,
         package_checklist,
         package_details,
         osara_keymap_replace,
         osara_keymap_note,
         spanish_variant_choice,
         reaper_language_choice,
-    ) = build_packages_page(
+        uninstall_list,
+        uninstall_details,
+        uninstall_remove_settings,
+        uninstall_settings_note,
+    } = build_packages_tabs(
         &packages_page,
         model,
-        package_rows,
-        configuration_rows,
-        package_items,
-        can_install,
+        PackagesPageState {
+            package_rows,
+            configuration_rows,
+            package_items,
+            can_install,
+            uninstall_list,
+            uninstall_items,
+        },
     );
     book.add_page(
         &packages_page,
@@ -122,11 +134,11 @@ pub(crate) fn add_pages(
     );
 
     let review_page = new_wizard_page(book);
-    let review_text = build_review_page(&review_page, model);
+    let (review_heading, review_text) = build_review_page(&review_page, model);
     book.add_page(&review_page, &model.steps[REVIEW_STEP].label, false, None);
 
     let progress_page = new_wizard_page(book);
-    let (progress_status, progress_gauge, progress_details) =
+    let (progress_heading, progress_status, progress_gauge, progress_details) =
         build_progress_page(&progress_page, model);
     book.add_page(
         &progress_page,
@@ -150,14 +162,21 @@ pub(crate) fn add_pages(
         version_check_gauge,
         version_check_error_heading,
         version_check_error_log,
+        packages_notebook,
         package_checklist,
         package_details,
         osara_keymap_replace,
         osara_keymap_note,
         spanish_variant_choice,
         reaper_language_choice,
+        uninstall_list,
+        uninstall_details,
+        uninstall_remove_settings,
+        uninstall_settings_note,
         reapack_ack_confirm,
+        review_heading,
         review_text,
+        progress_heading,
         progress_status,
         progress_gauge,
         progress_details,
@@ -609,9 +628,11 @@ pub(crate) fn build_reapack_ack_page(page: &WizardPage, model: &WizardModel) -> 
     (donate_link, confirm)
 }
 
-pub(crate) fn build_review_page(page: &WizardPage, model: &WizardModel) -> TextCtrl {
+/// Build the Review page: its heading, which the Next handler changes to
+/// name the mode, and the summary text.
+pub(crate) fn build_review_page(page: &WizardPage, model: &WizardModel) -> (StaticText, TextCtrl) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
-    add_heading(
+    let heading = add_heading(
         page,
         &sizer,
         &model.text.review_heading,
@@ -624,15 +645,17 @@ pub(crate) fn build_review_page(page: &WizardPage, model: &WizardModel) -> TextC
     review.set_name("rabbit-review-text");
     sizer.add(&review, 1, SizerFlag::All | SizerFlag::Expand, 6);
     page.set_sizer(sizer, true);
-    review
+    (heading, review)
 }
 
+/// Build the Progress page: its heading, which names what the run does, the
+/// status line, the gauge and the log.
 pub(crate) fn build_progress_page(
     page: &WizardPage,
     model: &WizardModel,
-) -> (StaticText, Gauge, TextCtrl) {
+) -> (StaticText, StaticText, Gauge, TextCtrl) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
-    add_heading(
+    let heading = add_heading(
         page,
         &sizer,
         &model.text.progress_heading,
@@ -661,7 +684,7 @@ pub(crate) fn build_progress_page(
     sizer.add(&details, 1, SizerFlag::All | SizerFlag::Expand, 6);
 
     page.set_sizer(sizer, true);
-    (status, gauge, details)
+    (heading, status, gauge, details)
 }
 
 pub(crate) fn build_done_page(
@@ -752,10 +775,18 @@ pub(crate) fn build_done_page(
     (status, details, launch_reaper, open_resource)
 }
 
-pub(crate) fn add_heading<W: WxWidget>(page: &W, sizer: &BoxSizer, label: &str, name: &str) {
+/// Add a page heading. Returned for the pages whose heading changes with
+/// what the page is doing.
+pub(crate) fn add_heading<W: WxWidget>(
+    page: &W,
+    sizer: &BoxSizer,
+    label: &str,
+    name: &str,
+) -> StaticText {
     let heading = StaticText::builder(page).with_label(label).build();
     heading.set_name(name);
     sizer.add(&heading, 0, SizerFlag::All | SizerFlag::Expand, 6);
+    heading
 }
 
 pub(crate) fn add_label<W: WxWidget>(page: &W, sizer: &BoxSizer, label: &str, name: &str) {

@@ -79,6 +79,30 @@ thread_local! {
 }
 
 thread_local! {
+    /// The run button's two labels: "Install", and "Uninstall" in uninstall
+    /// mode, each with its own mnemonic. Set once when the window is built;
+    /// `update_navigation` picks one from the mode on every step change, as
+    /// it does for the close button.
+    static RUN_BUTTON_LABELS: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn install_run_button_labels(install: String, uninstall: String) {
+    RUN_BUTTON_LABELS.with(|cell| *cell.borrow_mut() = Some((install, uninstall)));
+}
+
+/// The run button's label for `mode`.
+pub(crate) fn run_button_label(mode: crate::WizardMode) -> Option<String> {
+    RUN_BUTTON_LABELS.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|(install, uninstall)| match mode {
+                crate::WizardMode::Install => install.clone(),
+                crate::WizardMode::Uninstall => uninstall.clone(),
+            })
+    })
+}
+
+thread_local! {
     /// How the target's key map compared with its OSARA key map when the
     /// package list was last built. The key map note and review line say
     /// why the checkbox started where it did.

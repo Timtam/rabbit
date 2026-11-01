@@ -132,6 +132,7 @@ fn wizard_command_labels_include_native_mnemonics() {
         assert_eq!(model.controls.back_label, "Back");
         assert_eq!(model.controls.next_label, "Next");
         assert_eq!(model.controls.install_label, "Install");
+        assert_eq!(model.controls.uninstall_label, "Uninstall");
         assert_eq!(model.controls.close_label, "Close");
         assert_eq!(model.controls.cancel_label, "Cancel");
         assert_eq!(
@@ -146,6 +147,7 @@ fn wizard_command_labels_include_native_mnemonics() {
         assert_eq!(model.controls.back_label, "&Back");
         assert_eq!(model.controls.next_label, "&Next");
         assert_eq!(model.controls.install_label, "&Install");
+        assert_eq!(model.controls.uninstall_label, "&Uninstall");
         assert_eq!(model.controls.close_label, "&Close");
         assert_eq!(model.controls.cancel_label, "&Cancel");
         assert_eq!(
@@ -169,6 +171,46 @@ fn wizard_command_labels_include_native_mnemonics() {
         model.text.packages_osara_keymap_replace_label,
         "Replace your current key map with latest OSARA key map"
     );
+}
+
+/// The Uninstall button sits beside Back, Next and Close, which reads
+/// Cancel while a run is going, so its access key must be none of theirs in
+/// any language, and a letter of its own label rather than one appended in
+/// brackets.
+#[test]
+fn the_uninstall_mnemonic_clashes_with_no_other_button_in_any_locale() {
+    let key = |localizer: &Localizer, id: &str| -> char {
+        let text = localizer.text(id);
+        assert!(!text.missing, "{}: {id}", localizer.active_locale());
+        let mut chars = text.value.trim().chars();
+        let key = chars.next().unwrap();
+        assert_eq!(chars.next(), None, "{}: {id}", localizer.active_locale());
+        key.to_lowercase().next().unwrap()
+    };
+    for &locale in rabbit_core::localization::embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let uninstall = key(&localizer, "wizard-button-uninstall-mnemonic");
+        for other in ["back", "next", "close", "cancel"] {
+            assert_ne!(
+                uninstall,
+                key(&localizer, &format!("wizard-button-{other}-mnemonic")),
+                "{locale}: Uninstall and {other} share an access key"
+            );
+        }
+        let label = localizer.text("wizard-button-uninstall").value;
+        assert!(
+            label.to_lowercase().contains(uninstall),
+            "{locale}: {uninstall} isn't in {label}"
+        );
+        assert!(
+            !wx_mnemonic_label(
+                &label,
+                &localizer.text("wizard-button-uninstall-mnemonic").value
+            )
+            .contains("(&"),
+            "{locale}: {label}"
+        );
+    }
 }
 
 #[test]

@@ -4,9 +4,13 @@ app-short-name = RABBIT
 common-yes = si
 common-no = no
 
+# What happens to a package in this run, the first thing its row says. An
+# unticked row on either tab gets action-keep, so keep it neutral: on the
+# Uninstall tab it only means the package isn't marked for removal.
 action-install = Instalar
 action-update = Actualizar
-action-keep = No hace falta tocarlo
+action-keep = No modificar
+action-uninstall = Desinstalar
 
 package-reaper = REAPER
 package-osara = OSARA
@@ -124,6 +128,8 @@ wizard-button-next = Siguiente
 wizard-button-next-mnemonic = S
 wizard-button-install = Instalar
 wizard-button-install-mnemonic = I
+wizard-button-uninstall = Desinstalar
+wizard-button-uninstall-mnemonic = D
 wizard-button-close = Cerrar
 wizard-button-close-mnemonic = C
 wizard-button-cancel = Cancelar
@@ -163,8 +169,8 @@ wizard-target-details = Carpeta de instalación de Reaper: { $app_path }
     Carpeta de recursos: { $path }
     Escritura disponible: { $writable }
 
-wizard-packages-heading = Selecciona los paquetes
-wizard-packages-list-label = Paquetes para instalar o actualizar
+wizard-packages-heading = Elige qué instalar, actualizar o desinstalar
+wizard-packages-list-label = Instalar o actualizar: paquetes y ajustes
 wizard-packages-row-checked = Marcado
 wizard-packages-row-unchecked = No marcado
 wizard-packages-choice-shown = Nueva opción debajo de la lista: { $choice }.
@@ -173,6 +179,75 @@ wizard-packages-tree-group-label = Paquetes
 wizard-additional-software-tree-group-label = Software adicional
 wizard-language-tree-group-label = Paquetes de idioma
 wizard-configuration-tree-group-label = Configuración
+
+# The two tabs on the Packages page. Screen readers read the selected tab's
+# name when the page opens, so keep both short.
+wizard-packages-tab-install = Instalar o actualizar
+wizard-packages-tab-uninstall = Desinstalar
+# The label right before the Uninstall tab's list. Screen readers read it when
+# focus enters the list, so it names the tab first.
+wizard-uninstall-list-label = Desinstalar: software que RABBIT puede quitar
+# One row of the Uninstall tab. $package is the localized package name,
+# $action is action-uninstall or action-keep, and $installed is the installed
+# version or an unknown-version label.
+wizard-uninstall-row = { $package }: { $action }. Tienes la versión { $installed }
+# Why an Uninstall row can't be ticked: the short phrase that goes into
+# wizard-package-row-unavailable-suffix at the end of the row.
+wizard-uninstall-row-unavailable-not-yet = RABBIT todavía no puede desinstalarlo
+wizard-uninstall-row-unavailable-not-supported = RABBIT no puede desinstalarlo
+wizard-uninstall-row-unavailable-manual = quítalo a mano
+wizard-uninstall-row-unavailable-reapack = lo gestiona ReaPack
+wizard-uninstall-row-unavailable-reapack-check-failed = no se pudieron comprobar los registros de ReaPack
+wizard-uninstall-row-unavailable-no-receipt = RABBIT no instaló esta copia
+wizard-uninstall-row-unavailable-no-trusted-uninstaller = no hay un desinstalador de confianza para RABBIT
+wizard-uninstall-row-unavailable-unsafe-path = un archivo que RABBIT nunca quita
+# The details text of an Uninstall row that can't be ticked. $package is the
+# localized package name, $path a file path, $reapack_package the name ReaPack
+# knows the package by, and $reason an error message. Keep file paths as they are.
+wizard-uninstall-details-reapack = ReaPack gestiona { $package }: instaló { $path } como { $reapack_package }. Desinstálalo desde ReaPack.
+wizard-uninstall-details-reapack-check-failed = RABBIT no pudo comprobar los registros de ReaPack para { $path } ({ $reason }), así que no toca { $package }.
+wizard-uninstall-details-portable = { $package } sirve a todos los REAPER de este ordenador, así que RABBIT solo lo quita del REAPER estándar, no de uno portable.
+wizard-uninstall-details-no-receipt = RABBIT no instaló esta copia de { $package }, así que lo más probable es que sea tuya, y RABBIT no la toca.
+wizard-uninstall-details-no-trusted-uninstaller = RABBIT no encontró ningún desinstalador de { $package } en el que pueda confiar.
+wizard-uninstall-details-unsafe-path = RABBIT no va a quitar { $path }. Prefiere no tocar { $package } antes que quitarlo solo en parte.
+# The details text of an Uninstall row that can be ticked, one sentence per
+# line. $package is the localized package name, $packages a comma-separated
+# list of package names, and $reason an error message.
+wizard-uninstall-details-files = RABBIT mueve los archivos a una copia de seguridad en lugar de borrarlos.
+wizard-uninstall-details-dependents-stay = Estos paquetes se instalan sobre { $package } y se quedan: { $packages }. Puede que no funcionen sin él.
+wizard-uninstall-details-machine-wide = { $package } sirve a todos los REAPER y a todos los demás programas de este ordenador, así que todos lo pierden.
+wizard-uninstall-details-reapack-owned-extensions = ReaPack instaló estos, y se quedan sin actualizaciones cuando ReaPack ya no esté: { $packages }.
+wizard-uninstall-details-reapack-records-unreadable = RABBIT no pudo leer los registros de ReaPack para saber qué sigue gestionando ({ $reason }).
+wizard-uninstall-details-no-receipt-note = RABBIT no instaló esta copia. Quita los archivos que se sabe que instala { $package }.
+wizard-uninstall-details-reapack-orphan = ReaPack instaló { $package } en su día. ReaPack ya no está, así que RABBIT puede quitarlo; los registros de ReaPack sobre él se quedan.
+# The one row, without a checkbox, of an Uninstall list with nothing in it,
+# and its details text.
+wizard-uninstall-empty = RABBIT no encontró nada que pueda desinstalar en este REAPER.
+wizard-uninstall-empty-details = No hay instalado en este REAPER nada del software que RABBIT sabe desinstalar.
+# Stands in for the Uninstall list when RABBIT's records for the REAPER can't
+# be read. $error is the error message.
+wizard-uninstall-unreadable = RABBIT no pudo leer sus registros de este REAPER ({ $error }), así que no puede mostrar qué podría desinstalar.
+# The Uninstall tab's "Also remove settings" option: a heading, the checkbox
+# and a read-only note below it. The checkbox can be ticked only while a
+# ticked package has settings RABBIT can remove.
+wizard-uninstall-settings-heading = Configuración
+wizard-uninstall-remove-settings = Quitar también la configuración
+wizard-uninstall-settings-note-none-ticked = Marca un paquete para ver qué parte de su configuración puede quitar RABBIT. Si no marcas esta opción, la configuración se conserva.
+wizard-uninstall-settings-note-none-removable = Ninguno de los paquetes marcados tiene configuración que RABBIT pueda quitar.
+# $settings is one line per ticked package, each a
+# wizard-uninstall-settings-package line.
+wizard-uninstall-settings-note-removes = Con esta opción marcada, RABBIT también quita esta configuración. Va a la copia de seguridad con todo lo demás, así que la copia puede recuperarla.
+    { $settings }
+# $package is the localized package name, and $settings a comma-separated list
+# of what goes, such as "your grooves, SWS settings".
+wizard-uninstall-settings-package = { $package }: { $settings }
+# Said by VoiceOver on macOS when a tick in the Uninstall list makes "Also
+# remove settings" usable or unusable: that happens below the list, away from
+# the row being ticked. $option is the checkbox's name, as
+# wizard-uninstall-remove-settings reads.
+wizard-uninstall-settings-available = Ahora disponible debajo de la lista: { $option }.
+wizard-uninstall-settings-unavailable = Ya no está disponible: { $option }.
+
 # $package is the localized package name the configuration step depends on.
 wizard-configuration-row-unavailable = No está disponible: Se requiere instalar { $package }.
 wizard-configuration-row-already-applied = Ya se aplicó en esta ruta de Reaper.
@@ -257,6 +332,34 @@ wizard-review-no-package = No hay un paquete seleccionado.
 # $package is the localized package display name and $action is the localized planned action.
 wizard-review-package = { $package }: { $action }
 
+# Review in uninstall mode. The heading names the mode, so it is the first
+# thing read.
+wizard-review-uninstall-heading = Listo para desinstalar
+wizard-review-uninstall-packages = Paquetes que se van a desinstalar
+wizard-review-uninstall-no-package = No hay nada marcado para desinstalar.
+# One line per package. $package is the localized package name, $removes the
+# sentence on what goes, and $stays the one on what stays, or
+# wizard-review-uninstall-settings-removed.
+wizard-review-uninstall-package = { $package }: { $removes } { $stays }
+# Replaces the sentence on what stays when "Also remove settings" is ticked.
+# $settings is a comma-separated list of what goes, such as "your grooves, SWS
+# settings".
+wizard-review-uninstall-settings-removed = Su configuración también se quita y va a la copia de seguridad: { $settings }.
+wizard-review-uninstall-close-programs-note = Cierra antes los demás programas de música.
+# What is ticked on the tab that isn't running stays ticked, but isn't part of
+# this run. RABBIT leaves out what it ticked by itself, such as updates, but the
+# list can still hold a setting RABBIT ticked along with one of the user's
+# ticks, so the note doesn't say who ticked it. $packages is a comma-separated
+# list of names: packages, and for the Install or update tab also settings,
+# such as "Set REAPER's language".
+wizard-review-inactive-tab-note-install = Lo que está marcado en la pestaña «Instalar o actualizar» no forma parte de esta operación: { $packages }.
+wizard-review-inactive-tab-note-uninstall = Lo que está marcado en la pestaña «Desinstalar» no forma parte de esta operación: { $packages }.
+wizard-review-uninstall-reinstall-hint = Puedes volver a instalarlos más adelante desde la pestaña «Instalar o actualizar».
+# Why the Uninstall button is disabled. $reason is a sentence, such as
+# wizard-review-uninstall-not-writable.
+wizard-review-uninstall-blocked = Todavía no se puede desinstalar: { $reason }
+wizard-review-uninstall-not-writable = RABBIT no puede escribir en la carpeta de este REAPER.
+
 wizard-progress-heading = Progreso de la instalación
 wizard-progress-status-idle = Listo para instalar.
 wizard-progress-status-running = Instalando paquetes seleccionados. Esto puede tardar unos minutos.
@@ -267,6 +370,13 @@ wizard-progress-details-label = Detalles del progreso
 wizard-progress-details-idle = Sin instalación en curso.
 wizard-progress-details-starting = Iniciando operaciones de instalación.
 wizard-progress-details-cache-prefix = Caché
+# The progress page while an uninstall runs: its heading, the first status
+# line, the first line of the log, and the status line once the user asked to
+# stop. An uninstall stops after the package it is on, not after a step.
+wizard-progress-uninstall-heading = Desinstalación
+wizard-progress-status-uninstall-running = Desinstalando los paquetes marcados.
+wizard-progress-details-uninstall-starting = Iniciando la desinstalación.
+wizard-progress-status-uninstall-cancelling = Deteniendo. RABBIT termina el paquete que empezó y luego se cierra.
 
 # Live per-package status line on the progress page.
 # $package is the localized package display name (e.g. "REAPER", "OSARA").
@@ -280,6 +390,8 @@ wizard-progress-status-removing = desinstalando { $package }…
 wizard-progress-status-configuring = Aplicando configuración: { $step }
 
 # Running log lines appended to the progress details text control.
+# $package is the localized package display name and $step the localized
+# configuration step name.
 wizard-progress-log-download-started = Descargando { $package }…
 wizard-progress-log-download-completed = se descargó { $package }.
 wizard-progress-log-install-started = instalando { $package }…
@@ -297,9 +409,48 @@ wizard-done-status-error = La instalación ha fallado. Revisa el error a continu
 wizard-reaper-running-title = REAPER sigue abierto
 wizard-reaper-running-body = Cierra REAPER y vuelve a pulsar Instalar. RABBIT no puede actualizar REAPER ni sus extensiones mientras REAPER esté abierto.
 wizard-error-reaper-running = RABBIT se detuvo porque REAPER estaba abierto. Cierra REAPER y vuelve a ejecutar RABBIT.
+# Why a run stopped when another RABBIT is installing or uninstalling in the
+# same REAPER.
+wizard-error-lock-held = Otra copia de RABBIT abierta está instalando o desinstalando en este REAPER. Espera a que termine y vuelve a ejecutar RABBIT.
+# Shown instead of starting an uninstall while REAPER is open. Name the
+# button as wizard-button-uninstall does.
+wizard-reaper-running-uninstall-body = Cierra REAPER y vuelve a pulsar Desinstalar. RABBIT no puede desinstalar nada de REAPER mientras REAPER esté abierto.
+# The same, for packages every REAPER on the computer can load, such as
+# app2clap. $packages is a comma-separated list of localized package names.
+wizard-reaper-running-uninstall-every-body = Cierra todas las copias de REAPER de este ordenador, también las portables, y vuelve a pulsar Desinstalar. Cualquier REAPER de este ordenador puede usar { $packages }.
+# Shown instead of starting an uninstall while a program that has to be
+# closed first is running. $programs is a comma-separated list of program
+# names, such as "Surge XT.exe"; they are never translated.
+wizard-programs-running-uninstall-title = Cierra primero estos programas
+wizard-programs-running-uninstall-body = Cierra { $programs } y vuelve a pulsar Desinstalar.
+# Why an uninstall stopped, on the Done page.
+wizard-error-uninstall-any-reaper-running = RABBIT se detuvo porque había un REAPER abierto. Cierra todas las copias de REAPER de este ordenador, también las portables, y vuelve a ejecutar RABBIT.
+wizard-error-uninstall-not-enough-space = RABBIT se detuvo porque no hay suficiente espacio libre para la copia de seguridad. Libera espacio en la unidad donde está la carpeta de recursos de REAPER y vuelve a ejecutar RABBIT.
+# $package is the localized package name, and $path the full path of the
+# file another program has open.
+wizard-error-uninstall-file-in-use = { $package } no se ha desinstalado porque otro programa está usando { $path }. Cierra ese programa y vuelve a ejecutar RABBIT.
 wizard-done-status-completed-with-errors = La instalación se completó con errores. Revisa los detalles a continuación.
 wizard-done-status-cancelled = Has detenido la instalación. La lista de abajo muestra lo que RABBIT terminó antes de pararse.
 wizard-done-status-no-packages = No se ha seleccionado ningún paquete para instalar o actualizar.
+# The Done page after an uninstall. Its first line, one of the five below,
+# also ends the progress page. $packages is a comma-separated list of the
+# localized names of the packages that were uninstalled.
+wizard-done-uninstall-status-success = RABBIT ha desinstalado { $packages }.
+wizard-done-uninstall-status-completed-with-errors = RABBIT ha desinstalado { $packages }, pero no todo ha salido como estaba previsto.
+wizard-done-uninstall-status-error = La desinstalación ha fallado.
+wizard-done-uninstall-status-cancelled = Has detenido la desinstalación. Los paquetes a los que RABBIT todavía no había llegado siguen instalados.
+wizard-done-uninstall-status-no-packages = No se ha desinstalado nada.
+wizard-done-uninstall-removed-before-stop = Antes de que lo detuvieras, RABBIT desinstaló { $packages }.
+# There is no way back to the package list from the Done page. Name the tab
+# as wizard-packages-tab-install does.
+wizard-done-uninstall-reinstall-hint = Para recuperar uno, vuelve a ejecutar RABBIT y márcalo en la pestaña «Instalar o actualizar».
+# What to look at after an uninstall, one sentence per package. $package is
+# the localized package name. Name "Show details" as wizard-done-show-details
+# does.
+wizard-done-uninstall-not-installed = { $package } ya no estaba instalado, así que no había nada que quitar.
+wizard-done-uninstall-left-in-backup = Algunos archivos de { $package } no se pudieron devolver a su sitio y siguen en la copia de seguridad. «Mostrar detalles» los enumera.
+wizard-done-uninstall-leftovers = RABBIT todavía encuentra parte de { $package } y no lo toca. «Mostrar detalles» indica qué.
+wizard-done-uninstall-language-reset-failed = RABBIT no pudo volver a poner REAPER en inglés después de quitar { $package }. Elige un idioma en las preferencias de REAPER.
 wizard-done-show-details = Mostrar detalles
 # Mnemonic messages are single-character native access keys. Choose a character
 # from the translated label when possible.
@@ -319,6 +470,19 @@ wizard-self-update-status-checking = Comprobando actualizaciones de RABBIT…
 # button is the focused one, so a stray Enter never ends a running install.
 wizard-close-during-install-title = ¿Detener la instalación?
 wizard-close-during-install-body = RABBIT está instalando. Si lo detienes ahora, RABBIT termina el paso que empezó, conserva lo que ya está instalado, limpia lo que empezó y luego se cierra. Los paquetes a los que todavía no ha llegado se quedan sin instalar. ¿Quieres detener la instalación?
+
+# The same question while an uninstall runs. No is the focused button here
+# too.
+wizard-close-during-uninstall-title = ¿Detener la desinstalación?
+wizard-close-during-uninstall-body = RABBIT está desinstalando. Si lo detienes ahora, RABBIT termina el paquete que empezó, luego se detiene y se cierra. Los paquetes a los que todavía no ha llegado siguen instalados. ¿Quieres detener la desinstalación?
+
+# Asked before an uninstall that a backup can't undo, or that a package's
+# manifest asks to confirm. The No button is the focused one, so Enter never
+# starts it.
+wizard-confirm-uninstall-title = ¿Desinstalar los paquetes marcados?
+# $package is the localized package name.
+wizard-confirm-uninstall-unbacked = Una copia de seguridad no puede recuperar { $package }. Para tenerlo de nuevo, tendrás que volver a instalarlo.
+wizard-confirm-uninstall-question = ¿Desinstalar ahora?
 
 # Shown instead when the user closes the window while RABBIT is replacing its
 # own files. Not a question: that swap has no safe interruption point.
@@ -390,6 +554,23 @@ wizard-summary-package-status =   Estado: { $status }
 wizard-summary-package-installed-version =   Versión instalada: { $version }
 # $architecture is the detected REAPER architecture (x64, arm64, …).
 wizard-summary-architecture = Arquitectura: { $architecture }
+# "Show details" after an uninstall. $value is common-yes or common-no.
+wizard-summary-uninstall-remove-settings = Quitar también la configuración: { $value }
+# One line per file, below its package's line. $path is a full path.
+wizard-summary-removed-file = Quitado: { $path }
+wizard-summary-kept-file = Conservado porque cambió desde que RABBIT lo instaló: { $path }
+wizard-summary-kept-link = Conservado porque contiene un enlace que RABBIT nunca sigue: { $path }
+wizard-summary-kept-reapack = Conservado porque lo instaló ReaPack, que lleva la cuenta de él: { $path }
+wizard-summary-left-over = Sigue ahí: { $path }
+wizard-summary-left-in-backup = No se pudo devolver a su sitio, sigue en la copia de seguridad: { $path }
+# $id is the backup set's name, such as uninstall-unix-1782841261.
+wizard-summary-uninstall-backup = Copia de seguridad: { $id }
+# One line per uninstalled package. $package is the localized package name,
+# and $command the complete rabbit restore-backup command that brings it
+# back, which is never translated.
+wizard-summary-uninstall-restore = Para recuperar { $package }, cierra REAPER y ejecuta: { $command }
+# $path is the full path of the report RABBIT saved.
+wizard-summary-uninstall-report = Informe: { $path }
 status-installed-or-checked = Instalado o revisado
 status-planned-unattended = Plan desatendido
 status-deferred-unattended = Plan diferido
@@ -397,6 +578,16 @@ status-skipped-current = Omitido (ya existe)
 status-failed = Fallido
 status-skipped-dependency-failed = Omitido (falló una dependencia)
 status-cancelled = No instalado (lo detuviste)
+# What became of a package in an uninstall, after its name in "Show details".
+status-removed = Desinstalado
+status-removed-with-leftovers = Desinstalado, pero parte sigue ahí
+status-removed-pending-restart = Desinstalado; el resto se quita al reiniciar el ordenador
+status-would-remove = Se desinstalaría
+status-remove-not-installed = No estaba instalado
+status-remove-blocked = No desinstalado
+status-remove-failed = No se pudo desinstalar
+status-remove-cancelled = Sigue instalado (lo detuviste)
+status-remove-not-reached = Sigue instalado (el proceso se detuvo antes)
 
 # Per-package status messages surfaced on the wizard's Done page next to the
 # package name (e.g. "OSARA: <message>"). The wrapper template
