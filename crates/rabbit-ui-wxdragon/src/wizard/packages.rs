@@ -279,6 +279,7 @@ pub fn wizard_package_plan_for_target_with_available(
         package_rows,
         notes: plan.notes,
         can_install,
+        detections,
     })
 }
 

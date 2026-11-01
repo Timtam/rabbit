@@ -18,7 +18,7 @@ use wxdragon::prelude::*;
 
 use super::{PackagesStateCell, PackagesView, WXK_SPACE};
 
-use crate::wx_app::pages::{WizardPage, add_heading, add_label};
+use crate::wx_app::pages::add_label;
 use crate::wx_app::widgets::{
     REAPER_LANGUAGE_LABEL_NAME, SPANISH_VARIANT_LABEL_NAME, WizardWidgets, package_details,
     sync_osara_keymap_widgets, sync_reaper_language_widget, sync_spanish_variant_widget,
@@ -100,15 +100,19 @@ pub(crate) fn rebuild_package_list_widgets(
     widgets.package_details.set_value(&initial);
 }
 
-/// Put keyboard focus on the packages list with the screen-reader caret on
-/// its TOP-MOST entry — the "Packages" group header. After the list is
-/// repopulated (delete-all + re-append + per-item check-state writes) the
-/// native `wxTreeCtrl`'s caret ends up on an arbitrary row a few items
-/// down, so a screen-reader user entering the page starts mid-list instead
-/// of at the top. Called when the wizard auto-advances onto the packages
-/// page; deliberate Back navigation is left alone so it keeps the user's
-/// previous position.
-pub(crate) fn focus_packages_list_top(widgets: &WizardWidgets, package_items: &PackagesStateCell) {
+/// Put the packages list's screen-reader caret on its TOP-MOST entry — the
+/// "Packages" group header — without moving keyboard focus. After the list
+/// is repopulated (delete-all + re-append + per-item check-state writes)
+/// the native `wxTreeCtrl`'s caret ends up on an arbitrary row a few items
+/// down, so a screen-reader user entering the list would start mid-list
+/// instead of at the top. Called when the wizard auto-advances onto the
+/// packages page, where focus goes to the tab strip and Tab then enters
+/// the list; deliberate Back navigation is left alone so it keeps the
+/// user's previous position.
+pub(crate) fn reset_packages_list_caret(
+    widgets: &WizardWidgets,
+    package_items: &PackagesStateCell,
+) {
     // Clone the item id and DROP the borrow before touching the tree:
     // `select_item` dispatches the selection-changed handler synchronously
     // on MSW, and that handler borrows `package_items` too.
@@ -119,6 +123,12 @@ pub(crate) fn focus_packages_list_top(widgets: &WizardWidgets, package_items: &P
         tree.select_item(&group);
         tree.set_focused_item(&group);
     }
+}
+
+/// Put keyboard focus on the packages list with the screen-reader caret on
+/// its top-most entry; see [`reset_packages_list_caret`].
+pub(crate) fn focus_packages_list_top(widgets: &WizardWidgets, package_items: &PackagesStateCell) {
+    reset_packages_list_caret(widgets, package_items);
     widgets.package_checklist.set_focus();
 }
 
@@ -363,39 +373,16 @@ pub(crate) fn compute_configuration_group_tristate(
     }
 }
 
-/// Windows: native `wxTreeCtrl` driving `SysTreeView32` with
-/// `TVS_CHECKBOXES`. Each row exposes UIA Toggle pattern, screen readers
-/// announce checked state, Space toggles natively. See
-/// `native_tree_checkboxes` for the raw Win32 plumbing that flips the
-/// style after wx has created the control.
-pub(crate) fn build_packages_page(
-    page: &WizardPage,
-    model: &WizardModel,
-    package_rows: Rc<RefCell<Vec<crate::PackageRow>>>,
-    configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
-    package_items: PackagesStateCell,
-    can_install: Rc<Cell<bool>>,
-) -> (PackagesView, TextCtrl, CheckBox, TextCtrl, Choice, Choice) {
-    let sizer = BoxSizer::builder(Orientation::Vertical).build();
-    add_heading(
-        page,
-        &sizer,
-        &model.text.packages_heading,
-        "rabbit-packages-heading",
-    );
-    add_label(
-        page,
-        &sizer,
-        &model.text.packages_list_label,
-        "rabbit-packages-list-label",
-    );
-
+/// Windows: create a native `wxTreeCtrl` with real checkboxes, the list
+/// both Packages tabs use. Only the control is shared: what a toggle does
+/// differs between the tabs, so each wires its own handlers.
+pub(crate) fn build_checkbox_tree(parent: &Panel, name: &str) -> TreeCtrl {
     // wxTreeCtrl is a thin wrapper around the platform's native tree:
     // SysTreeView32 on Windows, NSOutlineView on macOS, GtkTreeView on GTK.
     // HasButtons + LinesAtRoot give the standard expand/collapse affordance;
     // HideRoot keeps the synthetic root invisible so the "Packages" group
     // appears as the top-level branch the user navigates first.
-    let tree = TreeCtrl::builder(page)
+    let tree = TreeCtrl::builder(parent)
         .with_style(
             TreeCtrlStyle::HasButtons
                 | TreeCtrlStyle::LinesAtRoot
@@ -404,7 +391,7 @@ pub(crate) fn build_packages_page(
         )
         .with_size(Size::new(-1, 220))
         .build();
-    tree.set_name("rabbit-package-list");
+    tree.set_name(name);
     // Floor the list height so longer translations (the labels, checkbox, and
     // notes below grow vertically in German/French) can never squeeze the
     // proportion-1 list down to nothing. It still expands to fill free space.
@@ -416,6 +403,34 @@ pub(crate) fn build_packages_page(
     // toggles natively, and the visual is indistinguishable from File
     // Explorer's "items to copy" tree.
     native_tree_checkboxes::enable_checkboxes(tree.get_handle());
+    tree
+}
+
+/// Windows: native `wxTreeCtrl` driving `SysTreeView32` with
+/// `TVS_CHECKBOXES`. Each row exposes UIA Toggle pattern, screen readers
+/// announce checked state, Space toggles natively. See
+/// `native_tree_checkboxes` for the raw Win32 plumbing that flips the
+/// style after wx has created the control.
+///
+/// `page` is the Install or update tab. The page heading sits above the
+/// tabs, so the tab starts with the list's label, which names the tab.
+pub(crate) fn build_packages_page(
+    page: &Panel,
+    model: &WizardModel,
+    package_rows: Rc<RefCell<Vec<crate::PackageRow>>>,
+    configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
+    package_items: PackagesStateCell,
+    can_install: Rc<Cell<bool>>,
+) -> (PackagesView, TextCtrl, CheckBox, TextCtrl, Choice, Choice) {
+    let sizer = BoxSizer::builder(Orientation::Vertical).build();
+    add_label(
+        page,
+        &sizer,
+        &model.text.packages_list_label,
+        "rabbit-packages-list-label",
+    );
+
+    let tree = build_checkbox_tree(page, "rabbit-package-list");
 
     populate_packages_tree(
         &tree,

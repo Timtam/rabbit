@@ -15,7 +15,7 @@ use wxdragon::widgets::SimpleBook;
 
 use wxdragon::prelude::*;
 
-use crate::wx_app::packages_page::{PackagesView, WXK_NUMPAD_ENTER, WXK_RETURN};
+use crate::wx_app::packages_page::{PackagesView, UninstallView, WXK_NUMPAD_ENTER, WXK_RETURN};
 use crate::wx_app::{
     DONE_STEP, PACKAGES_STEP, PROGRESS_STEP, REAPACK_ACK_STEP, REVIEW_STEP, TARGET_STEP,
 };
@@ -32,6 +32,10 @@ pub(crate) struct WizardWidgets {
     pub(crate) version_check_gauge: Gauge,
     pub(crate) version_check_error_heading: StaticText,
     pub(crate) version_check_error_log: TextCtrl,
+    /// The Packages page's two tabs, Install or update and Uninstall. The
+    /// install widgets below sit in the first, the uninstall ones in the
+    /// second.
+    pub(crate) packages_notebook: Notebook,
     pub(crate) package_checklist: PackagesView,
     pub(crate) package_details: TextCtrl,
     pub(crate) osara_keymap_replace: CheckBox,
@@ -43,6 +47,8 @@ pub(crate) struct WizardWidgets {
     /// Choice between the two Spanish OSARA translations. Enabled only
     /// while the Spanish language pack is selected.
     pub(crate) spanish_variant_choice: Choice,
+    pub(crate) uninstall_list: UninstallView,
+    pub(crate) uninstall_details: TextCtrl,
     pub(crate) reapack_ack_confirm: CheckBox,
     pub(crate) review_text: TextCtrl,
     pub(crate) progress_status: StaticText,
@@ -260,6 +266,12 @@ pub(crate) fn sync_spanish_variant_widget(rows: &[crate::PackageRow], choice: &C
 pub(crate) const REAPER_LANGUAGE_LABEL_NAME: &str = "rabbit-reaper-language-label";
 pub(crate) const SPANISH_VARIANT_LABEL_NAME: &str = "rabbit-spanish-variant-label";
 
+/// wxWindow names of the two Packages tabs. `set_optional_choice_shown`
+/// knows a dropdown sits in a tab, rather than straight on a wizard page, by
+/// its parent's name.
+pub(crate) const INSTALL_TAB_NAME: &str = "rabbit-packages-install-tab";
+pub(crate) const UNINSTALL_TAB_NAME: &str = "rabbit-packages-uninstall-tab";
+
 /// Show or hide a dropdown together with its label, then re-lay out the page
 /// so the row's space is reclaimed (or given back).
 ///
@@ -283,6 +295,38 @@ pub(crate) fn set_optional_choice_shown(choice: &Choice, label_name: &str, shown
     // The sizer reads each child's visibility when it lays the page out, so
     // the hidden row only stops taking vertical space once we ask for it.
     page.layout();
+    // Laying out a tab panel reaches no further than the panel. The scrolled
+    // page around the notebook would keep its old size and squeeze the tab
+    // instead, as the page itself once squeezed the package list to nothing.
+    let name = page.get_name();
+    if name == INSTALL_TAB_NAME || name == UNINSTALL_TAB_NAME {
+        refit_page_around_tab(&page);
+    }
+}
+
+/// Size the scrolled wizard page around a Packages tab again, after
+/// something in the tab was shown or hidden.
+///
+/// That takes two steps wxWidgets has single calls for, `InvalidateBestSize`
+/// and `FitInside`, which the pinned wxDragon doesn't wrap:
+/// - The notebook caches its best size, so it keeps asking for the old
+///   height. Setting the tab's minimum size to what it already is clears
+///   that cache for the tab and every window around it.
+/// - A scrolled window recomputes its scrollable height from its contents
+///   only when it is resized. Resizing the page by a pixel and back runs its
+///   own size handler twice, and each run sets the scrollable height from
+///   the contents and lays the page out, exactly what `FitInside` and
+///   `Layout` would do. The scroll position stays.
+pub(crate) fn refit_page_around_tab(tab: &Window) {
+    tab.set_min_size(tab.get_min_size());
+    let Some(page) = tab.get_parent().and_then(|notebook| notebook.get_parent()) else {
+        return;
+    };
+    let size = page.get_size();
+    if size.height > 1 {
+        page.set_size(Size::new(size.width, size.height - 1));
+        page.set_size(size);
+    }
 }
 
 /// Compare the target's key map with its OSARA key map and start the key

@@ -524,7 +524,16 @@ CLI and UI expectations:
 ## Accessibility Rules
 
 - Use native controls only: buttons, check boxes, radio buttons, list views,
-  tree views, text fields, progress controls, and standard dialogs.
+  tree views, tab controls, text fields, progress controls, and standard
+  dialogs.
+- A tab control is wxNotebook: SysTabControl32 on Windows, NSTabView on
+  macOS, which screen readers present as tabs. Its keyboard path: on
+  Windows, Ctrl+Tab and Ctrl+Shift+Tab or Ctrl+Page Down and Ctrl+Page Up
+  from inside it, and the arrow keys on its tab strip; on macOS, physical
+  Ctrl+Tab and Ctrl+Shift+Tab, which RABBIT reads itself because wxWidgets
+  takes Command for Control there, and VoiceOver's own navigation of the
+  tab group. After a switch on macOS, focus moves into the new tab and
+  RABBIT announces the tab's name.
 - Avoid custom drawing, canvas controls, owner-drawn lists, and grid controls in
   the main workflow.
 - Every control needs an accessible name, role, state, keyboard focus, and
@@ -562,6 +571,15 @@ user can finish the install by pressing Next a few times.
      page, with the error lines shown, so the user can go back or quit.
 
 3. Packages
+   - Two tabs, **Install or update** and **Uninstall**. The page opens on
+     Install or update with focus on the tab strip, so screen readers read
+     the tab and its position first, and Tab moves into the package list.
+     The tab showing when Next is pressed decides what the run does;
+     install and uninstall never mix. The Uninstall tab lists every
+     installed package under the same groups, with headings that can't be
+     ticked, nothing ticked by default, and rows RABBIT can't remove shown
+     but impossible to tick, saying why. Everything below describes the
+     Install or update tab.
    - Tree view with two top-level groups: **Packages** and
      **Configuration**. Packages contains REAPER, OSARA, SWS, ReaPack,
      ReaKontrol, FFmpeg (Windows only), JAWS scripts (Windows only), and

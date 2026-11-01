@@ -20,7 +20,7 @@ use wxdragon::prelude::*;
 use super::{PackagesStateCell, PackagesView, WXK_SPACE};
 
 use crate::wx_app::globals::{AnnouncePriority, announce, with_ui_localizer};
-use crate::wx_app::pages::{WizardPage, add_heading, add_label};
+use crate::wx_app::pages::add_label;
 use crate::wx_app::widgets::{
     REAPER_LANGUAGE_LABEL_NAME, SPANISH_VARIANT_LABEL_NAME, WizardWidgets, package_details,
     sync_osara_keymap_widgets, sync_reaper_language_widget, sync_spanish_variant_widget,
@@ -220,8 +220,11 @@ pub(crate) const PACKAGE_COL_LABEL: u32 = 1;
 /// row label. wx makes the first column it is given, the toggle, the one
 /// with the expander triangle. The model's `set_value` callback owns all
 /// the toggle side effects.
+///
+/// `page` is the Install or update tab. The page heading sits above the
+/// tabs, so the tab starts with the list's label, which names the tab.
 pub(crate) fn build_packages_page(
-    page: &WizardPage,
+    page: &Panel,
     model: &WizardModel,
     package_rows: Rc<RefCell<Vec<crate::PackageRow>>>,
     configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
@@ -229,12 +232,6 @@ pub(crate) fn build_packages_page(
     can_install: Rc<Cell<bool>>,
 ) -> (PackagesView, TextCtrl, CheckBox, TextCtrl, Choice, Choice) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
-    add_heading(
-        page,
-        &sizer,
-        &model.text.packages_heading,
-        "rabbit-packages-heading",
-    );
     add_label(
         page,
         &sizer,
@@ -1207,4 +1204,14 @@ pub(crate) fn rebuild_package_list_widgets(
 /// caret-drift problem this helper fixes is native-Windows-tree-specific.
 pub(crate) fn focus_packages_list_top(widgets: &WizardWidgets, _package_items: &PackagesStateCell) {
     widgets.package_checklist.set_focus();
+}
+
+/// Non-Windows twin of the tree-based helper: nothing to do. A freshly
+/// rebuilt DataView has no selection, so reading starts at the top, and
+/// selecting a row from code is exactly what crashes here (see
+/// [`focus_packages_list_top`]).
+pub(crate) fn reset_packages_list_caret(
+    _widgets: &WizardWidgets,
+    _package_items: &PackagesStateCell,
+) {
 }

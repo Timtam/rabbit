@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use rabbit_core::localization::DEFAULT_LOCALE;
-use rabbit_core::model::{Architecture, Platform};
+use rabbit_core::model::{Architecture, ComponentDetection, Platform};
 use rabbit_core::plan::{AvailablePackage, PlanActionKind};
 use rabbit_core::setup::SetupReport;
 use rabbit_core::version::Version;
@@ -78,7 +78,19 @@ pub struct WizardText {
     pub target_custom_portable_writable_label: String,
     pub target_custom_portable_note: String,
     pub packages_heading: String,
+    /// The Packages page's two tabs.
+    pub packages_tab_install: String,
+    pub packages_tab_uninstall: String,
     pub packages_list_label: String,
+    /// The label right before the Uninstall tab's list, naming the tab.
+    pub uninstall_list_label: String,
+    /// The one row, without a checkbox, of an empty Uninstall list, and its
+    /// details text.
+    pub uninstall_empty: String,
+    pub uninstall_empty_details: String,
+    /// What Next on the Uninstall tab says while the wizard can't uninstall.
+    pub uninstall_not_ready_title: String,
+    pub uninstall_not_ready_body: String,
     pub packages_row_checked: String,
     pub packages_row_unchecked: String,
     pub packages_tree_group_label: String,
@@ -417,6 +429,10 @@ pub struct WizardPackagePlan {
     pub package_rows: Vec<PackageRow>,
     pub notes: Vec<String>,
     pub can_install: bool,
+    /// What detection found at the target while building the plan. The
+    /// Uninstall tab's rows are built from it, so detection, which takes a
+    /// second or two, doesn't run twice.
+    pub detections: Vec<ComponentDetection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

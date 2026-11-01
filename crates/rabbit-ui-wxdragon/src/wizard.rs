@@ -16,6 +16,7 @@ mod self_update;
 mod summary;
 mod target;
 mod text;
+mod uninstall;
 
 #[cfg(test)]
 mod tests;
@@ -32,3 +33,4 @@ pub use review::*;
 pub use self_update::*;
 pub use summary::*;
 pub use target::*;
+pub use uninstall::*;

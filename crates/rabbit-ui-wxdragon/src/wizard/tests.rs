@@ -10,3 +10,4 @@ mod self_update;
 mod summary;
 mod support;
 mod target;
+mod uninstall;

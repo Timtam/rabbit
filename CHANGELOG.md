@@ -57,6 +57,16 @@ from this file and posts it as the GitHub release body.
 
 ### Changed
 
+- The wizard's **Packages** page now has two tabs, **Install or update** and
+  **Uninstall**, the start of uninstalling from the wizard. The page opens on
+  **Install or update** with focus on the tabs, so screen readers read
+  "Install or update, tab, 1 of 2" first; press Tab to reach the package
+  list, which works as before. The **Uninstall** tab lists what is installed
+  in the chosen REAPER, whether RABBIT can remove it, and if not, why, with
+  nothing ticked. Uninstalling from there doesn't work yet: Next on that tab
+  says so and points to `rabbit uninstall`. Switch tabs with Ctrl+Tab or
+  Ctrl+Page Down on Windows, and with Ctrl+Tab or VoiceOver's tab navigation
+  on macOS.
 - A package you uninstalled, or turned down in the wizard, is no longer
   offered again by itself: the wizard doesn't tick it, and `rabbit
   apply-packages` and `rabbit setup` without `--package` skip it and say so.

@@ -1,5 +1,6 @@
-//! The packages page. Windows drives a native `TreeCtrl` with real
-//! checkboxes; everywhere else a `DataViewCtrl` with a toggle column.
+//! The packages page and its two tabs. Windows drives a native `TreeCtrl`
+//! with real checkboxes; everywhere else a `DataViewCtrl` with a toggle
+//! column. Each tab's list has its own module per platform.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -18,6 +19,11 @@ pub(crate) mod native_tree_checkboxes;
 #[cfg(not(target_os = "windows"))]
 mod dataview;
 
+#[cfg(not(target_os = "windows"))]
+mod uninstall_dataview;
+#[cfg(target_os = "windows")]
+mod uninstall_native;
+
 #[cfg(target_os = "windows")]
 use native::PackageItems;
 #[cfg(target_os = "windows")]
@@ -25,6 +31,17 @@ pub(crate) use native::*;
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) use dataview::*;
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) use uninstall_dataview::{
+    UninstallStateCell, UninstallView, build_uninstall_tab, new_uninstall_state,
+    rebuild_uninstall_list_widgets,
+};
+#[cfg(target_os = "windows")]
+pub(crate) use uninstall_native::{
+    UninstallStateCell, UninstallView, build_uninstall_tab, new_uninstall_state,
+    rebuild_uninstall_list_widgets,
+};
 
 /// `wx/defs.h`: `WXK_SPACE = 32` (just the ASCII value). Kept around as a
 /// fallback intercept on platforms without TVS_CHECKBOXES; on Windows the

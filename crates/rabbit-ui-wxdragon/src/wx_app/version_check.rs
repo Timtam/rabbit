@@ -9,10 +9,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{
-    ConfigurationRow, PackageRow, TargetRow, WizardModel, apply_version_check_failures_to_rows,
-    localized_package_display_name, localizer_from_options,
-    recompute_configuration_row_availability, wizard_desired_package_ids,
-    wizard_package_plan_for_target_with_available,
+    ConfigurationRow, PackageRow, TargetRow, WizardModel, WizardUninstallList,
+    apply_version_check_failures_to_rows, localized_package_display_name, localizer_from_options,
+    recompute_configuration_row_availability, uninstall_list_for_target,
+    wizard_desired_package_ids, wizard_package_plan_for_target_with_available,
 };
 use rabbit_core::detection::detect_components;
 use rabbit_core::latest::fetch_latest_details_for_package_on;
@@ -33,8 +33,10 @@ use crate::wx_app::globals::{
     with_ui_localizer,
 };
 use crate::wx_app::packages_page::{
-    PackagesStateCell, focus_packages_list_top, rebuild_package_list_widgets,
+    PackagesStateCell, UninstallStateCell, rebuild_package_list_widgets,
+    rebuild_uninstall_list_widgets,
 };
+use crate::wx_app::packages_tabs::arrive_on_packages_page;
 use crate::wx_app::widgets::{
     WizardWidgets, effective_can_install, reapack_ack_confirmed, update_navigation,
 };
@@ -52,6 +54,10 @@ pub(crate) struct VersionCheckUi {
     pub(crate) package_items: PackagesStateCell,
     pub(crate) can_install: Rc<Cell<bool>>,
     pub(crate) review_can_install: Rc<Cell<bool>>,
+    /// The Uninstall tab's rows and list state, rebuilt from the same
+    /// detection as the package rows.
+    pub(crate) uninstall_list: Rc<RefCell<WizardUninstallList>>,
+    pub(crate) uninstall_items: UninstallStateCell,
     pub(crate) target: TargetRow,
     /// Which builds to check each package on (empty outside expert mode).
     pub(crate) channels: rabbit_core::package::PackageChannels,
@@ -164,6 +170,11 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
                                 &errors,
                             );
                         }
+                        // The Uninstall tab's rows come from the detection the
+                        // plan just ran, not from a second one. Version-check
+                        // failures don't touch them: they only stop installs.
+                        *ui.uninstall_list.borrow_mut() =
+                            uninstall_list_for_target(&ui.model, &ui.target, &plan.detections);
                         *ui.package_rows.borrow_mut() = plan.package_rows;
                         *ui.package_notes.borrow_mut() = plan.notes;
                         // The deferred fetch may have promoted ReaPack to
@@ -206,6 +217,12 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
                             &ui.package_rows.borrow(),
                             &ui.configuration_rows.borrow(),
                         );
+                        rebuild_uninstall_list_widgets(
+                            &ui.widgets,
+                            &ui.uninstall_items,
+                            &ui.model,
+                            &ui.uninstall_list.borrow(),
+                        );
                         ui.current_step.store(PACKAGES_STEP, Ordering::SeqCst);
                         update_navigation(
                             PACKAGES_STEP,
@@ -222,12 +239,13 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
                             reapack_ack_confirmed(&ui.widgets),
                         );
                         // The wizard just auto-advanced onto the packages
-                        // page: land the screen reader on the top of the
-                        // list (the "Packages" group header), not wherever
-                        // the native control left its caret after the
-                        // repopulation above. Mirrors the explicit gauge
-                        // focus on entering the version-check page.
-                        focus_packages_list_top(&ui.widgets, &ui.package_items);
+                        // page, which is now the one showing: select the
+                        // Install tab and land the screen reader on the tab
+                        // strip, with the install list's caret back at its
+                        // top for when Tab moves into it. Mirrors the
+                        // explicit gauge focus on entering the version-check
+                        // page.
+                        arrive_on_packages_page(&ui.model, &ui.widgets, &ui.package_items);
                     }
                     Err(error) => {
                         errors.push((String::new(), error.to_string()));

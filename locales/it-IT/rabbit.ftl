@@ -7,6 +7,7 @@ common-no = no
 action-install = Da installare
 action-update = Da aggiornare
 action-keep = Non modificare
+action-uninstall = Da disinstallare
 
 package-reaper = REAPER
 package-osara = OSARA
@@ -163,8 +164,8 @@ wizard-target-details = Percorso di installazione di REAPER: { $app_path }
     Percorso delle risorse: { $path }
     Scrivibile: { $writable }
 
-wizard-packages-heading = Scegli i pacchetti
-wizard-packages-list-label = Pacchetti da installare o aggiornare
+wizard-packages-heading = Scegli cosa installare, aggiornare o disinstallare
+wizard-packages-list-label = Installa o aggiorna: pacchetti e impostazioni
 wizard-packages-row-checked = Selezionato
 wizard-packages-row-unchecked = Non selezionato
 wizard-packages-choice-shown = Nuova scelta sotto l'elenco: { $choice }.
@@ -173,6 +174,60 @@ wizard-packages-tree-group-label = Pacchetti
 wizard-additional-software-tree-group-label = Software aggiuntivo
 wizard-language-tree-group-label = Pacchetti lingua
 wizard-configuration-tree-group-label = Configurazione
+
+# The two tabs on the Packages page. Screen readers read the selected tab's
+# name when the page opens, so keep both short.
+wizard-packages-tab-install = Installa o aggiorna
+wizard-packages-tab-uninstall = Disinstalla
+# The label right before the Uninstall tab's list. Screen readers read it when
+# focus enters the list, so it names the tab first.
+wizard-uninstall-list-label = Disinstalla: software che RABBIT può rimuovere
+# One row of the Uninstall tab. $package is the localized package name,
+# $action is action-uninstall or action-keep, and $installed is the installed
+# version or an unknown-version label.
+wizard-uninstall-row = { $package }: { $action }. Hai { $installed }
+# Why an Uninstall row can't be ticked: the short phrase that goes into
+# wizard-package-row-unavailable-suffix at the end of the row.
+wizard-uninstall-row-unavailable-not-yet = RABBIT non può ancora disinstallarlo
+wizard-uninstall-row-unavailable-not-supported = RABBIT non può disinstallarlo
+wizard-uninstall-row-unavailable-manual = da rimuovere a mano
+wizard-uninstall-row-unavailable-reapack = gestito da ReaPack
+wizard-uninstall-row-unavailable-reapack-check-failed = non è stato possibile controllare i registri di ReaPack
+wizard-uninstall-row-unavailable-no-receipt = RABBIT non ha installato questa copia
+wizard-uninstall-row-unavailable-no-trusted-uninstaller = nessun programma di disinstallazione di cui RABBIT si fidi
+wizard-uninstall-row-unavailable-unsafe-path = un file che RABBIT non rimuove mai
+# The details text of an Uninstall row that can't be ticked. $package is the
+# localized package name, $path a file path, $reapack_package the name ReaPack
+# knows the package by, and $reason an error message. Keep file paths as they are.
+wizard-uninstall-details-reapack = ReaPack gestisce { $package }: ha installato { $path } come { $reapack_package }. Disinstallalo invece da ReaPack.
+wizard-uninstall-details-reapack-check-failed = RABBIT non ha potuto controllare i registri di ReaPack per { $path } ({ $reason }), quindi non tocca { $package }.
+wizard-uninstall-details-portable = { $package } serve a tutti i REAPER di questo computer, quindi RABBIT lo rimuove solo dal REAPER standard, non da uno portatile.
+wizard-uninstall-details-no-receipt = RABBIT non ha installato questa copia di { $package }, quindi molto probabilmente è tua, e RABBIT non la tocca.
+wizard-uninstall-details-no-trusted-uninstaller = RABBIT non ha trovato nessun programma di disinstallazione di { $package } di cui fidarsi.
+wizard-uninstall-details-unsafe-path = RABBIT non rimuoverà { $path }. Preferisce non toccare { $package } piuttosto che rimuoverlo solo in parte.
+# The details text of an Uninstall row that can be ticked, one sentence per
+# line. $package is the localized package name, $packages a comma-separated
+# list of package names, and $reason an error message.
+wizard-uninstall-details-files = RABBIT sposta i file in un backup invece di eliminarli.
+wizard-uninstall-details-dependents-stay = Questi pacchetti si installano sopra { $package } e restano: { $packages }. Senza di esso potrebbero non funzionare.
+wizard-uninstall-details-machine-wide = { $package } serve a tutti i REAPER e a tutti gli altri programmi di questo computer, che lo perdono tutti.
+wizard-uninstall-details-reapack-owned-extensions = Questi li ha installati ReaPack, e restano senza aggiornamenti una volta rimosso ReaPack: { $packages }.
+wizard-uninstall-details-reapack-records-unreadable = RABBIT non ha potuto leggere i registri di ReaPack per sapere cosa gestisce ancora ({ $reason }).
+wizard-uninstall-details-no-receipt-note = RABBIT non ha installato questa copia. Rimuove i file che { $package } notoriamente installa.
+wizard-uninstall-details-reapack-orphan = { $package } è stato installato a suo tempo da ReaPack. ReaPack non c'è più, quindi RABBIT può rimuoverlo; i registri di ReaPack che lo riguardano restano.
+# The one row, without a checkbox, of an Uninstall list with nothing in it,
+# and its details text.
+wizard-uninstall-empty = RABBIT non ha trovato niente che possa disinstallare in questo REAPER.
+wizard-uninstall-empty-details = In questo REAPER non è installato nessuno dei software che RABBIT sa disinstallare.
+# Stands in for the Uninstall list when RABBIT's records for the REAPER can't
+# be read. $error is the error message.
+wizard-uninstall-unreadable = RABBIT non ha potuto leggere i suoi registri per questo REAPER ({ $error }), quindi non può elencare cosa potrebbe disinstallare.
+# Shown when Next is pressed on the Uninstall tab of a build that can't
+# uninstall from the wizard yet. Keep "rabbit uninstall", "--package sws"
+# and "--apply" exactly as they are.
+wizard-uninstall-not-ready-title = La disinstallazione dalla procedura guidata non è ancora pronta
+wizard-uninstall-not-ready-body = Questa versione di prova di RABBIT non può ancora disinstallare dalla procedura guidata, quindi non è stato modificato niente. Per disinstallare ora, chiudi RABBIT e usa rabbit uninstall dalla riga di comando: per esempio, rabbit uninstall --package sws mostra cosa verrebbe rimosso, e aggiungendo --apply lo rimuove.
+
 # $package is the localized package name the configuration step depends on.
 wizard-configuration-row-unavailable = Non disponibile: richiede l'installazione di { $package }.
 wizard-configuration-row-already-applied = Già applicato su questa destinazione REAPER.

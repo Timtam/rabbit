@@ -4,6 +4,7 @@ mod close_guard;
 mod expert_mode;
 mod globals;
 mod packages_page;
+mod packages_tabs;
 mod pages;
 mod progress_ui;
 mod self_update_ui;
@@ -25,13 +26,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    UiBootstrapOptions, WizardInstallOptions, WizardOutcomeReport,
+    UiBootstrapOptions, WizardInstallOptions, WizardOutcomeReport, WizardUninstallList,
     build_review_preview_for_package_rows, execute_wizard_install_with_progress,
     install_request_from_target_and_rows, load_wizard_model, localizer_from_options,
     reapack_selected_for_install_or_update, recompute_configuration_row_availability,
     refreshed_target_row, run_wizard_self_update_check, run_wizard_self_update_release_notes,
-    save_wizard_outcome_report, selected_configuration_step_ids, wizard_error_reason,
-    wizard_outcome_report_from_error, wizard_outcome_report_from_success,
+    save_wizard_outcome_report, selected_configuration_step_ids, uninstall_list_for_target,
+    wizard_error_reason, wizard_outcome_report_from_error, wizard_outcome_report_from_success,
     wizard_package_plan_for_target, wizard_package_plan_for_target_with_available,
 };
 use rabbit_core::localization::resolve_runtime_locale;
@@ -49,7 +50,11 @@ use crate::wx_app::globals::{
     show_warning, with_ui_frame, with_ui_localizer,
 };
 use crate::wx_app::packages_page::{
-    PackagesStateCell, new_packages_state, refresh_package_checklist,
+    PackagesStateCell, new_packages_state, new_uninstall_state, rebuild_uninstall_list_widgets,
+    refresh_package_checklist,
+};
+use crate::wx_app::packages_tabs::{
+    bind_packages_tab_switching, show_uninstall_not_ready, uninstall_tab_selected,
 };
 use crate::wx_app::pages::{add_pages, build_language_footer};
 use crate::wx_app::progress_ui::{ProgressUiState, apply_progress_event_to_ui};
@@ -148,6 +153,10 @@ pub fn run() {
         // `rebuild_packages_tree_model` on subsequent rebuilds (deferred
         // version-check finish, post-install rescan).
         let package_items: PackagesStateCell = new_packages_state();
+        // The Uninstall tab's rows, rebuilt with the package rows from the
+        // same detection, and its list's per-platform state.
+        let uninstall_list = Rc::new(RefCell::new(WizardUninstallList::default()));
+        let uninstall_items = new_uninstall_state();
         let can_install = Rc::new(Cell::new(model.controls.can_install));
         let review_can_install = Rc::new(Cell::new(false));
         let last_report = Arc::new(Mutex::new(None::<WizardOutcomeReport>));
@@ -206,6 +215,8 @@ pub fn run() {
             Rc::clone(&configuration_rows),
             Rc::clone(&package_items),
             Rc::clone(&can_install),
+            Rc::clone(&uninstall_list),
+            Rc::clone(&uninstall_items),
             self_update_status,
             language_footer,
         );
@@ -247,6 +258,7 @@ pub fn run() {
         bind_done_page_enter_closes(&wizard_widgets.done_status, &frame, &current_step);
         bind_done_page_enter_closes(&wizard_widgets.done_details, &frame, &current_step);
         bind_expert_mode_chord(&frame, &model, wizard_widgets, &current_step);
+        bind_packages_tab_switching(&frame, &model, wizard_widgets, &current_step);
         if expert_mode() {
             // RABBIT_EXPERT=1: no confirmation, setting the variable was it.
             apply_expert_mode(&model, &wizard_widgets);
@@ -319,6 +331,8 @@ pub fn run() {
             let configuration_rows = Rc::clone(&configuration_rows);
             let can_install = Rc::clone(&can_install);
             let review_can_install = Rc::clone(&review_can_install);
+            let uninstall_list = Rc::clone(&uninstall_list);
+            let uninstall_items = Rc::clone(&uninstall_items);
             next.on_click(move |_| {
                 let step = match current_step.load(Ordering::SeqCst) {
                     TARGET_STEP => {
@@ -359,6 +373,8 @@ pub fn run() {
                             package_items: Rc::clone(&package_items),
                             can_install: Rc::clone(&can_install),
                             review_can_install: Rc::clone(&review_can_install),
+                            uninstall_list: Rc::clone(&uninstall_list),
+                            uninstall_items: Rc::clone(&uninstall_items),
                             target: selected_target,
                             book,
                             step_label,
@@ -372,6 +388,13 @@ pub fn run() {
                         VERSION_CHECK_STEP
                     }
                     PACKAGES_STEP => {
+                        // The tab showing decides the run. Uninstalling from
+                        // the wizard isn't built yet: say so and stay, rather
+                        // than start anything.
+                        if uninstall_tab_selected(&widgets) {
+                            show_uninstall_not_ready(&model);
+                            return;
+                        }
                         let selected_target = selected_target_row(&model, &widgets);
                         let rows = package_rows.borrow();
                         let notes = package_notes.borrow();
@@ -443,6 +466,8 @@ pub fn run() {
             let last_reaper_app_path = Arc::clone(&last_reaper_app_path);
             let last_resource_path = Arc::clone(&last_resource_path);
             let install_run = Arc::clone(&install_run);
+            let uninstall_list = Rc::clone(&uninstall_list);
+            let uninstall_items = Rc::clone(&uninstall_items);
             let review_text = widgets.review_text;
             let review_step = Arc::clone(&current_step);
             let start_install = Rc::new(move || {
@@ -637,6 +662,8 @@ pub fn run() {
                     let review_can_install = Rc::clone(&review_can_install);
                     let last_reaper_app_path = Arc::clone(&last_reaper_app_path);
                     let last_resource_path = Arc::clone(&last_resource_path);
+                    let uninstall_list = Rc::clone(&uninstall_list);
+                    let uninstall_items = Rc::clone(&uninstall_items);
                     arm_post_install_hook(move || {
                         let Some(target) = selected_target_row(&model, &widgets) else {
                             return;
@@ -656,6 +683,16 @@ pub fn run() {
                         let Ok(plan) = plan else {
                             return;
                         };
+                        // The Uninstall list from the same fresh detection.
+                        // Rebuilt in place; the tab selection stays.
+                        *uninstall_list.borrow_mut() =
+                            uninstall_list_for_target(&model, &refreshed_target, &plan.detections);
+                        rebuild_uninstall_list_widgets(
+                            &widgets,
+                            &uninstall_items,
+                            &model,
+                            &uninstall_list.borrow(),
+                        );
                         *package_rows.borrow_mut() = plan.package_rows;
                         *package_notes.borrow_mut() = plan.notes;
                         // Recompute configuration row availability against
