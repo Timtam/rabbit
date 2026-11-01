@@ -67,9 +67,11 @@ pub(crate) struct VersionCheckUi {
 
 /// Reset the version-check page to its starting state, install the dispatcher
 /// that handles per-package events on the UI thread, and spawn the worker
-/// thread. The dispatcher auto-advances to the Packages step on full success;
-/// on any failure it stays on the version-check page with the error log
-/// populated and the Back button enabled.
+/// thread. When every check has answered, the dispatcher advances to the
+/// Packages step, even if some checks failed: those packages' rows are
+/// disabled with a reason, and Review notes the full error. It stays on the
+/// version-check page, with the error log populated and the Back button
+/// enabled, only when the package plan itself can't be built.
 pub(crate) fn start_version_check(ui: VersionCheckUi) {
     let package_ids = wizard_desired_package_ids(ui.model.platform);
     let package_count = package_ids.len() as i32;

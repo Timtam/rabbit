@@ -24,7 +24,14 @@
   "install_steps": [
     "run_upstream_installer"
   ],
-  "uninstall_steps": [],
+  "uninstall": {
+    "plans": [
+      {
+        "strategy": "not_supported",
+        "note_key": "uninstall-not-yet"
+      }
+    ]
+  },
   "backup_policy": "none",
   "user_plugin_prefixes": [],
   "user_plugin_suffixes": {

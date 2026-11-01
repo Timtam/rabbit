@@ -11,15 +11,19 @@ use rabbit_core::latest::fetch_latest_versions_on;
 use rabbit_core::localization::{
     DEFAULT_LOCALE, LocalizedText, Localizer, available_locales, resolve_runtime_locale,
 };
-use rabbit_core::model::{Architecture, Platform};
+use rabbit_core::model::{Architecture, InstallationKind, Platform};
 use rabbit_core::operation::{
     PackageOperationItem, PackageOperationOptions, PackageOperationReport, PackageOperationStatus,
     PlannedExecutionKind, execute_package_operation,
 };
 use rabbit_core::osara_keymap::{OsaraKeymapDefault, OsaraKeymapState, osara_keymap_default};
+use rabbit_core::package::uninstall::{
+    UninstallBackup, UninstallElevation, UninstallPlanSpec, UninstallSpec, UninstallStrategy,
+};
 use rabbit_core::package::{PACKAGE_OSARA, PackageChannels, STABLE_CHANNEL, remembered_channels};
 use rabbit_core::package::{
-    builtin_package_specs, default_desired_package_ids, embedded_package_manifest,
+    SupportedPlatform, builtin_package_specs, default_desired_package_ids,
+    embedded_package_manifest,
 };
 use rabbit_core::plan::{
     AvailablePackage, PlanActionKind, build_install_plan_with_installed_channels,
@@ -798,9 +802,11 @@ fn run_packages(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                     "  Install steps: {}",
                     serialized_names(&package.install_steps)
                 );
-                println!(
-                    "  Uninstall steps: {}",
-                    serialized_names(&package.uninstall_steps)
+                print_uninstall_plans(
+                    &package.uninstall,
+                    &package.supported_platforms,
+                    package.requires_standard_install,
+                    None,
                 );
                 println!(
                     "  Backup policy: {}",
@@ -1784,6 +1790,9 @@ fn print_backup_sets(backup_sets: &[BackupSet]) {
         if let Some(manifest_path) = &backup_set.manifest_path {
             println!("  Manifest: {}", manifest_path.display());
         }
+        if let Some(warning) = &backup_set.warning {
+            println!("  Warning: {warning}");
+        }
         println!("  Files: {}", backup_set.files.len());
         for file in &backup_set.files {
             println!("    {}", file.display());
@@ -1809,6 +1818,12 @@ fn print_restore_backup_report(report: &RestoreBackupReport) {
         }
         println!("    Size: {}", action.size);
         println!("    SHA-256: {}", action.sha256);
+    }
+    for target in &report.skipped_targets {
+        println!(
+            "  Skipped: {} (its backup never finished, so the file was never changed)",
+            target.display()
+        );
     }
 }
 
@@ -2210,9 +2225,11 @@ fn print_package_specs(packages: &[rabbit_core::package::PackageSpec]) {
             "  Install steps: {}",
             serialized_names(&package.install_steps)
         );
-        println!(
-            "  Uninstall steps: {}",
-            serialized_names(&package.uninstall_steps)
+        print_uninstall_plans(
+            &package.uninstall,
+            &package.supported_platforms,
+            package.requires_standard_install,
+            localizer.as_ref(),
         );
         println!(
             "  Backup policy: {}",
@@ -2227,6 +2244,60 @@ fn print_package_specs(packages: &[rabbit_core::package::PackageSpec]) {
             string_names(&package.user_plugin_suffixes)
         );
     }
+}
+
+/// One line per supported platform and REAPER target, saying which uninstall
+/// plan applies there. With a localizer, a plan's note is shown as text;
+/// without one (the raw `--manifest` listing), as its Fluent key.
+fn print_uninstall_plans(
+    uninstall: &UninstallSpec,
+    platforms: &[SupportedPlatform],
+    requires_standard_install: bool,
+    localizer: Option<&Localizer>,
+) {
+    println!("  Uninstall:");
+    for platform in platforms {
+        for target in [InstallationKind::Standard, InstallationKind::Portable] {
+            let label = format!(
+                "{}, {} REAPER",
+                serialized_name(platform),
+                serialized_name(&target)
+            );
+            if target == InstallationKind::Portable && requires_standard_install {
+                println!("    {label}: not offered, needs a standard REAPER");
+                continue;
+            }
+            let line = uninstall.plan_for(platform.platform(), target).map_or_else(
+                || "no plan".to_string(),
+                |plan| describe_uninstall_plan(plan, localizer),
+            );
+            println!("    {label}: {line}");
+        }
+    }
+}
+
+fn describe_uninstall_plan(plan: &UninstallPlanSpec, localizer: Option<&Localizer>) -> String {
+    let mut line = serialized_name(&plan.strategy);
+    let mut details = Vec::new();
+    if plan.elevation != UninstallElevation::Never {
+        details.push(format!("elevation {}", serialized_name(&plan.elevation)));
+    }
+    if plan.strategy == UninstallStrategy::RemoveFiles || plan.backup != UninstallBackup::Move {
+        details.push(format!("backup {}", serialized_name(&plan.backup)));
+    }
+    if !details.is_empty() {
+        line.push_str(&format!(" ({})", details.join(", ")));
+    }
+    if let Some(key) = &plan.note_key {
+        let note = localizer
+            .map(|localizer| localizer.text(key))
+            .filter(|text| !text.missing);
+        match note {
+            Some(note) => line.push_str(&format!(": {}", note.value)),
+            None => line.push_str(&format!(": {key}")),
+        }
+    }
+    line
 }
 
 fn serialized_name<T: Serialize + ?Sized>(value: &T) -> String {
@@ -2937,6 +3008,7 @@ mod tests {
                 schema_version: 1,
                 packages,
                 declined_packages: Default::default(),
+                applied_configuration: Default::default(),
             },
         )
         .unwrap();
@@ -2954,5 +3026,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(back.get("reaper").map(String::as_str), Some("stable"));
+    }
+
+    #[test]
+    fn uninstall_plans_print_their_strategy_and_note() {
+        use rabbit_core::package::uninstall::UninstallPlanSpec;
+
+        let plan = |json: &str| serde_json::from_str::<UninstallPlanSpec>(json).unwrap();
+        let not_yet = plan(r#"{ "strategy": "not_supported", "note_key": "uninstall-not-yet" }"#);
+        let english = rabbit_core::localization::Localizer::embedded("en-US").unwrap();
+        assert_eq!(
+            super::describe_uninstall_plan(&not_yet, Some(&english)),
+            "not_supported: RABBIT can't uninstall this yet."
+        );
+        // The raw manifest listing has no localizer and shows the key.
+        assert_eq!(
+            super::describe_uninstall_plan(&not_yet, None),
+            "not_supported: uninstall-not-yet"
+        );
+        let elevated = plan(
+            r#"{ "strategy": "remove_files", "elevation": "required", "backup": "none",
+                 "remove": { "receipt_files": true } }"#,
+        );
+        assert_eq!(
+            super::describe_uninstall_plan(&elevated, None),
+            "remove_files (elevation required, backup none)"
+        );
     }
 }

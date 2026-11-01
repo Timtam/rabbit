@@ -409,6 +409,7 @@ mod tests {
                 schema_version: 1,
                 packages,
                 declined_packages: Default::default(),
+                applied_configuration: Default::default(),
             },
         )
         .unwrap();

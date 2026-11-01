@@ -16,10 +16,10 @@ use crate::package::{InstallDestination, PACKAGE_FFMPEG, PackageSpec, package_sp
 use crate::preflight::{PreflightOptions, PreflightReport, run_install_preflight};
 use crate::progress::{ProgressEvent, ProgressReporter};
 use crate::receipt::{
-    InstallState, PackageReceiptParams, RECEIPT_RELATIVE_PATH, load_install_state, receipt_path,
-    save_install_state, upsert_package_receipt,
+    InstallState, PackageReceiptParams, load_install_state, save_install_state,
+    upsert_package_receipt,
 };
-use crate::rollback::{BackupManifest, BackupManifestFile, save_backup_manifest};
+use crate::rollback::BackupSetWriter;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallOptions {
@@ -115,7 +115,17 @@ pub fn install_cached_artifacts_with_progress(
     };
 
     let mut state = load_install_state(resource_path)?.unwrap_or_default();
-    let mut replacement_backup_set: Option<PathBuf> = None;
+    // Created on the first file this run replaces, so a run that only adds
+    // files leaves no empty set behind. A dry run plans the same paths
+    // without writing anything.
+    let mut replacement_backups: Option<BackupSetWriter> = None;
+    let new_backup_set = || {
+        if options.dry_run {
+            BackupSetWriter::planning(resource_path, &timestamp, "install-replacement")
+        } else {
+            BackupSetWriter::new(resource_path, &timestamp, "install-replacement")
+        }
+    };
 
     for artifact in artifacts {
         progress.report(ProgressEvent::InstallStarted {
@@ -158,50 +168,52 @@ pub fn install_cached_artifacts_with_progress(
             .filter(|_| prepared.files.len() == 1);
 
         for file in &prepared.files {
-            let install_target = resolve_install_target(
+            let target_path = resolve_install_target(
                 destination,
                 &artifact.descriptor.package_id,
                 resource_path,
                 install_as.as_deref().unwrap_or(&file.target_file_name),
             )?;
-            let target_path = install_target.target_path;
             let target_exists = target_path.is_file();
             let target_matches = target_exists && sha256_file(&target_path)? == file.source_sha256;
-            let backup_path = if target_exists && !target_matches {
-                let backup_set = resource_path
-                    .join("RABBIT")
-                    .join("backups")
-                    .join(&timestamp);
-                replacement_backup_set.get_or_insert_with(|| backup_set.clone());
-                Some(backup_set.join(&install_target.backup_relative))
-            } else {
+            let replaces = target_exists && !target_matches;
+            let package_id = artifact.descriptor.package_id.as_str();
+
+            let backup_path = if options.dry_run {
+                if replaces {
+                    let backups = replacement_backups.get_or_insert_with(new_backup_set);
+                    Some(backups.copy_file(Some(package_id), &target_path)?)
+                } else {
+                    None
+                }
+            } else if target_matches {
                 None
-            };
-
-            let action = classify_action(options.dry_run, target_exists, target_matches);
-            report.actions.push(InstallFileReport {
-                package_id: artifact.descriptor.package_id.clone(),
-                source_path: file.source_path.clone(),
-                target_path: target_path.clone(),
-                backup_path: backup_path.clone(),
-                action,
-                size: file.source_size,
-                sha256: file.source_sha256.clone(),
-            });
-
-            if options.dry_run {
-                artifact_target_paths.push(target_path);
-                continue;
-            }
-
-            if !target_matches {
+            } else {
+                let backups = if replaces {
+                    Some((
+                        replacement_backups.get_or_insert_with(new_backup_set),
+                        package_id,
+                    ))
+                } else {
+                    None
+                };
                 install_extension_file(
                     &file.source_path,
                     &file.source_sha256,
                     &target_path,
-                    backup_path.as_deref(),
-                )?;
-            }
+                    backups,
+                )?
+            };
+
+            report.actions.push(InstallFileReport {
+                package_id: package_id.to_string(),
+                source_path: file.source_path.clone(),
+                target_path: target_path.clone(),
+                backup_path,
+                action: classify_action(options.dry_run, target_exists, target_matches),
+                size: file.source_size,
+                sha256: file.source_sha256.clone(),
+            });
             artifact_target_paths.push(target_path);
         }
 
@@ -256,26 +268,15 @@ pub fn install_cached_artifacts_with_progress(
         });
     }
 
+    // The receipt joins the replaced files' set, copied before the new
+    // receipt is saved, so restoring the set brings back both together.
+    if let Some(backups) = &mut replacement_backups {
+        report.receipt_backup_path = backups.copy_receipt_if_present()?;
+        report.backup_manifest_path = Some(backups.manifest_path());
+    }
     if !options.dry_run && !artifacts.is_empty() {
-        if let Some(backup_set) = &replacement_backup_set {
-            report.receipt_backup_path = backup_receipt_if_present(resource_path, backup_set)?;
-            report.backup_manifest_path = Some(write_backup_manifest(
-                backup_set,
-                &timestamp,
-                &report.actions,
-                report.receipt_backup_path.as_ref(),
-            )?);
-        }
         save_install_state(resource_path, &state)?;
         report.receipt_written = true;
-    } else if options.dry_run
-        && let Some(backup_set) = &replacement_backup_set
-    {
-        let source_path = receipt_path(resource_path);
-        if source_path.is_file() {
-            report.receipt_backup_path = Some(backup_set.join(RECEIPT_RELATIVE_PATH));
-        }
-        report.backup_manifest_path = Some(backup_set.join(crate::rollback::BACKUP_MANIFEST_FILE));
     }
 
     Ok(report)
@@ -379,28 +380,18 @@ fn remove_exclusive_group_siblings_in(
     }
 }
 
-/// Where a prepared file installs (`target_path`) and the path used to
-/// stash a replaced copy under the backup set (`backup_relative`). Most
-/// packages drop into `<resource>/UserPlugins/`, but a few install to a
-/// fixed system location outside the REAPER resource path.
-struct InstallTarget {
-    target_path: PathBuf,
-    backup_relative: PathBuf,
-}
-
-/// Resolve a package's install destination from its declared
+/// Resolve where a package's file installs from its declared
 /// [`InstallDestination`]. The default is `<resource>/UserPlugins/<file>`;
 /// `WindowsClapDir` packages (app2clap) install into the per-user CLAP
 /// folder (`%LOCALAPPDATA%\Programs\Common\CLAP`), outside the REAPER
-/// resource path. For the off-resource case the backup-relative path is
-/// synthesized under a `CLAP/` subfolder so a replaced copy stays inside the
-/// backup set (joining an absolute path would otherwise escape it).
+/// resource path. A replaced copy of an outside file goes under the backup
+/// set's `external/` folder (see [`BackupSetWriter`]).
 fn resolve_install_target(
     destination: InstallDestination,
     package_id: &str,
     resource_path: &Path,
     file_name: &str,
-) -> Result<InstallTarget> {
+) -> Result<PathBuf> {
     match destination {
         InstallDestination::WindowsClapDir => {
             let clap_dir = rabbit_platform::windows_clap_dir().ok_or_else(|| {
@@ -411,28 +402,21 @@ fn resolve_install_target(
                         .to_string(),
                 }
             })?;
-            Ok(InstallTarget {
-                target_path: clap_dir.join(file_name),
-                backup_relative: PathBuf::from("CLAP").join(file_name),
-            })
+            Ok(clap_dir.join(file_name))
         }
-        InstallDestination::LangPack => {
-            // REAPER reads translations from <resource>/LangPack/. Inside the
-            // resource path, so portable installs work unchanged.
-            let relative = PathBuf::from("LangPack").join(file_name);
-            Ok(InstallTarget {
-                target_path: resource_path.join(&relative),
-                backup_relative: relative,
-            })
-        }
-        InstallDestination::UserPlugins => {
-            let relative = PathBuf::from("UserPlugins").join(file_name);
-            Ok(InstallTarget {
-                target_path: resource_path.join(&relative),
-                backup_relative: relative,
-            })
-        }
+        // REAPER reads translations from <resource>/LangPack/. Inside the
+        // resource path, so portable installs work unchanged.
+        InstallDestination::LangPack => Ok(resource_path.join("LangPack").join(file_name)),
+        InstallDestination::UserPlugins => Ok(resource_path.join("UserPlugins").join(file_name)),
     }
+}
+
+/// The folders outside any resource folder that RABBIT copies files into
+/// itself, and so the only outside places a backup restore may write to.
+/// Vendor installers write elsewhere too, but RABBIT never backs up what
+/// they replace. A new outside [`InstallDestination`] belongs here too.
+pub(crate) fn outside_install_roots() -> Vec<PathBuf> {
+    rabbit_platform::windows_clap_dir().into_iter().collect()
 }
 
 fn classify_action(dry_run: bool, target_exists: bool, target_matches: bool) -> InstallFileAction {
@@ -568,12 +552,16 @@ fn lookup_install_spec(package_id: &str, platform: crate::model::Platform) -> Re
         })
 }
 
+/// Copy a verified file into place. With `backups`, the file it replaces is
+/// copied into that backup set first, after the new file is staged and
+/// checked, so a download that fails its check leaves no backup behind.
+/// Returns where the replaced file's copy went.
 fn install_extension_file(
     source_path: &Path,
     source_sha256: &str,
     target_path: &Path,
-    backup_path: Option<&Path>,
-) -> Result<()> {
+    backups: Option<(&mut BackupSetWriter, &str)>,
+) -> Result<Option<PathBuf>> {
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent).with_path(parent)?;
     }
@@ -594,12 +582,16 @@ fn install_extension_file(
         });
     }
 
-    if let Some(backup_path) = backup_path {
-        if let Some(parent) = backup_path.parent() {
-            fs::create_dir_all(parent).with_path(parent)?;
-        }
-        fs::copy(target_path, backup_path).with_path(backup_path)?;
-    }
+    let backup_path = match backups {
+        Some((backups, package_id)) => match backups.copy_file(Some(package_id), target_path) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                let _ = fs::remove_file(&temp_path);
+                return Err(error);
+            }
+        },
+        None => None,
+    };
 
     // Removing the existing extension and renaming the new one into its place
     // are the two steps that touch the (possibly OS-protected) target file, so
@@ -613,9 +605,9 @@ fn install_extension_file(
     }
 
     match fs::rename(&temp_path, target_path) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(backup_path),
         Err(source) => {
-            if let Some(backup_path) = backup_path
+            if let Some(backup_path) = &backup_path
                 && backup_path.is_file()
                 && !target_path.exists()
             {
@@ -657,65 +649,6 @@ fn temporary_target_path(target_path: &Path) -> PathBuf {
         .and_then(|name| name.to_str())
         .unwrap_or("extension");
     target_path.with_file_name(format!("{file_name}.rabbit-tmp"))
-}
-
-fn backup_receipt_if_present(resource_path: &Path, backup_set: &Path) -> Result<Option<PathBuf>> {
-    let source_path = receipt_path(resource_path);
-    if !source_path.is_file() {
-        return Ok(None);
-    }
-
-    let backup_path = backup_set.join(RECEIPT_RELATIVE_PATH);
-    if let Some(parent) = backup_path.parent() {
-        fs::create_dir_all(parent).with_path(parent)?;
-    }
-    fs::copy(&source_path, &backup_path).with_path(&backup_path)?;
-    Ok(Some(backup_path))
-}
-
-fn write_backup_manifest(
-    backup_set: &Path,
-    created_at: &str,
-    actions: &[InstallFileReport],
-    receipt_backup_path: Option<&PathBuf>,
-) -> Result<PathBuf> {
-    let mut files = Vec::new();
-    for action in actions {
-        let Some(backup_path) = &action.backup_path else {
-            continue;
-        };
-
-        files.push(BackupManifestFile {
-            package_id: Some(action.package_id.clone()),
-            original_path: action.target_path.clone(),
-            backup_path: backup_path.clone(),
-            size: fs::metadata(backup_path).with_path(backup_path)?.len(),
-            sha256: sha256_file(backup_path)?,
-        });
-    }
-
-    let receipt_backup_path = receipt_backup_path.cloned();
-    if let Some(path) = &receipt_backup_path {
-        files.push(BackupManifestFile {
-            package_id: None,
-            original_path: PathBuf::from(RECEIPT_RELATIVE_PATH),
-            backup_path: path.clone(),
-            size: fs::metadata(path).with_path(path)?.len(),
-            sha256: sha256_file(path)?,
-        });
-    }
-
-    save_backup_manifest(
-        backup_set,
-        &BackupManifest {
-            schema_version: 1,
-            rabbit_version: env!("CARGO_PKG_VERSION").to_string(),
-            created_at: created_at.to_string(),
-            reason: "install-replacement".to_string(),
-            files,
-            receipt_backup_path,
-        },
-    )
 }
 
 fn install_timestamp() -> String {
@@ -760,12 +693,8 @@ mod tests {
         )
         .expect("default UserPlugins target resolves");
         assert_eq!(
-            target.target_path,
+            target,
             resource.join("UserPlugins").join("reaper_kontrol.dll")
-        );
-        assert_eq!(
-            target.backup_relative,
-            PathBuf::from("UserPlugins").join("reaper_kontrol.dll")
         );
     }
 
@@ -849,15 +778,11 @@ mod tests {
         )
         .expect("LangPack target resolves");
         assert_eq!(
-            target.target_path,
+            target,
             resource.join("LangPack").join("es_ES.ReaperLangPack")
         );
         // Inside the resource path, so portable installs work unchanged.
-        assert!(target.target_path.starts_with(&resource));
-        assert_eq!(
-            target.backup_relative,
-            PathBuf::from("LangPack").join("es_ES.ReaperLangPack")
-        );
+        assert!(target.starts_with(&resource));
     }
 
     #[cfg(target_os = "windows")]
@@ -872,15 +797,11 @@ mod tests {
         )
         .expect("CLAP folder resolves on Windows");
         let clap_dir = rabbit_platform::windows_clap_dir().expect("CLAP dir on Windows");
-        assert_eq!(target.target_path, clap_dir.join("app2clap.clap"));
+        assert_eq!(target, clap_dir.join("app2clap.clap"));
         // The install lands outside the REAPER resource path entirely.
-        assert!(!target.target_path.starts_with(&resource));
-        // Replaced copies still get stashed inside the backup set.
-        assert_eq!(
-            target.backup_relative,
-            PathBuf::from("CLAP").join("app2clap.clap")
-        );
-        assert!(target.backup_relative.is_relative());
+        assert!(!target.starts_with(&resource));
+        // So a restore may write there, and nowhere else outside it.
+        assert_eq!(super::outside_install_roots(), vec![clap_dir]);
     }
 
     #[test]
@@ -1000,6 +921,7 @@ mod tests {
                 schema_version: 1,
                 packages,
                 declined_packages: Default::default(),
+                applied_configuration: Default::default(),
             },
         )
         .unwrap();

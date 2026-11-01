@@ -36,9 +36,14 @@
   "install_steps": [
     "copy_user_plugin_binary"
   ],
-  "uninstall_steps": [
-    "remove_user_plugin_binary"
-  ],
+  "uninstall": {
+    "plans": [
+      {
+        "strategy": "not_supported",
+        "note_key": "uninstall-not-yet"
+      }
+    ]
+  },
   "backup_policy": "backup_overwritten_files",
   "user_plugin_prefixes": [],
   "user_plugin_suffixes": {

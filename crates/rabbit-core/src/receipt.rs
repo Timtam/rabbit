@@ -18,18 +18,43 @@ pub struct InstallState {
     /// Packages the user turned down and does not want offered again on
     /// this install.
     ///
-    /// Only ever the *negative* answer, and only for packages whose spec
-    /// sets `remember_opt_out`. "Yes" needs no memory — an installed
+    /// Only ever the *negative* answer. "Yes" needs no memory — an installed
     /// package is already recorded in `packages` — while "no" was otherwise
     /// forgotten the moment the wizard closed, so a default RABBIT picked
     /// for you (a language pack matching RABBIT's own language) came back
     /// ticked on every launch no matter how often you declined it.
+    ///
+    /// Two things put a package here: the wizard, for a package whose spec
+    /// sets `remember_opt_out` and that the user left unticked, and an
+    /// uninstall, for any package (see [`remove_package_receipt`]). Removing
+    /// a package is as clear a "no" as leaving it unticked, and one set for
+    /// both means a recommended package doesn't come back ticked on the very
+    /// next run after you removed it. The readers (the wizard's default
+    /// ticks and the CLI's default package list) still honour the set only
+    /// for packages that set `remember_opt_out`; uninstall widens them to
+    /// every package when it ships.
+    ///
+    /// Only the user's own verdict takes a package out again: ticking it in
+    /// the wizard (see [`record_package_opt_outs`]). Today the wizard only
+    /// sends that verdict for `remember_opt_out` packages, so a removed SWS
+    /// would stay in the set even after you ticked and installed it again;
+    /// uninstall must widen the wizard's accepted packages to every package
+    /// together with the readers. Installing does not clear it (see
+    /// [`upsert_package_receipt`]).
     ///
     /// Left out of the file entirely when empty, and read with
     /// `#[serde(default)]`, so receipts written by older RABBITs still load
     /// and older RABBITs still load receipts written by this one.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub declined_packages: BTreeSet<String>,
+    /// What each configuration step found or changed, by step id.
+    ///
+    /// Recorded so a later uninstall can undo exactly what RABBIT did and
+    /// nothing more: a ReaPack repository the user added themselves, or the
+    /// language REAPER used before RABBIT switched it, belong to the user.
+    /// Optional in the file, like `declined_packages`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub applied_configuration: BTreeMap<String, AppliedConfiguration>,
 }
 
 impl Default for InstallState {
@@ -38,8 +63,45 @@ impl Default for InstallState {
             schema_version: 1,
             packages: BTreeMap::new(),
             declined_packages: BTreeSet::new(),
+            applied_configuration: BTreeMap::new(),
         }
     }
+}
+
+/// What one configuration step found or changed. See
+/// [`InstallState::applied_configuration`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedConfiguration {
+    pub outcome: AppliedConfigurationOutcome,
+    /// For a ReaPack repository step: the repository it is about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reapack_repository: Option<ReapackRepository>,
+    /// For the language step: the language pack file it selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub langpack: Option<String>,
+    /// For the language step, when it changed the language: the `langpack=`
+    /// value under `[REAPER]` in `reaper.ini` just before, exactly as it was
+    /// written (`<>` is REAPER's "no language pack"). `None` when there was
+    /// no such line or no `reaper.ini`, and when the step changed nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub langpack_before: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppliedConfigurationOutcome {
+    /// RABBIT made the change: it added the ReaPack repository, or it wrote
+    /// the `langpack=` value.
+    Added,
+    /// The change was already there, so RABBIT wrote nothing.
+    AlreadyPresent,
+}
+
+/// A ReaPack repository, as RABBIT writes it into `reapack.ini`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReapackRepository {
+    pub name: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +223,47 @@ pub fn record_package_opt_outs(
     save_install_state(resource_path, &state)
 }
 
+/// Save what configuration step `step_id` found or changed into the
+/// receipt at `resource_path`. Never called for a dry run.
+pub fn record_applied_configuration(
+    resource_path: &Path,
+    step_id: &str,
+    applied: AppliedConfiguration,
+) -> Result<()> {
+    let mut state = load_install_state(resource_path)?.unwrap_or_default();
+    if merge_applied_configuration(&mut state, step_id, applied) {
+        save_install_state(resource_path, &state)?;
+    }
+    Ok(())
+}
+
+/// Put `applied` into `state` and say whether anything changed.
+///
+/// A step that found its work already done never replaces an earlier
+/// record. The step runs again whenever the user picks it, and if RABBIT
+/// added a ReaPack repository on an earlier run, finding it there now
+/// doesn't make it any less RABBIT's. A step that made a change replaces
+/// the record, so the language step always holds the value from just before
+/// RABBIT's latest switch.
+fn merge_applied_configuration(
+    state: &mut InstallState,
+    step_id: &str,
+    applied: AppliedConfiguration,
+) -> bool {
+    if applied.outcome == AppliedConfigurationOutcome::AlreadyPresent
+        && state.applied_configuration.contains_key(step_id)
+    {
+        return false;
+    }
+    if state.applied_configuration.get(step_id) == Some(&applied) {
+        return false;
+    }
+    state
+        .applied_configuration
+        .insert(step_id.to_string(), applied);
+    true
+}
+
 pub fn save_install_state(resource_path: &Path, state: &InstallState) -> Result<()> {
     let path = receipt_path(resource_path);
     if let Some(parent) = path.parent() {
@@ -194,6 +297,16 @@ pub struct PackageReceiptParams<'a> {
     pub architecture: Option<Architecture>,
 }
 
+/// Record that `package_id` was installed, replacing any earlier entry for
+/// it.
+///
+/// This leaves `declined_packages` alone. That set only ever changes on the
+/// user's own verdict, which the wizard gives through
+/// [`record_package_opt_outs`] when a row is ticked (today for
+/// `remember_opt_out` packages only). An install that comes without a
+/// verdict must not clear it: the CLI's `--package` is a scope for one run,
+/// not a standing preference, so `rabbit setup --package langpack-de` must
+/// not forget that the wizard was told no.
 pub fn upsert_package_receipt(
     state: &mut InstallState,
     resource_path: &Path,
@@ -237,6 +350,19 @@ pub fn upsert_package_receipt(
         },
     );
     Ok(())
+}
+
+/// Forget that `package_id` is installed and remember that the user removed
+/// it, by adding it to `declined_packages`, so the next install run doesn't
+/// tick it again by itself. Returns the entry that was removed, if there was
+/// one. The package is declined either way: a copy RABBIT has no receipt
+/// for can be uninstalled too.
+pub fn remove_package_receipt(
+    state: &mut InstallState,
+    package_id: &str,
+) -> Option<PackageReceipt> {
+    state.declined_packages.insert(package_id.to_string());
+    state.packages.remove(package_id)
 }
 
 /// "Does this package's on-disk install still match the receipt?"
@@ -485,6 +611,7 @@ mod tests {
             schema_version: 1,
             packages,
             declined_packages: Default::default(),
+            applied_configuration: Default::default(),
         };
         save_install_state(dir.path(), &state).unwrap();
 
@@ -535,6 +662,7 @@ mod tests {
                 schema_version: 1,
                 packages,
                 declined_packages: Default::default(),
+                applied_configuration: Default::default(),
             },
         )
         .unwrap();
@@ -600,6 +728,7 @@ mod tests {
                 schema_version: 1,
                 packages,
                 declined_packages: Default::default(),
+                applied_configuration: Default::default(),
             },
         )
         .unwrap();
@@ -613,5 +742,283 @@ mod tests {
         // And ticking it again clears it, as for any other package.
         record_package_opt_outs(dir.path(), &[], &["langpack-de".to_string()]).unwrap();
         assert!(declined_packages(dir.path()).is_empty());
+    }
+}
+
+/// What the receipt records for a later uninstall: removed packages and what
+/// configuration steps did.
+#[cfg(test)]
+mod tests_uninstall_records {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{
+        AppliedConfiguration, AppliedConfigurationOutcome, InstallState, PackageReceiptParams,
+        RECEIPT_RELATIVE_PATH, ReapackRepository, declined_packages, load_install_state,
+        record_applied_configuration, record_package_opt_outs, remove_package_receipt,
+        save_install_state, upsert_package_receipt,
+    };
+    use crate::package::{PACKAGE_OSARA, PACKAGE_SWS};
+
+    fn install(state: &mut InstallState, package_id: &str) {
+        upsert_package_receipt(
+            state,
+            std::path::Path::new("."),
+            PackageReceiptParams {
+                variant: None,
+                channel: None,
+                package_id,
+                version: None,
+                source_url: None,
+                source_sha256: None,
+                installed_paths: &[],
+                installed_at: None,
+                architecture: None,
+            },
+        )
+        .unwrap();
+    }
+
+    fn receipt_text(dir: &std::path::Path) -> String {
+        fs::read_to_string(dir.join(RECEIPT_RELATIVE_PATH)).unwrap()
+    }
+
+    fn repository_step(outcome: AppliedConfigurationOutcome) -> AppliedConfiguration {
+        AppliedConfiguration {
+            outcome,
+            reapack_repository: Some(ReapackRepository {
+                name: "REAPER Accessibility".to_string(),
+                url: "https://example.test/index.xml".to_string(),
+            }),
+            langpack: None,
+            langpack_before: None,
+        }
+    }
+
+    fn language_step(langpack: &str, before: Option<&str>) -> AppliedConfiguration {
+        AppliedConfiguration {
+            outcome: AppliedConfigurationOutcome::Added,
+            reapack_repository: None,
+            langpack: Some(langpack.to_string()),
+            langpack_before: before.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn removing_a_package_forgets_its_receipt_and_declines_it() {
+        let mut state = InstallState::default();
+        install(&mut state, PACKAGE_SWS);
+
+        let removed = remove_package_receipt(&mut state, PACKAGE_SWS);
+
+        assert_eq!(
+            removed.map(|receipt| receipt.id).as_deref(),
+            Some(PACKAGE_SWS)
+        );
+        assert!(!state.packages.contains_key(PACKAGE_SWS));
+        assert!(state.declined_packages.contains(PACKAGE_SWS));
+
+        // A copy RABBIT had no receipt for can be removed too, and is
+        // remembered the same way.
+        assert_eq!(remove_package_receipt(&mut state, PACKAGE_OSARA), None);
+        assert!(state.declined_packages.contains(PACKAGE_OSARA));
+    }
+
+    /// A removal is saved like any other refusal, so everything that reads
+    /// the user's refusals sees it.
+    #[test]
+    fn a_removal_is_saved_as_a_refusal() {
+        let dir = tempdir().unwrap();
+        let mut state = InstallState::default();
+        install(&mut state, PACKAGE_SWS);
+        remove_package_receipt(&mut state, PACKAGE_SWS);
+        save_install_state(dir.path(), &state).unwrap();
+
+        assert_eq!(load_install_state(dir.path()).unwrap().unwrap(), state);
+        assert!(declined_packages(dir.path()).contains(PACKAGE_SWS));
+    }
+
+    /// Installing a removed package again doesn't clear the refusal by
+    /// itself: the CLI's `--package` is a scope for one run. Ticking it in
+    /// the wizard is the user's verdict, and that clears it.
+    #[test]
+    fn only_ticking_a_removed_package_clears_the_refusal() {
+        let dir = tempdir().unwrap();
+        let mut state = InstallState::default();
+        install(&mut state, PACKAGE_SWS);
+        remove_package_receipt(&mut state, PACKAGE_SWS);
+        remove_package_receipt(&mut state, PACKAGE_OSARA);
+
+        install(&mut state, PACKAGE_SWS);
+        assert!(state.packages.contains_key(PACKAGE_SWS));
+        assert!(state.declined_packages.contains(PACKAGE_SWS));
+        save_install_state(dir.path(), &state).unwrap();
+
+        record_package_opt_outs(dir.path(), &[], &[PACKAGE_SWS.to_string()]).unwrap();
+        let state = load_install_state(dir.path()).unwrap().unwrap();
+        assert!(state.packages.contains_key(PACKAGE_SWS));
+        assert!(!state.declined_packages.contains(PACKAGE_SWS));
+        assert!(
+            state.declined_packages.contains(PACKAGE_OSARA),
+            "only the package ticked again is cleared"
+        );
+    }
+
+    /// A receipt from before these fields existed still loads, and one with
+    /// nothing to record in them is written exactly as an older RABBIT
+    /// would write it.
+    #[test]
+    fn older_receipts_without_the_new_fields_still_load() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("RABBIT")).unwrap();
+        fs::write(
+            dir.path().join(RECEIPT_RELATIVE_PATH),
+            r#"{"schema_version":1,"packages":{"osara":{"id":"osara","version":"2024.1",
+                "source_url":null,"source_sha256":null,"installed_files":[],
+                "installed_at":null,"rabbit_version":"0.9.0","architecture":null}},
+                "declined_packages":["langpack-de"]}"#,
+        )
+        .unwrap();
+
+        let state = load_install_state(dir.path()).unwrap().unwrap();
+        assert!(state.applied_configuration.is_empty());
+        assert!(state.packages.contains_key(PACKAGE_OSARA));
+        assert!(state.declined_packages.contains("langpack-de"));
+
+        save_install_state(dir.path(), &state).unwrap();
+        let text = receipt_text(dir.path());
+        assert!(
+            !text.contains("applied_configuration"),
+            "applied_configuration must stay out when empty: {text}"
+        );
+    }
+
+    /// Development builds of the uninstall work wrote a `removed_packages`
+    /// set and an OSARA `keymap_backup_id`, both dropped since. Neither
+    /// struct refuses unknown fields, so such a receipt still loads, and the
+    /// next save leaves both out.
+    #[test]
+    fn receipts_with_dropped_fields_still_load() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("RABBIT")).unwrap();
+        fs::write(
+            dir.path().join(RECEIPT_RELATIVE_PATH),
+            r#"{"schema_version":1,"packages":{"osara":{"id":"osara","version":"2024.1",
+                "source_url":null,"source_sha256":null,"installed_files":[],
+                "installed_at":null,"rabbit_version":"0.4.0","architecture":null,
+                "keymap_backup_id":"unix-1782841261"}},
+                "removed_packages":["sws"]}"#,
+        )
+        .unwrap();
+
+        let state = load_install_state(dir.path()).unwrap().unwrap();
+        assert!(state.packages.contains_key(PACKAGE_OSARA));
+        assert!(state.declined_packages.is_empty());
+
+        save_install_state(dir.path(), &state).unwrap();
+        let text = receipt_text(dir.path());
+        for field in ["removed_packages", "keymap_backup_id"] {
+            assert!(!text.contains(field), "{field} must be dropped: {text}");
+        }
+    }
+
+    #[test]
+    fn applied_configuration_round_trips() {
+        let dir = tempdir().unwrap();
+        record_applied_configuration(
+            dir.path(),
+            "reapack-add-reaper-accessibility-remote",
+            repository_step(AppliedConfigurationOutcome::Added),
+        )
+        .unwrap();
+        record_applied_configuration(
+            dir.path(),
+            "set-reaper-language",
+            language_step("DE_(+SWS).ReaperLangPack", Some("<>")),
+        )
+        .unwrap();
+
+        let state = load_install_state(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            state.applied_configuration["reapack-add-reaper-accessibility-remote"],
+            repository_step(AppliedConfigurationOutcome::Added)
+        );
+        assert_eq!(
+            state.applied_configuration["set-reaper-language"],
+            language_step("DE_(+SWS).ReaperLangPack", Some("<>"))
+        );
+        let text = receipt_text(dir.path());
+        assert!(text.contains(r#""outcome": "added""#), "{text}");
+        // A repository step has no language fields, and the other way round.
+        assert_eq!(text.matches("langpack_before").count(), 1, "{text}");
+        assert_eq!(text.matches("reapack_repository").count(), 1, "{text}");
+    }
+
+    /// The step runs again whenever the user picks it. Finding the
+    /// repository already there must not hide that RABBIT added it.
+    #[test]
+    fn finding_a_change_already_there_keeps_the_earlier_record() {
+        let dir = tempdir().unwrap();
+        let step = "reapack-add-reaper-accessibility-remote";
+        record_applied_configuration(
+            dir.path(),
+            step,
+            repository_step(AppliedConfigurationOutcome::Added),
+        )
+        .unwrap();
+        record_applied_configuration(
+            dir.path(),
+            step,
+            repository_step(AppliedConfigurationOutcome::AlreadyPresent),
+        )
+        .unwrap();
+        let state = load_install_state(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            state.applied_configuration[step].outcome,
+            AppliedConfigurationOutcome::Added
+        );
+
+        // With no earlier record, "already there" is recorded: RABBIT
+        // didn't add it, so an uninstall must leave it alone.
+        let other = "reapack-add-reaper-accessible-en-remote";
+        record_applied_configuration(
+            dir.path(),
+            other,
+            repository_step(AppliedConfigurationOutcome::AlreadyPresent),
+        )
+        .unwrap();
+        let state = load_install_state(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            state.applied_configuration[other].outcome,
+            AppliedConfigurationOutcome::AlreadyPresent
+        );
+        assert!(receipt_text(dir.path()).contains(r#""outcome": "already-present""#));
+    }
+
+    /// A later language switch replaces the record, so it holds the value
+    /// from just before RABBIT's latest change.
+    #[test]
+    fn a_later_language_switch_replaces_the_record() {
+        let dir = tempdir().unwrap();
+        let step = "set-reaper-language";
+        record_applied_configuration(
+            dir.path(),
+            step,
+            language_step("de.ReaperLangPack", Some("<>")),
+        )
+        .unwrap();
+        record_applied_configuration(
+            dir.path(),
+            step,
+            language_step("fr.ReaperLangPack", Some("de.ReaperLangPack")),
+        )
+        .unwrap();
+
+        let state = load_install_state(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            state.applied_configuration[step],
+            language_step("fr.ReaperLangPack", Some("de.ReaperLangPack"))
+        );
     }
 }

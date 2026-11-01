@@ -20,20 +20,22 @@ use crate::detection::{
     default_standard_installation, detect_components, matching_user_plugin_files,
 };
 use crate::error::{IoPathContext, RabbitError};
-use crate::hash::sha256_file;
 use crate::install::{
     InstallFileReport, InstallOptions, InstallReport, install_cached_artifacts_with_progress,
 };
 use crate::model::{Architecture, ComponentDetection, Platform};
 use crate::package::package_specs_by_id;
 use crate::plan::PlanActionKind;
-use crate::preflight::ensure_resource_path_ready;
+use crate::preflight::{
+    RunningProcess, ensure_reaper_closed_with_processes, ensure_resource_path_ready,
+    running_reaper_processes,
+};
 use crate::progress::{ProgressEvent, ProgressReporter};
 use crate::receipt::{
-    InstallState, PackageReceiptParams, RECEIPT_RELATIVE_PATH, load_install_state, receipt_path,
-    save_install_state, upsert_package_receipt,
+    InstallState, PackageReceiptParams, load_install_state, save_install_state,
+    upsert_package_receipt,
 };
-use crate::rollback::{BackupManifest, BackupManifestFile, save_backup_manifest};
+use crate::rollback::BackupSetWriter;
 
 use self::osara::osara_manual_steps;
 use self::reaper::reaper_manual_steps;
@@ -537,6 +539,31 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
     progress: &ProgressReporter,
     cancel: &CancelToken,
 ) -> Result<PackageOperationReport> {
+    execute_operation_with_process_scan(
+        resource_path,
+        artifacts,
+        detections,
+        cache_dir,
+        options,
+        progress,
+        cancel,
+        &|| running_reaper_processes(Platform::current()),
+    )
+}
+
+/// The operation itself, with the scan for running REAPER processes passed
+/// in so tests can stand in a REAPER that is "running".
+#[allow(clippy::too_many_arguments)] // The public entry point's, plus the scan.
+fn execute_operation_with_process_scan(
+    resource_path: &Path,
+    artifacts: Vec<ArtifactDescriptor>,
+    detections: &[ComponentDetection],
+    cache_dir: &Path,
+    options: &PackageOperationOptions,
+    progress: &ProgressReporter,
+    cancel: &CancelToken,
+    running_reaper: &dyn Fn() -> Vec<RunningProcess>,
+) -> Result<PackageOperationReport> {
     ensure_resource_path_ready(resource_path, options.dry_run)?;
 
     let _install_lock = if options.dry_run {
@@ -626,6 +653,23 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
     // dependency (e.g. one direct package depending on another).
     unattended_installable = dependency_ordered(unattended_installable);
     direct_installable = dependency_ordered(direct_installable);
+
+    // Make sure the target's REAPER is closed before the first download or
+    // installer starts. Vendor installers (REAPER's own, OSARA's, SWS's)
+    // change REAPER's folders as much as the file copies below do, and
+    // without this `apply-packages` only found a running REAPER at the first
+    // extension file, after those installers had run. Setup and the wizard
+    // check before this already; here it covers every caller. Nothing has
+    // changed yet, so stopping leaves the machine as it was. Dry runs and
+    // runs with nothing to install are never stopped.
+    if !options.dry_run && !(unattended_installable.is_empty() && direct_installable.is_empty()) {
+        ensure_reaper_closed_with_processes(
+            resource_path,
+            options.target_app_path.as_deref(),
+            options.allow_reaper_running,
+            &running_reaper(),
+        )?;
+    }
 
     // ---- Download pipeline: queue EVERY remote fetch up front on a small
     // concurrent pool, so a huge download (FFmpeg's ~390 MB archive) streams
@@ -832,18 +876,14 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
         // package error already recorded above.
         let receipt_save_result: Result<()> = if unattended_receipts_updated {
             (|| {
-                let backup_id = operation_timestamp();
-                let backup_set = resource_path
-                    .join("RABBIT")
-                    .join("backups")
-                    .join(&backup_id);
-                receipt_backup_path = backup_receipt_if_present(resource_path, &backup_set)?;
-                if let Some(path) = &receipt_backup_path {
-                    receipt_backup_manifest_path = Some(write_receipt_backup_manifest(
-                        &backup_set,
-                        &backup_id,
-                        path,
-                    )?);
+                let mut backups = BackupSetWriter::new(
+                    resource_path,
+                    &operation_timestamp(),
+                    "unattended-receipt-update",
+                );
+                receipt_backup_path = backups.copy_receipt_if_present()?;
+                if receipt_backup_path.is_some() {
+                    receipt_backup_manifest_path = Some(backups.manifest_path());
                 }
                 if let Some(state) = &unattended_state {
                     save_install_state(resource_path, state)?;
@@ -1646,94 +1686,19 @@ fn post_execute_unattended_artifact(
     Ok(UnattendedPostInstallReport::default())
 }
 
+/// Back up one file a post-install step is about to change (OSARA's
+/// replacement of `reaper-kb.ini`) into a set of its own. Returns the copy's
+/// path and the set's manifest. Files outside the resource folder are
+/// accepted too; the shared writer keeps them recoverable.
 pub(super) fn backup_file_for_unattended_change(
     resource_path: &Path,
     package_id: &str,
     source_path: &Path,
     reason: &str,
 ) -> Result<(PathBuf, PathBuf)> {
-    let relative_path = source_path
-        .strip_prefix(resource_path)
-        .map_err(|_| crate::error::RabbitError::InvalidPlannedExecution {
-            message: format!(
-                "backup source is outside the selected resource path: {}",
-                source_path.display()
-            ),
-        })?
-        .to_path_buf();
-    let backup_id = operation_timestamp();
-    let backup_set = resource_path
-        .join("RABBIT")
-        .join("backups")
-        .join(&backup_id);
-    let backup_path = backup_set.join(&relative_path);
-
-    if let Some(parent) = backup_path.parent() {
-        std::fs::create_dir_all(parent).with_path(parent)?;
-    }
-    std::fs::copy(source_path, &backup_path).with_path(&backup_path)?;
-
-    let manifest_path = save_backup_manifest(
-        &backup_set,
-        &BackupManifest {
-            schema_version: 1,
-            rabbit_version: env!("CARGO_PKG_VERSION").to_string(),
-            created_at: backup_id,
-            reason: reason.to_string(),
-            files: vec![BackupManifestFile {
-                package_id: Some(package_id.to_string()),
-                original_path: relative_path,
-                backup_path: backup_path.clone(),
-                size: std::fs::metadata(&backup_path)
-                    .with_path(&backup_path)?
-                    .len(),
-                sha256: sha256_file(&backup_path)?,
-            }],
-            receipt_backup_path: None,
-        },
-    )?;
-
-    Ok((backup_path, manifest_path))
-}
-
-fn backup_receipt_if_present(resource_path: &Path, backup_set: &Path) -> Result<Option<PathBuf>> {
-    let source_path = receipt_path(resource_path);
-    if !source_path.is_file() {
-        return Ok(None);
-    }
-
-    let backup_path = backup_set.join(RECEIPT_RELATIVE_PATH);
-    if let Some(parent) = backup_path.parent() {
-        std::fs::create_dir_all(parent).with_path(parent)?;
-    }
-    std::fs::copy(&source_path, &backup_path).with_path(&backup_path)?;
-    Ok(Some(backup_path))
-}
-
-fn write_receipt_backup_manifest(
-    backup_set: &Path,
-    created_at: &str,
-    receipt_backup_path: &Path,
-) -> Result<PathBuf> {
-    save_backup_manifest(
-        backup_set,
-        &BackupManifest {
-            schema_version: 1,
-            rabbit_version: env!("CARGO_PKG_VERSION").to_string(),
-            created_at: created_at.to_string(),
-            reason: "unattended-receipt-update".to_string(),
-            files: vec![BackupManifestFile {
-                package_id: None,
-                original_path: PathBuf::from(RECEIPT_RELATIVE_PATH),
-                backup_path: receipt_backup_path.to_path_buf(),
-                size: std::fs::metadata(receipt_backup_path)
-                    .with_path(receipt_backup_path)?
-                    .len(),
-                sha256: sha256_file(receipt_backup_path)?,
-            }],
-            receipt_backup_path: Some(receipt_backup_path.to_path_buf()),
-        },
-    )
+    let mut backups = BackupSetWriter::new(resource_path, &operation_timestamp(), reason);
+    let backup_path = backups.copy_file(Some(package_id), source_path)?;
+    Ok((backup_path, backups.manifest_path()))
 }
 
 pub(super) fn replace_file_from_source(source_path: &Path, target_path: &Path) -> Result<()> {
@@ -2225,8 +2190,8 @@ mod tests {
     use super::{
         PackageAutomationSupport, PackageOperationMessage, PackageOperationOptions,
         PackageOperationStatus, PlannedArtifact, PlannedAutomationKind, PlannedExecutionKind,
-        dependency_ordered, execute_resolved_package_operation,
-        execute_resolved_package_operation_with_detections,
+        backup_file_for_unattended_change, dependency_ordered, execute_operation_with_process_scan,
+        execute_resolved_package_operation, execute_resolved_package_operation_with_detections,
         execute_resolved_package_operation_with_detections_and_progress, first_failed_dependency,
         plan_action_for_artifact,
     };
@@ -2240,6 +2205,7 @@ mod tests {
         PACKAGE_SWS,
     };
     use crate::plan::PlanActionKind;
+    use crate::preflight::RunningProcess;
     use crate::progress::{ProgressEvent, ProgressReporter};
     use crate::receipt::{InstallState, load_install_state, save_install_state};
     use crate::version::Version;
@@ -3365,6 +3331,19 @@ mod tests {
                 .is_file()
         );
         assert!(resource_path.join("Data").join("Grooves").is_dir());
+
+        // Both halves of the Python bridge are in the receipt, so a later
+        // uninstall going by it removes both.
+        let state = load_install_state(&resource_path).unwrap().unwrap();
+        let recorded: Vec<_> = state.packages[PACKAGE_SWS]
+            .installed_files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
+        for script in ["sws_python.py", "sws_python64.py"] {
+            let path = std::path::Path::new("Scripts").join(script);
+            assert!(recorded.contains(&path), "{script} missing: {recorded:?}");
+        }
     }
 
     /// A later package's download failure no longer aborts the run: OSARA
@@ -4087,6 +4066,216 @@ mod tests {
         );
     }
 
+    /// A REAPER running from the target, as the process scan would report
+    /// it.
+    fn running_reaper_at(path: &std::path::Path) -> RunningProcess {
+        RunningProcess {
+            pid: "4242".to_string(),
+            name: "reaper.exe".to_string(),
+            executable_path: Some(path.to_path_buf()),
+        }
+    }
+
+    fn options_for_target(
+        target_app_path: &std::path::Path,
+        lock_path: &std::path::Path,
+        allow_reaper_running: bool,
+    ) -> PackageOperationOptions {
+        PackageOperationOptions {
+            dry_run: false,
+            allow_reaper_running,
+            stage_unsupported: false,
+            replace_osara_keymap: false,
+            target_app_path: Some(target_app_path.to_path_buf()),
+            lock_path: Some(lock_path.to_path_buf()),
+            force_reinstall_packages: Vec::new(),
+            package_variants: Default::default(),
+            package_channels: Default::default(),
+        }
+    }
+
+    /// `apply-packages` used to run vendor installers first and check for a
+    /// running REAPER only at the first extension file. The check now comes
+    /// before anything starts: nothing is downloaded, so no installer can
+    /// have run, and the error reads like the preflight's, which the wizard
+    /// and the CLI already recognise.
+    #[test]
+    fn a_running_reaper_stops_the_run_before_any_installer_starts() {
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let installer = dir.path().join("osara-installer.cmd");
+        fs::write(&installer, b"installer").unwrap();
+        let plugin = dir.path().join("reaper_reapack-x64.dll");
+        fs::write(&plugin, b"reapack").unwrap();
+        let resource_path = dir.path().join("PortableREAPER");
+        fs::create_dir_all(&resource_path).unwrap();
+        let target = resource_path.join("reaper.exe");
+        let lock_path = dir.path().join("install.lock");
+        let reaper = running_reaper_at(&target);
+
+        let error = execute_operation_with_process_scan(
+            &resource_path,
+            vec![
+                artifact_with_url(
+                    PACKAGE_OSARA,
+                    ArtifactKind::Installer,
+                    "osara-installer.cmd",
+                    &installer.display().to_string(),
+                ),
+                artifact_with_url(
+                    PACKAGE_REAPACK,
+                    ArtifactKind::ExtensionBinary,
+                    "reaper_reapack-x64.dll",
+                    &plugin.display().to_string(),
+                ),
+            ],
+            &[],
+            cache.path(),
+            &options_for_target(&target, &lock_path, false),
+            &ProgressReporter::noop(),
+            &CancelToken::new(),
+            &|| vec![reaper.clone()],
+        )
+        .unwrap_err();
+
+        match error {
+            RabbitError::PreflightFailed { message } => {
+                assert!(message.starts_with("reaper-process:"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(
+            fs::read_dir(cache.path()).unwrap().next().is_none(),
+            "nothing may be downloaded, so no installer can have run"
+        );
+        assert!(load_install_state(&resource_path).unwrap().is_none());
+        assert!(!lock_path.exists(), "the lock is released on the way out");
+    }
+
+    /// `--allow-reaper-running` still lets the run go ahead.
+    #[test]
+    fn allowing_a_running_reaper_lets_the_run_go_ahead() {
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let plugin = dir.path().join("reaper_reapack-x64.dll");
+        fs::write(&plugin, b"reapack").unwrap();
+        let resource_path = dir.path().join("PortableREAPER");
+        fs::create_dir_all(&resource_path).unwrap();
+        let target = resource_path.join("reaper.exe");
+        let reaper = running_reaper_at(&target);
+
+        let report = execute_operation_with_process_scan(
+            &resource_path,
+            vec![artifact_with_url(
+                PACKAGE_REAPACK,
+                ArtifactKind::ExtensionBinary,
+                "reaper_reapack-x64.dll",
+                &plugin.display().to_string(),
+            )],
+            &[],
+            cache.path(),
+            &options_for_target(&target, &dir.path().join("install.lock"), true),
+            &ProgressReporter::noop(),
+            &CancelToken::new(),
+            &|| vec![reaper.clone()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.items[0].status,
+            PackageOperationStatus::InstalledOrChecked
+        );
+        assert!(
+            resource_path
+                .join("UserPlugins")
+                .join("reaper_reapack-x64.dll")
+                .is_file()
+        );
+    }
+
+    /// A dry run changes nothing, and a run where everything is current
+    /// installs nothing, so neither is stopped by a running REAPER.
+    #[test]
+    fn a_running_reaper_does_not_stop_a_dry_run_or_a_run_with_nothing_to_install() {
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let resource_path = dir.path().join("PortableREAPER");
+        fs::create_dir_all(&resource_path).unwrap();
+        let target = resource_path.join("reaper.exe");
+        let reaper = running_reaper_at(&target);
+        let lock_path = dir.path().join("install.lock");
+        let reapack = || {
+            artifact(
+                PACKAGE_REAPACK,
+                ArtifactKind::ExtensionBinary,
+                "reaper_reapack-x64.dll",
+            )
+        };
+
+        let dry_run = PackageOperationOptions {
+            dry_run: true,
+            ..options_for_target(&target, &lock_path, false)
+        };
+        let report = execute_operation_with_process_scan(
+            &resource_path,
+            vec![reapack()],
+            &[],
+            cache.path(),
+            &dry_run,
+            &ProgressReporter::noop(),
+            &CancelToken::new(),
+            &|| vec![reaper.clone()],
+        )
+        .unwrap();
+        assert_eq!(report.items.len(), 1);
+
+        let report = execute_operation_with_process_scan(
+            &resource_path,
+            vec![reapack()],
+            &[detection(PACKAGE_REAPACK, Some("1.2.3"))],
+            cache.path(),
+            &options_for_target(&target, &lock_path, false),
+            &ProgressReporter::noop(),
+            &CancelToken::new(),
+            &|| vec![reaper.clone()],
+        )
+        .unwrap();
+        assert_eq!(
+            report.items[0].status,
+            PackageOperationStatus::SkippedCurrent
+        );
+    }
+
+    /// The unattended backup used to refuse files outside the resource
+    /// folder. Through the shared writer they are kept, under `external/`
+    /// with a note of where they came from.
+    #[test]
+    fn unattended_backups_accept_files_outside_the_resource_folder() {
+        let dir = tempdir().unwrap();
+        let resource_path = dir.path().join("REAPER");
+        fs::create_dir_all(&resource_path).unwrap();
+        let outside = dir.path().join("CLAP").join("app2clap.clap");
+        fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        fs::write(&outside, b"app2clap").unwrap();
+
+        let (backup_path, manifest_path) = backup_file_for_unattended_change(
+            &resource_path,
+            "app2clap",
+            &outside,
+            "test-replacement",
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&backup_path).unwrap(), b"app2clap");
+        assert!(backup_path.starts_with(resource_path.join("RABBIT").join("backups")));
+        assert_eq!(
+            backup_path.parent().unwrap().parent().unwrap().file_name(),
+            Some(std::ffi::OsStr::new("external"))
+        );
+        assert!(manifest_path.is_file());
+        assert!(outside.is_file(), "a backup copies; the original stays");
+    }
+
     fn artifact(package_id: &str, kind: ArtifactKind, file_name: &str) -> ArtifactDescriptor {
         artifact_with_url(
             package_id,
@@ -4205,6 +4394,7 @@ mkdir "!DEST!\Scripts" 2>nul
 mkdir "!DEST!\Data\Grooves" 2>nul
 type nul > "!DEST!\UserPlugins\reaper_sws-x64.dll"
 type nul > "!DEST!\Scripts\sws_python.py"
+type nul > "!DEST!\Scripts\sws_python64.py"
 type nul > "!DEST!\Data\Grooves\default.rgt"
 exit /b 0
 "#

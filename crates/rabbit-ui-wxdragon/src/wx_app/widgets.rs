@@ -373,12 +373,13 @@ pub(crate) fn bind_reapack_ack_navigation_updates(
 /// Make Enter on the Review page's summary start the install, as the default
 /// Install button would.
 ///
-/// The summary is a read-only multiline TextCtrl and holds focus on that
-/// page, and a multiline text box eats Enter (the NSTextView on macOS,
-/// DLGC_WANTALLKEYS on MSW) before the default button sees it: the same trap
-/// `bind_done_page_enter_closes` works around on the Done page. Guarded on
-/// the step and on Install being enabled, so Enter never starts anything the
-/// button itself would refuse.
+/// The summary is a read-only multiline TextCtrl. RABBIT never focuses it on
+/// purpose, but focus can reach it, for example when a screen reader user
+/// tabs in to read it, and a multiline text box eats Enter (the NSTextView on
+/// macOS, DLGC_WANTALLKEYS on MSW) before the default button sees it: the
+/// same trap `bind_done_page_enter_closes` works around on the Done page.
+/// Guarded on the step and on Install being enabled, so Enter never starts
+/// anything the button itself would refuse.
 pub(crate) fn bind_review_enter_installs(
     text: &TextCtrl,
     install: &Button,
