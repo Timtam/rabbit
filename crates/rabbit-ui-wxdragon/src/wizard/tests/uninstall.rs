@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use rabbit_core::localization::{DEFAULT_LOCALE, Localizer, embedded_locales};
 use rabbit_core::model::{Architecture, ComponentDetection, InstallationKind, Platform};
 use rabbit_core::package::uninstall::{UninstallStrategy, UninstallSummary};
-use rabbit_core::package::{PackageCategory, builtin_package_specs};
+use rabbit_core::package::{PACKAGE_REAPACK, PackageCategory, builtin_package_specs};
+use rabbit_core::plan::{InstallPlan, PlanAction, PlanActionKind};
+use rabbit_core::receipt::{InstallState, PackageReceipt};
 use rabbit_core::uninstall::{
     KeptPath, KeptReason, PlannedRemoval, Removability, RemovalReason, UNINSTALL_NOT_YET_KEY,
     UninstallNote, UninstallPlan, UninstallPlanInput, UninstallPlanItem, UninstallRoots,
@@ -369,6 +371,32 @@ fn an_empty_list_has_a_placeholder_row_and_a_details_sentence() {
         &plan(vec![removable_sws()]),
     );
     assert_eq!(with_rows.placeholder(&text), None);
+}
+
+/// The macOS list shows no row for an empty list, since every row there has
+/// a checkbox or a disclosure triangle, so switching to the tab says the
+/// placeholder's sentence with the tab's name.
+#[test]
+fn switching_to_an_empty_uninstall_tab_says_why_it_is_empty() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let text = wizard_text(&localizer);
+
+    assert_eq!(
+        WizardUninstallList::default().tab_announcement(&text),
+        "Uninstall. RABBIT found nothing it can uninstall in this REAPER."
+    );
+    let unreadable = WizardUninstallList {
+        unreadable: Some("RABBIT couldn't read its records.".to_string()),
+        ..WizardUninstallList::default()
+    };
+    assert_eq!(
+        unreadable.tab_announcement(&text),
+        "Uninstall. RABBIT couldn't read its records."
+    );
+    assert_eq!(
+        list_for(vec![removable_sws()]).tab_announcement(&text),
+        "Uninstall"
+    );
 }
 
 #[test]
@@ -777,9 +805,142 @@ fn review_says_the_install_ticks_are_not_part_of_the_run() {
 
     assert!(
         text.contains(
-            "What you ticked on the Install or update tab isn't part of this run: OSARA, REAPER."
+            "What is ticked on the Install or update tab isn't part of this run: OSARA, REAPER."
         ),
         "{text}"
+    );
+}
+
+/// A model for a portable REAPER whose Install or update tab offers
+/// `actions`, each with 9.9 available and `installed` on disk.
+fn install_tab_model_with(actions: &[(&str, PlanActionKind, Option<&str>)]) -> WizardModel {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let installation = fake_installation();
+    model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        vec![installation.clone()],
+        Some(0),
+        InstallPlan {
+            target: Some(installation),
+            actions: actions
+                .iter()
+                .map(|(package_id, action, installed)| PlanAction {
+                    package_id: package_id.to_string(),
+                    action: *action,
+                    installed_version: installed.map(|version| Version::parse(version).unwrap()),
+                    available_version: Some(Version::parse("9.9").unwrap()),
+                    reason: "test".to_string(),
+                })
+                .collect(),
+            notes: Vec::new(),
+        },
+    )
+}
+
+/// OSARA and SWS with updates, which RABBIT ticks by itself, FFmpeg not
+/// installed and not recommended, and the German language pack installed
+/// and current.
+fn install_tab_model() -> (Localizer, WizardModel) {
+    let model = install_tab_model_with(&[
+        ("osara", PlanActionKind::Update, Some("1.0")),
+        ("sws", PlanActionKind::Update, Some("1.0")),
+        ("ffmpeg", PlanActionKind::Install, None),
+        ("langpack-de", PlanActionKind::Keep, Some("9.9")),
+    ]);
+    (Localizer::embedded(DEFAULT_LOCALE).unwrap(), model)
+}
+
+/// Someone who opens RABBIT only to remove SWS never ticked the OSARA
+/// update, and SWS's own update tick would read as a contradiction of its
+/// removal, so Review leaves out what RABBIT ticked by itself.
+#[test]
+fn an_uninstall_review_leaves_out_the_install_ticks_rabbit_made() {
+    let (_, model) = install_tab_model();
+    let mut package_rows = model.package_rows.clone();
+    let mut configuration_rows = model.configuration_rows.clone();
+    remember_default_ticks(&mut package_rows, &mut configuration_rows);
+    let ticked: Vec<&str> = package_rows
+        .iter()
+        .filter(|row| row.selected)
+        .map(|row| row.package_id.as_str())
+        .collect();
+    assert_eq!(ticked, ["osara", "sws"]);
+
+    let install_ticked = install_tab_ticks_left_out(&package_rows, &configuration_rows);
+    assert!(install_ticked.is_empty(), "{install_ticked:?}");
+    let mut list = list_for(vec![removable_sws()]);
+    tick(&mut list, "sws");
+    let text = review(&list, Some(&target(true)), false, &install_ticked)
+        .lines
+        .join("\n");
+    assert!(!text.contains("Install or update tab isn't"), "{text}");
+}
+
+/// What the user did tick on the Install or update tab is named, with the
+/// setting RABBIT ticked along with it, since the uninstall leaves both
+/// out. Unticking one of RABBIT's ticks leaves nothing out.
+#[test]
+fn an_uninstall_review_names_the_install_ticks_the_user_made() {
+    let (localizer, model) = install_tab_model();
+    let mut package_rows = model.package_rows.clone();
+    let mut configuration_rows = model.configuration_rows.clone();
+    remember_default_ticks(&mut package_rows, &mut configuration_rows);
+
+    for (package_id, checked) in [("ffmpeg", true), ("langpack-de", true), ("osara", false)] {
+        let row = package_rows
+            .iter_mut()
+            .find(|row| row.package_id == package_id)
+            .unwrap();
+        apply_checkbox_state_to_package_row(&model, row, checked).unwrap();
+    }
+    recompute_configuration_row_availability(
+        &localizer,
+        &package_rows,
+        None,
+        &mut configuration_rows,
+    );
+
+    assert_eq!(
+        install_tab_ticks_left_out(&package_rows, &configuration_rows),
+        [
+            "FFmpeg for Improved Video Support",
+            "REAPER in German",
+            "Set REAPER's language"
+        ]
+    );
+}
+
+/// The configuration rows are built at start-up, and the version check
+/// ticks the recommended settings it makes available on them. Those are
+/// RABBIT's ticks too, so the defaults are taken once it has settled them.
+#[test]
+fn defaults_are_the_ticks_the_install_tab_opens_with() {
+    // At start-up RABBIT knew nothing of ReaPack, so its repository
+    // settings couldn't run.
+    let (localizer, model) = install_tab_model();
+    let mut configuration_rows = model.configuration_rows.clone();
+    // The version check finds ReaPack installed, which ticks them.
+    let mut package_rows =
+        install_tab_model_with(&[(PACKAGE_REAPACK, PlanActionKind::Keep, Some("9.9"))])
+            .package_rows;
+    recompute_configuration_row_availability(
+        &localizer,
+        &package_rows,
+        None,
+        &mut configuration_rows,
+    );
+    assert!(
+        !install_tab_ticks_left_out(&package_rows, &configuration_rows).is_empty(),
+        "the version check should have ticked a ReaPack setting"
+    );
+
+    remember_default_ticks(&mut package_rows, &mut configuration_rows);
+
+    assert_eq!(
+        install_tab_ticks_left_out(&package_rows, &configuration_rows),
+        Vec::<String>::new()
     );
 }
 
@@ -793,7 +954,7 @@ fn an_install_review_names_the_uninstall_ticks_it_leaves_out() {
             &["SWS Extension".to_string()]
         )
         .as_deref(),
-        Some("What you ticked on the Uninstall tab isn't part of this run: SWS Extension.")
+        Some("What is ticked on the Uninstall tab isn't part of this run: SWS Extension.")
     );
     assert_eq!(
         inactive_tab_note(&localizer, WizardMode::Install, &[]),
@@ -1228,6 +1389,16 @@ fn no_package_the_wizard_can_remove_yet_asks_a_question() {
                 ..ComponentDetection::not_installed(&spec.id, &spec.display_name)
             })
             .collect();
+        // A receipt for every package, as RABBIT's own installs leave
+        // behind. FFmpeg and the language packs can't be ticked without
+        // one, and would drop out of what this test checks.
+        let state = InstallState {
+            packages: specs
+                .iter()
+                .map(|spec| (spec.id.clone(), empty_receipt(&spec.id)))
+                .collect(),
+            ..InstallState::default()
+        };
         let roots = UninstallRoots::for_target(platform, dir.path(), None);
         let plan = build_uninstall_plan(&UninstallPlanInput {
             roots: &roots,
@@ -1235,7 +1406,7 @@ fn no_package_the_wizard_can_remove_yet_asks_a_question() {
             target: InstallationKind::Standard,
             specs: &specs,
             detections: &detections,
-            state: None,
+            state: Some(&state),
             remove_settings: false,
         });
         let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
@@ -1245,13 +1416,64 @@ fn no_package_the_wizard_can_remove_yet_asks_a_question() {
             .filter(|row| row.can_tick)
             .map(|row| row.package_id)
             .collect();
-        assert!(!tickable.is_empty(), "{platform:?}");
+        // Every Phase 1 package, so the coverage can't quietly shrink.
+        let mut phase_one = vec![
+            "sws",
+            "reapack",
+            "reakontrol",
+            "langpack-es",
+            "langpack-de",
+            "langpack-fr",
+        ];
+        if platform == Platform::Windows {
+            phase_one.extend(["ffmpeg", "app2clap"]);
+        }
+        for id in phase_one {
+            assert!(
+                tickable.iter().any(|ticked| ticked == id),
+                "{platform:?}: {id} isn't in {tickable:?}"
+            );
+        }
         assert_eq!(
             uninstall_confirmation_body(&localizer, &plan, &tickable),
             None,
             "{platform:?}: {tickable:?}"
         );
     }
+}
+
+/// A receipt for `package_id` that lists no files, which is all the plan
+/// asks of a package that can only be removed with one.
+fn empty_receipt(package_id: &str) -> PackageReceipt {
+    PackageReceipt {
+        id: package_id.to_string(),
+        version: None,
+        source_url: None,
+        source_sha256: None,
+        variant: None,
+        channel: None,
+        installed_files: Vec::new(),
+        installed_at: None,
+        rabbit_version: None,
+        architecture: None,
+        vendor_added_files: Vec::new(),
+    }
+}
+
+/// `action-keep` is shared with the Install or update tab, and an unticked
+/// Uninstall row starts with it. In Spanish it used to say there was no
+/// need to touch the package, which read as advice against removing it.
+#[test]
+fn an_unticked_uninstall_row_only_says_it_isnt_marked_in_spanish() {
+    let localizer = Localizer::embedded("es-ES").unwrap();
+    let list = uninstall_list_from_plan(
+        &localizer,
+        &builtin_package_specs(Platform::Windows),
+        &plan(vec![removable_sws()]),
+    );
+
+    let row = &list.rows[0].summary;
+    assert!(row.contains(": No modificar. Tienes la versión"), "{row}");
 }
 
 #[test]

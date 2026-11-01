@@ -4,6 +4,9 @@ app-short-name = RABBIT
 common-yes = yes
 common-no = no
 
+# What happens to a package in this run, the first thing its row says. An
+# unticked row on either tab gets action-keep, so keep it neutral: on the
+# Uninstall tab it only means the package isn't marked for removal.
 action-install = Will install
 action-update = Will update
 action-keep = Won't touch
@@ -344,9 +347,13 @@ wizard-review-uninstall-package = { $package }: { $removes } { $stays }
 wizard-review-uninstall-settings-removed = Its settings go too, into the backup: { $settings }.
 wizard-review-uninstall-close-programs-note = Close other music programs first.
 # What is ticked on the tab that isn't running stays ticked, but isn't part of
-# this run. $packages is a comma-separated list of package names.
-wizard-review-inactive-tab-note-install = What you ticked on the Install or update tab isn't part of this run: { $packages }.
-wizard-review-inactive-tab-note-uninstall = What you ticked on the Uninstall tab isn't part of this run: { $packages }.
+# this run. RABBIT leaves out what it ticked by itself, such as updates, but the
+# list can still hold a setting RABBIT ticked along with one of the user's
+# ticks, so the note doesn't say who ticked it. $packages is a comma-separated
+# list of names: packages, and for the Install or update tab also settings,
+# such as "Set REAPER's language".
+wizard-review-inactive-tab-note-install = What is ticked on the Install or update tab isn't part of this run: { $packages }.
+wizard-review-inactive-tab-note-uninstall = What is ticked on the Uninstall tab isn't part of this run: { $packages }.
 wizard-review-uninstall-reinstall-hint = You can install these again later from the Install or update tab.
 # Why the Uninstall button is disabled. $reason is a sentence, such as
 # wizard-review-uninstall-not-writable.

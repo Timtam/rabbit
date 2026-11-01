@@ -4,9 +4,12 @@ app-short-name = RABBIT
 common-yes = si
 common-no = no
 
+# What happens to a package in this run, the first thing its row says. An
+# unticked row on either tab gets action-keep, so keep it neutral: on the
+# Uninstall tab it only means the package isn't marked for removal.
 action-install = Instalar
 action-update = Actualizar
-action-keep = No hace falta tocarlo
+action-keep = No modificar
 action-uninstall = Desinstalar
 
 package-reaper = REAPER
@@ -344,9 +347,13 @@ wizard-review-uninstall-package = { $package }: { $removes } { $stays }
 wizard-review-uninstall-settings-removed = Su configuración también se quita y va a la copia de seguridad: { $settings }.
 wizard-review-uninstall-close-programs-note = Cierra antes los demás programas de música.
 # What is ticked on the tab that isn't running stays ticked, but isn't part of
-# this run. $packages is a comma-separated list of package names.
-wizard-review-inactive-tab-note-install = Lo que has marcado en la pestaña «Instalar o actualizar» no forma parte de esta operación: { $packages }.
-wizard-review-inactive-tab-note-uninstall = Lo que has marcado en la pestaña «Desinstalar» no forma parte de esta operación: { $packages }.
+# this run. RABBIT leaves out what it ticked by itself, such as updates, but the
+# list can still hold a setting RABBIT ticked along with one of the user's
+# ticks, so the note doesn't say who ticked it. $packages is a comma-separated
+# list of names: packages, and for the Install or update tab also settings,
+# such as "Set REAPER's language".
+wizard-review-inactive-tab-note-install = Lo que está marcado en la pestaña «Instalar o actualizar» no forma parte de esta operación: { $packages }.
+wizard-review-inactive-tab-note-uninstall = Lo que está marcado en la pestaña «Desinstalar» no forma parte de esta operación: { $packages }.
 wizard-review-uninstall-reinstall-hint = Puedes volver a instalarlos más adelante desde la pestaña «Instalar o actualizar».
 # Why the Uninstall button is disabled. $reason is a sentence, such as
 # wizard-review-uninstall-not-writable.

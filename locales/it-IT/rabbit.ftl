@@ -4,6 +4,9 @@ app-short-name = RABBIT
 common-yes = sì
 common-no = no
 
+# What happens to a package in this run, the first thing its row says. An
+# unticked row on either tab gets action-keep, so keep it neutral: on the
+# Uninstall tab it only means the package isn't marked for removal.
 action-install = Da installare
 action-update = Da aggiornare
 action-keep = Non modificare
@@ -344,9 +347,13 @@ wizard-review-uninstall-package = { $package }: { $removes } { $stays }
 wizard-review-uninstall-settings-removed = Anche le sue impostazioni vengono rimosse e finiscono nel backup: { $settings }.
 wizard-review-uninstall-close-programs-note = Prima chiudi gli altri programmi musicali.
 # What is ticked on the tab that isn't running stays ticked, but isn't part of
-# this run. $packages is a comma-separated list of package names.
-wizard-review-inactive-tab-note-install = Ciò che hai selezionato nella scheda «Installa o aggiorna» non fa parte di questa operazione: { $packages }.
-wizard-review-inactive-tab-note-uninstall = Ciò che hai selezionato nella scheda «Disinstalla» non fa parte di questa operazione: { $packages }.
+# this run. RABBIT leaves out what it ticked by itself, such as updates, but the
+# list can still hold a setting RABBIT ticked along with one of the user's
+# ticks, so the note doesn't say who ticked it. $packages is a comma-separated
+# list of names: packages, and for the Install or update tab also settings,
+# such as "Set REAPER's language".
+wizard-review-inactive-tab-note-install = Ciò che è selezionato nella scheda «Installa o aggiorna» non fa parte di questa operazione: { $packages }.
+wizard-review-inactive-tab-note-uninstall = Ciò che è selezionato nella scheda «Disinstalla» non fa parte di questa operazione: { $packages }.
 wizard-review-uninstall-reinstall-hint = Potrai reinstallarli più avanti dalla scheda «Installa o aggiorna».
 # Why the Uninstall button is disabled. $reason is a sentence, such as
 # wizard-review-uninstall-not-writable.

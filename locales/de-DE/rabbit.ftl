@@ -4,6 +4,9 @@ app-short-name = RABBIT
 common-yes = ja
 common-no = nein
 
+# What happens to a package in this run, the first thing its row says. An
+# unticked row on either tab gets action-keep, so keep it neutral: on the
+# Uninstall tab it only means the package isn't marked for removal.
 action-install = Installieren
 action-update = Aktualisieren
 action-keep = Beibehalten
@@ -344,9 +347,13 @@ wizard-review-uninstall-package = { $package }: { $removes } { $stays }
 wizard-review-uninstall-settings-removed = Die Einstellungen werden ebenfalls entfernt und kommen in die Sicherung: { $settings }.
 wizard-review-uninstall-close-programs-note = Schließen Sie vorher andere Musikprogramme.
 # What is ticked on the tab that isn't running stays ticked, but isn't part of
-# this run. $packages is a comma-separated list of package names.
-wizard-review-inactive-tab-note-install = Was Sie auf der Registerkarte „Installieren oder aktualisieren“ ausgewählt haben, gehört nicht zu diesem Durchlauf: { $packages }.
-wizard-review-inactive-tab-note-uninstall = Was Sie auf der Registerkarte „Deinstallieren“ ausgewählt haben, gehört nicht zu diesem Durchlauf: { $packages }.
+# this run. RABBIT leaves out what it ticked by itself, such as updates, but the
+# list can still hold a setting RABBIT ticked along with one of the user's
+# ticks, so the note doesn't say who ticked it. $packages is a comma-separated
+# list of names: packages, and for the Install or update tab also settings,
+# such as "Set REAPER's language".
+wizard-review-inactive-tab-note-install = Was auf der Registerkarte „Installieren oder aktualisieren“ ausgewählt ist, gehört nicht zu diesem Durchlauf: { $packages }.
+wizard-review-inactive-tab-note-uninstall = Was auf der Registerkarte „Deinstallieren“ ausgewählt ist, gehört nicht zu diesem Durchlauf: { $packages }.
 wizard-review-uninstall-reinstall-hint = Sie können diese Pakete später auf der Registerkarte „Installieren oder aktualisieren“ wieder installieren.
 # Why the Uninstall button is disabled. $reason is a sentence, such as
 # wizard-review-uninstall-not-writable.

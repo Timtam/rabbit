@@ -4,6 +4,9 @@ app-short-name = RABBIT
 common-yes = oui
 common-no = non
 
+# What happens to a package in this run, the first thing its row says. An
+# unticked row on either tab gets action-keep, so keep it neutral: on the
+# Uninstall tab it only means the package isn't marked for removal.
 action-install = À installer
 action-update = À mettre à jour
 action-keep = Ne pas modifier
@@ -344,9 +347,13 @@ wizard-review-uninstall-package = { $package } : { $removes } { $stays }
 wizard-review-uninstall-settings-removed = Ses réglages sont aussi supprimés et vont dans la sauvegarde : { $settings }.
 wizard-review-uninstall-close-programs-note = Fermez d'abord les autres programmes de musique.
 # What is ticked on the tab that isn't running stays ticked, but isn't part of
-# this run. $packages is a comma-separated list of package names.
-wizard-review-inactive-tab-note-install = Ce que vous avez coché dans l'onglet « Installer ou mettre à jour » ne fait pas partie de cette opération : { $packages }.
-wizard-review-inactive-tab-note-uninstall = Ce que vous avez coché dans l'onglet « Désinstaller » ne fait pas partie de cette opération : { $packages }.
+# this run. RABBIT leaves out what it ticked by itself, such as updates, but the
+# list can still hold a setting RABBIT ticked along with one of the user's
+# ticks, so the note doesn't say who ticked it. $packages is a comma-separated
+# list of names: packages, and for the Install or update tab also settings,
+# such as "Set REAPER's language".
+wizard-review-inactive-tab-note-install = Ce qui est coché dans l'onglet « Installer ou mettre à jour » ne fait pas partie de cette opération : { $packages }.
+wizard-review-inactive-tab-note-uninstall = Ce qui est coché dans l'onglet « Désinstaller » ne fait pas partie de cette opération : { $packages }.
 wizard-review-uninstall-reinstall-hint = Vous pourrez les réinstaller plus tard depuis l'onglet « Installer ou mettre à jour ».
 # Why the Uninstall button is disabled. $reason is a sentence, such as
 # wizard-review-uninstall-not-writable.

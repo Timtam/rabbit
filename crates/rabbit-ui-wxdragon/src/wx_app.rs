@@ -30,11 +30,11 @@ use crate::{
     ProgressUiState, UiBootstrapOptions, WizardInstallOptions, WizardMode, WizardOutcomeReport,
     WizardUninstallList, build_review_preview_for_package_rows, build_uninstall_review_preview,
     execute_wizard_install_with_progress, inactive_tab_note, install_request_from_target_and_rows,
-    load_wizard_model, localizer_from_options, reapack_selected_for_install_or_update,
-    recompute_configuration_row_availability, refreshed_target_row, run_wizard_self_update_check,
-    run_wizard_self_update_release_notes, save_wizard_outcome_report,
-    selected_configuration_step_ids, uninstall_list_for_target, wizard_error_reason,
-    wizard_outcome_report_from_error, wizard_outcome_report_from_success,
+    install_tab_ticks_left_out, load_wizard_model, localizer_from_options,
+    reapack_selected_for_install_or_update, recompute_configuration_row_availability,
+    refreshed_target_row, run_wizard_self_update_check, run_wizard_self_update_release_notes,
+    save_wizard_outcome_report, selected_configuration_step_ids, uninstall_list_for_target,
+    wizard_error_reason, wizard_outcome_report_from_error, wizard_outcome_report_from_success,
     wizard_package_plan_for_target, wizard_package_plan_for_target_with_available,
 };
 use rabbit_core::localization::resolve_runtime_locale;
@@ -277,7 +277,13 @@ pub fn run() {
         bind_done_page_enter_closes(&wizard_widgets.done_status, &frame, &current_step);
         bind_done_page_enter_closes(&wizard_widgets.done_details, &frame, &current_step);
         bind_expert_mode_chord(&frame, &model, wizard_widgets, &current_step);
-        bind_packages_tab_switching(&frame, &model, wizard_widgets, &current_step);
+        bind_packages_tab_switching(
+            &frame,
+            &model,
+            wizard_widgets,
+            &uninstall_list,
+            &current_step,
+        );
         if expert_mode() {
             // RABBIT_EXPERT=1: no confirmation, setting the variable was it.
             apply_expert_mode(&model, &wizard_widgets);
@@ -445,11 +451,11 @@ pub fn run() {
                         let rows = package_rows.borrow();
                         let checked = checked_package_indices(&rows);
                         if mode == WizardMode::Uninstall {
-                            let install_ticked: Vec<String> = checked
-                                .iter()
-                                .filter_map(|index| rows.get(*index))
-                                .map(|row| row.display_name.clone())
-                                .collect();
+                            // Only what the user ticked there: RABBIT's own
+                            // ticks, such as every update, say nothing about
+                            // what they meant to run.
+                            let install_ticked =
+                                install_tab_ticks_left_out(&rows, &configuration_rows.borrow());
                             let list = uninstall_list.borrow();
                             let remove_settings = list.settings_option_available()
                                 && widgets.uninstall_remove_settings.get_value();

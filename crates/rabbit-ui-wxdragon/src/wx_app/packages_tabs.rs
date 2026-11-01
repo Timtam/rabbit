@@ -190,7 +190,8 @@ pub(crate) fn arrive_on_packages_page(
 /// - After any switch, by those keys or by VoiceOver selecting a tab, focus
 ///   goes to the new tab's list and the tab's name is said: VoiceOver
 ///   doesn't speak a change made from code, and the list it lands in would
-///   otherwise be the only clue.
+///   otherwise be the only clue. An empty Uninstall list has no row to read,
+///   so its sentence is said with the name.
 ///
 /// Windows needs none of it: the native tab control switches on Ctrl+Tab
 /// and Ctrl+Page Down and moves focus into the new tab by itself.
@@ -198,6 +199,7 @@ pub(crate) fn bind_packages_tab_switching(
     frame: &Frame,
     model: &Arc<WizardModel>,
     widgets: WizardWidgets,
+    uninstall_list: &Rc<RefCell<WizardUninstallList>>,
     current_step: &Arc<AtomicUsize>,
 ) {
     if !cfg!(target_os = "macos") {
@@ -205,13 +207,14 @@ pub(crate) fn bind_packages_tab_switching(
     }
     {
         let model = Arc::clone(model);
+        let uninstall_list = Rc::clone(uninstall_list);
         let current_step = Arc::clone(current_step);
         widgets.packages_notebook.on_page_changed(move |event| {
             if current_step.load(Ordering::SeqCst) != PACKAGES_STEP {
                 return;
             }
             if let Some(tab) = event.get_selection() {
-                show_tab(&model, &widgets, tab as usize);
+                show_tab(&model, &widgets, &uninstall_list.borrow(), tab as usize);
             }
         });
     }
@@ -233,20 +236,26 @@ pub(crate) fn bind_packages_tab_switching(
     });
 }
 
-/// Focus the list on tab `tab` and say the tab's name.
-fn show_tab(model: &WizardModel, widgets: &WizardWidgets, tab: usize) {
-    let name = match tab {
+/// Focus the list on tab `tab` and say the tab's name, and for an empty
+/// Uninstall list why it is empty.
+fn show_tab(
+    model: &WizardModel,
+    widgets: &WizardWidgets,
+    uninstall_list: &WizardUninstallList,
+    tab: usize,
+) {
+    let message = match tab {
         INSTALL_TAB => {
             widgets.package_checklist.set_focus();
-            &model.text.packages_tab_install
+            model.text.packages_tab_install.clone()
         }
         UNINSTALL_TAB => {
             widgets.uninstall_list.set_focus();
-            &model.text.packages_tab_uninstall
+            uninstall_list.tab_announcement(&model.text)
         }
         _ => return,
     };
-    announce(name, AnnouncePriority::Interrupt);
+    announce(&message, AnnouncePriority::Interrupt);
 }
 
 /// Physical Ctrl+Tab, with or without Shift. Command and Option must not be

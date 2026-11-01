@@ -253,6 +253,11 @@ pub struct PackageRow {
     pub display_name: String,
     pub description: String,
     pub selected: bool,
+    /// The tick RABBIT gave the row before the user saw it: updates and
+    /// recommended packages start ticked. `selected` differing from it is
+    /// the user's doing, which is what Review's note about ticks an
+    /// uninstall leaves out names; see `install_tab_ticks_left_out`.
+    pub default_selected: bool,
     pub summary: String,
     pub details: String,
     pub installed_version: String,
@@ -310,6 +315,11 @@ pub struct ConfigurationRow {
     /// the step's `recommended` flag intersected with the row's
     /// `available_for_target`.
     pub selected: bool,
+    /// The tick the row had when the Install or update tab opened, as
+    /// [`PackageRow::default_selected`]. These rows outlive a version
+    /// check, which ticks recommended steps it makes available, so the
+    /// version check takes this again; see `remember_default_ticks`.
+    pub default_selected: bool,
     /// Row label as rendered in the tree. For configuration rows the
     /// summary is just `display_name` today; kept as a separate field
     /// so the wizard's tree-refresh helpers can stay symmetric with

@@ -2,12 +2,19 @@
 //! own beside the install list's, so the install list's toggle code stays
 //! out of it.
 //!
-//! The group rows are headings without a checkbox, and so is the row that
-//! stands in for an empty list. wx shows only model column 0 of a container
-//! row unless the model asks for more, so the label is column 0 here and
-//! those rows are containers: they show their text and no checkbox. The
-//! install model does the opposite, on purpose, so its group rows can tick
-//! everything below them.
+//! The group rows are headings without a checkbox. wx shows only model
+//! column 0 of a container row unless the model asks for more, so the label
+//! is column 0 here and the headings are containers: they show their text
+//! and no checkbox. The install model does the opposite, on purpose, so its
+//! group rows can tick everything below them.
+//!
+//! An empty list shows no row at all, unlike the Windows list's placeholder
+//! row. Whether a cell has a value follows from being a container alone, and
+//! wxOSX tells NSOutlineView every container is expandable: a leaf would show
+//! a checkbox VoiceOver reads as "unchecked", a container a disclosure
+//! triangle it reads as "collapsed", over nothing. The details text holds
+//! the sentence instead, and switching to the tab says it (see
+//! `WizardUninstallList::tab_announcement`).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -56,8 +63,6 @@ enum UninstallNodeKind {
     Group(usize),
     /// An index into the list's rows.
     Row(usize),
-    /// The row that stands in for an empty list.
-    Placeholder,
 }
 
 #[derive(Debug)]
@@ -75,7 +80,6 @@ struct UninstallTreeData {
     text: WizardText,
     group_nodes: [Box<UninstallNode>; 3],
     row_nodes: Vec<UninstallNode>,
-    placeholder_node: Box<UninstallNode>,
 }
 
 impl UninstallTreeData {
@@ -128,7 +132,8 @@ impl UninstallTreeData {
     }
 }
 
-/// The details text to start from: the first row's, or the placeholder's.
+/// The details text to start from: the first row's, or, for an empty list,
+/// why it is empty.
 fn initial_details(model: &WizardModel, list: &WizardUninstallList) -> String {
     match list.rows.first() {
         Some(row) => row.details.clone(),
@@ -218,31 +223,25 @@ fn build_uninstall_tree_model(
                     let group = GROUP_ORDER.iter().position(|group| *group == category)?;
                     Some(data.group_ptr(group) as *mut UninstallNode)
                 }
-                UninstallNodeKind::Group(_) | UninstallNodeKind::Placeholder => None,
+                UninstallNodeKind::Group(_) => None,
             }
         },
-        // is_container: the headings and the placeholder, so that they show
-        // only column 0, their text, and no checkbox.
+        // is_container: the headings, so that they show only column 0, their
+        // text, and no checkbox. Nothing else may be one: wxOSX gives every
+        // container a disclosure triangle, children or not.
         |_data: &UninstallTreeData, item: Option<&UninstallNode>| -> bool {
-            item.is_none_or(|node| !matches!(node.kind, UninstallNodeKind::Row(_)))
+            item.is_none_or(|node| matches!(node.kind, UninstallNodeKind::Group(_)))
         },
-        // get_children
+        // get_children: no heading, and so no row at all, for an empty list.
         |data: &UninstallTreeData, item: Option<&UninstallNode>| -> Vec<*mut UninstallNode> {
             match item.map(|node| node.kind) {
-                None => {
-                    let groups = data.groups_with_rows();
-                    if groups.is_empty() {
-                        vec![data.placeholder_node.as_ref() as *const UninstallNode
-                            as *mut UninstallNode]
-                    } else {
-                        groups
-                            .into_iter()
-                            .map(|group| data.group_ptr(group) as *mut UninstallNode)
-                            .collect()
-                    }
-                }
+                None => data
+                    .groups_with_rows()
+                    .into_iter()
+                    .map(|group| data.group_ptr(group) as *mut UninstallNode)
+                    .collect(),
                 Some(UninstallNodeKind::Group(group)) => data.rows_in_group(group),
-                Some(UninstallNodeKind::Row(_) | UninstallNodeKind::Placeholder) => Vec::new(),
+                Some(UninstallNodeKind::Row(_)) => Vec::new(),
             }
         },
         // get_value
@@ -256,7 +255,7 @@ fn build_uninstall_tree_model(
                     UninstallNodeKind::Row(index) => {
                         list.rows.get(index).is_some_and(|row| row.selected)
                     }
-                    UninstallNodeKind::Group(_) | UninstallNodeKind::Placeholder => false,
+                    UninstallNodeKind::Group(_) => false,
                 });
             }
             match node.kind {
@@ -265,11 +264,6 @@ fn build_uninstall_tree_model(
                     list.rows
                         .get(index)
                         .map(|row| row.summary.as_str())
-                        .unwrap_or_default(),
-                ),
-                UninstallNodeKind::Placeholder => Variant::from_string(
-                    list.placeholder(&data.text)
-                        .map(|(label, _)| label)
                         .unwrap_or_default(),
                 ),
             }
@@ -300,7 +294,7 @@ fn build_uninstall_tree_model(
             },
         ),
         // is_enabled: a row that can't be ticked is drawn, and exposed, as
-        // disabled. The headings and the placeholder read as plain text.
+        // disabled. The headings read as plain text.
         Some(
             |data: &UninstallTreeData, item: Option<&UninstallNode>, _col: u32| -> bool {
                 match item.map(|node| node.kind) {
@@ -378,9 +372,6 @@ pub(crate) fn build_uninstall_tab(
             })
         }),
         row_nodes: UninstallTreeData::row_nodes_for(row_count),
-        placeholder_node: Box::new(UninstallNode {
-            kind: UninstallNodeKind::Placeholder,
-        }),
     };
     let dv_model = build_uninstall_tree_model(data, Rc::clone(&toggle));
     *items.borrow_mut() = Some(dv_model.clone());
@@ -441,7 +432,6 @@ pub(crate) fn build_uninstall_tab(
 
     {
         let list = Rc::clone(&list);
-        let text = model.text.clone();
         tree.on_selection_changed(move |event| {
             let Some(node_ptr) = event
                 .get_item()
@@ -459,9 +449,6 @@ pub(crate) fn build_uninstall_tab(
             let value = match node.kind {
                 UninstallNodeKind::Row(index) => {
                     list.borrow().rows.get(index).map(|row| row.details.clone())
-                }
-                UninstallNodeKind::Placeholder => {
-                    list.borrow().placeholder(&text).map(|(_, details)| details)
                 }
                 // A heading leaves the details as they were, as the install
                 // list's groups do.
@@ -501,8 +488,8 @@ pub(crate) fn build_uninstall_tab(
                 return;
             }
             // Consume the key either way: the list has nothing else to do
-            // with Space, and letting it through beeps. A heading, the
-            // placeholder or a row that can't be ticked just stays as it is.
+            // with Space, and letting it through beeps. A heading or a row
+            // that can't be ticked just stays as it is.
             event.skip(false);
             let Some(dv_model) = items.borrow().clone() else {
                 return;

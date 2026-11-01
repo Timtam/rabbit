@@ -22,7 +22,7 @@ use rabbit_core::uninstall::{
 
 use super::bootstrap::localizer_from_options;
 use super::labels::version_text;
-use super::model::{TargetRow, WizardModel, WizardText};
+use super::model::{ConfigurationRow, PackageRow, TargetRow, WizardModel, WizardText};
 use super::packages::localized_package_display_name;
 
 /// The Packages page's tabs, in the notebook's order.
@@ -157,8 +157,10 @@ impl WizardUninstallList {
         self.ticked_rows().any(|row| !row.settings.is_empty())
     }
 
-    /// The label and the details text of the row, without a checkbox, that
-    /// stands in for an empty list. `None` while there are rows.
+    /// The label and the details text that stand in for an empty list: the
+    /// Windows list shows the label as a row without a checkbox, macOS says
+    /// it (see `tab_announcement`), and both show the details text. `None`
+    /// while there are rows.
     pub fn placeholder(&self, text: &WizardText) -> Option<(String, String)> {
         if !self.rows.is_empty() {
             return None;
@@ -170,6 +172,18 @@ impl WizardUninstallList {
                 text.uninstall_empty_details.clone(),
             ),
         })
+    }
+
+    /// What macOS says when the Uninstall tab is switched to: the tab's
+    /// name, then, for an empty list, the placeholder's sentence. The macOS
+    /// list has no placeholder row, since any row there either has a
+    /// checkbox or reads as a collapsed group, so the sentence the Windows
+    /// list reads as its only row is said here instead.
+    pub fn tab_announcement(&self, text: &WizardText) -> String {
+        match self.placeholder(text) {
+            Some((label, _)) => format!("{}. {label}", text.packages_tab_uninstall),
+            None => text.packages_tab_uninstall.clone(),
+        }
     }
 }
 
@@ -737,8 +751,9 @@ pub fn build_uninstall_review_preview(
 /// The note Review adds about the tab that isn't running: what is ticked
 /// there stays ticked but isn't part of this run. A tab can change behind
 /// the user's back, by Page Down on a checkbox on Windows, so Review says
-/// so. `other_tab_ticked` are the package names ticked there; `None` when
-/// there are none.
+/// so. `other_tab_ticked` are the names to list: the Uninstall tab's ticks,
+/// or `install_tab_ticks_left_out` for the Install or update tab. `None`
+/// when there are none.
 pub fn inactive_tab_note(
     localizer: &Localizer,
     mode: WizardMode,
@@ -756,6 +771,55 @@ pub fn inactive_tab_note(
             .format(key, &[("packages", other_tab_ticked.join(", ").as_str())])
             .value,
     )
+}
+
+/// What an uninstall's Review names as left out of the Install or update
+/// tab: the ticks there that RABBIT didn't set by itself, packages first,
+/// then settings, which the run leaves out just the same.
+///
+/// RABBIT ticks every update, the recommended packages and the settings
+/// that go with them before anyone sees the tab. Naming those told someone
+/// who never opened the tab that their ticks were left out, and named the
+/// very package Review was about to remove whenever it had an update. A tick
+/// the user did make, before a Page Down took them to the other tab, say,
+/// is what the note is for.
+pub fn install_tab_ticks_left_out(
+    package_rows: &[PackageRow],
+    configuration_rows: &[ConfigurationRow],
+) -> Vec<String> {
+    let packages = package_rows
+        .iter()
+        .filter(|row| row.selected && !row.default_selected)
+        .map(|row| row.display_name.clone());
+    // The same test as `selected_configuration_step_ids`: a step that can't
+    // run or is already in place isn't part of any run, ticked or not.
+    let settings = configuration_rows
+        .iter()
+        .filter(|row| {
+            row.selected
+                && !row.default_selected
+                && row.available_for_target
+                && !row.already_applied
+        })
+        .map(|row| row.display_name.clone());
+    packages.chain(settings).collect()
+}
+
+/// Take the Install or update tab's ticks as RABBIT's defaults, once the
+/// version check has settled them and before the tab shows. The package
+/// rows are new by then, but the configuration rows were built at start-up
+/// and the version check ticks the recommended ones it makes available, so
+/// their defaults are only known now.
+pub fn remember_default_ticks(
+    package_rows: &mut [PackageRow],
+    configuration_rows: &mut [ConfigurationRow],
+) {
+    for row in package_rows.iter_mut() {
+        row.default_selected = row.selected;
+    }
+    for row in configuration_rows.iter_mut() {
+        row.default_selected = row.selected;
+    }
 }
 
 /// Why RABBIT asks once more before an uninstall starts.

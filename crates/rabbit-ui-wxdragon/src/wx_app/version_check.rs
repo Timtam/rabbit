@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::{
     ConfigurationRow, PackageRow, TargetRow, WizardMode, WizardModel, WizardUninstallList,
     apply_version_check_failures_to_rows, localized_package_display_name, localizer_from_options,
-    recompute_configuration_row_availability, uninstall_list_for_target,
+    recompute_configuration_row_availability, remember_default_ticks, uninstall_list_for_target,
     wizard_desired_package_ids, wizard_package_plan_for_target_with_available,
 };
 use rabbit_core::detection::detect_components;
@@ -192,6 +192,13 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
                                 &mut ui.configuration_rows.borrow_mut(),
                             );
                         }
+                        // What the tab opens with is RABBIT's doing; an
+                        // uninstall's Review names only the ticks changed
+                        // from here.
+                        remember_default_ticks(
+                            &mut ui.package_rows.borrow_mut(),
+                            &mut ui.configuration_rows.borrow_mut(),
+                        );
                         ui.can_install.set(plan.can_install);
                         ui.review_can_install.set(false);
                         ui.review_can_uninstall.set(false);

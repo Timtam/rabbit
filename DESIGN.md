@@ -590,15 +590,19 @@ user can finish the install by pressing Next a few times.
      pressed decides what the run does; install and uninstall never mix.
      The Uninstall tab lists every installed package under the same groups,
      with headings that can't be ticked, nothing ticked by default, and rows
-     RABBIT can't remove shown but impossible to tick, saying why. Its rows
-     come from the detection the version check already ran, which asks only
-     which files exist and how big they are. Below its list, an unticked
-     **Also remove settings** checkbox with a note on what it would remove
-     works like the OSARA key map checkbox: disabled and out of the Tab
-     order until a ticked package has settings RABBIT may remove, and
-     unticked again when none has. On macOS, VoiceOver is told when a tick
-     makes the option available or not, since that happens away from the
-     row. Everything below describes the Install or update tab.
+     RABBIT can't remove shown but impossible to tick, saying why. An empty
+     list says so in its details text. On Windows the sentence is also a row
+     without a checkbox; macOS shows no row, because a row there has either
+     a checkbox or a disclosure triangle, and says the sentence with the
+     tab's name instead. Its rows come from the detection the version check
+     already ran, which asks only which files exist and how big they are.
+     Below its list, an unticked **Also remove settings** checkbox with a
+     note on what it would remove works like the OSARA key map checkbox:
+     disabled and out of the Tab order until a ticked package has settings
+     RABBIT may remove, and unticked again when none has. On macOS,
+     VoiceOver is told when a tick makes the option available or not, since
+     that happens away from the row. Everything below describes the Install
+     or update tab.
    - Tree view with two top-level groups: **Packages** and
      **Configuration**. Packages contains REAPER, OSARA, SWS, ReaPack,
      ReaKontrol, FFmpeg (Windows only), JAWS scripts (Windows only), and
@@ -665,14 +669,16 @@ user can finish the install by pressing Next a few times.
    - In uninstall mode the heading says "Ready to uninstall", and the
      summary has one line per package with what goes and what stays (or,
      with Also remove settings ticked, which settings go too), the
-     warnings, a note when ticks on the other tab are left out, and that
-     the packages can be installed again. The Uninstall button is enabled
-     whenever something removable is ticked, whatever the install plan
-     says. Uninstalling is never one key press away: focus goes to the
-     summary, there is no default button, and Enter starts nothing. A run
-     with a step a backup can't undo, or a package whose manifest asks for
-     it, gets a Yes/No question with No focused first. Back returns to the
-     Uninstall tab's list, never to the ReaPack donation page.
+     warnings, a note naming what is ticked on the other tab and left out
+     (on the Install or update tab, only ticks RABBIT didn't set itself,
+     such as an update it ticked by default), and that the packages can be
+     installed again. The Uninstall button is enabled whenever something
+     removable is ticked, whatever the install plan says. Uninstalling is
+     never one key press away: focus goes to the summary, there is no
+     default button, and Enter starts nothing. A run with a step a backup
+     can't undo, or a package whose manifest asks for it, gets a Yes/No
+     question with No focused first. Back returns to the Uninstall tab's
+     list, never to the ReaPack donation page.
 
 6. Progress
    - Single progress bar plus one current-step line. A "Show details" toggle
