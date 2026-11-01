@@ -78,6 +78,15 @@ pub enum RabbitError {
     #[error("refusing to restore {path}: {reason}")]
     BackupRestoreRefused { path: PathBuf, reason: String },
 
+    /// A restore of one package from a backup set can't go ahead. Raised
+    /// before any file is restored.
+    #[error("can't restore {package_id} from the backup set {backup_id}: {reason}")]
+    PackageRestoreRefused {
+        backup_id: String,
+        package_id: String,
+        reason: String,
+    },
+
     #[error("no artifact found for {package_id} on {platform:?}/{architecture:?}")]
     NoArtifactFound {
         package_id: String,

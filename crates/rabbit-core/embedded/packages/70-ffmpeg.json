@@ -31,10 +31,18 @@
     "copy_user_plugin_binary"
   ],
   "uninstall": {
+    "requires_receipt": true,
     "plans": [
       {
-        "strategy": "not_supported",
-        "note_key": "uninstall-not-yet"
+        "platform": "windows",
+        "strategy": "remove_files",
+        "summary": {
+          "removes_key": "uninstall-summary-ffmpeg-removes",
+          "keeps_key": "uninstall-summary-ffmpeg-keeps"
+        },
+        "remove": {
+          "receipt_files": true
+        }
       }
     ]
   },

@@ -562,11 +562,12 @@ pub(crate) fn package_rows(
             // without hunting for it. Packs for other languages stay listed
             // but unticked; nothing is offered for English, since REAPER is
             // already English.
-            // Has the user turned this package down on this install? It
-            // stays listed and tickable either way — a refusal suppresses
-            // the automatic tick, never the package itself.
-            let refused = spec
-                .is_some_and(|spec| spec.remember_opt_out && declined.contains(&action.package_id));
+            // Has the user turned this package down on this install, or
+            // uninstalled it? Either counts, for every package: a package
+            // removed through RABBIT must not come back ticked on the next
+            // run. It stays listed and tickable either way — a refusal
+            // suppresses the automatic tick, never the package itself.
+            let refused = declined.contains(&action.package_id);
             let recommended = spec
                 .map(|spec| {
                     rabbit_core::package::effective_recommended(spec, host)

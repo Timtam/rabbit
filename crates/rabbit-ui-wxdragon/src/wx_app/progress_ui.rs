@@ -319,6 +319,47 @@ pub(crate) fn apply_progress_event_to_ui(
                     .value,
             );
         }
+        // The wizard doesn't start uninstalls yet. When it does, each
+        // removal holds the status line the way an install does, and the
+        // log says whether the package really went.
+        ProgressEvent::RemoveStarted { package_id } => {
+            state.current_install = Some(package_id.clone());
+            let package = package_display_name(package_display_names, package_id);
+            status_line = Some(
+                localizer
+                    .format(
+                        "wizard-progress-status-removing",
+                        &[("package", package.as_str())],
+                    )
+                    .value,
+            );
+            log_line = Some(
+                localizer
+                    .format(
+                        "wizard-progress-log-remove-started",
+                        &[("package", package.as_str())],
+                    )
+                    .value,
+            );
+        }
+        ProgressEvent::RemoveCompleted {
+            package_id,
+            removed,
+        } => {
+            state.current_install = None;
+            state.completed_phases += 1;
+            let package = package_display_name(package_display_names, package_id);
+            let key = if *removed {
+                "wizard-progress-log-remove-completed"
+            } else {
+                "wizard-progress-log-remove-failed"
+            };
+            log_line = Some(
+                localizer
+                    .format(key, &[("package", package.as_str())])
+                    .value,
+            );
+        }
     });
 
     widgets.progress_gauge.set_value(state.percentage());
@@ -327,7 +368,9 @@ pub(crate) fn apply_progress_event_to_ui(
     // everything else.
     let spoken = matches!(
         event,
-        ProgressEvent::InstallStarted { .. } | ProgressEvent::ConfigurationStarted { .. }
+        ProgressEvent::InstallStarted { .. }
+            | ProgressEvent::ConfigurationStarted { .. }
+            | ProgressEvent::RemoveStarted { .. }
     );
     if let Some(line) = status_line
         && !status_frozen

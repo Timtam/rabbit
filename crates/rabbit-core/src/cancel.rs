@@ -36,6 +36,9 @@ pub struct CancelToken {
     /// Set for tokens made by [`CancelToken::child`]: the child is
     /// cancelled when its parent is, but not the other way around.
     parent: Option<Arc<CancelToken>>,
+    /// Set for tokens made by [`CancelToken::watching`]: a flag outside any
+    /// token that counts as a cancel too.
+    external: Option<&'static AtomicBool>,
 }
 
 impl CancelToken {
@@ -51,9 +54,25 @@ impl CancelToken {
     pub fn is_cancelled(&self) -> bool {
         self.flag.load(Ordering::Relaxed)
             || self
+                .external
+                .is_some_and(|external| external.load(Ordering::Relaxed))
+            || self
                 .parent
                 .as_ref()
                 .is_some_and(|parent| parent.is_cancelled())
+    }
+
+    /// A token that is also cancelled once `external` is set.
+    ///
+    /// The CLI hands it the flag its Ctrl+C handler sets. A signal handler
+    /// may only touch static data, so it can't reach a token's own flag;
+    /// this way the handler sets its static flag, and the run reads it at
+    /// its next checkpoint like any other cancel.
+    pub fn watching(external: &'static AtomicBool) -> Self {
+        Self {
+            external: Some(external),
+            ..Self::default()
+        }
     }
 
     /// A token that stops when `self` stops, plus whenever it is cancelled
@@ -66,6 +85,7 @@ impl CancelToken {
         Self {
             flag: Arc::new(AtomicBool::new(false)),
             parent: Some(Arc::new(self.clone())),
+            external: None,
         }
     }
 }
@@ -105,6 +125,19 @@ mod tests {
         parent.cancel();
 
         assert!(child.is_cancelled());
+    }
+
+    #[test]
+    fn a_watching_token_follows_its_flag_and_so_do_its_clones_and_children() {
+        static PRESSED: AtomicBool = AtomicBool::new(false);
+        let token = CancelToken::watching(&PRESSED);
+        let clone = token.clone();
+        let child = token.child();
+        assert!(!token.is_cancelled());
+
+        PRESSED.store(true, Ordering::Relaxed);
+
+        assert!(token.is_cancelled() && clone.is_cancelled() && child.is_cancelled());
     }
 
     #[test]

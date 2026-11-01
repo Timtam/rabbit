@@ -73,7 +73,7 @@ pub fn running_reaper_for_target(
     )
 }
 
-fn running_reaper_for_target_with_processes(
+pub(crate) fn running_reaper_for_target_with_processes(
     resource_path: &Path,
     target_app_path: Option<&Path>,
     running_processes: &[RunningProcess],
@@ -155,6 +155,20 @@ pub fn ensure_resource_path_ready(resource_path: &Path, dry_run: bool) -> Result
 }
 
 pub fn running_reaper_processes(platform: Option<Platform>) -> Vec<RunningProcess> {
+    running_processes_where(|name| is_reaper_process_name(platform, name))
+}
+
+/// The running processes whose name is one of `names`, ignoring case: the
+/// programs an uninstall plan says must be closed first, such as Surge XT's
+/// standalone apps (`Surge XT.exe` on Windows, `Surge XT` on macOS).
+pub fn running_processes_named(names: &[String]) -> Vec<RunningProcess> {
+    if names.is_empty() {
+        return Vec::new();
+    }
+    running_processes_where(|name| names.iter().any(|wanted| wanted.eq_ignore_ascii_case(name)))
+}
+
+fn running_processes_where(matches: impl Fn(&str) -> bool) -> Vec<RunningProcess> {
     // Only the name and the executable path are read. Asking for nothing
     // else keeps the scan short: it runs on the wizard's UI thread, and
     // sysinfo no longer spreads it over a thread pool.
@@ -170,7 +184,7 @@ pub fn running_reaper_processes(platform: Option<Platform>) -> Vec<RunningProces
         .iter()
         .filter_map(|(pid, process)| {
             let name = process.name().to_string_lossy().to_string();
-            if is_reaper_process_name(platform, &name) {
+            if matches(&name) {
                 Some(RunningProcess {
                     pid: pid.to_string(),
                     name,
@@ -199,7 +213,10 @@ fn effective_target_app_path(
         .or_else(|| detected_standard_app_path(resource_path))
 }
 
-fn portable_target_app_path(resource_path: &Path, platform: Option<Platform>) -> Option<PathBuf> {
+pub(crate) fn portable_target_app_path(
+    resource_path: &Path,
+    platform: Option<Platform>,
+) -> Option<PathBuf> {
     match platform {
         Some(Platform::Windows) => {
             let app_path = resource_path.join("reaper.exe");
@@ -336,7 +353,7 @@ fn standard_resource_path(platform: Option<Platform>) -> Option<PathBuf> {
     }
 }
 
-fn resource_path_check(resource_path: &Path, dry_run: bool) -> PreflightCheck {
+pub(crate) fn resource_path_check(resource_path: &Path, dry_run: bool) -> PreflightCheck {
     let nearest = nearest_existing_ancestor(resource_path);
     let Some(existing_path) = nearest else {
         return PreflightCheck {
@@ -433,7 +450,7 @@ fn reaper_process_check(
 /// plugin aside fails, the file is untouched; the rename-back is the inverse
 /// op in the same directory and is retried, so a plugin is never left
 /// displaced.
-fn macos_userplugins_write_check(resource_path: &Path) -> PreflightCheck {
+pub(crate) fn macos_userplugins_write_check(resource_path: &Path) -> PreflightCheck {
     let name = "reaper-userplugins-write".to_string();
     let user_plugins = resource_path.join("UserPlugins");
     if !user_plugins.is_dir() {

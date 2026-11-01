@@ -31,7 +31,40 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Added
+
+- `rabbit uninstall` removes SWS, ReaPack, ReaKontrol, FFmpeg, app2clap and
+  the language packs. Name each package with `--package`. Without `--apply`
+  it only lists what would go, what stays and what would stop it, and with
+  `--apply` it changes nothing at all if any package you named can't be
+  uninstalled, or one of its files can't be read. Removed files move into a
+  backup set rather than being deleted, your settings stay unless you add
+  `--remove-settings`, and if REAPER used the language pack you removed, it
+  goes back to English. REAPER must be closed; there is deliberately no
+  `--allow-reaper-running`. Ctrl+C stops the run before the next package.
+  For the JAWS scripts and a portable REAPER, which RABBIT can't remove, it
+  prints how to remove them by hand. The exit code is 0 when everything you
+  named is gone or wasn't installed, 2 when something can't be uninstalled,
+  and 1 when a removal failed. The wizard gets its own way to uninstall in a
+  later version.
+- `rabbit restore-backup --package <id>` brings one uninstalled package back
+  from its backup set: its files, its entry in RABBIT's receipt, and REAPER's
+  language if the uninstall reset it and no other language was picked since.
+  Restoring an uninstall's whole set does the same for every package in it,
+  and an uninstall that stopped partway through a package restores too.
+- `rabbit components` says for each package whether RABBIT can uninstall it,
+  and if not, why.
+
 ### Changed
+
+- A package you uninstalled, or turned down in the wizard, is no longer
+  offered again by itself: the wizard doesn't tick it, and `rabbit
+  apply-packages` and `rabbit setup` without `--package` skip it and say so.
+  Before, only the language packs were remembered this way. Ticking any
+  package in the wizard, or naming it with `--package` in a run that
+  installs, takes it off that list again; before, `--package` installed it
+  just for that run. Leaving an optional package unticked once still doesn't
+  hide its updates.
 
 - RABBIT now uses wxDragon 0.9.23, which brings wxWidgets 3.3.4. On macOS,
   text fields, dropdowns and the packages list now take their VoiceOver

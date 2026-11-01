@@ -88,9 +88,12 @@ pub fn install_request_from_target_and_rows(
         })
         .collect();
 
-    // Only rows that actually offered something carry a verdict: ticked is
-    // a yes, unticked is a no. A `Keep` row offered nothing, so it says
-    // nothing either way.
+    // A ticked row is a yes, for every package: it clears an earlier "no",
+    // including the one an uninstall records. An unticked row is a no only
+    // for packages that remember one, and only when the row offered
+    // something; a `Keep` row offered nothing, so it says nothing either
+    // way. Leaving an optional package such as FFmpeg unticked once must
+    // not hide its updates from then on.
     let remembers_opt_out: std::collections::BTreeSet<String> =
         builtin_package_specs(model.platform)
             .into_iter()
@@ -100,12 +103,11 @@ pub fn install_request_from_target_and_rows(
     let mut declined_packages = Vec::new();
     let mut accepted_packages = Vec::new();
     for (index, row) in package_rows.iter().enumerate() {
-        if !remembers_opt_out.contains(&row.package_id) {
-            continue;
-        }
         if selected_package_indices.contains(&index) {
             accepted_packages.push(row.package_id.clone());
-        } else if row.original_action != PlanActionKind::Keep {
+        } else if remembers_opt_out.contains(&row.package_id)
+            && row.original_action != PlanActionKind::Keep
+        {
             declined_packages.push(row.package_id.clone());
         }
     }

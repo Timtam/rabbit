@@ -46,8 +46,24 @@
   "uninstall": {
     "plans": [
       {
-        "strategy": "not_supported",
-        "note_key": "uninstall-not-yet"
+        "platform": "windows",
+        "strategy": "remove_files",
+        "summary": {
+          "removes_key": "uninstall-summary-app2clap-removes",
+          "keeps_key": "uninstall-summary-app2clap-keeps"
+        },
+        "remove": {
+          "receipt_files": true,
+          "paths": [
+            "{clap_dir}/app2clap.clap"
+          ]
+        },
+        "kept_user_data": [
+          {
+            "path": "{clap_dir}",
+            "note_key": "uninstall-kept-app2clap-clap-folder"
+          }
+        ]
       }
     ]
   },

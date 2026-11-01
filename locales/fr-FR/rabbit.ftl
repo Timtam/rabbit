@@ -36,9 +36,56 @@ package-langpack-es-description = Traduit l'interface de REAPER en espagnol, y c
 package-langpack-de-description = Traduit l'interface de REAPER en allemand, y compris l'extension SWS. Maintenu par MrData et publié dans le Stash de REAPER — RABBIT télécharge la version actuelle et l'installe sous le nom de_DE.ReaperLangPack. Après l'installation, sélectionnez la langue dans les préférences de REAPER (ou laissez RABBIT s'en charger).
 package-langpack-fr-description = Traduit l'interface de REAPER en français, y compris l'extension SWS. Maintenu par Lee Julien et Pierre-Marie Curt pour ReaperAccessible, la communauté francophone des utilisateurs de lecteurs d'écran, et publié dans leur dépôt ReaPack — RABBIT télécharge la version actuelle et l'installe sous le nom fr_CA.ReaperLangPack. OSARA lit ce nom de fichier pour choisir sa propre traduction française : sa traduction fr_CA est presque complète, là où sa traduction fr_FR laisse encore environ un tiers des messages en anglais ; le pack, lui, est le même français standard dans les deux cas. Après l'installation, sélectionnez la langue dans les préférences de REAPER (ou laissez RABBIT s'en charger).
 
-# Notes named by the uninstall plans in the package manifests. Every package's
-# plan points here until RABBIT learns to uninstall it.
+# Text named by the uninstall plans in the package manifests.
+#
+# The note for a package RABBIT can't uninstall yet.
 uninstall-not-yet = RABBIT ne peut pas encore désinstaller ce paquet.
+
+# The two sentences Review shows for a package about to be uninstalled: what
+# goes, and what stays. With "Also remove settings" ticked, another sentence
+# replaces the one about what stays.
+uninstall-summary-sws-removes = Supprime l'extension SWS.
+uninstall-summary-sws-keeps = Vos grooves et vos réglages SWS, comme vos actions cycliques, sont conservés.
+uninstall-summary-reapack-removes = Supprime l'extension ReaPack.
+uninstall-summary-reapack-keeps = Vos réglages et vos dépôts ReaPack sont conservés, de même que la liste de ce que ReaPack a installé.
+uninstall-summary-reakontrol-removes = Supprime l'extension ReaKontrol.
+uninstall-summary-reakontrol-keeps = Vos mappages FX sont conservés, et RABBIT ne touche pas à vos logiciels Native Instruments.
+uninstall-summary-ffmpeg-removes = Supprime les fichiers FFmpeg que RABBIT a installés dans UserPlugins. REAPER ne peut alors plus utiliser FFmpeg pour ouvrir des fichiers multimédias ou en faire le rendu.
+uninstall-summary-ffmpeg-keeps = Les fichiers FFmpeg dont RABBIT n'a aucune trace sont conservés, comme ceux laissés par des versions plus anciennes.
+uninstall-summary-app2clap-removes = Supprime app2clap de votre dossier CLAP. Tous les programmes dans lesquels vous utilisez des plug-ins CLAP le perdent, pas seulement REAPER.
+uninstall-summary-app2clap-keeps = Le dossier CLAP et les autres plug-ins qu'il contient sont conservés.
+uninstall-summary-langpack-removes = Supprime le pack de langue que RABBIT a installé. Si REAPER l'utilise, RABBIT remet REAPER en anglais.
+uninstall-summary-langpack-keeps = Les packs de langue que vous avez ajoutés vous-même sont conservés.
+
+# A short description of a file or folder that stays, shown next to its path,
+# for example "Data\Grooves (your grooves)". Start in lower case where the
+# language allows.
+uninstall-kept-sws-grooves = vos grooves
+uninstall-kept-sws-settings = réglages de SWS
+uninstall-kept-sws-cycle-actions = vos actions cycliques
+uninstall-kept-reapack-settings = réglages de ReaPack et vos dépôts
+uninstall-kept-reapack-data = la liste de ce que ReaPack a installé, et son cache de téléchargement
+uninstall-kept-reakontrol-fx-maps = vos mappages FX
+uninstall-kept-app2clap-clap-folder = le dossier CLAP, partagé avec d'autres plug-ins
+
+# Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
+uninstall-warning-sws-osara-keymap = Si vous utilisez les raccourcis clavier d'OSARA, certains d'entre eux lancent des actions SWS. Ces raccourcis cessent de fonctionner jusqu'à ce que vous réinstalliez SWS.
+uninstall-warning-sws-reapack-scripts = De nombreux scripts REAPER, dont des scripts d'accessibilité, ont besoin de SWS. Les scripts que vous avez installés avec ReaPack risquent de ne plus fonctionner.
+
+# A note on what stays behind after ReaPack is uninstalled.
+uninstall-note-reapack-packages-stay = Les scripts et extensions que vous avez installés avec ReaPack sont conservés, mais plus rien ne les tient à jour.
+
+# How to remove a package by hand where RABBIT doesn't, shown line by line.
+# Keep file names, folder paths and %APPDATA% exactly as they are.
+uninstall-manual-jaws-scripts = RABBIT ne peut pas encore supprimer les scripts JAWS. Pour les supprimer à la main :
+    1. Fermez REAPER.
+    2. Supprimez Reaper_ComAccess32.dll et Reaper_ComAccess64.dll de %APPDATA%\REAPER\UserPlugins.
+    Les fichiers des scripts restent dans le dossier de paramètres de JAWS, %APPDATA%\Freedom Scientific\JAWS. Certains contiennent vos propres modifications, comme vos affectations de touches.
+uninstall-manual-reaper-portable = RABBIT ne supprime pas un REAPER portable : les fichiers de REAPER et les vôtres partagent son dossier. Pour le supprimer à la main :
+    1. Fermez REAPER.
+    2. Copiez hors du dossier du REAPER portable tout ce que vous voulez garder, comme les projets que vous y avez enregistrés, vos raccourcis clavier et vos réglages.
+    3. Supprimez le dossier du REAPER portable.
+    Les sauvegardes que RABBIT a faites pour ce REAPER se trouvent aussi dans ce dossier, sous RABBIT\backups, et disparaissent avec lui.
 
 # $reason is one of the localized "wizard-package-row-unavailable-*" strings
 # explaining *why* the row is unavailable. Appended to the row's main summary
@@ -228,6 +275,7 @@ wizard-progress-status-downloading = Téléchargement de { $package }…
 wizard-progress-status-downloading-with-bytes = Téléchargement de { $package }… { $downloaded } / { $total }
 wizard-progress-status-downloading-many = Téléchargement de { $count } paquets… { $downloaded } / { $total }
 wizard-progress-status-installing = Installation de { $package }…
+wizard-progress-status-removing = Suppression de { $package }…
 # $step is the localized configuration step name.
 wizard-progress-status-configuring = Application de l'étape de configuration : { $step }
 
@@ -236,6 +284,9 @@ wizard-progress-log-download-started = Téléchargement de { $package }…
 wizard-progress-log-download-completed = { $package } téléchargé.
 wizard-progress-log-install-started = Installation de { $package }…
 wizard-progress-log-install-completed = { $package } installé.
+wizard-progress-log-remove-started = Suppression de { $package }…
+wizard-progress-log-remove-completed = { $package } supprimé.
+wizard-progress-log-remove-failed = Impossible de supprimer { $package }.
 wizard-progress-log-configuration-started = Application de { $step }…
 wizard-progress-log-configuration-completed = { $step } appliqué.
 

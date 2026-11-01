@@ -63,8 +63,24 @@
   "uninstall": {
     "plans": [
       {
-        "strategy": "not_supported",
-        "note_key": "uninstall-not-yet"
+        "strategy": "remove_files",
+        "summary": {
+          "removes_key": "uninstall-summary-reakontrol-removes",
+          "keeps_key": "uninstall-summary-reakontrol-keeps"
+        },
+        "remove": {
+          "receipt_files": true,
+          "matching_user_plugins": true,
+          "dirs_if_empty": [
+            "{resource}/reaKontrol"
+          ]
+        },
+        "kept_user_data": [
+          {
+            "path": "{resource}/reaKontrol/fxMaps",
+            "note_key": "uninstall-kept-reakontrol-fx-maps"
+          }
+        ]
       }
     ]
   },

@@ -204,6 +204,54 @@ fn a_declined_package_does_not_auto_tick_its_updates_either() {
 }
 
 #[test]
+fn a_package_the_user_uninstalled_starts_unticked_whatever_it_is() {
+    // Uninstalling records a "no" for any package, not only the ones that
+    // remember an unticked row. A recommended SWS would otherwise come back
+    // ticked on the very next run after the user removed it.
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let text = wizard_text(&localizer);
+    let specs = builtin_package_specs(Platform::Windows);
+    assert!(
+        specs
+            .iter()
+            .any(|spec| spec.id == PACKAGE_SWS && spec.recommended && !spec.remember_opt_out),
+        "this test only means anything while SWS is recommended and remembers no opt-out"
+    );
+    let rows = |kind: PlanActionKind, declined: &[&str]| {
+        let declined: std::collections::BTreeSet<String> =
+            declined.iter().map(ToString::to_string).collect();
+        package_rows(
+            &localizer,
+            &text,
+            Platform::Windows,
+            Architecture::X64,
+            &specs,
+            &[PlanAction {
+                package_id: PACKAGE_SWS.to_string(),
+                action: kind,
+                installed_version: None,
+                available_version: None,
+                reason: "test".to_string(),
+            }],
+            &[],
+            &HostCapabilities::default(),
+            &declined,
+            &Default::default(),
+        )
+    };
+
+    assert!(rows(PlanActionKind::Install, &[])[0].selected);
+    for kind in [PlanActionKind::Install, PlanActionKind::Update] {
+        let row = &rows(kind, &[PACKAGE_SWS])[0];
+        assert!(!row.selected, "{kind:?} must not be ticked for the user");
+        assert!(
+            row.available_for_target,
+            "it must stay listed so it can be ticked again"
+        );
+    }
+}
+
+#[test]
 fn reakontrol_install_row_starts_ticked_when_komplete_kontrol_is_detected() {
     // ReaKontrol's manifest baseline is `recommended: false`, but it
     // declares `recommended_when: komplete_kontrol_installed` so the

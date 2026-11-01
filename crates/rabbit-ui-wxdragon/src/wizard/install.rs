@@ -73,14 +73,15 @@ pub fn execute_wizard_install_with_progress(
         cancel,
     )?;
 
-    // Remember what the user decided about the packages that remember it,
-    // so a default RABBIT picked for them — a language pack matching
-    // RABBIT's own language — does not come back ticked on the next launch.
-    // The verdict is worked out where the rows are (see
+    // Remember what the user decided, so a default RABBIT picked for them —
+    // a language pack matching RABBIT's own language — does not come back
+    // ticked on the next launch, and a package they ticked again after
+    // uninstalling it is offered as usual from then on. The verdict is
+    // worked out where the rows are (see
     // `install_request_from_target_and_rows`), because only there can a
     // deliberate "no" be told apart from a row that had nothing to offer.
-    // The CLI records nothing: `--package` is a scope for one run, not a
-    // standing preference.
+    // The CLI records its own: naming a package with `--package` clears its
+    // refusal.
     let has_verdict =
         !(request.declined_packages.is_empty() && request.accepted_packages.is_empty());
     if !request.dry_run && has_verdict {

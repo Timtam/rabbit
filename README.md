@@ -329,8 +329,10 @@ RABBIT setup --resource-path "%APPDATA%\REAPER" --package langpack-es \
 
 `--reaper-language` only accepts a language pack, and lists the ones it
 knows if you mistype it. Unlike the wizard, the CLI never records a package
-you left out as "don't offer this again" — `--package` is a scope for this
-run, not a standing preference.
+you left out as "don't offer this again". It works the other way round,
+though: a package you uninstalled, or turned down in the wizard, is skipped
+by `apply-packages` and `setup` with a note, and naming it with `--package`
+in a run that installs takes it off that list, so later runs offer it again.
 
 ### Pre-release builds
 
@@ -379,6 +381,83 @@ without any extra permissions is enough. RABBIT only sends it to
 $env:GITHUB_TOKEN = "<your token>"; .\RABBIT.exe                        # Windows, PowerShell
 GITHUB_TOKEN="<your token>" /Applications/Rabbit.app/Contents/MacOS/rabbit   # macOS
 ```
+
+### Uninstall
+
+`uninstall` removes packages RABBIT knows how to take off again: today SWS,
+ReaPack, ReaKontrol, FFmpeg and app2clap (both Windows only) and the language
+packs. `RABBIT components` says for each package whether RABBIT can uninstall
+it, and if not, why. Name every package with `--package`; there is no "remove
+everything". Like the other commands, it only shows what it would do until you
+add `--apply`:
+
+```
+# See what would go, what stays, and anything that would stop it:
+RABBIT uninstall --resource-path "%APPDATA%\REAPER" --package sws
+
+# Uninstall SWS and the German language pack:
+RABBIT uninstall --resource-path "%APPDATA%\REAPER" --package sws \
+     --package langpack-de --apply
+```
+
+- **What goes:** the files RABBIT installed and the files the package is known
+  to install. A file RABBIT installed that changed since stays, and the report
+  says so.
+- **What stays:** your settings, such as SWS's grooves and `S&M.ini`,
+  ReaPack's repositories and its list of what it installed, and ReaKontrol's
+  FX maps. Add `--remove-settings` to remove those too. `reaper.ini`,
+  `reaper-kb.ini`, your key maps and everything ReaPack installed always stay,
+  even files ReaPack installed among a package's settings.
+- **Nothing is deleted for good.** Removed files move into a backup set under
+  `RABBIT\backups`, and so do settings removed with `--remove-settings`. The
+  run saves a report under `RABBIT\logs`. If REAPER used the language pack you
+  removed, RABBIT sets REAPER back to English.
+- **REAPER must be closed.** For REAPER on Windows, Surge XT, app2clap and the
+  JAWS scripts, every REAPER on the computer must be closed, portable ones
+  included. Unlike the commands that install, `uninstall` has no
+  `--allow-reaper-running`: a running REAPER holds its extensions' files open,
+  so they can't be moved, and it writes `reaper.ini` again when it closes,
+  which would undo the language reset. The dry run checks this too.
+- **All or nothing up front.** If any package you named can't be uninstalled,
+  or one of its files can't be read, `--apply` changes nothing at all and
+  says why. For the JAWS scripts (whichever REAPER you name) and a portable
+  REAPER, which RABBIT can't remove, it prints how to remove them by hand.
+- **Ctrl+C stops between packages.** The package being removed finishes, and
+  the rest stay installed. Press Ctrl+C again to stop at once; the files
+  already moved stay in the backup set, where `restore-backup` finds them.
+- **Removed packages stay removed.** The wizard no longer ticks them, and
+  `apply-packages` and `setup` skip them with a note. Name one with
+  `--package` to install it again.
+
+`--json` prints the plan in a dry run and the report with `--apply`, both with
+message codes instead of sentences. The exit code follows one table for the
+dry run and `--apply`:
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Every package was removed (or, in a dry run, can be), or isn't installed, so a script can run twice. Anything of a package RABBIT still finds afterwards is listed, never deleted. |
+| 1 | A removal failed or was stopped. Its files went back where they were; packages removed before it stay removed. Also when an error stopped RABBIT before anything changed, such as another RABBIT working on the same REAPER; the message says which. |
+| 2 | A package you named can't be uninstalled. Nothing changed. |
+
+To bring a package back, find the uninstall's backup set and restore just that
+package from it:
+
+```
+RABBIT backups --resource-path "%APPDATA%\REAPER"
+RABBIT restore-backup --resource-path "%APPDATA%\REAPER" \
+     --backup-id uninstall-unix-1234567890 --package sws --apply
+```
+
+Its files come back, its settings too if `--remove-settings` removed them. It
+goes back into RABBIT's receipt and is no longer skipped, and REAPER's language
+goes back to it if the uninstall changed that and you haven't picked another
+language since. Without `--package`, every package in the set comes back. An
+uninstall that stopped partway through a package restores the same way. Two
+limits: a package you installed again after uninstalling it can't be restored
+from the old set, because the newer copy is in the way (uninstall it first);
+and a removal that a backup can't hold, such as one by a vendor's own
+uninstaller or with administrator rights, can't be restored. RABBIT doesn't
+make such removals yet.
 
 ### Maintain
 

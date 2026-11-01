@@ -663,24 +663,30 @@ pub(crate) fn matching_user_plugin_files(
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        let lower_name = file_name.to_ascii_lowercase();
-
-        let prefix_matches = spec
-            .user_plugin_prefixes
-            .iter()
-            .any(|prefix| lower_name.starts_with(&prefix.to_ascii_lowercase()));
-        let suffix_matches = spec
-            .user_plugin_suffixes
-            .iter()
-            .any(|suffix| lower_name.ends_with(&suffix.to_ascii_lowercase()));
-
-        if prefix_matches && suffix_matches {
+        if user_plugin_name_matches(spec, file_name) {
             files.push(path);
         }
     }
 
     files.sort();
     Ok(files)
+}
+
+/// Whether `file_name` starts with one of the package's
+/// `user_plugin_prefixes` and ends with one of its `user_plugin_suffixes`,
+/// ignoring ASCII case. Shared with the uninstall planner, so a file
+/// detection counts as the package's is exactly a file uninstall may remove.
+pub(crate) fn user_plugin_name_matches(spec: &PackageSpec, file_name: &str) -> bool {
+    let lower_name = file_name.to_ascii_lowercase();
+    let prefix_matches = spec
+        .user_plugin_prefixes
+        .iter()
+        .any(|prefix| lower_name.starts_with(&prefix.to_ascii_lowercase()));
+    let suffix_matches = spec
+        .user_plugin_suffixes
+        .iter()
+        .any(|suffix| lower_name.ends_with(&suffix.to_ascii_lowercase()));
+    prefix_matches && suffix_matches
 }
 
 fn discover_standard_installation(platform: Platform) -> Option<Installation> {

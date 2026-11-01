@@ -33,10 +33,15 @@
     "run_upstream_installer"
   ],
   "uninstall": {
+    "install_snapshot": [
+      "{appdata}/Freedom Scientific/JAWS/*/Settings/*",
+      "{appdata}/REAPER/UserPlugins"
+    ],
     "plans": [
       {
-        "strategy": "not_supported",
-        "note_key": "uninstall-not-yet"
+        "platform": "windows",
+        "strategy": "manual",
+        "note_key": "uninstall-manual-jaws-scripts"
       }
     ]
   },

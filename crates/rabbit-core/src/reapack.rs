@@ -272,6 +272,144 @@ pub fn package_owner_for_file(
     query_owner(&db_path, &relative_path)
 }
 
+/// What ReaPack's records say about one file, for uninstall.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReapackOwnership {
+    /// ReaPack's records don't list the file, or there are no records.
+    NotOwned,
+    /// A ReaPack package lists the file.
+    Owned { package: String },
+    /// RABBIT couldn't tell. Uninstall treats this like `Owned`.
+    Undecided { reason: String },
+}
+
+/// Whether ReaPack's records claim `absolute_file`, failing closed.
+///
+/// [`package_owner_for_file`] answers "not owned" whenever it can't read a
+/// path or an entry's version, which is right for detection: there the
+/// answer only picks where a version number comes from. For uninstall the
+/// same answer would delete a file behind ReaPack's back, so every case that
+/// can't be decided says so instead: a path that can't be canonicalized, a
+/// database that can't be opened or queried, and anything other than a
+/// plain file where the database belongs. An entry whose version doesn't
+/// parse still owns its files.
+///
+/// Paths are compared ignoring case. ReaPack writes them as its index spells
+/// them, which needn't match the case on disk, and claiming too much only
+/// blocks a removal.
+pub fn reapack_ownership(resource_path: &Path, absolute_file: &Path) -> ReapackOwnership {
+    let db_path = registry_path(resource_path);
+    match fs::symlink_metadata(&db_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ReapackOwnership::NotOwned;
+        }
+        Err(error) => {
+            return ReapackOwnership::Undecided {
+                reason: format!("{}: {error}", db_path.display()),
+            };
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return ReapackOwnership::Undecided {
+                reason: format!("{} is not a file", db_path.display()),
+            };
+        }
+        Ok(_) => {}
+    }
+    let canonical_resource = match fs::canonicalize(resource_path) {
+        Ok(path) => path,
+        Err(error) => {
+            return ReapackOwnership::Undecided {
+                reason: format!("{}: {error}", resource_path.display()),
+            };
+        }
+    };
+    let canonical_file = match fs::canonicalize(absolute_file) {
+        Ok(path) => path,
+        Err(error) => {
+            return ReapackOwnership::Undecided {
+                reason: format!("{}: {error}", absolute_file.display()),
+            };
+        }
+    };
+    // ReaPack installs only into the resource folder, so its records can't
+    // claim anything outside it.
+    let Ok(relative) = canonical_file.strip_prefix(&canonical_resource) else {
+        return ReapackOwnership::NotOwned;
+    };
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    match query_owner_package(&db_path, &relative) {
+        Ok(Some(package)) => ReapackOwnership::Owned { package },
+        Ok(None) => ReapackOwnership::NotOwned,
+        Err(error) => ReapackOwnership::Undecided {
+            reason: error.to_string(),
+        },
+    }
+}
+
+fn query_owner_package(db_path: &Path, relative_path: &str) -> Result<Option<String>> {
+    let connection = open_read_only(db_path)?;
+    let sql = "SELECT e.package FROM entries e JOIN files f ON f.entry = e.id \
+               WHERE f.path = ?1 COLLATE NOCASE LIMIT 1";
+    let mut statement = connection.prepare(sql).with_sqlite_path(db_path)?;
+    statement
+        .query_row([relative_path], |row| row.get::<_, String>(0))
+        .optional()
+        .with_sqlite_path(db_path)
+}
+
+/// A ReaPack package and the files it has under one folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReapackManagedPackage {
+    pub package: String,
+    /// Paths as ReaPack records them: relative to the resource folder, with
+    /// `/` between components.
+    pub files: Vec<String>,
+}
+
+/// Every ReaPack package with files directly or deeper under `folder` (a
+/// resource-relative folder such as `UserPlugins`), in name order. Before
+/// ReaPack itself is removed, RABBIT names the extensions it still manages,
+/// because nothing keeps them up to date afterwards. No database means no
+/// packages.
+pub fn reapack_packages_with_files_under(
+    resource_path: &Path,
+    folder: &str,
+) -> Result<Vec<ReapackManagedPackage>> {
+    let db_path = registry_path(resource_path);
+    if !db_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let connection = open_read_only(&db_path)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT e.package, f.path FROM entries e JOIN files f ON f.entry = e.id \
+             WHERE f.path LIKE ?1 ESCAPE '\\' ORDER BY e.package, f.path",
+        )
+        .with_sqlite_path(&db_path)?;
+    let escaped = folder
+        .trim_end_matches('/')
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let rows = statement
+        .query_map([format!("{escaped}/%")], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .with_sqlite_path(&db_path)?;
+    let mut packages: Vec<ReapackManagedPackage> = Vec::new();
+    for row in rows {
+        let (package, file) = row.with_sqlite_path(&db_path)?;
+        match packages.last_mut() {
+            Some(last) if last.package == package => last.files.push(file),
+            _ => packages.push(ReapackManagedPackage {
+                package,
+                files: vec![file],
+            }),
+        }
+    }
+    Ok(packages)
+}
+
 pub fn list_entries(resource_path: &Path) -> Result<Vec<ReapackEntry>> {
     let db_path = registry_path(resource_path);
     if !db_path.is_file() {
@@ -662,5 +800,225 @@ mod tests {
 
         let entries = list_entries(dir.path()).unwrap();
         assert_eq!(entries.len(), 1);
+    }
+}
+
+/// Write a ReaPack `registry.db` under `resource_path` holding `packages`,
+/// each as (package name, version text, resource-relative files), with the
+/// two tables laid out as ReaPack lays them out.
+#[cfg(test)]
+pub(crate) fn write_test_registry(resource_path: &Path, packages: &[(&str, &str, &[&str])]) {
+    let db_path = registry_path(resource_path);
+    fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let connection = Connection::open(&db_path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE entries (
+                id INTEGER PRIMARY KEY,
+                remote TEXT NOT NULL,
+                category TEXT NOT NULL,
+                package TEXT NOT NULL,
+                desc TEXT NOT NULL,
+                type INTEGER NOT NULL,
+                version TEXT NOT NULL,
+                author TEXT NOT NULL,
+                flags INTEGER DEFAULT 0,
+                UNIQUE(remote, category, package)
+            );
+            CREATE TABLE files (
+                id INTEGER PRIMARY KEY,
+                entry INTEGER NOT NULL,
+                path TEXT UNIQUE NOT NULL,
+                main INTEGER NOT NULL,
+                type INTEGER NOT NULL,
+                FOREIGN KEY(entry) REFERENCES entries(id)
+            );",
+        )
+        .unwrap();
+    for (package, version, files) in packages {
+        connection
+            .execute(
+                "INSERT INTO entries(remote, category, package, desc, type, version, author) \
+                 VALUES('ReaTeam Extensions', 'Extensions', ?1, '', 0, ?2, '')",
+                [package, version],
+            )
+            .unwrap();
+        let entry = connection.last_insert_rowid();
+        for file in *files {
+            connection
+                .execute(
+                    "INSERT INTO files(entry, path, main, type) VALUES(?1, ?2, 1, 0)",
+                    rusqlite::params![entry, file],
+                )
+                .unwrap();
+        }
+    }
+}
+
+/// The ownership lookup uninstall relies on: it must never answer "not
+/// owned" when it couldn't tell.
+#[cfg(test)]
+mod tests_uninstall_ownership {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use tempfile::tempdir;
+
+    use super::{
+        ReapackManagedPackage, ReapackOwnership, package_owner_for_file, reapack_ownership,
+        reapack_packages_with_files_under, registry_path, write_test_registry,
+    };
+
+    const SWS_PACKAGE: &str = "SWS/S&M Extension";
+    const SWS_FILE: &str = "UserPlugins/reaper_sws-x64.dll";
+
+    fn plugin(resource: &Path, name: &str) -> PathBuf {
+        let path = resource.join("UserPlugins").join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"plug-in").unwrap();
+        path
+    }
+
+    #[test]
+    fn a_listed_file_is_owned_and_others_are_not() {
+        let dir = tempdir().unwrap();
+        let sws = plugin(dir.path(), "reaper_sws-x64.dll");
+        let mine = plugin(dir.path(), "reaper_mine.dll");
+        write_test_registry(dir.path(), &[(SWS_PACKAGE, "2.14.0.7", &[SWS_FILE])]);
+
+        assert_eq!(
+            reapack_ownership(dir.path(), &sws),
+            ReapackOwnership::Owned {
+                package: SWS_PACKAGE.to_string()
+            }
+        );
+        assert_eq!(
+            reapack_ownership(dir.path(), &mine),
+            ReapackOwnership::NotOwned
+        );
+    }
+
+    #[test]
+    fn without_a_database_nothing_is_owned() {
+        let dir = tempdir().unwrap();
+        let sws = plugin(dir.path(), "reaper_sws-x64.dll");
+        assert_eq!(
+            reapack_ownership(dir.path(), &sws),
+            ReapackOwnership::NotOwned
+        );
+    }
+
+    /// The detection lookup skips an entry whose version doesn't parse. For
+    /// uninstall the entry still owns its file.
+    #[test]
+    fn an_unparsable_version_still_owns_its_files() {
+        let dir = tempdir().unwrap();
+        let sws = plugin(dir.path(), "reaper_sws-x64.dll");
+        write_test_registry(dir.path(), &[(SWS_PACKAGE, "not a version", &[SWS_FILE])]);
+
+        assert!(package_owner_for_file(dir.path(), &sws).unwrap().is_none());
+        assert!(matches!(
+            reapack_ownership(dir.path(), &sws),
+            ReapackOwnership::Owned { .. }
+        ));
+    }
+
+    /// ReaPack writes paths as its index spells them.
+    #[test]
+    fn paths_are_compared_ignoring_case() {
+        let dir = tempdir().unwrap();
+        let sws = plugin(dir.path(), "reaper_sws-x64.dll");
+        write_test_registry(
+            dir.path(),
+            &[(SWS_PACKAGE, "2.14.0.7", &["userplugins/REAPER_SWS-X64.DLL"])],
+        );
+        assert!(matches!(
+            reapack_ownership(dir.path(), &sws),
+            ReapackOwnership::Owned { .. }
+        ));
+    }
+
+    #[test]
+    fn a_database_that_cant_be_read_fails_closed() {
+        let dir = tempdir().unwrap();
+        let sws = plugin(dir.path(), "reaper_sws-x64.dll");
+        let db = registry_path(dir.path());
+        fs::create_dir_all(db.parent().unwrap()).unwrap();
+        fs::write(&db, b"this is not an SQLite database, just text").unwrap();
+
+        assert!(package_owner_for_file(dir.path(), &sws).is_err());
+        assert!(matches!(
+            reapack_ownership(dir.path(), &sws),
+            ReapackOwnership::Undecided { .. }
+        ));
+    }
+
+    #[test]
+    fn a_folder_where_the_database_belongs_fails_closed() {
+        let dir = tempdir().unwrap();
+        let sws = plugin(dir.path(), "reaper_sws-x64.dll");
+        fs::create_dir_all(registry_path(dir.path())).unwrap();
+        assert!(matches!(
+            reapack_ownership(dir.path(), &sws),
+            ReapackOwnership::Undecided { .. }
+        ));
+    }
+
+    /// The detection lookup reads a path it can't canonicalize as "not
+    /// owned".
+    #[test]
+    fn a_path_that_cant_be_canonicalized_fails_closed() {
+        let dir = tempdir().unwrap();
+        write_test_registry(dir.path(), &[(SWS_PACKAGE, "2.14.0.7", &[SWS_FILE])]);
+        let missing = dir.path().join("UserPlugins").join("reaper_sws-x64.dll");
+
+        assert!(
+            package_owner_for_file(dir.path(), &missing)
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            reapack_ownership(dir.path(), &missing),
+            ReapackOwnership::Undecided { .. }
+        ));
+    }
+
+    #[test]
+    fn lists_the_packages_with_files_in_a_folder() {
+        let dir = tempdir().unwrap();
+        write_test_registry(
+            dir.path(),
+            &[
+                ("ReaPack", "1.2.5", &["UserPlugins/reaper_reapack-x64.dll"]),
+                (
+                    SWS_PACKAGE,
+                    "2.14.0.7",
+                    &[SWS_FILE, "Scripts/sws_python64.py"],
+                ),
+                ("A script", "1.0", &["Scripts/a_script.lua"]),
+                // `_` and `%` mean something to LIKE, so the folder name has
+                // to match as written, and only as a whole folder.
+                ("Lookalike", "1.0", &["UserPluginsX/reaper_x.dll"]),
+            ],
+        );
+
+        assert_eq!(
+            reapack_packages_with_files_under(dir.path(), "UserPlugins").unwrap(),
+            vec![
+                ReapackManagedPackage {
+                    package: "ReaPack".to_string(),
+                    files: vec!["UserPlugins/reaper_reapack-x64.dll".to_string()],
+                },
+                ReapackManagedPackage {
+                    package: SWS_PACKAGE.to_string(),
+                    files: vec![SWS_FILE.to_string()],
+                },
+            ]
+        );
+        assert!(
+            reapack_packages_with_files_under(tempdir().unwrap().path(), "UserPlugins")
+                .unwrap()
+                .is_empty()
+        );
     }
 }

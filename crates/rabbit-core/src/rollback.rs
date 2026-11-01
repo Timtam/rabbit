@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,7 +9,11 @@ use serde::{Deserialize, Serialize};
 use crate::error::{IoPathContext, JsonPathContext, RabbitError, Result};
 use crate::hash::sha256_file;
 use crate::preflight::{PreflightOptions, PreflightReport, run_install_preflight};
-use crate::receipt::{RECEIPT_RELATIVE_PATH, receipt_path};
+use crate::reaper_ini::{lang_pack_setting, restore_lang_pack_if_cleared};
+use crate::receipt::{
+    InstallState, PackageReceipt, RECEIPT_RELATIVE_PATH, load_install_state, merge_package_receipt,
+    receipt_path, save_install_state,
+};
 
 pub const BACKUP_MANIFEST_FILE: &str = "backup-manifest.json";
 
@@ -50,6 +56,29 @@ pub struct BackupManifest {
     pub reason: String,
     pub files: Vec<BackupManifestFile>,
     pub receipt_backup_path: Option<PathBuf>,
+    /// The packages an uninstall removed into this set, by id. Empty, and
+    /// left out of the file, for every other kind of set.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub packages: BTreeMap<String, BackupPackageRecord>,
+}
+
+/// What an uninstall set records about one package it removed, so a later
+/// restore of just that package can put it back properly.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupPackageRecord {
+    /// The package's receipt entry from just before the uninstall. A restore
+    /// merges it back into the receipt instead of copying the whole receipt
+    /// file, which has moved on since. `None` when RABBIT had no receipt for
+    /// the copy it removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<PackageReceipt>,
+    /// The `langpack=` value under `[REAPER]` in `reaper.ini` that the
+    /// uninstall replaced with `<>`, because it named a language pack file
+    /// the uninstall removed. `reaper.ini` itself never goes into a set:
+    /// restoring a whole copy would undo every REAPER setting changed since,
+    /// so a restore puts back only this one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub langpack_before: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,10 +114,61 @@ pub enum BackupEntryState {
     Done,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A file's size and SHA-256, when the caller has just read them and the
+/// writer needn't read the file again. FFmpeg's DLLs are 250 MB together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileDigest {
+    pub size: u64,
+    pub sha256: String,
+}
+
+impl FileDigest {
+    pub fn of(path: &Path) -> Result<Self> {
+        Ok(Self {
+            size: fs::metadata(path).with_path(path)?.len(),
+            sha256: sha256_file(path)?,
+        })
+    }
+}
+
+/// A file [`BackupSetWriter::move_file`] moved into a set, with what
+/// [`BackupSetWriter::put_back`] needs to move it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MovedFile {
+    pub original: PathBuf,
+    pub backup_path: PathBuf,
+    pub size: u64,
+    pub sha256: String,
+    /// It went to another volume as a checked copy rather than a rename, so
+    /// it comes back the same way.
+    pub copied: bool,
+}
+
+/// Why [`BackupSetWriter::move_file`] didn't move a file. Either way the
+/// file is still where it was and the set doesn't claim it.
+#[derive(Debug, thiserror::Error)]
+pub enum MoveFileError {
+    #[error(transparent)]
+    NotMoved(RabbitError),
+    /// The file was copied to the set's volume and the copy checked, but the
+    /// original couldn't be deleted, most often because another program has
+    /// it open. The copy was removed again.
+    #[error("{} is in use by another program: {source}", path.display())]
+    InUse {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestoreBackupOptions {
     pub dry_run: bool,
     pub allow_reaper_running: bool,
+    /// Restore only this package, from a set an uninstall wrote. `None`
+    /// restores the whole set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +183,40 @@ pub struct RestoreBackupReport {
     /// before it changed them, so there is nothing to put back.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_targets: Vec<PathBuf>,
+    /// The one package restored, when the restore asked for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_id: Option<String>,
+    /// For a set an uninstall wrote: what the restore did for each package
+    /// besides putting its files back, or in a dry run would do.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<RestoredPackage>,
+}
+
+/// A package a restore brought back from a set an uninstall wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoredPackage {
+    pub package_id: String,
+    /// The receipt entry the uninstall saved went back into the receipt.
+    /// `false` when RABBIT had no receipt for the copy it removed, and when
+    /// the entry was still there. Either way the package is off
+    /// `declined_packages`.
+    pub receipt_merged: bool,
+    /// The receipt still held the very entry the uninstall saved, so there
+    /// was nothing to merge: the uninstall stopped before it got as far as
+    /// the receipt, or an earlier restore from this set put the entry back.
+    #[serde(default)]
+    pub receipt_already_current: bool,
+    /// The `langpack=` value the uninstall replaced with `<>`, if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub langpack_before: Option<String>,
+    /// Whether that value went back into `reaper.ini`. Only while the line
+    /// still says `<>`: a language chosen since is the user's.
+    #[serde(default)]
+    pub langpack_restored: bool,
+    /// Why putting the value back failed. The package's files and receipt
+    /// entry are back all the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub langpack_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,8 +240,13 @@ pub enum RestoreBackupActionKind {
 
 /// Writes one backup set under `RABBIT/backups/<id>/`, keeping its manifest
 /// up to date after every step. Installs, the unattended installers' key map
-/// and receipt backups, and restore itself all write their sets through it,
-/// so every set has the same layout and every set can be restored.
+/// and receipt backups, restore itself and uninstall all write their sets
+/// through it, so every set has the same layout and every set can be
+/// restored.
+///
+/// Installs and restore copy files in and leave the originals alone.
+/// Uninstall moves them in (see [`BackupSetWriter::move_file`]) and can move
+/// them back while its run still goes on.
 ///
 /// Files inside the resource folder keep their relative path in the set.
 /// Files outside it (app2clap's CLAP folder) go under
@@ -181,6 +300,7 @@ impl BackupSetWriter {
                 reason: reason.to_string(),
                 files: Vec::new(),
                 receipt_backup_path: None,
+                packages: BTreeMap::new(),
             },
             planning,
             started: false,
@@ -195,6 +315,20 @@ impl BackupSetWriter {
 
     pub fn manifest_path(&self) -> PathBuf {
         self.set_path.join(BACKUP_MANIFEST_FILE)
+    }
+
+    /// The set's id: the name of its folder, which is the id asked for or,
+    /// when a set already had that, `<id>-2` and so on.
+    pub fn set_id(&self) -> String {
+        self.set_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Whether anything has been written yet.
+    pub fn is_started(&self) -> bool {
+        self.started
     }
 
     /// Copy `original` into the set and return where the copy is. The
@@ -240,27 +374,210 @@ impl BackupSetWriter {
         Ok(Some(backup_path))
     }
 
+    /// Move `original` into the set and say where it went. Uninstall's way
+    /// in: the file leaves its place, and the set is the only copy.
+    ///
+    /// The entry is saved as pending before the file moves and marked done
+    /// after, as for a copy. On the same volume the move is a rename. With
+    /// `across_volumes`, or when the rename finds the set on another volume
+    /// after all, the file is copied, the copy is checked against `digest`,
+    /// and only then is the original deleted. Checking free space for that
+    /// copy is the caller's job, before the run starts.
+    ///
+    /// `digest` is the size and hash the caller just read; `None` reads them
+    /// here. When the move fails, the file is still where it was and the
+    /// entry is taken out again.
+    pub fn move_file(
+        &mut self,
+        package_id: Option<&str>,
+        original: &Path,
+        digest: Option<FileDigest>,
+        across_volumes: bool,
+    ) -> std::result::Result<MovedFile, MoveFileError> {
+        let digest = match digest {
+            Some(digest) => digest,
+            None if self.planning => FileDigest {
+                size: 0,
+                sha256: String::new(),
+            },
+            None => FileDigest::of(original).map_err(MoveFileError::NotMoved)?,
+        };
+        let index = self
+            .begin_known_entry(package_id, original, digest.clone())
+            .map_err(MoveFileError::NotMoved)?;
+        let backup_path = self.manifest.files[index].backup_path.clone();
+        let mut moved = MovedFile {
+            original: original.to_path_buf(),
+            backup_path,
+            size: digest.size,
+            sha256: digest.sha256,
+            copied: false,
+        };
+        if self.planning {
+            return Ok(moved);
+        }
+        match relocate_into_set(original, &moved.backup_path, &moved.sha256, across_volumes) {
+            Ok(copied) => moved.copied = copied,
+            Err(error) => {
+                let _ = self.drop_entry(index);
+                return Err(error);
+            }
+        }
+        // A failed save leaves the entry pending on disk. Restore still
+        // trusts a pending entry whose copy is whole, so the file stays
+        // recoverable and the move counts as done.
+        let _ = self.finish_entry(index);
+        Ok(moved)
+    }
+
+    /// Move a file [`Self::move_file`] moved back to where it was, and take
+    /// its entry out of the set. Refuses when something is at the original
+    /// path again, rather than replacing it.
+    ///
+    /// The entry goes back to pending first: should RABBIT stop halfway, a
+    /// whole copy in the set is still restored, and a copy that already went
+    /// home is skipped. When moving back fails, the entry is done again and
+    /// the set still holds the file.
+    pub fn put_back(&mut self, moved: &MovedFile) -> Result<()> {
+        if self.planning {
+            return Ok(());
+        }
+        let index = self
+            .manifest
+            .files
+            .iter()
+            .position(|entry| entry.backup_path == moved.backup_path)
+            .ok_or_else(|| RabbitError::BackupNotFound(moved.backup_path.clone()))?;
+        if fs::symlink_metadata(&moved.original).is_ok() {
+            return Err(RabbitError::BackupRestoreRefused {
+                path: moved.original.clone(),
+                reason: "something is at this path again, and RABBIT never replaces it".to_string(),
+            });
+        }
+        self.manifest.files[index].state = BackupEntryState::Pending;
+        self.save()?;
+        match move_back(moved) {
+            Ok(()) => {
+                let _ = self.drop_entry(index);
+                remove_empty_parents(&moved.backup_path, &self.set_path);
+                Ok(())
+            }
+            Err(error) => {
+                self.manifest.files[index].state = BackupEntryState::Done;
+                let _ = self.save();
+                Err(error)
+            }
+        }
+    }
+
+    /// Record that an uninstall is removing `package_id` into this set, with
+    /// what a restore of just that package needs. Saved before any of the
+    /// package's files move.
+    pub fn record_package(&mut self, package_id: &str, record: BackupPackageRecord) -> Result<()> {
+        if self.planning {
+            return Ok(());
+        }
+        self.start()?;
+        self.manifest
+            .packages
+            .insert(package_id.to_string(), record);
+        let saved = self.save();
+        if saved.is_err() {
+            // Not on disk, so not in the set: the package's files won't move.
+            self.manifest.packages.remove(package_id);
+        }
+        saved
+    }
+
+    /// Record the `langpack=` value the uninstall of `package_id` is about
+    /// to replace, or forget it again with `None`. Saved before
+    /// `reaper.ini` changes, so the value is never lost.
+    pub fn set_langpack_before(&mut self, package_id: &str, value: Option<String>) -> Result<()> {
+        if self.planning {
+            return Ok(());
+        }
+        let Some(record) = self.manifest.packages.get_mut(package_id) else {
+            return Ok(());
+        };
+        record.langpack_before = value;
+        self.save()
+    }
+
+    /// Forget a package recorded with [`Self::record_package`], after its
+    /// files were put back: the set no longer holds it.
+    pub fn forget_package(&mut self, package_id: &str) -> Result<()> {
+        if self.planning || self.manifest.packages.remove(package_id).is_none() {
+            return Ok(());
+        }
+        self.save()
+    }
+
+    /// Remove the set again when it holds nothing: every file was put back
+    /// and every package forgotten. Returns whether no set is left, which is
+    /// also the case when nothing was ever written. Best effort; a set that
+    /// can't be removed is merely empty.
+    pub fn discard_if_empty(&mut self) -> bool {
+        if !self.started || self.planning {
+            return true;
+        }
+        if !self.manifest.files.is_empty()
+            || !self.manifest.packages.is_empty()
+            || self.manifest.receipt_backup_path.is_some()
+        {
+            return false;
+        }
+        let _ = fs::remove_file(self.manifest_path());
+        remove_empty_dirs(&self.set_path);
+        !self.set_path.exists()
+    }
+
+    /// Take the entry at `index` out of the manifest, with the origin note
+    /// of an outside file, after its file went back or never left.
+    fn drop_entry(&mut self, index: usize) -> Result<()> {
+        let entry = self.manifest.files.remove(index);
+        if entry.original_path.is_absolute()
+            && let Some(name) = entry.backup_path.file_name()
+        {
+            let mut note = name.to_os_string();
+            note.push(ORIGIN_SIDECAR_SUFFIX);
+            let _ = fs::remove_file(entry.backup_path.with_file_name(note));
+            remove_empty_parents(&entry.backup_path, &self.set_path);
+        }
+        self.save()
+    }
+
     /// Record `original` as pending, saved to disk before anything is
     /// copied, and write the origin note for an outside file. Returns the
     /// entry's index.
     fn begin_entry(&mut self, package_id: Option<&str>, original: &Path) -> Result<usize> {
         // Read the original first: one that can't be read leaves no set.
-        let (size, sha256) = if self.planning {
-            (0, String::new())
+        let digest = if self.planning {
+            FileDigest {
+                size: 0,
+                sha256: String::new(),
+            }
         } else {
-            (
-                fs::metadata(original).with_path(original)?.len(),
-                sha256_file(original)?,
-            )
+            FileDigest::of(original)?
         };
+        self.begin_known_entry(package_id, original, digest)
+    }
+
+    /// [`Self::begin_entry`] for a file whose size and hash the caller
+    /// already read.
+    fn begin_known_entry(
+        &mut self,
+        package_id: Option<&str>,
+        original: &Path,
+        digest: FileDigest,
+    ) -> Result<usize> {
         self.start()?;
         let slot = self.slot_for(original)?;
         self.manifest.files.push(BackupManifestFile {
             package_id: package_id.map(ToString::to_string),
             original_path: slot.original_path.clone(),
             backup_path: slot.backup_path,
-            size,
-            sha256,
+            size: digest.size,
+            sha256: digest.sha256,
             state: BackupEntryState::Pending,
         });
         if !self.planning {
@@ -357,6 +674,124 @@ struct BackupSlot {
     origin_note: Option<PathBuf>,
 }
 
+/// Move `original` to `backup_path`, a fresh path in a set. Returns whether
+/// it went as a checked copy (to another volume) rather than a rename.
+fn relocate_into_set(
+    original: &Path,
+    backup_path: &Path,
+    sha256: &str,
+    across_volumes: bool,
+) -> std::result::Result<bool, MoveFileError> {
+    if let Some(parent) = backup_path.parent() {
+        fs::create_dir_all(parent)
+            .with_path(parent)
+            .map_err(MoveFileError::NotMoved)?;
+    }
+    // A rename would replace whatever is there; a set never loses a file
+    // it already holds.
+    if fs::symlink_metadata(backup_path).is_ok() {
+        return Err(MoveFileError::NotMoved(RabbitError::BackupRestoreRefused {
+            path: backup_path.to_path_buf(),
+            reason: "the backup set already holds a file at this path".to_string(),
+        }));
+    }
+    if !across_volumes {
+        match fs::rename(original, backup_path) {
+            Ok(()) => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {}
+            Err(error) => {
+                return Err(MoveFileError::NotMoved(crate::error::io_error_at(
+                    original.to_path_buf(),
+                    error,
+                )));
+            }
+        }
+    }
+    copy_checked(original, backup_path, sha256).map_err(MoveFileError::NotMoved)?;
+    if let Err(source) = fs::remove_file(original) {
+        let _ = fs::remove_file(backup_path);
+        return Err(MoveFileError::InUse {
+            path: original.to_path_buf(),
+            source,
+        });
+    }
+    Ok(true)
+}
+
+/// Move a file back from a set to where it was, the way it came.
+fn move_back(moved: &MovedFile) -> Result<()> {
+    if let Some(parent) = moved.original.parent() {
+        fs::create_dir_all(parent).with_path(parent)?;
+    }
+    if !moved.copied {
+        match fs::rename(&moved.backup_path, &moved.original) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {}
+            Err(error) => return Err(crate::error::io_error_at(moved.original.clone(), error)),
+        }
+    }
+    // Copied under a temporary name and renamed into place, so a copy that
+    // breaks off never leaves half a file where the real one belongs.
+    let staged = temporary_restore_path(&moved.original);
+    copy_checked(&moved.backup_path, &staged, &moved.sha256)?;
+    fs::rename(&staged, &moved.original).map_err(|error| {
+        let _ = fs::remove_file(&staged);
+        crate::error::io_error_at(moved.original.clone(), error)
+    })?;
+    let _ = fs::remove_file(&moved.backup_path);
+    Ok(())
+}
+
+/// Copy `from` to `to` and check the copy's hash. A copy that fails or
+/// doesn't match is removed again.
+fn copy_checked(from: &Path, to: &Path, sha256: &str) -> Result<()> {
+    if let Err(error) = fs::copy(from, to) {
+        let _ = fs::remove_file(to);
+        return Err(crate::error::io_error_at(to.to_path_buf(), error));
+    }
+    let copied = match sha256_file(to) {
+        Ok(copied) => copied,
+        Err(error) => {
+            let _ = fs::remove_file(to);
+            return Err(error);
+        }
+    };
+    if copied != sha256 {
+        let _ = fs::remove_file(to);
+        return Err(RabbitError::HashMismatch {
+            path: to.to_path_buf(),
+            expected: sha256.to_string(),
+            actual: copied,
+        });
+    }
+    Ok(())
+}
+
+/// Remove the folders between `path` and `stop_at` that are empty, nearest
+/// first, leaving `stop_at` itself.
+fn remove_empty_parents(path: &Path, stop_at: &Path) {
+    let mut current = path.parent();
+    while let Some(folder) = current {
+        if folder == stop_at || !folder.starts_with(stop_at) || fs::remove_dir(folder).is_err() {
+            break;
+        }
+        current = folder.parent();
+    }
+}
+
+/// Remove `folder` and every folder inside it that holds nothing but empty
+/// folders. Files are never removed.
+fn remove_empty_dirs(folder: &Path) {
+    if let Ok(entries) = fs::read_dir(folder) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                remove_empty_dirs(&entry.path());
+            }
+        }
+    }
+    let _ = fs::remove_dir(folder);
+}
+
 pub fn list_backup_sets(resource_path: &Path) -> Result<Vec<BackupSet>> {
     let backups_root = backups_root(resource_path);
     if !backups_root.is_dir() {
@@ -425,6 +860,15 @@ pub fn restore_backup_set(
 /// [`restore_backup_set`] with the folders outside the resource folder that
 /// a restore may write to passed in, so tests can use a temporary folder
 /// instead of the user's real CLAP folder.
+///
+/// A set an uninstall wrote records each package it removed. Its files come
+/// back like any set's, but the receipt doesn't: the uninstall never copied
+/// the receipt file, which has moved on since anyway. Each package's own
+/// entry is merged back into the current receipt instead (unless it is
+/// still there, from an uninstall that never got that far), the package
+/// comes off `declined_packages`, and REAPER's language goes back if the
+/// uninstall reset it. With `options.package_id`, only that package comes
+/// back.
 fn restore_backup_set_within(
     resource_path: &Path,
     backup_id: &str,
@@ -435,6 +879,8 @@ fn restore_backup_set_within(
     if !backup_path.is_dir() {
         return Err(RabbitError::BackupNotFound(backup_path));
     }
+    let manifest = load_backup_manifest(&backup_path)?;
+    let packages = packages_to_restore(backup_id, manifest.as_ref(), options)?;
 
     let preflight = run_install_preflight(
         resource_path,
@@ -458,9 +904,55 @@ fn restore_backup_set_within(
         Some(crate::lock::acquire_package_install_lock(resource_path)?)
     };
 
+    // A package installed again since its uninstall has a newer receipt
+    // entry describing newer files. Putting the old files under it would
+    // leave a receipt that is wrong about both, so that stops the restore
+    // before anything changes, like a refused file.
+    //
+    // An entry that is still the one the set recorded is no reinstall. The
+    // uninstall stopped before it reached the receipt: RABBIT was ended in
+    // the middle of the package, or a failed package's files couldn't all be
+    // moved back. Or an earlier restore from this set merged the entry back
+    // already. Either way the set's files are the ones the entry describes,
+    // and the write-ahead manifest exists so that they can come back.
+    let state = if packages.is_empty() {
+        None
+    } else {
+        let state = load_install_state(resource_path)?.unwrap_or_default();
+        if let Some((package_id, _)) = packages.iter().find(|(package_id, record)| {
+            state
+                .packages
+                .get(package_id)
+                .is_some_and(|current| record.receipt.as_ref() != Some(current))
+        }) {
+            let mut reason = format!(
+                "RABBIT's receipt describes another copy of it, installed after this uninstall, \
+                 and a restore would mix the two. To go back to this copy, uninstall that one \
+                 first (rabbit uninstall --package {package_id} --apply), then restore again."
+            );
+            if options.package_id.is_none() {
+                reason.push_str(
+                    " The set's other packages can be restored one at a time with --package.",
+                );
+            }
+            return Err(RabbitError::PackageRestoreRefused {
+                backup_id: backup_id.to_string(),
+                package_id: package_id.clone(),
+                reason,
+            });
+        }
+        Some(state)
+    };
+
     // Every file is checked before the first one is touched, so a refused
     // or damaged entry stops the restore with nothing changed.
-    let plan = plan_restore(resource_path, &backup_path, outside_roots)?;
+    let plan = plan_restore(
+        resource_path,
+        &backup_path,
+        manifest.as_ref(),
+        options.package_id.as_deref(),
+        outside_roots,
+    )?;
 
     let before_restore_id = format!("{}-before-restore", restore_timestamp());
     let mut planned_backups =
@@ -497,6 +989,12 @@ fn restore_backup_set_within(
         }
     }
 
+    // After the files, so the receipt never claims a file that isn't back.
+    let restored = match state {
+        Some(state) => restore_package_records(resource_path, &packages, state, options.dry_run)?,
+        None => Vec::new(),
+    };
+
     Ok(RestoreBackupReport {
         resource_path: resource_path.to_path_buf(),
         backup_id: backup_id.to_string(),
@@ -505,7 +1003,118 @@ fn restore_backup_set_within(
         preflight,
         actions,
         skipped_targets: plan.skipped_targets,
+        package_id: options.package_id.clone(),
+        packages: restored,
     })
+}
+
+/// The packages of an uninstall set this restore brings back, with what the
+/// set recorded about each: every one of them, or only `options.package_id`.
+/// Empty for every other kind of set, whose files are all a restore needs.
+fn packages_to_restore(
+    backup_id: &str,
+    manifest: Option<&BackupManifest>,
+    options: &RestoreBackupOptions,
+) -> Result<Vec<(String, BackupPackageRecord)>> {
+    let recorded = manifest
+        .map(|manifest| &manifest.packages)
+        .filter(|packages| !packages.is_empty());
+    let Some(package_id) = &options.package_id else {
+        return Ok(recorded
+            .map(|packages| {
+                packages
+                    .iter()
+                    .map(|(id, record)| (id.clone(), record.clone()))
+                    .collect()
+            })
+            .unwrap_or_default());
+    };
+    let refuse = |reason: String| RabbitError::PackageRestoreRefused {
+        backup_id: backup_id.to_string(),
+        package_id: package_id.clone(),
+        reason,
+    };
+    // Only an uninstall set knows which receipt entry goes with a package.
+    // Restoring one package's files from an install's set would leave the
+    // receipt describing the newer version.
+    let Some(packages) = recorded else {
+        return Err(refuse(
+            "only a set an uninstall wrote can restore one package; restore this set as a \
+             whole instead"
+                .to_string(),
+        ));
+    };
+    match packages.get(package_id) {
+        Some(record) => Ok(vec![(package_id.clone(), record.clone())]),
+        None => Err(refuse(format!(
+            "the set holds only {}",
+            packages.keys().cloned().collect::<Vec<_>>().join(", ")
+        ))),
+    }
+}
+
+/// Merge each restored package's receipt entry back into `state`, take it
+/// off `declined_packages`, save, and put back the `langpack=` value its
+/// uninstall replaced. A dry run says what it would do and writes nothing.
+///
+/// The caller has refused any package whose current entry differs from the
+/// one its set recorded, so an entry still in `state` is that same one and
+/// stays as it is.
+fn restore_package_records(
+    resource_path: &Path,
+    packages: &[(String, BackupPackageRecord)],
+    mut state: InstallState,
+    dry_run: bool,
+) -> Result<Vec<RestoredPackage>> {
+    let mut restored: Vec<RestoredPackage> = packages
+        .iter()
+        .map(|(package_id, record)| {
+            let already_current = state.packages.contains_key(package_id);
+            RestoredPackage {
+                package_id: package_id.clone(),
+                receipt_merged: record.receipt.is_some() && !already_current,
+                receipt_already_current: already_current,
+                langpack_before: record.langpack_before.clone(),
+                langpack_restored: false,
+                langpack_error: None,
+            }
+        })
+        .collect();
+    if dry_run {
+        // Only the first value would go back: after it, the line no longer
+        // says `<>`.
+        let mut still_none = restored.iter().any(|item| item.langpack_before.is_some())
+            && lang_pack_setting(resource_path).ok().flatten().as_deref() == Some("<>");
+        for item in &mut restored {
+            if item.langpack_before.is_some() {
+                item.langpack_restored = still_none;
+                still_none = false;
+            }
+        }
+        return Ok(restored);
+    }
+
+    for (package_id, record) in packages {
+        // Restoring is the user's yes to the package, so it comes off
+        // declined_packages even when its entry never left and there was
+        // nothing to merge.
+        if !merge_package_receipt(&mut state, package_id, record.receipt.clone()) {
+            state.declined_packages.remove(package_id);
+        }
+    }
+    save_install_state(resource_path, &state)?;
+    // The package is back either way. A language that couldn't be put back
+    // is reported, and the user can pick it in REAPER's preferences.
+    for item in &mut restored {
+        let Some(value) = &item.langpack_before else {
+            continue;
+        };
+        match restore_lang_pack_if_cleared(resource_path, value) {
+            Ok(done) => item.langpack_restored = done,
+            Err(error) => item.langpack_error = Some(error.to_string()),
+        }
+    }
+    Ok(restored)
 }
 
 struct RestorePlan {
@@ -521,15 +1130,24 @@ struct PlannedRestore {
     sha256: String,
 }
 
+/// `package_id` limits the plan to that package's files. Only a manifest
+/// records which package a file belongs to, and the caller has made sure
+/// there is one.
 fn plan_restore(
     resource_path: &Path,
     backup_path: &Path,
+    manifest: Option<&BackupManifest>,
+    package_id: Option<&str>,
     outside_roots: &[PathBuf],
 ) -> Result<RestorePlan> {
-    match load_backup_manifest(backup_path)? {
-        Some(manifest) => {
-            plan_restore_from_manifest(resource_path, backup_path, &manifest, outside_roots)
-        }
+    match manifest {
+        Some(manifest) => plan_restore_from_manifest(
+            resource_path,
+            backup_path,
+            manifest,
+            package_id,
+            outside_roots,
+        ),
         None => plan_restore_from_layout(resource_path, backup_path),
     }
 }
@@ -541,13 +1159,18 @@ fn plan_restore_from_manifest(
     resource_path: &Path,
     backup_path: &Path,
     manifest: &BackupManifest,
+    package_id: Option<&str>,
     outside_roots: &[PathBuf],
 ) -> Result<RestorePlan> {
     let mut plan = RestorePlan {
         files: Vec::new(),
         skipped_targets: Vec::new(),
     };
-    for entry in &manifest.files {
+    for entry in manifest
+        .files
+        .iter()
+        .filter(|entry| package_id.is_none() || entry.package_id.as_deref() == package_id)
+    {
         let recorded = recorded_set_location(&entry.backup_path);
         let original_path = recorded
             .as_ref()
@@ -903,7 +1526,7 @@ fn backups_root(resource_path: &Path) -> PathBuf {
 /// would spell the same folder two ways (macOS's `/var` and `/private/var`)
 /// depending on whether a file exists yet, and then files inside the
 /// resource folder would stop counting as inside it.
-fn absolute_without_dots(path: &Path) -> std::io::Result<PathBuf> {
+pub(crate) fn absolute_without_dots(path: &Path) -> std::io::Result<PathBuf> {
     let absolute = std::path::absolute(path)?;
     if !absolute
         .components()
@@ -1038,9 +1661,9 @@ mod tests {
 
     use super::{
         BACKUP_MANIFEST_FILE, BackupEntryState, BackupManifest, BackupManifestFile,
-        BackupSetWriter, RestoreBackupActionKind, RestoreBackupOptions, list_backup_sets,
-        load_backup_manifest, relative_within, restore_backup_set, restore_backup_set_within,
-        save_backup_manifest,
+        BackupPackageRecord, BackupSetWriter, RestoreBackupActionKind, RestoreBackupOptions,
+        list_backup_sets, load_backup_manifest, relative_within, restore_backup_set,
+        restore_backup_set_within, save_backup_manifest,
     };
     use crate::error::RabbitError;
     use crate::hash::sha256_file;
@@ -1048,6 +1671,7 @@ mod tests {
     const APPLY: RestoreBackupOptions = RestoreBackupOptions {
         dry_run: false,
         allow_reaper_running: true,
+        package_id: None,
     };
 
     fn write(path: &Path, contents: &[u8]) {
@@ -1081,6 +1705,7 @@ mod tests {
                 reason: reason.to_string(),
                 files,
                 receipt_backup_path: None,
+                packages: Default::default(),
             },
         )
         .unwrap();
@@ -1110,6 +1735,7 @@ mod tests {
                     state: BackupEntryState::Done,
                 }],
                 receipt_backup_path: None,
+                packages: Default::default(),
             },
         )
         .unwrap();
@@ -1147,6 +1773,7 @@ mod tests {
             &RestoreBackupOptions {
                 dry_run: true,
                 allow_reaper_running: false,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1179,6 +1806,7 @@ mod tests {
             &RestoreBackupOptions {
                 dry_run: false,
                 allow_reaper_running: true,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1192,6 +1820,46 @@ mod tests {
                 .with_file_name("reaper_reapack-x64.dll.rabbit-restore-tmp")
                 .exists()
         );
+    }
+
+    /// Only an uninstall set records which receipt entry goes with a
+    /// package. Restoring one package from an install's set would leave the
+    /// receipt describing the newer version, so it is refused, and nothing
+    /// changes.
+    #[test]
+    fn only_an_uninstall_set_restores_one_package() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("UserPlugins/reaper_reapack-x64.dll");
+        write(&target, b"new");
+        let set = dir.path().join("RABBIT/backups/unix-1");
+        let backup = set.join("UserPlugins/reaper_reapack-x64.dll");
+        write(&backup, b"old");
+        save_manifest(
+            &set,
+            "install-replacement",
+            vec![legacy_entry(Some("reapack"), &target, &backup)],
+        );
+
+        let error = restore_backup_set(
+            dir.path(),
+            "unix-1",
+            &RestoreBackupOptions {
+                package_id: Some("reapack".to_string()),
+                ..APPLY
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(&error, RabbitError::PackageRestoreRefused { package_id, .. } if package_id == "reapack"),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("as a whole"), "{error}");
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        // Restoring the set as a whole still works as it always did.
+        let report = restore_backup_set(dir.path(), "unix-1", &APPLY).unwrap();
+        assert!(report.packages.is_empty() && report.package_id.is_none());
+        assert_eq!(fs::read(&target).unwrap(), b"old");
     }
 
     #[test]
@@ -1220,6 +1888,7 @@ mod tests {
             &RestoreBackupOptions {
                 dry_run: false,
                 allow_reaper_running: true,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1727,6 +2396,75 @@ mod tests {
         assert_eq!(fs::read(&keymap).unwrap(), b"own keymap");
         assert_eq!(report.actions.len(), 1);
         assert_eq!(report.skipped_targets, vec![keymap]);
+    }
+
+    /// Uninstall's way in: a file moves into the set, by rename or, from
+    /// another volume, as a checked copy, and can move back while the run
+    /// goes on. A file that went back leaves no entry and no origin note, and
+    /// a set that ends up holding nothing goes away.
+    #[test]
+    fn moved_files_can_go_back_and_an_empty_set_goes_away() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let inside = resource.join("UserPlugins").join("reaper_demo.dll");
+        let outside = dir.path().join("CLAP").join("demo.clap");
+        write(&inside, b"demo");
+        write(&outside, b"clap");
+
+        let mut writer = BackupSetWriter::new(&resource, "uninstall-unix-1", "uninstall");
+        writer
+            .record_package("demo", BackupPackageRecord::default())
+            .unwrap();
+        let renamed = writer
+            .move_file(Some("demo"), &inside, None, false)
+            .unwrap();
+        let copied = writer
+            .move_file(Some("demo"), &outside, None, true)
+            .unwrap();
+        let set = resource.join("RABBIT/backups/uninstall-unix-1");
+        assert!(!renamed.copied && copied.copied);
+        assert!(!inside.exists() && !outside.exists());
+        assert_eq!(renamed.backup_path, set.join("UserPlugins/reaper_demo.dll"));
+        assert_eq!(fs::read(&copied.backup_path).unwrap(), b"clap");
+        assert!(set.join("external/1/demo.clap.rabbit-origin").is_file());
+        let manifest = load_backup_manifest(&set).unwrap().unwrap();
+        assert_eq!(manifest.files.len(), 2);
+        assert!(
+            manifest
+                .files
+                .iter()
+                .all(|file| file.state == BackupEntryState::Done)
+        );
+        assert!(manifest.packages.contains_key("demo"));
+
+        // Something new at the original path is never replaced.
+        write(&inside, b"new");
+        assert!(writer.put_back(&renamed).is_err());
+        assert_eq!(fs::read(&inside).unwrap(), b"new");
+        assert_eq!(
+            load_backup_manifest(&set).unwrap().unwrap().files[0].state,
+            BackupEntryState::Done,
+            "the set still holds the file"
+        );
+        fs::remove_file(&inside).unwrap();
+
+        writer.put_back(&copied).unwrap();
+        writer.put_back(&renamed).unwrap();
+        assert_eq!(fs::read(&inside).unwrap(), b"demo");
+        assert_eq!(fs::read(&outside).unwrap(), b"clap");
+        assert!(!set.join("external").exists());
+        assert!(
+            load_backup_manifest(&set)
+                .unwrap()
+                .unwrap()
+                .files
+                .is_empty()
+        );
+
+        assert!(!writer.discard_if_empty(), "the package is still recorded");
+        writer.forget_package("demo").unwrap();
+        assert!(writer.discard_if_empty());
+        assert!(!set.exists());
     }
 
     /// Two sets asked for in the same second get separate folders, so the
