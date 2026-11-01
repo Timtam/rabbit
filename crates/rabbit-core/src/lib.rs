@@ -34,6 +34,7 @@ pub mod self_update;
 pub mod setup;
 pub mod signature;
 pub mod text_file;
+pub mod uninstall;
 pub mod upstream;
 pub mod version;
 

@@ -903,7 +903,7 @@ fn backups_root(resource_path: &Path) -> PathBuf {
 /// would spell the same folder two ways (macOS's `/var` and `/private/var`)
 /// depending on whether a file exists yet, and then files inside the
 /// resource folder would stop counting as inside it.
-fn absolute_without_dots(path: &Path) -> std::io::Result<PathBuf> {
+pub(crate) fn absolute_without_dots(path: &Path) -> std::io::Result<PathBuf> {
     let absolute = std::path::absolute(path)?;
     if !absolute
         .components()

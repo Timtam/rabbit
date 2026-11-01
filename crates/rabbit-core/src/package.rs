@@ -1343,7 +1343,7 @@ impl EmbeddedPackageSpec {
             .any(|supported| supported.matches_platform(platform))
     }
 
-    fn to_package_spec(&self, platform: Platform) -> PackageSpec {
+    pub(crate) fn to_package_spec(&self, platform: Platform) -> PackageSpec {
         PackageSpec {
             id: self.id.clone(),
             display_name: self.display_name.clone(),

@@ -618,7 +618,7 @@ impl UninstallPathToken {
 
 /// The folders absolute macOS paths may sit below, as path components. A
 /// path must add at least one component after one of them.
-const MACOS_ABSOLUTE_PREFIXES: &[&[&str]] = &[
+pub(crate) const MACOS_ABSOLUTE_PREFIXES: &[&[&str]] = &[
     &["Library", "Audio", "Plug-Ins", "VST3"],
     &["Library", "Audio", "Plug-Ins", "Components"],
     &["Library", "Audio", "Plug-Ins", "CLAP"],
@@ -629,7 +629,7 @@ const MACOS_ABSOLUTE_PREFIXES: &[&[&str]] = &[
 
 /// RABBIT's own folder inside the resource folder. It holds receipts,
 /// backups, logs and locks, and no uninstall may ever touch it.
-const RABBIT_FOLDER: &str = "RABBIT";
+pub(crate) const RABBIT_FOLDER: &str = "RABBIT";
 
 /// How a field uses its paths, which decides what they may look like.
 #[derive(Debug, Clone, Copy)]
@@ -1112,7 +1112,7 @@ fn names_rabbit_folder(parsed: &ParsedUninstallPath<'_>) -> bool {
 
 /// `*` matches any run of characters, including none. ASCII case is
 /// ignored, as the default file systems on Windows and macOS do.
-fn wildcard_matches_ignoring_case(pattern: &str, name: &str) -> bool {
+pub(crate) fn wildcard_matches_ignoring_case(pattern: &str, name: &str) -> bool {
     let pattern = pattern.to_ascii_lowercase();
     let name = name.to_ascii_lowercase();
     let mut parts = pattern.split('*');
