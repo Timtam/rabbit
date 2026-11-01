@@ -105,20 +105,23 @@ pub(crate) fn rebuild_package_list_widgets(
 /// is repopulated (delete-all + re-append + per-item check-state writes)
 /// the native `wxTreeCtrl`'s caret ends up on an arbitrary row a few items
 /// down, so a screen-reader user entering the list would start mid-list
-/// instead of at the top. Called when the wizard auto-advances onto the
-/// packages page, where focus goes to the tab strip and Tab then enters
-/// the list; deliberate Back navigation is left alone so it keeps the
-/// user's previous position.
+/// instead of at the top. When the wizard auto-advances onto the packages
+/// page, focus goes to the tab strip and this runs once Tab enters the
+/// list (see [`reset_packages_list_caret_on_focus`]); deliberate Back
+/// navigation is left alone so it keeps the user's previous position.
 pub(crate) fn reset_packages_list_caret(
     widgets: &WizardWidgets,
     package_items: &PackagesStateCell,
 ) {
+    move_caret_to_top(&widgets.package_checklist, package_items);
+}
+
+fn move_caret_to_top(tree: &TreeCtrl, package_items: &PackagesStateCell) {
     // Clone the item id and DROP the borrow before touching the tree:
     // `select_item` dispatches the selection-changed handler synchronously
     // on MSW, and that handler borrows `package_items` too.
     let group = package_items.borrow().packages_group.clone();
     if let Some(group) = group {
-        let tree = &widgets.package_checklist;
         tree.ensure_visible(&group);
         tree.select_item(&group);
         tree.set_focused_item(&group);
@@ -128,8 +131,24 @@ pub(crate) fn reset_packages_list_caret(
 /// Put keyboard focus on the packages list with the screen-reader caret on
 /// its top-most entry; see [`reset_packages_list_caret`].
 pub(crate) fn focus_packages_list_top(widgets: &WizardWidgets, package_items: &PackagesStateCell) {
+    CARET_RESET_PENDING.with(|pending| pending.set(false));
     reset_packages_list_caret(widgets, package_items);
     widgets.package_checklist.set_focus();
+}
+
+thread_local! {
+    /// Set when the page opens with focus elsewhere (on the tab strip): the
+    /// caret goes to the top once the list itself gets focus.
+    static CARET_RESET_PENDING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Have [`reset_packages_list_caret`] run when the list next gets focus,
+/// not now. Selecting a row in a SysTreeView32 raises accessibility events
+/// even while the tree hasn't got focus, so doing it as the page opens made
+/// NVDA read the "Packages" row (half checked) right after the tab strip
+/// that actually had focus.
+pub(crate) fn reset_packages_list_caret_on_focus() {
+    CARET_RESET_PENDING.with(|pending| pending.set(true));
 }
 
 /// Windows-only: tear down the existing native tree and rebuild both
@@ -431,6 +450,18 @@ pub(crate) fn build_packages_page(
     );
 
     let tree = build_checkbox_tree(page, "rabbit-package-list");
+    {
+        let package_items = Rc::clone(&package_items);
+        tree.on_set_focus(move |event| {
+            // wxMSW runs this before the tree's own focus handling, so the
+            // caret is on the top row by the time the tree reports focus,
+            // and that row is the one the screen reader reads.
+            if CARET_RESET_PENDING.with(|pending| pending.replace(false)) {
+                move_caret_to_top(&tree, &package_items);
+            }
+            event.skip(true);
+        });
+    }
 
     populate_packages_tree(
         &tree,

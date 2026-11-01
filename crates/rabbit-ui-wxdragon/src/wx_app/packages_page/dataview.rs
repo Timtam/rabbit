@@ -1210,8 +1210,4 @@ pub(crate) fn focus_packages_list_top(widgets: &WizardWidgets, _package_items: &
 /// rebuilt DataView has no selection, so reading starts at the top, and
 /// selecting a row from code is exactly what crashes here (see
 /// [`focus_packages_list_top`]).
-pub(crate) fn reset_packages_list_caret(
-    _widgets: &WizardWidgets,
-    _package_items: &PackagesStateCell,
-) {
-}
+pub(crate) fn reset_packages_list_caret_on_focus() {}
