@@ -611,695 +611,808 @@ impl From<CliArchitecture> for Architecture {
 /// Parse the process argv via clap and dispatch to the matching subcommand.
 /// Used by the merged `rabbit` binary when it sees CLI arguments.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+    run_with(Cli::parse())
+}
 
+/// Each command runs in a function of its own. As arms of one match, a
+/// debug build gave every command's locals a slot in the same stack frame,
+/// more than the 1 MB stack Windows gives the main thread, so every command
+/// overflowed before doing anything.
+fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
-        Command::Detect { portable, json } => {
-            let installations = discover_installations(&DiscoveryOptions {
-                include_standard: true,
-                portable_roots: portable,
-            })?;
+        command @ Command::Detect { .. } => run_detect(command),
+        command @ Command::Components { .. } => run_components(command),
+        command @ Command::Latest { .. } => run_latest(command),
+        command @ Command::Artifacts { .. } => run_artifacts(command),
+        command @ Command::Download { .. } => run_download(command),
+        command @ Command::Packages { .. } => run_packages(command),
+        command @ Command::Preflight { .. } => run_preflight(command),
+        command @ Command::InitResource { .. } => run_init_resource(command),
+        command @ Command::Backups { .. } => run_backups(command),
+        command @ Command::RestoreBackup { .. } => run_restore_backup(command),
+        command @ Command::InstallExtension { .. } => run_install_extension(command),
+        command @ Command::ApplyPackages { .. } => run_apply_packages(command),
+        command @ Command::Setup { .. } => run_setup(command),
+        command @ Command::Locales { .. } => run_locales(command),
+        command @ Command::Localize { .. } => run_localize(command),
+        command @ Command::PortableCheck { .. } => run_portable_check(command),
+        command @ Command::SelfUpdate { .. } => run_self_update(command),
+        command @ Command::Plan { .. } => run_plan(command),
+    }
+}
 
-            if json {
-                println!("{}", serde_json::to_string_pretty(&installations)?);
-            } else {
-                print_installations(&installations);
-            }
-        }
-        Command::Components {
-            resource_path,
-            json,
-        } => {
-            let platform =
-                Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
-            let components = detect_components(&resource_path, platform)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&components)?);
-            } else {
-                print_components(&components);
-            }
-        }
-        Command::Latest {
-            json,
-            package_channel,
-        } => {
-            let channels = parse_package_channels(&package_channel)?;
-            let latest = fetch_latest_versions_on(&channels)?;
-            warn_channel_fallbacks(
-                &channels,
-                latest
-                    .packages
-                    .iter()
-                    .map(|package| (package.package_id.as_str(), package.channel.as_deref())),
+fn run_detect(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::Detect { portable, json } = command else {
+        unreachable!("dispatched as Command::Detect");
+    };
+    let installations = discover_installations(&DiscoveryOptions {
+        include_standard: true,
+        portable_roots: portable,
+    })?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&installations)?);
+    } else {
+        print_installations(&installations);
+    }
+    Ok(())
+}
+
+fn run_components(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::Components {
+        resource_path,
+        json,
+    } = command
+    else {
+        unreachable!("dispatched as Command::Components");
+    };
+    let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
+    let components = detect_components(&resource_path, platform)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&components)?);
+    } else {
+        print_components(&components);
+    }
+    Ok(())
+}
+
+fn run_latest(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::Latest {
+        json,
+        package_channel,
+    } = command
+    else {
+        unreachable!("dispatched as Command::Latest");
+    };
+    let channels = parse_package_channels(&package_channel)?;
+    let latest = fetch_latest_versions_on(&channels)?;
+    warn_channel_fallbacks(
+        &channels,
+        latest
+            .packages
+            .iter()
+            .map(|package| (package.package_id.as_str(), package.channel.as_deref())),
+    );
+    if json {
+        println!("{}", serde_json::to_string_pretty(&latest)?);
+    } else {
+        print_latest(&latest.packages);
+        // Failed providers (e.g. the SWS homepage being down) go to
+        // stderr so scripts parsing stdout see only resolved versions.
+        for failure in &latest.failures {
+            eprintln!(
+                "warning: could not check the latest version of {}: {}",
+                failure.package_id, failure.message
             );
-            if json {
-                println!("{}", serde_json::to_string_pretty(&latest)?);
-            } else {
-                print_latest(&latest.packages);
-                // Failed providers (e.g. the SWS homepage being down) go to
-                // stderr so scripts parsing stdout see only resolved versions.
-                for failure in &latest.failures {
-                    eprintln!(
-                        "warning: could not check the latest version of {}: {}",
-                        failure.package_id, failure.message
-                    );
-                }
+        }
+    }
+    Ok(())
+}
+
+fn run_artifacts(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::Artifacts {
+        package,
+        architecture,
+        json,
+        package_channel,
+    } = command
+    else {
+        unreachable!("dispatched as Command::Artifacts");
+    };
+    let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
+    let architecture = architecture.map_or_else(Architecture::current, Into::into);
+    let packages = selected_package_ids(package, platform, None);
+    let channels = parse_package_channels(&package_channel)?;
+    let artifacts = resolve_latest_artifacts_on(&packages, platform, architecture, &channels)?;
+    warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
+    if json {
+        println!("{}", serde_json::to_string_pretty(&artifacts)?);
+    } else {
+        print_artifacts(&artifacts);
+    }
+    Ok(())
+}
+
+fn run_download(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::Download {
+        package,
+        architecture,
+        cache_dir,
+        json,
+        package_channel,
+    } = command
+    else {
+        unreachable!("dispatched as Command::Download");
+    };
+    let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
+    let architecture = architecture.map_or_else(Architecture::current, Into::into);
+    let packages = selected_package_ids(package, platform, None);
+    let channels = parse_package_channels(&package_channel)?;
+    let artifacts = resolve_latest_artifacts_on(&packages, platform, architecture, &channels)?;
+    warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
+    let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
+    let cached = download_artifacts(&artifacts, &cache_dir)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&cached)?);
+    } else {
+        print_cached_artifacts(&cached);
+    }
+    Ok(())
+}
+
+fn run_packages(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::Packages { manifest, json } = command else {
+        unreachable!("dispatched as Command::Packages");
+    };
+    if manifest {
+        let manifest = embedded_package_manifest();
+        if json {
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+        } else {
+            println!("Schema version: {}", manifest.schema_version);
+            for package in &manifest.packages {
+                println!("{}", package.id);
+                println!("  Display name: {}", package.display_name);
+                println!("  Kind: {}", serialized_name(&package.package_kind));
+                println!("  Required: {}", yes_no(package.required));
+                println!("  Recommended: {}", yes_no(package.recommended));
+                println!("  Channels: {}", channel_names(&package.channels));
+                println!(
+                    "  Supported platforms: {}",
+                    serialized_names(&package.supported_platforms)
+                );
+                println!(
+                    "  Supported architectures: {}",
+                    serialized_names(&package.supported_architectures)
+                );
+                println!(
+                    "  Artifact source: {}",
+                    artifact_source_label(
+                        package.github_release.is_some(),
+                        package.http_artifact.is_some(),
+                        package.hfs_listing.is_some(),
+                    )
+                );
+                println!("  Detectors: {}", serialized_names(&package.detectors));
+                println!(
+                    "  Install steps: {}",
+                    serialized_names(&package.install_steps)
+                );
+                println!(
+                    "  Uninstall steps: {}",
+                    serialized_names(&package.uninstall_steps)
+                );
+                println!(
+                    "  Backup policy: {}",
+                    serialized_name(&package.backup_policy)
+                );
+                println!(
+                    "  Windows suffixes: {}",
+                    string_names(&package.user_plugin_suffixes.windows)
+                );
+                println!(
+                    "  macOS suffixes: {}",
+                    string_names(&package.user_plugin_suffixes.macos)
+                );
             }
         }
-        Command::Artifacts {
-            package,
-            architecture,
-            json,
-            package_channel,
-        } => {
-            let platform =
-                Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
-            let architecture = architecture.map_or_else(Architecture::current, Into::into);
-            let packages = selected_package_ids(package, platform, None);
-            let channels = parse_package_channels(&package_channel)?;
-            let artifacts =
-                resolve_latest_artifacts_on(&packages, platform, architecture, &channels)?;
-            warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
-            if json {
-                println!("{}", serde_json::to_string_pretty(&artifacts)?);
-            } else {
-                print_artifacts(&artifacts);
-            }
+    } else {
+        let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
+        let packages = builtin_package_specs(platform);
+        if json {
+            println!("{}", serde_json::to_string_pretty(&packages)?);
+        } else {
+            print_package_specs(&packages);
         }
-        Command::Download {
-            package,
-            architecture,
-            cache_dir,
-            json,
-            package_channel,
-        } => {
-            let platform =
-                Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
-            let architecture = architecture.map_or_else(Architecture::current, Into::into);
-            let packages = selected_package_ids(package, platform, None);
-            let channels = parse_package_channels(&package_channel)?;
-            let artifacts =
-                resolve_latest_artifacts_on(&packages, platform, architecture, &channels)?;
-            warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
-            let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
-            let cached = download_artifacts(&artifacts, &cache_dir)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&cached)?);
-            } else {
-                print_cached_artifacts(&cached);
-            }
-        }
-        Command::Packages { manifest, json } => {
-            if manifest {
-                let manifest = embedded_package_manifest();
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&manifest)?);
-                } else {
-                    println!("Schema version: {}", manifest.schema_version);
-                    for package in &manifest.packages {
-                        println!("{}", package.id);
-                        println!("  Display name: {}", package.display_name);
-                        println!("  Kind: {}", serialized_name(&package.package_kind));
-                        println!("  Required: {}", yes_no(package.required));
-                        println!("  Recommended: {}", yes_no(package.recommended));
-                        println!("  Channels: {}", channel_names(&package.channels));
-                        println!(
-                            "  Supported platforms: {}",
-                            serialized_names(&package.supported_platforms)
-                        );
-                        println!(
-                            "  Supported architectures: {}",
-                            serialized_names(&package.supported_architectures)
-                        );
-                        println!(
-                            "  Artifact source: {}",
-                            artifact_source_label(
-                                package.github_release.is_some(),
-                                package.http_artifact.is_some(),
-                                package.hfs_listing.is_some(),
-                            )
-                        );
-                        println!("  Detectors: {}", serialized_names(&package.detectors));
-                        println!(
-                            "  Install steps: {}",
-                            serialized_names(&package.install_steps)
-                        );
-                        println!(
-                            "  Uninstall steps: {}",
-                            serialized_names(&package.uninstall_steps)
-                        );
-                        println!(
-                            "  Backup policy: {}",
-                            serialized_name(&package.backup_policy)
-                        );
-                        println!(
-                            "  Windows suffixes: {}",
-                            string_names(&package.user_plugin_suffixes.windows)
-                        );
-                        println!(
-                            "  macOS suffixes: {}",
-                            string_names(&package.user_plugin_suffixes.macos)
-                        );
-                    }
-                }
-            } else {
-                let platform =
-                    Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
-                let packages = builtin_package_specs(platform);
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&packages)?);
-                } else {
-                    print_package_specs(&packages);
-                }
-            }
-        }
-        Command::Preflight {
-            resource_path,
-            target_app_path,
+    }
+    Ok(())
+}
+
+fn run_preflight(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::Preflight {
+        resource_path,
+        target_app_path,
+        dry_run,
+        allow_reaper_running,
+        report_path,
+        save_report,
+        json,
+    } = command
+    else {
+        unreachable!("dispatched as Command::Preflight");
+    };
+    let report = run_install_preflight(
+        &resource_path,
+        &PreflightOptions {
             dry_run,
             allow_reaper_running,
-            report_path,
-            save_report,
-            json,
-        } => {
-            let report = run_install_preflight(
-                &resource_path,
-                &PreflightOptions {
-                    dry_run,
-                    allow_reaper_running,
-                    target_app_path,
-                },
-            );
-            let report_path =
-                selected_report_path(Some(&resource_path), report_path, save_report, "preflight")?;
-            save_optional_report(report_path.as_deref(), &report)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print_preflight_report(&report);
-            }
-            if !report.passed {
-                std::process::exit(2);
-            }
-        }
-        Command::InitResource {
-            resource_path,
             target_app_path,
+        },
+    );
+    let report_path =
+        selected_report_path(Some(&resource_path), report_path, save_report, "preflight")?;
+    save_optional_report(report_path.as_deref(), &report)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_preflight_report(&report);
+    }
+    if !report.passed {
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+fn run_init_resource(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::InitResource {
+        resource_path,
+        target_app_path,
+        portable,
+        apply,
+        allow_reaper_running,
+        report_path,
+        save_report,
+        json,
+    } = command
+    else {
+        unreachable!("dispatched as Command::InitResource");
+    };
+    let report = initialize_resource_path(
+        &resource_path,
+        &rabbit_core::resource::ResourceInitOptions {
+            dry_run: !apply,
             portable,
-            apply,
+            include_extension_support_dirs: true,
             allow_reaper_running,
-            report_path,
-            save_report,
-            json,
-        } => {
-            let report = initialize_resource_path(
-                &resource_path,
-                &rabbit_core::resource::ResourceInitOptions {
-                    dry_run: !apply,
-                    portable,
-                    include_extension_support_dirs: true,
-                    allow_reaper_running,
-                    target_app_path,
-                },
-            )?;
-            let report_path = selected_report_path(
-                Some(&resource_path),
-                report_path,
-                save_report,
-                "init-resource",
-            )?;
-            save_optional_report(report_path.as_deref(), &report)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print_resource_init_report(&report);
-            }
-        }
-        Command::Backups {
-            resource_path,
-            json,
-        } => {
-            let backup_sets = list_backup_sets(&resource_path)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&backup_sets)?);
-            } else {
-                print_backup_sets(&backup_sets);
-            }
-        }
-        Command::RestoreBackup {
-            resource_path,
-            backup_id,
-            apply,
-            allow_reaper_running,
-            report_path,
-            save_report,
-            json,
-        } => {
-            let report = restore_backup_set(
-                &resource_path,
-                &backup_id,
-                &RestoreBackupOptions {
-                    dry_run: !apply,
-                    allow_reaper_running,
-                },
-            )?;
-            let report_path = selected_report_path(
-                Some(&resource_path),
-                report_path,
-                save_report,
-                "restore-backup",
-            )?;
-            save_optional_report(report_path.as_deref(), &report)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print_restore_backup_report(&report);
-            }
-        }
-        Command::InstallExtension {
-            resource_path,
             target_app_path,
-            package,
-            architecture,
-            cache_dir,
-            apply,
+        },
+    )?;
+    let report_path = selected_report_path(
+        Some(&resource_path),
+        report_path,
+        save_report,
+        "init-resource",
+    )?;
+    save_optional_report(report_path.as_deref(), &report)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_resource_init_report(&report);
+    }
+    Ok(())
+}
+
+fn run_backups(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::Backups {
+        resource_path,
+        json,
+    } = command
+    else {
+        unreachable!("dispatched as Command::Backups");
+    };
+    let backup_sets = list_backup_sets(&resource_path)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&backup_sets)?);
+    } else {
+        print_backup_sets(&backup_sets);
+    }
+    Ok(())
+}
+
+fn run_restore_backup(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::RestoreBackup {
+        resource_path,
+        backup_id,
+        apply,
+        allow_reaper_running,
+        report_path,
+        save_report,
+        json,
+    } = command
+    else {
+        unreachable!("dispatched as Command::RestoreBackup");
+    };
+    let report = restore_backup_set(
+        &resource_path,
+        &backup_id,
+        &RestoreBackupOptions {
+            dry_run: !apply,
             allow_reaper_running,
-            accept_reapack_donation_notice,
+        },
+    )?;
+    let report_path = selected_report_path(
+        Some(&resource_path),
+        report_path,
+        save_report,
+        "restore-backup",
+    )?;
+    save_optional_report(report_path.as_deref(), &report)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_restore_backup_report(&report);
+    }
+    Ok(())
+}
+
+fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::InstallExtension {
+        resource_path,
+        target_app_path,
+        package,
+        architecture,
+        cache_dir,
+        apply,
+        allow_reaper_running,
+        accept_reapack_donation_notice,
+        report_path,
+        save_report,
+        json,
+        package_channel,
+    } = command
+    else {
+        unreachable!("dispatched as Command::InstallExtension");
+    };
+    ensure_reapack_donation_acknowledged(&package, accept_reapack_donation_notice)?;
+    let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
+    let architecture = architecture.map_or_else(Architecture::current, Into::into);
+    let channels = effective_package_channels(Some(&resource_path), &package, &package_channel)?;
+    let artifacts = resolve_latest_artifacts_on(&package, platform, architecture, &channels)?;
+    warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
+    // Without --apply, nothing is downloaded: every other command
+    // treats "no --apply" as "change nothing on this machine", and a
+    // download is a change to it. There is no file to install from
+    // and so no install report; what there is to say is which
+    // artifacts would be fetched, and whether the target is ready
+    // for them.
+    if !apply {
+        let preflight = run_install_preflight(
+            &resource_path,
+            &PreflightOptions {
+                dry_run: true,
+                allow_reaper_running,
+                target_app_path: target_app_path.clone(),
+            },
+        );
+        let planned = PlannedInstall {
+            resource_path: resource_path.clone(),
+            dry_run: true,
+            preflight,
+            artifacts,
+        };
+        let report_path = selected_report_path(
+            Some(&resource_path),
             report_path,
             save_report,
-            json,
-            package_channel,
-        } => {
-            ensure_reapack_donation_acknowledged(&package, accept_reapack_donation_notice)?;
+            "install-extension",
+        )?;
+        save_optional_report(report_path.as_deref(), &planned)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&planned)?);
+        } else {
+            print_preflight_report(&planned.preflight);
+            print_artifacts(&planned.artifacts);
+            println!(
+                "Dry run: nothing was downloaded or installed. Pass --apply to install, \
+                 or use `rabbit download` to fetch without installing."
+            );
+        }
+        return Ok(());
+    }
+    let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
+    let cached = download_artifacts(&artifacts, &cache_dir)?;
+    let report = install_cached_artifacts(
+        &resource_path,
+        &cached,
+        &InstallOptions {
+            dry_run: false,
+            allow_reaper_running,
+            target_app_path,
+            package_variants: Default::default(),
+        },
+    )?;
+    let report_path = selected_report_path(
+        Some(&resource_path),
+        report_path,
+        save_report,
+        "install-extension",
+    )?;
+    save_optional_report(report_path.as_deref(), &report)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_install_report(&report);
+    }
+    Ok(())
+}
+
+fn run_apply_packages(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::ApplyPackages {
+        resource_path,
+        target_app_path,
+        package,
+        architecture,
+        cache_dir,
+        apply,
+        allow_reaper_running,
+        stage_unsupported,
+        preserve_osara_keymap,
+        replace_osara_keymap,
+        package_variant,
+        accept_reapack_donation_notice,
+        report_path,
+        save_report,
+        json,
+        package_channel,
+    } = command
+    else {
+        unreachable!("dispatched as Command::ApplyPackages");
+    };
+    let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
+    let architecture = architecture.map_or_else(Architecture::current, Into::into);
+    let packages = selected_package_ids(package, platform, Some(&resource_path));
+    ensure_reapack_donation_acknowledged(&packages, accept_reapack_donation_notice)?;
+    let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
+    let channels = effective_package_channels(Some(&resource_path), &packages, &package_channel)?;
+    let keymap = osara_keymap_choice(
+        &resource_path,
+        platform,
+        replace_osara_keymap,
+        preserve_osara_keymap,
+    );
+    let report = execute_package_operation(
+        &resource_path,
+        &packages,
+        platform,
+        architecture,
+        &cache_dir,
+        &PackageOperationOptions {
+            dry_run: !apply,
+            allow_reaper_running,
+            stage_unsupported,
+            replace_osara_keymap: keymap.replace,
+            package_variants: parse_package_variants(&package_variant)?,
+            package_channels: channels.clone(),
+            target_app_path,
+            lock_path: None,
+            force_reinstall_packages: Vec::new(),
+        },
+    )?;
+    warn_channel_fallbacks(&channels, item_channels(&report.items));
+    explain_osara_keymap_choice(&keymap, &report.items);
+    let report_path = selected_report_path(
+        Some(&resource_path),
+        report_path,
+        save_report,
+        "apply-packages",
+    )?;
+    save_optional_report(report_path.as_deref(), &report)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_package_operation_report(&report);
+    }
+    // Everything installable was attempted; a per-package failure
+    // still yields a non-zero exit for scripts/CI. Distinct from the
+    // hard-error path (Err) and from preflight's exit(2).
+    if report.has_failures() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn run_setup(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::Setup {
+        resource_path,
+        target_app_path,
+        portable,
+        package,
+        architecture,
+        cache_dir,
+        apply,
+        allow_reaper_running,
+        stage_unsupported,
+        preserve_osara_keymap,
+        replace_osara_keymap,
+        package_variant,
+        package_channel,
+        accept_reapack_donation_notice,
+        config_step,
+        skip_config_step,
+        reaper_language,
+        report_path,
+        save_report,
+        json,
+    } = command
+    else {
+        unreachable!("dispatched as Command::Setup");
+    };
+    let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
+    let architecture = architecture.map_or_else(Architecture::current, Into::into);
+    let packages = selected_package_ids(package, platform, Some(&resource_path));
+    ensure_reapack_donation_acknowledged(&packages, accept_reapack_donation_notice)?;
+    let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
+    let configuration_step_ids = resolve_configuration_step_ids(
+        &resource_path,
+        platform,
+        &packages,
+        &config_step,
+        &skip_config_step,
+    );
+    let channels = effective_package_channels(Some(&resource_path), &packages, &package_channel)?;
+    let keymap = osara_keymap_choice(
+        &resource_path,
+        platform,
+        replace_osara_keymap,
+        preserve_osara_keymap,
+    );
+    let report = execute_setup_operation(
+        &resource_path,
+        &packages,
+        platform,
+        architecture,
+        &cache_dir,
+        &SetupOptions {
+            dry_run: !apply,
+            portable,
+            allow_reaper_running,
+            stage_unsupported,
+            replace_osara_keymap: keymap.replace,
+            package_variants: parse_package_variants(&package_variant)?,
+            package_channels: channels.clone(),
+            target_app_path,
+            lock_path: None,
+            force_reinstall_packages: Vec::new(),
+            reaper_language_package: validate_reaper_language(reaper_language)?,
+            configuration_step_ids,
+        },
+    )?;
+    warn_channel_fallbacks(&channels, item_channels(&report.package_operation.items));
+    explain_osara_keymap_choice(&keymap, &report.package_operation.items);
+    let report_path =
+        selected_report_path(Some(&resource_path), report_path, save_report, "setup")?;
+    save_optional_report(report_path.as_deref(), &report)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_setup_report(&report);
+    }
+    if report.package_operation.has_failures() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn run_locales(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::Locales { locales_dir, json } = command else {
+        unreachable!("dispatched as Command::Locales");
+    };
+    let locales = available_locales(&locales_dir)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&locales)?);
+    } else {
+        print_locales(&locales);
+    }
+    Ok(())
+}
+
+fn run_localize(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::Localize {
+        locale,
+        locales_dir,
+        id,
+        args,
+        json,
+    } = command
+    else {
+        unreachable!("dispatched as Command::Localize");
+    };
+    let localizer = Localizer::from_locale_dir(&locales_dir, &locale)?;
+    let owned_args = parse_localization_args(args)?;
+    let borrowed_args = owned_args
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let message = localizer.format(&id, &borrowed_args);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&message)?);
+    } else {
+        print_localized_text(&message);
+    }
+    Ok(())
+}
+
+fn run_portable_check(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::PortableCheck { locales_dir, json } = command else {
+        unreachable!("dispatched as Command::PortableCheck");
+    };
+    let report = check_portable_runtime(&locales_dir)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_portability_report(&report);
+    }
+    Ok(())
+}
+
+fn run_self_update(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::SelfUpdate { command } = command else {
+        unreachable!("dispatched as Command::SelfUpdate");
+    };
+    match command {
+        SelfUpdateCommand::Check { manifest_url, json } => {
             let platform =
                 Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
-            let architecture = architecture.map_or_else(Architecture::current, Into::into);
-            let channels =
-                effective_package_channels(Some(&resource_path), &package, &package_channel)?;
-            let artifacts =
-                resolve_latest_artifacts_on(&package, platform, architecture, &channels)?;
-            warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
-            // Without --apply, nothing is downloaded: every other command
-            // treats "no --apply" as "change nothing on this machine", and a
-            // download is a change to it. There is no file to install from
-            // and so no install report; what there is to say is which
-            // artifacts would be fetched, and whether the target is ready
-            // for them.
-            if !apply {
-                let preflight = run_install_preflight(
-                    &resource_path,
-                    &PreflightOptions {
-                        dry_run: true,
-                        allow_reaper_running,
-                        target_app_path: target_app_path.clone(),
-                    },
-                );
-                let planned = PlannedInstall {
-                    resource_path: resource_path.clone(),
-                    dry_run: true,
-                    preflight,
-                    artifacts,
-                };
-                let report_path = selected_report_path(
-                    Some(&resource_path),
-                    report_path,
-                    save_report,
-                    "install-extension",
-                )?;
-                save_optional_report(report_path.as_deref(), &planned)?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&planned)?);
-                } else {
-                    print_preflight_report(&planned.preflight);
-                    print_artifacts(&planned.artifacts);
-                    println!(
-                        "Dry run: nothing was downloaded or installed. Pass --apply to install, \
-                         or use `rabbit download` to fetch without installing."
-                    );
+            let report = check_self_update(platform, &manifest_url)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_self_update_report(&report);
+                // Only the check command pays for the notes fetch: stage
+                // and apply print the same report, and neither should
+                // spend a round-trip on text nobody asked to read while
+                // an update is being installed.
+                print_self_update_release_notes(&report);
+            }
+        }
+        SelfUpdateCommand::Stage {
+            manifest_url,
+            staging_dir,
+            json,
+        } => {
+            let platform =
+                Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
+            let staging_dir = staging_dir.unwrap_or_else(default_self_update_staging_dir);
+            let report = stage_self_update(platform, &manifest_url, &staging_dir)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_self_update_stage_report(&report);
+            }
+        }
+        SelfUpdateCommand::Apply {
+            manifest_url,
+            staging_dir,
+            install_root,
+            restart,
+            json,
+        } => {
+            let platform =
+                Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
+            let staging_dir = staging_dir.unwrap_or_else(default_self_update_staging_dir);
+            let stage = stage_self_update(platform, &manifest_url, &staging_dir)?;
+            let report = apply_self_update(
+                &stage,
+                &ApplySelfUpdateOptions {
+                    install_root,
+                    install_target_basename: None,
+                    ..Default::default()
+                },
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_self_update_apply_report(&report);
+            }
+            if restart && !report.replaced_files.is_empty() {
+                let pid = relaunch_current_executable()?;
+                if !json {
+                    println!("Relaunched RABBIT with PID {pid}; exiting current process.");
                 }
                 return Ok(());
             }
-            let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
-            let cached = download_artifacts(&artifacts, &cache_dir)?;
-            let report = install_cached_artifacts(
-                &resource_path,
-                &cached,
-                &InstallOptions {
-                    dry_run: false,
-                    allow_reaper_running,
-                    target_app_path,
-                    package_variants: Default::default(),
-                },
-            )?;
-            let report_path = selected_report_path(
-                Some(&resource_path),
-                report_path,
-                save_report,
-                "install-extension",
-            )?;
-            save_optional_report(report_path.as_deref(), &report)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print_install_report(&report);
-            }
-        }
-        Command::ApplyPackages {
-            resource_path,
-            target_app_path,
-            package,
-            architecture,
-            cache_dir,
-            apply,
-            allow_reaper_running,
-            stage_unsupported,
-            preserve_osara_keymap,
-            replace_osara_keymap,
-            package_variant,
-            accept_reapack_donation_notice,
-            report_path,
-            save_report,
-            json,
-            package_channel,
-        } => {
-            let platform =
-                Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
-            let architecture = architecture.map_or_else(Architecture::current, Into::into);
-            let packages = selected_package_ids(package, platform, Some(&resource_path));
-            ensure_reapack_donation_acknowledged(&packages, accept_reapack_donation_notice)?;
-            let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
-            let channels =
-                effective_package_channels(Some(&resource_path), &packages, &package_channel)?;
-            let keymap = osara_keymap_choice(
-                &resource_path,
-                platform,
-                replace_osara_keymap,
-                preserve_osara_keymap,
-            );
-            let report = execute_package_operation(
-                &resource_path,
-                &packages,
-                platform,
-                architecture,
-                &cache_dir,
-                &PackageOperationOptions {
-                    dry_run: !apply,
-                    allow_reaper_running,
-                    stage_unsupported,
-                    replace_osara_keymap: keymap.replace,
-                    package_variants: parse_package_variants(&package_variant)?,
-                    package_channels: channels.clone(),
-                    target_app_path,
-                    lock_path: None,
-                    force_reinstall_packages: Vec::new(),
-                },
-            )?;
-            warn_channel_fallbacks(&channels, item_channels(&report.items));
-            explain_osara_keymap_choice(&keymap, &report.items);
-            let report_path = selected_report_path(
-                Some(&resource_path),
-                report_path,
-                save_report,
-                "apply-packages",
-            )?;
-            save_optional_report(report_path.as_deref(), &report)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print_package_operation_report(&report);
-            }
-            // Everything installable was attempted; a per-package failure
-            // still yields a non-zero exit for scripts/CI. Distinct from the
-            // hard-error path (Err) and from preflight's exit(2).
-            if report.has_failures() {
-                std::process::exit(1);
-            }
-        }
-        Command::Setup {
-            resource_path,
-            target_app_path,
-            portable,
-            package,
-            architecture,
-            cache_dir,
-            apply,
-            allow_reaper_running,
-            stage_unsupported,
-            preserve_osara_keymap,
-            replace_osara_keymap,
-            package_variant,
-            package_channel,
-            accept_reapack_donation_notice,
-            config_step,
-            skip_config_step,
-            reaper_language,
-            report_path,
-            save_report,
-            json,
-        } => {
-            let platform =
-                Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
-            let architecture = architecture.map_or_else(Architecture::current, Into::into);
-            let packages = selected_package_ids(package, platform, Some(&resource_path));
-            ensure_reapack_donation_acknowledged(&packages, accept_reapack_donation_notice)?;
-            let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
-            let configuration_step_ids = resolve_configuration_step_ids(
-                &resource_path,
-                platform,
-                &packages,
-                &config_step,
-                &skip_config_step,
-            );
-            let channels =
-                effective_package_channels(Some(&resource_path), &packages, &package_channel)?;
-            let keymap = osara_keymap_choice(
-                &resource_path,
-                platform,
-                replace_osara_keymap,
-                preserve_osara_keymap,
-            );
-            let report = execute_setup_operation(
-                &resource_path,
-                &packages,
-                platform,
-                architecture,
-                &cache_dir,
-                &SetupOptions {
-                    dry_run: !apply,
-                    portable,
-                    allow_reaper_running,
-                    stage_unsupported,
-                    replace_osara_keymap: keymap.replace,
-                    package_variants: parse_package_variants(&package_variant)?,
-                    package_channels: channels.clone(),
-                    target_app_path,
-                    lock_path: None,
-                    force_reinstall_packages: Vec::new(),
-                    reaper_language_package: validate_reaper_language(reaper_language)?,
-                    configuration_step_ids,
-                },
-            )?;
-            warn_channel_fallbacks(&channels, item_channels(&report.package_operation.items));
-            explain_osara_keymap_choice(&keymap, &report.package_operation.items);
-            let report_path =
-                selected_report_path(Some(&resource_path), report_path, save_report, "setup")?;
-            save_optional_report(report_path.as_deref(), &report)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print_setup_report(&report);
-            }
-            if report.package_operation.has_failures() {
-                std::process::exit(1);
-            }
-        }
-        Command::Locales { locales_dir, json } => {
-            let locales = available_locales(&locales_dir)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&locales)?);
-            } else {
-                print_locales(&locales);
-            }
-        }
-        Command::Localize {
-            locale,
-            locales_dir,
-            id,
-            args,
-            json,
-        } => {
-            let localizer = Localizer::from_locale_dir(&locales_dir, &locale)?;
-            let owned_args = parse_localization_args(args)?;
-            let borrowed_args = owned_args
-                .iter()
-                .map(|(name, value)| (name.as_str(), value.as_str()))
-                .collect::<Vec<_>>();
-            let message = localizer.format(&id, &borrowed_args);
-            if json {
-                println!("{}", serde_json::to_string_pretty(&message)?);
-            } else {
-                print_localized_text(&message);
-            }
-        }
-        Command::PortableCheck { locales_dir, json } => {
-            let report = check_portable_runtime(&locales_dir)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print_portability_report(&report);
-            }
-        }
-        Command::SelfUpdate { command } => match command {
-            SelfUpdateCommand::Check { manifest_url, json } => {
-                let platform =
-                    Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
-                let report = check_self_update(platform, &manifest_url)?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                } else {
-                    print_self_update_report(&report);
-                    // Only the check command pays for the notes fetch: stage
-                    // and apply print the same report, and neither should
-                    // spend a round-trip on text nobody asked to read while
-                    // an update is being installed.
-                    print_self_update_release_notes(&report);
-                }
-            }
-            SelfUpdateCommand::Stage {
-                manifest_url,
-                staging_dir,
-                json,
-            } => {
-                let platform =
-                    Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
-                let staging_dir = staging_dir.unwrap_or_else(default_self_update_staging_dir);
-                let report = stage_self_update(platform, &manifest_url, &staging_dir)?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                } else {
-                    print_self_update_stage_report(&report);
-                }
-            }
-            SelfUpdateCommand::Apply {
-                manifest_url,
-                staging_dir,
-                install_root,
-                restart,
-                json,
-            } => {
-                let platform =
-                    Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
-                let staging_dir = staging_dir.unwrap_or_else(default_self_update_staging_dir);
-                let stage = stage_self_update(platform, &manifest_url, &staging_dir)?;
-                let report = apply_self_update(
-                    &stage,
-                    &ApplySelfUpdateOptions {
-                        install_root,
-                        install_target_basename: None,
-                        ..Default::default()
-                    },
-                )?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                } else {
-                    print_self_update_apply_report(&report);
-                }
-                if restart && !report.replaced_files.is_empty() {
-                    let pid = relaunch_current_executable()?;
-                    if !json {
-                        println!("Relaunched RABBIT with PID {pid}; exiting current process.");
-                    }
-                    return Ok(());
-                }
-            }
-        },
-        Command::Plan {
-            resource_path,
-            portable,
-            online,
-            format,
-            report_path,
-            save_report,
-            package_channel,
-        } => {
-            let platform =
-                Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
-            let installations = discover_installations(&DiscoveryOptions {
-                include_standard: true,
-                portable_roots: portable,
-            })?;
-            let explicit_resource_path = resource_path.clone();
-            let target = match resource_path.as_ref() {
-                Some(path) => installations
-                    .iter()
-                    .find(|installation| installation.resource_path == *path)
-                    .cloned(),
-                None => installations.first().cloned(),
-            };
-            let plan_report_resource_path = resource_path.clone().or_else(|| {
-                target
-                    .as_ref()
-                    .map(|installation| installation.resource_path.clone())
-            });
-            let detection_path = explicit_resource_path.or_else(|| {
-                target
-                    .as_ref()
-                    .map(|installation| installation.resource_path.clone())
-            });
-            let components = match detection_path.as_ref() {
-                Some(path) => detect_components(path, platform)?,
-                None => Vec::new(),
-            };
-
-            let desired = default_desired_package_ids();
-            let channels =
-                effective_package_channels(detection_path.as_deref(), &desired, &package_channel)?;
-            let (available, version_check_failures) = if online {
-                let report = fetch_latest_versions_on(&channels)?;
-                (report.packages, report.failures)
-            } else {
-                (Vec::new(), Vec::new())
-            };
-            let installed_channels = detection_path
-                .as_deref()
-                .map(rabbit_core::receipt::installed_channels_at)
-                .unwrap_or_default();
-            let mut plan = build_install_plan_with_installed_channels(
-                target,
-                &components,
-                &desired,
-                &available,
-                &installed_channels,
-            );
-            // Surface per-provider failures as plan notes instead of failing
-            // the whole plan: one unreachable upstream shouldn't block update
-            // guidance for everything else.
-            for failure in &version_check_failures {
-                plan.notes.push(format!(
-                    "The latest-version check for {} failed: {}. Install/update guidance for this package is incomplete in this plan.",
-                    failure.package_id, failure.message
-                ));
-            }
-            plan.notes.extend(channel_fallbacks(
-                &channels,
-                available
-                    .iter()
-                    .map(|package| (package.package_id.as_str(), package.channel.as_deref())),
-            ));
-            let report_path = selected_report_path(
-                plan_report_resource_path.as_deref(),
-                report_path,
-                save_report,
-                "plan",
-            )?;
-            save_optional_report(report_path.as_deref(), &plan)?;
-            match format {
-                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&plan)?),
-                OutputFormat::Text => print_plan(&plan),
-            }
         }
     }
+    Ok(())
+}
 
+fn run_plan(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::Plan {
+        resource_path,
+        portable,
+        online,
+        format,
+        report_path,
+        save_report,
+        package_channel,
+    } = command
+    else {
+        unreachable!("dispatched as Command::Plan");
+    };
+    let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
+    let installations = discover_installations(&DiscoveryOptions {
+        include_standard: true,
+        portable_roots: portable,
+    })?;
+    let explicit_resource_path = resource_path.clone();
+    let target = match resource_path.as_ref() {
+        Some(path) => installations
+            .iter()
+            .find(|installation| installation.resource_path == *path)
+            .cloned(),
+        None => installations.first().cloned(),
+    };
+    let plan_report_resource_path = resource_path.clone().or_else(|| {
+        target
+            .as_ref()
+            .map(|installation| installation.resource_path.clone())
+    });
+    let detection_path = explicit_resource_path.or_else(|| {
+        target
+            .as_ref()
+            .map(|installation| installation.resource_path.clone())
+    });
+    let components = match detection_path.as_ref() {
+        Some(path) => detect_components(path, platform)?,
+        None => Vec::new(),
+    };
+
+    let desired = default_desired_package_ids();
+    let channels =
+        effective_package_channels(detection_path.as_deref(), &desired, &package_channel)?;
+    let (available, version_check_failures) = if online {
+        let report = fetch_latest_versions_on(&channels)?;
+        (report.packages, report.failures)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let installed_channels = detection_path
+        .as_deref()
+        .map(rabbit_core::receipt::installed_channels_at)
+        .unwrap_or_default();
+    let mut plan = build_install_plan_with_installed_channels(
+        target,
+        &components,
+        &desired,
+        &available,
+        &installed_channels,
+    );
+    // Surface per-provider failures as plan notes instead of failing
+    // the whole plan: one unreachable upstream shouldn't block update
+    // guidance for everything else.
+    for failure in &version_check_failures {
+        plan.notes.push(format!(
+            "The latest-version check for {} failed: {}. Install/update guidance for this package is incomplete in this plan.",
+            failure.package_id, failure.message
+        ));
+    }
+    plan.notes.extend(channel_fallbacks(
+        &channels,
+        available
+            .iter()
+            .map(|package| (package.package_id.as_str(), package.channel.as_deref())),
+    ));
+    let report_path = selected_report_path(
+        plan_report_resource_path.as_deref(),
+        report_path,
+        save_report,
+        "plan",
+    )?;
+    save_optional_report(report_path.as_deref(), &plan)?;
+    match format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&plan)?),
+        OutputFormat::Text => print_plan(&plan),
+    }
     Ok(())
 }
 
@@ -2360,6 +2473,23 @@ mod tests {
     use clap::Parser;
 
     use super::{Cli, Command, DEFAULT_SELF_UPDATE_MANIFEST_URL, SelfUpdateCommand};
+
+    /// A command runs on the main thread, which gets 1 MB of stack on
+    /// Windows, and debug builds (tests included) use far more stack than
+    /// release builds. Dispatching from one big match once took more than
+    /// all of it; keep a command that loads every package manifest well
+    /// inside half of it.
+    #[test]
+    fn a_command_runs_within_half_the_windows_main_thread_stack() {
+        let cli = Cli::try_parse_from(["rabbit", "packages", "--json"]).unwrap();
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || super::run_with(cli).map_err(|error| error.to_string()))
+            .unwrap()
+            .join()
+            .expect("the command must not overflow its stack")
+            .unwrap();
+    }
 
     #[test]
     fn a_channel_that_resolved_to_the_regular_release_is_reported() {
