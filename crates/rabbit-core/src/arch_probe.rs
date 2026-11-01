@@ -51,11 +51,14 @@ fn architecture_from_bytes(data: &[u8]) -> Architecture {
     match object::Object::architecture(&file) {
         object::Architecture::I386 => Architecture::X86,
         object::Architecture::X86_64 => Architecture::X64,
-        // `object` collapses both `IMAGE_FILE_MACHINE_ARM64` and
-        // `IMAGE_FILE_MACHINE_ARM64EC` into `Aarch64`. The artifact resolver
-        // treats `Arm64` and `Arm64Ec` identically (both map to the same
-        // arm64ec asset on Windows), so the lossy mapping is fine — we
-        // canonicalise to `Arm64` and let the resolver decide.
+        // `object` maps the COFF Machine field only: `IMAGE_FILE_MACHINE_ARM64`
+        // (also what ARM64X images carry) and `IMAGE_FILE_MACHINE_ARM64EC`
+        // (used by .obj files) both become `Aarch64`, which we canonicalise
+        // to `Arm64`; the artifact resolver treats `Arm64` and `Arm64Ec`
+        // alike. A linked ARM64EC executable carries
+        // `IMAGE_FILE_MACHINE_AMD64` in its header (the EC identity lives in
+        // the load-config CHPE metadata, which `object` doesn't read), so it
+        // probes as `X64` above.
         object::Architecture::Aarch64 => Architecture::Arm64,
         _ => Architecture::Unknown,
     }
@@ -107,6 +110,43 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use tempfile::tempdir;
+
+    /// A minimal PE32+ image: a 64-byte DOS header pointing at NT headers
+    /// with a 112-byte optional header, no data directories and no sections.
+    fn write_pe64(path: &Path, machine: u16) {
+        let mut bytes = vec![0u8; 64];
+        bytes[0..2].copy_from_slice(b"MZ");
+        bytes[0x3c..0x40].copy_from_slice(&64u32.to_le_bytes()); // e_lfanew
+        bytes.extend_from_slice(b"PE\0\0");
+        bytes.extend_from_slice(&machine.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // NumberOfSections
+        bytes.extend_from_slice(&[0u8; 12]); // timestamp and symbol table
+        bytes.extend_from_slice(&112u16.to_le_bytes()); // SizeOfOptionalHeader
+        bytes.extend_from_slice(&0x0022u16.to_le_bytes()); // executable, large-address aware
+        let mut optional = [0u8; 112];
+        optional[0..2].copy_from_slice(&0x020bu16.to_le_bytes()); // PE32+
+        bytes.extend_from_slice(&optional);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn probes_pe_machine_types() {
+        let dir = tempdir().unwrap();
+        for (machine, expected) in [
+            (0x8664, Architecture::X64),   // AMD64, also linked ARM64EC images
+            (0xaa64, Architecture::Arm64), // ARM64 and ARM64X
+            (0xa641, Architecture::Arm64), // ARM64EC objects
+            (0x014c, Architecture::X86),
+        ] {
+            let path = dir.path().join(format!("reaper-{machine:04x}.exe"));
+            write_pe64(&path, machine);
+            assert_eq!(
+                probe_executable_architecture(&path),
+                expected,
+                "machine {machine:#06x}"
+            );
+        }
+    }
 
     #[test]
     fn probes_mach_o_fat_as_universal() {

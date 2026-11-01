@@ -37,9 +37,20 @@ from this file and posts it as the GitHub release body.
   text fields, dropdowns and the packages list now take their VoiceOver
   name from the label shown just before them, and VoiceOver can open
   context menus with VO+Shift+M.
+- RABBIT now checks download servers' certificates against the system's own
+  trust store (the Windows certificate store, the macOS keychain) instead
+  of a list built into RABBIT, which stays as a fallback on Windows.
+  Downloads now work with antivirus HTTPS scanning and on networks that
+  inspect HTTPS traffic with their own certificate, and a revoked
+  certificate is refused. On a network that blocks certificate revocation
+  checks, the first connection to a server can take up to about 10 seconds
+  longer.
 
 ### Fixed
 
+- RABBIT no longer misses a running REAPER whose location Windows only
+  reports as an empty path. It now asks you to close it, as it already did
+  when Windows reported no location at all.
 - On macOS, the group rows in the **Packages** list (**Packages**,
   **Additional software**, **Language packs**, **Configuration**) now show
   their names, and VoiceOver reads them. Before, a group row had only its

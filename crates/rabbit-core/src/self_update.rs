@@ -3,7 +3,6 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
@@ -226,7 +225,7 @@ pub fn default_self_update_staging_dir() -> PathBuf {
 }
 
 pub fn fetch_self_update_manifest(manifest_url: &str) -> Result<SelfUpdateManifest> {
-    let client = Client::builder()
+    let client = crate::http::client_builder()
         .user_agent(USER_AGENT)
         .build()
         .map_err(|source| RabbitError::Http {

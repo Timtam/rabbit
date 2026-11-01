@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sysinfo::{ProcessesToUpdate, System};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use crate::detection::{DiscoveryOptions, discover_installations};
 use crate::error::{RabbitError, Result};
@@ -132,8 +132,15 @@ pub fn ensure_resource_path_ready(resource_path: &Path, dry_run: bool) -> Result
 }
 
 pub fn running_reaper_processes(platform: Option<Platform>) -> Vec<RunningProcess> {
+    // Only the name and the executable path are read. Asking for nothing
+    // else keeps the scan short: it runs on the wizard's UI thread, and
+    // sysinfo no longer spreads it over a thread pool.
     let mut system = System::new();
-    system.refresh_processes(ProcessesToUpdate::All, true);
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet),
+    );
 
     system
         .processes()
@@ -144,7 +151,13 @@ pub fn running_reaper_processes(platform: Option<Platform>) -> Vec<RunningProces
                 Some(RunningProcess {
                     pid: pid.to_string(),
                     name,
-                    executable_path: process.exe().map(Path::to_path_buf),
+                    // Windows reports an empty path, not none, when it
+                    // opened the process but couldn't read its image name.
+                    // Treat that as unknown, which fails safe below.
+                    executable_path: process
+                        .exe()
+                        .filter(|path| !path.as_os_str().is_empty())
+                        .map(Path::to_path_buf),
                 })
             } else {
                 None
@@ -575,6 +588,36 @@ mod tests {
             allow_reaper_running: allow_running,
             target_app_path: target.map(PathBuf::from),
         }
+    }
+
+    /// What finding a running REAPER rests on: sysinfo names a process after
+    /// its executable and can tell where that executable is.
+    // Not Linux: there the name is the 15-character `comm`, shorter than
+    // test binary names.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn sysinfo_reports_own_process_name_and_exe() {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet),
+        );
+        let me = system
+            .process(Pid::from_u32(std::process::id()))
+            .expect("sysinfo should list the test process");
+        let exe = std::env::current_exe().unwrap();
+        assert!(
+            me.name().eq_ignore_ascii_case(exe.file_name().unwrap()),
+            "{:?}",
+            me.name()
+        );
+        let reported = me.exe().expect("exe path for our own process");
+        assert_eq!(
+            std::fs::canonicalize(reported).unwrap(),
+            std::fs::canonicalize(&exe).unwrap()
+        );
     }
 
     #[test]

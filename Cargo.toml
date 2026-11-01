@@ -29,13 +29,21 @@ panic = "abort"
 [workspace.dependencies]
 clap = { version = "4.5", features = ["derive"] }
 fluent-bundle = "0.16"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
+# reqwest is built with `rustls-no-provider`, and RABBIT installs ring (what
+# reqwest 0.12's `rustls-tls` used) in `rabbit_core::http::client_builder`.
+# reqwest's own `rustls` feature would compile aws-lc-rs instead, a second and
+# much larger C build on every target. Stay on reqwest's rustls 0.23 line, or
+# the provider lands in a rustls reqwest never reads; default features off,
+# because they include aws-lc-rs.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.10"
-sysinfo = "0.33"
+sha2 = "0.11"
+# Only the process list is used.
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 tempfile = "3.10"
-thiserror = "1.0"
+thiserror = "2"
 unic-langid = "0.9"
 # Pinned exactly: wxdragon's releases change behaviour and API in patch
 # versions (0.9.22 reworked DataView ownership), and the macOS package tree that
@@ -45,4 +53,4 @@ unic-langid = "0.9"
 # Cargo.lock holds all three at the same version; after any update, check they
 # still match.
 wxdragon = "=0.9.23"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }

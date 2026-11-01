@@ -1381,7 +1381,7 @@ fn artifact_from_href(
 /// `reqwest::blocking`'s default 30-second per-operation timeout — these are
 /// small responses and a hung fetch should fail fast.
 fn http_client() -> Result<Client> {
-    Client::builder()
+    crate::http::client_builder()
         .user_agent(USER_AGENT)
         .build()
         .map_err(|source| RabbitError::Http {
@@ -1417,7 +1417,7 @@ pub(crate) fn download_url_with_retries(
 /// client's `timeout` is per read/write operation, so this bounds how long a
 /// download may sit with NO bytes arriving — it does not cap total duration.
 fn download_http_client() -> Result<Client> {
-    Client::builder()
+    crate::http::client_builder()
         .user_agent(USER_AGENT)
         .timeout(DOWNLOAD_STALL_TIMEOUT)
         .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)

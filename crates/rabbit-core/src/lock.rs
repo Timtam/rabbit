@@ -4,7 +4,7 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::error::{IoPathContext, RabbitError, Result};
 
@@ -126,11 +126,14 @@ fn read_lock_holder(path: &Path) -> Option<PackageInstallLockMetadata> {
 }
 
 fn pid_is_alive(pid: u32) -> bool {
-    let mut system = System::new_with_specifics(
-        RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
+    let pid = Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
     );
-    system.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
-    system.process(Pid::from(pid as usize)).is_some()
+    system.process(pid).is_some()
 }
 
 fn lock_timestamp() -> String {
