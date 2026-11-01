@@ -35,8 +35,12 @@ pub struct InstallState {
     /// every package when it ships.
     ///
     /// Only the user's own verdict takes a package out again: ticking it in
-    /// the wizard (see [`record_package_opt_outs`]). Installing it does not
-    /// (see [`upsert_package_receipt`]).
+    /// the wizard (see [`record_package_opt_outs`]). Today the wizard only
+    /// sends that verdict for `remember_opt_out` packages, so a removed SWS
+    /// would stay in the set even after you ticked and installed it again;
+    /// uninstall must widen the wizard's accepted packages to every package
+    /// together with the readers. Installing does not clear it (see
+    /// [`upsert_package_receipt`]).
     ///
     /// Left out of the file entirely when empty, and read with
     /// `#[serde(default)]`, so receipts written by older RABBITs still load
@@ -297,10 +301,10 @@ pub struct PackageReceiptParams<'a> {
 /// it.
 ///
 /// This leaves `declined_packages` alone. That set only ever changes on the
-/// user's own verdict, and the wizard gives one whenever it installs a
-/// package: a ticked row clears the refusal through
-/// [`record_package_opt_outs`]. An install that comes without a verdict
-/// must not clear it either: the CLI's `--package` is a scope for one run,
+/// user's own verdict, which the wizard gives through
+/// [`record_package_opt_outs`] when a row is ticked (today for
+/// `remember_opt_out` packages only). An install that comes without a
+/// verdict must not clear it: the CLI's `--package` is a scope for one run,
 /// not a standing preference, so `rabbit setup --package langpack-de` must
 /// not forget that the wizard was told no.
 pub fn upsert_package_receipt(

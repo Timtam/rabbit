@@ -736,9 +736,11 @@ RABBIT's own changes: what each configuration step found or changed
 or the `langpack=` value the language step replaced). A package the user
 removes through RABBIT goes into `declined_packages`, the same set that holds
 the packages they left unticked, so it isn't ticked again on the next run.
-Only the user's own verdict takes it out again (ticking it in the wizard);
-installing it through `--package` does not, because that is a scope for one
-run, not a standing preference. These fields are optional and left out when
+Only the user's own verdict takes it out again (ticking it in the wizard,
+which today sends that verdict for `remember_opt_out` packages only and has
+to cover every package once uninstall ships); installing it through
+`--package` does not, because that is a scope for one run, not a standing
+preference. These fields are optional and left out when
 empty, so older RABBIT versions still read the file. OSARA's key map is always
 kept when OSARA is removed, so the receipt doesn't track a key map backup.
 
