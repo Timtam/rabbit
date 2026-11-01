@@ -82,6 +82,29 @@ fn running_reaper_for_target_with_processes(
     relevant_running_processes(resource_path, running_processes, target_app_path.as_deref())
 }
 
+/// Only the REAPER-running part of the install preflight, failing with the
+/// same [`RabbitError::PreflightFailed`] text the full preflight gives, so the
+/// wizard and the CLI recognise it the same way. For the step before vendor
+/// installers run: they change REAPER's folders too, but the full
+/// preflight's resource-folder and UserPlugins checks are about RABBIT's own
+/// file copies and run again before those.
+pub fn ensure_reaper_closed_with_processes(
+    resource_path: &Path,
+    target_app_path: Option<&Path>,
+    allow_reaper_running: bool,
+    running_processes: &[RunningProcess],
+) -> Result<()> {
+    let relevant_processes =
+        running_reaper_for_target_with_processes(resource_path, target_app_path, running_processes);
+    let check = reaper_process_check(&relevant_processes, allow_reaper_running);
+    if check.status == PreflightStatus::Fail {
+        return Err(RabbitError::PreflightFailed {
+            message: format!("{}: {}", check.name, check.message),
+        });
+    }
+    Ok(())
+}
+
 pub fn run_install_preflight(resource_path: &Path, options: &PreflightOptions) -> PreflightReport {
     run_install_preflight_with_processes(
         resource_path,
@@ -742,8 +765,17 @@ mod tests {
             let preflight_blocks = report.checks.iter().any(|check| {
                 check.name == super::REAPER_PROCESS_CHECK && check.status == PreflightStatus::Fail
             });
+            // The check that runs before vendor installers says the same,
+            // in the same words, so the wizard recognises it either way.
+            let closed = super::ensure_reaper_closed_with_processes(
+                dir.path(),
+                Some(&target),
+                false,
+                &processes,
+            );
             assert_eq!(!found.is_empty(), blocks, "{processes:?}");
             assert_eq!(preflight_blocks, blocks, "{processes:?}");
+            assert_eq!(closed.is_err(), blocks, "{processes:?}");
             if blocks {
                 assert!(
                     report
@@ -751,7 +783,23 @@ mod tests {
                         .starts_with(&format!("{}:", super::REAPER_PROCESS_CHECK)),
                     "the wizard recognises this failure by that prefix"
                 );
+                match closed {
+                    Err(crate::error::RabbitError::PreflightFailed { message }) => {
+                        assert_eq!(message, report.failure_message());
+                    }
+                    other => panic!("unexpected result: {other:?}"),
+                }
             }
+            // --allow-reaper-running turns the block into a go-ahead.
+            assert!(
+                super::ensure_reaper_closed_with_processes(
+                    dir.path(),
+                    Some(&target),
+                    true,
+                    &processes
+                )
+                .is_ok()
+            );
         }
     }
 

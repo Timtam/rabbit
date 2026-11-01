@@ -1784,6 +1784,9 @@ fn print_backup_sets(backup_sets: &[BackupSet]) {
         if let Some(manifest_path) = &backup_set.manifest_path {
             println!("  Manifest: {}", manifest_path.display());
         }
+        if let Some(warning) = &backup_set.warning {
+            println!("  Warning: {warning}");
+        }
         println!("  Files: {}", backup_set.files.len());
         for file in &backup_set.files {
             println!("    {}", file.display());
@@ -1809,6 +1812,12 @@ fn print_restore_backup_report(report: &RestoreBackupReport) {
         }
         println!("    Size: {}", action.size);
         println!("    SHA-256: {}", action.sha256);
+    }
+    for target in &report.skipped_targets {
+        println!(
+            "  Skipped: {} (its backup never finished, so the file was never changed)",
+            target.display()
+        );
     }
 }
 

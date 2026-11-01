@@ -1065,6 +1065,14 @@ Extension files:
 - Do not overwrite or delete user-created `reaKontrol/fxMaps` content during a
   ReaKontrol install or update.
 - Back up every overwritten file under `RABBIT/backups/<timestamp>/`.
+  Files from inside the resource folder keep their relative path in the
+  set; files from outside it (app2clap's CLAP folder) go under
+  `external/<n>/`, beside a `<file>.rabbit-origin` note of their original
+  path. Each manifest entry is saved, through a temp file and a rename,
+  before its copy starts and marked done after, so an interrupted run
+  still leaves a set that can be restored. Restore puts each file back at
+  its recorded path, refuses any path outside the resource folder and the
+  outside folders RABBIT installs into, and takes the install lock.
 - Keep a machine-readable operation report and a plain text report.
 - Treat non-writable targets as a planning error before downloading anything.
 - Do not request elevation unless the selected REAPER app install target

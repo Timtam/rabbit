@@ -48,6 +48,21 @@ from this file and posts it as the GitHub release body.
 
 ### Fixed
 
+- `rabbit restore-backup` now puts every file back where it came from.
+  Before, it put each file inside the REAPER resource folder, so a file from
+  outside it, such as app2clap's `app2clap.clap` from the CLAP folder, ended
+  up in a new `CLAP` folder there instead. A restore now writes nowhere but
+  the resource folder and the CLAP folder, and doesn't run while an install
+  into the same REAPER is running. Backups made from now on note each file
+  before copying it, so even a backup from an interrupted run can be
+  restored.
+- `rabbit backups` no longer fails when one backup's manifest is damaged.
+  It lists every backup and shows a warning on the damaged one.
+- `rabbit apply-packages` now checks that REAPER is closed before it runs any
+  installer, as `rabbit setup` and the wizard already did. Before, it ran
+  installers such as REAPER's and OSARA's while REAPER was open, and only
+  stopped at the first extension file. `--allow-reaper-running` still lets
+  it go ahead.
 - RABBIT no longer misses a running REAPER whose location Windows only
   reports as an empty path. It now asks you to close it, as it already did
   when Windows reported no location at all.

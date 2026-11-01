@@ -73,6 +73,11 @@ pub enum RabbitError {
     #[error("backup not found at {0}")]
     BackupNotFound(PathBuf),
 
+    /// A backup set names a place restore will not write to, or a copy it
+    /// will not read. Raised before any file is restored.
+    #[error("refusing to restore {path}: {reason}")]
+    BackupRestoreRefused { path: PathBuf, reason: String },
+
     #[error("no artifact found for {package_id} on {platform:?}/{architecture:?}")]
     NoArtifactFound {
         package_id: String,
