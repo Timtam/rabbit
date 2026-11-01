@@ -42,7 +42,7 @@ use wxdragon::widgets::SimpleBook;
 
 use crate::wx_app::close_guard::{
     CloseVerdict, InstallRunState, announce_stopping, close_verdict, confirm_stop_install,
-    show_close_blocked_by_self_update,
+    defer_close_dialog, show_close_blocked_by_self_update,
 };
 use crate::wx_app::globals::{
     arm_post_install_hook, fire_post_install_hook, install_ui_frame, install_ui_localizer,
@@ -984,11 +984,13 @@ pub fn run() {
                         // nothing to unwind.
                         event.skip(true);
                     }
+                    CloseVerdict::DialogOpen => {}
                     CloseVerdict::SelfUpdateInProgress => {
                         // Not a question: there is no answer that makes
                         // quitting safe here, so say what is happening
                         // instead of offering a choice RABBIT can't honour.
-                        show_close_blocked_by_self_update(&model_for_close);
+                        let model = Arc::clone(&model_for_close);
+                        defer_close_dialog(move || show_close_blocked_by_self_update(&model));
                     }
                     CloseVerdict::AlreadyStopping => {
                         // A second press while the first stop is still
@@ -996,25 +998,32 @@ pub fn run() {
                         announce_stopping(&widgets, &model_for_close);
                     }
                     CloseVerdict::Ask => {
-                        if !confirm_stop_install(&model_for_close) {
-                            return;
-                        }
-                        if !install_run.request_stop_and_close() {
-                            // The install finished while the question was on
-                            // screen, so there is nothing left to stop and
-                            // nobody left to close the window for us. Queue
-                            // the close for the next turn of the event loop
-                            // rather than re-entering this handler from
-                            // inside itself.
-                            wxdragon::call_after(Box::new(|| {
-                                with_ui_frame(|frame| frame.close(true));
-                            }));
-                            return;
-                        }
-                        // The button that raised the question is now the
-                        // wrong thing to press again.
-                        close_button.enable(false);
-                        announce_stopping(&widgets, &model_for_close);
+                        let model = Arc::clone(&model_for_close);
+                        let install_run = Arc::clone(&install_run);
+                        defer_close_dialog(move || {
+                            // The install may have finished before this turn
+                            // of the event loop came round, and then there is
+                            // nothing to ask about.
+                            if install_run.is_running() && !confirm_stop_install(&model) {
+                                return;
+                            }
+                            if !install_run.request_stop_and_close() {
+                                // The install finished before or while the
+                                // question was on screen, so there is nothing
+                                // left to stop and nobody left to close the
+                                // window for us. Queue the close for after
+                                // this dialog has been dismissed: until then
+                                // the close handler vetoes every request.
+                                wxdragon::call_after(Box::new(|| {
+                                    with_ui_frame(|frame| frame.close(true));
+                                }));
+                                return;
+                            }
+                            // The button that raised the question is now the
+                            // wrong thing to press again.
+                            close_button.enable(false);
+                            announce_stopping(&widgets, &model);
+                        });
                     }
                 }
                 // Every branch except `Allow` falls through without

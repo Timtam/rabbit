@@ -31,6 +31,20 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+### Changed
+
+- RABBIT now uses wxDragon 0.9.23, which brings wxWidgets 3.3.4. On macOS,
+  text fields, dropdowns and the packages list now take their VoiceOver
+  name from the label shown just before them, and VoiceOver can open
+  context menus with VO+Shift+M.
+
+### Fixed
+
+- On macOS, the group rows in the **Packages** list (**Packages**,
+  **Additional software**, **Language packs**, **Configuration**) now show
+  their names, and VoiceOver reads them. Before, a group row had only its
+  checkbox, so VoiceOver read it as a checkbox without a name.
+
 ## [0.4.4] - 2026-10-13
 
 ### Changed
