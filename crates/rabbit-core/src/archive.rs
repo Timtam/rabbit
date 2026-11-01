@@ -36,7 +36,7 @@ pub fn extract_user_plugin_from_archive(
         if !entry.is_file() {
             continue;
         }
-        let entry_name = entry.name().to_string();
+        let entry_name = zip_entry_name(&entry, archive_path)?;
         let Some(basename) = Path::new(&entry_name)
             .file_name()
             .and_then(|name| name.to_str())
@@ -99,6 +99,23 @@ fn matches_user_plugin_file(file_name: &str, spec: &PackageSpec) -> bool {
     prefix_match && suffix_match
 }
 
+/// The entry's name as text. zip 9 decodes it on every call (UTF-8 when the
+/// bytes are valid UTF-8, CP437 otherwise) and returns a `Result`. It can't
+/// fail in 9.2, but if it ever does, report an unreadable archive rather than
+/// skip an entry that might be the one we want.
+fn zip_entry_name(
+    entry: &zip::read::ZipFile<'_, BufReader<fs::File>>,
+    archive: &Path,
+) -> Result<String> {
+    entry
+        .name()
+        .map(std::borrow::Cow::into_owned)
+        .map_err(|source| RabbitError::ArchiveRead {
+            archive: archive.to_path_buf(),
+            message: source.to_string(),
+        })
+}
+
 /// Extract every file whose immediate parent directory is `bin` (case
 /// insensitive) into `extract_dir`, flattening the layout. Used by the
 /// FFmpeg pipeline: BtbN's archives lay the runtime DLLs out under a
@@ -132,7 +149,7 @@ pub fn extract_bin_directory_from_archive(
         if !entry.is_file() {
             continue;
         }
-        let entry_name = entry.name().to_string();
+        let entry_name = zip_entry_name(&entry, archive_path)?;
         let entry_path = Path::new(&entry_name);
         let parent_is_bin = entry_path
             .parent()
@@ -202,8 +219,8 @@ pub fn extract_bin_directory_from_seven_zip_archive(
         |entry, reader, _dest| {
             // Skip directory entries — we only flatten files. The 7z
             // crate's callback is called for each entry; returning
-            // `Ok(true)` continues iteration without writing anything,
-            // returning `Ok(false)` aborts.
+            // `Ok(true)` continues with the next one without writing
+            // anything.
             if entry.is_directory() {
                 return Ok(true);
             }
@@ -229,14 +246,20 @@ pub fn extract_bin_directory_from_seven_zip_archive(
             let target = extract_dir_owned.join(&basename);
             // Translate any std::io error into a RabbitError; the 7z
             // crate's callback expects a sevenz_rust2::Error so we
-            // stash the typed error in extract_error and abort the
-            // walk by returning Ok(false). The outer code surfaces
-            // the stashed error after `decompress_file_with_extract_fn`
-            // returns.
+            // stash the typed error in extract_error, keeping the first
+            // one, and stop the walk with an error. `Ok(false)` would
+            // only end the current solid block and carry on with the
+            // next. The outer code surfaces the stashed error after
+            // `decompress_file_with_extract_fn` returns.
             macro_rules! bail_with {
                 ($error:expr) => {{
-                    *extract_error.borrow_mut() = Some($error);
-                    return Ok(false);
+                    let mut slot = extract_error.borrow_mut();
+                    if slot.is_none() {
+                        *slot = Some($error);
+                    }
+                    return Err(sevenz_rust2::Error::Other(std::borrow::Cow::Borrowed(
+                        "extraction stopped after an error",
+                    )));
                 }};
             }
 
@@ -323,7 +346,7 @@ pub fn extract_all_files_flat(archive_path: &Path, extract_dir: &Path) -> Result
         if !entry.is_file() {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = zip_entry_name(&entry, archive_path)?;
         let Some(basename) = Path::new(&name)
             .file_name()
             .and_then(|name| name.to_str())
@@ -388,7 +411,10 @@ pub fn extract_zipped_installer(zip_path: &Path) -> Result<PathBuf> {
     let installers: Vec<usize> = (0..archive.len())
         .filter(|index| {
             archive.by_index(*index).is_ok_and(|entry| {
-                entry.is_file() && entry.name().to_ascii_lowercase().ends_with(".exe")
+                entry.is_file()
+                    && entry
+                        .name()
+                        .is_ok_and(|name| name.to_ascii_lowercase().ends_with(".exe"))
             })
         })
         .collect();
@@ -407,8 +433,9 @@ pub fn extract_zipped_installer(zip_path: &Path) -> Result<PathBuf> {
             archive: zip_path.to_path_buf(),
             message: source.to_string(),
         })?;
+    let entry_name = zip_entry_name(&entry, zip_path)?;
     // Only the file name: never trust a path from inside an archive.
-    let name = Path::new(entry.name())
+    let name = Path::new(&entry_name)
         .file_name()
         .map(|name| name.to_os_string())
         .ok_or_else(|| RabbitError::ArchiveRead {
@@ -453,7 +480,7 @@ pub fn extract_osara_macos_assets(
         if !entry.is_file() {
             continue;
         }
-        let entry_name = entry.name().to_string();
+        let entry_name = zip_entry_name(&entry, archive_path)?;
         let Some(suffix) = osara_resources_suffix(&entry_name) else {
             continue;
         };
@@ -503,8 +530,9 @@ mod tests {
     use zip::write::SimpleFileOptions;
 
     use super::{
-        extract_bin_directory_from_archive, extract_osara_macos_assets,
-        extract_user_plugin_from_archive, extract_zipped_installer, osara_resources_suffix,
+        extract_bin_directory_from_archive, extract_bin_directory_from_seven_zip_archive,
+        extract_osara_macos_assets, extract_user_plugin_from_archive, extract_zipped_installer,
+        osara_resources_suffix,
     };
     use crate::error::RabbitError;
     use crate::model::Platform;
@@ -816,6 +844,146 @@ mod tests {
             error,
             RabbitError::ArchiveMissingExtensionBinary { .. }
         ));
+    }
+
+    /// Real downloads compress their entries; the other tests store them.
+    #[test]
+    fn extracts_a_deflated_entry() {
+        let dir = tempdir().unwrap();
+        let archive_path = dir.path().join("reaKontrol_windows_test.zip");
+        let payload: Vec<u8> = (0..64 * 1024).map(|i| (i % 251) as u8).collect();
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file("README.md", options).unwrap();
+        writer.write_all(b"docs").unwrap();
+        writer.start_file("reaper_kontrol.dll", options).unwrap();
+        writer.write_all(&payload).unwrap();
+        writer.finish().unwrap();
+        assert!(std::fs::metadata(&archive_path).unwrap().len() < payload.len() as u64);
+
+        let spec = package_specs_by_id(Platform::Windows)
+            .remove(PACKAGE_REAKONTROL)
+            .unwrap();
+        let extracted =
+            extract_user_plugin_from_archive(&archive_path, &spec, &dir.path().join("extract"))
+                .unwrap();
+
+        assert_eq!(std::fs::read(&extracted.extracted_path).unwrap(), payload);
+    }
+
+    /// A name without the zip's UTF-8 flag is CP437, as Windows Explorer and
+    /// older tools write it: 0xA4 is ñ.
+    #[test]
+    fn decodes_a_cp437_entry_name() {
+        let dir = tempdir().unwrap();
+        let archive_path = dir.path().join("langpack.zip");
+        write_test_archive(
+            &archive_path,
+            &[("EspaXol.ReaperLangPack", b"langpack-bytes")],
+        );
+        // The writer sets no UTF-8 flag for an ASCII name; swap the
+        // placeholder for the CP437 byte in both headers.
+        let mut bytes = std::fs::read(&archive_path).unwrap();
+        let mut patched = 0;
+        for at in 0..bytes.len() - 7 {
+            if &bytes[at..at + 7] == b"EspaXol" {
+                bytes[at + 4] = 0xA4;
+                patched += 1;
+            }
+        }
+        assert_eq!(patched, 2);
+        std::fs::write(&archive_path, bytes).unwrap();
+
+        let mut spec = package_specs_by_id(Platform::Windows)
+            .remove(PACKAGE_REAKONTROL)
+            .unwrap();
+        spec.user_plugin_prefixes = Vec::new();
+        spec.user_plugin_suffixes = vec![".ReaperLangPack".to_string()];
+        let extracted =
+            extract_user_plugin_from_archive(&archive_path, &spec, &dir.path().join("extract"))
+                .unwrap();
+
+        assert_eq!(extracted.file_name, "Espa\u{f1}ol.ReaperLangPack");
+    }
+
+    /// FFmpeg's .7z keeps everything in one solid block, so entries RABBIT
+    /// skips sit before and between the ones it extracts.
+    #[test]
+    fn seven_zip_bin_extraction_skips_unread_entries_in_a_solid_block() {
+        let dir = tempdir().unwrap();
+        let archive_path = dir.path().join("ffmpeg-test.7z");
+        write_test_seven_zip(
+            &archive_path,
+            &[
+                ("ffmpeg-n8.0/LICENSE.txt", b"license-text"),
+                ("ffmpeg-n8.0/bin/avcodec-62.dll", b"avcodec"),
+                ("ffmpeg-n8.0/doc/README.md", b"docs"),
+                ("ffmpeg-n8.0/bin/avformat-62.dll", b"avformat"),
+            ],
+        );
+
+        let spec = package_specs_by_id(Platform::Windows)
+            .remove(PACKAGE_FFMPEG)
+            .unwrap();
+        let extract_dir = dir.path().join("extract");
+        let extracted =
+            extract_bin_directory_from_seven_zip_archive(&archive_path, &spec, &extract_dir)
+                .unwrap();
+
+        let names: Vec<_> = extracted
+            .iter()
+            .map(|item| item.file_name.as_str())
+            .collect();
+        assert_eq!(names, ["avcodec-62.dll", "avformat-62.dll"]);
+        assert_eq!(
+            std::fs::read(extract_dir.join("avcodec-62.dll")).unwrap(),
+            b"avcodec"
+        );
+        assert_eq!(
+            std::fs::read(extract_dir.join("avformat-62.dll")).unwrap(),
+            b"avformat"
+        );
+        assert!(!extract_dir.join("LICENSE.txt").exists());
+    }
+
+    #[test]
+    fn seven_zip_bin_extraction_errors_when_archive_lacks_bin_entries() {
+        let dir = tempdir().unwrap();
+        let archive_path = dir.path().join("no-bin.7z");
+        write_test_seven_zip(
+            &archive_path,
+            &[("ffmpeg-n8.0/include/libavformat/avformat.h", b"header")],
+        );
+
+        let spec = package_specs_by_id(Platform::Windows)
+            .remove(PACKAGE_FFMPEG)
+            .unwrap();
+        let error = extract_bin_directory_from_seven_zip_archive(&archive_path, &spec, dir.path())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RabbitError::ArchiveMissingExtensionBinary { .. }
+        ));
+    }
+
+    /// One solid LZMA2 block holding every entry.
+    fn write_test_seven_zip(path: &std::path::Path, entries: &[(&str, &[u8])]) {
+        let mut writer = sevenz_rust2::ArchiveWriter::create(path).unwrap();
+        writer
+            .push_archive_entries(
+                entries
+                    .iter()
+                    .map(|(name, _)| sevenz_rust2::ArchiveEntry::new_file(name))
+                    .collect(),
+                entries
+                    .iter()
+                    .map(|(_, data)| sevenz_rust2::SourceReader::from(*data))
+                    .collect(),
+            )
+            .unwrap();
+        writer.finish().unwrap();
     }
 
     fn write_test_archive(path: &std::path::Path, entries: &[(&str, &[u8])]) {

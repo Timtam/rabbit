@@ -1051,7 +1051,7 @@ pub(crate) fn jaws_for_reaper_version_from_filename(name: &str) -> Option<Versio
 }
 
 pub(crate) fn build_http_client() -> Result<Client> {
-    Client::builder()
+    crate::http::client_builder()
         .user_agent(USER_AGENT)
         .build()
         .map_err(|source| RabbitError::Http {

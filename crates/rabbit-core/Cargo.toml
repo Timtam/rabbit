@@ -11,7 +11,7 @@ fluent-bundle.workspace = true
 # `arch_probe.rs`. Default features off, only the readers we need on:
 # Mach-O (REAPER on macOS, including fat/universal binaries) and PE (REAPER
 # on Windows) — keeps the dep small versus pulling in ELF, Wasm, COFF, etc.
-object = { version = "0.36", default-features = false, features = ["read_core", "macho", "pe", "std"] }
+object = { version = "0.40", default-features = false, features = ["read_core", "macho", "pe", "std"] }
 rabbit-platform = { path = "../rabbit-platform" }
 # Data-driven version/detection rules (HTML scrape, binary-string scan) carry
 # regex patterns in the manifest. Default features (so manifest patterns can
@@ -20,7 +20,8 @@ rabbit-platform = { path = "../rabbit-platform" }
 # ReDoS-safe.
 regex = "1"
 reqwest.workspace = true
-rusqlite = { version = "0.37", features = ["bundled"] }
+rustls.workspace = true
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
 # Pure-Rust 7z reader. We need it specifically for the FFmpeg shared
@@ -31,13 +32,18 @@ serde_json.workspace = true
 # `lzma-rust2` transitive dep). The `util` feature is what surfaces
 # `decompress_file_with_extract_fn` — we use it as the entry point for
 # selective bin/ extraction.
-sevenz-rust2 = { version = "0.21", default-features = false, features = ["util"] }
+sevenz-rust2 = { version = "0.24", default-features = false, features = ["util"] }
 sha2.workspace = true
 sysinfo.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 unic-langid.workspace = true
 zip.workspace = true
+
+[dev-dependencies]
+# Tests build solid .7z fixtures. With feature resolver 2+ the writer stays
+# out of the shipped binary.
+sevenz-rust2 = { version = "0.24", default-features = false, features = ["util", "compress"] }
 
 # macOS-only: renamex_np(RENAME_SWAP) for the atomic app-bundle exchange in
 # the self-updater.
