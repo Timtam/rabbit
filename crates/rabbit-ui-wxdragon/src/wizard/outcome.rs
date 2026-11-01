@@ -222,11 +222,16 @@ pub fn summarize_wizard_error(
 /// page. A running REAPER gets a plain, translated sentence: it is the
 /// common case, and the raw preflight text ("reaper-process: Close REAPER
 /// before installing extensions: reaper.exe (5096).") reads like a log
-/// line. Anything else is the error's own message, which beats the
+/// line. Another RABBIT working on the same REAPER gets one too: the raw
+/// text names a lock file and a process id, and what the user can do is
+/// wait. Anything else is the error's own message, which beats the
 /// "Review the error below" with nothing below that issue #32 reported.
+/// Installs and uninstalls share the lock and the REAPER check, so both
+/// come here.
 pub fn wizard_error_reason(model: &WizardModel, error: &RabbitError) -> String {
     let reaper_check = format!("{}:", rabbit_core::preflight::REAPER_PROCESS_CHECK);
     match error {
+        RabbitError::PackageInstallInProgress { .. } => model.text.error_lock_held.clone(),
         RabbitError::PreflightFailed { message } if message.contains(&reaper_check) => {
             // A preflight lists every check that failed, joined by "; ".
             // Keep the others in view: closing REAPER would not fix them,

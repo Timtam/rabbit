@@ -18,7 +18,7 @@ use crate::wizard::*;
 
 /// A plan item for `package_id` with nothing but its removability set, as
 /// the plan builder leaves a package it finds installed.
-fn item(package_id: &str, removability: Removability) -> UninstallPlanItem {
+pub(super) fn item(package_id: &str, removability: Removability) -> UninstallPlanItem {
     UninstallPlanItem {
         package_id: package_id.to_string(),
         display_name: package_id.to_string(),
@@ -45,7 +45,7 @@ fn item(package_id: &str, removability: Removability) -> UninstallPlanItem {
 
 /// SWS as the plan describes a copy RABBIT can remove, with its manifest's
 /// sentences and a warning because OSARA is installed.
-fn removable_sws() -> UninstallPlanItem {
+pub(super) fn removable_sws() -> UninstallPlanItem {
     UninstallPlanItem {
         summary: Some(UninstallSummary {
             removes_key: "uninstall-summary-sws-removes".to_string(),
@@ -59,7 +59,7 @@ fn removable_sws() -> UninstallPlanItem {
     }
 }
 
-fn plan(items: Vec<UninstallPlanItem>) -> UninstallPlan {
+pub(super) fn plan(items: Vec<UninstallPlanItem>) -> UninstallPlan {
     UninstallPlan {
         resource_path: PathBuf::from("C:/REAPER"),
         platform: Platform::Windows,
@@ -480,7 +480,12 @@ fn rows_build_in_every_locale_without_missing_text() {
             &text.uninstall_list_label,
             &text.uninstall_empty,
             &text.uninstall_empty_details,
-            &text.uninstall_not_ready_title,
+            &text.progress_uninstall_heading,
+            &text.progress_status_uninstall_running,
+            &text.progress_status_uninstall_cancelling,
+            &text.close_during_uninstall_title,
+            &text.close_during_uninstall_body,
+            &text.error_lock_held,
         ] {
             assert!(
                 !label.is_empty() && !label.starts_with("wizard-"),
@@ -525,31 +530,6 @@ fn the_wizard_plan_hands_over_its_detections() {
             .iter()
             .filter(|detection| detection.package_id == "langpack-de")
             .all(|detection| !detection.installed)
-    );
-}
-
-/// The message's example must run as typed: `--resource-path` and
-/// `--package` are required. It removes what was ticked, settings too when
-/// that was ticked.
-#[test]
-fn the_not_ready_message_names_a_command_that_runs() {
-    let resource = std::path::Path::new(r"C:\Users\Test\AppData\Roaming\REAPER");
-    let ticked = ["sws".to_string(), "reapack".to_string()];
-    for &locale in embedded_locales() {
-        let localizer = Localizer::embedded(locale).unwrap();
-        let body = uninstall_not_ready_body(&localizer, resource, &ticked, true);
-        assert!(
-            body.contains(
-                r#"rabbit uninstall --resource-path "C:\Users\Test\AppData\Roaming\REAPER" --package sws --package reapack --remove-settings"#
-            ),
-            "{locale}: {body}"
-        );
-        assert!(body.contains("--apply"), "{locale}: {body}");
-        assert!(!body.contains('{'), "{locale}: {body}");
-    }
-    assert_eq!(
-        uninstall_cli_example(resource, &[], false),
-        r#"rabbit uninstall --resource-path "C:\Users\Test\AppData\Roaming\REAPER" --package sws"#
     );
 }
 
@@ -601,7 +581,7 @@ fn the_uninstall_button_has_its_own_run_flag() {
 }
 
 /// A target RABBIT can write to, at a folder that needn't exist.
-fn target(writable: bool) -> TargetRow {
+pub(super) fn target(writable: bool) -> TargetRow {
     let (_, model) = langpack_model(rabbit_core::plan::PlanActionKind::Install);
     TargetRow {
         path: PathBuf::from("C:/REAPER"),
@@ -610,7 +590,7 @@ fn target(writable: bool) -> TargetRow {
     }
 }
 
-fn list_for(items: Vec<UninstallPlanItem>) -> WizardUninstallList {
+pub(super) fn list_for(items: Vec<UninstallPlanItem>) -> WizardUninstallList {
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
     uninstall_list_from_plan(
         &localizer,
@@ -619,7 +599,7 @@ fn list_for(items: Vec<UninstallPlanItem>) -> WizardUninstallList {
     )
 }
 
-fn tick(list: &mut WizardUninstallList, package_id: &str) {
+pub(super) fn tick(list: &mut WizardUninstallList, package_id: &str) {
     let row = list
         .rows
         .iter_mut()
@@ -869,7 +849,7 @@ fn without_a_target_review_says_so_and_nothing_starts() {
 // "Also remove settings".
 // ---------------------------------------------------------------------------
 
-fn kept(path: &str, note_key: &str, removable_with_settings: bool) -> KeptPath {
+pub(super) fn kept(path: &str, note_key: &str, removable_with_settings: bool) -> KeptPath {
     KeptPath {
         path: PathBuf::from(path),
         reason: KeptReason::UserData,
@@ -881,7 +861,7 @@ fn kept(path: &str, note_key: &str, removable_with_settings: bool) -> KeptPath {
 
 /// SWS with settings the option could remove, two of them described alike,
 /// and one entry the option never takes.
-fn sws_with_settings() -> UninstallPlanItem {
+pub(super) fn sws_with_settings() -> UninstallPlanItem {
     UninstallPlanItem {
         kept: vec![
             kept("C:/REAPER/Data/Grooves", "uninstall-kept-sws-grooves", true),

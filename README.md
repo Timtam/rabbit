@@ -194,6 +194,11 @@ Launch the downloaded executable. The wizard walks you through:
 When it finishes, you can launch REAPER straight from the wizard or open the
 saved report.
 
+To uninstall instead, switch to the **Uninstall** tab on the package page
+(Ctrl+Tab), tick what should go, and press **Uninstall** on the review page.
+Removed files move into a backup rather than being deleted, and the last page
+says how to get a package back.
+
 ### Switching the language
 
 Use the language picker at the bottom of the window. Currently bundled

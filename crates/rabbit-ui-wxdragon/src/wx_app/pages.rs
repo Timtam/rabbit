@@ -138,7 +138,7 @@ pub(crate) fn add_pages(
     book.add_page(&review_page, &model.steps[REVIEW_STEP].label, false, None);
 
     let progress_page = new_wizard_page(book);
-    let (progress_status, progress_gauge, progress_details) =
+    let (progress_heading, progress_status, progress_gauge, progress_details) =
         build_progress_page(&progress_page, model);
     book.add_page(
         &progress_page,
@@ -176,6 +176,7 @@ pub(crate) fn add_pages(
         reapack_ack_confirm,
         review_heading,
         review_text,
+        progress_heading,
         progress_status,
         progress_gauge,
         progress_details,
@@ -647,12 +648,14 @@ pub(crate) fn build_review_page(page: &WizardPage, model: &WizardModel) -> (Stat
     (heading, review)
 }
 
+/// Build the Progress page: its heading, which names what the run does, the
+/// status line, the gauge and the log.
 pub(crate) fn build_progress_page(
     page: &WizardPage,
     model: &WizardModel,
-) -> (StaticText, Gauge, TextCtrl) {
+) -> (StaticText, StaticText, Gauge, TextCtrl) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
-    add_heading(
+    let heading = add_heading(
         page,
         &sizer,
         &model.text.progress_heading,
@@ -681,7 +684,7 @@ pub(crate) fn build_progress_page(
     sizer.add(&details, 1, SizerFlag::All | SizerFlag::Expand, 6);
 
     page.set_sizer(sizer, true);
-    (status, gauge, details)
+    (heading, status, gauge, details)
 }
 
 pub(crate) fn build_done_page(

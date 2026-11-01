@@ -11,3 +11,4 @@ mod summary;
 mod support;
 mod target;
 mod uninstall;
+mod uninstall_run;

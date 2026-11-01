@@ -93,8 +93,6 @@ pub struct WizardText {
     /// it is built as they change.
     pub uninstall_settings_heading: String,
     pub uninstall_remove_settings_label: String,
-    /// What the Uninstall button says while the wizard can't uninstall.
-    pub uninstall_not_ready_title: String,
     pub packages_row_checked: String,
     pub packages_row_unchecked: String,
     pub packages_tree_group_label: String,
@@ -159,6 +157,12 @@ pub struct WizardText {
     pub progress_details_idle: String,
     pub progress_details_starting: String,
     pub progress_details_cache_prefix: String,
+    /// The progress page's heading and first status line while an
+    /// uninstall runs, and what the status line says once the user asked
+    /// to stop one: a removal stops after the package, not the step.
+    pub progress_uninstall_heading: String,
+    pub progress_status_uninstall_running: String,
+    pub progress_status_uninstall_cancelling: String,
     pub done_heading: String,
     pub done_status: String,
     pub done_status_success: String,
@@ -167,6 +171,9 @@ pub struct WizardText {
     pub reaper_running_title: String,
     pub reaper_running_body: String,
     pub error_reaper_running: String,
+    /// Why a run failed when another RABBIT holds the target's install
+    /// lock, installing or uninstalling there.
+    pub error_lock_held: String,
     pub done_status_cancelled: String,
     pub done_status_no_packages: String,
     pub done_show_details_label: String,
@@ -181,6 +188,9 @@ pub struct WizardText {
     pub self_update_status_checking: String,
     pub close_during_install_title: String,
     pub close_during_install_body: String,
+    /// The same question while an uninstall runs.
+    pub close_during_uninstall_title: String,
+    pub close_during_uninstall_body: String,
     pub close_during_self_update_title: String,
     pub close_during_self_update_body: String,
     pub expert_enable_title: String,

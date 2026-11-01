@@ -164,22 +164,6 @@ pub(crate) fn show_warning(title: &str, body: &str) {
     });
 }
 
-/// A plain message with an OK button, parented on the wizard window, for
-/// news that isn't a warning. Every screen reader reads it when it opens,
-/// and focus goes back where it was when it closes.
-pub(crate) fn show_information(title: &str, body: &str) {
-    with_ui_frame(|frame| {
-        let dialog = MessageDialog::builder(frame, body, title)
-            .with_style(
-                MessageDialogStyle::OK
-                    | MessageDialogStyle::IconInformation
-                    | MessageDialogStyle::Centre,
-            )
-            .build();
-        dialog.show_modal();
-    });
-}
-
 pub(crate) fn arm_post_install_hook(callback: impl FnOnce() + 'static) {
     POST_INSTALL_HOOK.with(|cell| {
         *cell.borrow_mut() = Some(Box::new(callback));

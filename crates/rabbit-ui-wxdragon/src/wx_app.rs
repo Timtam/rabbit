@@ -27,8 +27,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    UiBootstrapOptions, WizardInstallOptions, WizardMode, WizardOutcomeReport, WizardUninstallList,
-    build_review_preview_for_package_rows, build_uninstall_review_preview,
+    ProgressUiState, UiBootstrapOptions, WizardInstallOptions, WizardMode, WizardOutcomeReport,
+    WizardUninstallList, build_review_preview_for_package_rows, build_uninstall_review_preview,
     execute_wizard_install_with_progress, inactive_tab_note, install_request_from_target_and_rows,
     load_wizard_model, localizer_from_options, reapack_selected_for_install_or_update,
     recompute_configuration_row_availability, refreshed_target_row, run_wizard_self_update_check,
@@ -59,10 +59,10 @@ use crate::wx_app::packages_tabs::{
     bind_packages_tab_switching, focus_uninstall_list, selected_wizard_mode,
 };
 use crate::wx_app::pages::{add_pages, build_language_footer};
-use crate::wx_app::progress_ui::{ProgressUiState, apply_progress_event_to_ui};
+use crate::wx_app::progress_ui::apply_progress_event_to_ui;
 use crate::wx_app::self_update_ui::{SelfUpdateUiState, render_self_update_status};
 use crate::wx_app::shell::{launch_reaper, open_resource_folder, seat_macos_apple_languages};
-use crate::wx_app::uninstall_run::start_uninstall;
+use crate::wx_app::uninstall_run::{UninstallNavigation, UninstallRunUi, start_uninstall};
 use crate::wx_app::version_check::{VersionCheckUi, start_version_check};
 use crate::wx_app::widgets::{
     append_done_status, bind_done_page_enter_closes, bind_reapack_ack_navigation_updates,
@@ -70,8 +70,8 @@ use crate::wx_app::widgets::{
     checked_package_indices, clone_last_path, clone_last_resource_path, effective_run_enabled,
     osara_keymap_choice, planned_reaper_launch_path_for_target, progress_details_for_start,
     reapack_ack_confirmed, refresh_target_choice, refreshed_target_index, selected_target_row,
-    set_last_path, set_last_report, set_last_resource_path, step_status, target_is_valid,
-    update_navigation,
+    set_heading, set_last_path, set_last_report, set_last_resource_path, step_status,
+    target_is_valid, update_navigation,
 };
 
 pub(crate) const TARGET_STEP: usize = 0;
@@ -579,6 +579,130 @@ pub fn run() {
             let uninstall_items = Rc::clone(&uninstall_items);
             let wizard_mode = Rc::clone(&wizard_mode);
             let review_can_uninstall = Rc::clone(&review_can_uninstall);
+            // Rebuilds both Packages tabs from fresh detection after a run,
+            // an install or an uninstall. The run arms it as the post-run
+            // hook, which holds this UI-thread `Rc<RefCell>` state so the
+            // worker's `call_after` completion can refresh it without
+            // smuggling non-Send references across threads. It re-detects
+            // the selected target, plans against the fresh receipts, and
+            // rebuilds the cached state and both lists in place, never the
+            // tab selection or focus. After an uninstall the Install tab
+            // offers what went again, unticked, because the run recorded it
+            // as declined.
+            let rescan_after_run: Rc<dyn Fn()> = {
+                let model = Arc::clone(&model);
+                let package_rows = Rc::clone(&package_rows);
+                let package_notes = Rc::clone(&package_notes);
+                let package_items = Rc::clone(&package_items);
+                let configuration_rows = Rc::clone(&configuration_rows);
+                let can_install = Rc::clone(&can_install);
+                let review_can_install = Rc::clone(&review_can_install);
+                let review_can_uninstall = Rc::clone(&review_can_uninstall);
+                let last_reaper_app_path = Arc::clone(&last_reaper_app_path);
+                let last_resource_path = Arc::clone(&last_resource_path);
+                let uninstall_list = Rc::clone(&uninstall_list);
+                let uninstall_items = Rc::clone(&uninstall_items);
+                Rc::new(move || {
+                    let Some(target) = selected_target_row(&model, &widgets) else {
+                        return;
+                    };
+                    let refreshed_target = refreshed_target_row(&model, &target);
+                    // Plan against the versions this run installed from,
+                    // so a development build just installed reads as
+                    // current instead of as something to replace.
+                    let plan = match RUN_AVAILABLE.with(|cell| cell.borrow().clone()) {
+                        Some(available) => wizard_package_plan_for_target_with_available(
+                            &model,
+                            Some(&refreshed_target),
+                            &available,
+                        ),
+                        None => wizard_package_plan_for_target(&model, Some(&refreshed_target)),
+                    };
+                    let Ok(plan) = plan else {
+                        return;
+                    };
+                    // The Uninstall list from the same fresh detection.
+                    // Rebuilt in place; the tab selection stays.
+                    *uninstall_list.borrow_mut() =
+                        uninstall_list_for_target(&model, &refreshed_target, &plan.detections);
+                    rebuild_uninstall_list_widgets(
+                        &widgets,
+                        &uninstall_items,
+                        &model,
+                        &uninstall_list.borrow(),
+                    );
+                    *package_rows.borrow_mut() = plan.package_rows;
+                    *package_notes.borrow_mut() = plan.notes;
+                    // Recompute configuration row availability against
+                    // the freshly-rebuilt package plan (e.g. ReaPack
+                    // just got installed → REAPER Accessibility step
+                    // becomes available).
+                    if let Ok(localizer) = localizer_from_options(&model.bootstrap_options) {
+                        recompute_configuration_row_availability(
+                            &localizer,
+                            &package_rows.borrow(),
+                            Some(&refreshed_target.path),
+                            &mut configuration_rows.borrow_mut(),
+                        );
+                    }
+                    can_install.set(plan.can_install);
+                    review_can_install.set(false);
+                    review_can_uninstall.set(false);
+                    // The run may have replaced the key map or brought a
+                    // new OSARA key map: compare again for a next run.
+                    crate::wx_app::widgets::reset_osara_keymap_choice(
+                        &refreshed_target.path,
+                        &package_rows.borrow(),
+                        &widgets.osara_keymap_replace,
+                    );
+                    refresh_package_checklist(
+                        &widgets.package_checklist,
+                        &package_items,
+                        &widgets.package_details,
+                        &widgets.osara_keymap_replace,
+                        &widgets.osara_keymap_note,
+                        &widgets.spanish_variant_choice,
+                        &widgets.reaper_language_choice,
+                        &model,
+                        &package_rows.borrow(),
+                        &configuration_rows.borrow(),
+                    );
+                    refresh_target_choice(
+                        &model,
+                        &widgets.target_choice,
+                        refreshed_target_index(&model, &widgets),
+                        &refreshed_target,
+                    );
+                    widgets.target_details.set_value(&refreshed_target.details);
+                    set_last_path(
+                        &last_reaper_app_path,
+                        Some(planned_reaper_launch_path_for_target(&refreshed_target)),
+                    );
+                    set_last_resource_path(
+                        &last_resource_path,
+                        Some(refreshed_target.path.clone()),
+                    );
+                })
+            };
+            let uninstall_run_ui = UninstallRunUi {
+                navigation: UninstallNavigation {
+                    model: Arc::clone(&model),
+                    widgets,
+                    book,
+                    step_label,
+                    labels: Arc::clone(&labels),
+                    back,
+                    next,
+                    install,
+                    close,
+                    current_step: Arc::clone(&current_step),
+                    last_reaper_app_path: Arc::clone(&last_reaper_app_path),
+                    last_resource_path: Arc::clone(&last_resource_path),
+                },
+                uninstall_list: Rc::clone(&uninstall_list),
+                install_run: Arc::clone(&install_run),
+                rescan: Rc::clone(&rescan_after_run),
+            };
             let review_text = widgets.review_text;
             let review_step = Arc::clone(&current_step);
             let review_mode = Rc::clone(&wizard_mode);
@@ -587,7 +711,7 @@ pub fn run() {
                 // goes its own way from here and none of the install below
                 // applies to it.
                 if wizard_mode.get() == WizardMode::Uninstall {
-                    start_uninstall(&model, &widgets, &uninstall_list);
+                    start_uninstall(&uninstall_run_ui);
                     return;
                 }
                 // Catch a running REAPER here, while the user can still do
@@ -634,6 +758,7 @@ pub fn run() {
                 install.enable(false);
                 widgets.done_launch_reaper.enable(false);
                 widgets.done_open_resource.enable(false);
+                set_heading(&widgets.progress_heading, &model.text.progress_heading);
                 widgets
                     .progress_status
                     .set_label(&model.text.progress_status_running);
@@ -772,109 +897,13 @@ pub fn run() {
                     ));
                 drop(rows);
 
-                // Arm the post-install rescan hook. The hook captures the
-                // UI-thread `Rc<RefCell>` shared state so the call_after
-                // success arm can refresh it without smuggling non-Send
-                // references across threads. The hook closure runs on the
-                // UI thread; it re-detects the selected target, runs the
-                // offline package plan against the now-fresh receipts, and
-                // updates both the cached state and the on-screen package
-                // list — so navigating Back from the Done page (or
-                // re-opening the Packages step via Rescan) shows the
-                // post-install version without the user having to click
-                // anything.
+                // Arm the post-run rescan (`rescan_after_run`), which the
+                // completion below fires once the install has written its
+                // receipts, so navigating Back from Done shows the new
+                // versions without the user having to do anything.
                 {
-                    let model = Arc::clone(&model);
-                    let package_rows = Rc::clone(&package_rows);
-                    let package_notes = Rc::clone(&package_notes);
-                    let package_items = Rc::clone(&package_items);
-                    let configuration_rows = Rc::clone(&configuration_rows);
-                    let can_install = Rc::clone(&can_install);
-                    let review_can_install = Rc::clone(&review_can_install);
-                    let last_reaper_app_path = Arc::clone(&last_reaper_app_path);
-                    let last_resource_path = Arc::clone(&last_resource_path);
-                    let uninstall_list = Rc::clone(&uninstall_list);
-                    let uninstall_items = Rc::clone(&uninstall_items);
-                    arm_post_install_hook(move || {
-                        let Some(target) = selected_target_row(&model, &widgets) else {
-                            return;
-                        };
-                        let refreshed_target = refreshed_target_row(&model, &target);
-                        // Plan against the versions this run installed from,
-                        // so a development build just installed reads as
-                        // current instead of as something to replace.
-                        let plan = match RUN_AVAILABLE.with(|cell| cell.borrow().clone()) {
-                            Some(available) => wizard_package_plan_for_target_with_available(
-                                &model,
-                                Some(&refreshed_target),
-                                &available,
-                            ),
-                            None => wizard_package_plan_for_target(&model, Some(&refreshed_target)),
-                        };
-                        let Ok(plan) = plan else {
-                            return;
-                        };
-                        // The Uninstall list from the same fresh detection.
-                        // Rebuilt in place; the tab selection stays.
-                        *uninstall_list.borrow_mut() =
-                            uninstall_list_for_target(&model, &refreshed_target, &plan.detections);
-                        rebuild_uninstall_list_widgets(
-                            &widgets,
-                            &uninstall_items,
-                            &model,
-                            &uninstall_list.borrow(),
-                        );
-                        *package_rows.borrow_mut() = plan.package_rows;
-                        *package_notes.borrow_mut() = plan.notes;
-                        // Recompute configuration row availability against
-                        // the freshly-rebuilt package plan (e.g. ReaPack
-                        // just got installed → REAPER Accessibility step
-                        // becomes available).
-                        if let Ok(localizer) = localizer_from_options(&model.bootstrap_options) {
-                            recompute_configuration_row_availability(
-                                &localizer,
-                                &package_rows.borrow(),
-                                Some(&refreshed_target.path),
-                                &mut configuration_rows.borrow_mut(),
-                            );
-                        }
-                        can_install.set(plan.can_install);
-                        review_can_install.set(false);
-                        // The run may have replaced the key map or brought a
-                        // new OSARA key map: compare again for a next run.
-                        crate::wx_app::widgets::reset_osara_keymap_choice(
-                            &refreshed_target.path,
-                            &package_rows.borrow(),
-                            &widgets.osara_keymap_replace,
-                        );
-                        refresh_package_checklist(
-                            &widgets.package_checklist,
-                            &package_items,
-                            &widgets.package_details,
-                            &widgets.osara_keymap_replace,
-                            &widgets.osara_keymap_note,
-                            &widgets.spanish_variant_choice,
-                            &widgets.reaper_language_choice,
-                            &model,
-                            &package_rows.borrow(),
-                            &configuration_rows.borrow(),
-                        );
-                        refresh_target_choice(
-                            &model,
-                            &widgets.target_choice,
-                            refreshed_target_index(&model, &widgets),
-                            &refreshed_target,
-                        );
-                        widgets.target_details.set_value(&refreshed_target.details);
-                        set_last_path(
-                            &last_reaper_app_path,
-                            Some(planned_reaper_launch_path_for_target(&refreshed_target)),
-                        );
-                        set_last_resource_path(
-                            &last_resource_path,
-                            Some(refreshed_target.path.clone()),
-                        );
-                    });
+                    let rescan = Rc::clone(&rescan_after_run);
+                    arm_post_install_hook(move || rescan());
                 }
 
                 let ui_model = Arc::clone(&model);
@@ -928,6 +957,7 @@ pub fn run() {
                 drop(rows_for_progress);
 
                 let progress_state = Arc::new(Mutex::new(ProgressUiState::new(
+                    WizardMode::Install,
                     request.package_ids.len(),
                     request.configuration_step_ids.len(),
                 )));
@@ -970,7 +1000,7 @@ pub fn run() {
                     }));
                 });
 
-                let cancel = install_run.begin();
+                let cancel = install_run.begin(WizardMode::Install);
                 let install_run_for_worker = Arc::clone(&install_run);
                 std::thread::spawn(move || {
                     let result = execute_wizard_install_with_progress(request, &progress, &cancel);
@@ -1176,7 +1206,7 @@ pub fn run() {
                     CloseVerdict::AlreadyStopping => {
                         // A second press while the first stop is still
                         // unwinding. Re-announce rather than re-ask.
-                        announce_stopping(&widgets, &model_for_close);
+                        announce_stopping(&widgets, &model_for_close, install_run.mode());
                     }
                     CloseVerdict::Ask => {
                         let model = Arc::clone(&model_for_close);
@@ -1185,7 +1215,9 @@ pub fn run() {
                             // The install may have finished before this turn
                             // of the event loop came round, and then there is
                             // nothing to ask about.
-                            if install_run.is_running() && !confirm_stop_install(&model) {
+                            if install_run.is_running()
+                                && !confirm_stop_install(&model, install_run.mode())
+                            {
                                 return;
                             }
                             if !install_run.request_stop_and_close() {
@@ -1203,7 +1235,7 @@ pub fn run() {
                             // The button that raised the question is now the
                             // wrong thing to press again.
                             close_button.enable(false);
-                            announce_stopping(&widgets, &model);
+                            announce_stopping(&widgets, &model, install_run.mode());
                         });
                     }
                 }

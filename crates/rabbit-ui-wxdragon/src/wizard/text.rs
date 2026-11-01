@@ -50,7 +50,6 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         uninstall_empty_details: localizer.text("wizard-uninstall-empty-details").value,
         uninstall_settings_heading: localizer.text("wizard-uninstall-settings-heading").value,
         uninstall_remove_settings_label: localizer.text("wizard-uninstall-remove-settings").value,
-        uninstall_not_ready_title: localizer.text("wizard-uninstall-not-ready-title").value,
         packages_row_checked: localizer.text("wizard-packages-row-checked").value,
         packages_row_unchecked: localizer.text("wizard-packages-row-unchecked").value,
         packages_tree_group_label: localizer.text("wizard-packages-tree-group-label").value,
@@ -135,6 +134,13 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         progress_details_idle: localizer.text("wizard-progress-details-idle").value,
         progress_details_starting: localizer.text("wizard-progress-details-starting").value,
         progress_details_cache_prefix: localizer.text("wizard-progress-details-cache-prefix").value,
+        progress_uninstall_heading: localizer.text("wizard-progress-uninstall-heading").value,
+        progress_status_uninstall_running: localizer
+            .text("wizard-progress-status-uninstall-running")
+            .value,
+        progress_status_uninstall_cancelling: localizer
+            .text("wizard-progress-status-uninstall-cancelling")
+            .value,
         done_status_success: localizer.text("wizard-done-status-success").value,
         done_status_completed_with_errors: localizer
             .text("wizard-done-status-completed-with-errors")
@@ -143,6 +149,7 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         reaper_running_title: localizer.text("wizard-reaper-running-title").value,
         reaper_running_body: localizer.text("wizard-reaper-running-body").value,
         error_reaper_running: localizer.text("wizard-error-reaper-running").value,
+        error_lock_held: localizer.text("wizard-error-lock-held").value,
         done_status_cancelled: localizer.text("wizard-done-status-cancelled").value,
         done_status_no_packages: localizer.text("wizard-done-status-no-packages").value,
         done_show_details_label: localizer.text("wizard-done-show-details").value,
@@ -173,6 +180,8 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         self_update_status_checking: localizer.text("wizard-self-update-status-checking").value,
         close_during_install_title: localizer.text("wizard-close-during-install-title").value,
         close_during_install_body: localizer.text("wizard-close-during-install-body").value,
+        close_during_uninstall_title: localizer.text("wizard-close-during-uninstall-title").value,
+        close_during_uninstall_body: localizer.text("wizard-close-during-uninstall-body").value,
         close_during_self_update_title: localizer
             .text("wizard-close-during-self-update-title")
             .value,

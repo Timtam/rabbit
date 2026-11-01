@@ -662,6 +662,20 @@ user can finish the install by pressing Next a few times.
 6. Install/update progress
    - Single progress bar plus one current-step line. A "Show details" toggle
      reveals the underlying log for users who want it; collapsed by default.
+   - Before an uninstall starts, the Uninstall button refuses with a message
+     while something the uninstall preflight needs closed is running: the
+     target's REAPER, every REAPER for a package any REAPER can load (such
+     as app2clap), and the programs a package's plan names. It uses the
+     engine's own process checks, so the two agree, and there is no way to
+     go ahead anyway.
+   - In uninstall mode the heading says "Uninstalling", focus moves to the
+     gauge, and the gauge counts one step per package, so it never parks
+     halfway. The status line names each package as its removal starts and
+     says whether it went; both are spoken on macOS. Which progress events
+     are spoken is decided by one exhaustive match, so a new event can't be
+     added without that decision. Closing the window asks "Stop
+     uninstalling?" with No focused, and the run stops after the package it
+     is on.
 
 7. Done
    - One sentence summarizing success or failure.
@@ -669,6 +683,16 @@ user can finish the install by pressing Next a few times.
      report button: every run saves its report under `<resource>/RABBIT/logs/`
      by itself. The signature-verification counts, lock-file paths, and
      similar diagnostics stay in that saved report.
+   - After an uninstall the status names the packages that went, says why
+     any stayed (in the user's language for REAPER or another RABBIT being
+     open, a file in use and too little room for the backup; otherwise the
+     engine's own sentence), and that a package comes back by ticking it on
+     the Install or update tab in a new run. Show details lists the files
+     removed, kept and left over, the backup set, and one `rabbit
+     restore-backup` command per removed package. The saved report is the
+     engine's `uninstall-<time>` report, which the details point to; the
+     wizard writes one of its own only for a run the engine refused before
+     it began. Both tabs are then rebuilt from fresh detection.
 
 Streamlining rules (apply when adding new wizard text):
 

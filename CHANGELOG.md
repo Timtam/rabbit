@@ -45,8 +45,8 @@ from this file and posts it as the GitHub release body.
   For the JAWS scripts and a portable REAPER, which RABBIT can't remove, it
   prints how to remove them by hand. The exit code is 0 when everything you
   named is gone or wasn't installed, 2 when something can't be uninstalled,
-  and 1 when a removal failed. The wizard gets its own way to uninstall in a
-  later version.
+  and 1 when a removal failed. The wizard's **Uninstall** tab removes the same
+  packages.
 - `rabbit restore-backup --package <id>` brings one uninstalled package back
   from its backup set: its files, its entry in RABBIT's receipt, and REAPER's
   language if the uninstall reset it and no other language was picked since.
@@ -66,11 +66,20 @@ from this file and posts it as the GitHub release body.
   nothing ticked, and an **Also remove settings** option, unticked, for the
   ticked packages that have settings RABBIT can remove. Next on that tab
   goes to a Review that says what each package loses and keeps; Enter never
-  starts an uninstall there. Uninstalling itself doesn't work yet: the
-  **Uninstall** button says so and names the `rabbit uninstall` command
-  for what you ticked. Switch tabs with Ctrl+Tab or
-  Ctrl+Page Down on Windows, and with Ctrl+Tab or VoiceOver's tab navigation
-  on macOS.
+  starts an uninstall there. Press **Uninstall** on Review to remove what you
+  ticked. If REAPER is open, RABBIT asks you to close it first; for app2clap,
+  every REAPER on the computer. The progress page says each package as it
+  goes and whether it went, and VoiceOver reads both. Closing RABBIT during
+  an uninstall asks first, then stops after the package it is on. The Done
+  page says what went, why anything stayed, and how to get a package back:
+  run RABBIT again and tick it on **Install or update**, where it is no
+  longer ticked by itself. **Show details** lists the files, the backup they
+  went into, and the `rabbit restore-backup` command that brings each
+  package back. Switch tabs with Ctrl+Tab or Ctrl+Page Down on Windows, and
+  with Ctrl+Tab or VoiceOver's tab navigation on macOS.
+- When another copy of RABBIT is already installing into the same REAPER,
+  the Done page now says so in plain words, in your language, instead of
+  naming a lock file and a process number.
 - A package you uninstalled, or turned down in the wizard, is no longer
   offered again by itself: the wizard doesn't tick it, and `rabbit
   apply-packages` and `rabbit setup` without `--package` skip it and say so.

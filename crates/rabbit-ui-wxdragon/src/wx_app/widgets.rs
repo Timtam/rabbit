@@ -57,6 +57,8 @@ pub(crate) struct WizardWidgets {
     /// Review's heading, which names the mode.
     pub(crate) review_heading: StaticText,
     pub(crate) review_text: TextCtrl,
+    /// Progress's heading, which names the run: installing or uninstalling.
+    pub(crate) progress_heading: StaticText,
     pub(crate) progress_status: StaticText,
     pub(crate) progress_gauge: Gauge,
     pub(crate) progress_details: TextCtrl,
@@ -146,6 +148,14 @@ pub(crate) fn progress_details_for_start(
     }
 
     lines.join("\n")
+}
+
+/// Give a page heading `label`, only when it says something else: a screen
+/// reader may announce every change of a label it is reading.
+pub(crate) fn set_heading(heading: &StaticText, label: &str) {
+    if heading.get_label() != label {
+        heading.set_label(label);
+    }
 }
 
 pub(crate) fn step_status(model: &WizardModel, step: usize) -> String {

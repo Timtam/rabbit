@@ -10,8 +10,6 @@
 //! file's contents, so the UI thread can afford it: the version check's
 //! handler builds the rows from the detection it has just run.
 
-use std::path::Path;
-
 use rabbit_core::Result;
 use rabbit_core::localization::Localizer;
 use rabbit_core::model::{ComponentDetection, InstallationKind};
@@ -826,48 +824,4 @@ pub fn uninstall_confirmation_body(
     }
     lines.push(localizer.text("wizard-confirm-uninstall-question").value);
     Some(lines.join("\n\n"))
-}
-
-/// The command line the "can't uninstall from the wizard yet" message
-/// suggests: the REAPER folder the wizard is on and the packages ticked,
-/// with `--remove-settings` when that was ticked too, so it does what the
-/// wizard was asked to. `--resource-path` and `--package` are required, so
-/// a command without them would fail as typed.
-pub fn uninstall_cli_example(
-    resource_path: &Path,
-    package_ids: &[String],
-    remove_settings: bool,
-) -> String {
-    let mut command = format!(
-        "rabbit uninstall --resource-path \"{}\"",
-        resource_path.display()
-    );
-    if package_ids.is_empty() {
-        command.push_str(" --package sws");
-    }
-    for package_id in package_ids {
-        command.push_str(" --package ");
-        command.push_str(package_id);
-    }
-    if remove_settings {
-        command.push_str(" --remove-settings");
-    }
-    command
-}
-
-/// The message's text, with the example command for `resource_path` and
-/// the ticked packages.
-pub fn uninstall_not_ready_body(
-    localizer: &Localizer,
-    resource_path: &Path,
-    package_ids: &[String],
-    remove_settings: bool,
-) -> String {
-    let command = uninstall_cli_example(resource_path, package_ids, remove_settings);
-    localizer
-        .format(
-            "wizard-uninstall-not-ready-body",
-            &[("command", command.as_str())],
-        )
-        .value
 }
