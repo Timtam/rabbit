@@ -33,6 +33,10 @@
     "run_upstream_installer"
   ],
   "uninstall": {
+    "install_snapshot": [
+      "{appdata}/Freedom Scientific/JAWS/*/Settings/*",
+      "{appdata}/REAPER/UserPlugins"
+    ],
     "plans": [
       {
         "platform": "windows",

@@ -3756,6 +3756,7 @@ mod tests {
                 installed_at: None,
                 rabbit_version: None,
                 architecture: None,
+                vendor_added_files: Vec::new(),
             },
         );
         rabbit_core::receipt::save_install_state(
@@ -4156,6 +4157,7 @@ mod tests {
             installed_at: None,
             rabbit_version: None,
             architecture: None,
+            vendor_added_files: Vec::new(),
         };
         state.packages.insert("sws".to_string(), entry.clone());
         state.declined_packages.insert("langpack-de".to_string());

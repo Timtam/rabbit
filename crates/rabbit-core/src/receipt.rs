@@ -129,6 +129,22 @@ pub struct PackageReceipt {
     pub installed_at: Option<String>,
     pub rabbit_version: Option<String>,
     pub architecture: Option<Architecture>,
+    /// Files the package's own installer added or changed in the folders
+    /// its manifest lists under `uninstall.install_snapshot`, found by
+    /// listing those folders right before the installer ran and again
+    /// afterwards. Today only the JAWS scripts declare any: their installer
+    /// copies about a hundred files into each JAWS version and language
+    /// folder, and nothing else tells RABBIT which ones.
+    ///
+    /// Kept apart from `installed_files` on purpose. Detection checks that
+    /// every installed file is still there, and deleting one of the JAWS
+    /// side files must not make RABBIT think the scripts are gone.
+    ///
+    /// A reinstall keeps the list (see [`upsert_package_receipt`]), and that
+    /// run's own snapshot then adds to it. Optional in the file, like
+    /// `declined_packages`, so receipts from before it existed still load.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vendor_added_files: Vec<VendorAddedFile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +152,26 @@ pub struct InstalledFileReceipt {
     pub path: PathBuf,
     pub sha256: Option<String>,
     pub size: Option<u64>,
+}
+
+/// One file in [`PackageReceipt::vendor_added_files`], as the installer
+/// left it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VendorAddedFile {
+    /// Absolute: these files sit outside the resource folder.
+    pub path: PathBuf,
+    pub sha256: String,
+    pub size: u64,
+    /// The file was already there before the installer ran, and RABBIT had
+    /// no record of it as the installer's own, so what it replaced may have
+    /// been the user's: their own key assignments in `reaper.jkm`, say, or
+    /// a file JAWS itself keeps there. An uninstall must never remove such a
+    /// file just because it is on this list. Files the installer added leave
+    /// this `false`, which is left out of the file. A file it rewrote while
+    /// the file still held exactly what an earlier install recorded keeps
+    /// that install's mark.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub existed_before: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,7 +335,9 @@ pub struct PackageReceiptParams<'a> {
 }
 
 /// Record that `package_id` was installed, replacing any earlier entry for
-/// it.
+/// it. Only `vendor_added_files` carries over from the earlier entry: the
+/// files an earlier run's installer added are still on disk after this run,
+/// and the caller merges this run's snapshot, if it took one, into them.
 ///
 /// This leaves `declined_packages` alone. That set only ever changes on the
 /// user's own verdict, which the callers give through
@@ -329,6 +367,11 @@ pub fn upsert_package_receipt(
         .collect::<Result<Vec<_>>>()?;
     installed_files.sort_by(|left, right| left.path.cmp(&right.path));
     installed_files.dedup_by(|left, right| left.path == right.path);
+    let vendor_added_files = state
+        .packages
+        .get(package_id)
+        .map(|earlier| earlier.vendor_added_files.clone())
+        .unwrap_or_default();
 
     state.packages.insert(
         package_id.to_string(),
@@ -347,6 +390,7 @@ pub fn upsert_package_receipt(
             installed_at,
             rabbit_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             architecture,
+            vendor_added_files,
         },
     );
     Ok(())
@@ -627,6 +671,7 @@ mod tests {
                 installed_at: None,
                 rabbit_version: Some("0.1.0".to_string()),
                 architecture: None,
+                vendor_added_files: Vec::new(),
             },
         );
 
@@ -677,6 +722,7 @@ mod tests {
                 installed_at: None,
                 rabbit_version: None,
                 architecture: None,
+                vendor_added_files: Vec::new(),
             },
         );
         save_install_state(
@@ -743,6 +789,7 @@ mod tests {
                 installed_at: None,
                 rabbit_version: None,
                 architecture: None,
+                vendor_added_files: Vec::new(),
             },
         );
         save_install_state(
@@ -778,11 +825,12 @@ mod tests_uninstall_records {
 
     use super::{
         AppliedConfiguration, AppliedConfigurationOutcome, InstallState, PackageReceiptParams,
-        RECEIPT_RELATIVE_PATH, ReapackRepository, declined_packages, load_install_state,
-        merge_package_receipt, record_applied_configuration, record_package_opt_outs,
-        remove_package_receipt, save_install_state, upsert_package_receipt,
+        RECEIPT_RELATIVE_PATH, ReapackRepository, VendorAddedFile, declined_packages,
+        load_install_state, merge_package_receipt, record_applied_configuration,
+        record_package_opt_outs, remove_package_receipt, save_install_state,
+        upsert_package_receipt,
     };
-    use crate::package::{PACKAGE_OSARA, PACKAGE_SWS};
+    use crate::package::{PACKAGE_JAWS_SCRIPTS, PACKAGE_OSARA, PACKAGE_SWS};
 
     fn install(state: &mut InstallState, package_id: &str) {
         upsert_package_receipt(
@@ -943,13 +991,80 @@ mod tests_uninstall_records {
         let state = load_install_state(dir.path()).unwrap().unwrap();
         assert!(state.applied_configuration.is_empty());
         assert!(state.packages.contains_key(PACKAGE_OSARA));
+        assert!(state.packages[PACKAGE_OSARA].vendor_added_files.is_empty());
         assert!(state.declined_packages.contains("langpack-de"));
 
         save_install_state(dir.path(), &state).unwrap();
         let text = receipt_text(dir.path());
+        for field in ["applied_configuration", "vendor_added_files"] {
+            assert!(
+                !text.contains(field),
+                "{field} must stay out when empty: {text}"
+            );
+        }
+    }
+
+    fn vendor_file(path: &str, existed_before: bool) -> VendorAddedFile {
+        VendorAddedFile {
+            path: std::path::PathBuf::from(path),
+            sha256: "ab".repeat(32),
+            size: 42,
+            existed_before,
+        }
+    }
+
+    /// The files the JAWS scripts' installer added go into the receipt and
+    /// come back out unchanged; the mark for a file that was there before is
+    /// written only where it is set.
+    #[test]
+    fn vendor_added_files_round_trip() {
+        let dir = tempdir().unwrap();
+        let mut state = InstallState::default();
+        install(&mut state, PACKAGE_JAWS_SCRIPTS);
+        state
+            .packages
+            .get_mut(PACKAGE_JAWS_SCRIPTS)
+            .unwrap()
+            .vendor_added_files = vec![
+            vendor_file("/jaws/2026/Settings/deu/reaper.jss", false),
+            vendor_file("/jaws/2026/Settings/deu/reaper.jkm", true),
+        ];
+        save_install_state(dir.path(), &state).unwrap();
+
+        assert_eq!(load_install_state(dir.path()).unwrap().unwrap(), state);
+        let text = receipt_text(dir.path());
+        assert_eq!(text.matches("vendor_added_files").count(), 1, "{text}");
+        assert_eq!(text.matches("existed_before").count(), 1, "{text}");
+    }
+
+    /// An update installs the scripts again. The files earlier installs
+    /// recorded are still on disk, so the record carries over to the new
+    /// entry, for that run's own snapshot to add to.
+    #[test]
+    fn a_reinstall_keeps_the_vendor_added_files() {
+        let mut state = InstallState::default();
+        install(&mut state, PACKAGE_JAWS_SCRIPTS);
+        let recorded = vec![vendor_file("/jaws/reaper.jss", false)];
+        state
+            .packages
+            .get_mut(PACKAGE_JAWS_SCRIPTS)
+            .unwrap()
+            .vendor_added_files = recorded.clone();
+
+        install(&mut state, PACKAGE_JAWS_SCRIPTS);
+        assert_eq!(
+            state.packages[PACKAGE_JAWS_SCRIPTS].vendor_added_files,
+            recorded
+        );
+
+        // An uninstall forgets the entry, record and all; the backup set
+        // keeps it for a restore.
+        remove_package_receipt(&mut state, PACKAGE_JAWS_SCRIPTS);
+        install(&mut state, PACKAGE_JAWS_SCRIPTS);
         assert!(
-            !text.contains("applied_configuration"),
-            "applied_configuration must stay out when empty: {text}"
+            state.packages[PACKAGE_JAWS_SCRIPTS]
+                .vendor_added_files
+                .is_empty()
         );
     }
 

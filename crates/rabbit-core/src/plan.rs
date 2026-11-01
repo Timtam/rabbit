@@ -401,6 +401,7 @@ mod tests {
                 installed_at: None,
                 rabbit_version: None,
                 architecture: None,
+                vendor_added_files: Vec::new(),
             },
         );
         crate::receipt::save_install_state(

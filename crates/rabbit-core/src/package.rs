@@ -1579,6 +1579,7 @@ mod tests {
                 installed_at: None,
                 rabbit_version: None,
                 architecture: None,
+                vendor_added_files: Vec::new(),
             },
         );
         save_install_state(resource, &state).unwrap();
@@ -2285,6 +2286,7 @@ mod tests {
             installed_at: None,
             rabbit_version: None,
             architecture: None,
+            vendor_added_files: Vec::new(),
         };
         let save = |channel: &str| {
             let mut packages = std::collections::BTreeMap::new();

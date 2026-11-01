@@ -39,6 +39,21 @@ pub struct UninstallSpec {
     /// as OSARA's warning that REAPER stops speaking.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub always_warn: Vec<AlwaysWarning>,
+    /// Folders the package's installer writes to that no receipt path
+    /// covers, such as the JAWS scripts' files in JAWS's own settings
+    /// folders. RABBIT lists them right before it runs the installer and
+    /// again afterwards, and records every file the installer added or
+    /// changed there on the receipt (`vendor_added_files`), so a later
+    /// uninstall knows which of them came from the package.
+    ///
+    /// Written like plan paths, except that `*` may stand for a whole folder
+    /// name at any level (`{appdata}/Freedom Scientific/JAWS/*/Settings/*`
+    /// covers every JAWS version and language). A matched folder is listed
+    /// with everything below it. These paths are only ever read, never
+    /// removed. The manifest's validation keeps them narrow: a folder token,
+    /// then a folder spelt out, and nothing called RABBIT.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub install_snapshot: Vec<UninstallPath>,
     /// The plans, in order. The first one matching the platform and target
     /// wins, the same rule `http_artifact.targets` uses.
     pub plans: Vec<UninstallPlanSpec>,
@@ -452,6 +467,19 @@ impl UninstallPath {
     /// components, backslashes, drive or stream colons, stray braces, and a
     /// `*` anywhere but the last component.
     pub fn parse(&self) -> Result<ParsedUninstallPath<'_>, String> {
+        self.parse_with(false)
+    }
+
+    /// [`parse`](Self::parse) for an `install_snapshot` root, which RABBIT
+    /// only ever lists and never removes. There a `*` may appear in any
+    /// component, and may be the whole component, because the JAWS version
+    /// and language folders can be called anything. Everything else is
+    /// refused exactly as `parse` refuses it.
+    pub fn parse_pattern(&self) -> Result<ParsedUninstallPath<'_>, String> {
+        self.parse_with(true)
+    }
+
+    fn parse_with(&self, wildcards_anywhere: bool) -> Result<ParsedUninstallPath<'_>, String> {
         let path = self.0.as_str();
         let (root, rest) = if let Some(after_brace) = path.strip_prefix('{') {
             let (name, rest) = after_brace
@@ -489,7 +517,7 @@ impl UninstallPath {
             {
                 return Err(format!("{path:?} may not contain {bad:?}"));
             }
-            if component.contains('*') {
+            if component.contains('*') && !wildcards_anywhere {
                 if index != last {
                     return Err(format!(
                         "{path:?} uses * before its last component; * is allowed only there"
@@ -679,6 +707,10 @@ pub(super) fn validate_uninstall_spec(spec: &EmbeddedPackageSpec) -> Result<(), 
         .any(|warning| warning.package == spec.id)
     {
         return Err("uninstall warn_when_installed names the package itself".to_string());
+    }
+    for root in &uninstall.install_snapshot {
+        check_snapshot_root(spec, root)
+            .map_err(|message| format!("uninstall install_snapshot: {message}"))?;
     }
     for (index, plan) in uninstall.plans.iter().enumerate() {
         validate_plan(spec, plan)
@@ -1084,6 +1116,63 @@ fn check_path(
         return Err(format!(
             "{field}: {shown:?} reaches into RABBIT's own folder, which holds receipts, backups \
              and logs and is never touched"
+        ));
+    }
+    Ok(())
+}
+
+/// The rules for an `install_snapshot` root. Nothing is ever removed through
+/// one, but what the snapshot records is what a later uninstall may offer to
+/// remove, so a root must stay narrow:
+/// - it starts with a folder token, never an absolute path or an object
+///   token, and the token must exist on a platform the package is offered
+///   on;
+/// - the first component after the token is spelt out, so a root never
+///   covers everything in `%APPDATA%` or the resource folder;
+/// - no component is called RABBIT, whose folder holds receipts, backups and
+///   logs. The listing also skips `{resource}/RABBIT` wherever a `*` would
+///   reach it.
+fn check_snapshot_root(spec: &EmbeddedPackageSpec, root: &UninstallPath) -> Result<(), String> {
+    let shown = root.as_str();
+    let parsed = root.parse_pattern()?;
+    let UninstallPathRoot::Token(token) = parsed.root else {
+        return Err(format!(
+            "{shown:?} must start with a folder token such as {{appdata}}"
+        ));
+    };
+    if token.kind() != UninstallTokenKind::FolderRoot {
+        return Err(format!(
+            "{{{}}} isn't a folder to list, so {shown:?} can't start with it",
+            token.name()
+        ));
+    }
+    if let Some(only_on) = token.platform()
+        && !spec.supported_platforms.contains(&only_on)
+    {
+        return Err(format!(
+            "{{{}}} exists only on {}, where the package isn't offered, so {shown:?} would \
+             never resolve",
+            token.name(),
+            platform_name(only_on)
+        ));
+    }
+    match parsed.components.first() {
+        Some(first) if !first.contains('*') => {}
+        _ => {
+            return Err(format!(
+                "{shown:?} must spell out the folder right after {{{}}}, so it never lists \
+                 everything there",
+                token.name()
+            ));
+        }
+    }
+    if parsed
+        .components
+        .iter()
+        .any(|component| component.eq_ignore_ascii_case(RABBIT_FOLDER))
+    {
+        return Err(format!(
+            "{shown:?} reaches into RABBIT's own folder, which holds receipts, backups and logs"
         ));
     }
     Ok(())
@@ -2117,6 +2206,64 @@ mod tests {
             "",
             &windows_remove_plans(r#""blocking_programs": ["C:/Demo/demo.exe"]"#),
             "must be a program name, not a path",
+        );
+    }
+
+    /// Snapshot roots are only listed, so `*` may stand for whole folder
+    /// names, but each root still has to stay narrow and resolvable.
+    #[test]
+    fn install_snapshot_roots_are_checked() {
+        let windows_only = r#""supported_platforms": ["windows"],"#;
+        let with_roots = |roots: &str| {
+            format!(
+                r#"{{ "install_snapshot": [{roots}],
+                     "plans": [{{ "strategy": "not_supported", "note_key": "a" }}] }}"#
+            )
+        };
+        accepts(
+            windows_only,
+            &with_roots(
+                r#""{appdata}/Freedom Scientific/JAWS/*/Settings/*", "{appdata}/REAPER/UserPlugins""#,
+            ),
+        );
+        accepts("", &with_roots(r#""{resource}/Data/*/presets""#));
+        for (root, expected) in [
+            (
+                r#""{appdata}/*/Settings""#,
+                "must spell out the folder right after {appdata}",
+            ),
+            (
+                r#""{appdata}""#,
+                "must spell out the folder right after {appdata}",
+            ),
+            (r#""{app_path}""#, "{app_path} isn't a folder to list"),
+            (r#""{app_dir}/Plugins""#, "{app_dir} isn't a folder to list"),
+            (
+                r#""/Applications/Demo.app""#,
+                "must start with a folder token",
+            ),
+            (
+                r#""{appdata}/REAPER/RABBIT/logs""#,
+                "reaches into RABBIT's own folder",
+            ),
+            (r#""{appdata}/JAWS/../REAPER""#, "may not use . or .."),
+            (
+                r#""{home}/Library/Demo""#,
+                "where the package isn't offered",
+            ),
+        ] {
+            rejects(windows_only, &with_roots(root), expected);
+        }
+        // The plan paths keep their stricter grammar.
+        assert!(
+            UninstallPath::new("{appdata}/JAWS/*/Settings")
+                .parse()
+                .is_err()
+        );
+        assert!(
+            UninstallPath::new("{appdata}/JAWS/*/Settings")
+                .parse_pattern()
+                .is_ok()
         );
     }
 

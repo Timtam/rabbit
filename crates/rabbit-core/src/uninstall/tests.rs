@@ -179,6 +179,7 @@ fn receipt(id: &str, files: &[(&str, Option<&str>)]) -> InstallState {
             installed_at: None,
             rabbit_version: None,
             architecture: None,
+            vendor_added_files: Vec::new(),
         },
     );
     state

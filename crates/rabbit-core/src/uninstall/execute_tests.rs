@@ -182,6 +182,7 @@ fn save_receipt(fixture: &Fixture, packages: &[(&str, &[&str])]) -> InstallState
                 installed_at: None,
                 rabbit_version: None,
                 architecture: None,
+                vendor_added_files: Vec::new(),
             },
         );
     }

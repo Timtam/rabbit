@@ -1,6 +1,7 @@
 mod jaws_scripts;
 mod osara;
 mod reaper;
+mod snapshot;
 mod surge_xt;
 mod sws;
 
@@ -25,6 +26,7 @@ use crate::install::{
 };
 use crate::model::{Architecture, ComponentDetection, Platform};
 use crate::package::package_specs_by_id;
+use crate::package::uninstall::UninstallPath;
 use crate::plan::PlanActionKind;
 use crate::preflight::{
     RunningProcess, ensure_reaper_closed_with_processes, ensure_resource_path_ready,
@@ -36,9 +38,11 @@ use crate::receipt::{
     upsert_package_receipt,
 };
 use crate::rollback::BackupSetWriter;
+use crate::uninstall::UninstallRoots;
 
 use self::osara::osara_manual_steps;
 use self::reaper::reaper_manual_steps;
+use self::snapshot::InstallSnapshot;
 use self::sws::sws_manual_steps;
 use crate::upstream::{
     execute_planned_execution, verify_planned_execution_freshness, verify_planned_execution_paths,
@@ -810,6 +814,16 @@ fn execute_operation_with_process_scan(
                     continue;
                 }
             };
+            // Some installers write where no receipt path reaches: the JAWS
+            // scripts' into JAWS's own settings folders. The folders their
+            // manifest names are listed right before the installer runs, so
+            // the receipt can record what it added or changed there.
+            let snapshot = take_install_snapshot(
+                &planned.artifact,
+                resource_path,
+                options.target_app_path.as_deref(),
+                unattended_state.as_ref(),
+            );
             // The unattended runner (vendor installer, archive extractor,
             // dmg mount + copy) is the work the user is waiting on for
             // these packages — emit start/complete around it so the UI
@@ -847,6 +861,7 @@ fn execute_operation_with_process_scan(
                     &cached,
                     options.target_app_path.as_deref(),
                     options.replace_osara_keymap,
+                    snapshot.as_ref(),
                 ) {
                     Ok(()) => unattended_receipts_updated = true,
                     Err(error) => {
@@ -1579,6 +1594,37 @@ fn executed_unattended_item(
     })
 }
 
+/// List the folders `artifact`'s manifest names under
+/// `uninstall.install_snapshot`, right before its installer runs. `None` for
+/// the packages that name none, which is all but the JAWS scripts. `state`
+/// is the receipt as this run holds it, whose earlier record of the
+/// package's files the snapshot brings up to date.
+fn take_install_snapshot(
+    artifact: &ArtifactDescriptor,
+    resource_path: &Path,
+    target_app_path: Option<&Path>,
+    state: Option<&InstallState>,
+) -> Option<InstallSnapshot> {
+    let roots = install_snapshot_roots(&artifact.package_id, artifact.platform);
+    if roots.is_empty() {
+        return None;
+    }
+    let paths = UninstallRoots::for_target(artifact.platform, resource_path, target_app_path);
+    let recorded = state
+        .and_then(|state| state.packages.get(&artifact.package_id))
+        .map(|receipt| receipt.vendor_added_files.as_slice())
+        .unwrap_or_default();
+    Some(InstallSnapshot::take(&roots, paths, recorded))
+}
+
+/// The snapshot roots `package_id`'s manifest declares.
+fn install_snapshot_roots(package_id: &str, platform: Platform) -> Vec<UninstallPath> {
+    package_specs_by_id(platform)
+        .remove(package_id)
+        .map(|spec| spec.uninstall.install_snapshot)
+        .unwrap_or_default()
+}
+
 fn upsert_unattended_package_receipt(
     state: &mut InstallState,
     resource_path: &Path,
@@ -1586,6 +1632,7 @@ fn upsert_unattended_package_receipt(
     cached_artifact: &CachedArtifact,
     target_app_path: Option<&Path>,
     replace_osara_keymap: bool,
+    snapshot: Option<&InstallSnapshot>,
 ) -> Result<()> {
     let installed_paths = receipt_paths_for_artifact(
         artifact,
@@ -1607,7 +1654,15 @@ fn upsert_unattended_package_receipt(
             installed_at: Some(operation_timestamp()),
             architecture: Some(artifact.architecture),
         },
-    )
+    )?;
+    // The second listing runs only once the install is confirmed, and can't
+    // fail it: whatever it can't read stays out of the record.
+    if let Some(snapshot) = snapshot
+        && let Some(receipt) = state.packages.get_mut(&artifact.package_id)
+    {
+        receipt.vendor_added_files = snapshot.record();
+    }
+    Ok(())
 }
 
 fn receipt_paths_for_artifact(
@@ -2187,19 +2242,22 @@ mod tests {
 
     use tempfile::tempdir;
 
+    use super::snapshot::InstallSnapshot;
     use super::{
         PackageAutomationSupport, PackageOperationMessage, PackageOperationOptions,
         PackageOperationStatus, PlannedArtifact, PlannedAutomationKind, PlannedExecutionKind,
         backup_file_for_unattended_change, dependency_ordered, execute_operation_with_process_scan,
         execute_resolved_package_operation, execute_resolved_package_operation_with_detections,
         execute_resolved_package_operation_with_detections_and_progress, first_failed_dependency,
-        plan_action_for_artifact,
+        plan_action_for_artifact, take_install_snapshot, upsert_unattended_package_receipt,
     };
     use crate::artifact::{ArtifactDescriptor, ArtifactKind, CachedArtifact};
     use crate::cancel::CancelToken;
     use crate::detection::detect_components;
     use crate::error::RabbitError;
+    use crate::hash::sha256_bytes;
     use crate::model::{Architecture, ComponentDetection, Confidence, Platform};
+    use crate::package::uninstall::UninstallPath;
     use crate::package::{
         PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT,
         PACKAGE_SWS,
@@ -2207,7 +2265,8 @@ mod tests {
     use crate::plan::PlanActionKind;
     use crate::preflight::RunningProcess;
     use crate::progress::{ProgressEvent, ProgressReporter};
-    use crate::receipt::{InstallState, load_install_state, save_install_state};
+    use crate::receipt::{InstallState, VendorAddedFile, load_install_state, save_install_state};
+    use crate::uninstall::UninstallRoots;
     use crate::version::Version;
     use std::collections::HashSet;
 
@@ -4274,6 +4333,72 @@ mod tests {
         );
         assert!(manifest_path.is_file());
         assert!(outside.is_file(), "a backup copies; the original stays");
+    }
+
+    /// The receipt step puts what the install snapshot found on the
+    /// package's entry, and an install that takes no snapshot keeps it.
+    /// SWS stands in for the JAWS scripts, whose real installer and folders
+    /// a test can't use; the snapshot is taken by hand around a fake one.
+    #[test]
+    fn the_receipt_records_what_the_install_snapshot_found() {
+        let dir = tempdir().unwrap();
+        let resource_path = dir.path().join("REAPER");
+        let plugins = resource_path.join("UserPlugins");
+        fs::create_dir_all(&plugins).unwrap();
+        fs::write(plugins.join("reaper_sws-x64.dll"), b"sws").unwrap();
+        let settings = dir.path().join("Settings");
+        fs::create_dir_all(&settings).unwrap();
+        fs::write(settings.join("untouched.jcf"), b"mine").unwrap();
+        let artifact = artifact(PACKAGE_SWS, ArtifactKind::Installer, "sws.exe");
+        let cached = CachedArtifact {
+            descriptor: artifact.clone(),
+            path: dir.path().join("sws.exe"),
+            size: 0,
+            sha256: String::new(),
+            reused_existing_file: false,
+        };
+        // SWS declares no snapshot folders, so the real pipeline takes none
+        // for it and lists nothing.
+        assert!(take_install_snapshot(&artifact, &resource_path, None, None).is_none());
+
+        let paths = UninstallRoots {
+            appdata: Some(dir.path().to_path_buf()),
+            ..UninstallRoots::new(&resource_path)
+        };
+        let snapshot =
+            InstallSnapshot::take(&[UninstallPath::new("{appdata}/Settings")], paths, &[]);
+        fs::write(settings.join("added.jss"), b"added").unwrap();
+
+        let mut state = InstallState::default();
+        upsert_unattended_package_receipt(
+            &mut state,
+            &resource_path,
+            &artifact,
+            &cached,
+            None,
+            false,
+            Some(&snapshot),
+        )
+        .unwrap();
+        let expected = vec![VendorAddedFile {
+            path: settings.join("added.jss"),
+            sha256: sha256_bytes(b"added"),
+            size: 5,
+            existed_before: false,
+        }];
+        assert_eq!(state.packages[PACKAGE_SWS].vendor_added_files, expected);
+
+        upsert_unattended_package_receipt(
+            &mut state,
+            &resource_path,
+            &artifact,
+            &cached,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(state.packages[PACKAGE_SWS].vendor_added_files, expected);
     }
 
     fn artifact(package_id: &str, kind: ArtifactKind, file_name: &str) -> ArtifactDescriptor {

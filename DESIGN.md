@@ -749,6 +749,22 @@ fields are optional and left out when
 empty, so older RABBIT versions still read the file. OSARA's key map is always
 kept when OSARA is removed, so the receipt doesn't track a key map backup.
 
+Some vendor installers write where no receipt path reaches. For those, the
+manifest's `uninstall` block lists the folders under `install_snapshot`:
+RABBIT lists them right before the installer runs and again afterwards, and
+the package's receipt entry records every file the installer added or changed
+there, with its hash and size (`vendor_added_files`, kept apart from
+`installed_files` so deleting one of these files doesn't make detection think
+the package is gone). Files that were there before and didn't change are not
+recorded. A changed file is marked `existed_before`, because what it held may
+have been the user's, unless an earlier install recorded it and it still held
+exactly that. A reinstall keeps the record and adds to it. Nothing below a
+folder RABBIT couldn't list before the run is recorded, links are never
+followed, and nothing here can fail an install. Only the JAWS scripts declare
+folders so far: everything in each JAWS version's `Settings` folder under
+`%APPDATA%\Freedom Scientific\JAWS`, where the language folders are, and
+`%APPDATA%\REAPER\UserPlugins`. Nothing removes these files yet.
+
 ## Package Model
 
 Use a manifest-driven package system so future packages can be added without
@@ -810,7 +826,9 @@ plans. FFmpeg and the language packs set `requires_receipt`, because a copy
 RABBIT has no receipt for is most likely the user's own; the others name
 their files, so a copy without a receipt can go too, unless ReaPack still
 manages it. The JAWS scripts, and a portable REAPER on Windows, have
-`manual` plans whose note holds the instructions. REAPER otherwise, OSARA
+`manual` plans whose note holds the instructions; the JAWS scripts' block also
+lists `install_snapshot` folders, so what their installer adds or changes is
+recorded from now on (see the receipt above). REAPER otherwise, OSARA
 and Surge XT still say `not_supported`. `rabbit packages` prints each
 package's plan per platform and target, and `rabbit components` says for
 each package whether RABBIT can uninstall it, and if not, why.

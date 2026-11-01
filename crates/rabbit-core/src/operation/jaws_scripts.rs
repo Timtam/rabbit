@@ -33,6 +33,12 @@
 //! installer manually. We still let the package run for portable targets so
 //! the JAWS-side scripts do get refreshed; the verification path falls back
 //! to the per-user JAWS Settings file in that case.
+//!
+//! Which JAWS-side files the installer wrote is recorded at install time, for
+//! a later uninstall: the manifest lists the JAWS settings folders and the
+//! REAPER `UserPlugins` folder under `uninstall.install_snapshot`, and the
+//! generic snapshot in `super::snapshot` puts every file the installer added
+//! or changed there on the receipt (`vendor_added_files`).
 
 use std::path::{Path, PathBuf};
 

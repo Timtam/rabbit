@@ -743,6 +743,7 @@ mod tests {
                 installed_at: None,
                 rabbit_version: None,
                 architecture: None,
+                vendor_added_files: Vec::new(),
             },
         );
 
@@ -913,6 +914,7 @@ mod tests {
                 installed_at: Some("unix-old".to_string()),
                 rabbit_version: Some("0.1.0".to_string()),
                 architecture: Some(Architecture::X64),
+                vendor_added_files: Vec::new(),
             },
         );
         save_install_state(
@@ -1246,6 +1248,7 @@ mod tests {
                 installed_at: None,
                 rabbit_version: None,
                 architecture: None,
+                vendor_added_files: Vec::new(),
             },
         );
         save_install_state(dir.path(), &state).unwrap();
