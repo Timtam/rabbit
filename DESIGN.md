@@ -731,13 +731,16 @@ later changes files manually, RABBIT should show that the receipt and disk state
 do not match.
 
 The receipt also records what a later uninstall needs in order to undo only
-RABBIT's own changes: the packages the user removed through RABBIT
-(`removed_packages`), what each configuration step found or changed
+RABBIT's own changes: what each configuration step found or changed
 (`applied_configuration`: the ReaPack repository and whether RABBIT added it,
-or the `langpack=` value the language step replaced), and, on OSARA's entry,
-the backup set holding the key map from before OSARA's first install
-(`keymap_backup_id`, never set by an update). All of these are optional and
-left out when empty, so older RABBIT versions still read the file.
+or the `langpack=` value the language step replaced). A package the user
+removes through RABBIT goes into `declined_packages`, the same set that holds
+the packages they left unticked, so it isn't ticked again on the next run.
+Only the user's own verdict takes it out again (ticking it in the wizard);
+installing it through `--package` does not, because that is a scope for one
+run, not a standing preference. These fields are optional and left out when
+empty, so older RABBIT versions still read the file. OSARA's key map is always
+kept when OSARA is removed, so the receipt doesn't track a key map backup.
 
 ## Package Model
 
@@ -1109,9 +1112,12 @@ Extension files:
   `external/<n>/`, beside a `<file>.rabbit-origin` note of their original
   path. Each manifest entry is saved, through a temp file and a rename,
   before its copy starts and marked done after, so an interrupted run
-  still leaves a set that can be restored. Restore puts each file back at
-  its recorded path, refuses any path outside the resource folder and the
-  outside folders RABBIT installs into, and takes the install lock.
+  still leaves a set that can be restored. Every path a set records is
+  absolute, so a set written through a relative `--resource-path` restores
+  from any folder; older sets that recorded relative paths are read by their
+  `RABBIT/backups/<id>` part. Restore puts each file back at its recorded
+  path, refuses any path outside the resource folder and the outside folders
+  RABBIT installs into, and takes the install lock.
 - Keep a machine-readable operation report and a plain text report.
 - Treat non-writable targets as a planning error before downloading anything.
 - Do not request elevation unless the selected REAPER app install target

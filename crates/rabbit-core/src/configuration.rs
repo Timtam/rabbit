@@ -807,7 +807,6 @@ mod tests {
                 installed_at: None,
                 rabbit_version: None,
                 architecture: None,
-                keymap_backup_id: None,
             },
         );
         crate::receipt::save_install_state(resource_path, &state).unwrap();

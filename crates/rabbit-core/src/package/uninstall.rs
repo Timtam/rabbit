@@ -427,19 +427,6 @@ pub enum UninstallPostStep {
     /// Set REAPER's `langpack=` back to `<>` when it names a pack file this
     /// run actually removed.
     ResetReaperLangpackIfSelected {},
-    /// Offer to put back the key map OSARA replaced.
-    OfferKeymapRestore {
-        source: KeymapBackupSource,
-        preserve_scr_lines: bool,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum KeymapBackupSource {
-    /// The backup set the OSARA receipt's `keymap_backup_id` names. RABBIT
-    /// never guesses one.
-    ReceiptKeymapBackupId,
 }
 
 /// A path in an uninstall plan, kept exactly as the manifest writes it: a
@@ -797,11 +784,15 @@ fn validate_plan(spec: &EmbeddedPackageSpec, plan: &UninstallPlanSpec) -> Result
     }
     validate_elevation_and_backup(plan)?;
 
+    // The scan matches a file when ANY prefix starts its name, and "" starts
+    // every name, so one empty prefix among good ones claims every file with
+    // the right suffix just as an all-empty list would.
     if plan.remove.matching_user_plugins
-        && spec
-            .user_plugin_prefixes
-            .iter()
-            .all(|prefix| prefix.is_empty())
+        && (spec.user_plugin_prefixes.is_empty()
+            || spec
+                .user_plugin_prefixes
+                .iter()
+                .any(|prefix| prefix.is_empty()))
     {
         return Err(
             "matching_user_plugins needs non-empty user_plugin_prefixes; an empty prefix \
@@ -1099,9 +1090,12 @@ fn check_path(
 }
 
 /// Whether a path names `{resource}/RABBIT`, something under it, or a
-/// pattern that could match it. Any component called RABBIT counts too,
-/// because the resource folder can also be reached through `{appdata}` or
-/// `{home}`; the run-time guard checks the resolved path as well.
+/// pattern that could match it. Any component called RABBIT counts, and so
+/// does a last component whose `*` could match RABBIT, whatever the root:
+/// the resource folder can also be reached through `{appdata}` or `{home}`,
+/// so `{appdata}/REAPER/RAB*` reaches RABBIT's folder as surely as
+/// `{resource}/RAB*` does. Only the last component can hold a `*`. The
+/// run-time guard checks the resolved path as well.
 fn names_rabbit_folder(parsed: &ParsedUninstallPath<'_>) -> bool {
     if parsed
         .components
@@ -1110,9 +1104,10 @@ fn names_rabbit_folder(parsed: &ParsedUninstallPath<'_>) -> bool {
     {
         return true;
     }
-    parsed.root == UninstallPathRoot::Token(UninstallPathToken::Resource)
-        && parsed.components.len() == 1
-        && wildcard_matches_ignoring_case(parsed.components[0], RABBIT_FOLDER)
+    parsed
+        .components
+        .last()
+        .is_some_and(|last| wildcard_matches_ignoring_case(last, RABBIT_FOLDER))
 }
 
 /// `*` matches any run of characters, including none. ASCII case is
@@ -1311,14 +1306,6 @@ mod tests {
                             "hive": "hkcu",
                             "key": "OSARA",
                             "only_if_value_in": { "value": "UninstallString", "dir": "{resource}/osara" }
-                        }
-                    ],
-                    "post": [
-                        {
-                            "offer_keymap_restore": {
-                                "source": "receipt_keymap_backup_id",
-                                "preserve_scr_lines": true
-                            }
                         }
                     ]
                 },
@@ -1996,8 +1983,34 @@ mod tests {
             &windows_remove_plans(r#""keep": ["{appdata}/REAPER/RABBIT/locks"]"#),
             "RABBIT's own folder",
         );
+        // So does a pattern that could match it there: on a standard install
+        // %APPDATA%\REAPER and $HOME/Library/Application Support/REAPER are
+        // the resource folder.
+        rejects(
+            "",
+            &plans(&[
+                &format!(
+                    r#"{{ "platform": "windows", "strategy": "remove_files", {SUMMARY},
+                         "remove": {{ "paths": ["{{appdata}}/REAPER/RAB*"] }} }}"#
+                ),
+                r#"{ "platform": "macos", "strategy": "not_supported", "note_key": "a" }"#,
+            ]),
+            "RABBIT's own folder",
+        );
+        rejects(
+            "",
+            &plans(&[
+                r#"{ "platform": "windows", "strategy": "not_supported", "note_key": "a" }"#,
+                &format!(
+                    r#"{{ "platform": "macos", "strategy": "remove_files", {SUMMARY},
+                         "remove": {{ "paths": ["{{home}}/Library/Application Support/REAPER/R*"] }} }}"#
+                ),
+            ]),
+            "RABBIT's own folder",
+        );
         // A pattern that can't match RABBIT is fine.
         accepts("", &path_plan("{resource}/Rab*.ini"));
+        accepts("", &path_plan("{resource}/UserPlugins/reaper_demo*.dll"));
     }
 
     #[test]
@@ -2022,7 +2035,13 @@ mod tests {
             r#""remove": { "matching_user_plugins": true }"#,
         )]);
         assert!(validate_package_spec(&demo_spec("", &uninstall)).is_ok());
-        for prefixes in [Vec::new(), vec![String::new()]] {
+        // One empty prefix among good ones matches every name just the same.
+        for prefixes in [
+            Vec::new(),
+            vec![String::new()],
+            vec![String::new(), "reaper_demo".to_string()],
+            vec!["reaper_demo".to_string(), String::new()],
+        ] {
             let mut spec = demo_spec("", &uninstall);
             spec.user_plugin_prefixes = prefixes;
             let message = validate_package_spec(&spec).unwrap_err();

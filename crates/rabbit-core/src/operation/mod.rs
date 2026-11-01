@@ -742,13 +742,6 @@ fn execute_operation_with_process_scan(
     // extensions are considered this set already reflects whether REAPER
     // succeeded, letting `first_failed_dependency` cascade the skip.
     let mut failed: HashSet<String> = HashSet::new();
-    // Whether this run is OSARA's first install here: detection looked and
-    // found no OSARA, the case where a replaced key map is the user's own.
-    // The resolved-artifact entry points pass no detections at all, and then
-    // nobody knows, so no key map backup is named in the receipt.
-    let osara_first_install = detections.iter().any(|detection| {
-        detection.package_id == crate::package::PACKAGE_OSARA && !detection.installed
-    });
 
     if options.dry_run {
         items.extend(unattended_installable.into_iter().map(|planned| {
@@ -825,19 +818,14 @@ fn execute_operation_with_process_scan(
             progress.report(ProgressEvent::InstallStarted {
                 package_id: package_id.clone(),
             });
-            let keymap_backup_id = match executed_unattended_item(
+            match executed_unattended_item(
                 planned,
                 &cached,
                 resource_path,
                 options.target_app_path.as_deref(),
                 options.replace_osara_keymap,
             ) {
-                Ok(item) => {
-                    let keymap_backup_id =
-                        osara::first_install_keymap_backup_id(osara_first_install, &item);
-                    items.push(item);
-                    keymap_backup_id
-                }
+                Ok(item) => items.push(item),
                 Err(error) => {
                     items.push(failed_operation_item(
                         planned.artifact.clone(),
@@ -850,7 +838,7 @@ fn execute_operation_with_process_scan(
                     });
                     continue;
                 }
-            };
+            }
             if let Some(state) = &mut unattended_state {
                 match upsert_unattended_package_receipt(
                     state,
@@ -859,7 +847,6 @@ fn execute_operation_with_process_scan(
                     &cached,
                     options.target_app_path.as_deref(),
                     options.replace_osara_keymap,
-                    keymap_backup_id,
                 ) {
                     Ok(()) => unattended_receipts_updated = true,
                     Err(error) => {
@@ -1599,7 +1586,6 @@ fn upsert_unattended_package_receipt(
     cached_artifact: &CachedArtifact,
     target_app_path: Option<&Path>,
     replace_osara_keymap: bool,
-    keymap_backup_id: Option<String>,
 ) -> Result<()> {
     let installed_paths = receipt_paths_for_artifact(
         artifact,
@@ -1620,7 +1606,6 @@ fn upsert_unattended_package_receipt(
             installed_paths: &installed_paths,
             installed_at: Some(operation_timestamp()),
             architecture: Some(artifact.architecture),
-            keymap_backup_id,
         },
     )
 }
@@ -3245,181 +3230,6 @@ mod tests {
                 .contains("applied the OSARA key map replacement")
         );
         assert!(!resource_path.join("osara").join("uninstall.exe").exists());
-        // No detections were passed, so nobody knows whether this was
-        // OSARA's first install, and the backup isn't named in the receipt.
-        let state = load_install_state(&resource_path).unwrap().unwrap();
-        assert_eq!(state.packages[PACKAGE_OSARA].keymap_backup_id, None);
-    }
-
-    /// Run the mock OSARA installer against `resource_path` with the key map
-    /// replacement, as detection saw the folder in `detections`.
-    #[cfg(target_os = "windows")]
-    fn run_osara_with_keymap_replacement(
-        dir: &std::path::Path,
-        resource_path: &std::path::Path,
-        detections: &[ComponentDetection],
-    ) -> super::PackageOperationReport {
-        let cache = tempdir().unwrap();
-        let source_path = dir.join("osara-installer.cmd");
-        std::fs::write(&source_path, osara_mock_installer_script()).unwrap();
-        execute_resolved_package_operation_with_detections(
-            resource_path,
-            vec![artifact_with_url(
-                PACKAGE_OSARA,
-                ArtifactKind::Installer,
-                "osara-installer.cmd",
-                &source_path.display().to_string(),
-            )],
-            detections,
-            cache.path(),
-            &PackageOperationOptions {
-                dry_run: false,
-                allow_reaper_running: false,
-                stage_unsupported: false,
-                replace_osara_keymap: true,
-                target_app_path: Some(resource_path.join("reaper.exe")),
-                lock_path: Some(dir.join("install.lock")),
-                force_reinstall_packages: Vec::new(),
-                package_variants: Default::default(),
-                package_channels: Default::default(),
-            },
-        )
-        .unwrap()
-    }
-
-    /// On OSARA's first install the replaced key map is the user's own, and
-    /// the receipt names the set it was backed up into, for a later
-    /// uninstall to offer back.
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn osara_first_install_names_the_replaced_key_map_backup() {
-        let dir = tempdir().unwrap();
-        let resource_path = dir.path().join("PortableREAPER");
-        std::fs::create_dir_all(&resource_path).unwrap();
-        std::fs::write(resource_path.join("reaper-kb.ini"), b"my own keys").unwrap();
-
-        let report = run_osara_with_keymap_replacement(
-            dir.path(),
-            &resource_path,
-            &[ComponentDetection::not_installed(PACKAGE_OSARA, "OSARA")],
-        );
-
-        assert_eq!(
-            report.items[0].status,
-            PackageOperationStatus::InstalledOrChecked
-        );
-        let state = load_install_state(&resource_path).unwrap().unwrap();
-        let backup_id = state.packages[PACKAGE_OSARA]
-            .keymap_backup_id
-            .clone()
-            .expect("a first install names the key map backup");
-        let set_path = resource_path
-            .join("RABBIT")
-            .join("backups")
-            .join(&backup_id);
-        assert_eq!(
-            report.items[0].backup_manifest_path.as_deref(),
-            Some(set_path.join("backup-manifest.json").as_path())
-        );
-        assert_eq!(
-            std::fs::read(set_path.join("reaper-kb.ini")).unwrap(),
-            b"my own keys"
-        );
-    }
-
-    /// An update replaces a key map that was already OSARA's. Its backup is
-    /// still made, but it is not the key map from before OSARA, so the
-    /// receipt doesn't name it.
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn osara_update_does_not_name_the_key_map_backup() {
-        let dir = tempdir().unwrap();
-        let resource_path = dir.path().join("PortableREAPER");
-        std::fs::create_dir_all(&resource_path).unwrap();
-        std::fs::write(resource_path.join("reaper-kb.ini"), b"older osara keys").unwrap();
-
-        let report = run_osara_with_keymap_replacement(
-            dir.path(),
-            &resource_path,
-            &[detection(PACKAGE_OSARA, Some("1.0.0"))],
-        );
-
-        assert_eq!(report.items[0].plan_action, PlanActionKind::Update);
-        assert!(report.items[0].backup_manifest_path.is_some());
-        let state = load_install_state(&resource_path).unwrap().unwrap();
-        assert_eq!(state.packages[PACKAGE_OSARA].keymap_backup_id, None);
-    }
-
-    /// The backup named on the first install survives every later update.
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn osara_update_keeps_the_key_map_backup_from_the_first_install() {
-        let dir = tempdir().unwrap();
-        let resource_path = dir.path().join("PortableREAPER");
-        std::fs::create_dir_all(&resource_path).unwrap();
-        std::fs::write(resource_path.join("reaper-kb.ini"), b"older osara keys").unwrap();
-        let mut state = InstallState::default();
-        state.packages.insert(
-            PACKAGE_OSARA.to_string(),
-            crate::receipt::PackageReceipt {
-                id: PACKAGE_OSARA.to_string(),
-                version: Some(Version::parse("1.0.0").unwrap()),
-                source_url: None,
-                source_sha256: None,
-                variant: None,
-                channel: None,
-                installed_files: Vec::new(),
-                installed_at: None,
-                rabbit_version: None,
-                architecture: None,
-                keymap_backup_id: Some("unix-1".to_string()),
-            },
-        );
-        save_install_state(&resource_path, &state).unwrap();
-
-        run_osara_with_keymap_replacement(
-            dir.path(),
-            &resource_path,
-            &[detection(PACKAGE_OSARA, Some("1.0.0"))],
-        );
-
-        let state = load_install_state(&resource_path).unwrap().unwrap();
-        assert_eq!(
-            state.packages[PACKAGE_OSARA].keymap_backup_id.as_deref(),
-            Some("unix-1")
-        );
-    }
-
-    /// The rule behind the tests above, on every platform: a backup is named
-    /// only for OSARA, only on its first install, and only when there was a
-    /// key map to back up.
-    #[test]
-    fn only_osaras_first_install_names_a_key_map_backup() {
-        let item = |package_id: &str, manifest: Option<&str>| {
-            let mut item = super::cancelled_item(
-                artifact(package_id, ArtifactKind::Installer, "installer.exe"),
-                PlanActionKind::Install,
-            );
-            item.backup_manifest_path = manifest.map(|id| {
-                std::path::Path::new("REAPER")
-                    .join("RABBIT")
-                    .join("backups")
-                    .join(id)
-                    .join("backup-manifest.json")
-            });
-            item
-        };
-        let named = |first_install, item| {
-            super::osara::first_install_keymap_backup_id(first_install, &item)
-        };
-
-        assert_eq!(
-            named(true, item(PACKAGE_OSARA, Some("unix-5-2"))).as_deref(),
-            Some("unix-5-2")
-        );
-        assert_eq!(named(false, item(PACKAGE_OSARA, Some("unix-5"))), None);
-        assert_eq!(named(true, item(PACKAGE_OSARA, None)), None);
-        assert_eq!(named(true, item(PACKAGE_SWS, Some("unix-5"))), None);
     }
 
     #[cfg(target_os = "windows")]

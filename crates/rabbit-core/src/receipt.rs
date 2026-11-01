@@ -18,32 +18,31 @@ pub struct InstallState {
     /// Packages the user turned down and does not want offered again on
     /// this install.
     ///
-    /// Only ever the *negative* answer, and only for packages whose spec
-    /// sets `remember_opt_out`. "Yes" needs no memory — an installed
+    /// Only ever the *negative* answer. "Yes" needs no memory — an installed
     /// package is already recorded in `packages` — while "no" was otherwise
     /// forgotten the moment the wizard closed, so a default RABBIT picked
     /// for you (a language pack matching RABBIT's own language) came back
     /// ticked on every launch no matter how often you declined it.
+    ///
+    /// Two things put a package here: the wizard, for a package whose spec
+    /// sets `remember_opt_out` and that the user left unticked, and an
+    /// uninstall, for any package (see [`remove_package_receipt`]). Removing
+    /// a package is as clear a "no" as leaving it unticked, and one set for
+    /// both means a recommended package doesn't come back ticked on the very
+    /// next run after you removed it. The readers (the wizard's default
+    /// ticks and the CLI's default package list) still honour the set only
+    /// for packages that set `remember_opt_out`; uninstall widens them to
+    /// every package when it ships.
+    ///
+    /// Only the user's own verdict takes a package out again: ticking it in
+    /// the wizard (see [`record_package_opt_outs`]). Installing it does not
+    /// (see [`upsert_package_receipt`]).
     ///
     /// Left out of the file entirely when empty, and read with
     /// `#[serde(default)]`, so receipts written by older RABBITs still load
     /// and older RABBITs still load receipts written by this one.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub declined_packages: BTreeSet<String>,
-    /// Packages the user uninstalled through RABBIT.
-    ///
-    /// Kept apart from `declined_packages`, which only covers packages that
-    /// set `remember_opt_out`: without this, a recommended package would come
-    /// back ticked on the very next run after you removed it. "You
-    /// uninstalled it" and "you said no" also read differently in reports.
-    /// Installing the package again takes it out of the set (see
-    /// [`upsert_package_receipt`]).
-    ///
-    /// Optional in the file, like `declined_packages`. An older RABBIT
-    /// ignores it and drops it when it saves the receipt, which only means
-    /// the package is offered again.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub removed_packages: BTreeSet<String>,
     /// What each configuration step found or changed, by step id.
     ///
     /// Recorded so a later uninstall can undo exactly what RABBIT did and
@@ -60,7 +59,6 @@ impl Default for InstallState {
             schema_version: 1,
             packages: BTreeMap::new(),
             declined_packages: BTreeSet::new(),
-            removed_packages: BTreeSet::new(),
             applied_configuration: BTreeMap::new(),
         }
     }
@@ -126,16 +124,6 @@ pub struct PackageReceipt {
     pub installed_at: Option<String>,
     pub rabbit_version: Option<String>,
     pub architecture: Option<Architecture>,
-    /// On OSARA's receipt: the backup set that holds the key map the user
-    /// had before OSARA's replaced it, so a later uninstall can offer it
-    /// back. Recorded only on OSARA's first install here. An update replaces
-    /// a key map that was already OSARA's, so its backup would hold an older
-    /// OSARA key map, and taking that for the user's own would be wrong.
-    /// Once set it is kept through every later update (see
-    /// [`upsert_package_receipt`]), and it is never filled in by guessing
-    /// for installs that came before it existed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keymap_backup_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -303,14 +291,18 @@ pub struct PackageReceiptParams<'a> {
     pub installed_paths: &'a [PathBuf],
     pub installed_at: Option<String>,
     pub architecture: Option<Architecture>,
-    /// See [`PackageReceipt::keymap_backup_id`]. Ignored when the receipt
-    /// already names one.
-    pub keymap_backup_id: Option<String>,
 }
 
 /// Record that `package_id` was installed, replacing any earlier entry for
-/// it, and take it out of `removed_packages`: installing it again is the
-/// user changing their mind.
+/// it.
+///
+/// This leaves `declined_packages` alone. That set only ever changes on the
+/// user's own verdict, and the wizard gives one whenever it installs a
+/// package: a ticked row clears the refusal through
+/// [`record_package_opt_outs`]. An install that comes without a verdict
+/// must not clear it either: the CLI's `--package` is a scope for one run,
+/// not a standing preference, so `rabbit setup --package langpack-de` must
+/// not forget that the wizard was told no.
 pub fn upsert_package_receipt(
     state: &mut InstallState,
     resource_path: &Path,
@@ -326,7 +318,6 @@ pub fn upsert_package_receipt(
         architecture,
         variant,
         channel,
-        keymap_backup_id,
     } = params;
     let mut installed_files = installed_paths
         .iter()
@@ -334,14 +325,6 @@ pub fn upsert_package_receipt(
         .collect::<Result<Vec<_>>>()?;
     installed_files.sort_by(|left, right| left.path.cmp(&right.path));
     installed_files.dedup_by(|left, right| left.path == right.path);
-
-    // The first recorded key map backup wins. It names the key map from
-    // before OSARA; anything an update could offer here is a later one.
-    let keymap_backup_id = state
-        .packages
-        .get(package_id)
-        .and_then(|existing| existing.keymap_backup_id.clone())
-        .or(keymap_backup_id);
 
     state.packages.insert(
         package_id.to_string(),
@@ -360,23 +343,21 @@ pub fn upsert_package_receipt(
             installed_at,
             rabbit_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             architecture,
-            keymap_backup_id,
         },
     );
-    state.removed_packages.remove(package_id);
     Ok(())
 }
 
 /// Forget that `package_id` is installed and remember that the user removed
-/// it, so the next install run doesn't tick it again by itself. Returns the
-/// entry that was removed, if there was one. The package goes into
-/// `removed_packages` either way: a copy RABBIT has no receipt for can be
-/// uninstalled too.
+/// it, by adding it to `declined_packages`, so the next install run doesn't
+/// tick it again by itself. Returns the entry that was removed, if there was
+/// one. The package is declined either way: a copy RABBIT has no receipt
+/// for can be uninstalled too.
 pub fn remove_package_receipt(
     state: &mut InstallState,
     package_id: &str,
 ) -> Option<PackageReceipt> {
-    state.removed_packages.insert(package_id.to_string());
+    state.declined_packages.insert(package_id.to_string());
     state.packages.remove(package_id)
 }
 
@@ -524,7 +505,6 @@ mod tests_user_content {
                 ],
                 installed_at: None,
                 architecture: None,
-                keymap_backup_id: None,
             },
         )
         .unwrap();
@@ -620,7 +600,6 @@ mod tests {
                 installed_at: None,
                 rabbit_version: Some("0.1.0".to_string()),
                 architecture: None,
-                keymap_backup_id: None,
             },
         );
 
@@ -628,7 +607,6 @@ mod tests {
             schema_version: 1,
             packages,
             declined_packages: Default::default(),
-            removed_packages: Default::default(),
             applied_configuration: Default::default(),
         };
         save_install_state(dir.path(), &state).unwrap();
@@ -672,7 +650,6 @@ mod tests {
                 installed_at: None,
                 rabbit_version: None,
                 architecture: None,
-                keymap_backup_id: None,
             },
         );
         save_install_state(
@@ -681,7 +658,6 @@ mod tests {
                 schema_version: 1,
                 packages,
                 declined_packages: Default::default(),
-                removed_packages: Default::default(),
                 applied_configuration: Default::default(),
             },
         )
@@ -740,7 +716,6 @@ mod tests {
                 installed_at: None,
                 rabbit_version: None,
                 architecture: None,
-                keymap_backup_id: None,
             },
         );
         save_install_state(
@@ -749,7 +724,6 @@ mod tests {
                 schema_version: 1,
                 packages,
                 declined_packages: Default::default(),
-                removed_packages: Default::default(),
                 applied_configuration: Default::default(),
             },
         )
@@ -767,8 +741,8 @@ mod tests {
     }
 }
 
-/// What the receipt records for a later uninstall: removed packages, what
-/// configuration steps did, and OSARA's key map backup.
+/// What the receipt records for a later uninstall: removed packages and what
+/// configuration steps did.
 #[cfg(test)]
 mod tests_uninstall_records {
     use std::fs;
@@ -777,12 +751,13 @@ mod tests_uninstall_records {
 
     use super::{
         AppliedConfiguration, AppliedConfigurationOutcome, InstallState, PackageReceiptParams,
-        RECEIPT_RELATIVE_PATH, ReapackRepository, load_install_state, record_applied_configuration,
-        remove_package_receipt, save_install_state, upsert_package_receipt,
+        RECEIPT_RELATIVE_PATH, ReapackRepository, declined_packages, load_install_state,
+        record_applied_configuration, record_package_opt_outs, remove_package_receipt,
+        save_install_state, upsert_package_receipt,
     };
     use crate::package::{PACKAGE_OSARA, PACKAGE_SWS};
 
-    fn install(state: &mut InstallState, package_id: &str, keymap_backup_id: Option<&str>) {
+    fn install(state: &mut InstallState, package_id: &str) {
         upsert_package_receipt(
             state,
             std::path::Path::new("."),
@@ -796,7 +771,6 @@ mod tests_uninstall_records {
                 installed_paths: &[],
                 installed_at: None,
                 architecture: None,
-                keymap_backup_id: keymap_backup_id.map(str::to_string),
             },
         )
         .unwrap();
@@ -828,9 +802,9 @@ mod tests_uninstall_records {
     }
 
     #[test]
-    fn removing_a_package_forgets_its_receipt_and_remembers_the_removal() {
+    fn removing_a_package_forgets_its_receipt_and_declines_it() {
         let mut state = InstallState::default();
-        install(&mut state, PACKAGE_SWS, None);
+        install(&mut state, PACKAGE_SWS);
 
         let removed = remove_package_receipt(&mut state, PACKAGE_SWS);
 
@@ -839,44 +813,52 @@ mod tests_uninstall_records {
             Some(PACKAGE_SWS)
         );
         assert!(!state.packages.contains_key(PACKAGE_SWS));
-        assert!(state.removed_packages.contains(PACKAGE_SWS));
+        assert!(state.declined_packages.contains(PACKAGE_SWS));
 
         // A copy RABBIT had no receipt for can be removed too, and is
         // remembered the same way.
         assert_eq!(remove_package_receipt(&mut state, PACKAGE_OSARA), None);
-        assert!(state.removed_packages.contains(PACKAGE_OSARA));
+        assert!(state.declined_packages.contains(PACKAGE_OSARA));
     }
 
+    /// A removal is saved like any other refusal, so everything that reads
+    /// the user's refusals sees it.
     #[test]
-    fn installing_a_removed_package_again_clears_the_removal() {
-        let mut state = InstallState::default();
-        install(&mut state, PACKAGE_SWS, None);
-        remove_package_receipt(&mut state, PACKAGE_SWS);
-        remove_package_receipt(&mut state, PACKAGE_OSARA);
-
-        install(&mut state, PACKAGE_SWS, None);
-
-        assert!(state.packages.contains_key(PACKAGE_SWS));
-        assert!(!state.removed_packages.contains(PACKAGE_SWS));
-        assert!(
-            state.removed_packages.contains(PACKAGE_OSARA),
-            "only the package installed again is cleared"
-        );
-    }
-
-    #[test]
-    fn removed_packages_round_trip_and_stay_out_of_the_file_when_empty() {
+    fn a_removal_is_saved_as_a_refusal() {
         let dir = tempdir().unwrap();
         let mut state = InstallState::default();
+        install(&mut state, PACKAGE_SWS);
         remove_package_receipt(&mut state, PACKAGE_SWS);
         save_install_state(dir.path(), &state).unwrap();
 
         assert_eq!(load_install_state(dir.path()).unwrap().unwrap(), state);
-        assert!(receipt_text(dir.path()).contains("removed_packages"));
+        assert!(declined_packages(dir.path()).contains(PACKAGE_SWS));
+    }
 
-        state.removed_packages.clear();
+    /// Installing a removed package again doesn't clear the refusal by
+    /// itself: the CLI's `--package` is a scope for one run. Ticking it in
+    /// the wizard is the user's verdict, and that clears it.
+    #[test]
+    fn only_ticking_a_removed_package_clears_the_refusal() {
+        let dir = tempdir().unwrap();
+        let mut state = InstallState::default();
+        install(&mut state, PACKAGE_SWS);
+        remove_package_receipt(&mut state, PACKAGE_SWS);
+        remove_package_receipt(&mut state, PACKAGE_OSARA);
+
+        install(&mut state, PACKAGE_SWS);
+        assert!(state.packages.contains_key(PACKAGE_SWS));
+        assert!(state.declined_packages.contains(PACKAGE_SWS));
         save_install_state(dir.path(), &state).unwrap();
-        assert!(!receipt_text(dir.path()).contains("removed_packages"));
+
+        record_package_opt_outs(dir.path(), &[], &[PACKAGE_SWS.to_string()]).unwrap();
+        let state = load_install_state(dir.path()).unwrap().unwrap();
+        assert!(state.packages.contains_key(PACKAGE_SWS));
+        assert!(!state.declined_packages.contains(PACKAGE_SWS));
+        assert!(
+            state.declined_packages.contains(PACKAGE_OSARA),
+            "only the package ticked again is cleared"
+        );
     }
 
     /// A receipt from before these fields existed still loads, and one with
@@ -896,22 +878,44 @@ mod tests_uninstall_records {
         .unwrap();
 
         let state = load_install_state(dir.path()).unwrap().unwrap();
-        assert!(state.removed_packages.is_empty());
         assert!(state.applied_configuration.is_empty());
-        assert_eq!(state.packages[PACKAGE_OSARA].keymap_backup_id, None);
+        assert!(state.packages.contains_key(PACKAGE_OSARA));
         assert!(state.declined_packages.contains("langpack-de"));
 
         save_install_state(dir.path(), &state).unwrap();
         let text = receipt_text(dir.path());
-        for field in [
-            "removed_packages",
-            "applied_configuration",
-            "keymap_backup_id",
-        ] {
-            assert!(
-                !text.contains(field),
-                "{field} must stay out when empty: {text}"
-            );
+        assert!(
+            !text.contains("applied_configuration"),
+            "applied_configuration must stay out when empty: {text}"
+        );
+    }
+
+    /// Development builds of the uninstall work wrote a `removed_packages`
+    /// set and an OSARA `keymap_backup_id`, both dropped since. Neither
+    /// struct refuses unknown fields, so such a receipt still loads, and the
+    /// next save leaves both out.
+    #[test]
+    fn receipts_with_dropped_fields_still_load() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("RABBIT")).unwrap();
+        fs::write(
+            dir.path().join(RECEIPT_RELATIVE_PATH),
+            r#"{"schema_version":1,"packages":{"osara":{"id":"osara","version":"2024.1",
+                "source_url":null,"source_sha256":null,"installed_files":[],
+                "installed_at":null,"rabbit_version":"0.4.0","architecture":null,
+                "keymap_backup_id":"unix-1782841261"}},
+                "removed_packages":["sws"]}"#,
+        )
+        .unwrap();
+
+        let state = load_install_state(dir.path()).unwrap().unwrap();
+        assert!(state.packages.contains_key(PACKAGE_OSARA));
+        assert!(state.declined_packages.is_empty());
+
+        save_install_state(dir.path(), &state).unwrap();
+        let text = receipt_text(dir.path());
+        for field in ["removed_packages", "keymap_backup_id"] {
+            assert!(!text.contains(field), "{field} must be dropped: {text}");
         }
     }
 
@@ -1011,51 +1015,6 @@ mod tests_uninstall_records {
         assert_eq!(
             state.applied_configuration[step],
             language_step("fr.ReaperLangPack", Some("de.ReaperLangPack"))
-        );
-    }
-
-    /// OSARA's key map backup is named on the first install and kept from
-    /// then on: an update never replaces it, with another id or with none.
-    #[test]
-    fn the_first_recorded_key_map_backup_is_kept() {
-        let mut state = InstallState::default();
-        install(&mut state, PACKAGE_OSARA, Some("unix-1"));
-        install(&mut state, PACKAGE_OSARA, None);
-        install(&mut state, PACKAGE_OSARA, Some("unix-2"));
-        assert_eq!(
-            state.packages[PACKAGE_OSARA].keymap_backup_id.as_deref(),
-            Some("unix-1")
-        );
-
-        // Once the package is removed, its receipt and the id go with it,
-        // and the next first install names its own backup.
-        let removed = remove_package_receipt(&mut state, PACKAGE_OSARA);
-        assert_eq!(
-            removed
-                .and_then(|receipt| receipt.keymap_backup_id)
-                .as_deref(),
-            Some("unix-1")
-        );
-        install(&mut state, PACKAGE_OSARA, Some("unix-3"));
-        assert_eq!(
-            state.packages[PACKAGE_OSARA].keymap_backup_id.as_deref(),
-            Some("unix-3")
-        );
-    }
-
-    #[test]
-    fn the_key_map_backup_id_round_trips() {
-        let dir = tempdir().unwrap();
-        let mut state = InstallState::default();
-        install(&mut state, PACKAGE_OSARA, Some("unix-1782841261"));
-        install(&mut state, PACKAGE_SWS, None);
-        save_install_state(dir.path(), &state).unwrap();
-
-        assert_eq!(load_install_state(dir.path()).unwrap().unwrap(), state);
-        // Only OSARA's entry carries the field.
-        assert_eq!(
-            receipt_text(dir.path()).matches("keymap_backup_id").count(),
-            1
         );
     }
 }

@@ -59,6 +59,10 @@ pub struct BackupManifestFile {
     /// inside it, absolute for files outside it. Sets written by older
     /// RABBIT versions also hold absolute paths for files inside it.
     pub original_path: PathBuf,
+    /// Where the copy is, always `<resource>/RABBIT/backups/<id>/...`. This
+    /// version records it absolute. Earlier ones recorded it relative to the
+    /// folder RABBIT was started in when `--resource-path` was relative, so
+    /// restore finds the copy by the `RABBIT/backups/<id>` part either way.
     pub backup_path: PathBuf,
     pub size: u64,
     pub sha256: String,
@@ -160,9 +164,16 @@ impl BackupSetWriter {
     }
 
     fn with_mode(resource_path: &Path, set_id: &str, reason: &str, planning: bool) -> Self {
+        // A relative resource path (`--resource-path .`) would make every
+        // path the manifest records relative to the folder RABBIT was
+        // started in, and a restore started anywhere else couldn't find the
+        // copies. Only an empty path or an unreadable current folder can
+        // fail here, and then the path is used as given, as before.
+        let resource_path =
+            absolute_without_dots(resource_path).unwrap_or_else(|_| resource_path.to_path_buf());
         Self {
-            resource_path: resource_path.to_path_buf(),
-            set_path: backups_root(resource_path).join(set_id),
+            set_path: backups_root(&resource_path).join(set_id),
+            resource_path,
             manifest: BackupManifest {
                 schema_version: 1,
                 rabbit_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -297,8 +308,10 @@ impl BackupSetWriter {
 
     /// Where a backup of `original` goes.
     fn slot_for(&self, original: &Path) -> Result<BackupSlot> {
-        let absolute = std::path::absolute(original).with_path(original)?;
-        let resource = std::path::absolute(&self.resource_path).with_path(&self.resource_path)?;
+        // Both without `..`, or a file reached through `../REAPER` would
+        // never count as inside the resource folder on macOS.
+        let absolute = absolute_without_dots(original).with_path(original)?;
+        let resource = absolute_without_dots(&self.resource_path).with_path(&self.resource_path)?;
         if let Some(relative) = relative_within(&absolute, &resource)
             && is_plain_relative(&relative)
             && !collides_with_set_layout(&relative)
@@ -536,17 +549,19 @@ fn plan_restore_from_manifest(
     };
     for entry in &manifest.files {
         let recorded = recorded_set_location(&entry.backup_path);
+        let original_path = recorded
+            .as_ref()
+            .and_then(|recorded| recorded.resource_relative_original(&entry.original_path))
+            .unwrap_or_else(|| entry.original_path.clone());
         let target_path = restore_target(
             resource_path,
-            &entry.original_path,
-            recorded.as_ref().map(|(resource, _)| resource.as_path()),
+            &original_path,
+            recorded
+                .as_ref()
+                .map(|recorded| recorded.resource.as_path()),
             outside_roots,
         )?;
-        let source_path = restore_source(
-            backup_path,
-            &entry.backup_path,
-            recorded.as_ref().map(|(_, set)| set.as_path()),
-        )?;
+        let source_path = restore_source(backup_path, &entry.backup_path, recorded.as_ref())?;
         let finished = entry.state == BackupEntryState::Done;
 
         // A pending entry's copy may never have finished. The run stopped
@@ -645,7 +660,7 @@ fn restore_target(
         }
         Some(original_path.to_path_buf())
     } else {
-        let resource = std::path::absolute(resource_path).with_path(resource_path)?;
+        let resource = absolute_without_dots(resource_path).with_path(resource_path)?;
         relative_within(original_path, &resource)
             .or_else(|| recorded_resource.and_then(|old| relative_within(original_path, old)))
             .filter(|relative| is_plain_relative(relative))
@@ -669,18 +684,23 @@ fn restore_target(
     ))
 }
 
-/// The copy an entry names, always inside the set being restored. Entries
-/// record absolute paths; when the set has moved with its resource folder,
-/// the part after the recorded set folder still finds the copy.
+/// The copy an entry names, always inside the set being restored.
+///
+/// Every writer records the copy below `RABBIT/backups/<id>`: absolute, or
+/// relative to the folder RABBIT was started in when it was given a relative
+/// resource path. Either way the part after the set folder finds the copy,
+/// also when the set has moved with its resource folder or the restore runs
+/// from another folder. Only a recorded path without that part is read as
+/// relative to the set itself.
 fn restore_source(
     backup_path: &Path,
     recorded_backup_path: &Path,
-    recorded_set: Option<&Path>,
+    recorded: Option<&RecordedSet>,
 ) -> Result<PathBuf> {
-    let relative = if recorded_backup_path.is_relative() {
-        Some(recorded_backup_path.to_path_buf())
-    } else {
-        recorded_set.and_then(|set| relative_within(recorded_backup_path, set))
+    let relative = match recorded {
+        Some(recorded) => Some(recorded.inside.clone()),
+        None if recorded_backup_path.is_relative() => Some(recorded_backup_path.to_path_buf()),
+        None => None,
     };
     match relative {
         Some(relative)
@@ -695,19 +715,60 @@ fn restore_source(
     }
 }
 
-/// Where a set was when it recorded `backup_path`: the resource folder and
-/// the set folder, read from the last `RABBIT/backups/<id>` in the path.
-fn recorded_set_location(backup_path: &Path) -> Option<(PathBuf, PathBuf)> {
-    let parts = comparable_components(backup_path)?;
+/// Where a set was when it recorded a copy's path, read from the last
+/// `RABBIT/backups/<id>` in that path. See [`recorded_set_location`].
+struct RecordedSet {
+    /// The resource folder as recorded: absolute, or relative to the folder
+    /// RABBIT was started in, such as `REAPER`, `.` or `../REAPER`.
+    resource: PathBuf,
+    /// The copy's path inside the set.
+    inside: PathBuf,
+}
+
+impl RecordedSet {
+    /// The file's path inside the resource folder, for an entry an older
+    /// install wrote while RABBIT had a relative resource path.
+    ///
+    /// Those installs recorded the original as the resource path joined with
+    /// the file's path, `REAPER/UserPlugins/x.dll` or `./UserPlugins/x.dll`,
+    /// which reads like a path inside the resource folder but isn't. They
+    /// put the copy at the same path inside the set, and that is how such an
+    /// entry is told apart: its original is exactly the recorded resource
+    /// folder joined with the copy's path in the set. Every other relative
+    /// original is already inside the resource folder, and its copy's path
+    /// in the set is the original itself, so it can't match by accident.
+    fn resource_relative_original(&self, original: &Path) -> Option<PathBuf> {
+        (original.is_relative()
+            && !self.resource.as_os_str().is_empty()
+            && same_components(original, &self.resource.join(&self.inside)))
+        .then(|| self.inside.clone())
+    }
+}
+
+/// Where a set was when it recorded `backup_path`, read from the last
+/// `RABBIT/backups/<id>` in the path. Relative paths count too, with any
+/// `.` or `..` before that part, because sets written while RABBIT had a
+/// relative resource path record them that way.
+fn recorded_set_location(backup_path: &Path) -> Option<RecordedSet> {
     let components: Vec<Component<'_>> = backup_path.components().collect();
+    let names: Vec<Option<String>> = components
+        .iter()
+        .map(|component| match component {
+            Component::Normal(name) => Some(fold_case(&name.to_string_lossy())),
+            _ => None,
+        })
+        .collect();
     let rabbit = fold_case("RABBIT");
     let backups = fold_case("backups");
-    let start = (0..parts.len().saturating_sub(3))
-        .rev()
-        .find(|&index| parts[index] == rabbit && parts[index + 1] == backups)?;
-    let resource: PathBuf = components[..start].iter().collect();
-    let set: PathBuf = components[..start + 3].iter().collect();
-    Some((resource, set))
+    let start = (0..names.len().saturating_sub(3)).rev().find(|&index| {
+        names[index].as_deref() == Some(rabbit.as_str())
+            && names[index + 1].as_deref() == Some(backups.as_str())
+            && names[index + 2].is_some()
+    })?;
+    Some(RecordedSet {
+        resource: components[..start].iter().collect(),
+        inside: components[start + 3..].iter().collect(),
+    })
 }
 
 fn restore_file(action: &mut RestoreBackupAction, backups: &mut BackupSetWriter) -> Result<()> {
@@ -832,6 +893,37 @@ fn backups_root(resource_path: &Path) -> PathBuf {
     resource_path.join("RABBIT").join("backups")
 }
 
+/// `path` made absolute, with no `.` or `..` left in it.
+///
+/// `std::path::absolute` already resolves both on Windows, but keeps `..`
+/// elsewhere. It is resolved here by the text: the current folder comes from
+/// the operating system with every symbolic link already followed, so a `..`
+/// right after it means its parent. Only a link inside the typed path itself
+/// followed by `..` would end up somewhere else. Canonicalizing instead
+/// would spell the same folder two ways (macOS's `/var` and `/private/var`)
+/// depending on whether a file exists yet, and then files inside the
+/// resource folder would stop counting as inside it.
+fn absolute_without_dots(path: &Path) -> std::io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    if !absolute
+        .components()
+        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Ok(absolute);
+    }
+    let mut normal = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normal.pop();
+            }
+            other => normal.push(other),
+        }
+    }
+    Ok(normal)
+}
+
 /// A resource-relative path that would land on the set's own files (its
 /// manifest, or the `external` folder) goes under `external/` like an
 /// outside file, with its absolute path recorded.
@@ -858,6 +950,20 @@ fn first_component_is(path: &Path, name: &str) -> bool {
 fn same_path(left: &Path, right: &str) -> bool {
     let right = comparable_components(Path::new(right));
     right.is_some() && comparable_components(left) == right
+}
+
+/// Whether two paths have the same components, `.` and `..` included,
+/// ignoring case on Windows.
+fn same_components(left: &Path, right: &Path) -> bool {
+    let left: Vec<Component<'_>> = left.components().collect();
+    let right: Vec<Component<'_>> = right.components().collect();
+    left.len() == right.len()
+        && left.iter().zip(&right).all(|pair| match pair {
+            (Component::Normal(left), Component::Normal(right)) => {
+                fold_case(&left.to_string_lossy()) == fold_case(&right.to_string_lossy())
+            }
+            (left, right) => left == right,
+        })
 }
 
 /// The part of `path` below `root`, or `None` when `path` is not inside it.
@@ -1340,6 +1446,137 @@ mod tests {
             b"old kontrol"
         );
         assert!(!old_resource.exists());
+    }
+
+    /// A temporary folder named by a path relative to the current folder, the
+    /// way `--resource-path .` or `--resource-path REAPER` names one. Tests
+    /// run in the package's own folder, so it sits in the workspace's
+    /// `target` folder, reached through `..`. Returns the folder, which
+    /// removes itself when dropped, and its relative path.
+    fn relative_tempdir() -> (tempfile::TempDir, PathBuf) {
+        let base = Path::new("..").join("..").join("target");
+        fs::create_dir_all(&base).unwrap();
+        let dir = tempfile::tempdir_in(&base).unwrap();
+        let relative = base.join(dir.path().file_name().unwrap());
+        assert!(relative.is_relative() && relative.is_dir(), "{relative:?}");
+        (dir, relative)
+    }
+
+    /// A set written through a relative resource path records where things
+    /// are without depending on the folder RABBIT ran in, so it restores
+    /// through that relative path and through the absolute one alike, and
+    /// so does the set the restore itself writes.
+    #[test]
+    fn a_set_written_with_a_relative_resource_path_restores_from_anywhere() {
+        let (_dir, base) = relative_tempdir();
+        let resource = base.join("REAPER");
+        let plugin = resource.join("UserPlugins").join("reaper_demo.dll");
+        write(&plugin, b"old plugin");
+
+        let mut writer = BackupSetWriter::new(&resource, "unix-1", "install-replacement");
+        writer.copy_file(Some("demo"), &plugin).unwrap();
+        assert!(writer.path().is_absolute(), "{:?}", writer.path());
+        let manifest = load_backup_manifest(writer.path()).unwrap().unwrap();
+        assert!(manifest.files[0].backup_path.is_absolute());
+        assert_eq!(
+            manifest.files[0].original_path,
+            Path::new("UserPlugins").join("reaper_demo.dll")
+        );
+        fs::write(&plugin, b"new plugin").unwrap();
+
+        restore_backup_set_within(&resource, "unix-1", &APPLY, &[]).unwrap();
+        assert_eq!(fs::read(&plugin).unwrap(), b"old plugin");
+
+        // Undo it through the absolute path, from the set the restore wrote.
+        let absolute_resource = super::absolute_without_dots(&resource).unwrap();
+        let undo = list_backup_sets(&resource)
+            .unwrap()
+            .into_iter()
+            .find(|set| set.reason.as_deref() == Some("before-restore"))
+            .expect("the restore wrote a before-restore set");
+        restore_backup_set_within(&absolute_resource, &undo.id, &APPLY, &[]).unwrap();
+        assert_eq!(fs::read(&plugin).unwrap(), b"new plugin");
+
+        restore_backup_set_within(&absolute_resource, "unix-1", &APPLY, &[]).unwrap();
+        assert_eq!(fs::read(&plugin).unwrap(), b"old plugin");
+    }
+
+    /// Earlier versions given a relative resource path recorded relative
+    /// paths: every copy as `<that path>/RABBIT/backups/<id>/...`, and an
+    /// install replacement's original as `<that path>/UserPlugins/...`,
+    /// while the unattended key map backup recorded its original inside the
+    /// resource folder. Such sets are on users' machines, and they restore
+    /// again, to the right place, through a relative or an absolute path.
+    #[test]
+    fn older_sets_with_relative_paths_restore_again() {
+        let (_dir, base) = relative_tempdir();
+        let resource = base.join("REAPER");
+        let absolute_resource = super::absolute_without_dots(&resource).unwrap();
+        let keymap = resource.join("reaper-kb.ini");
+        let plugin_inside = Path::new("UserPlugins").join("reaper_demo.dll");
+        let plugin = resource.join(&plugin_inside);
+
+        let write_old_set = |id: &str, recorded_resource: &Path| {
+            let set = resource.join("RABBIT/backups").join(id);
+            write(&set.join("reaper-kb.ini"), b"own keymap");
+            write(&set.join(&plugin_inside), b"old plugin");
+            let recorded_set = recorded_resource.join("RABBIT").join("backups").join(id);
+            let entry = |original: PathBuf, inside: &Path| BackupManifestFile {
+                package_id: None,
+                original_path: original,
+                backup_path: recorded_set.join(inside),
+                size: fs::metadata(set.join(inside)).unwrap().len(),
+                sha256: sha256_file(&set.join(inside)).unwrap(),
+                state: BackupEntryState::Done,
+            };
+            save_manifest(
+                &set,
+                "install-replacement",
+                vec![
+                    entry(PathBuf::from("reaper-kb.ini"), Path::new("reaper-kb.ini")),
+                    entry(recorded_resource.join(&plugin_inside), &plugin_inside),
+                ],
+            );
+        };
+
+        for (id, recorded_resource, restore_through) in [
+            ("unix-1", resource.clone(), resource.clone()),
+            ("unix-2", resource.clone(), absolute_resource.clone()),
+            ("unix-3", PathBuf::from("."), resource.clone()),
+            ("unix-4", PathBuf::from("REAPER"), absolute_resource.clone()),
+            ("unix-5", Path::new("..").join("REAPER"), resource.clone()),
+        ] {
+            write(&keymap, b"osara keymap");
+            write(&plugin, b"new plugin");
+            write_old_set(id, &recorded_resource);
+
+            let report = restore_backup_set_within(&restore_through, id, &APPLY, &[])
+                .unwrap_or_else(|error| panic!("{id}: {error}"));
+
+            assert_eq!(fs::read(&keymap).unwrap(), b"own keymap", "{id}");
+            assert_eq!(fs::read(&plugin).unwrap(), b"old plugin", "{id}");
+            assert_eq!(
+                report.actions[1].target_path,
+                restore_through.join(&plugin_inside),
+                "{id}"
+            );
+        }
+        // Nothing went to the resource path joined onto itself.
+        assert!(!resource.join("REAPER").exists());
+    }
+
+    #[test]
+    fn absolute_paths_lose_their_dots() {
+        let current = std::env::current_dir().unwrap();
+        let dotted = Path::new("a").join("..").join("b").join(".").join("c");
+        assert_eq!(
+            super::absolute_without_dots(&dotted).unwrap(),
+            current.join("b").join("c")
+        );
+        assert_eq!(
+            super::absolute_without_dots(&current).unwrap(),
+            std::path::absolute(&current).unwrap()
+        );
     }
 
     /// Without a manifest the set's layout mirrors the resource folder,

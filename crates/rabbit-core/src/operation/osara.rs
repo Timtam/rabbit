@@ -9,7 +9,7 @@ use crate::reapack::extract_scr_lines;
 use crate::text_file::{read_text_file_lossless, write_text_file_lossless};
 
 use super::{
-    PackageAutomationSupport, PackageOperationItem, PlannedAutomationKind, PlannedExecutionKind,
+    PackageAutomationSupport, PlannedAutomationKind, PlannedExecutionKind,
     PlannedExecutionOverride, UnattendedPostInstallReport, backup_file_for_unattended_change,
     replace_file_from_source, target_likely_portable,
 };
@@ -204,28 +204,6 @@ pub(super) fn osara_manual_steps(
         );
     }
     steps
-}
-
-/// The backup set to name in OSARA's receipt as the key map from before
-/// OSARA, or `None`.
-///
-/// Only on a first install, where `replace_by_default` replaces whatever key
-/// map is there because there is no OSARA yet: that key map is the user's
-/// own. On an update the replaced key map was already OSARA's, an older
-/// OSARA's after the installer has run, and offering it back later as "the
-/// key map you had before OSARA" would be wrong. Nothing is named either
-/// when there was no key map to back up.
-pub(super) fn first_install_keymap_backup_id(
-    first_install: bool,
-    item: &PackageOperationItem,
-) -> Option<String> {
-    if !first_install || item.package_id != PACKAGE_OSARA {
-        return None;
-    }
-    // The key map replacement is the only post-install step that makes a
-    // backup set, and a set's id is its folder's name.
-    let set_path = item.backup_manifest_path.as_deref()?.parent()?;
-    Some(set_path.file_name()?.to_string_lossy().into_owned())
 }
 
 pub(super) fn apply_osara_keymap_replacement(
