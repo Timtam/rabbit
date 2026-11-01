@@ -195,7 +195,13 @@ questions they cannot reasonably answer.
   process. The osascript route is the same path Apple's own installer
   uses for GUI-driven elevation and is screen-reader friendly. The only
   consumer today is the Surge XT
-  `MountDiskImageAndRunPkgInstaller` runner.
+  `MountDiskImageAndRunPkgInstaller` runner. The root shell behind
+  `do shell script` would split and expand an unquoted path, so every
+  word is POSIX single-quoted and the whole command is then put into one
+  AppleScript string, after a `cd /`. Nothing is written to a script
+  file, which another process of the same user could rewrite before root
+  runs it. `run_elevated_shell_lines` puts several commands behind one
+  prompt the same way and reports which one failed.
 
 ## Recommended Technical Direction
 

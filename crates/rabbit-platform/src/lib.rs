@@ -30,7 +30,8 @@ pub use disk_image::{
     install_app_bundle_from_disk_image, mount_disk_image, run_pkg_installer_from_disk_image,
 };
 pub use elevation::{
-    ElevatedWindow, ElevationError, is_nsis_destination_argument, run_elevated_and_wait,
+    ElevatedWindow, ElevationError, ShellCommand, ShellLinesOutcome, is_nsis_destination_argument,
+    run_elevated_and_wait, run_elevated_shell_lines,
 };
 pub use file_version::{
     read_file_version_parts, read_file_version_string, read_string_file_info_key,

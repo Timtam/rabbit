@@ -231,6 +231,9 @@ fn platform_run_pkg_installer_from_disk_image(
         }
     })?;
 
+    // Volume and folder names on a disk image can contain spaces.
+    // `run_elevated_and_wait` quotes every argument for the root shell, so
+    // the `.pkg` path reaches `installer` as one word whatever it holds.
     let installer_args = vec![
         "-pkg".to_string(),
         pkg.display().to_string(),
