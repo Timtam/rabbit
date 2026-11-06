@@ -181,7 +181,7 @@ fn plan_item(
         requires_elevation,
         unbacked,
         confirm: false,
-        warnings: package_warnings(input, spec),
+        warnings: package_warnings(input, spec, strategy),
         notes: Vec::new(),
     };
     item.confirm = item.unbacked
@@ -325,8 +325,14 @@ fn plan_item(
     item
 }
 
-/// The warnings that don't depend on which files would go.
-fn package_warnings(input: &UninstallPlanInput<'_>, spec: &PackageSpec) -> Vec<UninstallWarning> {
+/// The warnings that don't depend on which files would go. Each thing is
+/// said once: a screen reader reads every sentence of the details and of
+/// Review in turn.
+fn package_warnings(
+    input: &UninstallPlanInput<'_>,
+    spec: &PackageSpec,
+    strategy: Option<UninstallStrategy>,
+) -> Vec<UninstallWarning> {
     let mut warnings: Vec<UninstallWarning> = spec
         .uninstall
         .always_warn
@@ -348,7 +354,8 @@ fn package_warnings(input: &UninstallPlanInput<'_>, spec: &PackageSpec) -> Vec<U
     );
     // Removing a package never removes what installs on top of it: REAPER's
     // extensions stay in the resource folder, and work again once REAPER is
-    // back. The user is told they stay.
+    // back. The user is told they stay, naming the ones installed; a
+    // manifest says no more about them.
     let dependents: Vec<String> = input
         .specs
         .iter()
@@ -360,7 +367,10 @@ fn package_warnings(input: &UninstallPlanInput<'_>, spec: &PackageSpec) -> Vec<U
             package_ids: dependents,
         });
     }
-    if spec.requires_standard_install {
+    // A vendor's uninstaller plan says in its own summary whom it takes the
+    // package from, as Surge XT's "for every music program on this
+    // computer" does.
+    if spec.requires_standard_install && strategy != Some(UninstallStrategy::VendorUninstaller) {
         warnings.push(UninstallWarning::MachineWide);
     }
     warnings

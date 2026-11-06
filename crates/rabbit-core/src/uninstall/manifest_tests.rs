@@ -1224,7 +1224,9 @@ fn surge_xt_on_windows_runs_its_own_uninstaller() {
     let summary = surge.summary.as_ref().unwrap();
     assert_eq!(summary.removes_key, "uninstall-summary-surge-removes");
     assert_eq!(summary.keeps_key, "uninstall-summary-surge-keeps");
-    assert!(surge.warnings.contains(&UninstallWarning::MachineWide));
+    // Its summary already says it goes for every music program; the same
+    // thing isn't said twice.
+    assert!(!surge.warnings.contains(&UninstallWarning::MachineWide));
     assert_eq!(
         surge.notes,
         vec![UninstallNote::Manifest {
@@ -1338,14 +1340,14 @@ fn reaper_on_windows_runs_its_own_uninstaller_and_keeps_the_resource_folder() {
     );
     assert!(!resource.removable_with_settings);
 
-    // Its extensions stay, and the user is told so (decision 16).
-    assert!(reaper.warnings.contains(&UninstallWarning::Always {
-        message_key: "uninstall-warning-reaper-extensions-stay".to_string(),
-        confirm: false
-    }));
-    assert!(reaper.warnings.contains(&UninstallWarning::DependentsStay {
-        package_ids: vec![PACKAGE_OSARA.to_string(), PACKAGE_SWS.to_string()]
-    }));
+    // Its extensions stay, and the user is told so once, naming them
+    // (decision 16).
+    assert_eq!(
+        reaper.warnings,
+        [UninstallWarning::DependentsStay {
+            package_ids: vec![PACKAGE_OSARA.to_string(), PACKAGE_SWS.to_string()]
+        }]
+    );
 
     // REAPER comes off last, after everything that installs on top of it.
     let order: Vec<&str> = plan

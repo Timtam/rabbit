@@ -3299,7 +3299,8 @@ fn uninstall_warning_text(
             localized_text(localizer, message_key)
         }
         UninstallWarning::DependentsStay { package_ids } => format!(
-            "These packages install on top of {name} and stay: {}. They may not work without it.",
+            "These packages install on top of {name} and stay: {}. They work again once you \
+             install {name} again.",
             package_ids.join(", ")
         ),
         UninstallWarning::MachineWide => format!(

@@ -88,8 +88,6 @@ uninstall-kept-reaper-resource = REAPER's resource folder, with your settings, e
 # Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
 uninstall-warning-sws-osara-keymap = If you use OSARA's key map, some of its keys run SWS actions. Those keys stop working until you install SWS again.
 uninstall-warning-sws-reapack-scripts = Many REAPER scripts, accessibility scripts among them, need SWS. Scripts you installed with ReaPack may stop working.
-# Shown before REAPER is uninstalled.
-uninstall-warning-reaper-extensions-stay = Extensions such as OSARA and SWS stay in REAPER's resource folder. They work again once you install REAPER again.
 
 # A note on what stays behind after ReaPack is uninstalled.
 uninstall-note-reapack-packages-stay = Scripts and extensions you installed with ReaPack stay, but nothing keeps them up to date.
@@ -256,7 +254,7 @@ wizard-uninstall-details-unsafe-path = RABBIT won't remove { $path }. It leaves 
 # line. $package is the localized package name, $packages a comma-separated
 # list of package names, and $reason an error message.
 wizard-uninstall-details-files = RABBIT moves the files into a backup rather than deleting them.
-wizard-uninstall-details-dependents-stay = These packages install on top of { $package } and stay: { $packages }. They may not work without it.
+wizard-uninstall-details-dependents-stay = These packages install on top of { $package } and stay: { $packages }. They work again once you install { $package } again.
 wizard-uninstall-details-machine-wide = { $package } serves every REAPER and every other program on this computer, so they all lose it.
 wizard-uninstall-details-reapack-owned-extensions = ReaPack installed these, and they stay without updates once it is gone: { $packages }.
 wizard-uninstall-details-reapack-records-unreadable = RABBIT couldn't read ReaPack's records to say what it still manages ({ $reason }).

@@ -37,11 +37,6 @@
     "run_upstream_installer"
   ],
   "uninstall": {
-    "always_warn": [
-      {
-        "message_key": "uninstall-warning-reaper-extensions-stay"
-      }
-    ],
     "plans": [
       {
         "platform": "windows",

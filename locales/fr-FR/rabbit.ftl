@@ -88,7 +88,6 @@ uninstall-kept-reaper-resource = le dossier de ressources de REAPER, avec vos r�
 # Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
 uninstall-warning-sws-osara-keymap = Si vous utilisez les raccourcis clavier d'OSARA, certains d'entre eux lancent des actions SWS. Ces raccourcis cessent de fonctionner jusqu'à ce que vous réinstalliez SWS.
 uninstall-warning-sws-reapack-scripts = De nombreux scripts REAPER, dont des scripts d'accessibilité, ont besoin de SWS. Les scripts que vous avez installés avec ReaPack risquent de ne plus fonctionner.
-uninstall-warning-reaper-extensions-stay = Les extensions comme OSARA et SWS restent dans le dossier de ressources de REAPER. Elles fonctionnent à nouveau dès que vous réinstallez REAPER.
 
 # A note on what stays behind after ReaPack is uninstalled.
 uninstall-note-reapack-packages-stay = Les scripts et extensions que vous avez installés avec ReaPack sont conservés, mais plus rien ne les tient à jour.
@@ -254,7 +253,7 @@ wizard-uninstall-details-unsafe-path = RABBIT ne supprimera pas { $path }. Il pr
 # line. $package is the localized package name, $packages a comma-separated
 # list of package names, and $reason an error message.
 wizard-uninstall-details-files = RABBIT déplace les fichiers dans une sauvegarde au lieu de les effacer.
-wizard-uninstall-details-dependents-stay = Ces paquets s'installent par-dessus { $package } et restent : { $packages }. Ils risquent de ne pas fonctionner sans lui.
+wizard-uninstall-details-dependents-stay = Ces paquets s'installent par-dessus { $package } et restent : { $packages }. Ils fonctionnent à nouveau dès que vous réinstallez { $package }.
 wizard-uninstall-details-machine-wide = { $package } sert à tous les REAPER et à tous les autres programmes de cet ordinateur, qui le perdent tous.
 wizard-uninstall-details-reapack-owned-extensions = ReaPack a installé ceux-ci, et ils restent sans mises à jour une fois ReaPack supprimé : { $packages }.
 wizard-uninstall-details-reapack-records-unreadable = RABBIT n'a pas pu lire les registres de ReaPack pour savoir ce qu'il gère encore ({ $reason }).

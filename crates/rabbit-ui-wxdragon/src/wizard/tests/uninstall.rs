@@ -1678,7 +1678,9 @@ pub(super) fn vendor_surge() -> UninstallPlanItem {
         requires_elevation: true,
         unbacked: true,
         confirm: true,
-        warnings: vec![UninstallWarning::MachineWide],
+        // Its summary says it goes for every music program, so the plan
+        // doesn't add the machine-wide warning.
+        warnings: Vec::new(),
         notes: vec![UninstallNote::Manifest {
             note_key: "uninstall-note-surge-fonts-stay".to_string(),
         }],
@@ -1696,9 +1698,8 @@ fn vendor_reaper() -> UninstallPlanItem {
             removes_key: "uninstall-summary-reaper-windows-removes".to_string(),
             keeps_key: "uninstall-summary-reaper-keeps".to_string(),
         }),
-        warnings: vec![UninstallWarning::Always {
-            message_key: "uninstall-warning-reaper-extensions-stay".to_string(),
-            confirm: false,
+        warnings: vec![UninstallWarning::DependentsStay {
+            package_ids: vec!["osara".to_string(), "sws".to_string()],
         }],
         blocking_programs: Vec::new(),
         notes: Vec::new(),
@@ -1720,7 +1721,6 @@ fn a_package_its_own_uninstaller_removes_can_be_ticked() {
         "Windows asks for your permission before anything is removed.",
         "Your own patches, in the Surge XT folder in your Documents, stay.",
         "The fonts Surge XT installed stay",
-        "serves every REAPER and every other program on this computer",
     ] {
         assert!(
             row.details.contains(sentence),
@@ -1729,26 +1729,33 @@ fn a_package_its_own_uninstaller_removes_can_be_ticked() {
         );
     }
     assert!(!row.details.contains("into a backup"), "{}", row.details);
+    // "For every music program" is said once.
+    assert_eq!(
+        row.details.matches("every music program").count()
+            + row.details.matches("every other program").count(),
+        1,
+        "{}",
+        row.details
+    );
 
     let reaper = rows_for(vec![vendor_reaper()]).remove(0);
     assert!(reaper.can_tick);
-    let extensions = reaper
-        .details
-        .find("Extensions such as OSARA and SWS stay")
-        .expect("REAPER says its extensions stay");
-    let removes = reaper
-        .details
-        .find("REAPER's own uninstaller removes the program.")
-        .unwrap();
+    for sentence in [
+        "REAPER's own uninstaller removes the program.",
+        "Your settings, extensions and projects stay.",
+        "These packages install on top of REAPER and stay: OSARA, SWS Extension. They work \
+         again once you install REAPER again.",
+    ] {
+        assert!(
+            reaper.details.contains(sentence),
+            "{sentence}: {}",
+            reaper.details
+        );
+    }
     assert!(
-        extensions < removes,
-        "the warning comes first: {}",
+        !reaper.details.contains("may not work"),
+        "{}",
         reaper.details
-    );
-    assert!(
-        reaper
-            .details
-            .contains("Your settings, extensions and projects stay.")
     );
 }
 

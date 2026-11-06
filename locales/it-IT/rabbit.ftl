@@ -88,7 +88,6 @@ uninstall-kept-reaper-resource = la cartella delle risorse di REAPER, con le tue
 # Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
 uninstall-warning-sws-osara-keymap = Se usi la mappa dei tasti di OSARA, alcuni dei suoi tasti eseguono azioni di SWS. Quei tasti smettono di funzionare finché non reinstalli SWS.
 uninstall-warning-sws-reapack-scripts = Molti script di REAPER, tra cui script per l'accessibilità, richiedono SWS. Gli script che hai installato con ReaPack potrebbero smettere di funzionare.
-uninstall-warning-reaper-extensions-stay = Le estensioni come OSARA e SWS restano nella cartella delle risorse di REAPER. Tornano a funzionare quando reinstalli REAPER.
 
 # A note on what stays behind after ReaPack is uninstalled.
 uninstall-note-reapack-packages-stay = Gli script e le estensioni che hai installato con ReaPack restano, ma niente li tiene più aggiornati.
@@ -254,7 +253,7 @@ wizard-uninstall-details-unsafe-path = RABBIT non rimuoverà { $path }. Preferis
 # line. $package is the localized package name, $packages a comma-separated
 # list of package names, and $reason an error message.
 wizard-uninstall-details-files = RABBIT sposta i file in un backup invece di eliminarli.
-wizard-uninstall-details-dependents-stay = Questi pacchetti si installano sopra { $package } e restano: { $packages }. Senza di esso potrebbero non funzionare.
+wizard-uninstall-details-dependents-stay = Questi pacchetti si installano sopra { $package } e restano: { $packages }. Tornano a funzionare quando reinstalli { $package }.
 wizard-uninstall-details-machine-wide = { $package } serve a tutti i REAPER e a tutti gli altri programmi di questo computer, che lo perdono tutti.
 wizard-uninstall-details-reapack-owned-extensions = Questi li ha installati ReaPack, e restano senza aggiornamenti una volta rimosso ReaPack: { $packages }.
 wizard-uninstall-details-reapack-records-unreadable = RABBIT non ha potuto leggere i registri di ReaPack per sapere cosa gestisce ancora ({ $reason }).

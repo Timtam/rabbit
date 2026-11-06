@@ -88,7 +88,6 @@ uninstall-kept-reaper-resource = der Ressourcenordner von REAPER mit Ihren Einst
 # Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
 uninstall-warning-sws-osara-keymap = Wenn Sie die OSARA-Tastenzuordnung verwenden, führen einige ihrer Tasten SWS-Aktionen aus. Diese Tasten funktionieren erst wieder, wenn Sie SWS erneut installieren.
 uninstall-warning-sws-reapack-scripts = Viele REAPER-Skripte, darunter Skripte für die Barrierefreiheit, benötigen SWS. Skripte, die Sie mit ReaPack installiert haben, funktionieren dann möglicherweise nicht mehr.
-uninstall-warning-reaper-extensions-stay = Erweiterungen wie OSARA und SWS bleiben im Ressourcenordner von REAPER. Sie funktionieren wieder, sobald Sie REAPER erneut installieren.
 
 # A note on what stays behind after ReaPack is uninstalled.
 uninstall-note-reapack-packages-stay = Skripte und Erweiterungen, die Sie mit ReaPack installiert haben, bleiben erhalten, aber nichts hält sie mehr aktuell.
@@ -254,7 +253,7 @@ wizard-uninstall-details-unsafe-path = RABBIT entfernt { $path } nicht. Es läss
 # line. $package is the localized package name, $packages a comma-separated
 # list of package names, and $reason an error message.
 wizard-uninstall-details-files = RABBIT verschiebt die Dateien in eine Sicherung, statt sie zu löschen.
-wizard-uninstall-details-dependents-stay = Diese Pakete bauen auf { $package } auf und bleiben installiert: { $packages }. Ohne { $package } funktionieren sie möglicherweise nicht.
+wizard-uninstall-details-dependents-stay = Diese Pakete bauen auf { $package } auf und bleiben installiert: { $packages }. Sie funktionieren wieder, sobald Sie { $package } erneut installieren.
 wizard-uninstall-details-machine-wide = { $package } dient jedem REAPER und jedem anderen Programm auf diesem Computer. Sie alle verlieren es.
 wizard-uninstall-details-reapack-owned-extensions = Diese wurden mit ReaPack installiert und bleiben ohne Aktualisierungen zurück, sobald ReaPack entfernt ist: { $packages }.
 wizard-uninstall-details-reapack-records-unreadable = RABBIT konnte die Einträge von ReaPack nicht lesen und kann deshalb nicht sagen, was ReaPack noch verwaltet ({ $reason }).

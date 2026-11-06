@@ -88,7 +88,6 @@ uninstall-kept-reaper-resource = la carpeta de recursos de REAPER, con tus ajust
 # Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
 uninstall-warning-sws-osara-keymap = Si usas el mapa de teclado de OSARA, algunos de sus atajos ejecutan acciones de SWS. Esos atajos dejan de funcionar hasta que vuelvas a instalar SWS.
 uninstall-warning-sws-reapack-scripts = Muchos scripts de REAPER, entre ellos scripts de accesibilidad, necesitan SWS. Los scripts que instalaste con ReaPack pueden dejar de funcionar.
-uninstall-warning-reaper-extensions-stay = Las extensiones como OSARA y SWS se quedan en la carpeta de recursos de REAPER. Vuelven a funcionar en cuanto instales REAPER de nuevo.
 
 # A note on what stays behind after ReaPack is uninstalled.
 uninstall-note-reapack-packages-stay = Los scripts y extensiones que instalaste con ReaPack se conservan, pero ya nada los mantiene al día.
@@ -254,7 +253,7 @@ wizard-uninstall-details-unsafe-path = RABBIT no va a quitar { $path }. Prefiere
 # line. $package is the localized package name, $packages a comma-separated
 # list of package names, and $reason an error message.
 wizard-uninstall-details-files = RABBIT mueve los archivos a una copia de seguridad en lugar de borrarlos.
-wizard-uninstall-details-dependents-stay = Estos paquetes se instalan sobre { $package } y se quedan: { $packages }. Puede que no funcionen sin él.
+wizard-uninstall-details-dependents-stay = Estos paquetes se instalan sobre { $package } y se quedan: { $packages }. Vuelven a funcionar en cuanto instales { $package } de nuevo.
 wizard-uninstall-details-machine-wide = { $package } sirve a todos los REAPER y a todos los demás programas de este ordenador, así que todos lo pierden.
 wizard-uninstall-details-reapack-owned-extensions = ReaPack instaló estos, y se quedan sin actualizaciones cuando ReaPack ya no esté: { $packages }.
 wizard-uninstall-details-reapack-records-unreadable = RABBIT no pudo leer los registros de ReaPack para saber qué sigue gestionando ({ $reason }).
