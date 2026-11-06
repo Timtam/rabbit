@@ -854,6 +854,26 @@ pub fn uninstaller_program(command: &str) -> Result<PathBuf, VendorRefusal> {
     Ok(program)
 }
 
+/// Whether `path` is `\\server\share\name...` with nothing but plain names
+/// after the share, and at least one of them: no `\\?\UNC\` or other device
+/// paths, no `.` or `..`.
+pub fn is_full_share_path(path: &Path) -> bool {
+    let mut components = path.components();
+    let starts_on_a_share = matches!(
+        components.next(),
+        Some(Component::Prefix(prefix)) if matches!(
+            prefix.kind(),
+            Prefix::UNC(server, share) if !server.is_empty() && !share.is_empty()
+        )
+    ) && matches!(components.next(), Some(Component::RootDir));
+    let rest: Vec<Component<'_>> = components.collect();
+    starts_on_a_share
+        && !rest.is_empty()
+        && rest
+            .iter()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
 /// Whether `path` is `X:\name...` with nothing but plain names after the
 /// drive, and at least one of them: no
 /// `\\server\share`, no `\\?\` or `\\.\` device paths, no `.` or `..`.

@@ -531,7 +531,24 @@ pub(crate) fn strictly_inside(path: &Path, root: &Path) -> bool {
 
 /// `path` canonicalized, or made absolute when it doesn't exist yet.
 fn canonical_or_absolute(path: &Path) -> PathBuf {
+    if is_network_path(path) {
+        return absolute(path);
+    }
     fs::canonicalize(path).unwrap_or_else(|_| absolute(path))
+}
+
+/// Whether `path` is on a network share, `\\server\share\...` in either
+/// spelling. The guard never resolves such a root, it compares its text:
+/// resolving it connects to that server, and in the elevated helper, which
+/// is given the resource folder only to keep away from it, that would sign
+/// in there with an administrator's account, on a server the standard user
+/// who started RABBIT may have chosen.
+pub(crate) fn is_network_path(path: &Path) -> bool {
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
+    )
 }
 
 /// `path` made absolute, with no `.` or `..` left. A path that can't be made
@@ -618,6 +635,54 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, b"file").unwrap();
         path.to_path_buf()
+    }
+
+    /// A share in either spelling is a network path the guard never
+    /// resolves; a drive, local device paths and relative paths aren't.
+    #[cfg(windows)]
+    #[test]
+    fn shares_are_network_paths_and_drives_are_not() {
+        use super::is_network_path;
+        for path in [
+            "\\\\server\\share\\REAPER",
+            "\\\\?\\UNC\\server\\share\\REAPER",
+        ] {
+            assert!(is_network_path(Path::new(path)), "{path}");
+        }
+        for path in [
+            "C:\\REAPER",
+            "\\\\?\\C:\\REAPER",
+            "\\\\.\\C:\\REAPER",
+            "REAPER",
+        ] {
+            assert!(!is_network_path(Path::new(path)), "{path}");
+        }
+    }
+
+    /// The guard works with a resource folder on a share, as the elevated
+    /// helper gets it when `%APPDATA%` is redirected: a file in a local
+    /// folder may go, and one spelt inside the share's RABBIT folder is
+    /// still refused, by its text.
+    #[cfg(windows)]
+    #[test]
+    fn a_resource_folder_on_a_share_is_kept_away_from_by_its_text() {
+        let (dir, mut roots) = fixture();
+        let share = PathBuf::from("\\\\rabbit-test.invalid\\share\\REAPER");
+        roots.resource = share.clone();
+        let clap = dir.path().join("CLAP");
+        let plugin = write(&clap.join("demo.clap"));
+        assert_eq!(
+            check_removal(&roots, &plugin, &RemovalGuard::under(clap)),
+            Ok(())
+        );
+        assert_eq!(
+            check_removal(
+                &roots,
+                &share.join("RABBIT").join("install-state.json"),
+                &RemovalGuard::under(share.clone())
+            ),
+            Err(PathRefusal::RabbitFolder)
+        );
     }
 
     fn resolve(path: &str, roots: &UninstallRoots) -> Result<Vec<ResolvedPath>, PathRefusal> {

@@ -315,13 +315,44 @@ fn the_helpers_command_line_is_checked_before_anything_else() {
     // The pipe must be the parent's own.
     refused(&|args| args.parent_pid = 4243);
     refused(&|args| args.resource_path = PathBuf::from("REAPER"));
-    refused(&|args| args.resource_path = PathBuf::from("\\\\server\\share\\REAPER"));
+    for device_or_partial in [
+        "\\\\?\\UNC\\server\\share\\REAPER",
+        "\\\\?\\C:\\REAPER",
+        "\\\\.\\C:\\REAPER",
+        "\\\\server\\share",
+        "\\\\server\\share\\..\\REAPER",
+    ] {
+        refused(&|args| args.resource_path = PathBuf::from(device_or_partial));
+    }
     refused(&|args| args.target_app_path = Some(PathBuf::from("reaper.exe")));
+    // REAPER's app is never on a share; its uninstaller only runs from
+    // Program Files.
+    refused(&|args| {
+        args.target_app_path = Some(PathBuf::from("\\\\server\\share\\REAPER\\reaper.exe"));
+    });
     refused(&|args| args.package_ids.clear());
     refused(&|args| args.package_ids.push("surge-xt".to_string()));
     refused(&|args| args.package_ids.push("Surge XT".to_string()));
     refused(&|args| args.package_ids.push("..\\reaper".to_string()));
     refused(&|args| args.package_ids.push(String::new()));
+}
+
+/// Windows may redirect `%APPDATA%`, and with it the standard REAPER's
+/// resource folder, to a network share. The helper takes that folder too:
+/// it only keeps away from it, by its text. Refusing it failed every run
+/// with Surge XT or REAPER for such a user, after the dry run and Review
+/// had said they would go.
+#[cfg(windows)]
+#[test]
+fn a_resource_folder_on_a_network_share_is_accepted() {
+    let mut args = args_for(&["surge-xt", "reaper"]);
+    args.resource_path = PathBuf::from("\\\\server\\users$\\someone\\AppData\\Roaming\\REAPER");
+    assert_eq!(args.validate(), Ok(()));
+    let arguments = args.to_arguments().unwrap();
+    assert!(arguments.windows(2).any(|pair| {
+        pair[0] == "--resource-path"
+            && pair[1] == "\\\\server\\users$\\someone\\AppData\\Roaming\\REAPER"
+    }));
 }
 
 #[test]

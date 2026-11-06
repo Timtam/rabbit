@@ -72,7 +72,7 @@ use crate::package::{PackageSpec, builtin_package_specs};
 use super::paths::{UninstallRoots, absolute};
 use super::vendor::{
     SystemVendorEnvironment, VendorEnvironment, VendorEvent, VendorJob, VendorOutcome,
-    VendorRefusal, is_full_drive_path, run_vendor_uninstaller,
+    VendorRefusal, is_full_drive_path, is_full_share_path, run_vendor_uninstaller,
 };
 
 #[cfg(test)]
@@ -169,8 +169,11 @@ impl HelperArgs {
 
     /// Whether the command line is one RABBIT would have written: a pipe
     /// name of exactly RABBIT's form that carries the parent's process ID,
-    /// full paths on a drive letter, and at least one package, each named
-    /// once.
+    /// full paths, and at least one package, each named once. REAPER's app
+    /// must be on a drive letter. The resource folder may also be on a
+    /// network share, as `%APPDATA%` is when Windows redirects it there:
+    /// the helper only compares other paths with it, by their text, and
+    /// never opens it ([`super::paths`] doesn't resolve network paths).
     pub fn validate(&self) -> Result<(), String> {
         if !is_uninstall_pipe_name(&self.pipe) {
             return Err(format!("{:?} isn't an uninstall pipe's name", self.pipe));
@@ -181,9 +184,9 @@ impl HelperArgs {
                 self.pipe, self.parent_pid
             ));
         }
-        if !is_full_drive_path(&self.resource_path) {
+        if !is_full_drive_path(&self.resource_path) && !is_full_share_path(&self.resource_path) {
             return Err(format!(
-                "{} isn't a full path on a drive",
+                "{} isn't a full path on a drive or a network share",
                 self.resource_path.display()
             ));
         }
@@ -599,7 +602,9 @@ pub fn helper_exit_message(code: i32) -> String {
         HELPER_EXIT_NOT_ELEVATED => "it didn't get administrator rights".to_string(),
         HELPER_EXIT_NO_PARENT => "it couldn't reach RABBIT".to_string(),
         HELPER_EXIT_PIPE_FAILED => "its connection to RABBIT broke".to_string(),
-        HELPER_EXIT_NO_FOLDERS => "Windows didn't say where Program Files is".to_string(),
+        HELPER_EXIT_NO_FOLDERS => {
+            "Windows didn't say where Program Files or ProgramData is".to_string()
+        }
         other => format!("it ended with code {other}"),
     }
 }
