@@ -500,6 +500,67 @@ fn a_package_every_reaper_loads_asks_to_close_them_all() {
     assert!(!blocker.body.contains("Close REAPER,"), "{}", blocker.body);
 }
 
+/// REAPER needs every REAPER closed for a reason of its own: its own
+/// uninstaller doesn't run while any REAPER is open. Saying that every
+/// REAPER can use REAPER makes no sense, so REAPER is never among the
+/// packages the sentence names, and alone it gets a sentence of its own.
+#[test]
+fn reaper_itself_is_never_a_package_every_reaper_can_use() {
+    let reaper = || UninstallPlanItem {
+        every_reaper_closed: true,
+        ..item("reaper", Removability::Removable)
+    };
+    let surge = || UninstallPlanItem {
+        every_reaper_closed: true,
+        ..item("surge-xt", Removability::Removable)
+    };
+    let report = preflight(vec![
+        check(REAPER_PROCESS_CHECK, PreflightStatus::Fail),
+        check(ANY_REAPER_PROCESS_CHECK, PreflightStatus::Fail),
+    ]);
+
+    let alone = uninstall_blocker(
+        &en(),
+        &plan(vec![reaper()]),
+        &ids(&["reaper"]),
+        &report,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        alone.body,
+        "Close every copy of REAPER on this computer, including portable ones, then press \
+         Uninstall again. REAPER's own uninstaller doesn't run while any REAPER is open."
+    );
+
+    let both = uninstall_blocker(
+        &en(),
+        &plan(vec![surge(), reaper()]),
+        &ids(&["surge-xt", "reaper"]),
+        &report,
+        &[],
+    )
+    .unwrap();
+    assert!(
+        both.body
+            .ends_with("Every REAPER on this computer can use Surge XT."),
+        "{}",
+        both.body
+    );
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let alone = uninstall_blocker(
+            &localizer,
+            &plan(vec![reaper()]),
+            &ids(&["reaper"]),
+            &report,
+            &[],
+        )
+        .unwrap();
+        assert_reads(locale, &alone.body);
+    }
+}
+
 #[test]
 fn a_program_the_plan_names_stops_the_run_by_name() {
     let surge = UninstallPlanItem {
@@ -1635,15 +1696,17 @@ fn a_removal_finishing_after_a_restart_says_to_restart() {
         outcome.heading,
         "RABBIT uninstalled SWS Extension, Surge XT. Restart your computer to finish."
     );
-    assert!(
-        outcome
-            .status_text
-            .contains("Restart your computer to finish removing Surge XT."),
+    // Said once, right at the start: the same instruction for Surge XT
+    // straight after it would only repeat it.
+    assert_eq!(
+        outcome.status_text.matches("Restart your computer").count(),
+        1,
         "{}",
         outcome.status_text
     );
     let details = outcome.detail_lines.join("\n");
     for line in [
+        "Restart your computer to finish removing Surge XT.",
         "Surge XT: Uninstalled; the rest goes when you restart the computer",
         "  Its own uninstaller: C:/ProgramData/Surge XT/uninstall/unins000.exe",
         "  Removed: C:/Program Files/Common Files/CLAP/Surge Synth Team/SurgeXTData",
@@ -1651,6 +1714,25 @@ fn a_removal_finishing_after_a_restart_says_to_restart() {
     ] {
         assert!(details.contains(line), "{line}: {details}");
     }
+
+    // When the heading is about something else, the package's own
+    // sentence is the only place the restart is mentioned, so it stays.
+    let report = self::report(vec![
+        pending_restart_surge(),
+        checks_failed("sws", REAPER_PROCESS_CHECK),
+    ]);
+    let outcome = self::outcome(&report);
+    assert_eq!(
+        outcome.status,
+        UninstallOutcomeStatus::CompletedWithProblems
+    );
+    assert!(
+        outcome
+            .status_text
+            .contains("Restart your computer to finish removing Surge XT."),
+        "{}",
+        outcome.status_text
+    );
 }
 
 /// A declined permission prompt is not a stop the user asked for: Done says

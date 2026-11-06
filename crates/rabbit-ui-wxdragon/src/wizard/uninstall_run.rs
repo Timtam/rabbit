@@ -116,19 +116,26 @@ pub fn uninstall_blocker(
     // A package every REAPER on the computer may load needs all of them
     // closed, which covers the target's REAPER too: one sentence, not two.
     let reaper = if failed(ANY_REAPER_PROCESS_CHECK) {
+        // REAPER is never among the packages every REAPER can use: its own
+        // uninstaller needs them all closed because it doesn't run while
+        // any REAPER is open, and alone it says so.
         let packages = ticked()
-            .filter(|item| item.every_reaper_closed)
+            .filter(|item| item.every_reaper_closed && item.package_id != PACKAGE_REAPER)
             .map(|item| localized_package_display_name(localizer, &item.package_id))
             .collect::<Vec<_>>()
             .join(", ");
-        lines.push(
+        lines.push(if packages.is_empty() {
+            localizer
+                .text("wizard-reaper-running-uninstall-reaper-body")
+                .value
+        } else {
             localizer
                 .format(
                     "wizard-reaper-running-uninstall-every-body",
                     &[("packages", packages.as_str())],
                 )
-                .value,
-        );
+                .value
+        });
         true
     } else if failed(REAPER_PROCESS_CHECK) {
         lines.push(localizer.text("wizard-reaper-running-uninstall-body").value);
@@ -337,7 +344,25 @@ pub fn wizard_uninstall_outcome(
         }
     };
     let mut blocks = vec![heading.clone()];
-    let reasons = uninstall_reasons(localizer, report);
+    let mut reasons = uninstall_reasons(localizer, report);
+    // The heading already says to restart; read right after it, the same
+    // instruction per package only repeats it. Show details keeps it.
+    if status == UninstallOutcomeStatus::PendingRestart {
+        let restart_lines: Vec<String> = report
+            .items
+            .iter()
+            .filter(|item| item.status == UninstallStatus::RemovedPendingRestart)
+            .map(|item| {
+                localizer
+                    .format(
+                        "wizard-done-uninstall-pending-restart",
+                        &[("package", package_name(localizer, item).as_str())],
+                    )
+                    .value
+            })
+            .collect();
+        reasons.retain(|reason| !restart_lines.contains(reason));
+    }
     if !reasons.is_empty() {
         blocks.push(reasons.join("\n"));
     }
