@@ -1584,7 +1584,8 @@ fn executed_unattended_item(
     // OSARA entry in Windows' list of installed programs with one pointing
     // at the portable folder's uninstaller, which the post-install step
     // deletes. Noted here, put back as soon as the installer is done, whether
-    // or not it succeeded: what it found is right either way.
+    // or not it succeeded, if the entry still points at that uninstaller:
+    // otherwise someone else changed it meanwhile.
     let osara_uninstall_entry = (planned.artifact.package_id == crate::package::PACKAGE_OSARA)
         .then(|| {
             osara::uninstall_entry_before_install(
@@ -3311,37 +3312,28 @@ mod tests {
         assert!(!resource_path.join("osara").join("uninstall.exe").exists());
     }
 
+    /// Install OSARA into `<dir>\PortableREAPER` with a stand-in for OSARA's
+    /// installer that, like the real one run silently, points its entry in
+    /// `registry` at the portable folder's uninstaller.
     #[cfg(target_os = "windows")]
-    #[test]
-    fn osara_portable_install_leaves_the_list_of_installed_programs_as_it_was() {
-        use rabbit_platform::{RegistryValue, UninstallEntry};
-
-        // OSARA's installer, run silently, points its entry in the list at
-        // the portable folder. The stand-in does that to a throwaway key.
-        let registry = super::osara::test_registry::ThrowawayUninstallRoot::create();
-        let standard = UninstallEntry::new(vec![
-            RegistryValue::string("DisplayName", "OSARA"),
-            RegistryValue::string(
-                "UninstallString",
-                "\"C:\\Users\\Someone\\AppData\\Roaming\\REAPER\\osara\\uninstall.exe\"",
-            ),
-        ]);
-        registry.root().write_entry("OSARA", &standard).unwrap();
+    fn install_osara_into_portable_writing_its_entry(
+        dir: &std::path::Path,
+        registry: &super::osara::test_registry::ThrowawayUninstallRoot,
+    ) {
         registry.use_for_osara_installs();
-        let dir = tempdir().unwrap();
         let cache = tempdir().unwrap();
-        let source_path = dir.path().join("osara-installer.cmd");
+        let source_path = dir.join("osara-installer.cmd");
         let script = osara_mock_installer_script().replace(
             "exit /b 0",
             &format!(
-                "reg add \"HKCU\\{}\\OSARA\" /v UninstallString /d portable /f >nul || exit /b 5\n\
+                "reg add \"HKCU\\{}\\OSARA\" /v UninstallString /d \"!DEST!\\osara\\uninstall.exe\" /f >nul || exit /b 5\n\
                  echo written> \"!DEST!\\entry-written.txt\"\n\
                  exit /b 0",
                 registry.root().path()
             ),
         );
         std::fs::write(&source_path, script).unwrap();
-        let resource_path = dir.path().join("PortableREAPER");
+        let resource_path = dir.join("PortableREAPER");
 
         let report = execute_resolved_package_operation(
             &resource_path,
@@ -3374,7 +3366,68 @@ mod tests {
             resource_path.join("entry-written.txt").is_file(),
             "the stand-in installer rewrote the entry"
         );
+        assert!(!resource_path.join("osara").join("uninstall.exe").exists());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn osara_portable_install_leaves_the_list_of_installed_programs_as_it_was() {
+        use rabbit_platform::{RegistryValue, UninstallEntry};
+
+        let registry = super::osara::test_registry::ThrowawayUninstallRoot::create();
+        let dir = tempdir().unwrap();
+        let standard_uninstaller = dir
+            .path()
+            .join("AppData")
+            .join("REAPER")
+            .join("osara")
+            .join("uninstall.exe");
+        std::fs::create_dir_all(standard_uninstaller.parent().unwrap()).unwrap();
+        std::fs::write(&standard_uninstaller, b"uninstall").unwrap();
+        let standard = UninstallEntry::new(vec![
+            RegistryValue::string("DisplayName", "OSARA"),
+            RegistryValue::string(
+                "UninstallString",
+                &format!("\"{}\"", standard_uninstaller.display()),
+            ),
+        ]);
+        registry.root().write_entry("OSARA", &standard).unwrap();
+
+        install_osara_into_portable_writing_its_entry(dir.path(), &registry);
+
         assert_eq!(registry.root().read_entry("OSARA").unwrap(), Some(standard));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn osara_portable_install_removes_the_entry_an_older_rabbit_left_there() {
+        use rabbit_platform::{RegistryValue, UninstallEntry};
+
+        // Older RABBITs left the entry pointing at the portable folder's
+        // uninstaller, which they had deleted. Putting that back after every
+        // update brought back the old version, still with no uninstaller.
+        let registry = super::osara::test_registry::ThrowawayUninstallRoot::create();
+        let dir = tempdir().unwrap();
+        let stale = dir
+            .path()
+            .join("PortableREAPER")
+            .join("osara")
+            .join("uninstall.exe");
+        registry
+            .root()
+            .write_entry(
+                "OSARA",
+                &UninstallEntry::new(vec![
+                    RegistryValue::string("DisplayName", "OSARA"),
+                    RegistryValue::string("DisplayVersion", "2025.3.6.1234,abcdef12"),
+                    RegistryValue::string("UninstallString", &format!("\"{}\"", stale.display())),
+                ]),
+            )
+            .unwrap();
+
+        install_osara_into_portable_writing_its_entry(dir.path(), &registry);
+
+        assert_eq!(registry.root().read_entry("OSARA").unwrap(), None);
     }
 
     #[cfg(target_os = "windows")]

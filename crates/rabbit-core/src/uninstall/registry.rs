@@ -93,8 +93,9 @@ pub(super) fn clean_registry_entries(
 
 /// Whether the program `value` names sits directly in `dir`. A value whose
 /// program RABBIT can't pin down, or names by a relative path, points
-/// nowhere RABBIT can vouch for.
-fn points_into(value: &str, dir: &Path) -> bool {
+/// nowhere RABBIT can vouch for. OSARA's install uses it too, to tell the
+/// entry its installer wrote into a portable REAPER from anyone else's.
+pub(crate) fn points_into(value: &str, dir: &Path) -> bool {
     let Some(program) = program_named_by(value) else {
         return false;
     };
@@ -111,7 +112,7 @@ fn points_into(value: &str, dir: &Path) -> bool {
 /// arguments after it drop away. `None` when RABBIT can't tell where the
 /// program's name ends: an unclosed quote, or no `.exe` in a value that
 /// holds a space.
-fn program_named_by(value: &str) -> Option<&str> {
+pub(crate) fn program_named_by(value: &str) -> Option<&str> {
     let value = value.trim();
     if let Some(quoted) = value.strip_prefix('"') {
         let (program, _) = quoted.split_once('"')?;

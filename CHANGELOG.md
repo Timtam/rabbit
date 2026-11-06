@@ -142,7 +142,10 @@ from this file and posts it as the GitHub release body.
   installer replaced the list's OSARA entry with one for the portable copy,
   whose uninstaller RABBIT removes, so an OSARA in the standard REAPER lost
   its entry too. RABBIT now puts the entry back as it was before the
-  install.
+  install, unless its uninstaller is gone too: an entry an earlier RABBIT
+  left pointing at the portable copy is removed the next time you install
+  or update OSARA there. If another copy of RABBIT changes the entry while
+  OSARA installs, RABBIT leaves it as that copy wrote it.
 
 ## [0.4.4] - 2026-10-13
 

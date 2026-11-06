@@ -58,6 +58,7 @@ pub use preflight::{
     ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, BACKUP_SPACE_MARGIN, PROGRAMS_RUNNING_CHECK,
     UninstallPreflightOptions, run_uninstall_preflight, run_uninstall_preflight_with_processes,
 };
+pub(crate) use registry::{points_into, program_named_by};
 
 /// The note key a package without any plan for this target shows, the same
 /// one manifests use while a package's turn hasn't come.
