@@ -10,13 +10,15 @@ use rabbit_core::plan::{AvailablePackage, PlanActionKind};
 use rabbit_core::preflight::{
     PreflightCheck, PreflightReport, PreflightStatus, REAPER_PROCESS_CHECK,
 };
-use rabbit_core::progress::{ProgressEvent, ProgressReporter};
+use rabbit_core::progress::{ProgressEvent, ProgressReporter, RemovalMethod};
 use rabbit_core::report::SavedReportPaths;
 use rabbit_core::uninstall::{
-    ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, KeptFile, KeptFileReason, PROGRAMS_RUNNING_CHECK,
-    RegistryEntryAction, RegistryEntryOutcome, Removability, RemovalReason, RemovedFile,
-    UninstallMessage, UninstallPlanItem, UninstallProblem, UninstallReport, UninstallReportItem,
-    UninstallRequest, UninstallStatus, execute_uninstall,
+    ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, KeptFile, KeptFileReason, LeftoverKind,
+    LeftoverOutcome, LeftoverResult, NothingListed, PROGRAMS_RUNNING_CHECK, RegistryEntryAction,
+    RegistryEntryOutcome, Removability, RemovalReason, RemovedFile, UninstallMessage,
+    UninstallPlanItem, UninstallProblem, UninstallReport, UninstallReportItem, UninstallRequest,
+    UninstallServices, UninstallStatus, VendorOutcome, VendorRefusal, VendorStatus,
+    execute_uninstall,
 };
 use rabbit_core::version::Version;
 use tempfile::tempdir;
@@ -36,6 +38,14 @@ fn en() -> Localizer {
 fn started(id: &str) -> ProgressEvent {
     ProgressEvent::RemoveStarted {
         package_id: id.to_string(),
+        method: RemovalMethod::Files,
+    }
+}
+
+fn still_waiting(id: &str) -> ProgressEvent {
+    ProgressEvent::VendorStillWaiting {
+        package_id: id.to_string(),
+        seconds: 30,
     }
 }
 
@@ -144,12 +154,43 @@ fn the_spoken_events_are_the_starts_and_both_ends_of_a_removal() {
             false,
         ),
         (started("sws"), true),
+        (
+            ProgressEvent::RemoveStarted {
+                package_id: id(),
+                method: RemovalMethod::VendorUninstaller,
+            },
+            true,
+        ),
+        (still_waiting("surge-xt"), true),
         (completed("sws", true), true),
         (completed("sws", false), true),
     ];
     for (event, spoken) in events {
         assert_eq!(is_spoken(&event), spoken, "{event:?}");
     }
+}
+
+/// A vendor's uninstaller still running is heard once per run: the first
+/// time moves focus to the log on Windows, where the screen reader reads
+/// the line just added; later ones only add their line. It counts no phase
+/// of its own, so the gauge still reaches 100.
+#[test]
+fn still_waiting_moves_focus_to_the_log_only_the_first_time() {
+    let mut state = ProgressUiState::new(WizardMode::Uninstall, 2, 0);
+    let mut moves = Vec::new();
+    for event in [
+        started("surge-xt"),
+        still_waiting("surge-xt"),
+        completed("surge-xt", true),
+        started("reaper"),
+        still_waiting("reaper"),
+        completed("reaper", true),
+    ] {
+        state.record(&event);
+        moves.push(state.moves_focus_to_log(&event));
+    }
+    assert_eq!(moves, [false, true, false, false, false, false]);
+    assert_eq!(state.percentage(), 100);
 }
 
 // ---------------------------------------------------------------------------
@@ -250,7 +291,7 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
                 detection
             })
             .collect();
-    let mut list = uninstall_list_for_target(&model, &target, &detections);
+    let mut list = uninstall_list_for_target(&model, &target, &detections, &NothingListed);
     tick(&mut list, "sws");
 
     let request = uninstall_request_for_target(&model, &target, &list, true).unwrap();
@@ -263,6 +304,7 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
     };
     let preview = execute_uninstall(
         &dry_run,
+        &UninstallServices::without_elevation(),
         &ProgressReporter::noop(),
         &rabbit_core::cancel::CancelToken::new(),
     )
@@ -275,6 +317,7 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
 
     let report = execute_uninstall(
         &request,
+        &UninstallServices::without_elevation(),
         &ProgressReporter::noop(),
         &rabbit_core::cancel::CancelToken::new(),
     )
@@ -323,7 +366,7 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
     let sws_row = |target: &TargetRow| {
         let plan = wizard_package_plan_for_target_with_available(&model, Some(target), &available)
             .unwrap();
-        let list = uninstall_list_for_target(&model, target, &plan.detections);
+        let list = uninstall_list_for_target(&model, target, &plan.detections, &NothingListed);
         assert!(list.rows.iter().all(|row| row.package_id != "sws"));
         plan.package_rows
             .into_iter()
@@ -571,6 +614,8 @@ fn report_item(
         leftovers: Vec::new(),
         registry_entries: Vec::new(),
         problems: Vec::new(),
+        pending_restart: Vec::new(),
+        vendor: None,
         message: format!("English message for {package_id}."),
         message_code,
     }
@@ -1126,6 +1171,13 @@ fn done_reads_in_every_locale() {
             checks_failed("ffmpeg", BACKUP_SPACE_CHECK),
             not_reached("reapack", "sws"),
         ]),
+        report(vendor_outcomes()),
+        report(vec![pending_restart_surge()]),
+        report(vec![
+            declined("sws"),
+            declined("surge-xt"),
+            declined("reaper"),
+        ]),
     ];
     let statuses = [
         UninstallStatus::Removed,
@@ -1294,4 +1346,190 @@ fn a_refused_run_leaves_a_report_of_its_own() {
     save_wizard_uninstall_outcome(&localizer, &mut outcome).unwrap();
     assert_eq!(outcome.report_path, None);
     assert!(!missing.exists());
+}
+
+// ---------------------------------------------------------------------------
+// After a vendor's own uninstaller.
+// ---------------------------------------------------------------------------
+
+/// Surge XT removed by its own uninstaller, with a file Windows removes at
+/// the next restart.
+fn pending_restart_surge() -> UninstallReportItem {
+    UninstallReportItem {
+        pending_restart: vec![PathBuf::from(
+            "C:/Program Files/Common Files/VST3/Surge Synth Team/Surge XT.vst3/Contents/x86_64-win/Surge XT.vst3",
+        )],
+        vendor: Some(VendorOutcome {
+            status: VendorStatus::RemovedPendingRestart,
+            uninstaller: Some(PathBuf::from(
+                "C:/ProgramData/Surge XT/uninstall/unins000.exe",
+            )),
+            launched: true,
+            exit_code: Some(0),
+            removed_leftovers: vec![LeftoverOutcome {
+                path: PathBuf::from(
+                    "C:/Program Files/Common Files/CLAP/Surge Synth Team/SurgeXTData",
+                ),
+                kind: LeftoverKind::Junction,
+                result: LeftoverResult::Removed,
+            }],
+            ..VendorOutcome::new("surge-xt")
+        }),
+        ..report_item(
+            "surge-xt",
+            UninstallStatus::RemovedPendingRestart,
+            UninstallMessage::UninstalledByVendor,
+        )
+    }
+}
+
+fn declined(package_id: &str) -> UninstallReportItem {
+    report_item(
+        package_id,
+        UninstallStatus::Cancelled,
+        UninstallMessage::ElevationDeclined,
+    )
+}
+
+/// One of each way a vendor's uninstaller can end badly, one package each.
+fn vendor_outcomes() -> Vec<UninstallReportItem> {
+    vec![
+        report_item(
+            "surge-xt",
+            UninstallStatus::Blocked,
+            UninstallMessage::VendorRefused {
+                refusal: VendorRefusal::UntrustedOwner {
+                    path: PathBuf::from("C:/ProgramData/Surge XT/uninstall/unins001.exe"),
+                },
+            },
+        ),
+        report_item(
+            "reaper",
+            UninstallStatus::Cancelled,
+            UninstallMessage::VendorCancelled,
+        ),
+        report_item(
+            "sws",
+            UninstallStatus::Failed,
+            UninstallMessage::VendorFailed { exit_code: 2 },
+        ),
+        report_item(
+            "osara",
+            UninstallStatus::Failed,
+            UninstallMessage::VendorStillThere {
+                still_present: vec![PathBuf::from("C:/x")],
+                still_listed: true,
+            },
+        ),
+        report_item(
+            "reapack",
+            UninstallStatus::Failed,
+            UninstallMessage::VendorStillOpen { seconds: 600 },
+        ),
+        report_item(
+            "ffmpeg",
+            UninstallStatus::Failed,
+            UninstallMessage::VendorRunFailed {
+                error: "the pipe broke".to_string(),
+            },
+        ),
+        report_item(
+            "app2clap",
+            UninstallStatus::Failed,
+            UninstallMessage::ElevationFailed {
+                error: "no pipe".to_string(),
+            },
+        ),
+        UninstallReportItem {
+            problems: vec![UninstallProblem::ReceiptNotSaved {
+                error: "denied".to_string(),
+            }],
+            ..report_item(
+                "reakontrol",
+                UninstallStatus::Failed,
+                UninstallMessage::ResourceFolderDamaged {
+                    missing: vec![PathBuf::from("C:/REAPER/reaper.ini")],
+                },
+            )
+        },
+    ]
+}
+
+/// A removal that finishes after a restart says so: on Done's first line,
+/// in a sentence of its own, and in the details, next to the uninstaller
+/// that ran and the link RABBIT removed after it.
+#[test]
+fn a_removal_finishing_after_a_restart_says_to_restart() {
+    let report = report(vec![
+        removed("sws", &["C:/REAPER/UserPlugins/reaper_sws-x64.dll"]),
+        pending_restart_surge(),
+    ]);
+    let outcome = outcome(&report);
+    assert_eq!(outcome.status, UninstallOutcomeStatus::PendingRestart);
+    assert_eq!(
+        outcome.heading,
+        "RABBIT uninstalled SWS Extension, Surge XT. Restart your computer to finish."
+    );
+    assert!(
+        outcome
+            .status_text
+            .contains("Restart your computer to finish removing Surge XT."),
+        "{}",
+        outcome.status_text
+    );
+    let details = outcome.detail_lines.join("\n");
+    for line in [
+        "Surge XT: Uninstalled; the rest goes when you restart the computer",
+        "  Its own uninstaller: C:/ProgramData/Surge XT/uninstall/unins000.exe",
+        "  Removed: C:/Program Files/Common Files/CLAP/Surge Synth Team/SurgeXTData",
+        "  Goes when you restart the computer: C:/Program Files/Common Files/VST3/",
+    ] {
+        assert!(details.contains(line), "{line}: {details}");
+    }
+}
+
+/// A declined permission prompt is not a stop the user asked for: Done says
+/// plainly that nothing was uninstalled and why, with no way back offered
+/// for packages that never went.
+#[test]
+fn a_declined_prompt_says_nothing_was_uninstalled() {
+    let report = report(vec![declined("sws"), declined("surge-xt")]);
+    let outcome = outcome(&report);
+    assert_eq!(outcome.status, UninstallOutcomeStatus::PermissionDeclined);
+    assert_eq!(
+        outcome.heading,
+        "Nothing was uninstalled, because the Windows permission prompt was declined."
+    );
+    assert_eq!(outcome.status_text, outcome.heading);
+}
+
+/// Each way a vendor's uninstaller ends badly gets its own plain sentence:
+/// what happened, and what the user can do.
+#[test]
+fn each_vendor_outcome_reads_as_a_sentence() {
+    let reasons = uninstall_reasons(&en(), &report(vendor_outcomes()));
+    for sentence in [
+        "Next to Surge XT's uninstaller is a file an administrator didn't put there: \
+         C:/ProgramData/Surge XT/uninstall/unins001.exe",
+        "Nothing was changed. You can uninstall Surge XT in Windows Settings",
+        "REAPER's own uninstaller was cancelled before it finished.",
+        "SWS Extension's own uninstaller ended with error code 2.",
+        "OSARA's own uninstaller finished, but OSARA is still installed.",
+        "ReaPack's own uninstaller is still open, so RABBIT stopped and left the packages after \
+         it alone. Press Alt+Tab to find its window, and answer it.",
+        "(the pipe broke), so it stopped there.",
+        "RABBIT couldn't get administrator rights (no pipe), so nothing was uninstalled.",
+        "these files were missing from REAPER's resource folder: C:/REAPER/reaper.ini",
+        "couldn't update its records",
+    ] {
+        assert!(
+            reasons.iter().any(|reason| reason.contains(sentence)),
+            "{sentence}: {reasons:#?}"
+        );
+    }
+    assert_eq!(
+        outcome(&report(vendor_outcomes())).status,
+        UninstallOutcomeStatus::Cancelled,
+        "REAPER's uninstaller was cancelled by the user"
+    );
 }

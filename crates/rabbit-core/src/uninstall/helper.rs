@@ -67,7 +67,7 @@ use super::vendor::{
 
 #[cfg(test)]
 #[path = "helper_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 /// The hidden command RABBIT starts itself with to run as the helper.
 pub const HELPER_SUBCOMMAND: &str = "__uninstall-helper";
@@ -773,6 +773,23 @@ impl<C: LineChannel + 'static> ElevatedSession for ChannelSession<C> {
         if let HelperHandle::Elevated(child) = helper {
             let _ = child.wait_timeout(FINISH_WAIT);
         }
+    }
+}
+
+/// A helper that never starts, for runs that may not ask for administrator
+/// rights: listings, and tests that remove files only. A run that needs the
+/// helper then fails before anything changes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoElevatedHelper;
+
+impl ElevatedHelper for NoElevatedHelper {
+    fn start(
+        &self,
+        _request: &ElevatedRunRequest,
+    ) -> Result<Box<dyn ElevatedSession>, ElevationStartError> {
+        Err(ElevationStartError::Failed(
+            "this run may not ask for administrator rights".to_string(),
+        ))
     }
 }
 

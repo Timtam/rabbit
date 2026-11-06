@@ -1063,7 +1063,8 @@ fn check_leftover_removal(
     check_path(plan, path, REMOVE_LEFTOVERS)?;
     if plan.elevation != UninstallElevation::Required {
         return Err(
-            "remove_leftovers needs elevation required: only the elevated helper removes              leftovers"
+            "remove_leftovers needs elevation required: only the elevated helper removes \
+             leftovers"
                 .to_string(),
         );
     }
@@ -1073,7 +1074,9 @@ fn check_leftover_removal(
     );
     if !machine_wide {
         return Err(format!(
-            "remove_leftovers: {:?} must start with {{common_program_files}},              {{program_files}} or {{program_data}}; the elevated helper never reads per-user              folders",
+            "remove_leftovers: {:?} must start with {{common_program_files}}, \
+             {{program_files}} or {{program_data}}; the elevated helper never reads per-user \
+             folders",
             path.as_str()
         ));
     }

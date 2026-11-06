@@ -7,9 +7,10 @@ use rabbit_core::package::{PACKAGE_REAPACK, PackageCategory, builtin_package_spe
 use rabbit_core::plan::{InstallPlan, PlanAction, PlanActionKind};
 use rabbit_core::receipt::{InstallState, PackageReceipt};
 use rabbit_core::uninstall::{
-    KeptPath, KeptReason, PlannedRemoval, Removability, RemovalReason, UNINSTALL_NOT_YET_KEY,
-    UninstallNote, UninstallPlan, UninstallPlanInput, UninstallPlanItem, UninstallRoots,
-    UninstallWarning, build_uninstall_plan,
+    KeptPath, KeptReason, NothingListed, PlannedRemoval, PlannedVendorRun, Removability,
+    RemovalReason, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanInput,
+    UninstallPlanItem, UninstallRoots, UninstallWarning, VendorJob, VendorLookup, VendorRefusal,
+    build_uninstall_plan,
 };
 use rabbit_core::version::Version;
 use tempfile::tempdir;
@@ -36,6 +37,7 @@ pub(super) fn item(package_id: &str, removability: Removability) -> UninstallPla
         kept: Vec::new(),
         post: Vec::new(),
         registry_cleanup: Vec::new(),
+        vendor_run: None,
         blocking_programs: Vec::new(),
         every_reaper_closed: false,
         requires_elevation: false,
@@ -253,7 +255,9 @@ fn every_reason_a_package_stays_reads_as_a_sentence() {
         },
         Removability::NeedsStandardTarget,
         Removability::NoReceipt,
-        Removability::NoTrustedUninstaller,
+        Removability::NoTrustedUninstaller {
+            refusal: VendorRefusal::NotListed,
+        },
         Removability::UnsafePath {
             path,
             refusal: rabbit_core::uninstall::PathRefusal::RabbitFolder,
@@ -413,7 +417,7 @@ fn a_target_with_nothing_installed_lists_nothing() {
         .map(|spec| ComponentDetection::not_installed(&spec.id, &spec.display_name))
         .collect();
 
-    let list = uninstall_list_for_target(&model, &target, &detections);
+    let list = uninstall_list_for_target(&model, &target, &detections, &NothingListed);
 
     assert!(list.rows.is_empty());
     assert_eq!(list.unreadable, None);
@@ -435,7 +439,7 @@ fn a_receipt_that_cant_be_read_says_so_instead_of_listing_nothing() {
         ..model.target_rows[0].clone()
     };
 
-    let list = uninstall_list_for_target(&model, &target, &[]);
+    let list = uninstall_list_for_target(&model, &target, &[], &NothingListed);
 
     assert!(list.rows.is_empty());
     let (label, _) = list.placeholder(&model.text).unwrap();
@@ -455,7 +459,7 @@ fn the_target_row_decides_whether_the_plan_is_for_a_portable_reaper() {
             portable,
             ..model.target_rows[0].clone()
         };
-        let plan = uninstall_plan_for_target(&model, &target, &[]).unwrap();
+        let plan = uninstall_plan_for_target(&model, &target, &[], &NothingListed).unwrap();
         let expected = if portable {
             InstallationKind::Portable
         } else {
@@ -482,6 +486,15 @@ fn rows_build_in_every_locale_without_missing_text() {
                 Removability::ManagedByReaPack {
                     path: PathBuf::from("C:/REAPER/UserPlugins/reaper_reapack-x64.dll"),
                     reapack_package: "ReaPack".to_string(),
+                },
+            ),
+            vendor_surge(),
+            item(
+                "reaper",
+                Removability::NoTrustedUninstaller {
+                    refusal: VendorRefusal::ForeignFile {
+                        path: PathBuf::from("C:/Program Files/REAPER (x64)/planted.dll"),
+                    },
                 },
             ),
         ]
@@ -1239,6 +1252,7 @@ fn the_real_sws_plan_offers_its_existing_settings() {
         detections: &detections,
         state: None,
         remove_settings: false,
+        vendor_lookup: &NothingListed,
     });
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
     let list = uninstall_list_from_plan(&localizer, &specs, &plan);
@@ -1411,6 +1425,7 @@ fn no_package_the_wizard_can_remove_yet_asks_a_question() {
             detections: &detections,
             state: Some(&state),
             remove_settings: false,
+            vendor_lookup: &NothingListed,
         });
         let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
         let tickable: Vec<String> = uninstall_list_from_plan(&localizer, &specs, &plan)
@@ -1478,6 +1493,7 @@ fn osara_says_what_goes_and_what_stays() {
             detections: &detections,
             state: None,
             remove_settings: false,
+            vendor_lookup: &NothingListed,
         });
         let mut list = uninstall_list_from_plan(&localizer, &specs, &plan);
         let row = list
@@ -1576,8 +1592,10 @@ fn review_and_the_settings_note_read_in_every_locale() {
                     ..sws_with_settings()
                 },
                 item("ffmpeg", Removability::Removable),
+                vendor_surge(),
             ]),
         );
+        tick(&mut list, "surge-xt");
         let mut texts = vec![
             uninstall_settings_note(&localizer, &list),
             uninstall_settings_availability_note(&localizer, true, &list).unwrap(),
@@ -1630,6 +1648,273 @@ fn review_and_the_settings_note_read_in_every_locale() {
             assert!(
                 !label.is_empty() && !label.starts_with("wizard-"),
                 "{locale}: {label}"
+            );
+        }
+    }
+}
+
+/// Surge XT as the plan describes it once RABBIT found its own uninstaller
+/// and trusts it: removed with administrator rights, no backup, a question
+/// first, and Surge and every REAPER closed.
+pub(super) fn vendor_surge() -> UninstallPlanItem {
+    UninstallPlanItem {
+        strategy: Some(UninstallStrategy::VendorUninstaller),
+        summary: Some(UninstallSummary {
+            removes_key: "uninstall-summary-surge-removes".to_string(),
+            keeps_key: "uninstall-summary-surge-keeps".to_string(),
+        }),
+        vendor_run: Some(PlannedVendorRun {
+            kind: rabbit_core::package::uninstall::VendorUninstallerKind::Inno,
+            uninstaller: PathBuf::from("C:/ProgramData/Surge XT/uninstall/unins000.exe"),
+            arguments: vec!["/VERYSILENT".to_string()],
+            timeout_seconds: 600,
+            still_waiting_seconds: 30,
+            verify_gone: Vec::new(),
+            remove_leftovers: Vec::new(),
+            report_leftovers: Vec::new(),
+        }),
+        blocking_programs: vec!["Surge XT.exe".to_string()],
+        every_reaper_closed: true,
+        requires_elevation: true,
+        unbacked: true,
+        confirm: true,
+        warnings: vec![UninstallWarning::MachineWide],
+        notes: vec![UninstallNote::Manifest {
+            note_key: "uninstall-note-surge-fonts-stay".to_string(),
+        }],
+        ..item("surge-xt", Removability::Removable)
+    }
+}
+
+/// REAPER as the plan describes a standard REAPER whose own uninstaller
+/// RABBIT trusts.
+fn vendor_reaper() -> UninstallPlanItem {
+    UninstallPlanItem {
+        package_id: "reaper".to_string(),
+        display_name: "REAPER".to_string(),
+        summary: Some(UninstallSummary {
+            removes_key: "uninstall-summary-reaper-windows-removes".to_string(),
+            keeps_key: "uninstall-summary-reaper-keeps".to_string(),
+        }),
+        warnings: vec![UninstallWarning::Always {
+            message_key: "uninstall-warning-reaper-extensions-stay".to_string(),
+            confirm: false,
+        }],
+        blocking_programs: Vec::new(),
+        notes: Vec::new(),
+        ..vendor_surge()
+    }
+}
+
+/// A package its own uninstaller removes can be ticked once RABBIT trusts
+/// the uninstaller. Its details say what goes, that Windows asks first, and
+/// what stays, never that its files go into a backup.
+#[test]
+fn a_package_its_own_uninstaller_removes_can_be_ticked() {
+    let row = rows_for(vec![vendor_surge()]).remove(0);
+    assert!(row.can_tick, "{}", row.details);
+    assert_eq!(row.unavailability_reason, None);
+    for sentence in [
+        "Surge XT's own uninstaller removes it for every music program on this computer. A \
+         backup can't bring it back.",
+        "Windows asks for your permission before anything is removed.",
+        "Your own patches, in the Surge XT folder in your Documents, stay.",
+        "The fonts Surge XT installed stay",
+        "serves every REAPER and every other program on this computer",
+    ] {
+        assert!(
+            row.details.contains(sentence),
+            "{sentence}: {}",
+            row.details
+        );
+    }
+    assert!(!row.details.contains("into a backup"), "{}", row.details);
+
+    let reaper = rows_for(vec![vendor_reaper()]).remove(0);
+    assert!(reaper.can_tick);
+    let extensions = reaper
+        .details
+        .find("Extensions such as OSARA and SWS stay")
+        .expect("REAPER says its extensions stay");
+    let removes = reaper
+        .details
+        .find("REAPER's own uninstaller removes the program.")
+        .unwrap();
+    assert!(
+        extensions < removes,
+        "the warning comes first: {}",
+        reaper.details
+    );
+    assert!(
+        reaper
+            .details
+            .contains("Your settings, extensions and projects stay.")
+    );
+}
+
+/// An uninstaller RABBIT doesn't trust leaves the row unticked, and its
+/// details say what was wrong and how to remove the package without RABBIT.
+#[test]
+fn an_uninstaller_rabbit_cant_trust_says_why_and_how_to_remove_it_by_hand() {
+    let row = rows_for(vec![item(
+        "surge-xt",
+        Removability::NoTrustedUninstaller {
+            refusal: VendorRefusal::ForeignFile {
+                path: PathBuf::from("C:/ProgramData/Surge XT/uninstall/planted.dll"),
+            },
+        },
+    )])
+    .remove(0);
+    assert!(!row.can_tick);
+    assert_eq!(
+        row.unavailability_reason.as_deref(),
+        Some("no uninstaller RABBIT can trust")
+    );
+    for sentence in [
+        "RABBIT found no uninstaller for Surge XT it can trust.",
+        "Next to Surge XT's uninstaller is a file that doesn't belong there: \
+         C:/ProgramData/Surge XT/uninstall/planted.dll",
+        "You can uninstall Surge XT yourself in Windows Settings, under Apps, Installed apps.",
+    ] {
+        assert!(
+            row.details.contains(sentence),
+            "{sentence}: {}",
+            row.details
+        );
+    }
+}
+
+/// Review names the run's one permission prompt, and asks to answer a
+/// window from each vendor's uninstaller, once per package. It asks to
+/// close other music programs, for REAPER's own uninstaller too. And the
+/// question before starting covers every removal a backup can't undo.
+#[test]
+fn review_names_the_one_permission_prompt_and_the_question_covers_each_package() {
+    let mut list = list_for(vec![vendor_reaper(), removable_sws(), vendor_surge()]);
+    for id in ["reaper", "sws", "surge-xt"] {
+        tick(&mut list, id);
+    }
+    let preview = review(&list, Some(&target(true)), false, &[]);
+    let text = preview.lines.join("\n");
+    assert!(preview.can_uninstall);
+    let note = "Windows asks for your permission once, before anything is removed. If you don't \
+                allow it, nothing is uninstalled.";
+    assert_eq!(text.matches(note).count(), 1, "{text}");
+    for package in ["REAPER", "Surge XT"] {
+        assert!(
+            text.contains(&format!(
+                "If a window from {package}'s own uninstaller appears, answer it."
+            )),
+            "{text}"
+        );
+    }
+    assert_eq!(
+        text.matches("Close other music programs first.").count(),
+        1,
+        "{text}"
+    );
+
+    // REAPER alone asks too: its own uninstaller removes ReaRoute and the
+    // file associations other programs use.
+    let mut reaper_only = list_for(vec![vendor_reaper()]);
+    tick(&mut reaper_only, "reaper");
+    let text = review(&reaper_only, Some(&target(true)), false, &[])
+        .lines
+        .join("\n");
+    assert!(text.contains("Close other music programs first."), "{text}");
+    assert!(text.contains(note), "{text}");
+
+    // SWS alone goes into a backup, with no prompt and no question.
+    let mut sws_only = list_for(vec![removable_sws()]);
+    tick(&mut sws_only, "sws");
+    let text = review(&sws_only, Some(&target(true)), false, &[])
+        .lines
+        .join("\n");
+    assert!(!text.contains("permission"), "{text}");
+
+    let plan = plan(vec![vendor_reaper(), removable_sws(), vendor_surge()]);
+    let body = question(&plan, &["reaper", "sws", "surge-xt"]).unwrap();
+    assert!(
+        body.contains("A backup can't bring REAPER back.")
+            && body.contains("A backup can't bring Surge XT back.")
+            && body.ends_with("Uninstall now?"),
+        "{body}"
+    );
+    assert!(question(&plan, &["sws"]).is_none());
+}
+
+/// Finds every vendor's uninstaller at one made-up path, as if HKLM listed
+/// it and every check passed. Nothing reads the registry.
+struct FoundIt(PathBuf);
+
+impl VendorLookup for FoundIt {
+    fn locate(&self, _job: &VendorJob<'_>) -> Result<PathBuf, VendorRefusal> {
+        Ok(self.0.clone())
+    }
+}
+
+/// The shipped plans for Surge XT and a standard REAPER on Windows, through
+/// the wizard: both rows can be ticked once the lookup trusts their
+/// uninstallers, and both read in every language.
+#[test]
+fn the_shipped_vendor_plans_read_in_every_locale() {
+    let dir = tempdir().unwrap();
+    let specs = builtin_package_specs(Platform::Windows);
+    let detections: Vec<ComponentDetection> = specs
+        .iter()
+        .map(|spec| ComponentDetection {
+            installed: ["reaper", "surge-xt"].contains(&spec.id.as_str()),
+            version: Some(Version::parse("7.82").unwrap()),
+            ..ComponentDetection::not_installed(&spec.id, &spec.display_name)
+        })
+        .collect();
+    let mut roots = UninstallRoots::new(dir.path());
+    roots.common_program_files = Some(dir.path().join("Common Files"));
+    roots.program_data = Some(dir.path().join("ProgramData"));
+    roots.program_files = vec![dir.path().join("Program Files")];
+    roots.documents = Some(dir.path().join("Documents"));
+    let app = dir
+        .path()
+        .join("Program Files")
+        .join("REAPER (x64)")
+        .join("reaper.exe");
+    roots.app_dir = app.parent().map(std::path::Path::to_path_buf);
+    roots.app_path = Some(app);
+    let plan = build_uninstall_plan(&UninstallPlanInput {
+        roots: &roots,
+        platform: Platform::Windows,
+        target: InstallationKind::Standard,
+        specs: &specs,
+        detections: &detections,
+        state: None,
+        remove_settings: false,
+        vendor_lookup: &FoundIt(dir.path().join("uninstall.exe")),
+    });
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let mut list = uninstall_list_from_plan(&localizer, &specs, &plan);
+        let listed: Vec<&str> = list
+            .rows
+            .iter()
+            .map(|row| row.package_id.as_str())
+            .collect();
+        assert_eq!(listed, ["reaper", "surge-xt"], "{locale}");
+        assert!(list.rows.iter().all(|row| row.can_tick), "{locale}");
+        tick(&mut list, "reaper");
+        tick(&mut list, "surge-xt");
+        let mut texts: Vec<String> = list.rows.iter().map(|row| row.details.clone()).collect();
+        texts.push(
+            build_uninstall_review_preview(&localizer, Some(&target(true)), &list, false, &[])
+                .lines
+                .join("\n"),
+        );
+        texts.push(
+            uninstall_confirmation_body(&localizer, &plan, &ids(&["reaper", "surge-xt"])).unwrap(),
+        );
+        for text in texts {
+            assert!(
+                !text.contains("wizard-") && !text.contains("uninstall-") && !text.contains('{'),
+                "{locale}: {text}"
             );
         }
     }

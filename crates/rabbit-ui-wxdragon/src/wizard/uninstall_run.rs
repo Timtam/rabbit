@@ -19,9 +19,9 @@ use rabbit_core::preflight::{
 };
 use rabbit_core::report::{default_report_path, save_json_and_text_reports};
 use rabbit_core::uninstall::{
-    ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, KeptFileReason, PROGRAMS_RUNNING_CHECK,
-    RegistryEntryAction, UninstallMessage, UninstallPlan, UninstallProblem, UninstallReport,
-    UninstallReportItem, UninstallRequest, UninstallStatus,
+    ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, KeptFileReason, LeftoverResult,
+    PROGRAMS_RUNNING_CHECK, RegistryEntryAction, UninstallMessage, UninstallPlan, UninstallProblem,
+    UninstallReport, UninstallReportItem, UninstallRequest, UninstallStatus,
 };
 use rabbit_core::{RabbitError, Result};
 use serde::Serialize;
@@ -29,7 +29,7 @@ use serde::Serialize;
 use super::model::{TargetRow, WizardModel};
 use super::outcome::wizard_error_reason;
 use super::packages::localized_package_display_name;
-use super::uninstall::WizardUninstallList;
+use super::uninstall::{WizardUninstallList, refusal_text};
 
 /// What the engine is asked to do when the Uninstall button is pressed: the
 /// ticked packages, from the target Review named, with "Also remove
@@ -241,17 +241,29 @@ pub enum UninstallOutcomeStatus {
     /// Nothing was uninstalled and nothing failed: a check stopped the run
     /// before anything changed, or nothing ticked was installed any more.
     NothingDone,
+    /// Everything ticked is gone, but some of it only once the computer
+    /// restarts.
+    PendingRestart,
+    /// The Windows permission prompt was declined, so nothing was
+    /// uninstalled at all.
+    PermissionDeclined,
 }
 
-/// The status of a run that returned a report. A stop outranks a problem,
-/// as for an install: "you stopped it" explains a half-finished run, where
-/// "finished with problems" would send the user looking for a fault.
+/// The status of a run that returned a report. A declined permission prompt
+/// comes first: it is why nothing happened at all. Then a stop outranks a
+/// problem, as for an install: "you stopped it" explains a half-finished
+/// run, where "finished with problems" would send the user looking for a
+/// fault.
 pub fn uninstall_outcome_status(report: &UninstallReport) -> UninstallOutcomeStatus {
-    if report.was_cancelled() {
+    if report.elevation_declined() {
+        UninstallOutcomeStatus::PermissionDeclined
+    } else if report.was_cancelled() {
         UninstallOutcomeStatus::Cancelled
     } else if report.changed_anything() {
         if report.has_failures() || report.finished_with_problems() {
             UninstallOutcomeStatus::CompletedWithProblems
+        } else if report.needs_restart() {
+            UninstallOutcomeStatus::PendingRestart
         } else {
             UninstallOutcomeStatus::Success
         }
@@ -316,6 +328,12 @@ pub fn wizard_uninstall_outcome(
         UninstallOutcomeStatus::Failed => format("wizard-done-uninstall-status-error"),
         UninstallOutcomeStatus::Cancelled => format("wizard-done-uninstall-status-cancelled"),
         UninstallOutcomeStatus::NothingDone => format("wizard-done-uninstall-status-no-packages"),
+        UninstallOutcomeStatus::PendingRestart => {
+            format("wizard-done-uninstall-status-pending-restart")
+        }
+        UninstallOutcomeStatus::PermissionDeclined => {
+            format("wizard-done-uninstall-status-declined")
+        }
     };
     let mut blocks = vec![heading.clone()];
     let reasons = uninstall_reasons(localizer, report);
@@ -442,9 +460,58 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
             .format(key, &[("package", package.as_str())])
             .value
     };
+    let with = |key: &str, name: &str, value: &str| {
+        localizer
+            .format(key, &[("package", package.as_str()), (name, value)])
+            .value
+    };
     let mut reasons = Vec::new();
     match &item.message_code {
-        UninstallMessage::Removed { .. } | UninstallMessage::WouldRemove => {}
+        UninstallMessage::Removed { .. }
+        | UninstallMessage::WouldRemove
+        | UninstallMessage::UninstalledByVendor => {}
+        // Done's first line says the prompt was declined, for every package.
+        UninstallMessage::ElevationDeclined => {}
+        UninstallMessage::VendorRefused { refusal } => {
+            reasons.push(refusal_text(localizer, refusal, &package));
+            reasons.push(with_package("uninstall-vendor-refused-nothing-changed"));
+        }
+        UninstallMessage::VendorCancelled => {
+            reasons.push(with_package("wizard-done-uninstall-vendor-cancelled"));
+        }
+        UninstallMessage::VendorFailed { exit_code } => reasons.push(with(
+            "wizard-done-uninstall-vendor-failed",
+            "code",
+            &exit_code.to_string(),
+        )),
+        UninstallMessage::VendorStillThere { .. } => {
+            reasons.push(with_package("wizard-done-uninstall-vendor-still-there"));
+        }
+        UninstallMessage::VendorStillOpen { .. } => {
+            reasons.push(with_package("wizard-done-uninstall-vendor-still-open"));
+        }
+        UninstallMessage::VendorRunFailed { error } => reasons.push(with(
+            "wizard-done-uninstall-vendor-run-failed",
+            "error",
+            error,
+        )),
+        UninstallMessage::ElevationFailed { error } => reasons.push(with(
+            "wizard-done-uninstall-elevation-failed",
+            "error",
+            error,
+        )),
+        UninstallMessage::ResourceFolderDamaged { missing } => {
+            let paths = missing
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            reasons.push(with(
+                "wizard-done-uninstall-resource-damaged",
+                "paths",
+                &paths,
+            ));
+        }
         UninstallMessage::NotInstalled => {
             reasons.push(with_package("wizard-done-uninstall-not-installed"));
         }
@@ -483,6 +550,9 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
         | UninstallMessage::BackupFailed { .. }
         | UninstallMessage::ReceiptSaveFailed { .. } => reasons.push(item.message.clone()),
     }
+    if item.status == UninstallStatus::RemovedPendingRestart {
+        reasons.push(with_package("wizard-done-uninstall-pending-restart"));
+    }
     if !item.left_in_backup.is_empty() {
         reasons.push(with_package("wizard-done-uninstall-left-in-backup"));
     }
@@ -497,6 +567,9 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
             UninstallProblem::RegistryEntryUnreadable { .. }
             | UninstallProblem::RegistryEntryNotRemoved { .. } => {
                 reasons.push(with_package("wizard-done-uninstall-registry-failed"));
+            }
+            UninstallProblem::ReceiptNotSaved { .. } => {
+                reasons.push(with_package("wizard-done-uninstall-receipt-not-saved"));
             }
         }
     }
@@ -564,6 +637,28 @@ pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallRepor
             item.removed_dirs
                 .iter()
                 .map(|dir| file_line("wizard-summary-removed-file", dir)),
+        );
+        // A vendor's uninstaller: which one ran, the links and empty folders
+        // RABBIT removed after it, and what goes at the next restart.
+        if let Some(vendor) = &item.vendor {
+            lines.extend(
+                vendor
+                    .uninstaller
+                    .iter()
+                    .map(|path| file_line("wizard-summary-vendor-uninstaller", path)),
+            );
+            lines.extend(
+                vendor
+                    .removed_leftovers
+                    .iter()
+                    .filter(|leftover| leftover.result == LeftoverResult::Removed)
+                    .map(|leftover| file_line("wizard-summary-removed-file", &leftover.path)),
+            );
+        }
+        lines.extend(
+            item.pending_restart
+                .iter()
+                .map(|path| file_line("wizard-summary-pending-restart", path)),
         );
         lines.extend(item.kept.iter().map(|kept| {
             let key = match kept.reason {
@@ -654,7 +749,9 @@ fn registry_lines(localizer: &Localizer, item: &UninstallReportItem) -> Vec<Stri
             "wizard-summary-registry-failed",
             &[("key", key.as_str()), ("error", error.as_str())],
         )),
-        UninstallProblem::LanguageResetFailed { .. } => None,
+        UninstallProblem::LanguageResetFailed { .. } | UninstallProblem::ReceiptNotSaved { .. } => {
+            None
+        }
     }));
     lines
 }

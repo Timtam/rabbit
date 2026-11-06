@@ -56,7 +56,7 @@ pub use komplete_kontrol::is_komplete_kontrol_installed;
 pub use links::{remove_empty_dir, remove_junction};
 pub use locale::os_default_locale;
 pub use paths::{
-    user_appdata_dir, user_home_dir, user_local_appdata_dir, windows_clap_dir,
+    user_appdata_dir, user_documents_dir, user_home_dir, user_local_appdata_dir, windows_clap_dir,
     windows_common_program_files_dir, windows_common_program_files_dirs, windows_program_data_dir,
     windows_program_files_dirs, windows_public_desktop_dir, windows_user_desktop_dir,
 };

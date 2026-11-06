@@ -62,10 +62,8 @@ impl UninstallRoots {
     /// `app_path`, read from this computer. Windows folders resolve only on
     /// Windows and `{home}` only on macOS, as the manifest's validation
     /// expects: Git Bash sets `HOME` on Windows, but no plan means it there.
-    ///
-    /// `{documents}` stays unresolved for now. Windows keeps it as a known
-    /// folder that an environment variable can't name, and no package
-    /// RABBIT removes so far uses it.
+    /// `{documents}` is the user's Documents folder, which Windows keeps as a
+    /// known folder an environment variable can't name.
     pub fn for_target(platform: Platform, resource: &Path, app_path: Option<&Path>) -> Self {
         let windows = platform == Platform::Windows;
         let app_path = app_path.map(absolute);
@@ -93,7 +91,7 @@ impl UninstallRoots {
                 .then(rabbit_platform::windows_program_data_dir)
                 .flatten(),
             home: (!windows).then(rabbit_platform::user_home_dir).flatten(),
-            documents: None,
+            documents: rabbit_platform::user_documents_dir(),
         }
     }
 

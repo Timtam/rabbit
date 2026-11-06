@@ -1395,6 +1395,65 @@ pub(crate) mod windows {
         assert!(surge.uninstaller.exists());
     }
 
+    /// The shipped Surge XT plan, with its key swapped for the fixture's.
+    fn shipped_surge_spec() -> VendorUninstallerSpec {
+        let spec = crate::package::builtin_package_specs(crate::model::Platform::Windows)
+            .into_iter()
+            .find(|spec| spec.id == crate::package::PACKAGE_SURGE_XT)
+            .unwrap();
+        let vendor = spec
+            .uninstall
+            .plan_for(crate::model::Platform::Windows, InstallationKind::Standard)
+            .and_then(|plan| plan.vendor_uninstaller.clone())
+            .unwrap();
+        serde_json::from_str(
+            &serde_json::to_string(&vendor)
+                .unwrap()
+                .replace("69F3FE96-DEEC-4C7C-B72D-E8957EC8411B_is1", SURGE_KEY),
+        )
+        .unwrap()
+    }
+
+    /// A plain empty folder where Surge's VST3 junction is expected, as on
+    /// some computers: the shipped plan removes it as an empty folder after
+    /// refusing it as a link, then the vendor folder it leaves empty, and
+    /// nothing counts as left over.
+    #[test]
+    fn the_shipped_plan_removes_an_empty_folder_where_a_junction_was_expected() {
+        let fixture = Fixture::new();
+        let surge = install_surge(&fixture);
+        fs::remove_dir(&surge.vst3_junction).unwrap();
+        fs::create_dir(&surge.vst3_junction).unwrap();
+        let env = fixture.env(surge_uninstaller(&fixture, &surge));
+
+        let (outcome, _) = run(&shipped_surge_spec(), &fixture.roots(None), &env);
+
+        assert_eq!(outcome.status, VendorStatus::Removed, "{outcome:#?}");
+        let results: Vec<(&PathBuf, &LeftoverResult)> = outcome
+            .removed_leftovers
+            .iter()
+            .map(|leftover| (&leftover.path, &leftover.result))
+            .collect();
+        assert_eq!(
+            results,
+            [
+                (&surge.clap_junction, &LeftoverResult::Removed),
+                (
+                    &surge.vst3_junction,
+                    &LeftoverResult::Refused {
+                        refusal: PathRefusal::NotALink
+                    }
+                ),
+                (&surge.clap_junction, &LeftoverResult::NotFound),
+                (&surge.vst3_junction, &LeftoverResult::Removed),
+                (&surge.clap_vendor_dir, &LeftoverResult::Removed),
+                (&surge.vst3_vendor_dir, &LeftoverResult::Removed),
+            ]
+        );
+        assert!(!surge.vst3_vendor_dir.exists() && !surge.clap_vendor_dir.exists());
+        assert_eq!(fs::read(&surge.data_file).unwrap(), b"patch");
+    }
+
     /// Another program from the same vendor keeps its folder; something
     /// that should be a junction and isn't stays, and is reported.
     #[test]

@@ -84,6 +84,13 @@ pub fn machine_common_program_files_dir() -> io::Result<PathBuf> {
     imp::known_folder(imp::KnownFolder::ProgramFilesCommon)
 }
 
+/// The user's Documents folder as Windows names it (`FOLDERID_Documents`),
+/// wherever the user moved it, OneDrive included. An environment variable
+/// can't name it.
+pub(crate) fn windows_documents_dir() -> io::Result<PathBuf> {
+    imp::known_folder(imp::KnownFolder::Documents)
+}
+
 /// Whether `sid` is one of [`TRUSTED_OWNER_SIDS`].
 pub fn is_trusted_owner_sid(sid: &str) -> bool {
     TRUSTED_OWNER_SIDS
@@ -197,8 +204,9 @@ mod imp {
     };
     use windows_sys::Win32::System::Com::CoTaskMemFree;
     use windows_sys::Win32::UI::Shell::{
-        FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesCommon,
-        FOLDERID_ProgramFilesX86, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+        FOLDERID_Documents, FOLDERID_ProgramData, FOLDERID_ProgramFiles,
+        FOLDERID_ProgramFilesCommon, FOLDERID_ProgramFilesX86, KF_FLAG_DEFAULT,
+        SHGetKnownFolderPath,
     };
 
     use super::NAME_ATTEMPTS;
@@ -240,13 +248,15 @@ mod imp {
         ))
     }
 
-    /// The machine-wide folders RABBIT asks Windows for by name.
+    /// The folders RABBIT asks Windows for by name: the machine-wide ones,
+    /// and the user's Documents.
     #[derive(Debug, Clone, Copy)]
     pub(super) enum KnownFolder {
         ProgramData,
         ProgramFiles,
         ProgramFilesX86,
         ProgramFilesCommon,
+        Documents,
     }
 
     pub(super) fn known_folder(folder: KnownFolder) -> io::Result<PathBuf> {
@@ -255,6 +265,7 @@ mod imp {
             KnownFolder::ProgramFiles => &FOLDERID_ProgramFiles,
             KnownFolder::ProgramFilesX86 => &FOLDERID_ProgramFilesX86,
             KnownFolder::ProgramFilesCommon => &FOLDERID_ProgramFilesCommon,
+            KnownFolder::Documents => &FOLDERID_Documents,
         };
         let mut path = std::ptr::null_mut();
         // SAFETY: a null token means the current user; `path` is a valid
@@ -344,6 +355,7 @@ mod imp {
         ProgramFiles,
         ProgramFilesX86,
         ProgramFilesCommon,
+        Documents,
     }
 
     pub(super) fn known_folder(_folder: KnownFolder) -> io::Result<PathBuf> {

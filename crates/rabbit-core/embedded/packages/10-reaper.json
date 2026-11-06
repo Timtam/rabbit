@@ -37,7 +37,59 @@
     "run_upstream_installer"
   ],
   "uninstall": {
+    "always_warn": [
+      {
+        "message_key": "uninstall-warning-reaper-extensions-stay"
+      }
+    ],
     "plans": [
+      {
+        "platform": "windows",
+        "target": "standard",
+        "strategy": "vendor_uninstaller",
+        "elevation": "required",
+        "backup": "none",
+        "summary": {
+          "removes_key": "uninstall-summary-reaper-windows-removes",
+          "keeps_key": "uninstall-summary-reaper-keeps"
+        },
+        "vendor_uninstaller": {
+          "kind": "nsis",
+          "locate": [
+            {
+              "registry": {
+                "hive": "hklm",
+                "key": "REAPER",
+                "value": "UninstallString"
+              }
+            }
+          ],
+          "install_location": {
+            "registry": {
+              "hive": "hklm",
+              "key": "REAPER",
+              "value": "InstallLocation"
+            },
+            "must_equal": "{app_dir}"
+          },
+          "must_be_in": {
+            "under": "{program_files}"
+          },
+          "arguments": [
+            "/S"
+          ],
+          "timeout_seconds": 600,
+          "verify_gone": [
+            "{app_path}"
+          ]
+        },
+        "kept_user_data": [
+          {
+            "path": "{resource}",
+            "note_key": "uninstall-kept-reaper-resource"
+          }
+        ]
+      },
       {
         "platform": "windows",
         "target": "portable",
@@ -45,6 +97,7 @@
         "note_key": "uninstall-manual-reaper-portable"
       },
       {
+        "platform": "macos",
         "strategy": "not_supported",
         "note_key": "uninstall-not-yet"
       }

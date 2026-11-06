@@ -63,6 +63,10 @@ uninstall-summary-langpack-keeps = I pacchetti lingua che hai aggiunto tu restan
 uninstall-summary-osara-removes = Rimuove l'estensione OSARA, le sue traduzioni e la copia della sua mappa dei tasti nella cartella KeyMaps.
 uninstall-summary-osara-removes-windows = Rimuove l'estensione OSARA, le sue traduzioni, il suo programma di disinstallazione e la copia della sua mappa dei tasti nella cartella KeyMaps. Se Windows elenca questo OSARA tra i programmi installati, RABBIT lo toglie da quell'elenco.
 uninstall-summary-osara-keeps = La tua mappa dei tasti resta com'è, così come le impostazioni di OSARA e i backup della tua mappa dei tasti fatti da OSARA.
+uninstall-summary-surge-removes = Il programma di disinstallazione di Surge XT lo rimuove per tutti i programmi musicali di questo computer. Un backup non può recuperarlo.
+uninstall-summary-surge-keeps = Le tue patch, nella cartella Surge XT dei tuoi Documenti, restano.
+uninstall-summary-reaper-windows-removes = Il programma di disinstallazione di REAPER rimuove il programma. Rimuove anche le associazioni dei file di REAPER e ReaRoute per tutti i REAPER di questo computer.
+uninstall-summary-reaper-keeps = Le tue impostazioni, estensioni e progetti restano.
 
 # A short description of a file or folder that stays, shown next to its path,
 # for example "Data\Grooves (your grooves)". Start in lower case where the
@@ -78,13 +82,17 @@ uninstall-kept-osara-key-map = la tua mappa dei tasti
 uninstall-kept-osara-replaced-key-map = la tua mappa dei tasti di prima che OSARA la sostituisse
 uninstall-kept-osara-merged-key-map = la tua mappa dei tasti di prima che OSARA vi aggiungesse i suoi tasti
 uninstall-kept-osara-settings = le impostazioni di OSARA, in un file condiviso da tutte le estensioni
+uninstall-kept-surge-user-data = le tue patch e tutto il resto che hai salvato con Surge XT
+uninstall-kept-reaper-resource = la cartella delle risorse di REAPER, con le tue impostazioni, estensioni e mappe dei tasti
 
 # Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
 uninstall-warning-sws-osara-keymap = Se usi la mappa dei tasti di OSARA, alcuni dei suoi tasti eseguono azioni di SWS. Quei tasti smettono di funzionare finché non reinstalli SWS.
 uninstall-warning-sws-reapack-scripts = Molti script di REAPER, tra cui script per l'accessibilità, richiedono SWS. Gli script che hai installato con ReaPack potrebbero smettere di funzionare.
+uninstall-warning-reaper-extensions-stay = Le estensioni come OSARA e SWS restano nella cartella delle risorse di REAPER. Tornano a funzionare quando reinstalli REAPER.
 
 # A note on what stays behind after ReaPack is uninstalled.
 uninstall-note-reapack-packages-stay = Gli script e le estensioni che hai installato con ReaPack restano, ma niente li tiene più aggiornati.
+uninstall-note-surge-fonts-stay = I font installati da Surge XT restano: il suo programma di installazione li segna come da non rimuovere mai.
 
 # How to remove a package by hand where RABBIT doesn't, shown line by line.
 # Keep file names, folder paths and %APPDATA% exactly as they are.
@@ -252,6 +260,8 @@ wizard-uninstall-details-reapack-owned-extensions = Questi li ha installati ReaP
 wizard-uninstall-details-reapack-records-unreadable = RABBIT non ha potuto leggere i registri di ReaPack per sapere cosa gestisce ancora ({ $reason }).
 wizard-uninstall-details-no-receipt-note = RABBIT non ha installato questa copia. Rimuove i file che { $package } notoriamente installa.
 wizard-uninstall-details-reapack-orphan = { $package } è stato installato a suo tempo da ReaPack. ReaPack non c'è più, quindi RABBIT può rimuoverlo; i registri di ReaPack che lo riguardano restano.
+wizard-uninstall-details-vendor = Windows ti chiede il permesso prima di rimuovere qualcosa.
+wizard-uninstall-details-vendor-by-hand = Puoi disinstallare { $package } da solo nelle Impostazioni di Windows, in App, App installate.
 # The one row, without a checkbox, of an Uninstall list with nothing in it,
 # and its details text.
 wizard-uninstall-empty = RABBIT non ha trovato niente che possa disinstallare in questo REAPER.
@@ -378,6 +388,8 @@ wizard-review-uninstall-package = { $package }: { $removes } { $stays }
 # settings".
 wizard-review-uninstall-settings-removed = Anche le sue impostazioni vengono rimosse e finiscono nel backup: { $settings }.
 wizard-review-uninstall-close-programs-note = Prima chiudi gli altri programmi musicali.
+wizard-review-uninstall-elevation-note-windows = Windows ti chiede il permesso una sola volta, prima di rimuovere qualcosa. Se non lo concedi, non viene disinstallato niente.
+wizard-review-uninstall-vendor-window-note = Se compare una finestra del programma di disinstallazione di { $package }, rispondi.
 # What is ticked on the tab that isn't running stays ticked, but isn't part of
 # this run. RABBIT leaves out what it ticked by itself, such as updates, but the
 # list can still hold a setting RABBIT ticked along with one of the user's
@@ -431,6 +443,8 @@ wizard-progress-log-install-completed = { $package } installato.
 wizard-progress-log-remove-started = Disinstallazione di { $package }…
 wizard-progress-log-remove-completed = { $package } disinstallato.
 wizard-progress-log-remove-failed = Impossibile disinstallare { $package }.
+wizard-progress-status-vendor-running = Esecuzione del programma di disinstallazione di { $package }…
+wizard-progress-status-vendor-still-waiting = Ancora in attesa del programma di disinstallazione di { $package }. Potrebbe mostrare una domanda in un'altra finestra; premi Alt+Tab per trovarla.
 wizard-progress-log-configuration-started = Applicazione di { $step }…
 wizard-progress-log-configuration-completed = { $step } applicato.
 
@@ -472,6 +486,8 @@ wizard-done-uninstall-status-completed-with-errors = RABBIT ha disinstallato { $
 wizard-done-uninstall-status-error = Disinstallazione non riuscita.
 wizard-done-uninstall-status-cancelled = Hai interrotto la disinstallazione. I pacchetti che RABBIT non aveva ancora raggiunto sono ancora installati.
 wizard-done-uninstall-status-no-packages = Non è stato disinstallato niente.
+wizard-done-uninstall-status-pending-restart = RABBIT ha disinstallato { $packages }. Riavvia il computer per completare.
+wizard-done-uninstall-status-declined = Non è stato disinstallato niente, perché la richiesta di autorizzazione di Windows è stata rifiutata.
 wizard-done-uninstall-removed-before-stop = Prima che lo interrompessi, RABBIT ha disinstallato { $packages }.
 # There is no way back to the package list from the Done page. Name the tab
 # as wizard-packages-tab-install does.
@@ -484,6 +500,15 @@ wizard-done-uninstall-left-in-backup = Alcuni file di { $package } non sono stat
 wizard-done-uninstall-leftovers = RABBIT trova ancora parte di { $package } e la lascia com'è. «Mostra dettagli» indica quale.
 wizard-done-uninstall-language-reset-failed = RABBIT non è riuscito a riportare REAPER in inglese dopo aver rimosso { $package }. Scegli una lingua nelle preferenze di REAPER.
 wizard-done-uninstall-registry-failed = RABBIT ha disinstallato { $package }, ma l'elenco dei programmi installati di Windows potrebbe mostrarlo ancora. «Mostra dettagli» indica la voce.
+wizard-done-uninstall-pending-restart = Riavvia il computer per finire di rimuovere { $package }.
+wizard-done-uninstall-vendor-cancelled = Il programma di disinstallazione di { $package } è stato annullato prima di finire.
+wizard-done-uninstall-vendor-failed = Il programma di disinstallazione di { $package } è terminato con il codice di errore { $code }. «Mostra dettagli» indica cosa è ancora presente.
+wizard-done-uninstall-vendor-still-there = Il programma di disinstallazione di { $package } è terminato, ma { $package } è ancora installato. Puoi disinstallarlo nelle Impostazioni di Windows, in App, App installate.
+wizard-done-uninstall-vendor-still-open = Il programma di disinstallazione di { $package } è ancora aperto, quindi RABBIT si è fermato e non ha toccato i pacchetti successivi. Premi Alt+Tab per trovare la sua finestra e rispondi.
+wizard-done-uninstall-vendor-run-failed = RABBIT non è riuscito a portare a termine il programma di disinstallazione di { $package } ({ $error }), quindi si è fermato lì.
+wizard-done-uninstall-elevation-failed = RABBIT non ha ottenuto i diritti di amministratore ({ $error }), quindi non è stato disinstallato niente.
+wizard-done-uninstall-resource-damaged = Importante: dopo l'esecuzione del programma di disinstallazione di { $package }, questi file mancavano nella cartella delle risorse di REAPER: { $paths }. RABBIT si è fermato e ha riscritto i suoi registri. Non può recuperare le impostazioni di REAPER; se hai una copia di reaper.ini, rimettila al suo posto prima di avviare REAPER.
+wizard-done-uninstall-receipt-not-saved = RABBIT ha disinstallato { $package }, ma non è riuscito ad aggiornare i suoi registri. Alla prossima esecuzione, RABBIT vedrà comunque che { $package } non c'è più.
 wizard-done-show-details = Mostra dettagli
 # Mnemonic messages are single-character native access keys. Choose a character
 # from the translated label when possible.
@@ -596,6 +621,8 @@ wizard-summary-kept-link = Conservato perché contiene un collegamento che RABBI
 wizard-summary-kept-reapack = Conservato perché l'ha installato ReaPack, che ne tiene traccia: { $path }
 wizard-summary-left-over = Ancora presente: { $path }
 wizard-summary-left-in-backup = Non rimesso al suo posto, ancora nel backup: { $path }
+wizard-summary-pending-restart = Rimosso al riavvio del computer: { $path }
+wizard-summary-vendor-uninstaller = Il suo programma di disinstallazione: { $path }
 # What became of a package's entry in Windows' list of installed programs,
 # below the package's line. $key is the entry's registry key, such as
 # HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\OSARA, and is

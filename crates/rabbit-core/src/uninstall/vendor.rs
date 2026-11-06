@@ -208,6 +208,153 @@ impl VendorEnvironment for SystemVendorEnvironment {
     }
 }
 
+/// Looks a vendor's uninstaller up before a run, the way the elevated
+/// helper does again right before it starts it, and changes nothing. RABBIT
+/// shows the answer before anything happens: a package whose uninstaller it
+/// can't trust can't be ticked, and no permission prompt is raised for it.
+pub trait VendorLookup {
+    /// The uninstaller `job` names, once every check passes, or why not.
+    fn locate(&self, job: &VendorJob<'_>) -> Result<PathBuf, VendorRefusal>;
+}
+
+/// The real lookup: Windows' list of programs installed for every user
+/// (HKLM) and the real folders, read only. Only RABBIT's own entry points
+/// use it; it never starts anything.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemVendorLookup;
+
+impl VendorLookup for SystemVendorLookup {
+    fn locate(&self, job: &VendorJob<'_>) -> Result<PathBuf, VendorRefusal> {
+        if !cfg!(windows) {
+            return Err(VendorRefusal::Unsupported);
+        }
+        let env = LookupOnly {
+            views: UninstallViews::local_machine(),
+        };
+        locate_uninstaller(job, &env).map(|located| located.program)
+    }
+}
+
+/// A lookup that finds nothing, as on a computer where Windows lists no
+/// program for every user. For listings and tests that never run a vendor's
+/// uninstaller.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NothingListed;
+
+impl VendorLookup for NothingListed {
+    fn locate(&self, _job: &VendorJob<'_>) -> Result<PathBuf, VendorRefusal> {
+        Err(VendorRefusal::NotListed)
+    }
+}
+
+/// What [`SystemVendorLookup`] reads through: a list of installed programs
+/// and the owners of files. Everything that would change something refuses.
+struct LookupOnly {
+    views: UninstallViews,
+}
+
+fn read_only() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "looking an uninstaller up changes nothing",
+    )
+}
+
+impl VendorEnvironment for LookupOnly {
+    fn uninstall_views(&self) -> &UninstallViews {
+        &self.views
+    }
+
+    fn owner_is_trusted(&self, path: &Path) -> io::Result<bool> {
+        rabbit_platform::file_owner_is_trusted(path)
+    }
+
+    fn create_working_folder(&self) -> io::Result<PathBuf> {
+        Err(read_only())
+    }
+
+    fn copy_file(&self, _from: &Path, _to: &Path) -> io::Result<()> {
+        Err(read_only())
+    }
+
+    fn run_program(
+        &self,
+        _command: &VendorCommand,
+        _limits: RunLimits,
+        _on_started: &mut dyn FnMut(),
+        _on_still_waiting: &mut dyn FnMut(),
+    ) -> io::Result<ProgramEnd> {
+        Err(read_only())
+    }
+
+    fn pending_file_renames(&self) -> io::Result<Vec<PendingFileRename>> {
+        Ok(Vec::new())
+    }
+
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn sleep(&self, _duration: Duration) {}
+}
+
+/// What running a vendor's uninstaller would do, as the plan sees it before
+/// the run. The elevated helper finds and checks everything again right
+/// before it starts the uninstaller.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedVendorRun {
+    pub kind: VendorUninstallerKind,
+    /// The uninstaller RABBIT found and checked.
+    pub uninstaller: PathBuf,
+    pub arguments: Vec<String>,
+    pub timeout_seconds: u64,
+    pub still_waiting_seconds: u64,
+    /// What must be gone afterwards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verify_gone: Vec<PathBuf>,
+    /// What RABBIT removes after the uninstaller, in order: links as links,
+    /// folders only when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove_leftovers: Vec<PathBuf>,
+    /// What RABBIT reports if it is still there afterwards, and never
+    /// removes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub report_leftovers: Vec<PathBuf>,
+}
+
+/// Look `job`'s uninstaller up through `lookup` and say what running it
+/// would do. Every path the run needs afterwards must resolve too, as it
+/// must in the helper.
+pub fn plan_vendor_run(
+    job: &VendorJob<'_>,
+    lookup: &dyn VendorLookup,
+) -> Result<PlannedVendorRun, VendorRefusal> {
+    let paths = after_run_paths(job)?;
+    let uninstaller = lookup.locate(job)?;
+    // A path the plan names twice, as a link and then as an empty folder in
+    // case it isn't one, is listed once.
+    let mut remove_leftovers: Vec<PathBuf> = Vec::new();
+    for (_, resolved) in paths.remove_leftovers {
+        if !remove_leftovers.contains(&resolved.path) {
+            remove_leftovers.push(resolved.path);
+        }
+    }
+    Ok(PlannedVendorRun {
+        kind: job.spec.kind,
+        uninstaller,
+        arguments: job.spec.arguments.clone(),
+        timeout_seconds: job.spec.timeout_seconds,
+        still_waiting_seconds: job.spec.still_waiting_seconds,
+        verify_gone: paths.verify_gone,
+        remove_leftovers,
+        report_leftovers: paths
+            .report_leftovers
+            .into_iter()
+            .map(|resolved| resolved.path)
+            .collect(),
+    })
+}
+
 /// Start `command` as an ordinary child process, with the rights this
 /// process has and `environment` added to its environment, and wait for it
 /// within `limits`.
@@ -517,6 +664,13 @@ impl LeftoverResult {
             self,
             Self::Refused { .. } | Self::Failed { .. } | Self::Skipped
         )
+    }
+}
+
+impl LeftoverOutcome {
+    /// It should have gone, and it is still there now.
+    pub fn still_there(&self) -> bool {
+        self.result.is_left_over() && fs::symlink_metadata(&self.path).is_ok()
     }
 }
 
@@ -1071,11 +1225,15 @@ pub fn run_vendor_uninstaller(
             .filter(|resolved| fs::symlink_metadata(&resolved.path).is_ok())
             .map(|resolved| resolved.path.clone())
             .collect();
+        // Only what is still there counts: a later entry of the list may
+        // have removed what an earlier one couldn't, such as a plain empty
+        // folder where a junction was expected.
         let left_over = !outcome.leftovers.is_empty()
-            || outcome
-                .removed_leftovers
-                .iter()
-                .any(|leftover| leftover.result.is_left_over() && verdict == Verdict::Gone);
+            || (verdict == Verdict::Gone
+                && outcome
+                    .removed_leftovers
+                    .iter()
+                    .any(LeftoverOutcome::still_there));
         if outcome.status == VendorStatus::Removed && left_over {
             outcome.status = VendorStatus::RemovedWithLeftovers;
         }

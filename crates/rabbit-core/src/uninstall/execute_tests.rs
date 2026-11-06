@@ -21,8 +21,9 @@ use super::execute::{
 use super::preflight::VolumeProbe;
 use super::tests::{Fixture, installed, remove_files, remove_files_with, running, spec, write};
 use super::{
-    BACKUP_SPACE_CHECK, KeptFile, KeptFileReason, KeptReason, RemovalReason, UninstallMessage,
-    UninstallProblem, UninstallReport, UninstallRequest, UninstallStatus,
+    BACKUP_SPACE_CHECK, KeptFile, KeptFileReason, KeptReason, NoElevatedHelper, NothingListed,
+    RemovalReason, UninstallMessage, UninstallProblem, UninstallReport, UninstallRequest,
+    UninstallStatus,
 };
 #[cfg(windows)]
 use super::{RegistryEntryAction, RegistryEntryOutcome};
@@ -34,7 +35,7 @@ use crate::package::{
     PACKAGE_OSARA, PACKAGE_REAPACK, PACKAGE_SWS, PackageSpec, builtin_package_specs,
 };
 use crate::preflight::RunningProcess;
-use crate::progress::{ProgressEvent, ProgressReporter};
+use crate::progress::{ProgressEvent, ProgressReporter, RemovalMethod};
 use crate::reapack::write_test_registry;
 use crate::receipt::{
     InstallState, InstalledFileReceipt, PackageReceipt, load_install_state, save_install_state,
@@ -156,6 +157,8 @@ impl<'f> Harness<'f> {
                 named_processes: &named,
                 volumes: &self.volumes,
                 installed_programs: self.installed_programs.as_ref(),
+                vendor_lookup: &NothingListed,
+                elevated_helper: &NoElevatedHelper,
             },
             &self.progress,
             &self.cancel,
@@ -374,7 +377,8 @@ fn removed_files_move_into_a_backup_set_and_the_receipt_forgets_the_package() {
         *events.lock().unwrap(),
         vec![
             ProgressEvent::RemoveStarted {
-                package_id: "demo".to_string()
+                package_id: "demo".to_string(),
+                method: RemovalMethod::Files,
             },
             ProgressEvent::RemoveCompleted {
                 package_id: "demo".to_string(),

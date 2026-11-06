@@ -177,8 +177,12 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
                         // The Uninstall tab's rows come from the detection the
                         // plan just ran, not from a second one. Version-check
                         // failures don't touch them: they only stop installs.
-                        *ui.uninstall_list.borrow_mut() =
-                            uninstall_list_for_target(&ui.model, &ui.target, &plan.detections);
+                        *ui.uninstall_list.borrow_mut() = uninstall_list_for_target(
+                            &ui.model,
+                            &ui.target,
+                            &plan.detections,
+                            &rabbit_core::uninstall::SystemVendorLookup,
+                        );
                         *ui.package_rows.borrow_mut() = plan.package_rows;
                         *ui.package_notes.borrow_mut() = plan.notes;
                         // The deferred fetch may have promoted ReaPack to
