@@ -15,6 +15,7 @@
 //! helper -> RABBIT  {"event":"started","package_id":"surge-xt"}
 //! helper -> RABBIT  {"event":"vendor-launched","package_id":"surge-xt"}
 //! helper -> RABBIT  {"event":"still-waiting","package_id":"surge-xt","seconds":30}
+//! helper -> RABBIT  {"event":"waiting-for-files","package_id":"surge-xt","seconds":30}
 //! helper -> RABBIT  {"event":"finished","package_id":"surge-xt","outcome":{...}}
 //! RABBIT -> helper  {"order":"quit"}
 //! ```
@@ -254,6 +255,9 @@ pub enum HelperEvent {
     VendorLaunched { package_id: String },
     /// The uninstaller has run for `seconds` and hasn't ended.
     StillWaiting { package_id: String, seconds: u64 },
+    /// The uninstaller has ended, but `seconds` later its files are still
+    /// there, and the helper keeps checking.
+    WaitingForFiles { package_id: String, seconds: u64 },
     Finished {
         package_id: String,
         outcome: Box<VendorOutcome>,
@@ -443,6 +447,10 @@ pub(crate) fn serve(
                     package_id: package_id.clone(),
                 },
                 VendorEvent::StillWaiting { seconds } => HelperEvent::StillWaiting {
+                    package_id: package_id.clone(),
+                    seconds,
+                },
+                VendorEvent::WaitingForFiles { seconds } => HelperEvent::WaitingForFiles {
                     package_id: package_id.clone(),
                     seconds,
                 },
@@ -754,6 +762,10 @@ impl<C: LineChannel + 'static> ElevatedSession for ChannelSession<C> {
                     package_id: id,
                     seconds,
                 } if id == package_id => on_event(&VendorEvent::StillWaiting { seconds }),
+                HelperEvent::WaitingForFiles {
+                    package_id: id,
+                    seconds,
+                } if id == package_id => on_event(&VendorEvent::WaitingForFiles { seconds }),
                 HelperEvent::Finished {
                     package_id: id,
                     outcome,

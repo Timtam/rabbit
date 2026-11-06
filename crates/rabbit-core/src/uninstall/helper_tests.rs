@@ -211,6 +211,13 @@ fn orders_and_events_are_one_json_object_per_line() {
             r#"{"event":"still-waiting","package_id":"reaper","seconds":30}"#,
         ),
         (
+            HelperEvent::WaitingForFiles {
+                package_id: "surge-xt".to_string(),
+                seconds: 30,
+            },
+            r#"{"event":"waiting-for-files","package_id":"surge-xt","seconds":30}"#,
+        ),
+        (
             HelperEvent::Refused {
                 reason: HelperRefusal::OutOfOrder {
                     package_id: "surge-xt".to_string(),
@@ -739,4 +746,51 @@ fn a_helper_lost_mid_run_fails_the_package_and_the_rest() {
     let later = session.run("surge-xt", &mut |_| panic!("no order goes out"));
     assert_eq!(later.status, VendorStatus::Failed);
     assert!(!later.launched);
+}
+
+/// Waiting for the files to go after the uninstaller ended crosses the
+/// pipe like still waiting does, so RABBIT can tell the user.
+#[test]
+fn waiting_for_files_reaches_rabbit() {
+    let (rabbit, mut helper) = MemoryChannel::pair();
+    let mut session = ChannelSession::new(rabbit, HelperHandle::Detached, HashMap::new());
+    let talking = thread::spawn(move || {
+        helper.read_line(LONG).unwrap().unwrap();
+        for event in [
+            HelperEvent::Started {
+                package_id: "surge-xt".to_string(),
+            },
+            HelperEvent::VendorLaunched {
+                package_id: "surge-xt".to_string(),
+            },
+            HelperEvent::WaitingForFiles {
+                package_id: "surge-xt".to_string(),
+                seconds: 30,
+            },
+            HelperEvent::Finished {
+                package_id: "surge-xt".to_string(),
+                outcome: Box::new(VendorOutcome {
+                    status: VendorStatus::Removed,
+                    launched: true,
+                    exit_code: Some(0),
+                    ..VendorOutcome::new("surge-xt")
+                }),
+            },
+        ] {
+            helper
+                .send_line(&serde_json::to_string(&event).unwrap(), LONG)
+                .unwrap();
+        }
+    });
+    let mut events = Vec::new();
+    let outcome = session.run("surge-xt", &mut |event| events.push(event.clone()));
+    talking.join().unwrap();
+    assert_eq!(outcome.status, VendorStatus::Removed);
+    assert_eq!(
+        events,
+        [
+            VendorEvent::Launched,
+            VendorEvent::WaitingForFiles { seconds: 30 }
+        ]
+    );
 }

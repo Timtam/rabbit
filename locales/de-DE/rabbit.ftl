@@ -445,6 +445,7 @@ wizard-progress-log-remove-completed = { $package } deinstalliert.
 wizard-progress-log-remove-failed = { $package } konnte nicht deinstalliert werden.
 wizard-progress-status-vendor-running = Das Deinstallationsprogramm von { $package } läuft…
 wizard-progress-status-vendor-still-waiting = RABBIT wartet noch auf das Deinstallationsprogramm von { $package }. Vielleicht zeigt es eine Frage in einem anderen Fenster; drücken Sie Alt+Tab, um es zu finden.
+wizard-progress-status-vendor-waiting-for-files = Das Deinstallationsprogramm von { $package } ist fertig, und RABBIT wartet darauf, dass seine Dateien verschwinden. Wenn ein anderes Musikprogramm { $package } geöffnet hat, schließen Sie es.
 wizard-progress-log-configuration-started = { $step } wird angewendet…
 wizard-progress-log-configuration-completed = { $step } angewendet.
 

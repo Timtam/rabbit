@@ -104,8 +104,12 @@ from this file and posts it as the GitHub release body.
   belongs, and says why otherwise. If an uninstaller takes long, the
   progress page says RABBIT is still waiting and that it may be asking a
   question in another window; screen readers on Windows hear this once, as
-  focus moves to the progress log. A removal that finishes only after a
-  restart says so, and `rabbit uninstall` then exits with 0. A portable
+  focus moves to the progress log. If an uninstaller has finished but its
+  files are still there, for example because another music program has
+  Surge XT open, the progress page says RABBIT is waiting for them and asks
+  you to close that program; screen readers hear this once too. A removal
+  that finishes only after a restart says so, and `rabbit uninstall` then
+  exits with 0. A portable
   REAPER stays yours to remove by hand.
 
 ### Changed

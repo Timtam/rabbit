@@ -445,6 +445,7 @@ wizard-progress-log-remove-completed = { $package } disinstallato.
 wizard-progress-log-remove-failed = Impossibile disinstallare { $package }.
 wizard-progress-status-vendor-running = Esecuzione del programma di disinstallazione di { $package }…
 wizard-progress-status-vendor-still-waiting = Ancora in attesa del programma di disinstallazione di { $package }. Potrebbe mostrare una domanda in un'altra finestra; premi Alt+Tab per trovarla.
+wizard-progress-status-vendor-waiting-for-files = Il programma di disinstallazione di { $package } è terminato e RABBIT aspetta che i suoi file spariscano. Se un altro programma musicale ha { $package } aperto, chiudilo.
 wizard-progress-log-configuration-started = Applicazione di { $step }…
 wizard-progress-log-configuration-completed = { $step } applicato.
 

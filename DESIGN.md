@@ -702,9 +702,12 @@ user can finish the install by pressing Next a few times.
      gets its own line ("Running Surge XT's own uninstaller…"), and once it
      has run for 30 seconds the status and the log say RABBIT is still
      waiting and that it may be asking a question in another window, found
-     with Alt+Tab. That line is spoken on macOS; on Windows, which has no
-     announcement, focus moves to the log the first time in a run, so the
-     screen reader reads it once. Which progress events are spoken is
+     with Alt+Tab. When an Inno uninstaller has ended but its files are
+     still there 30 seconds later, a line says RABBIT is waiting for them
+     and to close the music program that has the package open. Each line is
+     spoken on macOS; on Windows, which has no announcement, focus moves to
+     the log the first time each happens in a run, so the screen reader
+     reads it once. Which progress events are spoken is
      decided by one exhaustive match, so a new event can't be added without
      that decision. Closing the window asks "Stop uninstalling?" with No
      focused, and the run stops after the package it is on; a vendor's

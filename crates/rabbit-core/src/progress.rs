@@ -96,6 +96,11 @@ pub enum ProgressEvent {
     /// ended. It may be showing a question in a window of its own. Sent
     /// once per uninstaller.
     VendorStillWaiting { package_id: String, seconds: u64 },
+    /// The package's own uninstaller has ended, but `seconds` later what it
+    /// was to remove is still there, and RABBIT keeps checking until the
+    /// uninstaller's time limit. Another program may have the package
+    /// open. Sent at most once per uninstaller.
+    VendorWaitingForFiles { package_id: String, seconds: u64 },
     /// The uninstall is done with this package. It fires after every
     /// `RemoveStarted`, also when the removal failed or a check stopped it,
     /// so a progress page never waits on a package that is over.

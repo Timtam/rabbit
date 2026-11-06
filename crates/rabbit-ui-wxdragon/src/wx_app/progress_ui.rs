@@ -237,6 +237,17 @@ pub(crate) fn apply_progress_event_to_ui(
             status_line = Some(line.clone());
             log_line = Some(line);
         }
+        // The uninstaller has ended, but its files linger: most often a
+        // music program still has the package open.
+        ProgressEvent::VendorWaitingForFiles { package_id, .. } => {
+            let line = package_line(
+                localizer,
+                "wizard-progress-status-vendor-waiting-for-files",
+                package_id,
+            );
+            status_line = Some(line.clone());
+            log_line = Some(line);
+        }
         // The end of a removal stays on the status line until the next one
         // starts, and is spoken: whether the package really went is what
         // the user is waiting to hear.

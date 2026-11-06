@@ -453,10 +453,12 @@ wizard-progress-log-remove-started = Uninstalling { $package }…
 wizard-progress-log-remove-completed = Uninstalled { $package }.
 wizard-progress-log-remove-failed = Couldn't uninstall { $package }.
 # For a package its own uninstaller removes: the status and log line while
-# it runs, and the line said once when it runs for a long time. $package
+# it runs, the line said once when it runs for a long time, and the line
+# said once when its files are still there long after it ended. $package
 # is the localized package name. Name Alt+Tab as Windows does.
 wizard-progress-status-vendor-running = Running { $package }'s own uninstaller…
 wizard-progress-status-vendor-still-waiting = Still waiting for { $package }'s own uninstaller. It may be showing a question in another window; press Alt+Tab to find it.
+wizard-progress-status-vendor-waiting-for-files = { $package }'s own uninstaller has finished, and RABBIT is waiting for its files to go. If another music program has { $package } open, close it.
 wizard-progress-log-configuration-started = Applying { $step }…
 wizard-progress-log-configuration-completed = Applied { $step }.
 

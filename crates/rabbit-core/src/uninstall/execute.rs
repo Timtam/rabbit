@@ -775,9 +775,16 @@ impl RemovalRun<'_> {
         let resource = self.plan.resource_path.clone();
         let guarded = guarded_files(&resource);
         let progress = self.progress;
-        let outcome = self.session.run(id, &mut |event| {
-            if let VendorEvent::StillWaiting { seconds } = event {
+        let outcome = self.session.run(id, &mut |event| match event {
+            VendorEvent::Launched => {}
+            VendorEvent::StillWaiting { seconds } => {
                 progress.report(ProgressEvent::VendorStillWaiting {
+                    package_id: id.to_string(),
+                    seconds: *seconds,
+                });
+            }
+            VendorEvent::WaitingForFiles { seconds } => {
+                progress.report(ProgressEvent::VendorWaitingForFiles {
                     package_id: id.to_string(),
                     seconds: *seconds,
                 });

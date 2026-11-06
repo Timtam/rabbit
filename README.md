@@ -234,8 +234,10 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
   extensions work again once you install REAPER again. REAPER always goes
   last. If an uninstaller takes long, the progress page says RABBIT is still
   waiting: it may be showing a question in a window of its own, which
-  Alt+Tab finds. A removal that finishes only after a restart says so on the
-  last page. A portable REAPER stays yours to remove by hand.
+  Alt+Tab finds. If it has finished but its files are still there, the
+  progress page says RABBIT is waiting for them: close the music program
+  that has the package open. A removal that finishes only after a restart
+  says so on the last page. A portable REAPER stays yours to remove by hand.
 - **Getting a package back:** start RABBIT again and tick it on the **Install
   or update** tab, which no longer ticks a package you removed by itself. To
   put back the very files that went instead, **Show details** on the last

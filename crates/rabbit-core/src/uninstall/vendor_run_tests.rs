@@ -48,10 +48,12 @@ impl VolumeProbe for OneVolume {
 }
 
 /// What one scripted vendor run does: the files it removes, as the real
-/// uninstaller would, whether it says it is still waiting, and how it ends.
+/// uninstaller would, whether it says it is still waiting, or waiting for
+/// its files to go once it has ended, and how it ends.
 struct Script {
     removes: Vec<PathBuf>,
     still_waiting: Option<u64>,
+    waiting_for_files: Option<u64>,
     cancels: Option<CancelToken>,
     outcome: VendorOutcome,
 }
@@ -61,6 +63,7 @@ impl Script {
         Self {
             removes: Vec::new(),
             still_waiting: None,
+            waiting_for_files: None,
             cancels: None,
             outcome,
         }
@@ -149,6 +152,9 @@ impl ElevatedSession for ScriptedSession {
         on_event(&VendorEvent::Launched);
         if let Some(seconds) = script.still_waiting {
             on_event(&VendorEvent::StillWaiting { seconds });
+        }
+        if let Some(seconds) = script.waiting_for_files {
+            on_event(&VendorEvent::WaitingForFiles { seconds });
         }
         for path in &script.removes {
             if path.is_dir() {
@@ -1157,7 +1163,8 @@ fn reaper_taking_its_settings_or_the_receipt_fails_loudly_and_the_receipt_comes_
 }
 
 /// The still-waiting status reaches the progress page once, between the
-/// package's start and its end.
+/// package's start and its end, and so does waiting for the files to go
+/// after the uninstaller ended.
 #[test]
 fn a_long_uninstaller_sends_still_waiting_once() {
     let computer = Computer::new();
@@ -1165,6 +1172,7 @@ fn a_long_uninstaller_sends_still_waiting_once() {
         PACKAGE_SURGE_XT,
         Script {
             still_waiting: Some(30),
+            waiting_for_files: Some(30),
             ..Script::ends(outcome(PACKAGE_SURGE_XT, VendorStatus::Removed, Some(0)))
                 .removing(&[&computer.surge_vst3])
         },
@@ -1182,6 +1190,10 @@ fn a_long_uninstaller_sends_still_waiting_once() {
                 method: RemovalMethod::VendorUninstaller,
             },
             ProgressEvent::VendorStillWaiting {
+                package_id: PACKAGE_SURGE_XT.to_string(),
+                seconds: 30,
+            },
+            ProgressEvent::VendorWaitingForFiles {
                 package_id: PACKAGE_SURGE_XT.to_string(),
                 seconds: 30,
             },

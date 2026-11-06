@@ -39,6 +39,9 @@ pub struct ProgressUiState {
     pub current_package: Option<String>,
     /// How many times a vendor's uninstaller was reported still running.
     pub still_waiting_count: usize,
+    /// How many times RABBIT was reported still waiting for an ended
+    /// uninstaller's files to go.
+    pub waiting_for_files_count: usize,
 }
 
 /// The phases one package goes through in a run of `mode`. An install
@@ -62,6 +65,7 @@ impl ProgressUiState {
             active_downloads: HashMap::new(),
             current_package: None,
             still_waiting_count: 0,
+            waiting_for_files_count: 0,
         }
     }
 
@@ -144,6 +148,9 @@ impl ProgressUiState {
             ProgressEvent::VendorStillWaiting { .. } => {
                 self.still_waiting_count += 1;
             }
+            ProgressEvent::VendorWaitingForFiles { .. } => {
+                self.waiting_for_files_count += 1;
+            }
             ProgressEvent::InstallCompleted { .. } | ProgressEvent::RemoveCompleted { .. } => {
                 self.current_package = None;
                 self.completed_phases += 1;
@@ -161,11 +168,17 @@ impl ProgressUiState {
     /// [`ProgressUiState::record`] has counted it in, so that a screen
     /// reader on Windows, which has no `announce()`, reads the line just
     /// added: only for the first time a vendor's uninstaller is reported
-    /// still running in a run. It may be waiting for an answer in a window
-    /// of its own, and the user has to hear that once, not with every
-    /// uninstaller.
+    /// still running in a run, and the first time RABBIT is still waiting
+    /// for an ended uninstaller's files to go. The first may be waiting for
+    /// an answer in a window of its own; the second for a program that has
+    /// the package open to be closed. The user has to hear each once, not
+    /// with every uninstaller.
     pub fn moves_focus_to_log(&self, event: &ProgressEvent) -> bool {
-        matches!(event, ProgressEvent::VendorStillWaiting { .. }) && self.still_waiting_count == 1
+        match event {
+            ProgressEvent::VendorStillWaiting { .. } => self.still_waiting_count == 1,
+            ProgressEvent::VendorWaitingForFiles { .. } => self.waiting_for_files_count == 1,
+            _ => false,
+        }
     }
 }
 
@@ -178,7 +191,9 @@ impl ProgressUiState {
 /// install's end needs no line of its own: the next download or install,
 /// or the Done page, says what happens next. A vendor's uninstaller that
 /// keeps RABBIT waiting is spoken too: it may be asking a question in a
-/// window of its own.
+/// window of its own. So are its files lingering after it ended: another
+/// program may have the package open, and nothing else is heard until the
+/// uninstaller's time limit.
 ///
 /// No wildcard arm, on purpose: a new event must not compile until someone
 /// decides whether it is heard. A `matches!` here once let the uninstall
@@ -189,7 +204,8 @@ pub fn is_spoken(event: &ProgressEvent) -> bool {
         | ProgressEvent::ConfigurationStarted { .. }
         | ProgressEvent::RemoveStarted { .. }
         | ProgressEvent::RemoveCompleted { .. }
-        | ProgressEvent::VendorStillWaiting { .. } => true,
+        | ProgressEvent::VendorStillWaiting { .. }
+        | ProgressEvent::VendorWaitingForFiles { .. } => true,
         ProgressEvent::DownloadStarted { .. }
         | ProgressEvent::DownloadProgress { .. }
         | ProgressEvent::DownloadCompleted { .. }

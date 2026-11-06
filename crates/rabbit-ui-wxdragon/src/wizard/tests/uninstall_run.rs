@@ -49,6 +49,13 @@ fn still_waiting(id: &str) -> ProgressEvent {
     }
 }
 
+fn waiting_for_files(id: &str) -> ProgressEvent {
+    ProgressEvent::VendorWaitingForFiles {
+        package_id: id.to_string(),
+        seconds: 30,
+    }
+}
+
 fn completed(id: &str, removed: bool) -> ProgressEvent {
     ProgressEvent::RemoveCompleted {
         package_id: id.to_string(),
@@ -162,6 +169,7 @@ fn the_spoken_events_are_the_starts_and_both_ends_of_a_removal() {
             true,
         ),
         (still_waiting("surge-xt"), true),
+        (waiting_for_files("surge-xt"), true),
         (completed("sws", true), true),
         (completed("sws", false), true),
     ];
@@ -190,6 +198,29 @@ fn still_waiting_moves_focus_to_the_log_only_the_first_time() {
         moves.push(state.moves_focus_to_log(&event));
     }
     assert_eq!(moves, [false, true, false, false, false, false]);
+    assert_eq!(state.percentage(), 100);
+}
+
+/// Waiting for an ended uninstaller's files to go is heard once per run
+/// too, apart from still waiting for one that runs: each tells the user
+/// something different to do.
+#[test]
+fn waiting_for_files_moves_focus_to_the_log_once_of_its_own() {
+    let mut state = ProgressUiState::new(WizardMode::Uninstall, 2, 0);
+    let mut moves = Vec::new();
+    for event in [
+        started("surge-xt"),
+        still_waiting("surge-xt"),
+        waiting_for_files("surge-xt"),
+        completed("surge-xt", true),
+        started("reaper"),
+        waiting_for_files("reaper"),
+        completed("reaper", true),
+    ] {
+        state.record(&event);
+        moves.push(state.moves_focus_to_log(&event));
+    }
+    assert_eq!(moves, [false, true, true, false, false, false, false]);
     assert_eq!(state.percentage(), 100);
 }
 

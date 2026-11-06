@@ -1505,7 +1505,7 @@ pub(crate) mod windows {
             }
         }));
 
-        let (outcome, _) = run(&surge_spec(60), &fixture.roots(None), &env);
+        let (outcome, events) = run(&surge_spec(60), &fixture.roots(None), &env);
 
         assert_eq!(outcome.status, VendorStatus::Removed, "{outcome:?}");
         let waited = env.clock.as_ref().unwrap().elapsed();
@@ -1514,6 +1514,38 @@ pub(crate) mod windows {
             "{waited:?}"
         );
         assert!(!surge.clap_vendor_dir.exists());
+        // A few seconds are nothing to tell the user about.
+        assert_eq!(events, [VendorEvent::Launched]);
+    }
+
+    /// Files that linger well after the uninstaller ended, such as a
+    /// plug-in another program holds open, keep RABBIT checking for up to
+    /// the time limit. After `still_waiting_seconds` the user hears so,
+    /// once, rather than nothing at all.
+    #[test]
+    fn files_that_linger_after_the_uninstaller_are_reported_once() {
+        let fixture = Fixture::new();
+        let surge = install_surge(&fixture);
+        let (vst3, clap, list) = (surge.vst3.clone(), surge.clap.clone(), fixture.list.root());
+        let mut env = fixture.env(Runner::Fake(Box::new(|_| FakeRun::exits(0))));
+        env.clock = Some(VirtualClock::new(move |elapsed| {
+            if elapsed >= Duration::from_secs(70) && vst3.exists() {
+                fs::remove_dir_all(&vst3).unwrap();
+                fs::remove_file(&clap).unwrap();
+                list.delete_entry(SURGE_KEY).unwrap();
+            }
+        }));
+
+        let (outcome, events) = run(&surge_spec(600), &fixture.roots(None), &env);
+
+        assert_eq!(outcome.status, VendorStatus::Removed, "{outcome:?}");
+        assert_eq!(
+            events,
+            [
+                VendorEvent::Launched,
+                VendorEvent::WaitingForFiles { seconds: 30 }
+            ]
+        );
     }
 
     #[test]

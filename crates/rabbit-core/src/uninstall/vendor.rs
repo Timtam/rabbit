@@ -37,8 +37,10 @@
 //! 4. **Check.** What `verify_gone` names and the registry entry must be
 //!    gone. Inno documents that some of its work may still run after its
 //!    exit code returns, so for Inno RABBIT checks every few seconds until
-//!    `timeout_seconds` has passed. Files Windows removes at the next
-//!    restart count as removed, pending a restart.
+//!    `timeout_seconds` has passed, and says it is waiting for the files to
+//!    go once the checks have failed for `still_waiting_seconds`. Files
+//!    Windows removes at the next restart count as removed, pending a
+//!    restart.
 //! 5. **Leftovers.** Only once everything is gone does RABBIT remove
 //!    `remove_leftovers`, in order, each through the guard again: junctions
 //!    as links, never followed, and folders only when empty. What
@@ -405,6 +407,10 @@ pub enum VendorEvent {
     /// It has run for `seconds` and hasn't ended. It may be showing a
     /// window that waits for an answer.
     StillWaiting { seconds: u64 },
+    /// It has ended, but `seconds` later what it was to remove is still
+    /// there, and RABBIT keeps checking. Another program may hold a file
+    /// of the package open.
+    WaitingForFiles { seconds: u64 },
 }
 
 /// Why RABBIT didn't start a vendor's uninstaller. Nothing changed.
@@ -1186,12 +1192,21 @@ pub fn run_vendor_uninstaller(
     // Inno may still be at work after it returns, so only its success is
     // waited for; any other ending gets one look, for the report.
     let poll = exit == VendorExit::Success && job.spec.kind == VendorUninstallerKind::Inno;
+    let checks = VerifyChecks {
+        timeout: limits.timeout,
+        poll,
+        still_waiting_after: limits.still_waiting_after,
+    };
     let verdict = verify_gone(
         env,
         &located,
         &paths.verify_gone,
-        limits.timeout,
-        poll,
+        checks,
+        &mut || {
+            (*events.borrow_mut())(VendorEvent::WaitingForFiles {
+                seconds: still_waiting,
+            })
+        },
         &mut outcome,
     );
     outcome.status = match exit {
@@ -1448,18 +1463,35 @@ enum Verdict {
     StillThere,
 }
 
+/// How long, and whether, [`verify_gone`] keeps checking.
+#[derive(Debug, Clone, Copy)]
+struct VerifyChecks {
+    timeout: Duration,
+    /// Keep checking until `timeout`, rather than looking once.
+    poll: bool,
+    /// How long the checks may fail before the user is told RABBIT is
+    /// still waiting for the files to go.
+    still_waiting_after: Duration,
+}
+
 /// Check whether `verify_gone` and the registry entry are gone, and with
-/// `poll` keep checking every [`VERIFY_POLL_INTERVAL`] until they are or
-/// `timeout` has passed. Records what is still there in `outcome`.
+/// `checks.poll` keep checking every [`VERIFY_POLL_INTERVAL`] until they
+/// are or `checks.timeout` has passed. The uninstaller has ended by then,
+/// so once the checks have failed for `checks.still_waiting_after`,
+/// `on_waiting` runs, once: the user hears that RABBIT is waiting rather
+/// than nothing for up to the whole time limit. Records what is still
+/// there in `outcome`.
 fn verify_gone(
     env: &dyn VendorEnvironment,
     located: &LocatedUninstaller,
     verify_gone: &[PathBuf],
-    timeout: Duration,
-    poll: bool,
+    checks: VerifyChecks,
+    on_waiting: &mut dyn FnMut(),
     outcome: &mut VendorOutcome,
 ) -> Verdict {
-    let deadline = env.now() + timeout;
+    let started = env.now();
+    let deadline = started + checks.timeout;
+    let mut told = false;
     loop {
         let still_present: Vec<PathBuf> = verify_gone
             .iter()
@@ -1507,8 +1539,12 @@ fn verify_gone(
             }
         }
         let now = env.now();
-        if !poll || now >= deadline {
+        if !checks.poll || now >= deadline {
             return Verdict::StillThere;
+        }
+        if !told && now.duration_since(started) >= checks.still_waiting_after {
+            told = true;
+            on_waiting();
         }
         env.sleep(VERIFY_POLL_INTERVAL.min(deadline - now));
     }
