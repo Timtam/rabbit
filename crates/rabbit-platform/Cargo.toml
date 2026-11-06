@@ -10,10 +10,17 @@ serde.workspace = true
 sys-locale = "0.3"
 
 [target.'cfg(windows)'.dependencies]
+# Win32_Security only because RegCreateKeyExW's signature names its
+# SECURITY_ATTRIBUTES; RABBIT always passes null there.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
+    # WriteFile's signature names OVERLAPPED (ctrl_c.rs). Other crates in the
+    # workspace happen to turn this on too, so only a build of this crate on
+    # its own notices it missing.
+    "Win32_System_IO",
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_Shell",

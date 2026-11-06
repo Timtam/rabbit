@@ -291,6 +291,68 @@ fn reaper_configuration_and_rabbits_folder_always_stay() {
     assert_eq!(kept(demo, KeptReason::RabbitFolder), vec![receipt_file]);
 }
 
+/// Every `reaper-*.ini` is REAPER's own, and so is a copy of one. That
+/// includes `reaper-extstate.ini`, where every extension keeps its settings
+/// side by side: a package that lists it among its settings, as OSARA does,
+/// never takes it, not even with "Also remove settings".
+#[test]
+fn reapers_own_files_stay_even_among_a_packages_settings() {
+    let fixture = Fixture::new();
+    let extstate = fixture.file("reaper-extstate.ini");
+    let extstate_copy = fixture.file("reaper-extstate.ini.bak");
+    let fx_tags = fixture.file("reaper-fxtags.ini");
+    // Only names that start like REAPER's own count.
+    let lookalike = fixture.file("old-reaper-kb.ini");
+    let notes = fixture.file("reaper-demo-notes.txt");
+    let state = receipt(
+        "demo",
+        &[
+            ("reaper-fxtags.ini", Some("aa")),
+            ("reaper-extstate.ini.bak", Some("bb")),
+            ("old-reaper-kb.ini", Some("cc")),
+        ],
+    );
+    let specs = [spec(
+        "demo",
+        "",
+        &remove_files(
+            r#""remove": { "receipt_files": true },
+               "kept_user_data": [
+                   { "path": "{resource}/reaper-extstate.ini", "note_key": "test-settings" },
+                   { "path": "{resource}/reaper-demo-notes.txt", "note_key": "test-notes" }
+               ]"#,
+        ),
+    )];
+
+    for remove_settings in [false, true] {
+        let plan = fixture.plan_with(
+            &specs,
+            &installed(&["demo"]),
+            Some(&state),
+            InstallationKind::Standard,
+            remove_settings,
+        );
+        let demo = item(&plan, "demo");
+
+        let mut expected = vec![lookalike.clone()];
+        if remove_settings {
+            expected.push(notes.clone());
+        }
+        assert_eq!(removed(demo), sorted(expected));
+        assert_eq!(
+            kept(demo, KeptReason::ReaperConfiguration),
+            sorted(vec![
+                extstate.clone(),
+                extstate_copy.clone(),
+                fx_tags.clone()
+            ])
+        );
+        let settings = demo.kept.iter().find(|kept| kept.path == extstate).unwrap();
+        assert_eq!(settings.note_key.as_deref(), Some("test-settings"));
+        assert!(settings.exists && !settings.removable_with_settings);
+    }
+}
+
 #[test]
 fn the_keep_list_wins_over_every_rule_that_would_remove() {
     let fixture = Fixture::new();

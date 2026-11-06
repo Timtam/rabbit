@@ -27,9 +27,9 @@ use super::paths::{
     is_in_rabbit_folder, resolve_path, same_ignoring_case,
 };
 use super::{
-    KeptPath, KeptReason, PathRefusal, PlannedRemoval, Removability, RemovalReason,
-    UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanItem, UninstallWarning,
-    resource_relative,
+    KeptPath, KeptReason, PathRefusal, PlannedRegistryCleanup, PlannedRemoval, Removability,
+    RemovalReason, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanItem,
+    UninstallWarning, resource_relative,
 };
 
 /// Everything [`build_uninstall_plan`] needs.
@@ -164,6 +164,7 @@ fn plan_item(
         dirs_if_empty: Vec::new(),
         kept: Vec::new(),
         post: plan.map(|plan| plan.post.clone()).unwrap_or_default(),
+        registry_cleanup: Vec::new(),
         blocking_programs: plan
             .map(|plan| plan.blocking_programs.clone())
             .unwrap_or_default(),
@@ -285,6 +286,7 @@ fn plan_item(
     item.files = collected.files;
     item.files.extend(settings);
     item.dirs_if_empty = collected.dirs_if_empty;
+    item.registry_cleanup = planner.registry_cleanup();
     item
 }
 
@@ -702,6 +704,29 @@ impl PackagePlanner<'_> {
         }
     }
 
+    /// The plan's `registry_cleanup`, with each folder resolved. Nothing is
+    /// read from the registry here: the engine reads each entry right
+    /// before it would remove it, so a plan stays the same wherever it is
+    /// built. A folder that doesn't resolve to exactly one place can't
+    /// vouch for an entry, so its entry is left out and stays.
+    fn registry_cleanup(&self) -> Vec<PlannedRegistryCleanup> {
+        self.plan
+            .registry_cleanup
+            .iter()
+            .filter_map(|cleanup| {
+                let resolved = resolve_path(&cleanup.only_if_value_in.dir, self.roots).ok()?;
+                let [folder] = resolved.as_slice() else {
+                    return None;
+                };
+                Some(PlannedRegistryCleanup {
+                    key: cleanup.key.clone(),
+                    value: cleanup.only_if_value_in.value.clone(),
+                    dir: folder.path.clone(),
+                })
+            })
+            .collect()
+    }
+
     fn dirs_if_empty(&self) -> Result<Vec<PathBuf>, Removability> {
         let mut dirs = Vec::new();
         for path in &self.plan.remove.dirs_if_empty {
@@ -806,20 +831,28 @@ fn reason_rank(reason: RemovalReason) -> u8 {
     }
 }
 
-/// REAPER's own configuration anywhere in the resource folder: `reaper.ini`,
-/// `reaper-kb.ini`, and copies of them such as
+/// REAPER's own configuration anywhere in the resource folder: `reaper.ini`
+/// and its `reaper-*.ini` files, and copies of them such as
 /// `reaper-kb.ini.osara-merge-backup`. REAPER rewrites them, they hold the
 /// user's settings and keys, and no package's removal ever takes them, not
-/// even with "Also remove settings".
+/// even with "Also remove settings". That includes `reaper-extstate.ini`,
+/// where OSARA keeps its settings: every extension keeps its own there too,
+/// so the file is never one package's to remove.
 fn is_reaper_configuration(roots: &UninstallRoots, path: &Path) -> bool {
+    let is_configuration = |name: &str| {
+        name == "reaper.ini" || (name.starts_with("reaper-") && name.ends_with(".ini"))
+    };
     inside_or_same(path, &roots.resource)
         && path
             .file_name()
             .map(|name| name.to_string_lossy().to_lowercase())
             .is_some_and(|name| {
-                ["reaper.ini", "reaper-kb.ini"]
-                    .iter()
-                    .any(|config| name == *config || name.starts_with(&format!("{config}.")))
+                // The file itself, or a copy named after it, such as
+                // `reaper-kb.ini.osara-merge-backup`.
+                is_configuration(&name)
+                    || name
+                        .match_indices(".ini.")
+                        .any(|(at, _)| is_configuration(&name[..at + ".ini".len()]))
             })
 }
 

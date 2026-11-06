@@ -60,6 +60,9 @@ uninstall-summary-app2clap-removes = Entfernt app2clap aus Ihrem CLAP-Ordner. Al
 uninstall-summary-app2clap-keeps = Der CLAP-Ordner und die anderen Plug-ins darin bleiben erhalten.
 uninstall-summary-langpack-removes = Entfernt das Sprachpaket, das RABBIT installiert hat. Wenn REAPER es verwendet, stellt RABBIT REAPER wieder auf Englisch um.
 uninstall-summary-langpack-keeps = Sprachpakete, die Sie selbst hinzugefügt haben, bleiben erhalten.
+uninstall-summary-osara-removes = Entfernt die OSARA-Erweiterung, ihre Übersetzungen und die Kopie der OSARA-Tastenzuordnung im Ordner KeyMaps.
+uninstall-summary-osara-removes-windows = Entfernt die OSARA-Erweiterung, ihre Übersetzungen, ihr Deinstallationsprogramm und die Kopie der OSARA-Tastenzuordnung im Ordner KeyMaps. Wenn Windows dieses OSARA in der Liste der installierten Programme führt, entfernt RABBIT es aus dieser Liste.
+uninstall-summary-osara-keeps = Ihre Tastenzuordnung bleibt unverändert, ebenso die Einstellungen von OSARA und die Sicherungen Ihrer Tastenzuordnung, die OSARA angelegt hat.
 
 # A short description of a file or folder that stays, shown next to its path,
 # for example "Data\Grooves (your grooves)". Start in lower case where the
@@ -71,6 +74,10 @@ uninstall-kept-reapack-settings = ReaPack-Einstellungen und Ihre Repositorys
 uninstall-kept-reapack-data = die Liste der von ReaPack installierten Pakete und sein Download-Cache
 uninstall-kept-reakontrol-fx-maps = Ihre FX-Maps
 uninstall-kept-app2clap-clap-folder = der CLAP-Ordner, den auch andere Plug-ins nutzen
+uninstall-kept-osara-key-map = Ihre Tastenzuordnung
+uninstall-kept-osara-replaced-key-map = Ihre Tastenzuordnung, bevor OSARA sie ersetzt hat
+uninstall-kept-osara-merged-key-map = Ihre Tastenzuordnung, bevor OSARA seine Tasten hinzugefügt hat
+uninstall-kept-osara-settings = die Einstellungen von OSARA, in einer Datei, die alle Erweiterungen gemeinsam nutzen
 
 # Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
 uninstall-warning-sws-osara-keymap = Wenn Sie die OSARA-Tastenzuordnung verwenden, führen einige ihrer Tasten SWS-Aktionen aus. Diese Tasten funktionieren erst wieder, wenn Sie SWS erneut installieren.
@@ -451,6 +458,7 @@ wizard-done-uninstall-not-installed = { $package } war nicht mehr installiert, e
 wizard-done-uninstall-left-in-backup = Einige Dateien von { $package } konnten nicht zurückgelegt werden und liegen noch in der Sicherung. „Details anzeigen“ listet sie auf.
 wizard-done-uninstall-leftovers = RABBIT findet noch Teile von { $package } und lässt sie unangetastet. „Details anzeigen“ listet sie auf.
 wizard-done-uninstall-language-reset-failed = RABBIT konnte REAPER nach dem Entfernen von { $package } nicht auf Englisch zurückstellen. Wählen Sie in den Einstellungen von REAPER eine Sprache.
+wizard-done-uninstall-registry-failed = RABBIT hat { $package } deinstalliert, aber die Liste der installierten Programme von Windows zeigt es möglicherweise noch an. „Details anzeigen“ nennt den Eintrag.
 wizard-done-show-details = Details anzeigen
 # Mnemonic messages are single-character native access keys. Choose a character
 # from the translated label when possible.
@@ -563,6 +571,13 @@ wizard-summary-kept-link = Behalten, weil der Ordner eine Verknüpfung enthält,
 wizard-summary-kept-reapack = Behalten, weil ReaPack die Datei installiert hat und verwaltet: { $path }
 wizard-summary-left-over = Noch vorhanden: { $path }
 wizard-summary-left-in-backup = Konnte nicht zurückgelegt werden, liegt noch in der Sicherung: { $path }
+# What became of a package's entry in Windows' list of installed programs,
+# below the package's line. $key is the entry's registry key, such as
+# HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\OSARA, and is
+# never translated; $error is Windows' own error message.
+wizard-summary-registry-removed = Aus der Liste der installierten Programme von Windows entfernt: { $key }
+wizard-summary-registry-kept = Weiterhin in der Liste der installierten Programme von Windows, weil der Eintrag nicht auf dieses REAPER verweist: { $key }
+wizard-summary-registry-failed = Weiterhin in der Liste der installierten Programme von Windows, weil RABBIT den Eintrag nicht lesen oder entfernen konnte ({ $error }): { $key }
 # $id is the backup set's name, such as uninstall-unix-1782841261.
 wizard-summary-uninstall-backup = Sicherung: { $id }
 # One line per uninstalled package. $package is the localized package name,

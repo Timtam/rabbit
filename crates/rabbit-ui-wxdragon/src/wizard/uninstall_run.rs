@@ -20,8 +20,8 @@ use rabbit_core::preflight::{
 use rabbit_core::report::{default_report_path, save_json_and_text_reports};
 use rabbit_core::uninstall::{
     ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, KeptFileReason, PROGRAMS_RUNNING_CHECK,
-    UninstallMessage, UninstallPlan, UninstallProblem, UninstallReport, UninstallReportItem,
-    UninstallRequest, UninstallStatus,
+    RegistryEntryAction, UninstallMessage, UninstallPlan, UninstallProblem, UninstallReport,
+    UninstallReportItem, UninstallRequest, UninstallStatus,
 };
 use rabbit_core::{RabbitError, Result};
 use serde::Serialize;
@@ -494,6 +494,10 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
             UninstallProblem::LanguageResetFailed { .. } => {
                 reasons.push(with_package("wizard-done-uninstall-language-reset-failed"));
             }
+            UninstallProblem::RegistryEntryUnreadable { .. }
+            | UninstallProblem::RegistryEntryNotRemoved { .. } => {
+                reasons.push(with_package("wizard-done-uninstall-registry-failed"));
+            }
         }
     }
     reasons
@@ -513,9 +517,10 @@ fn check_reason(localizer: &Localizer, check: &PreflightCheck) -> String {
 }
 
 /// "Show details" after an uninstall: the target, then for each package
-/// what became of it, the files it removed, kept and left behind, and why
-/// it stayed; then the backup set with a command per package to bring it
-/// back, and where the report is.
+/// what became of it, the files it removed, kept and left behind, its
+/// entries in Windows' list of installed programs, and why it stayed; then
+/// the backup set with a command per package to bring it back, and where
+/// the report is.
 pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallReport) -> Vec<String> {
     let path_line = |key: &str, path: &Path| {
         localizer
@@ -578,6 +583,7 @@ pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallRepor
                 .iter()
                 .map(|path| file_line("wizard-summary-left-in-backup", path)),
         );
+        lines.extend(registry_lines(localizer, item));
         lines.extend(
             item_reasons(localizer, item)
                 .into_iter()
@@ -619,6 +625,37 @@ pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallRepor
             &saved.text_path,
         ));
     }
+    lines
+}
+
+/// What became of a package's entries in Windows' list of installed
+/// programs, one indented line each, naming the entry's key: the Done
+/// page's sentence about one that couldn't go doesn't, and the user needs
+/// it to find the entry. An entry that wasn't there says nothing.
+fn registry_lines(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String> {
+    let line =
+        |key: &str, args: &[(&str, &str)]| format!("  {}", localizer.format(key, args).value);
+    let mut lines: Vec<String> = item
+        .registry_entries
+        .iter()
+        .filter_map(|entry| {
+            let message = match entry.action {
+                RegistryEntryAction::Removed => "wizard-summary-registry-removed",
+                RegistryEntryAction::PointsElsewhere { .. } => "wizard-summary-registry-kept",
+                // The wizard never runs a dry run.
+                RegistryEntryAction::WouldRemove | RegistryEntryAction::NotFound => return None,
+            };
+            Some(line(message, &[("key", entry.key.as_str())]))
+        })
+        .collect();
+    lines.extend(item.problems.iter().filter_map(|problem| match problem {
+        UninstallProblem::RegistryEntryUnreadable { key, error }
+        | UninstallProblem::RegistryEntryNotRemoved { key, error } => Some(line(
+            "wizard-summary-registry-failed",
+            &[("key", key.as_str()), ("error", error.as_str())],
+        )),
+        UninstallProblem::LanguageResetFailed { .. } => None,
+    }));
     lines
 }
 

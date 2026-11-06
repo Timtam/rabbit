@@ -898,18 +898,25 @@ manifest loads: every supported platform and target has a plan and every
 plan is reachable, each strategy has the fields it needs, removals that need
 administrator rights never go into the user's backups, and no path may reach
 into `{resource}/RABBIT`. `rabbit uninstall` carries out `remove_files`
-plans (see Safety Behavior); the wizard gets its own way in later. SWS, ReaPack,
-ReaKontrol, FFmpeg, app2clap and the language packs have `remove_files`
-plans. FFmpeg and the language packs set `requires_receipt`, because a copy
-RABBIT has no receipt for is most likely the user's own; the others name
-their files, so a copy without a receipt can go too, unless ReaPack still
-manages it. The JAWS scripts, and a portable REAPER on Windows, have
-`manual` plans whose note holds the instructions; the JAWS scripts' block also
-lists `install_snapshot` folders, so what their installer adds or changes is
-recorded from now on (see the receipt above). REAPER otherwise, OSARA
-and Surge XT still say `not_supported`. `rabbit packages` prints each
-package's plan per platform and target, and `rabbit components` says for
-each package whether RABBIT can uninstall it, and if not, why.
+plans (see Safety Behavior); the wizard gets its own way in later. OSARA, SWS,
+ReaPack, ReaKontrol, FFmpeg, app2clap and the language packs have
+`remove_files` plans. FFmpeg and the language packs set `requires_receipt`,
+because a copy RABBIT has no receipt for is most likely the user's own; the
+others name their files, so a copy without a receipt can go too, unless
+ReaPack still manages it. OSARA's Windows plan also has a `registry_cleanup`
+entry: once the files are gone, the engine removes
+`HKCU\...\Uninstall\OSARA`, but only while its `UninstallString` names a
+program directly in this resource folder's `osara` folder, compared ignoring
+case and by real path, so an entry that belongs to another REAPER stays. The
+entry is read only when the run gets there, never while the plan is built,
+and one that can't be read or removed is a problem in the report, not a
+reason to put the files back. The JAWS scripts, and a portable REAPER on
+Windows, have `manual` plans whose note holds the instructions; the JAWS
+scripts' block also lists `install_snapshot` folders, so what their
+installer adds or changes is recorded from now on (see the receipt above).
+REAPER otherwise and Surge XT still say `not_supported`. `rabbit packages`
+prints each package's plan per platform and target, and `rabbit components`
+says for each package whether RABBIT can uninstall it, and if not, why.
 
 Every package ships a `display_description_key` that resolves to a one- or
 two-sentence localized description of what the package is and why a user
@@ -1243,8 +1250,10 @@ Extension files:
   package's files couldn't all go back), or an earlier restore from the set
   put the entry back. Its files are restored and the entry stays as it is.
 - Uninstall removes only regular files a RABBIT receipt lists with a hash and
-  files the package manifest names. `reaper.ini`, `reaper-kb.ini` and
-  everything in `{resource}/RABBIT` always stay, and every path passes a guard
+  files the package manifest names. `reaper.ini`, every `reaper-*.ini` such
+  as `reaper-kb.ini` and `reaper-extstate.ini` (where every extension keeps
+  its settings), copies of them, and everything in `{resource}/RABBIT`
+  always stay, and every path passes a guard
   against links, `..` and whole folders, once when the plan is built and again
   right before it moves. Before anything moves, every file of every package
   is read and hashed, as the dry run does, so a file that can't be read

@@ -205,15 +205,17 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
   anything on them, and Ctrl+Shift+Tab or Ctrl+Page Up to go back; the arrow
   keys work while the tabs have focus. On macOS, Ctrl+Tab and Ctrl+Shift+Tab
   anywhere on the page, or VoiceOver's own navigation of the tab group.
-- **What RABBIT can remove:** SWS, ReaPack, ReaKontrol, FFmpeg and app2clap
-  (both Windows only) and the language packs. Every other installed package
-  is listed too, with the reason it can't be ticked.
+- **What RABBIT can remove:** OSARA, SWS, ReaPack, ReaKontrol, FFmpeg and
+  app2clap (both Windows only) and the language packs. Every other installed
+  package is listed too, with the reason it can't be ticked.
 - **What is kept:** your settings, such as SWS's grooves, ReaPack's
   repositories and ReaKontrol's FX maps, unless you tick **Also remove
   settings** below the list. `reaper.ini`, `reaper-kb.ini`, your key maps and
-  everything ReaPack installed always stay. Everything that goes, settings
-  removed with that option included, moves into a backup set under
-  `RABBIT\backups` rather than being deleted.
+  everything ReaPack installed always stay, and so do the key map backups
+  OSARA made and OSARA's settings, which live in `reaper-extstate.ini` beside
+  every other extension's. Everything that goes, settings removed with that
+  option included, moves into a backup set under `RABBIT\backups` rather than
+  being deleted.
 - **Starting it:** the review page says what each package loses and keeps.
   Enter doesn't start an uninstall there; press **Uninstall**. REAPER must be
   closed, and for app2clap every REAPER on the computer.
@@ -413,12 +415,12 @@ GITHUB_TOKEN="<your token>" /Applications/Rabbit.app/Contents/MacOS/rabbit   # m
 
 ### Uninstall
 
-`uninstall` removes packages RABBIT knows how to take off again: today SWS,
-ReaPack, ReaKontrol, FFmpeg and app2clap (both Windows only) and the language
-packs. `RABBIT components` says for each package whether RABBIT can uninstall
-it, and if not, why. Name every package with `--package`; there is no "remove
-everything". Like the other commands, it only shows what it would do until you
-add `--apply`:
+`uninstall` removes packages RABBIT knows how to take off again: today OSARA,
+SWS, ReaPack, ReaKontrol, FFmpeg and app2clap (both Windows only) and the
+language packs. `RABBIT components` says for each package whether RABBIT can
+uninstall it, and if not, why. Name every package with `--package`; there is
+no "remove everything". Like the other commands, it only shows what it would
+do until you add `--apply`:
 
 ```
 # See what would go, what stays, and anything that would stop it:
@@ -431,12 +433,19 @@ RABBIT uninstall --resource-path "%APPDATA%\REAPER" --package sws \
 
 - **What goes:** the files RABBIT installed and the files the package is known
   to install. A file RABBIT installed that changed since stays, and the report
-  says so.
+  says so. For OSARA, that is its plug-in, its translations, the copy of its
+  key map in `KeyMaps` and, on Windows, its uninstaller; then the `osara`
+  folder if nothing else is left in it. On Windows, OSARA also comes off
+  Windows' list of installed programs, but only if that entry points into the
+  REAPER you named: there is one OSARA entry for the whole computer, and one
+  that belongs to another REAPER stays. The report says which.
 - **What stays:** your settings, such as SWS's grooves and `S&M.ini`,
   ReaPack's repositories and its list of what it installed, and ReaKontrol's
   FX maps. Add `--remove-settings` to remove those too. `reaper.ini`,
   `reaper-kb.ini`, your key maps and everything ReaPack installed always stay,
-  even files ReaPack installed among a package's settings.
+  even files ReaPack installed among a package's settings. So do the key map
+  backups OSARA made, and OSARA's settings, which live in
+  `reaper-extstate.ini` beside every other extension's.
 - **Nothing is deleted for good.** Removed files move into a backup set under
   `RABBIT\backups`, and so do settings removed with `--remove-settings`. The
   run saves a report under `RABBIT\logs`. If REAPER used the language pack you
@@ -486,7 +495,8 @@ limits: a package you installed again after uninstalling it can't be restored
 from the old set, because the newer copy is in the way (uninstall it first);
 and a removal that a backup can't hold, such as one by a vendor's own
 uninstaller or with administrator rights, can't be restored. RABBIT doesn't
-make such removals yet.
+make such removals yet. A restored OSARA isn't back on Windows' list of
+installed programs; installing OSARA again puts it there.
 
 ### Maintain
 
