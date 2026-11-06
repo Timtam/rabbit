@@ -1580,9 +1580,29 @@ fn executed_unattended_item(
             )
         })
         .flatten();
+    // OSARA (Windows, portable target): its silent installer replaces the
+    // OSARA entry in Windows' list of installed programs with one pointing
+    // at the portable folder's uninstaller, which the post-install step
+    // deletes. Noted here, put back as soon as the installer is done, whether
+    // or not it succeeded: what it found is right either way.
+    let osara_uninstall_entry = (planned.artifact.package_id == crate::package::PACKAGE_OSARA)
+        .then(|| {
+            osara::uninstall_entry_before_install(
+                planned.artifact.platform,
+                resource_path,
+                target_app_path,
+            )
+        })
+        .flatten();
 
     let install_started_at = SystemTime::now();
     let process_result = execute_planned_execution(&planned_execution, false);
+    if let Some(entry) = &osara_uninstall_entry {
+        // Best-effort: OSARA itself is installed either way, and a failure
+        // only leaves the entry as the installer wrote it, as every RABBIT
+        // before this fix did.
+        let _ = entry.restore();
+    }
     let post_install_result = post_execute_unattended_artifact(
         &planned.artifact,
         resource_path,
@@ -3289,6 +3309,72 @@ mod tests {
         );
         assert!(resource_path.join("osara").join("locale").is_dir());
         assert!(!resource_path.join("osara").join("uninstall.exe").exists());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn osara_portable_install_leaves_the_list_of_installed_programs_as_it_was() {
+        use rabbit_platform::{RegistryValue, UninstallEntry};
+
+        // OSARA's installer, run silently, points its entry in the list at
+        // the portable folder. The stand-in does that to a throwaway key.
+        let registry = super::osara::test_registry::ThrowawayUninstallRoot::create();
+        let standard = UninstallEntry::new(vec![
+            RegistryValue::string("DisplayName", "OSARA"),
+            RegistryValue::string(
+                "UninstallString",
+                "\"C:\\Users\\Someone\\AppData\\Roaming\\REAPER\\osara\\uninstall.exe\"",
+            ),
+        ]);
+        registry.root().write_entry("OSARA", &standard).unwrap();
+        registry.use_for_osara_installs();
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let source_path = dir.path().join("osara-installer.cmd");
+        let script = osara_mock_installer_script().replace(
+            "exit /b 0",
+            &format!(
+                "reg add \"HKCU\\{}\\OSARA\" /v UninstallString /d portable /f >nul || exit /b 5\n\
+                 echo written> \"!DEST!\\entry-written.txt\"\n\
+                 exit /b 0",
+                registry.root().path()
+            ),
+        );
+        std::fs::write(&source_path, script).unwrap();
+        let resource_path = dir.path().join("PortableREAPER");
+
+        let report = execute_resolved_package_operation(
+            &resource_path,
+            vec![artifact_with_url(
+                PACKAGE_OSARA,
+                ArtifactKind::Installer,
+                "osara-installer.cmd",
+                &source_path.display().to_string(),
+            )],
+            cache.path(),
+            &PackageOperationOptions {
+                dry_run: false,
+                allow_reaper_running: false,
+                stage_unsupported: false,
+                replace_osara_keymap: false,
+                target_app_path: Some(resource_path.join("reaper.exe")),
+                lock_path: None,
+                force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
+                package_channels: Default::default(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.items[0].status,
+            PackageOperationStatus::InstalledOrChecked
+        );
+        assert!(
+            resource_path.join("entry-written.txt").is_file(),
+            "the stand-in installer rewrote the entry"
+        );
+        assert_eq!(registry.root().read_entry("OSARA").unwrap(), Some(standard));
     }
 
     #[cfg(target_os = "windows")]

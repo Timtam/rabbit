@@ -10,8 +10,11 @@ serde.workspace = true
 sys-locale = "0.3"
 
 [target.'cfg(windows)'.dependencies]
+# Win32_Security only because RegCreateKeyExW's signature names its
+# SECURITY_ATTRIBUTES; RABBIT always passes null there.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_Registry",

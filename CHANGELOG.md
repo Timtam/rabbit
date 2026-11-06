@@ -127,6 +127,12 @@ from this file and posts it as the GitHub release body.
   **Additional software**, **Language packs**, **Configuration**) now show
   their names, and VoiceOver reads them. Before, a group row had only its
   checkbox, so VoiceOver read it as a checkbox without a name.
+- Installing OSARA into a portable REAPER no longer leaves Windows' list of
+  installed programs pointing at an uninstaller that isn't there. OSARA's
+  installer replaced the list's OSARA entry with one for the portable copy,
+  whose uninstaller RABBIT removes, so an OSARA in the standard REAPER lost
+  its entry too. RABBIT now puts the entry back as it was before the
+  install.
 
 ## [0.4.4] - 2026-10-13
 

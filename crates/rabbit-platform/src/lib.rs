@@ -48,7 +48,8 @@ pub use paths::{
     windows_program_files_dirs, windows_public_desktop_dir, windows_user_desktop_dir,
 };
 pub use registry::{
-    read_uninstall_display_version, read_uninstall_install_location, read_uninstall_value,
+    HkcuUninstallRoot, RegistryValue, UninstallEntry, read_uninstall_display_version,
+    read_uninstall_install_location, read_uninstall_value,
 };
 pub use signature::{SignatureVerdict, verify_executable_signature};
 pub use volume::{available_space, same_volume};

@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use rabbit_platform::{HkcuUninstallRoot, UninstallEntry};
+
 use crate::artifact::ArtifactKind;
 use crate::error::{IoPathContext, RabbitError, Result};
 use crate::model::Platform;
@@ -15,6 +17,10 @@ use super::{
 };
 
 pub(super) const TITLE: &str = "OSARA";
+
+/// The name OSARA's installer gives its entry in Windows' per-user list of
+/// installed programs (`HKCU\...\Uninstall\OSARA`, osara.nsi).
+const UNINSTALL_ENTRY: &str = "OSARA";
 
 /// OSARA-specific automation routing. Today: Windows installer is unattended,
 /// macOS archive is unattended via the OSARA-asset extractor.
@@ -114,6 +120,8 @@ pub(super) fn post_install_unattended(
     if matches!(platform, Platform::Windows)
         && target_likely_portable(resource_path, target_app_path)
     {
+        // The uninstall entry the installer pointed at this file is put
+        // back as it was by `UninstallEntryBefore::restore`.
         let uninstall_path = resource_path.join("osara").join("uninstall.exe");
         if uninstall_path.is_file() {
             std::fs::remove_file(&uninstall_path).with_path(&uninstall_path)?;
@@ -123,6 +131,138 @@ pub(super) fn post_install_unattended(
         report = apply_osara_keymap_replacement(resource_path)?;
     }
     Ok(report)
+}
+
+/// OSARA's entry in Windows' per-user list of installed programs as it was
+/// before OSARA's installer ran into a portable REAPER, or a note that there
+/// was none.
+///
+/// Run silently, the installer never shows its page that asks "standard or
+/// portable?", so it always does what it does for a standard install: it
+/// writes the entry pointing at `<portable folder>\osara\uninstall.exe`,
+/// replacing a standard install's entry, and RABBIT then deletes that
+/// uninstaller. Putting the entry back leaves the list as the portable
+/// install found it.
+#[derive(Debug)]
+pub(super) struct UninstallEntryBefore {
+    root: HkcuUninstallRoot,
+    entry: Option<UninstallEntry>,
+}
+
+impl UninstallEntryBefore {
+    /// Put the entry back exactly as it was, or delete it if there was none.
+    pub(super) fn restore(&self) -> std::io::Result<()> {
+        match &self.entry {
+            Some(entry) => self.root.write_entry(UNINSTALL_ENTRY, entry),
+            None => self.root.delete_entry(UNINSTALL_ENTRY).map(|_| ()),
+        }
+    }
+}
+
+/// Note OSARA's uninstall entry right before OSARA's Windows installer runs
+/// into a portable REAPER. `None` when nothing is to be put back afterwards:
+/// on macOS, for a standard install, whose entry the installer writes
+/// rightly, and when the entry can't be read, because deleting it afterwards
+/// could take a standard install's entry with it.
+pub(super) fn uninstall_entry_before_install(
+    platform: Platform,
+    resource_path: &Path,
+    target_app_path: Option<&Path>,
+) -> Option<UninstallEntryBefore> {
+    uninstall_entry_before_install_in(uninstall_root()?, platform, resource_path, target_app_path)
+}
+
+fn uninstall_entry_before_install_in(
+    root: HkcuUninstallRoot,
+    platform: Platform,
+    resource_path: &Path,
+    target_app_path: Option<&Path>,
+) -> Option<UninstallEntryBefore> {
+    // The same test that decides to delete the portable uninstaller.
+    if platform != Platform::Windows || !target_likely_portable(resource_path, target_app_path) {
+        return None;
+    }
+    let entry = root.read_entry(UNINSTALL_ENTRY).ok()?;
+    Some(UninstallEntryBefore { root, entry })
+}
+
+/// Where OSARA's uninstall entry lives: Windows' real per-user list.
+#[cfg(not(test))]
+fn uninstall_root() -> Option<HkcuUninstallRoot> {
+    Some(HkcuUninstallRoot::installed_programs())
+}
+
+/// Unit tests never reach the real list, whose OSARA entry belongs to
+/// whoever uses this computer. The install pipeline's tests run OSARA's
+/// installer stand-in into portable targets, so a test build uses the
+/// throwaway key a test on this thread named, and leaves the entry alone
+/// when none did.
+#[cfg(test)]
+fn uninstall_root() -> Option<HkcuUninstallRoot> {
+    TEST_UNINSTALL_ROOT.with(|root| root.borrow().clone())
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_UNINSTALL_ROOT: std::cell::RefCell<Option<HkcuUninstallRoot>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Stand-ins for Windows' list of installed programs, for tests here and in
+/// the install pipeline's.
+#[cfg(all(test, windows))]
+pub(super) mod test_registry {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use rabbit_platform::HkcuUninstallRoot;
+
+    use super::{TEST_UNINSTALL_ROOT, UNINSTALL_ENTRY};
+
+    /// A key of one test's own, `HKCU\Software\RABBIT-test-<unique>`, in
+    /// place of the real list. Dropping it, also when the test panics,
+    /// deletes the OSARA entry in it and then the key, and stops pointing
+    /// this thread's OSARA installs at it.
+    pub(crate) struct ThrowawayUninstallRoot {
+        name: String,
+    }
+
+    impl ThrowawayUninstallRoot {
+        pub(crate) fn create() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default();
+            Self {
+                name: format!(
+                    "RABBIT-test-{}-{nanos}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ),
+            }
+        }
+
+        pub(crate) fn root(&self) -> HkcuUninstallRoot {
+            HkcuUninstallRoot::at(format!("Software\\{}", self.name))
+        }
+
+        /// Have OSARA installs on this thread note and put back the entry
+        /// in this key.
+        pub(crate) fn use_for_osara_installs(&self) {
+            TEST_UNINSTALL_ROOT.with(|root| *root.borrow_mut() = Some(self.root()));
+        }
+    }
+
+    impl Drop for ThrowawayUninstallRoot {
+        fn drop(&mut self) {
+            TEST_UNINSTALL_ROOT.with(|root| root.borrow_mut().take());
+            // Plain deletes, entry first: each refuses a key that still has
+            // a subkey, and the tests make nothing else in here.
+            let _ = self.root().delete_entry(UNINSTALL_ENTRY);
+            let _ = HkcuUninstallRoot::at("Software").delete_entry(&self.name);
+        }
+    }
 }
 
 pub(super) fn verification_paths(resource_path: &Path, replace_osara_keymap: bool) -> Vec<PathBuf> {
@@ -454,5 +594,135 @@ mod tests {
             new_contents,
             "osara keymap\nSCR 4 0 RSdeadbeef \"Script: foo.lua\" foo.lua\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod uninstall_entry_tests {
+    use rabbit_platform::HkcuUninstallRoot;
+    use tempfile::tempdir;
+
+    use super::{uninstall_entry_before_install_in, uninstall_root};
+    use crate::model::Platform;
+
+    #[test]
+    fn test_builds_never_reach_the_real_list_of_installed_programs() {
+        assert_eq!(uninstall_root(), None);
+    }
+
+    #[test]
+    fn standard_installs_and_macos_leave_the_entry_alone() {
+        // Never created: nothing here gets as far as the registry.
+        let root = HkcuUninstallRoot::at("Software\\RABBIT-test-never-created");
+        let dir = tempdir().unwrap();
+        let resource_path = dir.path().join("AppData").join("REAPER");
+        let standard_app = dir
+            .path()
+            .join("Program Files")
+            .join("REAPER")
+            .join("reaper.exe");
+
+        for (platform, target_app_path) in [
+            (Platform::Windows, Some(standard_app.as_path())),
+            (Platform::Windows, None),
+            (
+                Platform::MacOs,
+                Some(resource_path.join("REAPER.app")).as_deref(),
+            ),
+        ] {
+            assert!(
+                uninstall_entry_before_install_in(
+                    root.clone(),
+                    platform,
+                    &resource_path,
+                    target_app_path,
+                )
+                .is_none(),
+                "{platform:?} {target_app_path:?}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    mod windows {
+        use rabbit_platform::{RegistryValue, UninstallEntry};
+        use tempfile::tempdir;
+
+        use super::super::test_registry::ThrowawayUninstallRoot;
+        use super::super::{UNINSTALL_ENTRY, uninstall_entry_before_install_in};
+        use crate::model::Platform;
+
+        fn installer_entry_for(portable: &str) -> UninstallEntry {
+            UninstallEntry::new(vec![
+                RegistryValue::string("DisplayName", "OSARA"),
+                RegistryValue::string("DisplayVersion", "2025.11.1.2000,0123abcd"),
+                RegistryValue::string("Publisher", "NV Access"),
+                RegistryValue::string(
+                    "UninstallString",
+                    &format!("\"{portable}\\osara\\uninstall.exe\""),
+                ),
+            ])
+        }
+
+        #[test]
+        fn a_portable_install_puts_back_the_entry_it_replaced() {
+            let registry = ThrowawayUninstallRoot::create();
+            let root = registry.root();
+            let standard = UninstallEntry::new(vec![
+                RegistryValue::string("DisplayName", "OSARA"),
+                RegistryValue::string("DisplayVersion", "2025.3.6.1234,abcdef12"),
+                RegistryValue::string("Publisher", "NV Access"),
+                RegistryValue::string(
+                    "UninstallString",
+                    "\"C:\\Users\\Someone\\AppData\\Roaming\\REAPER\\osara\\uninstall.exe\"",
+                ),
+                RegistryValue::string("Comments", "added by hand"),
+            ]);
+            root.write_entry(UNINSTALL_ENTRY, &standard).unwrap();
+            let before = root.read_entry(UNINSTALL_ENTRY).unwrap();
+            assert_eq!(before.as_ref(), Some(&standard));
+            let dir = tempdir().unwrap();
+            let portable = dir.path().join("PortableREAPER");
+
+            let noted = uninstall_entry_before_install_in(
+                root.clone(),
+                Platform::Windows,
+                &portable,
+                Some(&portable.join("reaper.exe")),
+            )
+            .expect("a portable target notes the entry");
+            root.write_entry(
+                UNINSTALL_ENTRY,
+                &installer_entry_for(&portable.display().to_string()),
+            )
+            .unwrap();
+            noted.restore().unwrap();
+
+            assert_eq!(root.read_entry(UNINSTALL_ENTRY).unwrap(), before);
+        }
+
+        #[test]
+        fn a_portable_install_removes_the_entry_when_there_was_none() {
+            let registry = ThrowawayUninstallRoot::create();
+            let root = registry.root();
+            let dir = tempdir().unwrap();
+            let portable = dir.path().join("PortableREAPER");
+
+            let noted = uninstall_entry_before_install_in(
+                root.clone(),
+                Platform::Windows,
+                &portable,
+                Some(&portable.join("reaper.exe")),
+            )
+            .expect("a portable target notes the missing entry");
+            root.write_entry(
+                UNINSTALL_ENTRY,
+                &installer_entry_for(&portable.display().to_string()),
+            )
+            .unwrap();
+            noted.restore().unwrap();
+
+            assert_eq!(root.read_entry(UNINSTALL_ENTRY).unwrap(), None);
+        }
     }
 }
