@@ -48,9 +48,9 @@ use rabbit_core::self_update::{
 };
 use rabbit_core::setup::{SetupOptions, SetupReport, execute_setup_operation};
 use rabbit_core::uninstall::{
-    KeptFileReason, KeptReason, Removability, RemovalReason, UninstallMessage, UninstallNote,
-    UninstallPlan, UninstallPlanItem, UninstallReport, UninstallReportItem, UninstallRequest,
-    UninstallStatus, UninstallWarning, execute_uninstall, plan_uninstall_at,
+    KeptFileReason, KeptReason, RegistryEntryAction, Removability, RemovalReason, UninstallMessage,
+    UninstallNote, UninstallPlan, UninstallPlanItem, UninstallReport, UninstallReportItem,
+    UninstallRequest, UninstallStatus, UninstallWarning, execute_uninstall, plan_uninstall_at,
 };
 use serde::Serialize;
 
@@ -2967,6 +2967,30 @@ fn print_uninstall_item(
         };
         detail(keep, &format!("{} ({why})", shown(&kept.path)));
     }
+    for entry in &item.registry_entries {
+        let key = &entry.key;
+        match &entry.action {
+            RegistryEntryAction::Removed => detail(
+                "removed",
+                &format!("{key} (its entry in Windows' list of installed programs)"),
+            ),
+            RegistryEntryAction::WouldRemove => detail(
+                "remove",
+                &format!("{key} (its entry in Windows' list of installed programs)"),
+            ),
+            RegistryEntryAction::PointsElsewhere { found, .. } => {
+                let why = match found {
+                    Some(found) => format!("it points at {found}, outside this REAPER"),
+                    None => "it doesn't say where its program is".to_string(),
+                };
+                detail(
+                    keep,
+                    &format!("{key} (in Windows' list of installed programs; {why})"),
+                );
+            }
+            RegistryEntryAction::NotFound => {}
+        }
+    }
     if let Some(plan) = plan {
         for kept in plan
             .kept
@@ -4007,8 +4031,11 @@ mod tests {
         assert!(elsewhere.contains("isn't offered on macOS"), "{elsewhere}");
     }
 
-    /// A portable REAPER in a temporary folder with SWS and OSARA in it, as
-    /// this platform names their plug-ins.
+    /// A portable REAPER in a temporary folder with SWS in it, as this
+    /// platform names its plug-in. REAPER itself is a stand-in that only
+    /// detection takes for the real thing; RABBIT can't uninstall it from a
+    /// portable folder on either platform, so it is the package a run gets
+    /// blocked by.
     struct FakeReaper {
         _dir: tempfile::TempDir,
         resource: PathBuf,
@@ -4024,8 +4051,13 @@ mod tests {
             std::fs::create_dir_all(&plugins).unwrap();
             let sws = plugins.join(format!("reaper_sws{suffix}"));
             std::fs::write(&sws, b"SWS").unwrap();
-            std::fs::write(plugins.join(format!("reaper_osara{suffix}")), b"OSARA").unwrap();
             std::fs::write(resource.join("S&M.ini"), b"[settings]").unwrap();
+            std::fs::write(resource.join("reaper.ini"), b"[REAPER]").unwrap();
+            if cfg!(windows) {
+                std::fs::write(resource.join("reaper.exe"), b"REAPER").unwrap();
+            } else {
+                std::fs::create_dir_all(resource.join("REAPER.app")).unwrap();
+            }
             Self {
                 _dir: dir,
                 resource,
@@ -4081,13 +4113,13 @@ mod tests {
             0
         );
 
-        // OSARA can't be uninstalled yet, so asking for it with SWS blocks
-        // both, in the dry run and with --apply alike.
+        // RABBIT can't uninstall a portable REAPER, so asking for it with
+        // SWS blocks both, in the dry run and with --apply alike.
         assert_eq!(
-            super::uninstall_exit_code(&reaper.run(&["sws", "osara"], false)),
+            super::uninstall_exit_code(&reaper.run(&["sws", "reaper"], false)),
             2
         );
-        let blocked = reaper.run(&["sws", "osara"], true);
+        let blocked = reaper.run(&["sws", "reaper"], true);
         assert_eq!(super::uninstall_exit_code(&blocked), 2);
         assert!(reaper.sws.is_file(), "a blocked run changes nothing");
         assert!(blocked.backup_set_id.is_none());
@@ -4112,7 +4144,7 @@ mod tests {
     #[test]
     fn uninstall_json_carries_the_plan_and_the_message_codes() {
         let reaper = FakeReaper::new();
-        let report = reaper.run(&["sws", "osara"], false);
+        let report = reaper.run(&["sws", "reaper"], false);
         let json = serde_json::to_value(&report).unwrap();
 
         assert_eq!(json["dry_run"], true);
@@ -4139,12 +4171,15 @@ mod tests {
             )),
             "{removed:#?}"
         );
-        assert_eq!(item("osara")["status"], "blocked");
-        assert_eq!(item("osara")["message_code"]["code"], "not-removable");
-        assert_eq!(
-            item("osara")["message_code"]["removability"],
+        assert_eq!(item("reaper")["status"], "blocked");
+        assert_eq!(item("reaper")["message_code"]["code"], "not-removable");
+        // By hand on Windows; on macOS, not until a later version.
+        let removability = if cfg!(windows) {
+            serde_json::json!({ "kind": "manual", "note_key": "uninstall-manual-reaper-portable" })
+        } else {
             serde_json::json!({ "kind": "not-supported", "note_key": "uninstall-not-yet" })
-        );
+        };
+        assert_eq!(item("reaper")["message_code"]["removability"], removability);
 
         let planned: Vec<&str> = json["plan"]["items"]
             .as_array()

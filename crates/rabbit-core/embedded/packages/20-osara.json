@@ -64,8 +64,91 @@
   "uninstall": {
     "plans": [
       {
-        "strategy": "not_supported",
-        "note_key": "uninstall-not-yet"
+        "platform": "windows",
+        "strategy": "remove_files",
+        "summary": {
+          "removes_key": "uninstall-summary-osara-removes-windows",
+          "keeps_key": "uninstall-summary-osara-keeps"
+        },
+        "remove": {
+          "receipt_files": true,
+          "matching_user_plugins": true,
+          "paths": [
+            "{resource}/KeyMaps/OSARA.ReaperKeyMap",
+            "{resource}/osara/locale/*.po",
+            "{resource}/osara/uninstall.exe"
+          ],
+          "dirs_if_empty": [
+            "{resource}/osara/locale",
+            "{resource}/osara"
+          ]
+        },
+        "kept_user_data": [
+          {
+            "path": "{resource}/reaper-kb.ini",
+            "note_key": "uninstall-kept-osara-key-map"
+          },
+          {
+            "path": "{resource}/KeyMaps/OSARAReplacedBackup.ReaperKeyMap",
+            "note_key": "uninstall-kept-osara-replaced-key-map"
+          },
+          {
+            "path": "{resource}/reaper-kb.ini.osara-merge-backup",
+            "note_key": "uninstall-kept-osara-merged-key-map"
+          },
+          {
+            "path": "{resource}/reaper-extstate.ini",
+            "note_key": "uninstall-kept-osara-settings"
+          }
+        ],
+        "registry_cleanup": [
+          {
+            "hive": "hkcu",
+            "key": "OSARA",
+            "only_if_value_in": {
+              "value": "UninstallString",
+              "dir": "{resource}/osara"
+            }
+          }
+        ]
+      },
+      {
+        "platform": "macos",
+        "strategy": "remove_files",
+        "summary": {
+          "removes_key": "uninstall-summary-osara-removes",
+          "keeps_key": "uninstall-summary-osara-keeps"
+        },
+        "remove": {
+          "receipt_files": true,
+          "matching_user_plugins": true,
+          "paths": [
+            "{resource}/KeyMaps/OSARA.ReaperKeyMap",
+            "{resource}/osara/locale/*.po"
+          ],
+          "dirs_if_empty": [
+            "{resource}/osara/locale",
+            "{resource}/osara"
+          ]
+        },
+        "kept_user_data": [
+          {
+            "path": "{resource}/reaper-kb.ini",
+            "note_key": "uninstall-kept-osara-key-map"
+          },
+          {
+            "path": "{resource}/KeyMaps/OSARAReplacedBackup.ReaperKeyMap",
+            "note_key": "uninstall-kept-osara-replaced-key-map"
+          },
+          {
+            "path": "{resource}/reaper-kb.ini.osara-merge-backup",
+            "note_key": "uninstall-kept-osara-merged-key-map"
+          },
+          {
+            "path": "{resource}/reaper-extstate.ini",
+            "note_key": "uninstall-kept-osara-settings"
+          }
+        ]
       }
     ]
   },

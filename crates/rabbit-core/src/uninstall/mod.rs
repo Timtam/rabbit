@@ -35,6 +35,7 @@ pub mod paths;
 pub mod plan;
 mod post;
 pub mod preflight;
+mod registry;
 #[cfg(test)]
 mod tests;
 
@@ -117,6 +118,10 @@ pub struct UninstallPlanItem {
     /// What stays, and why.
     pub kept: Vec<KeptPath>,
     pub post: Vec<UninstallPostStep>,
+    /// Entries in Windows' per-user list of installed programs that go
+    /// once the files have, each only if it still points into this REAPER.
+    /// Empty unless the package can be removed.
+    pub registry_cleanup: Vec<PlannedRegistryCleanup>,
     /// Programs that must not be running, from the manifest.
     pub blocking_programs: Vec<String>,
     /// No REAPER at all may run, not only the target's: a vendor
@@ -261,6 +266,26 @@ impl PlannedRemoval {
     }
 }
 
+/// An entry in Windows' per-user list of installed programs
+/// (`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall`) that a
+/// removal would leave pointing at an uninstaller that is gone.
+///
+/// One entry serves every REAPER on the computer: OSARA's installer writes
+/// the same `OSARA` entry whichever REAPER it installs into. So the entry
+/// goes only while the program its `value` names sits directly in `dir`,
+/// this REAPER's folder for it; one that points anywhere else belongs to
+/// another REAPER and stays.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedRegistryCleanup {
+    /// The entry's name in the list, such as `OSARA`.
+    pub key: String,
+    /// The value naming the entry's program, such as `UninstallString`.
+    pub value: String,
+    /// The folder that program must sit in, such as the resource folder's
+    /// `osara` folder.
+    pub dir: PathBuf,
+}
+
 /// Why a path is in the plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -308,8 +333,10 @@ pub enum KeptReason {
     /// A whole folder such as the resource folder: shown as kept, never
     /// removed.
     FolderRoot,
-    /// REAPER's own configuration, `reaper.ini` and `reaper-kb.ini`, and
-    /// copies of them. Never removed.
+    /// REAPER's own configuration: `reaper.ini`, its `reaper-*.ini` files
+    /// such as `reaper-kb.ini` and `reaper-extstate.ini`, where every
+    /// extension keeps its settings side by side, and copies of them. Never
+    /// removed.
     ReaperConfiguration,
     /// A key map, or the folder of them, listed in `kept_user_data`. Never
     /// taken by "Also remove settings".
@@ -333,8 +360,8 @@ pub enum KeptReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum UninstallWarning {
-    /// The manifest's `always_warn`, such as OSARA's warning that REAPER
-    /// stops speaking.
+    /// The manifest's `always_warn`: a warning shown whatever else is
+    /// installed, with a question before starting when `confirm` says so.
     Always { message_key: String, confirm: bool },
     /// The manifest's `warn_when_installed`, while that package is installed.
     OtherPackageInstalled {
@@ -534,6 +561,10 @@ pub struct UninstallReportItem {
     pub left_in_backup: Vec<PathBuf>,
     /// What detection still finds of the package after the run.
     pub leftovers: Vec<PathBuf>,
+    /// What became of the plan's entries in Windows' list of installed
+    /// programs; in a dry run, what would. An entry RABBIT couldn't read
+    /// or remove is a problem instead.
+    pub registry_entries: Vec<RegistryEntryOutcome>,
     /// Steps after the removal that didn't work. The package is removed
     /// all the same.
     pub problems: Vec<UninstallProblem>,
@@ -579,6 +610,34 @@ pub enum KeptFileReason {
     InstalledByReaPack,
 }
 
+/// What became of one entry in Windows' per-user list of installed programs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryEntryOutcome {
+    /// The entry's whole key, such as
+    /// `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\OSARA`.
+    pub key: String,
+    pub action: RegistryEntryAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RegistryEntryAction {
+    /// It pointed into this REAPER, and it is gone.
+    Removed,
+    /// A dry run: it points into this REAPER, and would go.
+    WouldRemove,
+    /// There is no such entry, so there was nothing to do.
+    NotFound,
+    /// It stays: it points somewhere else, most likely into another REAPER,
+    /// or names no program RABBIT can place. `found` is the value as the
+    /// entry holds it, if it holds one; `expected` the folder it would have
+    /// to point into.
+    PointsElsewhere {
+        found: Option<String>,
+        expected: PathBuf,
+    },
+}
+
 /// Something after the removal that didn't work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "kebab-case")]
@@ -586,6 +645,12 @@ pub enum UninstallProblem {
     /// REAPER's language setting still names the language pack that was
     /// removed.
     LanguageResetFailed { error: String },
+    /// An entry in Windows' list of installed programs couldn't be read, so
+    /// RABBIT couldn't tell whether it points into this REAPER, and left it.
+    RegistryEntryUnreadable { key: String, error: String },
+    /// An entry in Windows' list of installed programs pointed into this
+    /// REAPER, but couldn't be removed.
+    RegistryEntryNotRemoved { key: String, error: String },
 }
 
 impl UninstallProblem {
@@ -595,6 +660,14 @@ impl UninstallProblem {
             Self::LanguageResetFailed { error } => format!(
                 "RABBIT couldn't set REAPER back to no language pack ({error}). Choose a \
                  language in REAPER's preferences."
+            ),
+            Self::RegistryEntryUnreadable { key, error } => format!(
+                "RABBIT couldn't read {key} in Windows' list of installed programs ({error}), so \
+                 it leaves that entry alone."
+            ),
+            Self::RegistryEntryNotRemoved { key, error } => format!(
+                "RABBIT couldn't remove {key} from Windows' list of installed programs \
+                 ({error}), so Windows still lists it."
             ),
         }
     }

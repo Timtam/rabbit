@@ -447,6 +447,45 @@ pub fn same_ignoring_case(left: &Path, right: &Path) -> bool {
     }
 }
 
+/// Whether two folders are the same one, whether or not they still exist:
+/// by their text, ignoring case, or by their real paths. A folder that is
+/// gone is placed by the real path of the nearest folder above it that is
+/// still there, so a resource folder reached through a junction, or spelt
+/// with a short 8.3 name, still matches after the folder inside it was
+/// removed.
+pub(crate) fn same_folder(left: &Path, right: &Path) -> bool {
+    if same_ignoring_case(left, right) {
+        return true;
+    }
+    match (real_path_so_far(left), real_path_so_far(right)) {
+        (Some(left), Some(right)) => same_ignoring_case(&left, &right),
+        _ => false,
+    }
+}
+
+/// `path` with the part of it that exists canonicalized and the rest kept
+/// as written. `None` for a path that isn't plain and absolute, and for one
+/// none of which exists.
+fn real_path_so_far(path: &Path) -> Option<PathBuf> {
+    if !is_plain_absolute(path) {
+        return None;
+    }
+    let mut existing = path;
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(real) = fs::canonicalize(existing) {
+            return Some(
+                missing
+                    .iter()
+                    .rev()
+                    .fold(real, |path, name| path.join(name)),
+            );
+        }
+        missing.push(existing.file_name()?);
+        existing = existing.parent()?;
+    }
+}
+
 /// Whether `path` is strictly below `root`, compared by text and ignoring
 /// case.
 fn strictly_inside(path: &Path, root: &Path) -> bool {

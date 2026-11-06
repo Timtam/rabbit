@@ -35,8 +35,9 @@ pub struct UninstallSpec {
     /// that keys in OSARA's key map call SWS actions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warn_when_installed: Vec<InstalledPackageWarning>,
-    /// Warnings shown whenever this package is about to be uninstalled, such
-    /// as OSARA's warning that REAPER stops speaking.
+    /// Warnings shown whenever this package is about to be uninstalled,
+    /// whatever else is installed, each with a question before starting if
+    /// it asks for one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub always_warn: Vec<AlwaysWarning>,
     /// Folders the package's installer writes to that no receipt path

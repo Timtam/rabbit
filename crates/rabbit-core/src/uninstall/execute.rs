@@ -20,13 +20,15 @@
 //!    so the next install run doesn't tick it again.
 //! 6. Run the plan's post helpers, such as setting REAPER back to no
 //!    language pack.
+//! 7. Remove the plan's entries in Windows' list of installed programs, each
+//!    only while it still points into this REAPER.
 //!
 //! When a step up to 5 fails, every file the package moved goes back where it
 //! was and the receipt stays as it was: the receipt never claims files that
 //! are gone, and never loses an entry for files that are still there. A
-//! post helper that fails leaves the package removed, with a problem in the
-//! report. Packages removed earlier in the run stay removed; each can be
-//! restored from the backup set on its own.
+//! post helper or a registry entry that fails leaves the package removed,
+//! with a problem in the report. Packages removed earlier in the run stay
+//! removed; each can be restored from the backup set on its own.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
@@ -34,6 +36,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use rabbit_platform::HkcuUninstallRoot;
 
 use crate::cancel::CancelToken;
 use crate::detection::{default_standard_installation, detect_components};
@@ -63,10 +67,11 @@ use super::preflight::{
     UninstallPreflightOptions, VolumeProbe, backup_space_check, backup_volume_folder,
     blocking_programs, crosses_volumes, process_checks, run_uninstall_preflight_with,
 };
+use super::registry::clean_registry_entries;
 use super::{
-    KeptFile, KeptFileReason, Removability, RemovalReason, RemovedFile, UninstallMessage,
-    UninstallPlan, UninstallPlanItem, UninstallProblem, UninstallReport, UninstallReportItem,
-    UninstallRequest, UninstallStatus, save_uninstall_report,
+    KeptFile, KeptFileReason, RegistryEntryAction, Removability, RemovalReason, RemovedFile,
+    UninstallMessage, UninstallPlan, UninstallPlanItem, UninstallProblem, UninstallReport,
+    UninstallReportItem, UninstallRequest, UninstallStatus, save_uninstall_report,
 };
 
 /// The reason an uninstall's backup set records.
@@ -109,6 +114,7 @@ pub fn execute_uninstall(
     let detect = || detect_components(&roots.resource, request.platform);
     let reaper_processes = || running_reaper_processes(Platform::current());
     let named_processes = |names: &[String]| running_processes_named(names);
+    let installed_programs = installed_programs(request.platform);
     execute_uninstall_in(
         request,
         &UninstallEnvironment {
@@ -120,14 +126,31 @@ pub fn execute_uninstall(
             reaper_processes: &reaper_processes,
             named_processes: &named_processes,
             volumes: &SystemVolumes,
+            installed_programs: installed_programs.as_ref(),
         },
         progress,
         cancel,
     )
 }
 
+/// Windows' per-user list of installed programs, which a plan's
+/// `registry_cleanup` names entries in. `None` off Windows, where there is
+/// no such list.
+#[cfg(not(test))]
+fn installed_programs(platform: Platform) -> Option<HkcuUninstallRoot> {
+    (platform == Platform::Windows).then(HkcuUninstallRoot::installed_programs)
+}
+
+/// Unit tests never reach the real list, whose entries belong to whoever
+/// uses this computer. The engine's tests hand it a throwaway key of their
+/// own instead.
+#[cfg(test)]
+fn installed_programs(_platform: Platform) -> Option<HkcuUninstallRoot> {
+    None
+}
+
 /// Everything [`execute_uninstall`] reads from the computer, so tests can
-/// stand in their own packages, detection, processes and volumes.
+/// stand in their own packages, detection, processes, volumes and registry.
 pub(crate) struct UninstallEnvironment<'a> {
     pub specs: &'a [PackageSpec],
     pub roots: &'a UninstallRoots,
@@ -140,6 +163,9 @@ pub(crate) struct UninstallEnvironment<'a> {
     /// The running programs with one of these names.
     pub named_processes: &'a dyn Fn(&[String]) -> Vec<RunningProcess>,
     pub volumes: &'a dyn VolumeProbe,
+    /// Windows' per-user list of installed programs, or a test's stand-in
+    /// for it. `None` leaves every entry a plan names alone, unread.
+    pub installed_programs: Option<&'a HkcuUninstallRoot>,
 }
 
 /// The uninstall plan for every package at `resource_path`, built from
@@ -356,7 +382,10 @@ pub(crate) fn execute_uninstall_in(
     let mut outcomes: Vec<UninstallReportItem> = Vec::new();
     if request.dry_run {
         for plan_item in to_remove {
-            let (item, _) = survey(plan_item, environment, &backup_folder, reapack_installed);
+            let (mut item, _) = survey(plan_item, environment, &backup_folder, reapack_installed);
+            if item.status == UninstallStatus::WouldRemove {
+                clean_registry(&mut item, plan_item, environment, false);
+            }
             outcomes.push(item);
         }
     } else if !blocked.is_empty() {
@@ -600,8 +629,29 @@ impl RemovalRun<'_> {
                 }
             }
         }
+        // Only once the receipt no longer claims the package: an entry that
+        // can't go is a problem to report, never a reason to put the files
+        // back.
+        clean_registry(&mut item, plan_item, self.environment, true);
         item
     }
+}
+
+/// Remove the plan's entries in Windows' list of installed programs that
+/// still point into this REAPER, or with `remove` false say which would go,
+/// and note what became of each on `item`.
+fn clean_registry(
+    item: &mut UninstallReportItem,
+    plan_item: &UninstallPlanItem,
+    environment: &UninstallEnvironment<'_>,
+    remove: bool,
+) {
+    let Some(list) = environment.installed_programs else {
+        return;
+    };
+    let (entries, problems) = clean_registry_entries(list, &plan_item.registry_cleanup, remove);
+    item.registry_entries.extend(entries);
+    item.problems.extend(problems);
 }
 
 /// Take `package_id` out of the receipt, remember that the user removed it,
@@ -1059,6 +1109,7 @@ fn new_item_for(
         put_back: Vec::new(),
         left_in_backup: Vec::new(),
         leftovers: Vec::new(),
+        registry_entries: Vec::new(),
         problems: Vec::new(),
         message: String::new(),
         message_code: code,
@@ -1201,6 +1252,34 @@ fn english_message(item: &UninstallReportItem) -> String {
             " RABBIT still finds some of {name}, and leaves it alone: {}.",
             path_list(&item.leftovers)
         ));
+    }
+    for entry in &item.registry_entries {
+        let key = &entry.key;
+        match &entry.action {
+            RegistryEntryAction::Removed => message.push_str(&format!(
+                " RABBIT also removed {key} from Windows' list of installed programs."
+            )),
+            RegistryEntryAction::WouldRemove => message.push_str(&format!(
+                " RABBIT would also remove {key} from Windows' list of installed programs."
+            )),
+            RegistryEntryAction::PointsElsewhere {
+                found: Some(found),
+                expected,
+            } => message.push_str(&format!(
+                " {key} stays in Windows' list of installed programs: it points at {found}, \
+                 not into {}.",
+                expected.display()
+            )),
+            RegistryEntryAction::PointsElsewhere {
+                found: None,
+                expected,
+            } => message.push_str(&format!(
+                " {key} stays in Windows' list of installed programs: it doesn't say where its \
+                 program is, so RABBIT can't tell that it points into {}.",
+                expected.display()
+            )),
+            RegistryEntryAction::NotFound => {}
+        }
     }
     for problem in &item.problems {
         message.push(' ');

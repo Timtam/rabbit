@@ -35,6 +35,7 @@ pub(super) fn item(package_id: &str, removability: Removability) -> UninstallPla
         dirs_if_empty: Vec::new(),
         kept: Vec::new(),
         post: Vec::new(),
+        registry_cleanup: Vec::new(),
         blocking_programs: Vec::new(),
         every_reaper_closed: false,
         requires_elevation: false,
@@ -1283,8 +1284,8 @@ fn removals_that_go_into_a_backup_need_no_question() {
 }
 
 /// A plan as later phases bring them: Surge XT's vendor uninstaller, which
-/// a backup can't undo, and OSARA, whose manifest asks before REAPER stops
-/// speaking.
+/// a backup can't undo, and the JAWS scripts, whose manifest is to ask
+/// before they go. The warning's text is borrowed: any manifest's will do.
 fn plan_with_questions() -> UninstallPlan {
     plan(vec![
         UninstallPlanItem {
@@ -1293,7 +1294,7 @@ fn plan_with_questions() -> UninstallPlan {
                 confirm: true,
             }],
             confirm: true,
-            ..item("osara", Removability::Removable)
+            ..item("jaws-scripts", Removability::Removable)
         },
         removable_sws(),
         UninstallPlanItem {
@@ -1329,13 +1330,13 @@ fn a_warning_whose_manifest_asks_to_confirm_asks_first() {
     let plan = plan_with_questions();
 
     assert_eq!(
-        uninstall_confirm_reasons(&plan, &ids(&["osara"])),
+        uninstall_confirm_reasons(&plan, &ids(&["jaws-scripts"])),
         [UninstallConfirmReason::Warning {
-            package_id: "osara".to_string(),
+            package_id: "jaws-scripts".to_string(),
             message_key: "uninstall-warning-sws-osara-keymap".to_string(),
         }]
     );
-    let body = question(&plan, &["osara", "surge-xt"]).unwrap();
+    let body = question(&plan, &["jaws-scripts", "surge-xt"]).unwrap();
     let warning = body.find("some of its keys run SWS actions").unwrap();
     let unbacked = body.find("A backup can't bring Surge XT back.").unwrap();
     assert!(warning < unbacked, "{body}");
@@ -1364,7 +1365,8 @@ fn the_question_reads_in_every_locale() {
     for &locale in embedded_locales() {
         let localizer = Localizer::embedded(locale).unwrap();
         let body =
-            uninstall_confirmation_body(&localizer, &plan, &ids(&["osara", "surge-xt"])).unwrap();
+            uninstall_confirmation_body(&localizer, &plan, &ids(&["jaws-scripts", "surge-xt"]))
+                .unwrap();
         assert!(
             !body.contains("wizard-") && !body.contains("uninstall-") && !body.contains('{'),
             "{locale}: {body}"
@@ -1375,7 +1377,8 @@ fn the_question_reads_in_every_locale() {
 
 /// Every package RABBIT can remove so far is a file removal that goes into
 /// a backup with no warning that asks, so none of them asks a question.
-/// The question is for the packages later phases add.
+/// That includes OSARA: the people who use RABBIT know that REAPER stops
+/// speaking without it. The question is for the packages later phases add.
 #[test]
 fn no_package_the_wizard_can_remove_yet_asks_a_question() {
     let dir = tempdir().unwrap();
@@ -1416,25 +1419,27 @@ fn no_package_the_wizard_can_remove_yet_asks_a_question() {
             .filter(|row| row.can_tick)
             .map(|row| row.package_id)
             .collect();
-        // Every Phase 1 package, so the coverage can't quietly shrink.
-        let mut phase_one = vec![
+        // Every package of Phases 1 and 3, so the coverage can't quietly
+        // shrink.
+        let mut removable = vec![
             "sws",
             "reapack",
             "reakontrol",
             "langpack-es",
             "langpack-de",
             "langpack-fr",
+            "osara",
         ];
         if platform == Platform::Windows {
-            phase_one.push("ffmpeg");
+            removable.push("ffmpeg");
             // app2clap lives in Windows' own CLAP folder, which only a
             // Windows machine can name; planning for Windows elsewhere
             // rightly blocks it.
             if cfg!(windows) {
-                phase_one.push("app2clap");
+                removable.push("app2clap");
             }
         }
-        for id in phase_one {
+        for id in removable {
             assert!(
                 tickable.iter().any(|ticked| ticked == id),
                 "{platform:?}: {id} isn't in {tickable:?}"
@@ -1444,6 +1449,76 @@ fn no_package_the_wizard_can_remove_yet_asks_a_question() {
             uninstall_confirmation_body(&localizer, &plan, &tickable),
             None,
             "{platform:?}: {tickable:?}"
+        );
+    }
+}
+
+/// OSARA's row and its Review line, from the shipped manifest: what goes,
+/// on Windows that RABBIT takes it off Windows' list of installed programs,
+/// and that the key map and OSARA's settings stay. "Also remove settings"
+/// has nothing of OSARA's to take: its settings share a file with every
+/// other extension's. Nothing asks before it goes.
+#[test]
+fn osara_says_what_goes_and_what_stays() {
+    let dir = tempdir().unwrap();
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    for (platform, names_the_list) in [(Platform::Windows, true), (Platform::MacOs, false)] {
+        let specs = builtin_package_specs(platform);
+        let detections = vec![ComponentDetection {
+            installed: true,
+            version: Some(Version::parse("2025.3.6.1234").unwrap()),
+            ..ComponentDetection::not_installed("osara", "OSARA")
+        }];
+        let roots = UninstallRoots::for_target(platform, dir.path(), None);
+        let plan = build_uninstall_plan(&UninstallPlanInput {
+            roots: &roots,
+            platform,
+            target: InstallationKind::Standard,
+            specs: &specs,
+            detections: &detections,
+            state: None,
+            remove_settings: false,
+        });
+        let mut list = uninstall_list_from_plan(&localizer, &specs, &plan);
+        let row = list
+            .rows
+            .iter()
+            .find(|row| row.package_id == "osara")
+            .unwrap();
+        assert!(row.can_tick, "{platform:?}: {}", row.details);
+        assert!(
+            row.details
+                .contains("Removes the OSARA extension, its translations"),
+            "{}",
+            row.details
+        );
+        assert_eq!(
+            row.details.contains("RABBIT takes it off that list."),
+            names_the_list,
+            "{platform:?}: {}",
+            row.details
+        );
+        assert!(
+            row.details.contains("Your key map stays as it is"),
+            "{}",
+            row.details
+        );
+        assert!(row.settings.is_empty(), "{:?}", row.settings);
+
+        tick(&mut list, "osara");
+        assert!(!list.settings_option_available());
+        let preview =
+            build_uninstall_review_preview(&localizer, Some(&target(true)), &list, true, &[]);
+        let text = preview.lines.join("\n");
+        assert!(
+            text.contains("OSARA: Removes the OSARA extension"),
+            "{text}"
+        );
+        assert!(text.contains("Your key map stays as it is"), "{text}");
+        assert!(preview.can_uninstall);
+        assert_eq!(
+            uninstall_confirmation_body(&localizer, &plan, &ids(&["osara"])),
+            None
         );
     }
 }

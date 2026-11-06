@@ -60,6 +60,9 @@ uninstall-summary-app2clap-removes = Elimina app2clap de tu carpeta CLAP. Lo pie
 uninstall-summary-app2clap-keeps = La carpeta CLAP y los demás plugins que contiene se conservan.
 uninstall-summary-langpack-removes = Elimina el paquete de idioma que instaló RABBIT. Si REAPER lo usa, RABBIT vuelve a poner REAPER en inglés.
 uninstall-summary-langpack-keeps = Los paquetes de idioma que añadiste tú se conservan.
+uninstall-summary-osara-removes = Elimina la extensión OSARA, sus traducciones y la copia de su mapa de teclado en la carpeta KeyMaps.
+uninstall-summary-osara-removes-windows = Elimina la extensión OSARA, sus traducciones, su desinstalador y la copia de su mapa de teclado en la carpeta KeyMaps. Si Windows incluye este OSARA en su lista de programas instalados, RABBIT lo quita de esa lista.
+uninstall-summary-osara-keeps = Tu mapa de teclado se queda como está, igual que la configuración de OSARA y las copias de seguridad de tu mapa de teclado que hizo OSARA.
 
 # A short description of a file or folder that stays, shown next to its path,
 # for example "Data\Grooves (your grooves)". Start in lower case where the
@@ -71,6 +74,10 @@ uninstall-kept-reapack-settings = configuración de ReaPack y tus repositorios
 uninstall-kept-reapack-data = la lista de lo que ReaPack instaló y su caché de descargas
 uninstall-kept-reakontrol-fx-maps = tus mapas de FX
 uninstall-kept-app2clap-clap-folder = la carpeta CLAP, que comparten otros plugins
+uninstall-kept-osara-key-map = tu mapa de teclado
+uninstall-kept-osara-replaced-key-map = tu mapa de teclado de antes de que OSARA lo reemplazara
+uninstall-kept-osara-merged-key-map = tu mapa de teclado de antes de que OSARA le añadiera sus atajos
+uninstall-kept-osara-settings = la configuración de OSARA, en un archivo que comparten todas las extensiones
 
 # Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
 uninstall-warning-sws-osara-keymap = Si usas el mapa de teclado de OSARA, algunos de sus atajos ejecutan acciones de SWS. Esos atajos dejan de funcionar hasta que vuelvas a instalar SWS.
@@ -451,6 +458,7 @@ wizard-done-uninstall-not-installed = { $package } ya no estaba instalado, así 
 wizard-done-uninstall-left-in-backup = Algunos archivos de { $package } no se pudieron devolver a su sitio y siguen en la copia de seguridad. «Mostrar detalles» los enumera.
 wizard-done-uninstall-leftovers = RABBIT todavía encuentra parte de { $package } y no lo toca. «Mostrar detalles» indica qué.
 wizard-done-uninstall-language-reset-failed = RABBIT no pudo volver a poner REAPER en inglés después de quitar { $package }. Elige un idioma en las preferencias de REAPER.
+wizard-done-uninstall-registry-failed = RABBIT desinstaló { $package }, pero puede que la lista de programas instalados de Windows aún lo muestre. «Mostrar detalles» indica la entrada.
 wizard-done-show-details = Mostrar detalles
 # Mnemonic messages are single-character native access keys. Choose a character
 # from the translated label when possible.
@@ -563,6 +571,13 @@ wizard-summary-kept-link = Conservado porque contiene un enlace que RABBIT nunca
 wizard-summary-kept-reapack = Conservado porque lo instaló ReaPack, que lleva la cuenta de él: { $path }
 wizard-summary-left-over = Sigue ahí: { $path }
 wizard-summary-left-in-backup = No se pudo devolver a su sitio, sigue en la copia de seguridad: { $path }
+# What became of a package's entry in Windows' list of installed programs,
+# below the package's line. $key is the entry's registry key, such as
+# HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\OSARA, and is
+# never translated; $error is Windows' own error message.
+wizard-summary-registry-removed = Quitada de la lista de programas instalados de Windows: { $key }
+wizard-summary-registry-kept = Sigue en la lista de programas instalados de Windows porque no apunta a este REAPER: { $key }
+wizard-summary-registry-failed = Sigue en la lista de programas instalados de Windows porque RABBIT no pudo leerla ni quitarla ({ $error }): { $key }
 # $id is the backup set's name, such as uninstall-unix-1782841261.
 wizard-summary-uninstall-backup = Copia de seguridad: { $id }
 # One line per uninstalled package. $package is the localized package name,

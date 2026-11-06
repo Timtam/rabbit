@@ -60,6 +60,9 @@ uninstall-summary-app2clap-removes = Removes app2clap from your CLAP folder. Eve
 uninstall-summary-app2clap-keeps = The CLAP folder and the other plug-ins in it stay.
 uninstall-summary-langpack-removes = Removes the language pack RABBIT installed. If REAPER uses it, RABBIT sets REAPER back to English.
 uninstall-summary-langpack-keeps = Language packs you added yourself stay.
+uninstall-summary-osara-removes = Removes the OSARA extension, its translations, and the copy of its key map in the KeyMaps folder.
+uninstall-summary-osara-removes-windows = Removes the OSARA extension, its translations, its uninstaller, and the copy of its key map in the KeyMaps folder. If Windows lists this OSARA among your installed programs, RABBIT takes it off that list.
+uninstall-summary-osara-keeps = Your key map stays as it is, and so do OSARA's settings and the backups of your key map that OSARA made.
 
 # A short description of a file or folder that stays, shown next to its path,
 # for example "Data\Grooves (your grooves)". Start in lower case where the
@@ -71,6 +74,10 @@ uninstall-kept-reapack-settings = ReaPack settings and your repositories
 uninstall-kept-reapack-data = ReaPack's list of what it installed, and its download cache
 uninstall-kept-reakontrol-fx-maps = your FX maps
 uninstall-kept-app2clap-clap-folder = the CLAP folder, which other plug-ins share
+uninstall-kept-osara-key-map = your key map
+uninstall-kept-osara-replaced-key-map = your key map from before OSARA replaced it
+uninstall-kept-osara-merged-key-map = your key map from before OSARA added its keys to it
+uninstall-kept-osara-settings = OSARA's settings, in a file every extension shares
 
 # Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
 uninstall-warning-sws-osara-keymap = If you use OSARA's key map, some of its keys run SWS actions. Those keys stop working until you install SWS again.
@@ -451,6 +458,7 @@ wizard-done-uninstall-not-installed = { $package } wasn't installed any more, so
 wizard-done-uninstall-left-in-backup = Some files of { $package } couldn't be put back and are still in the backup. Show details lists them.
 wizard-done-uninstall-leftovers = RABBIT still finds some of { $package } and leaves it alone. Show details lists what.
 wizard-done-uninstall-language-reset-failed = RABBIT couldn't set REAPER back to English after removing { $package }. Choose a language in REAPER's preferences.
+wizard-done-uninstall-registry-failed = RABBIT uninstalled { $package }, but Windows' list of installed programs may still show it. Show details names the entry.
 wizard-done-show-details = Show details
 # Mnemonic messages are single-character native access keys. Choose a character
 # from the translated label when possible.
@@ -563,6 +571,13 @@ wizard-summary-kept-link = Kept, because it holds a link RABBIT never follows: {
 wizard-summary-kept-reapack = Kept, because ReaPack installed it and keeps track of it: { $path }
 wizard-summary-left-over = Still there: { $path }
 wizard-summary-left-in-backup = Couldn't be put back, still in the backup: { $path }
+# What became of a package's entry in Windows' list of installed programs,
+# below the package's line. $key is the entry's registry key, such as
+# HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\OSARA, and is
+# never translated; $error is Windows' own error message.
+wizard-summary-registry-removed = Taken off Windows' list of installed programs: { $key }
+wizard-summary-registry-kept = Still in Windows' list of installed programs, because it doesn't point into this REAPER: { $key }
+wizard-summary-registry-failed = Still in Windows' list of installed programs, because RABBIT couldn't read or remove it ({ $error }): { $key }
 # $id is the backup set's name, such as uninstall-unix-1782841261.
 wizard-summary-uninstall-backup = Backup set: { $id }
 # One line per uninstalled package. $package is the localized package name,

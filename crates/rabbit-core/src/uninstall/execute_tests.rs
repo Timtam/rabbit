@@ -1,7 +1,8 @@
 //! The uninstall engine on temporary resource folders: what moves into the
 //! backup set, what stays, how the receipt changes, and how a failure puts
-//! everything back. Packages, detection, running programs and volumes are
-//! all stood in by each test; nothing here touches a real REAPER folder.
+//! everything back. Packages, detection, running programs, volumes and
+//! Windows' list of installed programs are all stood in by each test;
+//! nothing here touches a real REAPER folder or the real list.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -9,6 +10,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
+
+use rabbit_platform::HkcuUninstallRoot;
+#[cfg(windows)]
+use rabbit_platform::{RegistryValue, UninstallEntry};
 
 use super::execute::{
     SurveyedDigest, UNINSTALL_BACKUP_REASON, UninstallEnvironment, execute_uninstall_in,
@@ -19,11 +24,15 @@ use super::{
     BACKUP_SPACE_CHECK, KeptFile, KeptFileReason, KeptReason, RemovalReason, UninstallMessage,
     UninstallProblem, UninstallReport, UninstallRequest, UninstallStatus,
 };
+#[cfg(windows)]
+use super::{RegistryEntryAction, RegistryEntryOutcome};
 use crate::cancel::CancelToken;
 use crate::error::RabbitError;
 use crate::hash::{sha256_bytes, sha256_file};
 use crate::model::{ComponentDetection, InstallationKind, Platform};
-use crate::package::{PACKAGE_REAPACK, PACKAGE_SWS, PackageSpec, builtin_package_specs};
+use crate::package::{
+    PACKAGE_OSARA, PACKAGE_REAPACK, PACKAGE_SWS, PackageSpec, builtin_package_specs,
+};
 use crate::preflight::RunningProcess;
 use crate::progress::{ProgressEvent, ProgressReporter};
 use crate::reapack::write_test_registry;
@@ -70,6 +79,9 @@ struct Harness<'f> {
     reapers: Vec<Vec<RunningProcess>>,
     progress: ProgressReporter,
     cancel: CancelToken,
+    /// A throwaway key standing in for Windows' list of installed programs;
+    /// without one, the run leaves every entry alone, unread.
+    installed_programs: Option<HkcuUninstallRoot>,
 }
 
 impl<'f> Harness<'f> {
@@ -83,6 +95,7 @@ impl<'f> Harness<'f> {
             reapers: vec![Vec::new()],
             progress: ProgressReporter::noop(),
             cancel: CancelToken::new(),
+            installed_programs: None,
         }
     }
 
@@ -142,6 +155,7 @@ impl<'f> Harness<'f> {
                 reaper_processes: &reapers,
                 named_processes: &named,
                 volumes: &self.volumes,
+                installed_programs: self.installed_programs.as_ref(),
             },
             &self.progress,
             &self.cancel,
@@ -1584,4 +1598,352 @@ fn settings_reapack_installed_stay_while_reapack_does() {
     assert!(demo.kept.is_empty());
     assert!(!at(&fixture, "Demo.ini").exists());
     assert!(!fixture.resource.join("DemoData").exists());
+}
+
+// OSARA, and its entry in Windows' list of installed programs.
+
+/// OSARA in the fixture's REAPER as RABBIT installs it on Windows, with what
+/// it leaves behind on purpose. Returns OSARA's own files.
+fn install_osara(fixture: &Fixture) -> Vec<PathBuf> {
+    let files: Vec<PathBuf> = [
+        "UserPlugins/reaper_osara64.dll",
+        "KeyMaps/OSARA.ReaperKeyMap",
+        "osara/locale/de_DE.po",
+        "osara/uninstall.exe",
+    ]
+    .iter()
+    .map(|file| fixture.file(file))
+    .collect();
+    for kept in OSARA_KEEPS {
+        fixture.file(kept);
+    }
+    save_receipt(
+        fixture,
+        &[(
+            PACKAGE_OSARA,
+            &[
+                "UserPlugins/reaper_osara64.dll",
+                "KeyMaps/OSARA.ReaperKeyMap",
+            ],
+        )],
+    );
+    files
+}
+
+/// The user's key map, the backups OSARA made of it, and the file where
+/// OSARA keeps its settings beside every other extension's.
+const OSARA_KEEPS: [&str; 4] = [
+    "reaper-kb.ini",
+    "KeyMaps/OSARAReplacedBackup.ReaperKeyMap",
+    "reaper-kb.ini.osara-merge-backup",
+    "reaper-extstate.ini",
+];
+
+/// The engine with the shipped Windows packages, OSARA installed.
+fn osara_harness(fixture: &Fixture) -> Harness<'_> {
+    Harness::new(
+        fixture,
+        builtin_package_specs(Platform::Windows),
+        &[PACKAGE_OSARA],
+    )
+}
+
+/// OSARA's entry as its installer writes it, naming `uninstaller`.
+#[cfg(windows)]
+fn osara_entry(uninstaller: &Path) -> UninstallEntry {
+    UninstallEntry::new(vec![
+        RegistryValue::string("DisplayName", "OSARA"),
+        RegistryValue::string("DisplayVersion", "2025.3.6.1234,abcdef12"),
+        RegistryValue::string("Publisher", "James Teh"),
+        RegistryValue::string("UninstallString", &format!("\"{}\"", uninstaller.display())),
+    ])
+}
+
+/// A key of one test's own, `HKCU\Software\RABBIT-test-<unique>`, standing
+/// in for Windows' list of installed programs, so no test here reaches the
+/// real one. Dropping it, also when the test panics, deletes what the tests
+/// put in it, an `OSARA` entry and a `Child` below that, then the key.
+#[cfg(windows)]
+struct ThrowawayList {
+    name: String,
+}
+
+#[cfg(windows)]
+impl ThrowawayList {
+    fn create() -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::UNIX_EPOCH;
+
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        Self {
+            name: format!(
+                "RABBIT-test-{}-{nanos}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ),
+        }
+    }
+
+    fn root(&self) -> HkcuUninstallRoot {
+        HkcuUninstallRoot::at(format!("Software\\{}", self.name))
+    }
+
+    /// The whole key the report names for the entry `name` in this list.
+    fn key(&self, name: &str) -> String {
+        format!("HKCU\\Software\\{}\\{name}", self.name)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ThrowawayList {
+    fn drop(&mut self) {
+        // Plain deletes, innermost first: each refuses a key that still has
+        // a subkey, so nothing here can reach past what the tests made.
+        let root = self.root();
+        let _ = HkcuUninstallRoot::at(format!("{}\\OSARA", root.path())).delete_entry("Child");
+        let _ = root.delete_entry("OSARA");
+        let _ = HkcuUninstallRoot::at("Software").delete_entry(&self.name);
+    }
+}
+
+/// OSARA goes, files and folders, and so does its entry in the list of
+/// installed programs, which points into this REAPER. What OSARA leaves
+/// behind on purpose stays. The dry run before says so and changes nothing.
+#[cfg(windows)]
+#[test]
+fn osara_goes_with_its_entry_in_the_list_of_installed_programs() {
+    let list = ThrowawayList::create();
+    let fixture = Fixture::new();
+    let files = install_osara(&fixture);
+    let osara_folder = fixture.resource.join("osara");
+    let entry = osara_entry(&osara_folder.join("uninstall.exe"));
+    list.root().write_entry("OSARA", &entry).unwrap();
+    let harness = Harness {
+        installed_programs: Some(list.root()),
+        ..osara_harness(&fixture)
+    };
+
+    let before = tree(&fixture.resource);
+    let preview = harness.dry_run(&[PACKAGE_OSARA]);
+    let osara = preview.item(PACKAGE_OSARA).unwrap();
+    assert_eq!(
+        osara.status,
+        UninstallStatus::WouldRemove,
+        "{}",
+        osara.message
+    );
+    assert_eq!(
+        osara.registry_entries,
+        vec![RegistryEntryOutcome {
+            key: list.key("OSARA"),
+            action: RegistryEntryAction::WouldRemove,
+        }]
+    );
+    assert!(
+        osara.message.contains(&format!(
+            "would also remove {} from Windows' list of installed programs",
+            list.key("OSARA")
+        )),
+        "{}",
+        osara.message
+    );
+    assert_eq!(tree(&fixture.resource), before, "a dry run changes nothing");
+    assert_eq!(
+        list.root().read_entry("OSARA").unwrap(),
+        Some(entry.clone())
+    );
+
+    let report = harness.apply(&[PACKAGE_OSARA]);
+    let osara = report.item(PACKAGE_OSARA).unwrap();
+    assert_eq!(osara.status, UninstallStatus::Removed, "{}", osara.message);
+    assert!(files.iter().all(|file| !file.exists()));
+    assert_eq!(
+        osara.removed_dirs,
+        vec![osara_folder.join("locale"), osara_folder.clone()]
+    );
+    for kept in OSARA_KEEPS {
+        assert!(at(&fixture, kept).is_file(), "{kept} stays");
+    }
+    assert_eq!(
+        osara.registry_entries,
+        vec![RegistryEntryOutcome {
+            key: list.key("OSARA"),
+            action: RegistryEntryAction::Removed,
+        }]
+    );
+    assert!(osara.problems.is_empty(), "{:?}", osara.problems);
+    assert!(!report.finished_with_problems() && !report.has_failures());
+    assert_eq!(list.root().read_entry("OSARA").unwrap(), None);
+    let receipt = load_install_state(&fixture.resource).unwrap().unwrap();
+    assert!(!receipt.packages.contains_key(PACKAGE_OSARA));
+    assert!(receipt.declined_packages.contains(PACKAGE_OSARA));
+}
+
+/// The list has one OSARA entry for the whole computer. One that points
+/// into another REAPER, here the standard one while this is a portable
+/// REAPER, or doesn't say where its program is, isn't this REAPER's to
+/// remove: it stays, and the report says why. OSARA itself still goes.
+#[cfg(windows)]
+#[test]
+fn an_entry_that_points_into_another_reaper_stays() {
+    let elsewhere = |fixture: &Fixture| {
+        osara_entry(
+            &fixture
+                .dir
+                .path()
+                .join("AppData")
+                .join("REAPER")
+                .join("osara")
+                .join("uninstall.exe"),
+        )
+    };
+    let without_program =
+        |_: &Fixture| UninstallEntry::new(vec![RegistryValue::string("DisplayName", "OSARA")]);
+    let entries: [&dyn Fn(&Fixture) -> UninstallEntry; 2] = [&elsewhere, &without_program];
+    for make_entry in entries {
+        let list = ThrowawayList::create();
+        let fixture = Fixture::new();
+        let files = install_osara(&fixture);
+        let entry = make_entry(&fixture);
+        list.root().write_entry("OSARA", &entry).unwrap();
+        let harness = Harness {
+            installed_programs: Some(list.root()),
+            ..osara_harness(&fixture)
+        };
+        let expected = vec![RegistryEntryOutcome {
+            key: list.key("OSARA"),
+            action: RegistryEntryAction::PointsElsewhere {
+                found: entry.string_value("UninstallString"),
+                expected: fixture.resource.join("osara"),
+            },
+        }];
+
+        let preview = harness.dry_run(&[PACKAGE_OSARA]);
+        assert_eq!(
+            preview.item(PACKAGE_OSARA).unwrap().registry_entries,
+            expected
+        );
+
+        let report = harness.apply(&[PACKAGE_OSARA]);
+        let osara = report.item(PACKAGE_OSARA).unwrap();
+        assert_eq!(osara.status, UninstallStatus::Removed, "{}", osara.message);
+        assert!(files.iter().all(|file| !file.exists()));
+        assert_eq!(osara.registry_entries, expected);
+        assert!(osara.problems.is_empty(), "{:?}", osara.problems);
+        assert!(
+            osara.message.contains(&format!(
+                "{} stays in Windows' list of installed programs",
+                list.key("OSARA")
+            )),
+            "{}",
+            osara.message
+        );
+        assert!(!report.finished_with_problems());
+        assert_eq!(list.root().read_entry("OSARA").unwrap(), Some(entry));
+    }
+}
+
+/// An entry that points into this REAPER but can't be removed doesn't undo
+/// the removal: the files and the receipt entry stay gone, and the report
+/// names the entry as a problem. RABBIT never removes an entry with keys
+/// below it; OSARA's has none, so whatever it holds isn't OSARA's.
+#[cfg(windows)]
+#[test]
+fn an_entry_that_cant_be_removed_leaves_osara_removed_with_a_problem() {
+    let list = ThrowawayList::create();
+    let fixture = Fixture::new();
+    let files = install_osara(&fixture);
+    let entry = osara_entry(&fixture.resource.join("osara").join("uninstall.exe"));
+    list.root().write_entry("OSARA", &entry).unwrap();
+    HkcuUninstallRoot::at(format!("{}\\OSARA", list.root().path()))
+        .write_entry("Child", &entry)
+        .unwrap();
+    let harness = Harness {
+        installed_programs: Some(list.root()),
+        ..osara_harness(&fixture)
+    };
+
+    let report = harness.apply(&[PACKAGE_OSARA]);
+    let osara = report.item(PACKAGE_OSARA).unwrap();
+    assert_eq!(osara.status, UninstallStatus::Removed, "{}", osara.message);
+    assert!(files.iter().all(|file| !file.exists()));
+    assert!(osara.registry_entries.is_empty());
+    assert!(
+        matches!(
+            &osara.problems[..],
+            [UninstallProblem::RegistryEntryNotRemoved { key, .. }] if *key == list.key("OSARA")
+        ),
+        "{:?}",
+        osara.problems
+    );
+    assert!(
+        osara.message.contains(&list.key("OSARA")),
+        "{}",
+        osara.message
+    );
+    assert!(report.finished_with_problems() && !report.has_failures());
+    assert!(
+        load_install_state(&fixture.resource)
+            .unwrap()
+            .unwrap()
+            .declined_packages
+            .contains(PACKAGE_OSARA)
+    );
+    assert_eq!(list.root().read_entry("OSARA").unwrap(), Some(entry));
+}
+
+/// An entry RABBIT can't read is left alone: RABBIT can't tell whether it
+/// points into this REAPER. OSARA still goes, and the report says so. The
+/// stand-in list here is one RABBIT can't even name a key in, so every read
+/// fails before it reaches the registry, on every platform.
+#[test]
+fn an_entry_that_cant_be_read_leaves_osara_removed_with_a_problem() {
+    let fixture = Fixture::new();
+    let files = install_osara(&fixture);
+    let harness = Harness {
+        installed_programs: Some(HkcuUninstallRoot::at("")),
+        ..osara_harness(&fixture)
+    };
+    let unreadable = |problems: &[UninstallProblem]| {
+        matches!(
+            problems,
+            [UninstallProblem::RegistryEntryUnreadable { key, .. }] if key.ends_with("\\OSARA")
+        )
+    };
+
+    let preview = harness.dry_run(&[PACKAGE_OSARA]);
+    let osara = preview.item(PACKAGE_OSARA).unwrap();
+    assert_eq!(osara.status, UninstallStatus::WouldRemove);
+    assert!(unreadable(&osara.problems), "{:?}", osara.problems);
+
+    let report = harness.apply(&[PACKAGE_OSARA]);
+    let osara = report.item(PACKAGE_OSARA).unwrap();
+    assert_eq!(osara.status, UninstallStatus::Removed, "{}", osara.message);
+    assert!(files.iter().all(|file| !file.exists()));
+    assert!(osara.registry_entries.is_empty());
+    assert!(unreadable(&osara.problems), "{:?}", osara.problems);
+    assert!(report.finished_with_problems() && !report.has_failures());
+}
+
+/// OSARA's folders go only once its own files have left them empty. A file
+/// the user put there keeps the `osara` folder, and the file, where they
+/// are. Without a list of installed programs, no entry is even read.
+#[test]
+fn a_file_placed_by_hand_keeps_osaras_folder() {
+    let fixture = Fixture::new();
+    let files = install_osara(&fixture);
+    let notes = fixture.file("osara/my notes.txt");
+    let osara_folder = fixture.resource.join("osara");
+
+    let report = osara_harness(&fixture).apply(&[PACKAGE_OSARA]);
+    let osara = report.item(PACKAGE_OSARA).unwrap();
+    assert_eq!(osara.status, UninstallStatus::Removed, "{}", osara.message);
+    assert!(files.iter().all(|file| !file.exists()));
+    assert_eq!(osara.removed_dirs, vec![osara_folder.join("locale")]);
+    assert!(osara_folder.is_dir() && notes.is_file());
+    assert!(osara.registry_entries.is_empty() && osara.problems.is_empty());
 }

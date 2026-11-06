@@ -455,9 +455,8 @@ fn removal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
     lines.join("\n")
 }
 
-/// The warnings the manifest says always to show, such as OSARA's that
-/// REAPER stops speaking. They come before anything else, on the row and on
-/// Review.
+/// The warnings the manifest says always to show, whatever else is
+/// installed. They come before anything else, on the row and on Review.
 fn always_warning_lines(localizer: &Localizer, item: &UninstallPlanItem) -> Vec<String> {
     item.warnings
         .iter()
@@ -828,8 +827,7 @@ pub enum UninstallConfirmReason {
     /// A backup can't undo the package's removal: a vendor uninstaller, a
     /// removal that needs administrator rights, or a whole folder going.
     Unbacked { package_id: String },
-    /// The manifest's `always_warn` entry asks for the question, such as
-    /// OSARA's warning that REAPER stops speaking.
+    /// The manifest's `always_warn` entry asks for the question.
     Warning {
         package_id: String,
         message_key: String,
@@ -838,9 +836,10 @@ pub enum UninstallConfirmReason {
 
 /// The reasons to ask before uninstalling `package_ids`, in manifest order.
 /// Empty for a run of file removals that all go into a backup and that no
-/// manifest asks about, which is every package RABBIT can remove so far:
-/// the question is for the packages later versions add, and they only add
-/// data for it.
+/// manifest asks about, which is every package RABBIT can remove so far,
+/// OSARA included: the people who use RABBIT know that REAPER stops
+/// speaking without it, so asking would only be in their way. The question
+/// is for the packages later versions add, and they only add data for it.
 pub fn uninstall_confirm_reasons(
     plan: &UninstallPlan,
     package_ids: &[String],

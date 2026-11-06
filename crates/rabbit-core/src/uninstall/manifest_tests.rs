@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 
 use super::tests::{Fixture, detection, installed, write};
 use super::{
-    KeptReason, Removability, RemovalReason, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan,
-    UninstallPlanInput, UninstallPlanItem, UninstallWarning, build_uninstall_plan,
+    KeptReason, PlannedRegistryCleanup, Removability, RemovalReason, UNINSTALL_NOT_YET_KEY,
+    UninstallNote, UninstallPlan, UninstallPlanInput, UninstallPlanItem, UninstallWarning,
+    build_uninstall_plan,
 };
 use crate::detection::detect_component_with_probes;
 use crate::model::{ComponentDetection, InstallationKind, Platform};
@@ -205,7 +206,7 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
             InstallationKind::Standard,
             &[
                 (PACKAGE_REAPER, not_supported),
-                (PACKAGE_OSARA, not_supported),
+                (PACKAGE_OSARA, remove_files),
                 (PACKAGE_SWS, remove_files),
                 (PACKAGE_REAPACK, remove_files),
                 (PACKAGE_REAKONTROL, remove_files),
@@ -227,7 +228,7 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
             // standard REAPER's plan, which removes nothing.
             &[
                 (PACKAGE_REAPER, manual),
-                (PACKAGE_OSARA, not_supported),
+                (PACKAGE_OSARA, remove_files),
                 (PACKAGE_SWS, remove_files),
                 (PACKAGE_REAPACK, remove_files),
                 (PACKAGE_REAKONTROL, remove_files),
@@ -243,7 +244,7 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
     ];
     let macos = [
         (PACKAGE_REAPER, not_supported),
-        (PACKAGE_OSARA, not_supported),
+        (PACKAGE_OSARA, remove_files),
         (PACKAGE_SWS, remove_files),
         (PACKAGE_REAPACK, remove_files),
         (PACKAGE_REAKONTROL, remove_files),
@@ -857,4 +858,251 @@ fn a_language_pack_placed_by_hand_is_refused() {
     assert_eq!(langpack.removability, Removability::NoReceipt);
     assert!(langpack.removability.is_blocked());
     assert!(langpack.files.is_empty());
+}
+
+/// What OSARA's installer puts into a REAPER on Windows (osara.nsi): the
+/// plug-in for each architecture, OSARA's copy of its key map, its
+/// translations and its uninstaller.
+const OSARA_WINDOWS_FILES: [&str; 7] = [
+    "UserPlugins/reaper_osara32.dll",
+    "UserPlugins/reaper_osara64.dll",
+    "UserPlugins/reaper_osara_arm64ec.dll",
+    "KeyMaps/OSARA.ReaperKeyMap",
+    "osara/locale/de_DE.po",
+    "osara/locale/fr_CA.po",
+    "osara/uninstall.exe",
+];
+
+/// What stays when OSARA goes, with the note each gets and the reason
+/// "Also remove settings" can't take it: the user's key map, the backups
+/// OSARA made of it when it replaced it or merged its keys into it, and
+/// `reaper-extstate.ini`, where OSARA keeps its settings beside every other
+/// extension's.
+const OSARA_KEPT: [(&str, &str, KeptReason); 4] = [
+    (
+        "reaper-kb.ini",
+        "uninstall-kept-osara-key-map",
+        KeptReason::ReaperConfiguration,
+    ),
+    (
+        "KeyMaps/OSARAReplacedBackup.ReaperKeyMap",
+        "uninstall-kept-osara-replaced-key-map",
+        KeptReason::KeyMap,
+    ),
+    (
+        "reaper-kb.ini.osara-merge-backup",
+        "uninstall-kept-osara-merged-key-map",
+        KeptReason::ReaperConfiguration,
+    ),
+    (
+        "reaper-extstate.ini",
+        "uninstall-kept-osara-settings",
+        KeptReason::ReaperConfiguration,
+    ),
+];
+
+/// A resource folder holding what OSARA leaves behind on purpose.
+fn write_osara_kept_files(fixture: &Fixture) {
+    for (file, _, _) in OSARA_KEPT {
+        fixture.file(file);
+    }
+}
+
+/// That OSARA's plan keeps everything in [`OSARA_KEPT`], as it should, and
+/// asks nothing before it goes: no warning, no question. The people who use
+/// RABBIT know that REAPER stops speaking without OSARA.
+fn assert_osara_keeps_its_users_data_and_asks_nothing(
+    fixture: &Fixture,
+    osara: &UninstallPlanItem,
+) {
+    for (file, note_key, reason) in OSARA_KEPT {
+        let path = file
+            .split('/')
+            .fold(fixture.resource.clone(), |path, part| path.join(part));
+        assert!(!removed(osara).contains(&path), "{file} goes");
+        let kept = osara
+            .kept
+            .iter()
+            .find(|kept| kept.path == path)
+            .unwrap_or_else(|| panic!("{file} isn't listed as kept: {:?}", osara.kept));
+        assert_eq!(kept.reason, reason, "{file}");
+        assert_eq!(kept.note_key.as_deref(), Some(note_key), "{file}");
+        assert!(kept.exists, "{file}");
+        assert!(
+            !kept.removable_with_settings,
+            "{file} must stay even with Also remove settings"
+        );
+    }
+    assert!(osara.warnings.is_empty(), "{:?}", osara.warnings);
+    assert!(!osara.confirm, "removing OSARA asks no question");
+    assert!(!osara.unbacked && !osara.requires_elevation && !osara.every_reaper_closed);
+}
+
+/// OSARA on Windows: its plug-ins, its key map file, translations and
+/// uninstaller go, then its folders if that empties them, then its entry in
+/// Windows' list of installed programs if the entry points into this
+/// REAPER. The same on a portable REAPER. The user's key map, the backups
+/// OSARA made of it, OSARA's settings and anything else in its folders stay,
+/// with or without "Also remove settings".
+#[test]
+fn osara_on_windows_removes_its_files_and_keeps_the_key_map_and_settings() {
+    let fixture = Fixture::new();
+    let files: Vec<PathBuf> = OSARA_WINDOWS_FILES
+        .iter()
+        .map(|file| fixture.file(file))
+        .collect();
+    write_osara_kept_files(&fixture);
+    let own_key_map = fixture.file("KeyMaps/Mine.ReaperKeyMap");
+    let own_notes = fixture.file("osara/my notes.txt");
+    let sws = fixture.file("UserPlugins/reaper_sws-x64.dll");
+    // As install records OSARA: the plug-in and its key map file with a
+    // hash, and its folder and the key map it replaced without one, the
+    // way user content is recorded.
+    let mut state = receipt(
+        &fixture,
+        &[(
+            PACKAGE_OSARA,
+            &[
+                "UserPlugins/reaper_osara64.dll",
+                "KeyMaps/OSARA.ReaperKeyMap",
+                "osara",
+                "reaper-kb.ini",
+            ],
+        )],
+    );
+    for entry in &mut state
+        .packages
+        .get_mut(PACKAGE_OSARA)
+        .unwrap()
+        .installed_files
+    {
+        if entry.path == Path::new("reaper-kb.ini") {
+            entry.sha256 = None;
+        }
+    }
+    let resource = &fixture.resource;
+    let shipped = Shipped::new(&fixture, Platform::Windows);
+
+    for target in [InstallationKind::Standard, InstallationKind::Portable] {
+        for remove_settings in [false, true] {
+            let plan = shipped.plan_with(
+                &installed(&[PACKAGE_OSARA]),
+                Some(&state),
+                target,
+                remove_settings,
+            );
+            let osara = item(&plan, PACKAGE_OSARA);
+
+            assert_eq!(osara.removability, Removability::Removable, "{target:?}");
+            assert_eq!(removed(osara), sorted(files.clone()), "{target:?}");
+            for kept in [&own_key_map, &own_notes, &sws] {
+                assert!(!removed(osara).contains(kept), "{}", kept.display());
+            }
+            let plugin = resource
+                .join("UserPlugins")
+                .join("reaper_osara_arm64ec.dll");
+            assert_eq!(reason_of(osara, &plugin), RemovalReason::MatchingUserPlugin);
+            let key_map = resource.join("KeyMaps").join("OSARA.ReaperKeyMap");
+            assert_eq!(reason_of(osara, &key_map), RemovalReason::ManifestPath);
+            assert_eq!(
+                osara.dirs_if_empty,
+                vec![
+                    resource.join("osara").join("locale"),
+                    resource.join("osara")
+                ]
+            );
+            assert_eq!(
+                osara.registry_cleanup,
+                vec![PlannedRegistryCleanup {
+                    key: "OSARA".to_string(),
+                    value: "UninstallString".to_string(),
+                    dir: resource.join("osara"),
+                }]
+            );
+            assert_osara_keeps_its_users_data_and_asks_nothing(&fixture, osara);
+            assert!(osara.notes.is_empty(), "{:?}", osara.notes);
+        }
+    }
+
+    // A copy RABBIT has no receipt for comes off the same way, with a note.
+    let plan = shipped.plan(&installed(&[PACKAGE_OSARA]), None);
+    let osara = item(&plan, PACKAGE_OSARA);
+    assert_eq!(osara.removability, Removability::Removable);
+    assert_eq!(removed(osara), sorted(files));
+    assert_eq!(osara.notes, vec![UninstallNote::NoReceipt]);
+}
+
+/// OSARA on macOS: RABBIT copies the plug-in, the key map file and the
+/// translations out of OSARA's installer, so those go, then the folders if
+/// that empties them. macOS has no list of installed programs to clean up.
+#[test]
+fn osara_on_macos_removes_its_plugin_key_map_and_translations() {
+    let fixture = Fixture::new();
+    let files: Vec<PathBuf> = [
+        "UserPlugins/reaper_osara.dylib",
+        "KeyMaps/OSARA.ReaperKeyMap",
+        "osara/locale/de_DE.po",
+        "osara/locale/pt_BR.po",
+    ]
+    .iter()
+    .map(|file| fixture.file(file))
+    .collect();
+    write_osara_kept_files(&fixture);
+    // A Windows plug-in a shared folder may hold isn't OSARA's here.
+    let windows_plugin = fixture.file("UserPlugins/reaper_osara64.dll");
+    let shipped = Shipped::new(&fixture, Platform::MacOs);
+
+    for remove_settings in [false, true] {
+        let plan = shipped.plan_with(
+            &installed(&[PACKAGE_OSARA]),
+            None,
+            InstallationKind::Standard,
+            remove_settings,
+        );
+        let osara = item(&plan, PACKAGE_OSARA);
+
+        assert_eq!(osara.removability, Removability::Removable);
+        assert_eq!(removed(osara), sorted(files.clone()));
+        assert!(!removed(osara).contains(&windows_plugin));
+        assert_eq!(
+            osara.dirs_if_empty,
+            vec![
+                fixture.resource.join("osara").join("locale"),
+                fixture.resource.join("osara")
+            ]
+        );
+        assert!(osara.registry_cleanup.is_empty());
+        assert_osara_keeps_its_users_data_and_asks_nothing(&fixture, osara);
+    }
+}
+
+/// An OSARA that ReaPack installed and still manages is ReaPack's to
+/// remove, like any other package. Nothing of it is planned, its entry in
+/// Windows' list of installed programs included.
+#[test]
+fn osara_managed_by_reapack_is_reapacks_to_remove() {
+    let fixture = Fixture::new();
+    let plugin = fixture.file("UserPlugins/reaper_osara64.dll");
+    fixture.file("osara/locale/de_DE.po");
+    write_test_registry(
+        &fixture.resource,
+        &[(
+            "OSARA",
+            "2025.3.6.1234",
+            &["UserPlugins/reaper_osara64.dll"],
+        )],
+    );
+    let shipped = Shipped::new(&fixture, Platform::Windows);
+
+    let plan = shipped.plan(&installed(&[PACKAGE_OSARA, PACKAGE_REAPACK]), None);
+    let osara = item(&plan, PACKAGE_OSARA);
+    assert_eq!(
+        osara.removability,
+        Removability::ManagedByReaPack {
+            path: plugin,
+            reapack_package: "OSARA".to_string()
+        }
+    );
+    assert!(osara.files.is_empty() && osara.dirs_if_empty.is_empty());
+    assert!(osara.registry_cleanup.is_empty());
 }

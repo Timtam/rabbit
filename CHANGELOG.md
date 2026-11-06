@@ -75,6 +75,16 @@ from this file and posts it as the GitHub release body.
   and an uninstall that stopped partway through a package restores too.
 - `rabbit components` says for each package whether RABBIT can uninstall it,
   and if not, why.
+- OSARA can be uninstalled too, from the wizard's **Uninstall** tab and with
+  `rabbit uninstall --package osara`. RABBIT removes OSARA's plug-in, its
+  translations, the copy of its key map in `KeyMaps` and, on Windows, its
+  uninstaller, then the `osara` folder if nothing else is left in it. Your
+  key map stays as it is, and so do the key map backups OSARA made and
+  OSARA's settings, even with **Also remove settings**: they live in
+  `reaper-extstate.ini`, which every extension shares. On Windows, OSARA
+  also comes off Windows' list of installed programs, but only if that
+  entry points into the REAPER you uninstall it from; one that belongs to
+  another REAPER stays, and **Show details** and the report say so.
 
 ### Changed
 

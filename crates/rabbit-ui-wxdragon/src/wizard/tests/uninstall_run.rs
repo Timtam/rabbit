@@ -14,9 +14,9 @@ use rabbit_core::progress::{ProgressEvent, ProgressReporter};
 use rabbit_core::report::SavedReportPaths;
 use rabbit_core::uninstall::{
     ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, KeptFile, KeptFileReason, PROGRAMS_RUNNING_CHECK,
-    Removability, RemovalReason, RemovedFile, UninstallMessage, UninstallPlanItem,
-    UninstallProblem, UninstallReport, UninstallReportItem, UninstallRequest, UninstallStatus,
-    execute_uninstall,
+    RegistryEntryAction, RegistryEntryOutcome, Removability, RemovalReason, RemovedFile,
+    UninstallMessage, UninstallPlanItem, UninstallProblem, UninstallReport, UninstallReportItem,
+    UninstallRequest, UninstallStatus, execute_uninstall,
 };
 use rabbit_core::version::Version;
 use tempfile::tempdir;
@@ -569,6 +569,7 @@ fn report_item(
         put_back: Vec::new(),
         left_in_backup: Vec::new(),
         leftovers: Vec::new(),
+        registry_entries: Vec::new(),
         problems: Vec::new(),
         message: format!("English message for {package_id}."),
         message_code,
@@ -814,6 +815,79 @@ fn leftovers_and_a_language_left_set_finish_with_problems() {
     );
 }
 
+const OSARA_ENTRY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\OSARA";
+
+/// The entry OSARA's installer wrote in Windows' list of installed programs
+/// is named in the details, whatever became of it. One that went, or that
+/// belongs to another REAPER and stayed, is no problem; one RABBIT couldn't
+/// remove is, and Done says where to look.
+#[test]
+fn done_names_the_entry_in_the_list_of_installed_programs() {
+    let entry = |action| RegistryEntryOutcome {
+        key: OSARA_ENTRY.to_string(),
+        action,
+    };
+    let removed_entry = UninstallReportItem {
+        registry_entries: vec![entry(RegistryEntryAction::Removed)],
+        ..removed("osara", &["C:/REAPER/UserPlugins/reaper_osara64.dll"])
+    };
+    let done = outcome(&report(vec![removed_entry]));
+    assert_eq!(done.status, UninstallOutcomeStatus::Success);
+    let details = done.detail_lines.join("\n");
+    assert!(
+        details.contains(&format!(
+            "  Taken off Windows' list of installed programs: {OSARA_ENTRY}"
+        )),
+        "{details}"
+    );
+
+    let elsewhere = UninstallReportItem {
+        registry_entries: vec![entry(RegistryEntryAction::PointsElsewhere {
+            found: Some(
+                r#""C:\Users\Someone\AppData\Roaming\REAPER\osara\uninstall.exe""#.to_string(),
+            ),
+            expected: PathBuf::from("C:/REAPER/osara"),
+        })],
+        ..removed("osara", &["C:/REAPER/UserPlugins/reaper_osara64.dll"])
+    };
+    let done = outcome(&report(vec![elsewhere]));
+    assert_eq!(done.status, UninstallOutcomeStatus::Success);
+    let details = done.detail_lines.join("\n");
+    assert!(
+        details.contains(&format!(
+            "  Still in Windows' list of installed programs, because it doesn't point into this \
+             REAPER: {OSARA_ENTRY}"
+        )),
+        "{details}"
+    );
+
+    let stuck = UninstallReportItem {
+        problems: vec![UninstallProblem::RegistryEntryNotRemoved {
+            key: OSARA_ENTRY.to_string(),
+            error: "Access is denied. (os error 5)".to_string(),
+        }],
+        ..removed("osara", &["C:/REAPER/UserPlugins/reaper_osara64.dll"])
+    };
+    let done = outcome(&report(vec![stuck]));
+    assert_eq!(done.status, UninstallOutcomeStatus::CompletedWithProblems);
+    assert!(
+        done.status_text.contains(
+            "RABBIT uninstalled OSARA, but Windows' list of installed programs may still show \
+             it. Show details names the entry."
+        ),
+        "{}",
+        done.status_text
+    );
+    let details = done.detail_lines.join("\n");
+    assert!(
+        details.contains(&format!(
+            "  Still in Windows' list of installed programs, because RABBIT couldn't read or \
+             remove it (Access is denied. (os error 5)): {OSARA_ENTRY}"
+        )),
+        "{details}"
+    );
+}
+
 /// The user stopped the run: what went is named, and so is the way back.
 #[test]
 fn a_stopped_run_says_what_went_before_the_stop() {
@@ -990,9 +1064,33 @@ fn a_package_gone_in_the_meantime_is_nothing_done() {
 
 #[test]
 fn done_reads_in_every_locale() {
+    let entry = |action| RegistryEntryOutcome {
+        key: OSARA_ENTRY.to_string(),
+        action,
+    };
     let reports = [
         report(vec![
             removed("sws", &["C:/REAPER/UserPlugins/reaper_sws-x64.dll"]),
+            UninstallReportItem {
+                registry_entries: vec![
+                    entry(RegistryEntryAction::Removed),
+                    entry(RegistryEntryAction::PointsElsewhere {
+                        found: None,
+                        expected: PathBuf::from("C:/REAPER/osara"),
+                    }),
+                ],
+                problems: vec![
+                    UninstallProblem::RegistryEntryUnreadable {
+                        key: OSARA_ENTRY.to_string(),
+                        error: String::new(),
+                    },
+                    UninstallProblem::RegistryEntryNotRemoved {
+                        key: OSARA_ENTRY.to_string(),
+                        error: String::new(),
+                    },
+                ],
+                ..removed("osara", &["C:/REAPER/UserPlugins/reaper_osara64.dll"])
+            },
             UninstallReportItem {
                 leftovers: vec![PathBuf::from("C:/x")],
                 left_in_backup: vec![PathBuf::from("C:/y")],
