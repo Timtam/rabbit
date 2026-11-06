@@ -509,6 +509,13 @@ wizard-done-uninstall-vendor-run-failed = RABBIT no ha podido terminar de ejecut
 wizard-done-uninstall-elevation-failed = RABBIT no ha obtenido permisos de administrador ({ $error }), así que no se ha desinstalado nada.
 wizard-done-uninstall-resource-damaged = Importante: después de ejecutarse el propio desinstalador de { $package }, faltaban estos archivos en la carpeta de recursos de REAPER: { $paths }. RABBIT se ha detenido y ha vuelto a escribir sus registros. No puede recuperar los ajustes de REAPER; si tienes una copia de reaper.ini, vuelve a ponerla en su sitio antes de abrir REAPER.
 wizard-done-uninstall-receipt-not-saved = RABBIT ha desinstalado { $package }, pero no ha podido actualizar sus registros. La próxima vez que se ejecute, RABBIT verá igualmente que { $package } ya no está.
+wizard-done-uninstall-vendor-lost = RABBIT ha perdido el rastro del propio desinstalador de { $package } después de que empezara. Puede que siga en marcha, así que RABBIT no puede saber qué ha quitado, y se ha detenido ahí.
+wizard-done-uninstall-vendor-lost-reaper = Cuando el desinstalador haya terminado, comprueba que reaper.ini sigue en la carpeta de recursos de REAPER: guarda tus ajustes de REAPER.
+wizard-done-uninstall-vendor-files-left = El propio desinstalador de { $package } terminó, pero algunos de sus archivos siguen ahí. «Mostrar detalles» los enumera.
+wizard-done-uninstall-vendor-not-listed = Windows ya no muestra { $package } en la lista de programas instalados, así que tampoco está en Configuración de Windows.
+wizard-done-uninstall-working-folder-left = RABBIT no ha podido quitar { $path }, la carpeta desde la que ejecutó el desinstalador de { $package }. Solo un administrador puede borrarla.
+wizard-done-uninstall-restart-list-unreadable = RABBIT no ha podido leer qué archivos quita Windows en el próximo reinicio, así que no sabe si los archivos que quedan de { $package } se irán entonces.
+wizard-done-uninstall-installed-list-unreadable = RABBIT no ha podido leer la lista de programas instalados de Windows después del desinstalador de { $package }, así que no ha podido comprobar si Windows aún muestra { $package }.
 wizard-done-show-details = Mostrar detalles
 # Mnemonic messages are single-character native access keys. Choose a character
 # from the translated label when possible.

@@ -1331,14 +1331,20 @@ Extension files:
   REAPER on the computer must be closed, and the programs the plan names;
   REAPER is always removed last. The status follows the uninstaller and
   fresh detection: exit 0 with everything gone is Removed; with files
-  Windows deletes at the next restart, RemovedPendingRestart; with
+  Windows deletes at the next restart, RemovedPendingRestart, even while
+  detection still finds the package through those very files; with
   leftovers, which are listed and never deleted, RemovedWithLeftovers; a
-  package still detected is Failed and keeps its receipt entry; NSIS's exit
-  1 is Cancelled; any other code is Failed. Afterwards the receipt follows
-  detection: the entry goes, and the package joins `declined_packages`,
-  only once the package is gone. An uninstaller still open after
-  `timeout_seconds` is left running, the package Failed and the run
-  stopped; so is a helper that stops answering. If `reaper.ini` or RABBIT's
+  package still detected otherwise is Failed and keeps its receipt entry;
+  NSIS's exit 1 is Cancelled; any other code is Failed. Afterwards the
+  receipt follows detection: the entry goes, and the package joins
+  `declined_packages`, only once the package is gone. An uninstaller still
+  open after `timeout_seconds` is left running, the package Failed and the
+  run stopped; so is one RABBIT lost track of after it started, because the
+  helper stopped answering. Either may still be at work, so the receipt
+  stays as it was. A working folder RABBIT couldn't remove, or a Windows
+  list it couldn't read afterwards, is reported as a problem; a list it
+  couldn't read is never taken to mean the package is still listed. If
+  `reaper.ini` or RABBIT's
   receipt is gone after a vendor's uninstaller ran, the run stops, the
   package is Failed, and the receipt is written again from the copy the run
   holds in memory. The helper is told to quit at the end of every run.

@@ -509,6 +509,13 @@ wizard-done-uninstall-vendor-run-failed = RABBIT konnte das Deinstallationsprogr
 wizard-done-uninstall-elevation-failed = RABBIT hat keine Administratorrechte erhalten ({ $error }). Deshalb wurde nichts deinstalliert.
 wizard-done-uninstall-resource-damaged = Wichtig: Nachdem das Deinstallationsprogramm von { $package } gelaufen war, fehlten diese Dateien im Ressourcenordner von REAPER: { $paths }. RABBIT hat angehalten und seine Aufzeichnungen neu geschrieben. Die Einstellungen von REAPER kann RABBIT nicht zurückholen; wenn Sie eine Kopie von reaper.ini haben, legen Sie sie zurück, bevor Sie REAPER starten.
 wizard-done-uninstall-receipt-not-saved = RABBIT hat { $package } deinstalliert, konnte aber seine Aufzeichnungen nicht aktualisieren. Beim nächsten Start stellt RABBIT trotzdem fest, dass { $package } nicht mehr da ist.
+wizard-done-uninstall-vendor-lost = RABBIT hat das Deinstallationsprogramm von { $package } aus den Augen verloren, nachdem es gestartet war. Vielleicht läuft es noch; deshalb kann RABBIT nicht sagen, was es entfernt hat, und hat dort angehalten.
+wizard-done-uninstall-vendor-lost-reaper = Prüfen Sie, sobald das Deinstallationsprogramm fertig ist, ob reaper.ini noch im Ressourcenordner von REAPER liegt: Darin stehen Ihre Einstellungen für REAPER.
+wizard-done-uninstall-vendor-files-left = Das Deinstallationsprogramm von { $package } ist fertig, aber einige seiner Dateien sind noch da. „Details anzeigen“ listet sie auf.
+wizard-done-uninstall-vendor-not-listed = Windows führt { $package } nicht mehr in der Liste der installierten Programme, deshalb finden Sie es auch nicht in den Windows-Einstellungen.
+wizard-done-uninstall-working-folder-left = RABBIT konnte { $path } nicht entfernen, den Ordner, aus dem es das Deinstallationsprogramm von { $package } gestartet hat. Nur ein Administrator kann ihn löschen.
+wizard-done-uninstall-restart-list-unreadable = RABBIT konnte nicht lesen, welche Dateien Windows beim nächsten Neustart entfernt. Deshalb kann es nicht sagen, ob die verbliebenen Dateien von { $package } dann verschwinden.
+wizard-done-uninstall-installed-list-unreadable = RABBIT konnte die Liste der installierten Programme von Windows nach dem Deinstallationsprogramm von { $package } nicht lesen. Deshalb konnte es nicht prüfen, ob Windows { $package } noch auflistet.
 wizard-done-show-details = Details anzeigen
 # Mnemonic messages are single-character native access keys. Choose a character
 # from the translated label when possible.

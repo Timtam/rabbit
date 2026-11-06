@@ -288,6 +288,9 @@ struct Run<'c> {
     /// Detection after the uninstallers ran: by default, whatever is still
     /// on disk.
     still_installed: Box<dyn Fn() -> Vec<&'static str> + 'c>,
+    /// Whole detections after the uninstallers ran, files included, in
+    /// place of `still_installed`.
+    detections_after: Option<Box<dyn Fn() -> Vec<ComponentDetection> + 'c>>,
     reapers: Vec<RunningProcess>,
     progress: ProgressReporter,
     cancel: CancelToken,
@@ -313,6 +316,7 @@ impl<'c> Run<'c> {
                 }
                 ids
             }),
+            detections_after: None,
             reapers: Vec::new(),
             progress: ProgressReporter::noop(),
             cancel: CancelToken::new(),
@@ -326,6 +330,9 @@ impl<'c> Run<'c> {
             // Everything asked for is installed before the run.
             if first.replace(false) {
                 return Ok(installed(&[PACKAGE_SWS, PACKAGE_SURGE_XT, PACKAGE_REAPER]));
+            }
+            if let Some(detections) = &self.detections_after {
+                return Ok(detections());
             }
             Ok(installed(&(self.still_installed)()))
         };
@@ -505,6 +512,126 @@ fn files_left_for_the_next_restart_still_count_as_removed() {
     assert!(!computer.receipt().packages.contains_key(PACKAGE_SURGE_XT));
 }
 
+/// What RABBIT's own detection says about `id` on `computer` right now,
+/// starting from its receipt, as a real run asks. Windows' list of
+/// installed programs is never read.
+fn detected_now(computer: &Computer, id: &str) -> ComponentDetection {
+    let spec = computer.specs.iter().find(|spec| spec.id == id).unwrap();
+    let state = load_install_state(computer.resource()).unwrap();
+    crate::detection::detect_component_with_probes(
+        computer.resource(),
+        Platform::Windows,
+        spec,
+        state.as_ref(),
+        |_| None,
+    )
+    .unwrap()
+}
+
+/// The usual restart case: another music program has Surge's VST3 loaded,
+/// so Windows deletes the plug-in inside the bundle at the next restart,
+/// and the bundle folder stays until then. Detection still finds Surge
+/// through that bundle, here through the receipt, which lists it. That is
+/// no reason to call the removal failed: it is RemovedPendingRestart, the
+/// receipt entry goes and Surge joins `declined_packages`.
+#[test]
+fn a_bundle_waiting_for_the_restart_is_still_removed_pending_the_restart() {
+    let computer = Computer::new();
+    let pending = computer
+        .surge_vst3
+        .join("Contents")
+        .join("x86_64-win")
+        .join("Surge XT.vst3");
+    let helper = ScriptedHelper::new(vec![(
+        PACKAGE_SURGE_XT,
+        Script::ends(VendorOutcome {
+            still_present: vec![computer.surge_vst3.clone()],
+            pending_restart: vec![pending.clone()],
+            ..outcome(
+                PACKAGE_SURGE_XT,
+                VendorStatus::RemovedPendingRestart,
+                Some(0),
+            )
+        }),
+    )]);
+    let mut run = Run::new(&computer, &helper);
+    run.detections_after = Some(Box::new(|| {
+        let surge = detected_now(&computer, PACKAGE_SURGE_XT);
+        assert!(surge.installed, "the bundle is still there: {surge:#?}");
+        let mut detections = installed(&[PACKAGE_SWS, PACKAGE_REAPER]);
+        detections.push(surge);
+        detections
+    }));
+
+    let report = run.uninstall(&[PACKAGE_SURGE_XT]);
+
+    let surge = item(&report, PACKAGE_SURGE_XT);
+    assert_eq!(
+        surge.status,
+        UninstallStatus::RemovedPendingRestart,
+        "{report:#?}"
+    );
+    assert_eq!(surge.message_code, UninstallMessage::UninstalledByVendor);
+    assert_eq!(surge.pending_restart, [pending]);
+    assert!(report.needs_restart() && !report.has_failures());
+    let receipt = computer.receipt();
+    assert!(!receipt.packages.contains_key(PACKAGE_SURGE_XT));
+    assert!(receipt.declined_packages.contains(PACKAGE_SURGE_XT));
+}
+
+/// A restart only finishes what Windows has queued. If detection finds the
+/// package through something that isn't waiting for the restart, the
+/// removal failed as before, and the entry stays.
+#[test]
+fn a_package_found_outside_what_the_restart_removes_still_failed() {
+    let computer = Computer::new();
+    let pending = computer
+        .surge_vst3
+        .join("Contents")
+        .join("x86_64-win")
+        .join("Surge XT.vst3");
+    let effects = write(
+        &computer
+            .dir
+            .path()
+            .join("Common Files")
+            .join("VST3")
+            .join("Surge Synth Team")
+            .join("Surge XT Effects.vst3"),
+        b"effects",
+    );
+    let helper = ScriptedHelper::new(vec![(
+        PACKAGE_SURGE_XT,
+        Script::ends(VendorOutcome {
+            still_present: vec![computer.surge_vst3.clone()],
+            pending_restart: vec![pending],
+            ..outcome(
+                PACKAGE_SURGE_XT,
+                VendorStatus::RemovedPendingRestart,
+                Some(0),
+            )
+        }),
+    )]);
+    let mut run = Run::new(&computer, &helper);
+    run.detections_after = Some(Box::new(|| {
+        let mut surge = super::tests::detection(PACKAGE_SURGE_XT, true);
+        surge.files = vec![effects.clone()];
+        let mut detections = installed(&[PACKAGE_SWS, PACKAGE_REAPER]);
+        detections.push(surge);
+        detections
+    }));
+
+    let report = run.uninstall(&[PACKAGE_SURGE_XT]);
+
+    let surge = item(&report, PACKAGE_SURGE_XT);
+    assert_eq!(surge.status, UninstallStatus::Failed, "{report:#?}");
+    assert!(matches!(
+        surge.message_code,
+        UninstallMessage::VendorStillThere { .. }
+    ));
+    assert!(computer.receipt().packages.contains_key(PACKAGE_SURGE_XT));
+}
+
 /// Exit 0 with leftovers, the package no longer detected:
 /// RemovedWithLeftovers, the leftovers listed and never deleted.
 #[test]
@@ -588,7 +715,7 @@ fn a_package_still_detected_afterwards_failed_and_keeps_its_entry() {
         surge.message_code,
         UninstallMessage::VendorStillThere {
             still_present: vec![computer.surge_vst3.clone()],
-            still_listed: true,
+            still_listed: Some(true),
         }
     );
     assert!(computer.receipt().packages.contains_key(PACKAGE_SURGE_XT));
@@ -739,6 +866,179 @@ fn a_lost_helper_or_a_refusal_stops_the_run() {
             assert!(report.has_failures());
         }
     }
+}
+
+/// A helper lost once the uninstaller had started can't say how it ended,
+/// and the uninstaller may still be at work. Failed, the run stops, and the
+/// receipt is left alone even where the package already looks gone, as for
+/// an uninstaller still open at its time limit. The message says nobody
+/// knows yet what it removed; for REAPER, that includes its settings.
+#[test]
+fn a_helper_lost_after_the_uninstaller_started_leaves_the_receipt_alone() {
+    for id in [PACKAGE_SURGE_XT, PACKAGE_REAPER] {
+        let computer = Computer::new();
+        let gone = if id == PACKAGE_REAPER {
+            computer.app()
+        } else {
+            computer.surge_vst3.clone()
+        };
+        let helper = ScriptedHelper::new(vec![(
+            id,
+            Script::ends(VendorOutcome::failed(
+                id,
+                true,
+                "RABBIT lost contact with its helper (it ended)",
+            ))
+            .removing(&[&gone]),
+        )]);
+
+        // Surge goes before REAPER, and SWS before REAPER too.
+        let other = if id == PACKAGE_REAPER {
+            PACKAGE_SWS
+        } else {
+            PACKAGE_REAPER
+        };
+        let report = Run::new(&computer, &helper).uninstall(&[id, other]);
+
+        let lost = item(&report, id);
+        assert_eq!(lost.status, UninstallStatus::Failed, "{report:#?}");
+        assert_eq!(
+            lost.message_code,
+            UninstallMessage::VendorLost {
+                error: "RABBIT lost contact with its helper (it ended)".to_string()
+            }
+        );
+        assert!(
+            lost.message.contains("may still be running"),
+            "{}",
+            lost.message
+        );
+        assert_eq!(
+            lost.message.contains("reaper.ini"),
+            id == PACKAGE_REAPER,
+            "{}",
+            lost.message
+        );
+        assert!(computer.receipt().packages.contains_key(id), "{id}");
+        assert!(!computer.receipt().declined_packages.contains(id), "{id}");
+        let expected = if id == PACKAGE_REAPER {
+            UninstallStatus::Removed
+        } else {
+            UninstallStatus::NotReached
+        };
+        assert_eq!(item(&report, other).status, expected, "{report:#?}");
+        assert!(report.has_failures());
+    }
+}
+
+/// What went wrong around a vendor run reaches the user, not only the JSON:
+/// a working folder left behind is named, and a list RABBIT couldn't read
+/// afterwards is a check it couldn't make, never "Windows still lists it".
+#[test]
+fn problems_around_a_vendor_run_reach_the_report() {
+    use super::UninstallProblem;
+    use super::vendor::VendorProblem;
+
+    let computer = Computer::new();
+    let folder = computer
+        .dir
+        .path()
+        .join("ProgramData")
+        .join("RABBIT-uninstall-1");
+    let helper = ScriptedHelper::new(vec![(
+        PACKAGE_REAPER,
+        Script::ends(VendorOutcome {
+            problems: vec![VendorProblem::WorkingFolderNotRemoved {
+                path: folder.clone(),
+                error: "in use".to_string(),
+            }],
+            ..outcome(PACKAGE_REAPER, VendorStatus::Removed, Some(0))
+        })
+        .removing(&[&computer.app()]),
+    )]);
+    let report = Run::new(&computer, &helper).uninstall(&[PACKAGE_REAPER]);
+    let reaper = item(&report, PACKAGE_REAPER);
+    assert_eq!(reaper.status, UninstallStatus::Removed);
+    assert_eq!(
+        reaper.problems,
+        [UninstallProblem::VendorWorkingFolderLeft {
+            path: folder.clone(),
+            error: "in use".to_string(),
+        }]
+    );
+    assert!(
+        reaper.message.contains(&folder.display().to_string()),
+        "{}",
+        reaper.message
+    );
+    assert!(report.finished_with_problems());
+
+    let computer = Computer::new();
+    let helper = ScriptedHelper::new(vec![(
+        PACKAGE_SURGE_XT,
+        Script::ends(VendorOutcome {
+            still_present: vec![computer.surge_vst3.clone()],
+            // What the runner reported when the list couldn't be read.
+            still_listed: true,
+            problems: vec![VendorProblem::ListUnreadable {
+                error: "access denied".to_string(),
+            }],
+            ..outcome(PACKAGE_SURGE_XT, VendorStatus::Failed, Some(0))
+        }),
+    )]);
+    let report = Run::new(&computer, &helper).uninstall(&[PACKAGE_SURGE_XT]);
+    let surge = item(&report, PACKAGE_SURGE_XT);
+    assert_eq!(
+        surge.message_code,
+        UninstallMessage::VendorStillThere {
+            still_present: vec![computer.surge_vst3.clone()],
+            still_listed: None,
+        }
+    );
+    assert_eq!(
+        surge.problems,
+        [UninstallProblem::InstalledListUnreadable {
+            error: "access denied".to_string(),
+        }]
+    );
+    assert!(
+        !surge.message.contains("Windows still lists it"),
+        "{}",
+        surge.message
+    );
+    assert!(
+        surge.message.contains("couldn't check"),
+        "{}",
+        surge.message
+    );
+
+    let computer = Computer::new();
+    let helper = ScriptedHelper::new(vec![(
+        PACKAGE_SURGE_XT,
+        Script::ends(VendorOutcome {
+            still_present: vec![computer.surge_vst3.clone()],
+            problems: vec![VendorProblem::PendingRenamesUnreadable {
+                error: "access denied".to_string(),
+            }],
+            ..outcome(PACKAGE_SURGE_XT, VendorStatus::Failed, Some(0))
+        }),
+    )]);
+    let report = Run::new(&computer, &helper).uninstall(&[PACKAGE_SURGE_XT]);
+    let surge = item(&report, PACKAGE_SURGE_XT);
+    assert_eq!(
+        surge.message_code,
+        UninstallMessage::VendorStillThere {
+            still_present: vec![computer.surge_vst3.clone()],
+            still_listed: Some(false),
+        }
+    );
+    assert_eq!(
+        surge.problems,
+        [UninstallProblem::RestartListUnreadable {
+            error: "access denied".to_string(),
+        }]
+    );
+    assert!(surge.message.contains("restart"), "{}", surge.message);
 }
 
 /// Declining the Windows permission prompt cancels the whole run before

@@ -779,9 +779,38 @@ pub enum UninstallProblem {
     /// couldn't be saved without it. Nothing can be put back; the next
     /// detection finds the package gone all the same.
     ReceiptNotSaved { error: String },
+    /// The folder under ProgramData that REAPER's uninstaller ran from, as
+    /// a copy, couldn't be removed afterwards. Only administrators can
+    /// change it, and nothing removes it later.
+    VendorWorkingFolderLeft { path: PathBuf, error: String },
+    /// Windows' list of files it removes at the next restart couldn't be
+    /// read, so RABBIT couldn't tell whether the files still there go then.
+    RestartListUnreadable { error: String },
+    /// Windows' list of installed programs couldn't be read after the
+    /// vendor's uninstaller, so RABBIT couldn't check whether it still
+    /// lists the package.
+    InstalledListUnreadable { error: String },
 }
 
 impl UninstallProblem {
+    /// The problems a vendor run reported, as the report's own.
+    pub fn from_vendor(problem: &VendorProblem) -> Self {
+        match problem {
+            VendorProblem::WorkingFolderNotRemoved { path, error } => {
+                Self::VendorWorkingFolderLeft {
+                    path: path.clone(),
+                    error: error.clone(),
+                }
+            }
+            VendorProblem::PendingRenamesUnreadable { error } => Self::RestartListUnreadable {
+                error: error.clone(),
+            },
+            VendorProblem::ListUnreadable { error } => Self::InstalledListUnreadable {
+                error: error.clone(),
+            },
+        }
+    }
+
     /// English, for the CLI and the saved report.
     pub fn message(&self) -> String {
         match self {
@@ -800,6 +829,19 @@ impl UninstallProblem {
             Self::ReceiptNotSaved { error } => format!(
                 "RABBIT couldn't update its receipt ({error}). The receipt still lists the \
                  package; the next time RABBIT looks, it finds the package gone."
+            ),
+            Self::VendorWorkingFolderLeft { path, error } => format!(
+                "RABBIT couldn't remove {}, the folder it ran the uninstaller from ({error}). \
+                 Only an administrator can delete it.",
+                path.display()
+            ),
+            Self::RestartListUnreadable { error } => format!(
+                "RABBIT couldn't read which files Windows removes at the next restart \
+                 ({error}), so it couldn't tell whether the files still there go then."
+            ),
+            Self::InstalledListUnreadable { error } => format!(
+                "RABBIT couldn't read Windows' list of installed programs afterwards ({error}), \
+                 so it couldn't check whether Windows still lists the package."
             ),
         }
     }
@@ -888,10 +930,11 @@ pub enum UninstallMessage {
     },
     /// The vendor's uninstaller said it succeeded, but the package is still
     /// there: `still_present` names what is, and `still_listed` says
-    /// whether Windows still lists it.
+    /// whether Windows still lists it, `None` when its list couldn't be
+    /// read.
     VendorStillThere {
         still_present: Vec<PathBuf>,
-        still_listed: bool,
+        still_listed: Option<bool>,
     },
     /// The vendor's uninstaller was still open after `seconds`. RABBIT left
     /// it running and stopped the run, so nothing else would collide with
@@ -899,9 +942,16 @@ pub enum UninstallMessage {
     VendorStillOpen {
         seconds: u64,
     },
-    /// Starting the vendor's uninstaller, waiting for it, or talking to the
-    /// elevated helper went wrong. The run stopped there.
+    /// Starting the vendor's uninstaller, or talking to the elevated helper
+    /// before it started, went wrong. The run stopped there.
     VendorRunFailed {
+        error: String,
+    },
+    /// RABBIT lost track of the vendor's uninstaller after it had started:
+    /// the helper went away, or waiting for the uninstaller failed. It may
+    /// still be running, so what it removed is unknown; the receipt stays
+    /// as it was, and the run stopped there.
+    VendorLost {
         error: String,
     },
     /// The Windows permission prompt was declined, so nothing was

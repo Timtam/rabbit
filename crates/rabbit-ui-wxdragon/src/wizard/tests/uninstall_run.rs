@@ -1172,6 +1172,7 @@ fn done_reads_in_every_locale() {
             not_reached("reapack", "sws"),
         ]),
         report(vendor_outcomes()),
+        report(vendor_outcomes_to_check()),
         report(vec![pending_restart_surge()]),
         report(vec![
             declined("sws"),
@@ -1418,7 +1419,7 @@ fn vendor_outcomes() -> Vec<UninstallReportItem> {
             UninstallStatus::Failed,
             UninstallMessage::VendorStillThere {
                 still_present: vec![PathBuf::from("C:/x")],
-                still_listed: true,
+                still_listed: Some(true),
             },
         ),
         report_item(
@@ -1453,6 +1454,139 @@ fn vendor_outcomes() -> Vec<UninstallReportItem> {
             )
         },
     ]
+}
+
+/// The vendor outcomes that say what the user can still check: a package
+/// Windows no longer lists, one whose list couldn't be read, an uninstaller
+/// RABBIT lost track of, and a working folder left behind.
+fn vendor_outcomes_to_check() -> Vec<UninstallReportItem> {
+    let still_there = |package_id: &str, still_listed| {
+        report_item(
+            package_id,
+            UninstallStatus::Failed,
+            UninstallMessage::VendorStillThere {
+                still_present: vec![PathBuf::from(
+                    "C:/Program Files/Common Files/VST3/Surge Synth Team/Surge XT.vst3",
+                )],
+                still_listed,
+            },
+        )
+    };
+    vec![
+        still_there("surge-xt", Some(false)),
+        UninstallReportItem {
+            problems: vec![
+                UninstallProblem::InstalledListUnreadable {
+                    error: "denied".to_string(),
+                },
+                UninstallProblem::RestartListUnreadable {
+                    error: "denied".to_string(),
+                },
+            ],
+            ..still_there("osara", None)
+        },
+        report_item(
+            "reaper",
+            UninstallStatus::Failed,
+            UninstallMessage::VendorLost {
+                error: "the pipe broke".to_string(),
+            },
+        ),
+        report_item(
+            "reapack",
+            UninstallStatus::Failed,
+            UninstallMessage::VendorLost {
+                error: "the pipe broke".to_string(),
+            },
+        ),
+        UninstallReportItem {
+            problems: vec![UninstallProblem::VendorWorkingFolderLeft {
+                path: PathBuf::from("C:/ProgramData/RABBIT-uninstall-0123"),
+                error: "in use".to_string(),
+            }],
+            ..report_item(
+                "sws",
+                UninstallStatus::Removed,
+                UninstallMessage::UninstalledByVendor,
+            )
+        },
+    ]
+}
+
+/// Windows Settings is only worth naming while Windows still lists the
+/// package. Once its own uninstaller took the entry, Done says some files
+/// are left and that Windows no longer lists it; when the list couldn't be
+/// read, it claims neither.
+#[test]
+fn a_package_windows_no_longer_lists_isnt_sent_to_windows_settings() {
+    let settings = "You can uninstall it in Windows Settings";
+    let reasons = |items| uninstall_reasons(&en(), &report(items));
+    let listed = reasons(vendor_outcomes());
+    assert!(
+        listed.iter().any(|reason| reason.contains(settings)),
+        "{listed:#?}"
+    );
+
+    let reasons = reasons(vendor_outcomes_to_check());
+    assert!(
+        !reasons.iter().any(|reason| reason.contains(settings)),
+        "{reasons:#?}"
+    );
+    for sentence in [
+        "Surge XT's own uninstaller finished, but some of its files are still there. Show \
+         details lists them.",
+        "Windows no longer lists Surge XT among the installed programs, so it isn't in Windows \
+         Settings either.",
+        "OSARA's own uninstaller finished, but some of its files are still there.",
+        "couldn't check whether Windows still lists OSARA.",
+        "so it can't tell whether the files of OSARA that are left go then.",
+    ] {
+        assert!(
+            reasons.iter().any(|reason| reason.contains(sentence)),
+            "{sentence}: {reasons:#?}"
+        );
+    }
+    assert!(
+        !reasons
+            .iter()
+            .any(|reason| reason.contains("Windows no longer lists OSARA")),
+        "{reasons:#?}"
+    );
+}
+
+/// An uninstaller RABBIT lost track of may still be running: Done says so,
+/// and for REAPER's, to check that REAPER's settings survived. A working
+/// folder RABBIT couldn't remove is named, so the user can find it.
+#[test]
+fn a_lost_uninstaller_and_a_folder_left_behind_are_said() {
+    let report = report(vendor_outcomes_to_check());
+    let reasons = uninstall_reasons(&en(), &report);
+    for sentence in [
+        "RABBIT lost track of REAPER's own uninstaller after it started. It may still be \
+         running, so RABBIT can't tell what it removed, and stopped there.",
+        "RABBIT lost track of ReaPack's own uninstaller after it started.",
+        "check that reaper.ini is still in REAPER's resource folder",
+        "RABBIT couldn't remove C:/ProgramData/RABBIT-uninstall-0123, the folder it ran SWS \
+         Extension's uninstaller from. Only an administrator can delete it.",
+    ] {
+        assert!(
+            reasons.iter().any(|reason| reason.contains(sentence)),
+            "{sentence}: {reasons:#?}"
+        );
+    }
+    // REAPER's settings only come up for REAPER's uninstaller.
+    assert_eq!(
+        reasons
+            .iter()
+            .filter(|reason| reason.contains("reaper.ini"))
+            .count(),
+        1,
+        "{reasons:#?}"
+    );
+    assert_eq!(
+        outcome(&report).status,
+        UninstallOutcomeStatus::CompletedWithProblems
+    );
 }
 
 /// A removal that finishes after a restart says so: on Done's first line,

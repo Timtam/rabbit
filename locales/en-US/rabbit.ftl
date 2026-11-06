@@ -516,8 +516,9 @@ wizard-done-uninstall-language-reset-failed = RABBIT couldn't set REAPER back to
 wizard-done-uninstall-registry-failed = RABBIT uninstalled { $package }, but Windows' list of installed programs may still show it. Show details names the entry.
 # After a package's own uninstaller ran, or was to run. $package is the
 # localized package name, $code a number, $error an error message in
-# English, and $paths a comma-separated list of full paths. Name "Show
-# details" as wizard-done-show-details does, and Alt+Tab as Windows does.
+# English, $path a full path, and $paths a comma-separated list of full
+# paths. Name "Show details" as wizard-done-show-details does, and Alt+Tab
+# as Windows does.
 wizard-done-uninstall-pending-restart = Restart your computer to finish removing { $package }.
 wizard-done-uninstall-vendor-cancelled = { $package }'s own uninstaller was cancelled before it finished.
 wizard-done-uninstall-vendor-failed = { $package }'s own uninstaller ended with error code { $code }. Show details lists what is still there.
@@ -527,6 +528,13 @@ wizard-done-uninstall-vendor-run-failed = RABBIT couldn't finish running { $pack
 wizard-done-uninstall-elevation-failed = RABBIT couldn't get administrator rights ({ $error }), so nothing was uninstalled.
 wizard-done-uninstall-resource-damaged = Important: after { $package }'s own uninstaller ran, these files were missing from REAPER's resource folder: { $paths }. RABBIT stopped and wrote its records again. It can't bring REAPER's settings back; if you have a copy of reaper.ini, put it back before you start REAPER.
 wizard-done-uninstall-receipt-not-saved = RABBIT uninstalled { $package }, but couldn't update its records. The next time RABBIT runs, it finds { $package } gone all the same.
+wizard-done-uninstall-vendor-lost = RABBIT lost track of { $package }'s own uninstaller after it started. It may still be running, so RABBIT can't tell what it removed, and stopped there.
+wizard-done-uninstall-vendor-lost-reaper = Once the uninstaller has finished, check that reaper.ini is still in REAPER's resource folder: it holds your REAPER settings.
+wizard-done-uninstall-vendor-files-left = { $package }'s own uninstaller finished, but some of its files are still there. Show details lists them.
+wizard-done-uninstall-vendor-not-listed = Windows no longer lists { $package } among the installed programs, so it isn't in Windows Settings either.
+wizard-done-uninstall-working-folder-left = RABBIT couldn't remove { $path }, the folder it ran { $package }'s uninstaller from. Only an administrator can delete it.
+wizard-done-uninstall-restart-list-unreadable = RABBIT couldn't read which files Windows removes at the next restart, so it can't tell whether the files of { $package } that are left go then.
+wizard-done-uninstall-installed-list-unreadable = RABBIT couldn't read Windows' list of installed programs after { $package }'s uninstaller, so it couldn't check whether Windows still lists { $package }.
 wizard-done-show-details = Show details
 # Mnemonic messages are single-character native access keys. Choose a character
 # from the translated label when possible.

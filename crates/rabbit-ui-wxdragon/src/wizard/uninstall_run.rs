@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use rabbit_core::localization::Localizer;
 use rabbit_core::model::InstallationKind;
+use rabbit_core::package::PACKAGE_REAPER;
 use rabbit_core::preflight::{
     PreflightCheck, PreflightReport, PreflightStatus, REAPER_PROCESS_CHECK,
 };
@@ -484,9 +485,18 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
             "code",
             &exit_code.to_string(),
         )),
-        UninstallMessage::VendorStillThere { .. } => {
-            reasons.push(with_package("wizard-done-uninstall-vendor-still-there"));
-        }
+        // Windows Settings only helps while Windows still lists the
+        // package; once its entry is gone, sending the user there leads
+        // nowhere.
+        UninstallMessage::VendorStillThere { still_listed, .. } => match still_listed {
+            Some(true) => reasons.push(with_package("wizard-done-uninstall-vendor-still-there")),
+            Some(false) => {
+                reasons.push(with_package("wizard-done-uninstall-vendor-files-left"));
+                reasons.push(with_package("wizard-done-uninstall-vendor-not-listed"));
+            }
+            // A problem below says the list couldn't be read.
+            None => reasons.push(with_package("wizard-done-uninstall-vendor-files-left")),
+        },
         UninstallMessage::VendorStillOpen { .. } => {
             reasons.push(with_package("wizard-done-uninstall-vendor-still-open"));
         }
@@ -495,6 +505,17 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
             "error",
             error,
         )),
+        UninstallMessage::VendorLost { .. } => {
+            reasons.push(with_package("wizard-done-uninstall-vendor-lost"));
+            // Only REAPER's uninstaller works next to REAPER's settings.
+            if item.package_id == PACKAGE_REAPER {
+                reasons.push(
+                    localizer
+                        .text("wizard-done-uninstall-vendor-lost-reaper")
+                        .value,
+                );
+            }
+        }
         UninstallMessage::ElevationFailed { error } => reasons.push(with(
             "wizard-done-uninstall-elevation-failed",
             "error",
@@ -570,6 +591,21 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
             }
             UninstallProblem::ReceiptNotSaved { .. } => {
                 reasons.push(with_package("wizard-done-uninstall-receipt-not-saved"));
+            }
+            UninstallProblem::VendorWorkingFolderLeft { path, .. } => reasons.push(with(
+                "wizard-done-uninstall-working-folder-left",
+                "path",
+                &path.display().to_string(),
+            )),
+            UninstallProblem::RestartListUnreadable { .. } => {
+                reasons.push(with_package(
+                    "wizard-done-uninstall-restart-list-unreadable",
+                ));
+            }
+            UninstallProblem::InstalledListUnreadable { .. } => {
+                reasons.push(with_package(
+                    "wizard-done-uninstall-installed-list-unreadable",
+                ));
             }
         }
     }
@@ -749,9 +785,11 @@ fn registry_lines(localizer: &Localizer, item: &UninstallReportItem) -> Vec<Stri
             "wizard-summary-registry-failed",
             &[("key", key.as_str()), ("error", error.as_str())],
         )),
-        UninstallProblem::LanguageResetFailed { .. } | UninstallProblem::ReceiptNotSaved { .. } => {
-            None
-        }
+        UninstallProblem::LanguageResetFailed { .. }
+        | UninstallProblem::ReceiptNotSaved { .. }
+        | UninstallProblem::VendorWorkingFolderLeft { .. }
+        | UninstallProblem::RestartListUnreadable { .. }
+        | UninstallProblem::InstalledListUnreadable { .. } => None,
     }));
     lines
 }

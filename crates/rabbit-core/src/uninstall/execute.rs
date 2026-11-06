@@ -58,7 +58,7 @@ use crate::error::Result;
 use crate::lock::acquire_package_install_lock;
 use crate::model::{ComponentDetection, InstallationKind, Platform};
 use crate::package::uninstall::UninstallPostStep;
-use crate::package::{PackageSpec, builtin_package_specs};
+use crate::package::{PACKAGE_REAPER, PackageSpec, builtin_package_specs};
 use crate::preflight::{
     PreflightCheck, PreflightStatus, REAPER_PROCESS_CHECK, RunningProcess,
     ensure_resource_path_ready, portable_target_app_path, running_processes_named,
@@ -72,7 +72,7 @@ use crate::receipt::{
 use crate::rollback::{BackupPackageRecord, BackupSetWriter, FileDigest, MoveFileError, MovedFile};
 
 use super::helper::{ElevatedHelper, ElevatedRunRequest, ElevatedSession, ElevationStartError};
-use super::paths::{UninstallRoots, absolute, same_ignoring_case};
+use super::paths::{UninstallRoots, absolute, inside_or_same, same_ignoring_case};
 use super::plan::{
     UninstallPlanInput, build_uninstall_plan, installed_by_reapack, reapack_counts_as_installed,
 };
@@ -83,7 +83,9 @@ use super::preflight::{
     blocking_programs, crosses_volumes, process_checks, run_uninstall_preflight_with,
 };
 use super::registry::clean_registry_entries;
-use super::vendor::{VendorEvent, VendorLookup, VendorOutcome, VendorRefusal, VendorStatus};
+use super::vendor::{
+    VendorEvent, VendorLookup, VendorOutcome, VendorProblem, VendorRefusal, VendorStatus,
+};
 use super::{
     KeptFile, KeptFileReason, RegistryEntryAction, Removability, RemovalReason, RemovedFile,
     UninstallMessage, UninstallPlan, UninstallPlanItem, UninstallProblem, UninstallReport,
@@ -588,6 +590,7 @@ fn stops_the_run(item: &UninstallReportItem) -> bool {
             item.message_code,
             UninstallMessage::VendorStillOpen { .. }
                 | UninstallMessage::VendorRunFailed { .. }
+                | UninstallMessage::VendorLost { .. }
                 | UninstallMessage::ResourceFolderDamaged { .. }
         )
 }
@@ -602,6 +605,46 @@ fn guarded_files(resource: &Path) -> Vec<PathBuf> {
         .into_iter()
         .filter(|path| fs::symlink_metadata(path).is_ok())
         .collect()
+}
+
+/// Whether fresh detection finds the package only through what Windows
+/// removes at the next restart, after its uninstaller reported exactly
+/// that. Something detection found must be at or under a path the restart
+/// takes: one of `still_present`, each of which has a removal queued below
+/// it, or one of `pending_restart`. And nothing it found that the plan's
+/// `verify_gone` names may be anything else. Its other files, such as a
+/// vendor data folder a receipt lists next to the plug-in, don't place the
+/// package on their own: a receipt only counts while every file it lists is
+/// there.
+fn found_only_pending_files(
+    detection: &ComponentDetection,
+    outcome: &VendorOutcome,
+    plan_item: &UninstallPlanItem,
+) -> bool {
+    let pending = |path: &Path| {
+        outcome
+            .still_present
+            .iter()
+            .chain(&outcome.pending_restart)
+            .any(|going| inside_or_same(path, going))
+    };
+    let to_go = |path: &Path| {
+        plan_item.vendor_run.as_ref().is_some_and(|run| {
+            run.verify_gone
+                .iter()
+                .any(|gone| inside_or_same(path, gone))
+        })
+    };
+    let found: Vec<&PathBuf> = detection
+        .files
+        .iter()
+        .filter(|path| fs::symlink_metadata(path).is_ok())
+        .collect();
+    found.iter().any(|path| pending(path))
+        && found
+            .iter()
+            .filter(|path| to_go(path))
+            .all(|path| pending(path))
 }
 
 /// What a vendor run left behind that should have gone: what
@@ -750,8 +793,24 @@ impl RemovalRun<'_> {
             detections
                 .into_iter()
                 .find(|detection| detection.package_id == id && detection.installed)
+                // Detection still sees the files Windows removes at the
+                // next restart; finding the package only through them is
+                // what "removed pending a restart" means, not a failure.
+                .filter(|detection| {
+                    outcome.status != VendorStatus::RemovedPendingRestart
+                        || !found_only_pending_files(detection, &outcome, plan_item)
+                })
         });
         let still_installed = detected.as_ref().map(Option::is_some);
+        // Windows' list after the run, as far as RABBIT could read it.
+        let still_listed = (!outcome
+            .problems
+            .iter()
+            .any(|problem| matches!(problem, VendorProblem::ListUnreadable { .. })))
+        .then_some(outcome.still_listed);
+        // The uninstaller started and nobody saw it end: the helper went
+        // away, or waiting for it failed. It may still be at work.
+        let end_unknown = outcome.launched && outcome.exit_code.is_none();
 
         let (status, code) = match outcome.status {
             VendorStatus::Refused => (
@@ -779,12 +838,15 @@ impl RemovalRun<'_> {
             VendorStatus::Failed => (
                 UninstallStatus::Failed,
                 match (&outcome.error, outcome.exit_code) {
+                    (Some(error), _) if end_unknown => UninstallMessage::VendorLost {
+                        error: error.clone(),
+                    },
                     (Some(error), _) => UninstallMessage::VendorRunFailed {
                         error: error.clone(),
                     },
                     (None, Some(0)) => UninstallMessage::VendorStillThere {
                         still_present: outcome.still_present.clone(),
-                        still_listed: outcome.still_listed,
+                        still_listed,
                     },
                     (None, Some(exit_code)) => UninstallMessage::VendorFailed { exit_code },
                     (None, None) => UninstallMessage::VendorRunFailed {
@@ -806,7 +868,9 @@ impl RemovalRun<'_> {
                             .filter(|path| fs::symlink_metadata(path).is_ok())
                             .cloned()
                             .collect(),
-                        still_listed: false,
+                        // A removal is only reported once the entry is
+                        // gone from the list the runner read.
+                        still_listed: Some(false),
                     },
                 ),
                 _ => (
@@ -819,12 +883,15 @@ impl RemovalRun<'_> {
         let mut item = new_item(plan_item, status, code);
         item.pending_restart = outcome.pending_restart.clone();
         item.leftovers = vendor_leftovers(&outcome);
+        item.problems
+            .extend(outcome.problems.iter().map(UninstallProblem::from_vendor));
 
-        // Once the uninstaller has started, the receipt follows fresh
+        // Once the uninstaller has ended, the receipt follows fresh
         // detection: the entry goes when the package is gone, and stays
-        // while anything of it is found. An uninstaller still at work
-        // leaves the receipt alone; nobody can say yet what it removes.
-        let follows_detection = outcome.launched && outcome.status != VendorStatus::StillRunning;
+        // while anything of it is found. An uninstaller that may still be
+        // at work, still open at its time limit or lost track of, leaves
+        // the receipt alone; nobody can say yet what it removes.
+        let follows_detection = outcome.launched && !end_unknown;
         let mut receipt_changed = false;
         if follows_detection && still_installed == Some(false) {
             remove_package_receipt(&mut self.state, id);
@@ -1508,8 +1575,16 @@ fn english_message(item: &UninstallReportItem) -> String {
             if !still_present.is_empty() {
                 message.push_str(&format!(" Still there: {}.", path_list(still_present)));
             }
-            if *still_listed {
-                message.push_str(" Windows still lists it among the installed programs.");
+            // When the list couldn't be read, a problem says so.
+            match still_listed {
+                Some(true) => {
+                    message.push_str(" Windows still lists it among the installed programs.");
+                }
+                Some(false) => message.push_str(
+                    " Windows no longer lists it among the installed programs, so it isn't in \
+                     Windows Settings either.",
+                ),
+                None => {}
             }
             message
         }
@@ -1522,6 +1597,21 @@ fn english_message(item: &UninstallReportItem) -> String {
             "RABBIT couldn't finish running {name}'s own uninstaller, so it stopped there: \
              {error}"
         ),
+        UninstallMessage::VendorLost { error } => {
+            let mut message = format!(
+                "RABBIT lost track of {name}'s own uninstaller after it started ({error}). It \
+                 may still be running, so RABBIT can't tell what it removed. RABBIT stopped \
+                 there, so the packages after it weren't touched, and its receipt still lists \
+                 {name}."
+            );
+            if item.package_id == PACKAGE_REAPER {
+                message.push_str(
+                    " Once the uninstaller has finished, check that reaper.ini is still in \
+                     REAPER's resource folder: it holds your REAPER settings.",
+                );
+            }
+            message
+        }
         UninstallMessage::ElevationDeclined => format!(
             "The Windows permission prompt was declined, so RABBIT uninstalled nothing; {name} \
              is still installed."

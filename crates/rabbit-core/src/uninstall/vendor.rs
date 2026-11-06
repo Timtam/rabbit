@@ -551,7 +551,8 @@ pub struct VendorOutcome {
     /// What `verify_gone` names that is still there afterwards.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub still_present: Vec<PathBuf>,
-    /// Windows still lists the program afterwards.
+    /// Windows still lists the program afterwards. `false` also when its
+    /// list couldn't be read; a `ListUnreadable` problem then says so.
     pub still_listed: bool,
     /// Files Windows removes at the next restart that belong to the
     /// package.
@@ -1465,8 +1466,11 @@ fn verify_gone(
             .filter(|path| fs::symlink_metadata(path).is_ok())
             .cloned()
             .collect();
-        let still_listed = match env.uninstall_views().views_with_key(&located.key) {
-            Ok(views) => views.contains(&located.view),
+        // `None` when the list can't be read: then the entry may still be
+        // there, so nothing counts as gone, and the report says only that
+        // RABBIT couldn't check, never that Windows still lists it.
+        let listed = match env.uninstall_views().views_with_key(&located.key) {
+            Ok(views) => Some(views.contains(&located.view)),
             Err(error) => {
                 record_once(
                     &mut outcome.problems,
@@ -1474,15 +1478,15 @@ fn verify_gone(
                         error: error.to_string(),
                     },
                 );
-                true
+                None
             }
         };
         outcome.still_present = still_present.clone();
-        outcome.still_listed = still_listed;
-        if still_present.is_empty() && !still_listed {
+        outcome.still_listed = listed == Some(true);
+        if still_present.is_empty() && listed == Some(false) {
             return Verdict::Gone;
         }
-        if !still_listed {
+        if listed == Some(false) {
             match env.pending_file_renames() {
                 Ok(renames) => {
                     let pending = pending_under(&renames, &still_present);
