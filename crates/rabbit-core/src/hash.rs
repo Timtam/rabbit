@@ -8,11 +8,18 @@ use crate::error::{IoPathContext, Result};
 
 pub fn sha256_file(path: &Path) -> Result<String> {
     let mut file = File::open(path).with_path(path)?;
+    sha256_reader(&mut file).with_path(path)
+}
+
+/// SHA-256 of everything `reader` yields from where it stands, hex-encoded.
+/// For a file already held open, such as one locked against changes
+/// between its hash check and its start.
+pub fn sha256_reader(reader: &mut dyn Read) -> std::io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
 
     loop {
-        let read = file.read(&mut buffer).with_path(path)?;
+        let read = reader.read(&mut buffer)?;
         if read == 0 {
             break;
         }
@@ -47,7 +54,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{sha256_bytes, sha256_file};
+    use super::{sha256_bytes, sha256_file, sha256_reader};
 
     #[test]
     fn hashes_file_content() {
@@ -70,5 +77,13 @@ mod tests {
         fs::write(&file, b"rabbit").unwrap();
 
         assert_eq!(sha256_bytes(b"rabbit"), sha256_file(&file).unwrap());
+    }
+
+    #[test]
+    fn hashes_an_open_reader_like_a_file() {
+        assert_eq!(
+            sha256_reader(&mut &b"rabbit"[..]).unwrap(),
+            sha256_bytes(b"rabbit")
+        );
     }
 }

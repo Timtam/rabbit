@@ -29,6 +29,7 @@
 pub mod execute;
 #[cfg(test)]
 mod execute_tests;
+pub mod helper;
 #[cfg(test)]
 mod manifest_tests;
 pub mod paths;
@@ -38,6 +39,7 @@ pub mod preflight;
 mod registry;
 #[cfg(test)]
 mod tests;
+pub mod vendor;
 
 use std::path::{Path, PathBuf};
 
@@ -52,13 +54,21 @@ use crate::report::{SavedReportPaths, default_report_path, save_json_and_text_re
 use crate::version::Version;
 
 pub use execute::{execute_uninstall, plan_uninstall_at};
-pub use paths::{PathRefusal, RemovalGuard, UninstallRoots, check_removal};
+pub use helper::{
+    ElevatedHelper, ElevatedRunRequest, ElevatedSession, ElevationStartError, HELPER_SUBCOMMAND,
+    HelperArgs, InProcessElevatedHelper, MachineFolders, SystemElevatedHelper, run_elevated_helper,
+};
+pub use paths::{PathRefusal, RemovalGuard, UninstallRoots, check_link_removal, check_removal};
 pub use plan::{UninstallPlanInput, build_uninstall_plan};
 pub use preflight::{
     ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, BACKUP_SPACE_MARGIN, PROGRAMS_RUNNING_CHECK,
     UninstallPreflightOptions, run_uninstall_preflight, run_uninstall_preflight_with_processes,
 };
 pub(crate) use registry::{points_into, program_named_by};
+pub use vendor::{
+    VendorEnvironment, VendorEvent, VendorOutcome, VendorRefusal, VendorStatus,
+    run_vendor_uninstaller,
+};
 
 /// The note key a package without any plan for this target shows, the same
 /// one manifests use while a package's turn hasn't come.

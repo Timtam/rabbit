@@ -98,6 +98,31 @@ uninstall-manual-reaper-portable = RABBIT doesn't remove a portable REAPER: REAP
     3. Delete the portable REAPER folder.
     The backups RABBIT made for this REAPER are in that folder too, in RABBIT\backups, and go with it.
 
+# Why RABBIT didn't start a program's own uninstaller, which it runs with
+# administrator rights. Nothing has changed at that point. RABBIT shows one
+# of these, then uninstall-vendor-refused-nothing-changed.
+# { $package } is the package's name, such as Surge XT or REAPER.
+# { $path } is a file, a folder or a value as Windows holds it; keep it as it
+# is.
+uninstall-vendor-refused-not-listed = Windows doesn't list { $package } among the programs installed for all users, so RABBIT can't find its uninstaller.
+uninstall-vendor-refused-unclear-command = RABBIT can't tell which program Windows names as { $package }'s uninstaller: { $path }
+uninstall-vendor-refused-not-a-full-path = Windows names { $package }'s uninstaller by a path RABBIT doesn't trust: { $path }
+uninstall-vendor-refused-unknown-folder = RABBIT can't find a folder it needs to check { $package }'s uninstaller.
+uninstall-vendor-refused-wrong-folder = { $package }'s uninstaller isn't in the folder it belongs in: { $path }
+uninstall-vendor-refused-foreign-file = Next to { $package }'s uninstaller is a file that doesn't belong there: { $path }
+uninstall-vendor-refused-folder-or-link = Next to { $package }'s uninstaller is a folder or a link that doesn't belong there: { $path }
+uninstall-vendor-refused-untrusted-owner = Next to { $package }'s uninstaller is a file an administrator didn't put there: { $path }
+uninstall-vendor-refused-install-location-missing = Windows doesn't say which folder { $package } is installed in.
+uninstall-vendor-refused-install-location-mismatch = Windows says { $package } is installed in { $path }, not in the REAPER you chose.
+uninstall-vendor-refused-not-in-install-folder = { $package }'s uninstaller isn't in its program folder: { $path }
+uninstall-vendor-refused-not-below-program-files = { $package } isn't installed in a folder of its own in Program Files: { $path }
+uninstall-vendor-refused-copy-differs = The copy RABBIT made of { $package }'s uninstaller isn't the same as the original.
+uninstall-vendor-refused-unreadable = RABBIT couldn't read { $path } to check { $package }'s uninstaller.
+uninstall-vendor-refused-not-a-vendor-plan = RABBIT has no uninstaller for { $package } that it may run.
+uninstall-vendor-refused-unsupported = RABBIT can run { $package }'s uninstaller only on Windows.
+# Follows each of the messages above. { $package } as above.
+uninstall-vendor-refused-nothing-changed = Nothing was changed. You can uninstall { $package } in Windows Settings, under Apps, Installed apps.
+
 # $reason is one of the localized "wizard-package-row-unavailable-*" strings
 # explaining *why* the row is unavailable. Appended to the row's main summary
 # in the package CheckListBox.

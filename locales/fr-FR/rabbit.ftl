@@ -98,6 +98,31 @@ uninstall-manual-reaper-portable = RABBIT ne supprime pas un REAPER portable : l
     3. Supprimez le dossier du REAPER portable.
     Les sauvegardes que RABBIT a faites pour ce REAPER se trouvent aussi dans ce dossier, sous RABBIT\backups, et disparaissent avec lui.
 
+# Why RABBIT didn't start a program's own uninstaller, which it runs with
+# administrator rights. Nothing has changed at that point. RABBIT shows one
+# of these, then uninstall-vendor-refused-nothing-changed.
+# { $package } is the package's name, such as Surge XT or REAPER.
+# { $path } is a file, a folder or a value as Windows holds it; keep it as it
+# is.
+uninstall-vendor-refused-not-listed = Windows ne compte pas { $package } parmi les programmes installés pour tous les utilisateurs, donc RABBIT ne trouve pas son programme de désinstallation.
+uninstall-vendor-refused-unclear-command = RABBIT ne sait pas quel programme Windows indique comme programme de désinstallation de { $package } : { $path }
+uninstall-vendor-refused-not-a-full-path = Windows indique le programme de désinstallation de { $package } par un chemin auquel RABBIT ne fait pas confiance : { $path }
+uninstall-vendor-refused-unknown-folder = RABBIT ne trouve pas un dossier dont il a besoin pour vérifier le programme de désinstallation de { $package }.
+uninstall-vendor-refused-wrong-folder = Le programme de désinstallation de { $package } n'est pas dans le dossier où il doit être : { $path }
+uninstall-vendor-refused-foreign-file = À côté du programme de désinstallation de { $package } se trouve un fichier qui n'a rien à y faire : { $path }
+uninstall-vendor-refused-folder-or-link = À côté du programme de désinstallation de { $package } se trouve un dossier ou un lien qui n'a rien à y faire : { $path }
+uninstall-vendor-refused-untrusted-owner = À côté du programme de désinstallation de { $package } se trouve un fichier qu'aucun administrateur n'y a mis : { $path }
+uninstall-vendor-refused-install-location-missing = Windows n'indique pas dans quel dossier { $package } est installé.
+uninstall-vendor-refused-install-location-mismatch = D'après Windows, { $package } est installé dans { $path }, et non dans le REAPER que vous avez choisi.
+uninstall-vendor-refused-not-in-install-folder = Le programme de désinstallation de { $package } n'est pas dans son dossier de programme : { $path }
+uninstall-vendor-refused-not-below-program-files = { $package } n'est pas installé dans un dossier à lui sous Programmes (Program Files) : { $path }
+uninstall-vendor-refused-copy-differs = La copie que RABBIT a faite du programme de désinstallation de { $package } n'est pas identique à l'original.
+uninstall-vendor-refused-unreadable = RABBIT n'a pas pu lire { $path } pour vérifier le programme de désinstallation de { $package }.
+uninstall-vendor-refused-not-a-vendor-plan = RABBIT n'a aucun programme de désinstallation de { $package } qu'il ait le droit de lancer.
+uninstall-vendor-refused-unsupported = RABBIT ne peut lancer le programme de désinstallation de { $package } que sous Windows.
+# Follows each of the messages above. { $package } as above.
+uninstall-vendor-refused-nothing-changed = Rien n'a été modifié. Vous pouvez désinstaller { $package } dans les Paramètres de Windows, sous Applications, Applications installées.
+
 # $reason is one of the localized "wizard-package-row-unavailable-*" strings
 # explaining *why* the row is unavailable. Appended to the row's main summary
 # in the package CheckListBox.

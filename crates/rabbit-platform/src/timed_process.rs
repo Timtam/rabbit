@@ -157,24 +157,20 @@ impl TimedCommand {
         still_waiting_after: Duration,
         on_still_waiting: &mut dyn FnMut(),
     ) -> io::Result<TimedRunOutcome> {
+        self.start()?
+            .wait(timeout, still_waiting_after, on_still_waiting)
+    }
+
+    /// Start the program and return at once; [`RunningCommand::wait`] then
+    /// waits for it. Between the two the caller can let go of what it held
+    /// until the program had started, such as a lock on the program's file.
+    pub fn start(&self) -> io::Result<RunningCommand> {
         let mut command = self.command()?;
-        let mut child = command.spawn()?;
-        let started = Instant::now();
-        let mut said_still_waiting = false;
-        loop {
-            if let Some(status) = child.try_wait()? {
-                return Ok(TimedRunOutcome::Exited(exit_code(status)));
-            }
-            let elapsed = started.elapsed();
-            if elapsed >= timeout {
-                return Ok(TimedRunOutcome::TimedOut(child));
-            }
-            if !said_still_waiting && elapsed >= still_waiting_after {
-                said_still_waiting = true;
-                on_still_waiting();
-            }
-            std::thread::sleep(POLL_INTERVAL.min(timeout - elapsed));
-        }
+        let child = command.spawn()?;
+        Ok(RunningCommand {
+            child,
+            started: Instant::now(),
+        })
     }
 
     fn command(&self) -> io::Result<Command> {
@@ -195,6 +191,47 @@ impl TimedCommand {
             append_unquoted(&mut command, argument)?;
         }
         Ok(command)
+    }
+}
+
+/// A program [`TimedCommand::start`] started and nobody has waited for yet.
+/// Dropping it leaves the program running.
+#[derive(Debug)]
+pub struct RunningCommand {
+    child: Child,
+    started: Instant,
+}
+
+impl RunningCommand {
+    /// The program's process ID.
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Wait for the program until `timeout` after it started, as
+    /// [`TimedCommand::run`] does; `still_waiting_after` counts from the
+    /// start too.
+    pub fn wait(
+        mut self,
+        timeout: Duration,
+        still_waiting_after: Duration,
+        on_still_waiting: &mut dyn FnMut(),
+    ) -> io::Result<TimedRunOutcome> {
+        let mut said_still_waiting = false;
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                return Ok(TimedRunOutcome::Exited(exit_code(status)));
+            }
+            let elapsed = self.started.elapsed();
+            if elapsed >= timeout {
+                return Ok(TimedRunOutcome::TimedOut(self.child));
+            }
+            if !said_still_waiting && elapsed >= still_waiting_after {
+                said_still_waiting = true;
+                on_still_waiting();
+            }
+            std::thread::sleep(POLL_INTERVAL.min(timeout - elapsed));
+        }
     }
 }
 
@@ -428,6 +465,32 @@ mod windows_tests {
         assert!(child.try_wait().unwrap().is_none(), "still running");
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    /// `start` returns while the program runs, so the caller can let go of
+    /// a lock on its file, and `wait` then reports how it ended.
+    #[test]
+    fn a_started_program_is_waited_for_afterwards() {
+        let scratch = tempfile::tempdir().unwrap();
+        let report = scratch.path().join("command line.txt");
+        let mut command = this_binary_running(REPORTING_CHILD);
+        command.env(REPORT_TO, &report);
+
+        let running = command.start().unwrap();
+        assert_ne!(running.id(), std::process::id());
+        let outcome = running
+            .wait(
+                Duration::from_secs(120),
+                Duration::from_secs(120),
+                &mut || {},
+            )
+            .unwrap();
+
+        assert!(
+            matches!(outcome, TimedRunOutcome::Exited(CHILD_EXIT_CODE)),
+            "{outcome:?}"
+        );
+        assert!(report.is_file());
     }
 
     #[test]

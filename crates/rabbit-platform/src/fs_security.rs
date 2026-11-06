@@ -57,7 +57,31 @@ pub fn create_admin_only_directory(parent: &Path, name_prefix: &str) -> io::Resu
 /// `C:\ProgramData` as Windows names it (`FOLDERID_ProgramData`), not as
 /// an environment variable says, so a changed environment can't move it.
 pub fn program_data_dir() -> io::Result<PathBuf> {
-    imp::program_data_dir()
+    imp::known_folder(imp::KnownFolder::ProgramData)
+}
+
+/// The Program Files folders as Windows names them, the native one first:
+/// `C:\Program Files`, then `C:\Program Files (x86)` where Windows has one.
+/// Read like [`program_data_dir`], so the elevated helper finds them
+/// whatever environment it was started with.
+pub fn machine_program_files_dirs() -> io::Result<Vec<PathBuf>> {
+    let mut folders = vec![imp::known_folder(imp::KnownFolder::ProgramFiles)?];
+    // 64-bit Windows always has the 32-bit folder; a Windows without one
+    // simply has nothing more to list.
+    if let Ok(x86) = imp::known_folder(imp::KnownFolder::ProgramFilesX86)
+        && !folders
+            .iter()
+            .any(|known| known.as_os_str().eq_ignore_ascii_case(x86.as_os_str()))
+    {
+        folders.push(x86);
+    }
+    Ok(folders)
+}
+
+/// `C:\Program Files\Common Files` as Windows names it
+/// (`FOLDERID_ProgramFilesCommon`), read like [`program_data_dir`].
+pub fn machine_common_program_files_dir() -> io::Result<PathBuf> {
+    imp::known_folder(imp::KnownFolder::ProgramFilesCommon)
 }
 
 /// Whether `sid` is one of [`TRUSTED_OWNER_SIDS`].
@@ -173,7 +197,8 @@ mod imp {
     };
     use windows_sys::Win32::System::Com::CoTaskMemFree;
     use windows_sys::Win32::UI::Shell::{
-        FOLDERID_ProgramData, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+        FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesCommon,
+        FOLDERID_ProgramFilesX86, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
     };
 
     use super::NAME_ATTEMPTS;
@@ -215,17 +240,27 @@ mod imp {
         ))
     }
 
-    pub(super) fn program_data_dir() -> io::Result<PathBuf> {
+    /// The machine-wide folders RABBIT asks Windows for by name.
+    #[derive(Debug, Clone, Copy)]
+    pub(super) enum KnownFolder {
+        ProgramData,
+        ProgramFiles,
+        ProgramFilesX86,
+        ProgramFilesCommon,
+    }
+
+    pub(super) fn known_folder(folder: KnownFolder) -> io::Result<PathBuf> {
+        let id = match folder {
+            KnownFolder::ProgramData => &FOLDERID_ProgramData,
+            KnownFolder::ProgramFiles => &FOLDERID_ProgramFiles,
+            KnownFolder::ProgramFilesX86 => &FOLDERID_ProgramFilesX86,
+            KnownFolder::ProgramFilesCommon => &FOLDERID_ProgramFilesCommon,
+        };
         let mut path = std::ptr::null_mut();
         // SAFETY: a null token means the current user; `path` is a valid
         // place for the string Windows allocates.
         let result = unsafe {
-            SHGetKnownFolderPath(
-                &FOLDERID_ProgramData,
-                KF_FLAG_DEFAULT as u32,
-                std::ptr::null_mut(),
-                &mut path,
-            )
+            SHGetKnownFolderPath(id, KF_FLAG_DEFAULT as u32, std::ptr::null_mut(), &mut path)
         };
         let found = if result >= 0 && !path.is_null() {
             let mut length = 0;
@@ -303,7 +338,15 @@ mod imp {
         Err(unsupported())
     }
 
-    pub(super) fn program_data_dir() -> io::Result<PathBuf> {
+    #[derive(Debug, Clone, Copy)]
+    pub(super) enum KnownFolder {
+        ProgramData,
+        ProgramFiles,
+        ProgramFilesX86,
+        ProgramFilesCommon,
+    }
+
+    pub(super) fn known_folder(_folder: KnownFolder) -> io::Result<PathBuf> {
         Err(unsupported())
     }
 
@@ -368,6 +411,8 @@ mod tests {
         for error in [
             create_admin_only_directory(scratch.path(), "rabbit").unwrap_err(),
             program_data_dir().unwrap_err(),
+            machine_program_files_dirs().unwrap_err(),
+            machine_common_program_files_dir().unwrap_err(),
             file_owner_sid(&file).unwrap_err(),
             LockedFile::open(&file).unwrap_err(),
         ] {
@@ -457,6 +502,43 @@ mod windows_tests {
         let program_data = program_data_dir().unwrap();
         assert!(program_data.is_absolute(), "{}", program_data.display());
         assert!(program_data.is_dir(), "{}", program_data.display());
+    }
+
+    /// The known folders are the ones Windows' own environment variables
+    /// name in a normal session, read without asking the environment.
+    #[test]
+    fn program_files_and_common_files_are_the_known_folders() {
+        let same = |known: &Path, variable: &str| {
+            let Some(from_environment) = std::env::var_os(variable) else {
+                return;
+            };
+            assert!(
+                known.as_os_str().eq_ignore_ascii_case(&from_environment),
+                "{variable}: {} vs {}",
+                known.display(),
+                Path::new(&from_environment).display()
+            );
+        };
+        let program_files = machine_program_files_dirs().unwrap();
+        assert!(!program_files.is_empty());
+        for folder in &program_files {
+            assert!(
+                folder.is_absolute() && folder.is_dir(),
+                "{}",
+                folder.display()
+            );
+        }
+        same(&program_files[0], "ProgramW6432");
+        if let Some(x86) = program_files.get(1) {
+            same(x86, "ProgramFiles(x86)");
+        }
+        let common = machine_common_program_files_dir().unwrap();
+        assert!(
+            common.is_absolute() && common.is_dir(),
+            "{}",
+            common.display()
+        );
+        same(&common, "CommonProgramW6432");
     }
 
     #[test]

@@ -49,7 +49,7 @@ pub use file_version::{
 pub use fs_security::{
     ADMINISTRATORS_ONLY_SDDL, LockedFile, TRUSTED_OWNER_SIDS, create_admin_only_directory,
     file_owner_is_trusted, file_owner_sid, is_reparse_point, is_trusted_owner_sid,
-    program_data_dir,
+    machine_common_program_files_dir, machine_program_files_dirs, program_data_dir,
 };
 pub use jaws::{JawsInstall, detect_jaws_install, detect_jaws_install_under, is_jaws_installed};
 pub use komplete_kontrol::is_komplete_kontrol_installed;
@@ -70,5 +70,5 @@ pub use registry::{
     read_uninstall_display_version, read_uninstall_install_location, read_uninstall_value,
 };
 pub use signature::{SignatureVerdict, verify_executable_signature};
-pub use timed_process::{NsisInPlaceArgument, TimedCommand, TimedRunOutcome};
+pub use timed_process::{NsisInPlaceArgument, RunningCommand, TimedCommand, TimedRunOutcome};
 pub use volume::{available_space, same_volume};

@@ -600,7 +600,45 @@ enum Command {
         #[arg(long)]
         save_report: bool,
     },
+    /// RABBIT's elevated uninstall helper. RABBIT starts it itself, with
+    /// administrator rights, while it uninstalls something that needs them;
+    /// it takes its orders over the pipe it is given, from the RABBIT that
+    /// started it, and prints nothing.
+    #[command(name = "__uninstall-helper", hide = true)]
+    UninstallHelper {
+        /// The pipe the RABBIT that started the helper made for it.
+        #[arg(long)]
+        pipe: String,
+        /// That RABBIT's process ID, which must serve the pipe.
+        #[arg(long)]
+        parent_pid: u32,
+        /// The target REAPER's resource folder.
+        #[arg(long)]
+        resource_path: PathBuf,
+        /// The target REAPER's `reaper.exe`, for REAPER's own uninstaller.
+        #[arg(long)]
+        target_app_path: Option<PathBuf>,
+        /// Whether the target is a standard or a portable REAPER.
+        #[arg(long, value_enum)]
+        target_kind: HelperTargetKind,
+        /// A package the helper may run, repeatable, in the order it may run
+        /// them.
+        #[arg(long, required = true)]
+        package: Vec<String>,
+    },
 }
+
+/// The kind of REAPER the elevated uninstall helper works on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum HelperTargetKind {
+    Standard,
+    Portable,
+}
+
+/// The hidden command RABBIT's elevated uninstall helper runs as. The
+/// binary checks for it before anything else, so the helper never borrows a
+/// console.
+pub use rabbit_core::uninstall::HELPER_SUBCOMMAND as UNINSTALL_HELPER_SUBCOMMAND;
 
 /// Shown below `rabbit uninstall --help`. Every other command that changes
 /// files has `--allow-reaper-running`; this says why uninstall doesn't.
@@ -743,7 +781,42 @@ fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         command @ Command::PortableCheck { .. } => run_portable_check(command),
         command @ Command::SelfUpdate { .. } => run_self_update(command),
         command @ Command::Plan { .. } => run_plan(command),
+        command @ Command::UninstallHelper { .. } => run_uninstall_helper(command),
     }
+}
+
+/// The elevated uninstall helper's command line, as `rabbit_core` reads it.
+fn uninstall_helper_args(command: Command) -> rabbit_core::uninstall::HelperArgs {
+    let Command::UninstallHelper {
+        pipe,
+        parent_pid,
+        resource_path,
+        target_app_path,
+        target_kind,
+        package,
+    } = command
+    else {
+        unreachable!("dispatched as Command::UninstallHelper");
+    };
+    rabbit_core::uninstall::HelperArgs {
+        pipe,
+        parent_pid,
+        resource_path,
+        target_app_path,
+        target: match target_kind {
+            HelperTargetKind::Standard => InstallationKind::Standard,
+            HelperTargetKind::Portable => InstallationKind::Portable,
+        },
+        package_ids: package,
+    }
+}
+
+/// Run as RABBIT's elevated uninstall helper and end with its exit code.
+/// It prints nothing: a release build started this way has no console, and
+/// the RABBIT that started it reads everything it needs over the pipe.
+fn run_uninstall_helper(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let code = rabbit_core::uninstall::run_elevated_helper(&uninstall_helper_args(command));
+    std::process::exit(code);
 }
 
 fn run_detect(command: Command) -> Result<(), Box<dyn std::error::Error>> {
@@ -3316,6 +3389,93 @@ fn yes_no(value: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use rabbit_core::model::InstallationKind;
+
+    use super::uninstall_helper_args;
+
+    /// The helper's hidden command parses into exactly what RABBIT's
+    /// launcher writes, under the name the launcher uses, and stays out of
+    /// the help.
+    #[test]
+    fn the_uninstall_helper_command_is_hidden_and_reads_what_rabbit_writes() {
+        use rabbit_core::uninstall::{HELPER_SUBCOMMAND, HelperArgs};
+
+        let args = HelperArgs {
+            pipe: rabbit_platform::uninstall_pipe_name(4242, &[0x5a; 16]),
+            parent_pid: 4242,
+            resource_path: PathBuf::from("C:\\Users\\Someone\\AppData\\Roaming\\REAPER"),
+            target_app_path: Some(PathBuf::from("C:\\Program Files\\REAPER (x64)\\reaper.exe")),
+            target: InstallationKind::Standard,
+            package_ids: vec!["surge-xt".to_string(), "reaper".to_string()],
+        };
+        let mut argv = vec!["rabbit".to_string(), HELPER_SUBCOMMAND.to_string()];
+        argv.extend(args.to_arguments().unwrap());
+        let cli = Cli::try_parse_from(&argv).unwrap();
+        assert!(matches!(cli.command, Command::UninstallHelper { .. }));
+        assert_eq!(uninstall_helper_args(cli.command), args);
+
+        let portable = HelperArgs {
+            target_app_path: None,
+            target: InstallationKind::Portable,
+            package_ids: vec!["reaper".to_string()],
+            ..args
+        };
+        let mut argv = vec!["rabbit".to_string(), HELPER_SUBCOMMAND.to_string()];
+        argv.extend(portable.to_arguments().unwrap());
+        let cli = Cli::try_parse_from(&argv).unwrap();
+        assert_eq!(uninstall_helper_args(cli.command), portable);
+
+        // It needs a package, and only takes the kinds of REAPER there are.
+        let mut argv = vec!["rabbit".to_string(), HELPER_SUBCOMMAND.to_string()];
+        argv.extend(portable.to_arguments().unwrap());
+        let without_package: Vec<&String> = argv
+            .iter()
+            .take_while(|argument| argument.as_str() != "--package")
+            .collect();
+        assert!(Cli::try_parse_from(without_package).is_err());
+        let wrong_kind: Vec<String> = argv
+            .iter()
+            .map(|argument| argument.replace("portable", "network"))
+            .collect();
+        assert!(Cli::try_parse_from(wrong_kind).is_err());
+
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        assert!(!help.contains(HELPER_SUBCOMMAND), "{help}");
+        assert!(!help.contains("uninstall-helper"), "{help}");
+    }
+
+    /// From this crate's tests, as from any program not named like a
+    /// RABBIT build, the helper's entry point refuses to do anything: no
+    /// pipe, no registry, no program started.
+    #[test]
+    fn the_uninstall_helper_refuses_to_run_from_a_test() {
+        let args = rabbit_core::uninstall::HelperArgs {
+            pipe: rabbit_platform::uninstall_pipe_name(std::process::id(), &[0x5a; 16]),
+            parent_pid: std::process::id(),
+            resource_path: std::env::temp_dir(),
+            target_app_path: None,
+            target: InstallationKind::Standard,
+            package_ids: vec!["surge-xt".to_string()],
+        };
+        assert_eq!(
+            rabbit_core::uninstall::run_elevated_helper(&args),
+            rabbit_core::uninstall::helper::HELPER_EXIT_NOT_ALLOWED
+        );
+        use rabbit_core::uninstall::ElevatedHelper;
+        let started = rabbit_core::uninstall::SystemElevatedHelper.start(
+            &rabbit_core::uninstall::ElevatedRunRequest {
+                resource_path: std::env::temp_dir(),
+                target_app_path: None,
+                target: InstallationKind::Standard,
+                package_ids: vec!["surge-xt".to_string()],
+            },
+        );
+        assert!(matches!(
+            started,
+            Err(rabbit_core::uninstall::ElevationStartError::Failed(_))
+        ));
+    }
     use std::path::PathBuf;
 
     use clap::Parser;

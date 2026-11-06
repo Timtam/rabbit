@@ -307,6 +307,8 @@ pub enum PathRefusal {
     FolderRoot,
     #[error("it is a symbolic link or junction, which RABBIT never follows or removes")]
     Link,
+    #[error("it isn't the link RABBIT expected there")]
+    NotALink,
     #[error("it is in RABBIT's own folder, which holds receipts, backups and logs")]
     RabbitFolder,
     #[error("its name isn't what the package manifest expects")]
@@ -346,6 +348,35 @@ pub fn check_removal(
     path: &Path,
     guard: &RemovalGuard,
 ) -> Result<(), PathRefusal> {
+    check_removal_of(roots, path, guard, LastComponent::NotALink)
+}
+
+/// [`check_removal`] for a link that is to go as a link, such as a junction
+/// a vendor's uninstaller leaves behind: every check is the same, except
+/// that the last component must be a link rather than must not be one.
+/// Whatever removes it must still remove the link itself, never what it
+/// points to.
+pub fn check_link_removal(
+    roots: &UninstallRoots,
+    path: &Path,
+    guard: &RemovalGuard,
+) -> Result<(), PathRefusal> {
+    check_removal_of(roots, path, guard, LastComponent::Link)
+}
+
+/// What the last component of a path to remove must be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastComponent {
+    NotALink,
+    Link,
+}
+
+fn check_removal_of(
+    roots: &UninstallRoots,
+    path: &Path,
+    guard: &RemovalGuard,
+    last: LastComponent,
+) -> Result<(), PathRefusal> {
     if !is_plain_absolute(path) {
         return Err(PathRefusal::NotPlain);
     }
@@ -368,8 +399,11 @@ pub fn check_removal(
 
     let metadata =
         fs::symlink_metadata(path).map_err(|error| PathRefusal::unreadable(path, &error))?;
-    if metadata.file_type().is_symlink() {
-        return Err(PathRefusal::Link);
+    let is_link = metadata.file_type().is_symlink();
+    match last {
+        LastComponent::NotALink if is_link => return Err(PathRefusal::Link),
+        LastComponent::Link if !is_link => return Err(PathRefusal::NotALink),
+        _ => {}
     }
     let canonical_parent =
         fs::canonicalize(parent).map_err(|error| PathRefusal::unreadable(parent, &error))?;
@@ -488,7 +522,7 @@ fn real_path_so_far(path: &Path) -> Option<PathBuf> {
 
 /// Whether `path` is strictly below `root`, compared by text and ignoring
 /// case.
-fn strictly_inside(path: &Path, root: &Path) -> bool {
+pub(crate) fn strictly_inside(path: &Path, root: &Path) -> bool {
     match (folded_components(path), folded_components(root)) {
         (Some(path), Some(root)) => {
             !root.is_empty() && path.len() > root.len() && path.starts_with(&root)

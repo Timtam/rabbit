@@ -28,7 +28,15 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    attach_parent_console_on_windows();
+    // RABBIT's elevated uninstall helper prints nothing, and never borrows
+    // the console of the RABBIT that started it, which runs without its
+    // rights and maybe as another account.
+    let uninstall_helper = std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == rabbit_cli::UNINSTALL_HELPER_SUBCOMMAND);
+    if !uninstall_helper {
+        attach_parent_console_on_windows();
+    }
     match rabbit_cli::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
