@@ -1,0 +1,4 @@
+# Every text file is stored with LF line endings, whatever the editor on
+# Windows writes. Without this, a file saved with CRLF shows up in a diff as
+# rewritten from top to bottom, and git blame loses its history.
+* text=auto eol=lf
