@@ -65,7 +65,7 @@ uninstall-summary-osara-removes-windows = Entfernt die OSARA-Erweiterung, ihre �
 uninstall-summary-osara-keeps = Ihre Tastenzuordnung bleibt unverändert, ebenso die Einstellungen von OSARA und die Sicherungen Ihrer Tastenzuordnung, die OSARA angelegt hat.
 uninstall-summary-surge-removes = Das eigene Deinstallationsprogramm von Surge XT entfernt es für alle Musikprogramme auf diesem Computer. Eine Sicherung kann es nicht zurückholen.
 uninstall-summary-surge-keeps = Ihre eigenen Patches im Ordner Surge XT in Ihren Dokumenten bleiben erhalten.
-uninstall-summary-reaper-windows-removes = Das eigene Deinstallationsprogramm von REAPER entfernt das Programm. Es entfernt außerdem die Dateizuordnungen von REAPER und ReaRoute für jeden REAPER auf diesem Computer.
+uninstall-summary-reaper-windows-removes = Das eigene Deinstallationsprogramm von REAPER entfernt das Programm. Es entfernt außerdem die Dateizuordnungen von REAPER und ReaRoute für jedes REAPER auf diesem Computer.
 uninstall-summary-reaper-keeps = Ihre Einstellungen, Erweiterungen und Projekte bleiben erhalten.
 
 # A short description of a file or folder that stays, shown next to its path,
