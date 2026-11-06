@@ -85,6 +85,28 @@ from this file and posts it as the GitHub release body.
   also comes off Windows' list of installed programs, but only if that
   entry points into the REAPER you uninstall it from; one that belongs to
   another REAPER stays, and **Show details** and the report say so.
+- On Windows, Surge XT and a standard REAPER can be uninstalled too, from the
+  wizard's **Uninstall** tab and with `rabbit uninstall --package surge-xt`
+  or `--package reaper`. Their own uninstallers do the work, with
+  administrator rights: Windows asks for your permission once per run,
+  before anything is removed, however many of them you ticked. If you don't
+  allow it, nothing is uninstalled at all. Review says so beforehand, asks
+  you to close other music programs, and RABBIT asks once more with **No**
+  selected, because a backup can't bring these back. Surge XT goes for every
+  music program on the computer; your patches in `Documents\Surge XT` and
+  its fonts stay, and RABBIT removes the links into Surge's data folder its
+  uninstaller leaves behind. REAPER's uninstaller removes the program, its
+  file associations and ReaRoute for every REAPER on the computer; your
+  settings, extensions and projects stay, and the extensions work again
+  once you install REAPER again. REAPER always goes last, and every REAPER
+  on the computer must be closed. RABBIT runs only an uninstaller that
+  Windows' list of programs for every user names and that sits where it
+  belongs, and says why otherwise. If an uninstaller takes long, the
+  progress page says RABBIT is still waiting and that it may be asking a
+  question in another window; screen readers on Windows hear this once, as
+  focus moves to the progress log. A removal that finishes only after a
+  restart says so, and `rabbit uninstall` then exits with 0. A portable
+  REAPER stays yours to remove by hand.
 
 ### Changed
 

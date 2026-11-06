@@ -206,8 +206,9 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
   keys work while the tabs have focus. On macOS, Ctrl+Tab and Ctrl+Shift+Tab
   anywhere on the page, or VoiceOver's own navigation of the tab group.
 - **What RABBIT can remove:** OSARA, SWS, ReaPack, ReaKontrol, FFmpeg and
-  app2clap (both Windows only) and the language packs. Every other installed
-  package is listed too, with the reason it can't be ticked.
+  app2clap (both Windows only) and the language packs; on Windows also Surge
+  XT and a standard REAPER, through their own uninstallers (see below). Every
+  other installed package is listed too, with the reason it can't be ticked.
 - **What is kept:** your settings, such as SWS's grooves, ReaPack's
   repositories and ReaKontrol's FX maps, unless you tick **Also remove
   settings** below the list. `reaper.ini`, `reaper-kb.ini`, your key maps and
@@ -218,7 +219,23 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
   being deleted.
 - **Starting it:** the review page says what each package loses and keeps.
   Enter doesn't start an uninstall there; press **Uninstall**. REAPER must be
-  closed, and for app2clap every REAPER on the computer.
+  closed, and for app2clap, Surge XT and REAPER itself every REAPER on the
+  computer.
+- **Surge XT and REAPER (Windows):** their own uninstallers remove them, with
+  administrator rights. Windows asks for your permission once, before
+  anything is removed, however many of them you ticked; if you don't allow
+  it, nothing is uninstalled at all. RABBIT asks you once more before it
+  starts, with **No** selected, because a backup can't bring them back. Close
+  Surge XT and other music programs first. Surge XT goes for every music
+  program on the computer; your patches in `Documents\Surge XT` and the fonts
+  it installed stay. REAPER's uninstaller removes the program, and REAPER's
+  file associations and ReaRoute for every REAPER on the computer; your
+  settings, extensions and projects in `%APPDATA%\REAPER` stay, and the
+  extensions work again once you install REAPER again. REAPER always goes
+  last. If an uninstaller takes long, the progress page says RABBIT is still
+  waiting: it may be showing a question in a window of its own, which
+  Alt+Tab finds. A removal that finishes only after a restart says so on the
+  last page. A portable REAPER stays yours to remove by hand.
 - **Getting a package back:** start RABBIT again and tick it on the **Install
   or update** tab, which no longer ticks a package you removed by itself. To
   put back the very files that went instead, **Show details** on the last
@@ -417,7 +434,8 @@ GITHUB_TOKEN="<your token>" /Applications/Rabbit.app/Contents/MacOS/rabbit   # m
 
 `uninstall` removes packages RABBIT knows how to take off again: today OSARA,
 SWS, ReaPack, ReaKontrol, FFmpeg and app2clap (both Windows only) and the
-language packs. `RABBIT components` says for each package whether RABBIT can
+language packs, and on Windows Surge XT and a standard REAPER through their own
+uninstallers. `RABBIT components` says for each package whether RABBIT can
 uninstall it, and if not, why. Name every package with `--package`; there is
 no "remove everything". Like the other commands, it only shows what it would
 do until you add `--apply`:
@@ -460,6 +478,24 @@ RABBIT uninstall --resource-path "%APPDATA%\REAPER" --package sws \
   or one of its files can't be read, `--apply` changes nothing at all and
   says why. For the JAWS scripts (whichever REAPER you name) and a portable
   REAPER, which RABBIT can't remove, it prints how to remove them by hand.
+- **Surge XT and REAPER on Windows** come off through their own uninstallers,
+  which need administrator rights. The dry run names the packages that need
+  them and the uninstaller it would run. With `--apply`, Windows asks for
+  permission once for the whole run, before anything is removed; declined,
+  nothing is uninstalled and the exit code is 1. RABBIT runs only an
+  uninstaller that Windows' list of programs installed for every user names
+  and that sits where it belongs: Surge XT's in
+  `C:\ProgramData\Surge XT\uninstall`, with nothing beside it but its own
+  files, and REAPER's in the REAPER folder you named under Program Files.
+  Otherwise it says why and changes nothing; you can still uninstall the
+  program in Windows Settings. Surge XT's patches in `Documents\Surge XT` and
+  its fonts stay, and RABBIT removes the links into its data folder that its
+  uninstaller leaves behind, and its vendor folders if they are left empty.
+  REAPER's uninstaller keeps `%APPDATA%\REAPER`; if `reaper.ini` or RABBIT's
+  receipt is gone afterwards anyway, RABBIT stops, writes its receipt again
+  and says so. An uninstaller still open after ten minutes stops the run; it
+  may be waiting for an answer in a window of its own. What these
+  uninstallers remove can't be restored from a backup.
 - **Ctrl+C stops between packages.** The package being removed finishes, and
   the rest stay installed. Press Ctrl+C again to stop at once; the files
   already moved stay in the backup set, where `restore-backup` finds them.
@@ -473,8 +509,8 @@ dry run and `--apply`:
 
 | Exit code | Meaning |
 |---|---|
-| 0 | Every package was removed (or, in a dry run, can be), or isn't installed, so a script can run twice. Anything of a package RABBIT still finds afterwards is listed, never deleted. |
-| 1 | A removal failed or was stopped. Its files went back where they were; packages removed before it stay removed. Also when an error stopped RABBIT before anything changed, such as another RABBIT working on the same REAPER; the message says which. |
+| 0 | Every package was removed (or, in a dry run, can be), or isn't installed, so a script can run twice. Anything of a package RABBIT still finds afterwards is listed, never deleted. A removal that finishes only after a restart also exits with 0, and says to restart. |
+| 1 | A removal failed or was stopped, or the Windows permission prompt was declined. Its files went back where they were; packages removed before it stay removed. Also when an error stopped RABBIT before anything changed, such as another RABBIT working on the same REAPER; the message says which. |
 | 2 | A package you named can't be uninstalled. Nothing changed. |
 
 To bring a package back, find the uninstall's backup set and restore just that
@@ -493,10 +529,10 @@ language since. Without `--package`, every package in the set comes back. An
 uninstall that stopped partway through a package restores the same way. Two
 limits: a package you installed again after uninstalling it can't be restored
 from the old set, because the newer copy is in the way (uninstall it first);
-and a removal that a backup can't hold, such as one by a vendor's own
-uninstaller or with administrator rights, can't be restored. RABBIT doesn't
-make such removals yet. A restored OSARA isn't back on Windows' list of
-installed programs; installing OSARA again puts it there.
+and a removal that a backup can't hold, by Surge XT's or REAPER's own
+uninstaller, can't be restored: install the package again instead. A restored
+OSARA isn't back on Windows' list of installed programs; installing OSARA
+again puts it there.
 
 ### Maintain
 

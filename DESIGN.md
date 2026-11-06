@@ -672,13 +672,19 @@ user can finish the install by pressing Next a few times.
      warnings, a note naming what is ticked on the other tab and left out
      (on the Install or update tab, only ticks RABBIT didn't set itself,
      such as an update it ticked by default), and that the packages can be
-     installed again. The Uninstall button is enabled whenever something
+     installed again. When a ticked package's own uninstaller removes it
+     (Surge XT, a standard REAPER on Windows), the summary also says that
+     Windows asks for permission once, before anything is removed, that
+     nothing is uninstalled without it, and to answer a window from that
+     uninstaller if one appears; and it asks to close other music
+     programs. The Uninstall button is enabled whenever something
      removable is ticked, whatever the install plan says. Uninstalling is
      never one key press away: focus goes to the summary, there is no
      default button, and Enter starts nothing. A run with a step a backup
-     can't undo, or a package whose manifest asks for it, gets a Yes/No
-     question with No focused first. Back returns to the Uninstall tab's
-     list, never to the ReaPack donation page.
+     can't undo, such as a vendor's uninstaller, or a package whose
+     manifest asks for it, gets a Yes/No question with No focused first.
+     Back returns to the Uninstall tab's list, never to the ReaPack
+     donation page.
 
 6. Progress
    - Single progress bar plus one current-step line. A "Show details" toggle
@@ -692,11 +698,17 @@ user can finish the install by pressing Next a few times.
    - In uninstall mode the heading says "Uninstalling", focus moves to the
      gauge, and the gauge counts one step per package, so it never parks
      halfway. The status line names each package as its removal starts and
-     says whether it went; both are spoken on macOS. Which progress events
-     are spoken is decided by one exhaustive match, so a new event can't be
-     added without that decision. Closing the window asks "Stop
-     uninstalling?" with No focused, and the run stops after the package it
-     is on.
+     says whether it went; both are spoken on macOS. A vendor's uninstaller
+     gets its own line ("Running Surge XT's own uninstaller…"), and once it
+     has run for 30 seconds the status and the log say RABBIT is still
+     waiting and that it may be asking a question in another window, found
+     with Alt+Tab. That line is spoken on macOS; on Windows, which has no
+     announcement, focus moves to the log the first time in a run, so the
+     screen reader reads it once. Which progress events are spoken is
+     decided by one exhaustive match, so a new event can't be added without
+     that decision. Closing the window asks "Stop uninstalling?" with No
+     focused, and the run stops after the package it is on; a vendor's
+     uninstaller always runs to its end.
 
 7. Done
    - One sentence summarizing success or failure.
@@ -706,9 +718,12 @@ user can finish the install by pressing Next a few times.
      similar diagnostics stay in that saved report.
    - After an uninstall the status names the packages that went, says why
      any stayed (in the user's language for REAPER or another RABBIT being
-     open, a file in use and too little room for the backup; otherwise the
-     engine's own sentence), and that a package comes back by ticking it on
-     the Install or update tab in a new run. Show details lists the files
+     open, a file in use, too little room for the backup and every way a
+     vendor's uninstaller can end; otherwise the engine's own sentence), and
+     that a package comes back by ticking it on the Install or update tab in
+     a new run. A removal that finishes after a restart says to restart the
+     computer, and a declined permission prompt says plainly that nothing
+     was uninstalled. Show details lists the files
      removed, kept and left over, the backup set, and one `rabbit
      restore-backup` command per removed package. The saved report is the
      engine's `uninstall-<time>` report, which the details point to; the
@@ -898,9 +913,9 @@ manifest loads: every supported platform and target has a plan and every
 plan is reachable, each strategy has the fields it needs, removals that need
 administrator rights never go into the user's backups, and no path may reach
 into `{resource}/RABBIT`. `rabbit uninstall` carries out `remove_files`
-plans (see Safety Behavior); the wizard gets its own way in later. OSARA, SWS,
-ReaPack, ReaKontrol, FFmpeg, app2clap and the language packs have
-`remove_files` plans. FFmpeg and the language packs set `requires_receipt`,
+and `vendor_uninstaller` plans (see Safety Behavior), and so does the wizard's
+Uninstall tab. OSARA, SWS, ReaPack, ReaKontrol, FFmpeg, app2clap and the
+language packs have `remove_files` plans. FFmpeg and the language packs set `requires_receipt`,
 because a copy RABBIT has no receipt for is most likely the user's own; the
 others name their files, so a copy without a receipt can go too, unless
 ReaPack still manages it. OSARA's Windows plan also has a `registry_cleanup`
@@ -914,7 +929,18 @@ reason to put the files back. The JAWS scripts, and a portable REAPER on
 Windows, have `manual` plans whose note holds the instructions; the JAWS
 scripts' block also lists `install_snapshot` folders, so what their
 installer adds or changes is recorded from now on (see the receipt above).
-REAPER otherwise and Surge XT still say `not_supported`. `rabbit packages`
+On Windows, Surge XT (Inno Setup) and a standard REAPER (NSIS) have
+`vendor_uninstaller` plans with `elevation: required` and `backup: none`. Each
+names its uninstaller only through an HKLM `locate` value, where it must sit
+(`must_be_in`: Surge's exact `{program_data}/Surge XT/uninstall` folder holding
+only `unins000.*`, REAPER's install folder strictly below `{program_files}`,
+whose HKLM `InstallLocation` must equal `{app_dir}`), its silent arguments,
+a `timeout_seconds` of 600, and `verify_gone` paths that must be gone
+afterwards. Surge's `remove_leftovers` lists the `SurgeXTData` junctions,
+removed as links, then its vendor folders, only when empty; its
+`kept_user_data` is `{documents}/Surge XT`. REAPER's `kept_user_data` is
+`{resource}`, shown as kept and never removed, and its `always_warn` says its
+extensions stay. On macOS both still say `not_supported`. `rabbit packages`
 prints each package's plan per platform and target, and `rabbit components`
 says for each package whether RABBIT can uninstall it, and if not, why.
 
@@ -1276,15 +1302,51 @@ Extension files:
   and the package joins `declined_packages`. The set records each package's
   receipt entry, and the `langpack=` value REAPER had when the removal set it
   back to no language pack, never a copy of `reaper.ini`.
+- A package whose vendor's uninstaller removes it (Surge XT and a standard
+  REAPER, on Windows) is removable only once RABBIT found that uninstaller
+  through HKLM and every trust check passed, read only, while the plan is
+  built. Once every check of the run has passed and before the first
+  change, the run starts one hidden elevated helper, RABBIT itself under a
+  hidden command, for every such package: the run's only Windows
+  permission prompt. Declined, every package is Cancelled and nothing
+  changes; if the helper can't start, the packages that need it fail and
+  nothing changes either. The helper takes orders only from the RABBIT
+  that started it, over a named pipe both ends check by process ID, runs
+  only the packages on its command line, each once and in order, from the
+  built-in manifests, and repeats every check itself from HKLM and the
+  real folders, never from HKCU or a per-user folder: over-the-shoulder
+  elevation runs it as another account. REAPER's NSIS uninstaller runs from
+  a copy in a new folder under ProgramData that only administrators and
+  SYSTEM can write to, checked against the original by hash while both are
+  locked; Surge's Inno uninstaller runs in place after its folder is checked
+  again, holding nothing but administrator-owned `unins000.*` files. Neither
+  vendor signs its uninstaller, so there is no signature to check. Every
+  REAPER on the computer must be closed, and the programs the plan names;
+  REAPER is always removed last. The status follows the uninstaller and
+  fresh detection: exit 0 with everything gone is Removed; with files
+  Windows deletes at the next restart, RemovedPendingRestart; with
+  leftovers, which are listed and never deleted, RemovedWithLeftovers; a
+  package still detected is Failed and keeps its receipt entry; NSIS's exit
+  1 is Cancelled; any other code is Failed. Afterwards the receipt follows
+  detection: the entry goes, and the package joins `declined_packages`,
+  only once the package is gone. An uninstaller still open after
+  `timeout_seconds` is left running, the package Failed and the run
+  stopped; so is a helper that stops answering. If `reaper.ini` or RABBIT's
+  receipt is gone after a vendor's uninstaller ran, the run stops, the
+  package is Failed, and the receipt is written again from the copy the run
+  holds in memory. The helper is told to quit at the end of every run.
+  Nothing these uninstallers remove can be restored from a backup.
 - `rabbit uninstall` only shows what it would do unless given `--apply`, and
   needs every package named with `--package`; there is no "remove
-  everything". Its dry run runs the same checks, a running REAPER included,
+  everything". Its dry run names the packages that need administrator
+  rights and says Windows asks once. Its dry run runs the same checks, a running REAPER included,
   so it says what `--apply` would say. It has no `--allow-reaper-running`,
   unlike every command that installs: a running REAPER holds its extensions'
   files open and writes `reaper.ini` again when it closes. Its exit code is 2
   when a package asked for can't be uninstalled and nothing changed, 1 when a
-  removal failed or was stopped, and 0 otherwise, packages that aren't
-  installed included. Package settings stay unless `--remove-settings` is
+  removal failed or was stopped or the permission prompt was declined, and 0
+  otherwise, packages that aren't installed and removals that finish after a
+  restart included. Package settings stay unless `--remove-settings` is
   given; then they move into the same backup set. With `--apply`, the first
   Ctrl+C asks the run to stop before the next package, through the same
   cancel token the wizard uses, and a second one ends RABBIT at once.
