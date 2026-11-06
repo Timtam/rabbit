@@ -29,11 +29,20 @@
 //!   starts anything ([`super::vendor`]).
 //! - It never reads HKCU, `%APPDATA%` or any other per-user place: when a
 //!   standard user types an administrator's password, the helper runs as
-//!   that administrator, another account. The machine-wide folders it asks
-//!   Windows for by name; the resource folder and REAPER's app are the only
-//!   per-user paths, and they come from its command line.
+//!   that administrator, another account. The machine-wide folders it reads
+//!   from what only administrators can change, never from its environment
+//!   ([`MachineFolders::of_this_computer`]); the resource folder and
+//!   REAPER's app are the only per-user paths, and they come from its
+//!   command line.
 //! - A vendor uninstaller it has started always runs to its end, or to its
 //!   time limit, whatever happens to the pipe.
+//! - It loads DLLs from System32 only, never from the folder rabbit.exe
+//!   sits in, which for a portable RABBIT in Downloads anyone in the user's
+//!   session can write to: rabbit.exe's own imports are linked that way
+//!   (`crates/rabbit/build.rs`), and the helper's `main` sets the same rule
+//!   for anything loaded later. What stays open is replacing rabbit.exe
+//!   itself; the permission prompt then names no verified publisher
+//!   instead of RABBIT's signature.
 //!
 //! Nothing here can start the real helper from a test. The helper's entry
 //! point and the launcher both refuse unless the running program is a
@@ -501,8 +510,11 @@ pub struct MachineFolders {
 }
 
 impl MachineFolders {
-    /// Asked of Windows by name, never read from the environment, which
-    /// belongs to whichever account the helper runs as.
+    /// Read from what only administrators can change, never from the
+    /// environment, which an elevated process may inherit from the standard
+    /// user's session: Program Files and Common Files as Windows names them,
+    /// and ProgramData from HKLM with Windows' own drive (see
+    /// [`rabbit_platform::program_data_dir`]).
     pub fn of_this_computer() -> io::Result<Self> {
         Ok(Self {
             program_files: rabbit_platform::machine_program_files_dirs()?,

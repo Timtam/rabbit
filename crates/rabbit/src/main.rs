@@ -34,7 +34,9 @@ fn main() -> std::process::ExitCode {
     let uninstall_helper = std::env::args_os()
         .nth(1)
         .is_some_and(|argument| argument == rabbit_cli::UNINSTALL_HELPER_SUBCOMMAND);
-    if !uninstall_helper {
+    if uninstall_helper {
+        load_dlls_from_system32_only();
+    } else {
         attach_parent_console_on_windows();
     }
     match rabbit_cli::run() {
@@ -112,3 +114,24 @@ fn attach_parent_console_on_windows() {
 
 #[cfg(not(all(windows, not(debug_assertions), feature = "gui")))]
 fn attach_parent_console_on_windows() {}
+
+/// In the elevated uninstall helper, a DLL loaded by name while it runs
+/// comes from System32 only, as its imports already do (see build.rs), and
+/// never from the folder rabbit.exe sits in, which a standard user may be
+/// able to write to. Only the helper: it shows no window, so nothing a
+/// screen reader or a shell extension puts into the process needs to find
+/// its own DLLs elsewhere, as it may in the GUI.
+#[cfg(windows)]
+fn load_dlls_from_system32_only() {
+    use windows_sys::Win32::System::LibraryLoader::{
+        LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
+    };
+    // SAFETY: takes a flag and nothing else. If it fails, the helper still
+    // runs; its imports are already pinned to System32 at link time.
+    unsafe {
+        SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
+}
+
+#[cfg(not(windows))]
+fn load_dlls_from_system32_only() {}

@@ -174,9 +174,9 @@ impl VendorEnvironment for SystemVendorEnvironment {
     }
 
     fn create_working_folder(&self) -> io::Result<PathBuf> {
-        // ProgramData as Windows names it, never an environment variable
-        // and never a per-user temporary folder a standard user could
-        // write to.
+        // ProgramData as HKLM places it, never through the environment and
+        // never a per-user temporary folder a standard user could write
+        // to.
         let program_data = rabbit_platform::program_data_dir()?;
         rabbit_platform::create_admin_only_directory(&program_data, WORKING_FOLDER_PREFIX)
     }

@@ -54,15 +54,67 @@ pub fn create_admin_only_directory(parent: &Path, name_prefix: &str) -> io::Resu
     create_unique_directory(parent, name_prefix, ADMINISTRATORS_ONLY_SDDL)
 }
 
-/// `C:\ProgramData` as Windows names it (`FOLDERID_ProgramData`), not as
-/// an environment variable says, so a changed environment can't move it.
+/// `C:\ProgramData` as this computer's settings name it, whatever the
+/// environment says: the `ProgramData` value under HKLM's `ProfileList`,
+/// which only administrators can change, with `%SystemDrive%` read as the
+/// drive Windows itself runs from.
+///
+/// Windows' own lookup (`FOLDERID_ProgramData`) expands that
+/// `%SystemDrive%` from the calling process's environment, and an elevated
+/// process started from a standard user's session may inherit a value the
+/// user chose, pointing into a folder they own. Any other variable in the
+/// value is refused rather than guessed at.
 pub fn program_data_dir() -> io::Result<PathBuf> {
-    imp::known_folder(imp::KnownFolder::ProgramData)
+    imp::program_data_dir()
+}
+
+/// `raw`, the `ProfileList\ProgramData` value as stored, with
+/// `%SystemDrive%` (in any case) replaced by `system_drive`, such as `C:`.
+/// Anything else that looks like a variable, or a result that isn't a full
+/// path on a drive letter, is refused.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn expand_program_data(raw: &str, system_drive: &str) -> io::Result<PathBuf> {
+    const VARIABLE: &str = "%systemdrive%";
+    let refuse = |why: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Windows' setting for ProgramData, {raw:?}, {why}"),
+        )
+    };
+    let drive = system_drive.as_bytes();
+    if drive.len() != 2 || !drive[0].is_ascii_alphabetic() || drive[1] != b':' {
+        return Err(refuse("can't be placed: Windows' own drive is unknown"));
+    }
+    let mut expanded = String::new();
+    let mut rest = raw;
+    // ASCII lowercasing keeps every byte where it was, so an index into
+    // the lowercased text is one into `rest` too.
+    while let Some(start) = rest.to_ascii_lowercase().find(VARIABLE) {
+        expanded.push_str(&rest[..start]);
+        expanded.push_str(system_drive);
+        rest = &rest[start + VARIABLE.len()..];
+    }
+    expanded.push_str(rest);
+    if expanded.contains('%') {
+        return Err(refuse("names a variable other than %SystemDrive%"));
+    }
+    let bytes = expanded.as_bytes();
+    let full_drive_path = bytes.len() > 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes[2] == b'\\'
+        && !expanded.contains('/')
+        && !expanded.split('\\').any(|part| part == "." || part == "..");
+    if !full_drive_path {
+        return Err(refuse("isn't a full path on a drive"));
+    }
+    Ok(PathBuf::from(expanded.trim_end_matches('\\')))
 }
 
 /// The Program Files folders as Windows names them, the native one first:
 /// `C:\Program Files`, then `C:\Program Files (x86)` where Windows has one.
-/// Read like [`program_data_dir`], so the elevated helper finds them
+/// Windows keeps these as full paths in HKLM and reads no environment
+/// variable for them, so the elevated helper finds the same folders
 /// whatever environment it was started with.
 pub fn machine_program_files_dirs() -> io::Result<Vec<PathBuf>> {
     let mut folders = vec![imp::known_folder(imp::KnownFolder::ProgramFiles)?];
@@ -79,7 +131,8 @@ pub fn machine_program_files_dirs() -> io::Result<Vec<PathBuf>> {
 }
 
 /// `C:\Program Files\Common Files` as Windows names it
-/// (`FOLDERID_ProgramFilesCommon`), read like [`program_data_dir`].
+/// (`FOLDERID_ProgramFilesCommon`), read like
+/// [`machine_program_files_dirs`].
 pub fn machine_common_program_files_dir() -> io::Result<PathBuf> {
     imp::known_folder(imp::KnownFolder::ProgramFilesCommon)
 }
@@ -189,12 +242,13 @@ fn create_unique_directory(parent: &Path, name_prefix: &str, sddl: &str) -> io::
 
 #[cfg(windows)]
 mod imp {
+    use std::ffi::OsStr;
     use std::fs::{File, OpenOptions};
     use std::io;
     use std::os::windows::ffi::OsStringExt;
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
-    use std::path::{Path, PathBuf};
+    use std::path::{Component, Path, PathBuf, Prefix};
 
     use windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS;
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
@@ -203,16 +257,20 @@ mod imp {
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, READ_CONTROL,
     };
     use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::System::Registry::{
+        HKEY_LOCAL_MACHINE, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+        RRF_SUBKEY_WOW6464KEY, RegGetValueW,
+    };
+    use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
     use windows_sys::Win32::UI::Shell::{
-        FOLDERID_Documents, FOLDERID_ProgramData, FOLDERID_ProgramFiles,
-        FOLDERID_ProgramFilesCommon, FOLDERID_ProgramFilesX86, KF_FLAG_DEFAULT,
-        SHGetKnownFolderPath,
+        FOLDERID_Documents, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesCommon,
+        FOLDERID_ProgramFilesX86, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
     };
 
     use super::NAME_ATTEMPTS;
     use crate::win_util::{
         attribute_tag, open_no_follow, owner_sid_of, random_hex, security_descriptor_from_sddl,
-        wide_path,
+        wide_path, wide_str,
     };
 
     pub(super) fn create_unique_directory(
@@ -248,11 +306,11 @@ mod imp {
         ))
     }
 
-    /// The folders RABBIT asks Windows for by name: the machine-wide ones,
-    /// and the user's Documents.
+    /// The folders RABBIT asks Windows for by name: Program Files and its
+    /// Common Files, and the user's Documents. Not ProgramData: see
+    /// [`super::program_data_dir`].
     #[derive(Debug, Clone, Copy)]
     pub(super) enum KnownFolder {
-        ProgramData,
         ProgramFiles,
         ProgramFilesX86,
         ProgramFilesCommon,
@@ -261,7 +319,6 @@ mod imp {
 
     pub(super) fn known_folder(folder: KnownFolder) -> io::Result<PathBuf> {
         let id = match folder {
-            KnownFolder::ProgramData => &FOLDERID_ProgramData,
             KnownFolder::ProgramFiles => &FOLDERID_ProgramFiles,
             KnownFolder::ProgramFilesX86 => &FOLDERID_ProgramFilesX86,
             KnownFolder::ProgramFilesCommon => &FOLDERID_ProgramFilesCommon,
@@ -289,6 +346,90 @@ mod imp {
         // succeeded; freeing null does nothing.
         unsafe { CoTaskMemFree(path.cast()) };
         found
+    }
+
+    pub(super) fn program_data_dir() -> io::Result<PathBuf> {
+        let raw = profile_list_program_data()?;
+        let windows = system_windows_dir()?;
+        let drive = match windows.components().next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                    format!("{}:", char::from(letter))
+                }
+                _ => String::new(),
+            },
+            _ => String::new(),
+        };
+        super::expand_program_data(&raw, &drive)
+    }
+
+    /// `ProgramData` under HKLM's `ProfileList`, as stored: Windows keeps it
+    /// as `%SystemDrive%\ProgramData`, and RegGetValueW mustn't expand it,
+    /// which it would do from this process's environment.
+    fn profile_list_program_data() -> io::Result<String> {
+        let subkey = wide_str(OsStr::new(
+            "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
+        ))?;
+        let value = wide_str(OsStr::new("ProgramData"))?;
+        let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND | RRF_SUBKEY_WOW6464KEY;
+        let mut size = 0u32;
+        // SAFETY: both names are NUL-terminated; a null buffer asks for
+        // the size alone.
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                subkey.as_ptr(),
+                value.as_ptr(),
+                flags,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        };
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        let mut buffer = vec![0u16; (size as usize).div_ceil(2) + 1];
+        let mut size = (buffer.len() * 2) as u32;
+        // SAFETY: `buffer` holds `size` bytes.
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                subkey.as_ptr(),
+                value.as_ptr(),
+                flags,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        let length = buffer.iter().position(|&unit| unit == 0).unwrap_or(0);
+        String::from_utf16(&buffer[..length])
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    }
+
+    /// The folder Windows runs from, as the system itself knows it, never
+    /// `%SystemRoot%` or `%windir%`.
+    fn system_windows_dir() -> io::Result<PathBuf> {
+        let mut buffer = vec![0u16; 260];
+        loop {
+            // SAFETY: `buffer` holds `buffer.len()` units.
+            let length =
+                unsafe { GetSystemWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) }
+                    as usize;
+            if length == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if length < buffer.len() {
+                return Ok(PathBuf::from(std::ffi::OsString::from_wide(
+                    &buffer[..length],
+                )));
+            }
+            buffer.resize(length + 1, 0);
+        }
     }
 
     pub(super) fn file_owner_sid(path: &Path) -> io::Result<String> {
@@ -351,7 +492,6 @@ mod imp {
 
     #[derive(Debug, Clone, Copy)]
     pub(super) enum KnownFolder {
-        ProgramData,
         ProgramFiles,
         ProgramFilesX86,
         ProgramFilesCommon,
@@ -359,6 +499,10 @@ mod imp {
     }
 
     pub(super) fn known_folder(_folder: KnownFolder) -> io::Result<PathBuf> {
+        Err(unsupported())
+    }
+
+    pub(super) fn program_data_dir() -> io::Result<PathBuf> {
         Err(unsupported())
     }
 
@@ -400,6 +544,41 @@ mod tests {
             "",
         ] {
             assert!(!is_trusted_owner_sid(sid), "{sid}");
+        }
+    }
+
+    #[test]
+    fn program_data_takes_only_the_system_drive_from_outside_its_setting() {
+        for (raw, expected) in [
+            ("%SystemDrive%\\ProgramData", "C:\\ProgramData"),
+            ("%SYSTEMDRIVE%\\ProgramData\\", "C:\\ProgramData"),
+            ("%systemdrive%\\Data\\%SystemDrive%", "C:\\Data\\C:"),
+            ("D:\\ProgramData", "D:\\ProgramData"),
+        ] {
+            assert_eq!(
+                expand_program_data(raw, "C:").unwrap(),
+                PathBuf::from(expected),
+                "{raw}"
+            );
+        }
+        for raw in [
+            "%ALLUSERSPROFILE%",
+            "%SystemDrive%\\%USERNAME%",
+            "%SystemDrive%ProgramData",
+            "%SystemDrive%\\..\\ProgramData",
+            "\\\\server\\share\\ProgramData",
+            "ProgramData",
+            "%SystemDrive%",
+            "",
+        ] {
+            let error = expand_program_data(raw, "C:").unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{raw:?}");
+        }
+        for drive in ["", "C", "C:\\", "1:", "\\\\server"] {
+            assert!(
+                expand_program_data("%SystemDrive%\\ProgramData", drive).is_err(),
+                "{drive:?}"
+            );
         }
     }
 
@@ -509,11 +688,95 @@ mod windows_tests {
         assert_ne!(folder, second);
     }
 
+    /// In a normal session, the ProgramData read from HKLM is the one the
+    /// environment names too.
     #[test]
-    fn program_data_is_the_known_folder() {
+    fn program_data_is_the_folder_windows_names() {
         let program_data = program_data_dir().unwrap();
         assert!(program_data.is_absolute(), "{}", program_data.display());
         assert!(program_data.is_dir(), "{}", program_data.display());
+        if let Some(from_environment) = std::env::var_os("ProgramData") {
+            assert!(
+                program_data
+                    .as_os_str()
+                    .eq_ignore_ascii_case(&from_environment),
+                "{} vs {}",
+                program_data.display(),
+                Path::new(&from_environment).display()
+            );
+        }
+    }
+
+    /// Set in the child [`the_machine_folders_ignore_the_environment`]
+    /// starts: it then prints the folders and stops.
+    const PRINT_MACHINE_FOLDERS: &str = "RABBIT_TEST_PRINT_MACHINE_FOLDERS";
+
+    fn machine_folders() -> Vec<String> {
+        let mut folders = vec![program_data_dir().unwrap()];
+        folders.extend(machine_program_files_dirs().unwrap());
+        folders.push(machine_common_program_files_dir().unwrap());
+        folders
+            .iter()
+            .map(|folder| folder.display().to_string())
+            .collect()
+    }
+
+    /// The machine-wide folders the elevated helper works in come out the
+    /// same whatever environment the process starts with. A standard user
+    /// can set their own variables, an elevated process started from their
+    /// session may inherit them, and Windows' own lookup of ProgramData
+    /// expands `%SystemDrive%` from the environment. So a child of this
+    /// test, started with every variable these folders are spelt with
+    /// pointing into a scratch folder that has them all, must still name
+    /// the real ones.
+    #[test]
+    fn the_machine_folders_ignore_the_environment() {
+        if std::env::var_os(PRINT_MACHINE_FOLDERS).is_some() {
+            for folder in machine_folders() {
+                println!("folder={folder}");
+            }
+            return;
+        }
+        let scratch = tempfile::tempdir().unwrap();
+        let drive = scratch.path().join("drive");
+        let fake = |name: &str| {
+            let folder = drive.join(name);
+            fs::create_dir_all(&folder).unwrap();
+            folder
+        };
+        let test = concat!(
+            module_path!(),
+            "::the_machine_folders_ignore_the_environment"
+        );
+        let test = test.split_once("::").map_or(test, |(_, rest)| rest);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .env(PRINT_MACHINE_FOLDERS, "1")
+            .env("SystemDrive", &drive)
+            .env("SystemRoot", fake("Windows"))
+            .env("windir", fake("Windows"))
+            .env("ProgramData", fake("ProgramData"))
+            .env("ALLUSERSPROFILE", fake("ProgramData"))
+            .env("ProgramFiles", fake("Program Files"))
+            .env("ProgramW6432", fake("Program Files"))
+            .env("ProgramFiles(x86)", fake("Program Files (x86)"))
+            .env("CommonProgramFiles", fake("Program Files\\Common Files"))
+            .env("CommonProgramW6432", fake("Program Files\\Common Files"))
+            .env(
+                "CommonProgramFiles(x86)",
+                fake("Program Files (x86)\\Common Files"),
+            )
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}");
+        let printed: Vec<String> = stdout
+            .lines()
+            // libtest may print its own words before the first one.
+            .filter_map(|line| line.split_once("folder=").map(|(_, folder)| folder))
+            .map(str::to_string)
+            .collect();
+        assert_eq!(printed, machine_folders(), "{stdout}");
     }
 
     /// The known folders are the ones Windows' own environment variables

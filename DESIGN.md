@@ -1315,7 +1315,14 @@ Extension files:
   only the packages on its command line, each once and in order, from the
   built-in manifests, and repeats every check itself from HKLM and the
   real folders, never from HKCU or a per-user folder: over-the-shoulder
-  elevation runs it as another account. REAPER's NSIS uninstaller runs from
+  elevation runs it as another account. Its machine-wide folders don't
+  come from its environment either; ProgramData is read from HKLM with
+  Windows' own drive. rabbit.exe takes the DLLs it imports from System32
+  only (`/DEPENDENTLOADFLAG:0x800`), and the helper loads later ones the
+  same way, so a DLL put next to a portable RABBIT in Downloads can't run
+  with administrator rights. Replacing rabbit.exe itself stays possible
+  for whoever can write to its folder; the permission prompt then shows no
+  verified publisher. REAPER's NSIS uninstaller runs from
   a copy in a new folder under ProgramData that only administrators and
   SYSTEM can write to, checked against the original by hash while both are
   locked; Surge's Inno uninstaller runs in place after its folder is checked
