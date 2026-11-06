@@ -10,22 +10,38 @@ serde.workspace = true
 sys-locale = "0.3"
 
 [target.'cfg(windows)'.dependencies]
-# Win32_Security only because RegCreateKeyExW's signature names its
-# SECURITY_ATTRIBUTES; RABBIT always passes null there.
+# The OS random source, for the uninstall helper's pipe name and its
+# administrator-only folder names. Already in the tree through tempfile and
+# zip, so it adds no new crate.
+getrandom = "0.4"
+# Win32_Security: RegCreateKeyExW's SECURITY_ATTRIBUTES, and the token
+# queries (elevation, current user) in elevation.rs and fs_security.rs.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
+    # SDDL strings to security descriptors and back, and GetSecurityInfo:
+    # the administrator-only folder, the pipe's DACL and the owner check.
+    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
-    # WriteFile's signature names OVERLAPPED (ctrl_c.rs). Other crates in the
+    # CoTaskMemFree, which frees the path SHGetKnownFolderPath returns.
+    "Win32_System_Com",
+    # WriteFile's signature names OVERLAPPED (ctrl_c.rs), and the pipe
+    # channel waits on overlapped reads and writes. Other crates in the
     # workspace happen to turn this on too, so only a build of this crate on
     # its own notices it missing.
     "Win32_System_IO",
+    # The named pipe between RABBIT and its elevated uninstall helper.
+    "Win32_System_Pipes",
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# GetCommandLineW, so a test child can report the exact command line it got.
+windows-sys = { version = "0.61", features = ["Win32_System_Environment"] }
 
 [target.'cfg(unix)'.dependencies]
 # statfs, for the free space an uninstall's backup needs on another volume,

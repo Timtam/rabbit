@@ -1215,6 +1215,7 @@ dependencies = [
 name = "rabbit-platform"
 version = "0.4.4"
 dependencies = [
+ "getrandom 0.4.3",
  "libc",
  "plist",
  "serde",
