@@ -942,8 +942,12 @@ a `timeout_seconds` of 600, and `verify_gone` paths that must be gone
 afterwards. Surge's `remove_leftovers` lists the `SurgeXTData` junctions,
 removed as links, then its vendor folders, only when empty; its
 `kept_user_data` is `{documents}/Surge XT`. REAPER's `kept_user_data` is
-`{resource}`, shown as kept and never removed, and its `always_warn` says its
-extensions stay. On macOS both still say `not_supported`. `rabbit packages`
+`{resource}`, shown as kept and never removed; the engine's warning about
+installed packages that depend on REAPER says its extensions stay and work
+again once REAPER is back, so the manifest adds no warning of its own. A
+vendor plan's summary says whom the uninstaller takes the package from, so
+Surge XT gets no separate machine-wide warning. On macOS both still say
+`not_supported`. `rabbit packages`
 prints each package's plan per platform and target, and `rabbit components`
 says for each package whether RABBIT can uninstall it, and if not, why.
 
