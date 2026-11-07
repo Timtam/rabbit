@@ -7,10 +7,11 @@ use rabbit_core::package::{PACKAGE_REAPACK, PackageCategory, builtin_package_spe
 use rabbit_core::plan::{InstallPlan, PlanAction, PlanActionKind};
 use rabbit_core::receipt::{InstallState, PackageReceipt};
 use rabbit_core::uninstall::{
-    ByHandReason, KeptPath, KeptReason, NoMacosObjects, NothingListed, PlannedRemoval,
-    PlannedVendorRun, Removability, RemovalReason, UNINSTALL_NOT_YET_KEY, UninstallNote,
-    UninstallPlan, UninstallPlanInput, UninstallPlanItem, UninstallRoots, UninstallWarning,
-    VendorJob, VendorLookup, VendorRefusal, build_uninstall_plan,
+    ByHandReason, FakeMacosObjects, KeptPath, KeptReason, NoMacosObjects, NothingListed,
+    ObjectFacts, PathRefusal, PlannedRemoval, PlannedVendorRun, Removability, RemovalReason,
+    TrashFolderFacts, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanInput,
+    UninstallPlanItem, UninstallRoots, UninstallWarning, VendorJob, VendorLookup, VendorRefusal,
+    build_uninstall_plan,
 };
 use rabbit_core::version::Version;
 use tempfile::tempdir;
@@ -1403,6 +1404,10 @@ fn the_question_reads_in_every_locale() {
 /// a backup with no warning that asks, so none of them asks a question.
 /// That includes OSARA: the people who use RABBIT know that REAPER stops
 /// speaking without it. The question is for the packages later phases add.
+/// REAPER and Surge XT can't be ticked here: on Windows no uninstaller is
+/// found for them; on macOS these roots don't know where REAPER's app is,
+/// so `{app_path}` is refused, and Surge XT's turn hasn't come. Their
+/// questions are tested with their own plans.
 #[test]
 fn no_package_the_wizard_can_remove_yet_asks_a_question() {
     let dir = tempdir().unwrap();
@@ -1438,6 +1443,19 @@ fn no_package_the_wizard_can_remove_yet_asks_a_question() {
             vendor_lookup: &NothingListed,
             objects: &NoMacosObjects,
         });
+        if platform == Platform::MacOs {
+            assert!(
+                matches!(
+                    plan.item("reaper").map(|item| &item.removability),
+                    Some(Removability::UnsafePath {
+                        refusal: PathRefusal::UnknownRoot { .. },
+                        ..
+                    })
+                ),
+                "{:?}",
+                plan.item("reaper")
+            );
+        }
         let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
         let tickable: Vec<String> = uninstall_list_from_plan(&localizer, &specs, &plan)
             .rows
@@ -2080,7 +2098,7 @@ fn macos_rows_say_how_each_package_leaves() {
     assert!(reaper.can_tick, "{}", reaper.details);
     for sentence in [
         "Moves the REAPER app to the Trash.",
-        "RABBIT moves it to the Trash. Until you empty the Trash, you can drag it back from there.",
+        "Until you empty the Trash, you can drag it back from there.",
         "Your settings, extensions and projects stay.",
     ] {
         assert!(
@@ -2089,6 +2107,13 @@ fn macos_rows_say_how_each_package_leaves() {
             reaper.details
         );
     }
+    // The summary says where it goes; the route's line doesn't say it again.
+    assert_eq!(
+        reaper.details.matches("to the Trash").count(),
+        1,
+        "{}",
+        reaper.details
+    );
     assert!(!reaper.details.contains("password"), "{}", reaper.details);
 
     let root_list = mac_list(vec![root_moved_reaper()]);
@@ -2110,6 +2135,54 @@ fn macos_rows_say_how_each_package_leaves() {
             assert!(!row.details.contains(windows), "{windows}: {}", row.details);
         }
     }
+}
+
+/// Review names only the extensions that really stay on top of REAPER: one
+/// ticked along with it goes in the same run, and with every one ticked the
+/// line goes. REAPER's own details, about REAPER alone, still name them all.
+#[test]
+fn review_says_only_the_extensions_left_behind_stay_on_top_of_reaper() {
+    let reaper = UninstallPlanItem {
+        warnings: vec![UninstallWarning::DependentsStay {
+            package_ids: vec!["osara".to_string(), "sws".to_string()],
+        }],
+        ..trash_reaper()
+    };
+    let mut list = mac_list(vec![
+        reaper,
+        item("osara", Removability::Removable),
+        removable_sws(),
+    ]);
+    let row = list
+        .rows
+        .iter()
+        .find(|row| row.package_id == "reaper")
+        .unwrap();
+    assert!(
+        row.details
+            .contains("These packages install on top of REAPER and stay: OSARA, SWS Extension."),
+        "{}",
+        row.details
+    );
+
+    tick(&mut list, "reaper");
+    tick(&mut list, "osara");
+    let text = review(&list, Some(&target(true)), false, &[])
+        .lines
+        .join("\n");
+    assert!(
+        text.contains(
+            "These packages install on top of REAPER and stay: SWS Extension. They work again \
+             once you install REAPER again."
+        ),
+        "{text}"
+    );
+
+    tick(&mut list, "sws");
+    let text = review(&list, Some(&target(true)), false, &[])
+        .lines
+        .join("\n");
+    assert!(!text.contains("install on top of REAPER"), "{text}");
 }
 
 /// An app RABBIT can't move to the Trash, by itself or with a password,
@@ -2302,6 +2375,135 @@ fn an_app_going_to_the_trash_asks_with_its_own_sentence() {
             && !body.contains("A backup can't bring REAPER back"),
         "{body}"
     );
+}
+
+/// The shipped macOS REAPER plan on a stand-in Mac in a temporary folder,
+/// with REAPER.app in its `/Applications` described by `app` and the
+/// user's Trash a folder of theirs on the same disk. Nothing here reads or
+/// moves a real app.
+fn shipped_mac_reaper_plan(app: ObjectFacts) -> (tempfile::TempDir, UninstallPlan) {
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    let system = dir.path().join("system");
+    let applications = system.join("Applications");
+    let reaper_app = applications.join("REAPER.app");
+    std::fs::create_dir_all(reaper_app.join("Contents")).unwrap();
+    std::fs::create_dir_all(&resource).unwrap();
+    let mut roots = UninstallRoots::new(&resource);
+    roots.system_root = system;
+    roots.app_path = Some(reaper_app.clone());
+    roots.app_dir = Some(applications);
+    let objects = FakeMacosObjects::new()
+        .with_object(&reaper_app, app)
+        .with_trash(TrashFolderFacts {
+            path: PathBuf::from("/Users/me/.Trash"),
+            is_dir: true,
+            is_symlink: false,
+            owner_uid: 501,
+            owned_by_me: true,
+            dev: 1,
+        });
+    let specs = builtin_package_specs(Platform::MacOs);
+    let detections = vec![ComponentDetection {
+        installed: true,
+        version: Some(Version::parse("7.82").unwrap()),
+        ..ComponentDetection::not_installed("reaper", "REAPER")
+    }];
+    let plan = build_uninstall_plan(&UninstallPlanInput {
+        roots: &roots,
+        platform: Platform::MacOs,
+        target: InstallationKind::Standard,
+        specs: &specs,
+        detections: &detections,
+        state: None,
+        remove_settings: false,
+        vendor_lookup: &NothingListed,
+        objects: &objects,
+    });
+    (dir, plan)
+}
+
+/// REAPER.app as macOS describes it to the user who may move it, or, with
+/// `mine` false, to a user only root lets move it.
+fn mac_reaper_app(mine: bool) -> ObjectFacts {
+    ObjectFacts {
+        is_dir: true,
+        is_symlink: false,
+        owner_uid: if mine { 501 } else { 0 },
+        owned_by_me: mine,
+        writable: mine,
+        parent_writable_searchable: true,
+        removable_by_me: mine,
+        parent_sticky: false,
+        parent_owned_by_me: false,
+        locked: false,
+        parent_locked: false,
+        dev: 1,
+        bundle_identifier: Some("com.cockos.reaper".to_string()),
+    }
+}
+
+/// REAPER from the shipped macOS plan, as the wizard shows it: its row can
+/// be ticked on the Trash route and on root's, its details say where it
+/// goes and what stays, and its row, Review and question read in every
+/// language.
+#[test]
+fn the_shipped_macos_reaper_can_be_ticked_and_reads_in_every_locale() {
+    for mine in [true, false] {
+        let (_dir, plan) = shipped_mac_reaper_plan(mac_reaper_app(mine));
+        for &locale in embedded_locales() {
+            let localizer = Localizer::embedded(locale).unwrap();
+            let mut list = uninstall_list_from_plan(
+                &localizer,
+                &builtin_package_specs(Platform::MacOs),
+                &plan,
+            );
+            let row = list
+                .rows
+                .iter()
+                .find(|row| row.package_id == "reaper")
+                .unwrap();
+            assert!(row.can_tick, "{locale}, mine {mine}: {}", row.details);
+            assert!(
+                row.details.contains(
+                    &localizer
+                        .text("uninstall-summary-reaper-macos-removes")
+                        .value
+                ),
+                "{locale}: {}",
+                row.details
+            );
+            assert!(
+                row.details
+                    .contains(&localizer.text("uninstall-summary-reaper-keeps").value),
+                "{locale}: {}",
+                row.details
+            );
+            let mut texts = vec![row.summary.clone(), row.details.clone()];
+            tick(&mut list, "reaper");
+            let preview =
+                build_uninstall_review_preview(&localizer, Some(&target(true)), &list, false, &[]);
+            assert!(preview.can_uninstall, "{locale}: {:?}", preview.lines);
+            texts.push(preview.lines.join("\n"));
+            texts.push(uninstall_confirmation_body(&localizer, &plan, &ids(&["reaper"])).unwrap());
+            for text in texts {
+                assert!(
+                    !text.contains("wizard-")
+                        && !text.contains("uninstall-")
+                        && !text.contains('{'),
+                    "{locale}: {text}"
+                );
+            }
+            if locale == DEFAULT_LOCALE {
+                // Only root's route asks for a password.
+                let details = &list.rows[0].details;
+                assert_eq!(details.contains("password"), !mine, "{details}");
+                // There is no receipt, but the app is found by its name
+                // and bundle ID alone: nothing says it "removes the files".
+                assert!(!details.contains("didn't install"), "{details}");
+            }
+        }
+    }
 }
 
 /// Every macOS row, Review and question reads in every language, with no

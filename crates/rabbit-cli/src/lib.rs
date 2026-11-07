@@ -34,7 +34,7 @@ use rabbit_core::portable::{PortabilityCheckStatus, PortabilityReport, check_por
 use rabbit_core::preflight::{
     PreflightOptions, PreflightReport, PreflightStatus, run_install_preflight,
 };
-use rabbit_core::progress::ProgressReporter;
+use rabbit_core::progress::{ProgressEvent, ProgressReporter};
 use rabbit_core::report::{default_report_path, save_json_and_text_reports};
 use rabbit_core::resource::{ResourceInitActionKind, ResourceInitReport, initialize_resource_path};
 use rabbit_core::rollback::{
@@ -49,11 +49,12 @@ use rabbit_core::self_update::{
 };
 use rabbit_core::setup::{SetupOptions, SetupReport, execute_setup_operation};
 use rabbit_core::uninstall::{
-    APP_MANAGEMENT_HINT, AdministratorStepKind, AdministratorStepRecord, KeptFileReason,
-    KeptReason, LeftoverKind, LeftoverResult, RegistryEntryAction, Removability, RemovalReason,
-    RemovalRoute, SystemMacosObjects, SystemVendorLookup, UninstallMessage, UninstallNote,
-    UninstallPlan, UninstallPlanItem, UninstallReport, UninstallReportItem, UninstallRequest,
-    UninstallServices, UninstallStatus, UninstallWarning, execute_uninstall, plan_uninstall_at,
+    APP_MANAGEMENT_HINT, AdministratorStepKind, AdministratorStepRecord, ByHandReason,
+    KeptFileReason, KeptReason, LeftoverKind, LeftoverResult, RegistryEntryAction, Removability,
+    RemovalReason, RemovalRoute, SystemMacosObjects, SystemVendorLookup, UninstallMessage,
+    UninstallNote, UninstallPlan, UninstallPlanItem, UninstallReport, UninstallReportItem,
+    UninstallRequest, UninstallServices, UninstallStatus, UninstallWarning, execute_uninstall,
+    plan_uninstall_at,
 };
 use serde::Serialize;
 
@@ -1550,12 +1551,53 @@ fn uninstall_report(
     services: &UninstallServices<'_>,
     cancel: &CancelToken,
 ) -> Result<UninstallReport, Box<dyn std::error::Error>> {
-    let mut report = execute_uninstall(request, services, &ProgressReporter::noop(), cancel)?;
+    let (platform, dry_run) = (request.platform, request.dry_run);
+    let progress = ProgressReporter::new(move |event| {
+        if let Some(line) = uninstall_progress_line(platform, dry_run, &event) {
+            eprintln!("{line}");
+        }
+    });
+    let mut report = execute_uninstall(request, services, &progress, cancel)?;
     report
         .plan
         .items
         .retain(|item| request.package_ids.contains(&item.package_id));
     Ok(report)
+}
+
+/// What `uninstall --apply` prints to stderr right before macOS's password
+/// window opens. The window names osascript rather than rabbit, and the CLI
+/// otherwise says nothing until the run is over, so without this a window
+/// from an unknown tool would take focus with no word from rabbit.
+const CLI_ADMIN_PROMPT_TEXT: &str = "macOS now asks once for an administrator's name and \
+     password, in a window that may name osascript. With it, RABBIT runs one administrator \
+     command for this uninstall. If you cancel it, nothing is uninstalled.";
+
+/// What `uninstall --apply` prints to stderr when macOS's password window
+/// has been open a while without an answer: it may be behind the app rabbit
+/// runs in.
+const CLI_ADMIN_STILL_WAITING_TEXT: &str = "Still waiting for the administrator password \
+     window. If you don't hear it, check whether it is behind the app you run rabbit from, such \
+     as Terminal.";
+
+/// The line the CLI prints to stderr for `event` during an uninstall on
+/// `platform`, if any. Only a real macOS run says that the password window
+/// is coming, or still open. Windows' permission prompt names RABBIT
+/// itself, a dry run asks for nothing, and every other event stays quiet,
+/// so the output is the report alone, as before.
+fn uninstall_progress_line(
+    platform: Platform,
+    dry_run: bool,
+    event: &ProgressEvent,
+) -> Option<&'static str> {
+    if platform != Platform::MacOs || dry_run {
+        return None;
+    }
+    match event {
+        ProgressEvent::AdministratorPrompt { .. } => Some(CLI_ADMIN_PROMPT_TEXT),
+        ProgressEvent::AdministratorStillWaiting { .. } => Some(CLI_ADMIN_STILL_WAITING_TEXT),
+        _ => None,
+    }
 }
 
 /// The `--package` ids for `uninstall`, each once, in the order given. An id
@@ -2198,10 +2240,14 @@ fn uninstall_ability_text(item: &UninstallPlanItem) -> String {
         Removability::Manual { .. } => {
             format!("by hand only; rabbit uninstall --package {id} says how")
         }
-        Removability::ByHand { .. } => format!(
-            "no: move it to the Trash in Finder. {}",
-            item.removability.message(name)
-        ),
+        // An app that may not be the package at all isn't one to move to
+        // the Trash out of hand; its message says when to.
+        Removability::ByHand { reason, .. } if *reason != ByHandReason::NotTheExpectedApp => {
+            format!(
+                "no: move it to the Trash in Finder. {}",
+                item.removability.message(name)
+            )
+        }
         removability => format!("no. {}", removability.message(name)),
     }
 }
@@ -3516,12 +3562,40 @@ fn write_uninstall_item(
                  backup set, so a restore brings them back.",
             );
         }
+        // A package this run removes, or would, doesn't stay on top of this
+        // one, so only the others are named, and with none left there is
+        // nothing to say. One that was blocked, failed or not reached does
+        // stay.
+        let leaving: Vec<&str> = report
+            .items
+            .iter()
+            .filter(|other| {
+                other.status.is_removed() || other.status == UninstallStatus::WouldRemove
+            })
+            .map(|other| other.package_id.as_str())
+            .collect();
         for warning in &plan.warnings {
-            detail(
-                out,
-                "warning",
-                &uninstall_warning_text(warning, &item.display_name, localizer),
-            );
+            let text = match warning {
+                UninstallWarning::DependentsStay { package_ids } => {
+                    let staying: Vec<String> = package_ids
+                        .iter()
+                        .filter(|id| !leaving.contains(&id.as_str()))
+                        .cloned()
+                        .collect();
+                    if staying.is_empty() {
+                        continue;
+                    }
+                    uninstall_warning_text(
+                        &UninstallWarning::DependentsStay {
+                            package_ids: staying,
+                        },
+                        &item.display_name,
+                        localizer,
+                    )
+                }
+                _ => uninstall_warning_text(warning, &item.display_name, localizer),
+            };
+            detail(out, "warning", &text);
         }
         for note in &plan.notes {
             detail(
@@ -4625,9 +4699,11 @@ mod tests {
 
     /// A portable REAPER in a temporary folder with SWS in it, as this
     /// platform names its plug-in. REAPER itself is a stand-in that only
-    /// detection takes for the real thing; RABBIT can't uninstall it from a
-    /// portable folder on either platform, so it is the package a run gets
-    /// blocked by.
+    /// detection takes for the real thing, and RABBIT can't uninstall it, so
+    /// it is the package a run gets blocked by. On Windows a portable REAPER
+    /// is the user's to remove by hand. On macOS its app could go to the
+    /// Trash, but these runs read nothing about macOS apps, so RABBIT can't
+    /// check who may move it and leaves it to Finder.
     struct FakeReaper {
         _dir: tempfile::TempDir,
         resource: PathBuf,
@@ -4706,7 +4782,7 @@ mod tests {
             0
         );
 
-        // RABBIT can't uninstall a portable REAPER, so asking for it with
+        // RABBIT can't uninstall this portable REAPER, so asking for it with
         // SWS blocks both, in the dry run and with --apply alike.
         assert_eq!(
             super::uninstall_exit_code(&reaper.run(&["sws", "reaper"], false)),
@@ -4771,13 +4847,27 @@ mod tests {
         );
         assert_eq!(item("reaper")["status"], "blocked");
         assert_eq!(item("reaper")["message_code"]["code"], "not-removable");
-        // By hand on Windows; on macOS, not until a later version.
-        let removability = if cfg!(windows) {
-            serde_json::json!({ "kind": "manual", "note_key": "uninstall-manual-reaper-portable" })
+        // By hand on Windows. On macOS by hand in Finder: this run can't
+        // check who may move the app.
+        let removability = &item("reaper")["message_code"]["removability"];
+        if cfg!(windows) {
+            assert_eq!(
+                *removability,
+                serde_json::json!({ "kind": "manual", "note_key": "uninstall-manual-reaper-portable" })
+            );
         } else {
-            serde_json::json!({ "kind": "not-supported", "note_key": "uninstall-not-yet" })
-        };
-        assert_eq!(item("reaper")["message_code"]["removability"], removability);
+            assert_eq!(removability["kind"], "by-hand", "{removability:#}");
+            assert_eq!(
+                removability["reason"]["kind"], "could-not-check",
+                "{removability:#}"
+            );
+            assert!(
+                removability["path"]
+                    .as_str()
+                    .is_some_and(|path| std::path::Path::new(path).ends_with("REAPER/REAPER.app")),
+                "{removability:#}"
+            );
+        }
 
         let planned: Vec<&str> = json["plan"]["items"]
             .as_array()
@@ -5287,6 +5377,24 @@ mod tests {
                 && by_hand.contains("untick Locked"),
             "{by_hand}"
         );
+        // An app that may not be REAPER at all: the steps are only for one
+        // that is, as the GUI's details say, and nothing says to trash it
+        // out of hand.
+        let other_app = super::uninstall_ability_text(&rabbit_core::uninstall::UninstallPlanItem {
+            removability: rabbit_core::uninstall::Removability::ByHand {
+                path: PathBuf::from(MAC_REAPER_APP),
+                reason: rabbit_core::uninstall::ByHandReason::NotTheExpectedApp,
+            },
+            ..trash_reaper()
+        });
+        assert_eq!(
+            other_app,
+            format!(
+                "no. RABBIT can't move {MAC_REAPER_APP} to the Trash, because it isn't the app \
+                 RABBIT expects there. If it is the REAPER you want to remove, select it in \
+                 Finder and press Command-Delete."
+            )
+        );
     }
 
     /// A macOS dry run names the one password window, the window's osascript
@@ -5395,6 +5503,294 @@ mod tests {
             text.contains(&format!("  admin    {MAC_SURGE_APP}")),
             "{text}"
         );
+    }
+
+    /// `rabbit uninstall --package reaper` on macOS, from the shipped plan,
+    /// on a portable REAPER: a dry run says its app goes to the Trash with
+    /// no password and gives root nothing. An app only root may move,
+    /// outside /Applications, is the user's to move in Finder, and asking
+    /// for it changes nothing.
+    #[test]
+    fn a_macos_dry_run_sends_the_shipped_reapers_app_to_the_trash() {
+        use rabbit_core::uninstall::{
+            FakeMacosObjects, ObjectFacts, TrashFolderFacts, UninstallServices, UninstallStatus,
+        };
+
+        let reaper = FakeReaper::new();
+        let app = reaper.resource.join("REAPER.app");
+        std::fs::create_dir_all(app.join("Contents")).unwrap();
+        let run = |mine: bool| {
+            let objects = FakeMacosObjects::new()
+                .with_object(
+                    &app,
+                    ObjectFacts {
+                        is_dir: true,
+                        is_symlink: false,
+                        owner_uid: if mine { 501 } else { 0 },
+                        owned_by_me: mine,
+                        writable: mine,
+                        parent_writable_searchable: true,
+                        removable_by_me: mine,
+                        parent_sticky: false,
+                        parent_owned_by_me: true,
+                        locked: false,
+                        parent_locked: false,
+                        dev: 1,
+                        bundle_identifier: Some("com.cockos.reaper".to_string()),
+                    },
+                )
+                .with_trash(TrashFolderFacts {
+                    path: PathBuf::from("/Users/me/.Trash"),
+                    is_dir: true,
+                    is_symlink: false,
+                    owner_uid: 501,
+                    owned_by_me: true,
+                    dev: 1,
+                });
+            super::uninstall_report(
+                &rabbit_core::uninstall::UninstallRequest {
+                    platform: rabbit_core::model::Platform::MacOs,
+                    target_app_path: Some(app.clone()),
+                    target: Some(InstallationKind::Portable),
+                    ..reaper.request(&["reaper"], false)
+                },
+                &UninstallServices {
+                    macos_objects: &objects,
+                    ..UninstallServices::without_elevation()
+                },
+                &rabbit_core::cancel::CancelToken::new(),
+            )
+            .unwrap()
+        };
+
+        let english = rabbit_core::localization::Localizer::embedded("en-US").unwrap();
+        let report = run(true);
+        let item = report.item("reaper").unwrap();
+        assert_eq!(
+            item.status,
+            UninstallStatus::WouldRemove,
+            "{}",
+            item.message
+        );
+        assert!(report.administrator_steps.is_empty());
+        let text = super::uninstall_report_text(&report, Some(&english));
+        for line in [
+            "REAPER: will uninstall. RABBIT moves it to the Trash; no password prompt.\n"
+                .to_string(),
+            // Inside the resource folder, so named from there.
+            "  trash    REAPER.app\n".to_string(),
+            format!(
+                "  keep     {} (REAPER's resource folder, with your settings, extensions and key \
+                 maps)\n",
+                reaper.resource.display()
+            ),
+        ] {
+            assert!(text.contains(&line), "{line}\n{text}");
+        }
+        assert!(!text.contains("Needs administrator rights"), "{text}");
+        assert_eq!(super::uninstall_exit_code(&report), 0);
+        assert!(app.is_dir());
+
+        let report = run(false);
+        let item = report.item("reaper").unwrap();
+        assert_eq!(item.status, UninstallStatus::Blocked, "{}", item.message);
+        let text = super::uninstall_report_text(&report, Some(&english));
+        assert!(
+            text.contains("REAPER: blocked. RABBIT can't move")
+                && text.contains("because your account may not move it")
+                && text.contains("select it in Finder and press Command-Delete"),
+            "{text}"
+        );
+        assert!(!text.contains("Needs administrator rights"), "{text}");
+        assert_eq!(super::uninstall_exit_code(&report), 2);
+        assert!(app.is_dir());
+    }
+
+    /// `rabbit uninstall --package reaper` on macOS with a
+    /// `--target-app-path` that isn't there, while REAPER is found at its
+    /// own app: moving nothing would claim REAPER removed. The dry run and
+    /// `--apply` are both blocked, name the path RABBIT looked for, change
+    /// nothing and exit 2, so a script doesn't take REAPER for gone.
+    #[test]
+    fn a_macos_target_app_path_that_isnt_there_blocks_reaper() {
+        use rabbit_core::uninstall::{
+            ByHandReason, FakeMacosObjects, Removability, UninstallMessage, UninstallServices,
+            UninstallStatus,
+        };
+
+        let reaper = FakeReaper::new();
+        let app = reaper.resource.join("REAPER.app");
+        std::fs::create_dir_all(app.join("Contents")).unwrap();
+        let mistyped = reaper.resource.join("REAPER64.app");
+        let objects = FakeMacosObjects::new();
+        for apply in [false, true] {
+            let report = super::uninstall_report(
+                &rabbit_core::uninstall::UninstallRequest {
+                    platform: rabbit_core::model::Platform::MacOs,
+                    target_app_path: Some(mistyped.clone()),
+                    target: Some(InstallationKind::Portable),
+                    ..reaper.request(&["reaper"], apply)
+                },
+                &UninstallServices {
+                    macos_objects: &objects,
+                    ..UninstallServices::without_elevation()
+                },
+                &rabbit_core::cancel::CancelToken::new(),
+            )
+            .unwrap();
+            let item = report.item("reaper").unwrap();
+            assert_eq!(
+                item.status,
+                UninstallStatus::Blocked,
+                "{apply}: {}",
+                item.message
+            );
+            assert!(
+                matches!(
+                    &item.message_code,
+                    UninstallMessage::NotRemovable {
+                        removability: Removability::ByHand {
+                            path,
+                            reason: ByHandReason::CouldNotCheck { .. },
+                        },
+                    } if *path == mistyped
+                ),
+                "{apply}: {:?}",
+                item.message_code
+            );
+            let text = super::uninstall_report_text(&report, None);
+            assert!(
+                text.contains(&format!("RABBIT can't move {}", mistyped.display())),
+                "{text}"
+            );
+            assert_eq!(super::uninstall_exit_code(&report), 2, "{apply}");
+            assert!(item.removed.is_empty(), "{apply}");
+            assert!(objects.trashed().is_empty(), "{apply}");
+            assert!(app.is_dir());
+        }
+    }
+
+    /// The text after a run names only the extensions that really stay on
+    /// top of REAPER: one the same run removes, or would, isn't among them;
+    /// one it couldn't remove is; and with none left the warning goes.
+    #[test]
+    fn reapers_warning_names_only_the_extensions_the_run_leaves() {
+        use rabbit_core::uninstall::{
+            Removability, UninstallMessage, UninstallPlanItem, UninstallStatus, UninstallWarning,
+        };
+
+        let reaper = UninstallPlanItem {
+            warnings: vec![UninstallWarning::DependentsStay {
+                package_ids: vec!["osara".to_string(), "sws".to_string()],
+            }],
+            ..trash_reaper()
+        };
+        let osara = mac_item("osara", "OSARA", &[], false, false);
+        let sws = mac_item("sws", "SWS Extension", &[], false, false);
+        let blocked = |plan_item: &UninstallPlanItem| {
+            mac_report_item(
+                plan_item,
+                UninstallStatus::Blocked,
+                UninstallMessage::NotRemovable {
+                    removability: Removability::NoReceipt,
+                },
+                "RABBIT leaves it alone.",
+            )
+        };
+        let removed = |plan_item: &UninstallPlanItem| {
+            mac_report_item(
+                plan_item,
+                UninstallStatus::Removed,
+                UninstallMessage::Removed {
+                    backup_set_id: None,
+                },
+                "",
+            )
+        };
+        let text_of = |dry_run: bool, items| {
+            super::uninstall_report_text(
+                &mac_report(
+                    dry_run,
+                    vec![reaper.clone(), osara.clone(), sws.clone()],
+                    items,
+                    Vec::new(),
+                ),
+                None,
+            )
+        };
+
+        let text = text_of(
+            true,
+            vec![would_remove(&reaper), blocked(&osara), would_remove(&sws)],
+        );
+        assert!(
+            text.contains(
+                "  warning  These packages install on top of REAPER and stay: osara. They work \
+                 again once you install REAPER again.\n"
+            ),
+            "{text}"
+        );
+
+        let text = text_of(
+            true,
+            vec![
+                would_remove(&reaper),
+                would_remove(&osara),
+                would_remove(&sws),
+            ],
+        );
+        assert!(!text.contains("install on top of REAPER"), "{text}");
+
+        let text = text_of(
+            false,
+            vec![removed(&reaper), removed(&osara), removed(&sws)],
+        );
+        assert!(!text.contains("install on top of REAPER"), "{text}");
+    }
+
+    /// Only a real macOS run says, on stderr, that macOS's password window
+    /// is coming and when it is still open: the window names osascript, not
+    /// rabbit. A dry run asks for nothing, Windows' prompt names RABBIT
+    /// itself, and nothing else the run reports is printed while it runs.
+    #[test]
+    fn only_a_real_macos_run_announces_the_password_window() {
+        use rabbit_core::model::Platform;
+        use rabbit_core::progress::ProgressEvent;
+
+        let prompt = ProgressEvent::AdministratorPrompt {
+            package_ids: vec!["reaper".to_string()],
+        };
+        let waiting = ProgressEvent::AdministratorStillWaiting { seconds: 30 };
+        let other = ProgressEvent::RemoveCompleted {
+            package_id: "reaper".to_string(),
+            removed: true,
+        };
+        assert_eq!(
+            super::uninstall_progress_line(Platform::MacOs, false, &prompt),
+            Some(super::CLI_ADMIN_PROMPT_TEXT)
+        );
+        assert!(super::CLI_ADMIN_PROMPT_TEXT.contains("osascript"));
+        assert_eq!(
+            super::uninstall_progress_line(Platform::MacOs, false, &waiting),
+            Some(super::CLI_ADMIN_STILL_WAITING_TEXT)
+        );
+        assert_eq!(
+            super::uninstall_progress_line(Platform::MacOs, false, &other),
+            None
+        );
+        for (platform, dry_run) in [
+            (Platform::MacOs, true),
+            (Platform::Windows, false),
+            (Platform::Windows, true),
+        ] {
+            for event in [&prompt, &waiting] {
+                assert_eq!(
+                    super::uninstall_progress_line(platform, dry_run, event),
+                    None,
+                    "{platform:?} {dry_run}"
+                );
+            }
+        }
     }
 
     /// After a macOS run: an app in the Trash says it can come back, and

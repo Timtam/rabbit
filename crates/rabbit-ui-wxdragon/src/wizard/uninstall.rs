@@ -546,7 +546,7 @@ fn removal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
     if let Some(summary) = &item.summary {
         lines.push(text(&summary.keeps_key));
     }
-    lines.extend(other_warning_lines(localizer, item, name));
+    lines.extend(other_warning_lines(localizer, item, name, &[]));
     lines.extend(note_lines(localizer, item, name));
     lines.join("\n")
 }
@@ -556,7 +556,9 @@ fn removal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
 /// Windows asked; on macOS the administrator command deletes it for good
 /// after one password window, or moves an app the user can't move into the
 /// user's Trash; an app the user can move goes to the Trash with no
-/// password at all. A row that can be ticked always has one of these.
+/// password at all, which the summary before it already says, so its line
+/// only says how to get it back. A row that can be ticked always has one
+/// of these.
 fn route_details_key(item: &UninstallPlanItem) -> &'static str {
     match item.route() {
         RemovalRoute::BackupSet => "wizard-uninstall-details-files",
@@ -581,8 +583,16 @@ fn always_warning_lines(localizer: &Localizer, item: &UninstallPlanItem) -> Vec<
         .collect()
 }
 
-/// Every other warning, one sentence each.
-fn other_warning_lines(localizer: &Localizer, item: &UninstallPlanItem, name: &str) -> Vec<String> {
+/// Every other warning, one sentence each. `also_removed` are the packages
+/// the same run removes: Review leaves them out of the extensions that
+/// stay, and drops that line once none is left. A row's own details are
+/// about the package alone and pass none.
+fn other_warning_lines(
+    localizer: &Localizer,
+    item: &UninstallPlanItem,
+    name: &str,
+    also_removed: &[String],
+) -> Vec<String> {
     let format = |key: &str, args: &[(&str, &str)]| localizer.format(key, args).value;
     item.warnings
         .iter()
@@ -592,8 +602,15 @@ fn other_warning_lines(localizer: &Localizer, item: &UninstallPlanItem, name: &s
                 Some(localizer.text(message_key).value)
             }
             UninstallWarning::DependentsStay { package_ids } => {
-                let packages = package_ids
+                let staying: Vec<&String> = package_ids
                     .iter()
+                    .filter(|id| !also_removed.contains(id))
+                    .collect();
+                if staying.is_empty() {
+                    return None;
+                }
+                let packages = staying
+                    .into_iter()
                     .map(|id| localized_package_display_name(localizer, id))
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -735,6 +752,7 @@ pub struct WizardUninstallReviewPreview {
 /// 2. one line per package, with what goes and what stays, or, with "Also
 ///    remove settings" ticked, which of its settings go too;
 /// 3. the warnings, those the manifests always show first, and the notes;
+///    the extensions that stay leave out those ticked along with them;
 /// 4. "close other music programs" for a package that serves all of them,
 ///    or whose own uninstaller or the macOS administrator command removes
 ///    machine-wide parts;
@@ -825,8 +843,11 @@ pub fn build_uninstall_review_preview(
             .into_iter()
             .for_each(&mut add_note);
     }
+    // An extension ticked along with REAPER doesn't stay, so Review only
+    // names the ones that do.
+    let ticked_ids = list.ticked_package_ids();
     for (row, item) in &planned {
-        other_warning_lines(localizer, item, &row.display_name)
+        other_warning_lines(localizer, item, &row.display_name, &ticked_ids)
             .into_iter()
             .chain(note_lines(localizer, item, &row.display_name))
             .for_each(&mut add_note);

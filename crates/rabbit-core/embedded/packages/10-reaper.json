@@ -96,8 +96,29 @@
       },
       {
         "platform": "macos",
-        "strategy": "not_supported",
-        "note_key": "uninstall-not-yet"
+        "strategy": "remove_files",
+        "elevation": "if_needed",
+        "backup": "to_trash",
+        "summary": {
+          "removes_key": "uninstall-summary-reaper-macos-removes",
+          "keeps_key": "uninstall-summary-reaper-keeps"
+        },
+        "remove": {
+          "trees": [
+            {
+              "path": "{app_path}",
+              "must_end_with": ".app",
+              "name_contains": "REAPER",
+              "bundle_id": "com.cockos.reaper"
+            }
+          ]
+        },
+        "kept_user_data": [
+          {
+            "path": "{resource}",
+            "note_key": "uninstall-kept-reaper-resource"
+          }
+        ]
       }
     ]
   },

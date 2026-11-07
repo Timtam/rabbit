@@ -292,9 +292,10 @@ wizard-uninstall-details-vendor-by-hand = Sie können { $package } selbst in den
 # you; or into your Trash with an administrator's password, because your
 # account may not move it. Name the Trash and Put Back as Finder does in your
 # language. The password window may offer Touch ID, so don't say a password
-# is the only way.
+# is the only way. The Trash line follows the package's own sentence, which
+# already says that it goes to the Trash, so it only says how to get it back.
 wizard-uninstall-details-elevated-macos = macOS fragt einmal nach Name und Passwort eines Administrators, bevor etwas entfernt wird. Es kommt in keine Sicherung; um es wieder zu haben, installieren Sie es erneut.
-wizard-uninstall-details-trash = RABBIT legt es in den Papierkorb. Bis Sie den Papierkorb entleeren, können Sie es von dort wieder herausziehen.
+wizard-uninstall-details-trash = Bis Sie den Papierkorb entleeren, können Sie es von dort wieder herausziehen.
 wizard-uninstall-details-trash-elevated-macos = Ihr Benutzerkonto darf es nicht verschieben. Deshalb fragt macOS einmal nach Name und Passwort eines Administrators, bevor etwas entfernt wird, und RABBIT legt es dann in Ihren Papierkorb. Es behält seinen bisherigen Eigentümer, deshalb bietet der Finder dafür kein „Zurücklegen“ an, und das Entleeren des Papierkorbs kann nach dem Passwort eines Administrators fragen.
 # The one row, without a checkbox, of an Uninstall list with nothing in it,
 # and its details text.

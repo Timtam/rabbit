@@ -505,27 +505,34 @@ impl Removability {
                  remove only part of it.",
                 path.display()
             ),
-            // Get Info's Locked clears only the lock a user sets; the other
-            // locks RABBIT counts as Locked stay, so the steps can't promise
-            // to work every time.
-            Self::ByHand { path, reason } => format!(
-                "RABBIT can't move {} to the Trash, because {}. To remove {name}, {} in Finder and \
-                 press Command-Delete; Finder asks for an administrator's password if it needs \
-                 one.{}",
-                path.display(),
-                reason.message(),
-                if *reason == ByHandReason::Locked {
-                    "untick Locked in its Get Info window, then select it"
-                } else {
-                    "select it"
-                },
-                if *reason == ByHandReason::Locked {
-                    " If Locked isn't ticked, or Finder still can't move it, it has a lock that \
-                     Finder can't remove."
-                } else {
-                    ""
-                }
-            ),
+            Self::ByHand { path, reason } => {
+                let steps = match reason {
+                    // It may not be the package at all, so the steps are
+                    // only for the user who knows it is, as the GUI says.
+                    ByHandReason::NotTheExpectedApp => format!(
+                        "If it is the {name} you want to remove, select it in Finder and press \
+                         Command-Delete."
+                    ),
+                    // Get Info's Locked clears only the lock a user sets;
+                    // the other locks RABBIT counts as Locked stay, so the
+                    // steps can't promise to work every time.
+                    ByHandReason::Locked => format!(
+                        "To remove {name}, untick Locked in its Get Info window, then select it \
+                         in Finder and press Command-Delete; Finder asks for an administrator's \
+                         password if it needs one. If Locked isn't ticked, or Finder still can't \
+                         move it, it has a lock that Finder can't remove."
+                    ),
+                    _ => format!(
+                        "To remove {name}, select it in Finder and press Command-Delete; Finder \
+                         asks for an administrator's password if it needs one."
+                    ),
+                };
+                format!(
+                    "RABBIT can't move {} to the Trash, because {}. {steps}",
+                    path.display(),
+                    reason.message()
+                )
+            }
             Self::NotInstalled => format!("{name} isn't installed."),
             Self::Removable | Self::RemovableOrphanedFromReaPack => {
                 format!("RABBIT can remove {name}.")

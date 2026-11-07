@@ -297,9 +297,10 @@ wizard-uninstall-details-vendor-by-hand = You can uninstall { $package } yoursel
 # you; or into your Trash with an administrator's password, because your
 # account may not move it. Name the Trash and Put Back as Finder does in your
 # language. The password window may offer Touch ID, so don't say a password
-# is the only way.
+# is the only way. The Trash line follows the package's own sentence, which
+# already says that it goes to the Trash, so it only says how to get it back.
 wizard-uninstall-details-elevated-macos = macOS asks once for an administrator's name and password, before anything is removed. It doesn't go into a backup; to have it again, you install it again.
-wizard-uninstall-details-trash = RABBIT moves it to the Trash. Until you empty the Trash, you can drag it back from there.
+wizard-uninstall-details-trash = Until you empty the Trash, you can drag it back from there.
 wizard-uninstall-details-trash-elevated-macos = Your account may not move it, so macOS asks once for an administrator's name and password, before anything is removed, and RABBIT then moves it into your Trash. It keeps the owner it had, so Finder offers no Put Back for it, and emptying the Trash may ask for an administrator's password.
 # The one row, without a checkbox, of an Uninstall list with nothing in it,
 # and its details text.

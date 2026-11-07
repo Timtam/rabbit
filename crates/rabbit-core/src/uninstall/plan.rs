@@ -347,7 +347,18 @@ fn plan_item(
         Some(_) => Removability::RemovableOrphanedFromReaPack,
         None => Removability::Removable,
     };
-    if receipt.is_none() {
+    // Without a receipt RABBIT removes what the manifest says the package
+    // installs, and says so. What goes whole, to the Trash or through the
+    // administrator command, the manifest alone finds, by its place and
+    // name (an app also by its bundle ID), whoever installed it. As with a
+    // vendor's uninstaller there is nothing to say, and "removes the files"
+    // would only contradict "moves it to the Trash".
+    let found_by_the_manifest_alone = item.route().takes_whole_objects()
+        && collected
+            .files
+            .iter()
+            .all(|file| file.reason == RemovalReason::Tree);
+    if receipt.is_none() && !found_by_the_manifest_alone {
         item.notes.push(UninstallNote::NoReceipt);
     }
     if let Some(reapack_packages) = orphaned_from {
@@ -801,11 +812,27 @@ impl PackagePlanner<'_> {
         Ok(())
     }
 
+    /// The trees that exist, as whole objects. Most plans name every place a
+    /// tree may be, so one that isn't there is skipped. A `to_trash` plan
+    /// names the one app it moves, and the package is detected installed by
+    /// now, so a missing app means the target points somewhere else, such
+    /// as a mistyped `--target-app-path`: moving nothing would report the
+    /// package removed while it is still there. The user is told the path
+    /// and removes the app in Finder instead.
     fn add_trees(&self, candidates: &mut Vec<PlannedRemoval>) -> Result<(), Removability> {
         for tree in &self.plan.remove.trees {
             for resolved in self.resolve(&tree.path)? {
-                let Ok(metadata) = fs::symlink_metadata(&resolved.path) else {
-                    continue;
+                let metadata = match fs::symlink_metadata(&resolved.path) {
+                    Ok(metadata) => metadata,
+                    Err(error) if self.plan.backup == UninstallBackup::ToTrash => {
+                        return Err(Removability::ByHand {
+                            path: resolved.path,
+                            reason: ByHandReason::CouldNotCheck {
+                                error: error.to_string(),
+                            },
+                        });
+                    }
+                    Err(_) => continue,
                 };
                 let guard = RemovalGuard {
                     must_end_with: tree.must_end_with.clone(),

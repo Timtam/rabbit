@@ -74,7 +74,7 @@ use rabbit_platform::HkcuUninstallRoot;
 use crate::cancel::CancelToken;
 use crate::detection::{default_standard_installation, detect_components};
 use crate::error::{RabbitError, Result};
-use crate::lock::acquire_package_install_lock;
+use crate::lock::{acquire_package_install_lock, default_package_install_lock_path};
 use crate::model::{ComponentDetection, InstallationKind, Platform};
 use crate::package::uninstall::UninstallPostStep;
 use crate::package::{PACKAGE_REAPER, PackageSpec, builtin_package_specs};
@@ -291,9 +291,18 @@ pub(crate) fn execute_uninstall_in(
     ensure_resource_path_ready(&resource, request.dry_run)?;
     // Held from before the plan is built until the report is written, so an
     // install can't change the files between the plan and the moves. A
-    // resource folder that doesn't exist has nothing to remove, and taking
-    // the lock would create it.
-    let _install_lock = if request.dry_run || !resource.is_dir() {
+    // real run takes it even where the resource folder doesn't exist yet,
+    // which creates the folder: a standard REAPER that was never opened
+    // still has its app outside the folder to remove, and the receipt (the
+    // refusal) and the report are saved there afterwards. Folders made only
+    // for the lock go again when the run changed nothing, so a mistyped
+    // --resource-path leaves no trace. A dry run writes nothing.
+    let lock_folders_made = if request.dry_run {
+        Vec::new()
+    } else {
+        missing_folders(&default_package_install_lock_path(&resource))
+    };
+    let install_lock = if request.dry_run {
         None
     } else {
         Some(acquire_package_install_lock(&resource)?)
@@ -563,11 +572,40 @@ pub(crate) fn execute_uninstall_in(
         saved_report: None,
     };
     // A report of what was removed is the user's way back to the backup
-    // set, so every real run leaves one. A dry run writes nothing at all.
-    if !request.dry_run && resource.is_dir() {
+    // set, so every real run leaves one, except one that changed nothing in
+    // a folder only its lock made. A dry run writes nothing at all.
+    let changed_nothing = report.items.iter().all(|item| {
+        matches!(
+            item.status,
+            UninstallStatus::NotInstalled
+                | UninstallStatus::Blocked
+                | UninstallStatus::Cancelled
+                | UninstallStatus::NotReached
+        )
+    });
+    let leave_no_trace = !lock_folders_made.is_empty() && changed_nothing;
+    if !request.dry_run && !leave_no_trace && resource.is_dir() {
         report.saved_report = save_uninstall_report(&report).ok();
     }
+    if leave_no_trace {
+        drop(install_lock);
+        // Deepest first; remove_dir only ever removes an empty folder, so
+        // anything another program put there in the meantime stays.
+        for folder in &lock_folders_made {
+            let _ = fs::remove_dir(folder);
+        }
+    }
     Ok(report)
+}
+
+/// The folders above `path` that don't exist yet, deepest first: what
+/// creating `path`'s folder would make.
+fn missing_folders(path: &Path) -> Vec<PathBuf> {
+    path.ancestors()
+        .skip(1)
+        .take_while(|folder| !folder.as_os_str().is_empty() && !folder.exists())
+        .map(Path::to_path_buf)
+        .collect()
 }
 
 /// Start the run's elevated helper if a package needs it: the run's one

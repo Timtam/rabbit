@@ -1907,6 +1907,20 @@ mod tests {
             mac.remove.trees[0].bundle_id.as_deref(),
             Some("com.cockos.reaper")
         );
+        // It is the plan REAPER ships with on macOS, word for word.
+        let shipped = embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == "reaper")
+            .expect("REAPER is shipped")
+            .uninstall;
+        for target in [InstallationKind::Standard, InstallationKind::Portable] {
+            assert_eq!(
+                reaper.plan_for(Platform::MacOs, target),
+                shipped.plan_for(Platform::MacOs, target),
+                "{target:?}"
+            );
+        }
 
         let surge = demo_spec(r#""requires_standard_install": true,"#, surge).uninstall;
         let mac = surge

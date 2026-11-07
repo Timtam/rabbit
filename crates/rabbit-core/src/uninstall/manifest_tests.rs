@@ -2,25 +2,50 @@
 //! what each package RABBIT can uninstall would remove and keep, the
 //! warnings it shows, and the copies it refuses. Planning never removes
 //! anything, and every folder here is a fake one; the CLAP folder too.
+//! REAPER on macOS is planned on a stand-in Mac, where every fact macOS
+//! would give is handed in, and its dry runs and its one real run move
+//! nothing but a temporary app into a temporary Trash.
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
+use rabbit_platform::{ShellCommand, ShellStep};
+
+use super::admin_batch::{
+    AdministratorStepKind, AdministratorStepRecord, AdministratorStepVerdict, MV, PGREP, TEST,
+    administrator_steps, prepare_package, trash_name,
+};
+use super::execute::{UninstallEnvironment, execute_uninstall_in};
+use super::macos_plan_tests::{
+    DISK, MacFixture, OneVolume, join, my_trash, owned_by_me, owned_by_root, snapshot,
+};
 use super::tests::{Fixture, FoundAt, detection, installed, write};
 use super::{
-    KeptReason, NoMacosObjects, NothingListed, PlannedRegistryCleanup, Removability, RemovalReason,
-    UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanInput, UninstallPlanItem,
+    ByHandReason, FakeMacosObjects, KeptReason, MacosObjects, NoAdministratorShell,
+    NoElevatedHelper, NoMacosObjects, NothingListed, ObjectFacts, ObjectProbe,
+    PlannedRegistryCleanup, Removability, RemovalReason, RemovalRoute, TrashFolderFacts,
+    UNINSTALL_NOT_YET_KEY, UninstallMessage, UninstallNote, UninstallPlan, UninstallPlanInput,
+    UninstallPlanItem, UninstallReport, UninstallRequest, UninstallRoots, UninstallStatus,
     UninstallWarning, VendorLookup, VendorRefusal, build_uninstall_plan,
 };
+use crate::cancel::CancelToken;
 use crate::detection::detect_component_with_probes;
+use crate::localization::{Localizer, embedded_locales};
 use crate::model::{ComponentDetection, InstallationKind, Platform};
-use crate::package::uninstall::{UninstallPostStep, UninstallStrategy, VendorUninstallerKind};
+use crate::package::uninstall::{
+    UninstallBackup, UninstallElevation, UninstallPostStep, UninstallStrategy,
+    VendorUninstallerKind,
+};
 use crate::package::{
     PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_JAWS_SCRIPTS, PACKAGE_OSARA, PACKAGE_REAKONTROL,
     PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS, PackageSpec,
     builtin_package_specs, embedded_package_manifest, validate_package_spec,
 };
+use crate::preflight::{MACOS_REAPER_PROCESS_NAMES, RunningProcess};
+use crate::progress::ProgressReporter;
 use crate::reapack::write_test_registry;
 use crate::receipt::{InstallState, InstalledFileReceipt, PackageReceipt};
 
@@ -31,17 +56,34 @@ const SWS_IN_REAPACK: &str = "SWS/S&M extension";
 
 /// The shipped packages for one platform, planned on a fixture.
 struct Shipped<'f> {
-    fixture: &'f Fixture,
+    roots: &'f UninstallRoots,
+    resource: &'f Path,
     platform: Platform,
     specs: Vec<PackageSpec>,
+    /// Who may move a macOS app, as the test says macOS would answer.
+    objects: &'f dyn ObjectProbe,
 }
 
 impl<'f> Shipped<'f> {
     fn new(fixture: &'f Fixture, platform: Platform) -> Self {
         Self {
-            fixture,
+            roots: &fixture.roots,
+            resource: &fixture.resource,
             platform,
             specs: builtin_package_specs(platform),
+            objects: &NoMacosObjects,
+        }
+    }
+
+    /// The shipped macOS packages on a stand-in Mac, where `objects` says
+    /// who may move REAPER's app and what the user's Trash is.
+    fn on_mac(mac: &'f MacFixture, objects: &'f dyn ObjectProbe) -> Self {
+        Self {
+            roots: &mac.roots,
+            resource: &mac.resource,
+            platform: Platform::MacOs,
+            specs: builtin_package_specs(Platform::MacOs),
+            objects,
         }
     }
 
@@ -72,7 +114,7 @@ impl<'f> Shipped<'f> {
         vendor_lookup: &dyn VendorLookup,
     ) -> UninstallPlan {
         build_uninstall_plan(&UninstallPlanInput {
-            roots: &self.fixture.roots,
+            roots: self.roots,
             platform: self.platform,
             target,
             specs: &self.specs,
@@ -80,7 +122,7 @@ impl<'f> Shipped<'f> {
             state,
             remove_settings,
             vendor_lookup,
-            objects: &NoMacosObjects,
+            objects: self.objects,
         })
     }
 
@@ -94,14 +136,8 @@ impl<'f> Shipped<'f> {
             .iter()
             .filter(|spec| ids.contains(&spec.id.as_str()))
             .map(|spec| {
-                detect_component_with_probes(
-                    &self.fixture.resource,
-                    self.platform,
-                    spec,
-                    state,
-                    |_| None,
-                )
-                .unwrap()
+                detect_component_with_probes(self.resource, self.platform, spec, state, |_| None)
+                    .unwrap()
             })
             .collect();
         if !ids.contains(&PACKAGE_REAPACK) {
@@ -256,8 +292,10 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
             ],
         ),
     ];
+    // On macOS one plan serves a standard and a portable REAPER: its app
+    // goes to the Trash wherever it is.
     let macos = [
-        (PACKAGE_REAPER, not_supported),
+        (PACKAGE_REAPER, remove_files),
         (PACKAGE_OSARA, remove_files),
         (PACKAGE_SWS, remove_files),
         (PACKAGE_REAPACK, remove_files),
@@ -322,7 +360,7 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
         item(&plan, PACKAGE_SURGE_XT).removability,
         Removability::NeedsStandardTarget
     );
-    // On macOS, Surge XT and REAPER wait for a later version.
+    // On macOS, Surge XT waits for a later version.
     let macos = Shipped::new(&fixture, Platform::MacOs);
     let everything: Vec<ComponentDetection> = macos
         .specs
@@ -330,15 +368,12 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
         .map(|spec| detection(&spec.id, true))
         .collect();
     let macos_plan = macos.plan(&everything, None);
-    for id in [PACKAGE_REAPER, PACKAGE_SURGE_XT] {
-        assert_eq!(
-            item(&macos_plan, id).removability,
-            Removability::NotSupported {
-                note_key: UNINSTALL_NOT_YET_KEY.to_string()
-            },
-            "{id}"
-        );
-    }
+    assert_eq!(
+        item(&macos_plan, PACKAGE_SURGE_XT).removability,
+        Removability::NotSupported {
+            note_key: UNINSTALL_NOT_YET_KEY.to_string()
+        }
+    );
     assert_eq!(
         item(&plan, PACKAGE_APP2CLAP).removability,
         Removability::NeedsStandardTarget
@@ -1375,4 +1410,749 @@ fn reaper_on_windows_runs_its_own_uninstaller_and_keeps_the_resource_folder() {
             note_key: "uninstall-manual-reaper-portable".to_string()
         }
     );
+}
+
+// ---------------------------------------------------------------------------
+// REAPER on macOS, from the shipped plan, on a stand-in Mac.
+// ---------------------------------------------------------------------------
+
+/// The resource folder stays whole, with REAPER's own note, whatever the
+/// user asks for: it is a folder root, never one of REAPER's settings, and
+/// nothing REAPER removes is the folder itself.
+fn assert_keeps_the_resource_folder(reaper: &UninstallPlanItem, resource: &Path) {
+    let kept = reaper
+        .kept
+        .iter()
+        .find(|kept| kept.path == resource)
+        .unwrap_or_else(|| panic!("the resource folder isn't listed as staying: {reaper:#?}"));
+    assert_eq!(kept.reason, KeptReason::FolderRoot);
+    assert_eq!(
+        kept.note_key.as_deref(),
+        Some("uninstall-kept-reaper-resource")
+    );
+    assert!(!kept.removable_with_settings);
+    assert!(
+        reaper.files.iter().all(|file| file.path != resource),
+        "{:?}",
+        reaper.files
+    );
+}
+
+/// One engine run of the shipped macOS REAPER on `mac`, with `objects`
+/// answering for macOS. Detection finds REAPER by its app, before the run
+/// and after it, as it does on a Mac. Nothing asks for a password: the
+/// administrator shell is one that never runs.
+fn run_reaper_on_mac(
+    mac: &MacFixture,
+    target: InstallationKind,
+    objects: &dyn MacosObjects,
+    remove_settings: bool,
+    dry_run: bool,
+) -> UninstallReport {
+    let detect = || {
+        let ids: &[&str] = if mac.app.exists() {
+            &[PACKAGE_REAPER]
+        } else {
+            &[]
+        };
+        Ok(installed(ids))
+    };
+    run_reaper_on_mac_detecting(mac, target, objects, remove_settings, dry_run, &detect).unwrap()
+}
+
+/// The same run, with `detect` standing in for detection.
+fn run_reaper_on_mac_detecting(
+    mac: &MacFixture,
+    target: InstallationKind,
+    objects: &dyn MacosObjects,
+    remove_settings: bool,
+    dry_run: bool,
+    detect: &dyn Fn() -> crate::error::Result<Vec<ComponentDetection>>,
+) -> crate::error::Result<UninstallReport> {
+    let specs = builtin_package_specs(Platform::MacOs);
+    let reapers = Vec::<RunningProcess>::new;
+    let named = |_: &[String]| Vec::new();
+    execute_uninstall_in(
+        &UninstallRequest {
+            resource_path: mac.resource.clone(),
+            platform: Platform::MacOs,
+            package_ids: vec![PACKAGE_REAPER.to_string()],
+            remove_settings,
+            dry_run,
+            target_app_path: Some(mac.app.clone()),
+            target: Some(target),
+        },
+        &UninstallEnvironment {
+            specs: &specs,
+            roots: &mac.roots,
+            target,
+            target_app_path: Some(mac.app.clone()),
+            detect,
+            reaper_processes: &reapers,
+            named_processes: &named,
+            volumes: &OneVolume,
+            installed_programs: None,
+            vendor_lookup: &NothingListed,
+            elevated_helper: &NoElevatedHelper,
+            macos_objects: objects,
+            administrator_shell: &NoAdministratorShell,
+        },
+        &ProgressReporter::noop(),
+        &CancelToken::new(),
+    )
+}
+
+/// `path` as the text root is given.
+fn text(path: &Path) -> String {
+    path.to_str().unwrap().to_string()
+}
+
+/// The shipped macOS plan for REAPER: one plan for a standard and a
+/// portable REAPER, which moves the app to the Trash, asks root only when
+/// it must, and keeps the resource folder. Windows keeps its own plans: a
+/// standard REAPER goes through its own uninstaller, a portable one stays
+/// the user's to remove by hand.
+#[test]
+fn reapers_shipped_plans_send_the_mac_app_to_the_trash_and_leave_windows_as_it_was() {
+    let reaper = embedded_package_manifest()
+        .packages
+        .into_iter()
+        .find(|spec| spec.id == PACKAGE_REAPER)
+        .expect("REAPER is shipped")
+        .uninstall;
+
+    let standard = reaper
+        .plan_for(Platform::MacOs, InstallationKind::Standard)
+        .expect("a standard REAPER on macOS has a plan");
+    let portable = reaper
+        .plan_for(Platform::MacOs, InstallationKind::Portable)
+        .expect("a portable REAPER on macOS has a plan");
+    assert!(std::ptr::eq(standard, portable), "one plan for both");
+    assert_eq!(standard.strategy, UninstallStrategy::RemoveFiles);
+    assert_eq!(standard.elevation, UninstallElevation::IfNeeded);
+    assert_eq!(standard.backup, UninstallBackup::ToTrash);
+    let [tree] = standard.remove.trees.as_slice() else {
+        panic!("one tree: {:?}", standard.remove.trees);
+    };
+    assert_eq!(tree.path.as_str(), "{app_path}");
+    assert_eq!(tree.must_end_with.as_deref(), Some(".app"));
+    assert_eq!(tree.name_contains.as_deref(), Some("REAPER"));
+    assert_eq!(tree.bundle_id.as_deref(), Some("com.cockos.reaper"));
+    assert!(standard.remove.paths.is_empty() && !standard.remove.receipt_files);
+    let [kept] = standard.kept_user_data.as_slice() else {
+        panic!("one kept folder: {:?}", standard.kept_user_data);
+    };
+    assert_eq!(kept.path.as_str(), "{resource}");
+    assert!(standard.blocking_programs.is_empty() && standard.post.is_empty());
+
+    let windows = reaper
+        .plan_for(Platform::Windows, InstallationKind::Standard)
+        .expect("a standard REAPER on Windows has a plan");
+    assert_eq!(windows.strategy, UninstallStrategy::VendorUninstaller);
+    assert_eq!(windows.elevation, UninstallElevation::Required);
+    assert_eq!(
+        windows.summary.as_ref().unwrap().removes_key,
+        "uninstall-summary-reaper-windows-removes"
+    );
+    let vendor = windows.vendor_uninstaller.as_ref().unwrap();
+    assert_eq!(vendor.kind, VendorUninstallerKind::Nsis);
+    let windows_portable = reaper
+        .plan_for(Platform::Windows, InstallationKind::Portable)
+        .expect("a portable REAPER on Windows has a plan");
+    assert_eq!(windows_portable.strategy, UninstallStrategy::Manual);
+    assert_eq!(
+        windows_portable.note_key.as_deref(),
+        Some("uninstall-manual-reaper-portable")
+    );
+}
+
+/// The two sentences Review shows for REAPER on macOS, and the note on the
+/// folder that stays, read in every language RABBIT ships, none of them
+/// borrowed from English.
+#[test]
+fn reapers_macos_plan_reads_in_every_language() {
+    let reaper = embedded_package_manifest()
+        .packages
+        .into_iter()
+        .find(|spec| spec.id == PACKAGE_REAPER)
+        .expect("REAPER is shipped")
+        .uninstall;
+    let plan = reaper
+        .plan_for(Platform::MacOs, InstallationKind::Standard)
+        .unwrap();
+    let summary = plan.summary.as_ref().unwrap();
+    let mut keys = vec![summary.removes_key.as_str(), summary.keeps_key.as_str()];
+    keys.extend(
+        plan.kept_user_data
+            .iter()
+            .map(|kept| kept.note_key.as_str()),
+    );
+    assert_eq!(
+        keys,
+        [
+            "uninstall-summary-reaper-macos-removes",
+            "uninstall-summary-reaper-keeps",
+            "uninstall-kept-reaper-resource",
+        ]
+    );
+    assert_eq!(embedded_locales().len(), 5);
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        for key in &keys {
+            let text = localizer.text(key);
+            assert!(
+                !text.missing && !text.fallback_used && text.formatting_errors.is_empty(),
+                "{locale}: {key}: {text:?}"
+            );
+            assert_eq!(text.locale, locale);
+            assert!(
+                !text.value.trim().is_empty() && !text.value.contains('{'),
+                "{locale}: {key}: {}",
+                text.value
+            );
+        }
+    }
+}
+
+/// REAPER.app the user may move, in /Applications: the shipped plan sends
+/// it to the Trash as the user, with no password. A dry run gives root
+/// nothing and moves nothing.
+#[test]
+fn a_reaper_app_the_user_may_move_goes_to_the_trash_with_no_administrator_step() {
+    let mac = MacFixture::new();
+    let objects = mac.objects(owned_by_me());
+    let shipped = Shipped::on_mac(&mac, &objects);
+
+    let plan = shipped.plan(&installed(&[PACKAGE_REAPER]), None);
+    let reaper = item(&plan, PACKAGE_REAPER);
+
+    assert_eq!(reaper.strategy, Some(UninstallStrategy::RemoveFiles));
+    assert_eq!(reaper.removability, Removability::Removable);
+    assert_eq!(reaper.route(), RemovalRoute::Trash);
+    assert!(reaper.can_remove());
+    assert!(!reaper.requires_elevation && !reaper.needs_administrator());
+    // Only the target's REAPER must be closed: no pgrep looks for others.
+    assert!(!reaper.every_reaper_closed);
+    assert!(reaper.blocking_programs.is_empty());
+    // Gone from its place all the same, so the question before starting.
+    assert_eq!(reaper.backup, UninstallBackup::ToTrash);
+    assert!(reaper.unbacked && reaper.confirm);
+    let [app] = reaper.files.as_slice() else {
+        panic!("one tree: {:?}", reaper.files);
+    };
+    assert_eq!(app.path, mac.app);
+    assert_eq!(app.reason, RemovalReason::Tree);
+    assert_eq!(app.bundle_id.as_deref(), Some("com.cockos.reaper"));
+    assert!(app.is_dir);
+    let summary = reaper.summary.as_ref().unwrap();
+    assert_eq!(
+        summary.removes_key,
+        "uninstall-summary-reaper-macos-removes"
+    );
+    assert_eq!(summary.keeps_key, "uninstall-summary-reaper-keeps");
+    assert_keeps_the_resource_folder(reaper, &mac.resource);
+    // No receipt lists REAPER here, but the app is found by its name and
+    // bundle ID alone, so no note says RABBIT goes by what REAPER is known
+    // to install.
+    assert!(reaper.notes.is_empty(), "{:?}", reaper.notes);
+    assert!(reaper.warnings.is_empty(), "{:?}", reaper.warnings);
+
+    let report = run_reaper_on_mac(&mac, InstallationKind::Standard, &objects, false, true);
+    let planned = report.item(PACKAGE_REAPER).unwrap();
+    assert_eq!(planned.status, UninstallStatus::WouldRemove);
+    assert!(
+        report.administrator_steps.is_empty(),
+        "{:?}",
+        report.administrator_steps
+    );
+    assert!(objects.trashed().is_empty());
+    assert!(join(&mac.app, "Contents/MacOS/REAPER").is_file());
+}
+
+/// REAPER.app only root may move, directly in /Applications: the shipped
+/// plan lets the run's one administrator command move it into the user's
+/// Trash (decision 32), with every REAPER closed. Root gets exactly these
+/// steps: pgrep for REAPER first, then the Trash checked as a folder and as
+/// no link, then the app moved in under a fresh name. A dry run lists the
+/// same steps and runs none of them.
+#[test]
+fn a_root_owned_reaper_app_in_applications_goes_to_the_trash_through_the_administrator_command() {
+    let mac = MacFixture::new();
+    let objects = mac.objects(owned_by_root());
+    let shipped = Shipped::on_mac(&mac, &objects);
+
+    let plan = shipped.plan(&installed(&[PACKAGE_REAPER]), None);
+    let reaper = item(&plan, PACKAGE_REAPER);
+
+    assert_eq!(reaper.removability, Removability::Removable);
+    assert_eq!(reaper.route(), RemovalRoute::Administrator);
+    assert!(reaper.requires_elevation && reaper.needs_administrator() && reaper.can_remove());
+    // Root's pgrep finds every REAPER by name, so RABBIT's own checks ask
+    // for every REAPER closed too.
+    assert!(reaper.every_reaper_closed);
+    assert_eq!(removed(reaper), std::slice::from_ref(&mac.app));
+    assert_keeps_the_resource_folder(reaper, &mac.resource);
+    assert!(reaper.notes.is_empty(), "{:?}", reaper.notes);
+
+    // The command root would be given for it, word for word.
+    let trash = my_trash().path;
+    let at = SystemTime::now();
+    let package = prepare_package(reaper, &mac.roots, &objects, at).unwrap();
+    let batch = administrator_steps(&[package], None).unwrap();
+    let offset = rabbit_platform::local_utc_offset_seconds(at).unwrap_or(0);
+    let fresh = trash.join(trash_name(&mac.app, at, offset).unwrap());
+    let command =
+        |program: &str, arguments: &[&str]| ShellCommand::new(program, arguments.iter().copied());
+    let pattern = MACOS_REAPER_PROCESS_NAMES.join("|");
+    assert_eq!(pattern, "REAPER|reaper64");
+    assert_eq!(
+        batch.steps,
+        [
+            ShellStep::RunExpectingNoMatch(command(PGREP, &["-x", "-i", "--", &pattern])),
+            ShellStep::Run(command(TEST, &["-d", &text(&trash)])),
+            ShellStep::Run(command(TEST, &["!", "-L", &text(&trash)])),
+            ShellStep::Run(command(MV, &["-h", "-n", &text(&mac.app), &text(&fresh)])),
+        ]
+    );
+
+    let report = run_reaper_on_mac(&mac, InstallationKind::Standard, &objects, false, true);
+    assert_eq!(
+        report.item(PACKAGE_REAPER).unwrap().status,
+        UninstallStatus::WouldRemove
+    );
+    let record = |kind: AdministratorStepKind, target: String| AdministratorStepRecord {
+        package_id: Some(PACKAGE_REAPER.to_string()),
+        kind,
+        target,
+        destination: None,
+        verdict: AdministratorStepVerdict::WouldRun,
+    };
+    let [programs, is_folder, is_not_link, moved] = report.administrator_steps.as_slice() else {
+        panic!("four steps: {:#?}", report.administrator_steps);
+    };
+    assert_eq!(
+        *programs,
+        AdministratorStepRecord {
+            package_id: None,
+            kind: AdministratorStepKind::ProgramsClosed,
+            target: MACOS_REAPER_PROCESS_NAMES.join(", "),
+            destination: None,
+            verdict: AdministratorStepVerdict::WouldRun,
+        }
+    );
+    assert_eq!(
+        *is_folder,
+        record(AdministratorStepKind::TrashIsFolder, text(&trash))
+    );
+    assert_eq!(
+        *is_not_link,
+        record(AdministratorStepKind::TrashIsNotLink, text(&trash))
+    );
+    // The name in the Trash is made from the time a run moves the app, so
+    // only its shape is the same here.
+    let destination = PathBuf::from(moved.destination.clone().expect("where the app would go"));
+    assert_eq!(
+        *moved,
+        AdministratorStepRecord {
+            destination: Some(text(&destination)),
+            ..record(AdministratorStepKind::MoveToTrash, text(&mac.app))
+        }
+    );
+    assert_eq!(destination.parent(), Some(trash.as_path()));
+    let name = destination.file_name().unwrap().to_str().unwrap();
+    assert!(
+        name.starts_with("REAPER 20")
+            && name.ends_with(".app")
+            && name.len() == "REAPER 2026-11-07 15.30.12.app".len(),
+        "{name}"
+    );
+    assert!(objects.trashed().is_empty());
+    assert!(join(&mac.app, "Contents/MacOS/REAPER").is_file());
+}
+
+/// Whether a reason is the one a case expects.
+type IsExpected = fn(&ByHandReason) -> bool;
+
+/// Every REAPER.app in /Applications the shipped plan leaves to the user to
+/// move in Finder, and why: a Locked one, which not even root can move; one
+/// that isn't REAPER by its bundle ID; one RABBIT can't check; and one only
+/// root could move whose Trash root can't safely move it into. None asks for
+/// a password, and the resource folder is still listed as staying.
+#[test]
+fn reaper_apps_rabbit_cant_move_on_macos_are_left_to_the_user_with_the_reason() {
+    let mac = MacFixture::new();
+    let app = mac.app.clone();
+    let cases: Vec<(&str, FakeMacosObjects, IsExpected)> = vec![
+        (
+            "Locked",
+            mac.objects(ObjectFacts {
+                locked: true,
+                ..owned_by_me()
+            }),
+            |reason| *reason == ByHandReason::Locked,
+        ),
+        (
+            "Locked, and only root's",
+            mac.objects(ObjectFacts {
+                locked: true,
+                ..owned_by_root()
+            }),
+            |reason| *reason == ByHandReason::Locked,
+        ),
+        (
+            "another app's bundle ID",
+            mac.objects(ObjectFacts {
+                bundle_identifier: Some("com.example.other".to_string()),
+                ..owned_by_root()
+            }),
+            |reason| *reason == ByHandReason::NotTheExpectedApp,
+        ),
+        (
+            "no bundle ID",
+            mac.objects(ObjectFacts {
+                bundle_identifier: None,
+                ..owned_by_me()
+            }),
+            |reason| *reason == ByHandReason::NotTheExpectedApp,
+        ),
+        (
+            "unreadable",
+            FakeMacosObjects::new()
+                .with_unreadable_object(&app, io::ErrorKind::PermissionDenied)
+                .with_trash(my_trash()),
+            |reason| matches!(reason, ByHandReason::CouldNotCheck { .. }),
+        ),
+        (
+            "no Trash",
+            FakeMacosObjects::new().with_object(&app, owned_by_root()),
+            |reason| *reason == ByHandReason::NoTrashFolder,
+        ),
+        (
+            "Trash on another disk",
+            FakeMacosObjects::new()
+                .with_object(&app, owned_by_root())
+                .with_trash(TrashFolderFacts {
+                    dev: DISK + 1,
+                    ..my_trash()
+                }),
+            |reason| *reason == ByHandReason::NotOnTrashVolume,
+        ),
+    ];
+    for (case, objects, expected) in cases {
+        let shipped = Shipped::on_mac(&mac, &objects);
+        let plan = shipped.plan(&installed(&[PACKAGE_REAPER]), None);
+        let reaper = item(&plan, PACKAGE_REAPER);
+        match &reaper.removability {
+            Removability::ByHand { path, reason } => {
+                assert_eq!(path, &app, "{case}");
+                assert!(expected(reason), "{case}: {reason:?}");
+            }
+            other => panic!("{case}: expected the app to be left to the user, got {other:?}"),
+        }
+        assert!(reaper.removability.is_blocked(), "{case}");
+        assert!(
+            !reaper.requires_elevation && !reaper.can_remove() && reaper.files.is_empty(),
+            "{case}"
+        );
+        assert_keeps_the_resource_folder(reaper, &mac.resource);
+
+        // A dry run stops at it, and gives root nothing.
+        let report = run_reaper_on_mac(&mac, InstallationKind::Standard, &objects, false, true);
+        let planned = report.item(PACKAGE_REAPER).unwrap();
+        assert_eq!(planned.status, UninstallStatus::Blocked, "{case}");
+        assert_eq!(
+            planned.message_code,
+            UninstallMessage::NotRemovable {
+                removability: reaper.removability.clone()
+            },
+            "{case}"
+        );
+        assert!(report.administrator_steps.is_empty(), "{case}");
+        assert!(objects.trashed().is_empty(), "{case}");
+    }
+    assert!(join(&app, "Contents/MacOS/REAPER").is_file());
+}
+
+/// Root moves REAPER.app only out of /Applications, a folder only an
+/// administrator can change. One only root may move anywhere else, in the
+/// user's own Applications folder or in a portable REAPER's folder, is the
+/// user's to move in Finder.
+#[test]
+fn a_root_owned_reaper_app_outside_applications_is_left_to_the_user() {
+    for (folder, target) in [
+        ("home/Applications", InstallationKind::Standard),
+        ("REAPER", InstallationKind::Portable),
+    ] {
+        let mut mac = MacFixture::new();
+        let parent = join(mac.dir.path(), folder);
+        let app = parent.join("REAPER.app");
+        write(&join(&app, "Contents/MacOS/REAPER"), b"REAPER");
+        mac.roots.app_path = Some(app.clone());
+        mac.roots.app_dir = Some(parent);
+        mac.app = app.clone();
+        let objects = mac.objects(owned_by_root());
+        let shipped = Shipped::on_mac(&mac, &objects);
+
+        let plan = shipped.plan_with(&installed(&[PACKAGE_REAPER]), None, target, false);
+        let reaper = item(&plan, PACKAGE_REAPER);
+
+        assert_eq!(
+            reaper.removability,
+            Removability::ByHand {
+                path: app.clone(),
+                reason: ByHandReason::NotMovableByYou,
+            },
+            "{folder}"
+        );
+        assert!(
+            !reaper.requires_elevation && !reaper.can_remove(),
+            "{folder}"
+        );
+        assert!(reaper.files.is_empty(), "{folder}");
+        assert_keeps_the_resource_folder(reaper, &mac.resource);
+    }
+}
+
+/// A portable REAPER's app sits in its own folder, which is also its
+/// resource folder. The same shipped plan sends the app to the Trash as the
+/// user, and the folder, with everything of the user's in it, stays as it
+/// was, even with "Also remove settings": only RABBIT's own folder in it
+/// gains the run's report and receipt.
+#[test]
+fn a_portable_reaper_app_goes_to_the_trash_and_its_folder_stays_untouched() {
+    let mut mac = MacFixture::new();
+    let portable_app = mac.resource.join("REAPER.app");
+    write(&join(&portable_app, "Contents/MacOS/REAPER"), b"REAPER");
+    mac.roots.app_path = Some(portable_app.clone());
+    mac.roots.app_dir = Some(mac.resource.clone());
+    mac.app = portable_app.clone();
+    for file in [
+        "reaper.ini",
+        "reaper-kb.ini",
+        "UserPlugins/reaper_sws.dylib",
+        "KeyMaps/Mine.ReaperKeyMap",
+        "Projects/Song.rpp",
+    ] {
+        write(&join(&mac.resource, file), file.as_bytes());
+    }
+    let trash = mac.dir.path().join("Trash");
+    fs::create_dir(&trash).unwrap();
+    let objects = mac
+        .objects(owned_by_me())
+        .with_trash(TrashFolderFacts {
+            path: trash.clone(),
+            ..my_trash()
+        })
+        .with_trash_bin(&trash);
+    let shipped = Shipped::on_mac(&mac, &objects);
+
+    for remove_settings in [false, true] {
+        let plan = shipped.plan_with(
+            &installed(&[PACKAGE_REAPER]),
+            None,
+            InstallationKind::Portable,
+            remove_settings,
+        );
+        let reaper = item(&plan, PACKAGE_REAPER);
+        assert_eq!(reaper.removability, Removability::Removable);
+        assert_eq!(reaper.route(), RemovalRoute::Trash);
+        assert!(!reaper.requires_elevation && !reaper.every_reaper_closed);
+        assert_eq!(removed(reaper), std::slice::from_ref(&portable_app));
+        assert_keeps_the_resource_folder(reaper, &mac.resource);
+    }
+
+    // Everything but the app and RABBIT's own folder.
+    let users = |found: BTreeMap<PathBuf, Option<Vec<u8>>>| {
+        let rabbit = mac.resource.join("RABBIT");
+        found
+            .into_iter()
+            .filter(|(path, _)| !path.starts_with(&portable_app) && !path.starts_with(&rabbit))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let before = users(snapshot(&mac.resource));
+    assert!(before.contains_key(&mac.resource.join("reaper.ini")));
+
+    let report = run_reaper_on_mac(&mac, InstallationKind::Portable, &objects, true, false);
+
+    let reaper = report.item(PACKAGE_REAPER).unwrap();
+    assert_eq!(
+        reaper.status,
+        UninstallStatus::Removed,
+        "{}",
+        reaper.message
+    );
+    assert_eq!(objects.trashed(), std::slice::from_ref(&portable_app));
+    assert!(!portable_app.exists());
+    assert!(join(&trash, "REAPER.app/Contents/MacOS/REAPER").is_file());
+    assert_eq!(users(snapshot(&mac.resource)), before);
+    assert!(report.administrator_steps.is_empty());
+}
+
+/// A target that names a REAPER.app that isn't there, such as a mistyped
+/// `--target-app-path`, while detection still finds REAPER at another app:
+/// moving nothing would report REAPER removed. The shipped plan leaves it
+/// to the user instead, naming the path it looked for, and a real run
+/// changes nothing; the app detection found stays where it is.
+#[test]
+fn a_reaper_app_that_isnt_where_the_target_says_is_left_to_the_user() {
+    let mut mac = MacFixture::new();
+    let found = mac.app.clone();
+    let missing = join(&mac.system, "Applications/REAPER64.app");
+    mac.roots.app_path = Some(missing.clone());
+    mac.app = missing.clone();
+    let trash = mac.dir.path().join("Trash");
+    fs::create_dir(&trash).unwrap();
+    let objects = FakeMacosObjects::new()
+        .with_object(&found, owned_by_me())
+        .with_trash(TrashFolderFacts {
+            path: trash.clone(),
+            ..my_trash()
+        })
+        .with_trash_bin(&trash);
+    let shipped = Shipped::on_mac(&mac, &objects);
+
+    let plan = shipped.plan(&installed(&[PACKAGE_REAPER]), None);
+    let reaper = item(&plan, PACKAGE_REAPER);
+    match &reaper.removability {
+        Removability::ByHand {
+            path,
+            reason: ByHandReason::CouldNotCheck { .. },
+        } => assert_eq!(path, &missing),
+        other => panic!("expected the missing app to be left to the user, got {other:?}"),
+    }
+    assert!(reaper.removability.is_blocked() && !reaper.can_remove());
+    assert!(reaper.files.is_empty());
+    assert_keeps_the_resource_folder(reaper, &mac.resource);
+
+    // Detection finds REAPER by the app that is there, as it would on a Mac.
+    let detect = || Ok(installed(&[PACKAGE_REAPER]));
+    for dry_run in [true, false] {
+        let report = run_reaper_on_mac_detecting(
+            &mac,
+            InstallationKind::Standard,
+            &objects,
+            false,
+            dry_run,
+            &detect,
+        )
+        .unwrap();
+        let planned = report.item(PACKAGE_REAPER).unwrap();
+        assert_eq!(
+            planned.status,
+            UninstallStatus::Blocked,
+            "{dry_run}: {}",
+            planned.message
+        );
+        assert!(planned.removed.is_empty(), "{dry_run}");
+        assert!(report.administrator_steps.is_empty(), "{dry_run}");
+    }
+    assert!(objects.trashed().is_empty());
+    assert!(join(&found, "Contents/MacOS/REAPER").is_file());
+    assert!(fs::read_dir(&trash).unwrap().next().is_none());
+}
+
+/// A REAPER.app that was dragged into /Applications and never opened has
+/// no resource folder yet. A real run takes the install lock all the same,
+/// before it plans, which makes the folder on purpose; afterwards the
+/// receipt there records that REAPER was uninstalled, so the next install
+/// doesn't tick it again. A dry run writes nothing, the folder included.
+#[test]
+fn removing_a_reaper_whose_resource_folder_doesnt_exist_holds_the_install_lock() {
+    let mac = MacFixture::new();
+    fs::remove_dir_all(&mac.resource).unwrap();
+    let trash = mac.dir.path().join("Trash");
+    fs::create_dir(&trash).unwrap();
+    let objects = mac
+        .objects(owned_by_me())
+        .with_trash(TrashFolderFacts {
+            path: trash.clone(),
+            ..my_trash()
+        })
+        .with_trash_bin(&trash);
+    let lock = crate::lock::default_package_install_lock_path(&mac.resource);
+    // Detection is asked before the plan and again after the move; the
+    // lock must be held both times.
+    let unlocked = std::cell::Cell::new(0);
+    let detect = || {
+        if !lock.is_file() {
+            unlocked.set(unlocked.get() + 1);
+        }
+        let ids: &[&str] = if mac.app.exists() {
+            &[PACKAGE_REAPER]
+        } else {
+            &[]
+        };
+        Ok(installed(ids))
+    };
+
+    let report = run_reaper_on_mac_detecting(
+        &mac,
+        InstallationKind::Standard,
+        &objects,
+        false,
+        true,
+        &detect,
+    )
+    .unwrap();
+    assert_eq!(
+        report.item(PACKAGE_REAPER).unwrap().status,
+        UninstallStatus::WouldRemove
+    );
+    assert!(!mac.resource.exists(), "a dry run makes no folder");
+    unlocked.set(0);
+
+    let report = run_reaper_on_mac_detecting(
+        &mac,
+        InstallationKind::Standard,
+        &objects,
+        false,
+        false,
+        &detect,
+    )
+    .unwrap();
+    let reaper = report.item(PACKAGE_REAPER).unwrap();
+    assert_eq!(
+        reaper.status,
+        UninstallStatus::Removed,
+        "{}",
+        reaper.message
+    );
+    assert_eq!(unlocked.get(), 0, "detection ran without the install lock");
+    assert!(!lock.exists(), "the lock is let go at the end");
+    assert_eq!(objects.trashed(), std::slice::from_ref(&mac.app));
+    let state = crate::receipt::load_install_state(&mac.resource)
+        .unwrap()
+        .expect("the receipt is saved in the new folder");
+    assert!(state.declined_packages.contains(PACKAGE_REAPER));
+    assert!(report.saved_report.is_some());
+}
+
+/// A real run against a resource folder that doesn't exist, with nothing
+/// there to remove, such as a mistyped --resource-path: the folders the
+/// install lock needed go again, and no report is left behind.
+#[test]
+fn a_run_that_changes_nothing_leaves_no_folder_where_there_was_none() {
+    let mac = MacFixture::new();
+    fs::remove_dir_all(&mac.resource).unwrap();
+    fs::remove_dir_all(&mac.app).unwrap();
+    let objects = mac.objects(owned_by_me());
+    let detect = || Ok(installed(&[]));
+
+    let report = run_reaper_on_mac_detecting(
+        &mac,
+        InstallationKind::Standard,
+        &objects,
+        false,
+        false,
+        &detect,
+    )
+    .unwrap();
+    assert_eq!(
+        report.item(PACKAGE_REAPER).unwrap().status,
+        UninstallStatus::NotInstalled
+    );
+    assert!(report.saved_report.is_none());
+    assert!(!mac.resource.exists(), "the lock's folders went again");
+    assert!(mac.resource.parent().unwrap().is_dir());
+    assert!(objects.trashed().is_empty());
 }
