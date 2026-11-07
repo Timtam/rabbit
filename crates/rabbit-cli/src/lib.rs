@@ -3077,13 +3077,19 @@ fn write_uninstall_item(
                 "no permission prompt"
             }
         ),
-        // A vendor's uninstaller says in the message what it did.
-        UninstallStatus::Removed
-        | UninstallStatus::RemovedWithLeftovers
-        | UninstallStatus::RemovedPendingRestart
-            if item.vendor.is_some() =>
-        {
-            format!("removed. {}", item.message)
+        // Only what happened: the lines below list what goes at the
+        // restart, what RABBIT still finds and any problem. The report's
+        // message has those lists too, so printing it here would read every
+        // path twice.
+        UninstallStatus::RemovedPendingRestart if item.vendor.is_some() => {
+            "removed by its own uninstaller; some of its files go when you restart the computer."
+                .to_string()
+        }
+        UninstallStatus::RemovedWithLeftovers if item.vendor.is_some() => {
+            "removed by its own uninstaller, but RABBIT still finds some of it.".to_string()
+        }
+        UninstallStatus::Removed if item.vendor.is_some() => {
+            "removed by its own uninstaller. A backup can't bring it back.".to_string()
         }
         UninstallStatus::Removed => "removed.".to_string(),
         UninstallStatus::RemovedWithLeftovers => {
@@ -4720,6 +4726,12 @@ mod tests {
         );
         let pending = reaper.resource.join("Plugins").join("reaper_host.dll");
         let uninstaller = reaper.resource.join("Uninstall.exe");
+        // The message as the engine writes it, with the path list.
+        restart.items[0].message = format!(
+            "REAPER's own uninstaller removed it. Some of its files go when you restart the \
+             computer: {}.",
+            pending.display()
+        );
         restart.items[0].pending_restart = vec![pending];
         restart.items[0].vendor = Some(VendorOutcome {
             status: VendorStatus::RemovedPendingRestart,
@@ -4740,6 +4752,20 @@ mod tests {
                 "restart  {} goes when the computer restarts",
                 shown.display()
             )),
+            "{text}"
+        );
+        // Said once: the heading doesn't repeat the message's path list,
+        // which a screen reader would otherwise read twice.
+        assert_eq!(
+            text.matches(&shown.display().to_string()).count(),
+            1,
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "REAPER: removed by its own uninstaller; some of its files go when you restart \
+                 the computer."
+            ),
             "{text}"
         );
         assert!(
