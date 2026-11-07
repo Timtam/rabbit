@@ -98,6 +98,11 @@ pub(crate) fn rebuild_package_list_widgets(
         .map(package_details)
         .unwrap_or_default();
     widgets.package_details.set_value(&initial);
+    // No selection handler runs while the rows are rebuilt (see
+    // `clear_tree_without_taking_focus`), so the choices that follow the
+    // ticked rows are synced here.
+    sync_spanish_variant_widget(package_rows, &widgets.spanish_variant_choice);
+    sync_reaper_language_widget(package_rows, &widgets.reaper_language_choice);
 }
 
 /// Put the packages list's screen-reader caret on its TOP-MOST entry — the
@@ -151,6 +156,25 @@ pub(crate) fn reset_packages_list_caret_on_focus() {
     CARET_RESET_PENDING.with(|pending| pending.set(true));
 }
 
+/// Delete every row of `tree` without moving keyboard focus into it.
+///
+/// wxMSW's `DeleteAllItems` doesn't hold back the selection notifications
+/// comctl32 sends when it deletes the selected row, and wx answers those by
+/// calling `SetFocus()` on the tree, hidden or not. After an uninstall the
+/// rebuild used to run once Done had focus, so focus went to a list on the
+/// hidden Packages page and the screen reader read that page instead of
+/// the result. The rebuild now runs before Done is shown, after an install
+/// as after an uninstall; clearing the selection first also keeps every
+/// other rebuild from moving focus, since it goes through wx's guarded path
+/// and nothing is selected when the rows go.
+///
+/// It also means no selection handler runs during a rebuild, so a caller
+/// syncs what those handlers would have.
+pub(crate) fn clear_tree_without_taking_focus(tree: &TreeCtrl) {
+    tree.unselect_all();
+    tree.delete_all_items();
+}
+
 /// Windows-only: tear down the existing native tree and rebuild both
 /// top-level groups ("Packages" and "Configuration") from
 /// `package_rows` + `configuration_rows`. Each leaf gets its native
@@ -163,7 +187,8 @@ pub(crate) fn populate_packages_tree(
     package_rows: &[PackageRow],
     configuration_rows: &[ConfigurationRow],
 ) {
-    tree.delete_all_items();
+    // Forget the old handles before the tree lets go of them: a handler
+    // that runs while rows go may otherwise act on a deleted row.
     {
         let mut items = package_items.borrow_mut();
         items.packages_group = None;
@@ -173,6 +198,7 @@ pub(crate) fn populate_packages_tree(
         items.configuration_group = None;
         items.configuration_leaves.clear();
     }
+    clear_tree_without_taking_focus(tree);
 
     let Some(root) = tree.add_root("", None, None) else {
         return;

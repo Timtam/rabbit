@@ -340,12 +340,48 @@ pub struct VendorUninstallerSpec {
     /// After this long the progress page says RABBIT is still waiting.
     #[serde(default = "default_still_waiting_seconds")]
     pub still_waiting_seconds: u64,
+    /// Exit codes besides 0 with which this uninstaller ends when it has
+    /// done its work. The verdict then rests on `verify_gone` and the
+    /// registry entry alone, so a plan that lists any must have
+    /// `verify_gone`. REAPER's uninstaller needs it: the NSIS UAC plugin
+    /// (v0.2.4) it bundles sets the exit code to 1223 whenever it runs
+    /// elevated, whatever happens next, and REAPER's script never sets it
+    /// back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub success_exit_codes: Vec<i32>,
     /// Paths that must be gone afterwards. Only tested for existence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verify_gone: Vec<UninstallPath>,
     /// Paths reported, never removed, when they are still there afterwards.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub report_leftovers: Vec<UninstallPath>,
+    /// What the vendor's uninstaller leaves behind that RABBIT removes
+    /// itself, in this order, once `verify_gone` has passed, also when what
+    /// is still there goes at the next restart: links as links and folders
+    /// only when empty. Only the elevated helper removes them, so only plans
+    /// with `elevation: required` may list them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove_leftovers: Vec<LeftoverRemoval>,
+}
+
+/// One thing a vendor's uninstaller leaves behind that RABBIT removes.
+/// Limited to two kinds that can't take anything else with them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum LeftoverRemoval {
+    /// A junction, removed as a link. What it points to is never touched;
+    /// anything that isn't a junction stays.
+    Junction(UninstallPath),
+    /// A folder, removed only when it is empty and isn't a link.
+    EmptyDir(UninstallPath),
+}
+
+impl LeftoverRemoval {
+    pub fn path(&self) -> &UninstallPath {
+        match self {
+            Self::Junction(path) | Self::EmptyDir(path) => path,
+        }
+    }
 }
 
 fn default_still_waiting_seconds() -> u64 {
@@ -691,6 +727,7 @@ const KEEP: PathUse = PathUse::new("keep", false, false, true);
 const KEPT_USER_DATA: PathUse = PathUse::new("kept_user_data", false, false, false);
 const VERIFY_GONE: PathUse = PathUse::new("verify_gone", false, true, false);
 const REPORT_LEFTOVERS: PathUse = PathUse::new("report_leftovers", false, false, true);
+const REMOVE_LEFTOVERS: PathUse = PathUse::new("remove_leftovers", true, false, false);
 const LOCATE: PathUse = PathUse::new("locate", false, false, false);
 const MUST_EQUAL: PathUse = PathUse::new("install_location.must_equal", false, false, false);
 const MUST_BE_IN: PathUse = PathUse::new("must_be_in", false, false, false);
@@ -965,8 +1002,12 @@ fn validate_vendor_uninstaller(
     for path in &vendor.verify_gone {
         check_path(plan, path, VERIFY_GONE)?;
     }
+    check_success_exit_codes(vendor)?;
     for path in &vendor.report_leftovers {
         check_path(plan, path, REPORT_LEFTOVERS)?;
+    }
+    for leftover in &vendor.remove_leftovers {
+        check_leftover_removal(plan, leftover)?;
     }
 
     if vendor.kind == VendorUninstallerKind::Nsis {
@@ -1010,6 +1051,78 @@ fn validate_vendor_uninstaller(
                 "an elevated vendor uninstaller reads install_location from HKLM only".to_string(),
             );
         }
+    }
+    Ok(())
+}
+
+/// A code in `success_exit_codes` stands for "done", so something else has
+/// to say whether the uninstaller really removed anything: `verify_gone`.
+/// 0 always counts and NSIS's 1 always means the user cancelled.
+fn check_success_exit_codes(vendor: &VendorUninstallerSpec) -> Result<(), String> {
+    let codes = &vendor.success_exit_codes;
+    if codes.is_empty() {
+        return Ok(());
+    }
+    if vendor.verify_gone.is_empty() {
+        return Err(
+            "success_exit_codes needs verify_gone: only what is gone afterwards can tell such a \
+             code from a failure"
+                .to_string(),
+        );
+    }
+    for (index, code) in codes.iter().enumerate() {
+        if *code == 0 {
+            return Err("success_exit_codes needn't list 0, which always counts".to_string());
+        }
+        if *code == 1 && vendor.kind == VendorUninstallerKind::Nsis {
+            return Err(
+                "success_exit_codes may not list 1 for an nsis uninstaller: it means the user \
+                 cancelled"
+                    .to_string(),
+            );
+        }
+        if codes[..index].contains(code) {
+            return Err(format!("success_exit_codes lists {code} twice"));
+        }
+    }
+    Ok(())
+}
+
+/// The tokens a `remove_leftovers` path may start with: folders every user
+/// shares. The elevated helper that removes leftovers resolves these itself
+/// and never reads a per-user folder, which may belong to another account
+/// than the one it runs as, and which a standard user could rearrange
+/// under an administrator's feet.
+const MACHINE_WIDE_TOKENS: [UninstallPathToken; 3] = [
+    UninstallPathToken::CommonProgramFiles,
+    UninstallPathToken::ProgramFiles,
+    UninstallPathToken::ProgramData,
+];
+
+fn check_leftover_removal(
+    plan: &UninstallPlanSpec,
+    leftover: &LeftoverRemoval,
+) -> Result<(), String> {
+    let path = leftover.path();
+    check_path(plan, path, REMOVE_LEFTOVERS)?;
+    if plan.elevation != UninstallElevation::Required {
+        return Err(
+            "remove_leftovers needs elevation required: only the elevated helper removes \
+             leftovers"
+                .to_string(),
+        );
+    }
+    let machine_wide = matches!(
+        path.parse().map(|parsed| parsed.root),
+        Ok(UninstallPathRoot::Token(token)) if MACHINE_WIDE_TOKENS.contains(&token)
+    );
+    if !machine_wide {
+        return Err(format!(
+            "remove_leftovers: {:?} must start with {{common_program_files}}, \
+             {{program_files}} or {{program_data}}; the elevated helper never reads per-user \
+             folders",
+            path.as_str()
+        ));
     }
     Ok(())
 }
@@ -1250,7 +1363,7 @@ fn strategy_name(strategy: UninstallStrategy) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        UninstallBackup, UninstallPath, UninstallStrategy, UninstallTarget,
+        LeftoverRemoval, UninstallBackup, UninstallPath, UninstallStrategy, UninstallTarget,
         wildcard_matches_ignoring_case,
     };
     use crate::model::{InstallationKind, Platform};
@@ -1496,9 +1609,11 @@ mod tests {
                         "arguments": ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
                         "timeout_seconds": 600,
                         "verify_gone": ["{common_program_files}/VST3/Surge Synth Team/Surge XT.vst3"],
-                        "report_leftovers": [
-                            "{common_program_files}/CLAP/Surge Synth Team/SurgeXTData",
-                            "{common_program_files}/VST3/Surge Synth Team/SurgeXTData"
+                        "remove_leftovers": [
+                            { "junction": "{common_program_files}/CLAP/Surge Synth Team/SurgeXTData" },
+                            { "junction": "{common_program_files}/VST3/Surge Synth Team/SurgeXTData" },
+                            { "empty_dir": "{common_program_files}/CLAP/Surge Synth Team" },
+                            { "empty_dir": "{common_program_files}/VST3/Surge Synth Team" }
                         ]
                     },
                     "kept_user_data": [
@@ -1557,6 +1672,29 @@ mod tests {
             .expect("REAPER on macOS has a plan");
         assert_eq!(mac.backup, UninstallBackup::ToTrash);
         assert_eq!(mac.remove.trees[0].path.as_str(), "{app_path}");
+
+        let surge = demo_spec(r#""requires_standard_install": true,"#, surge).uninstall;
+        let vendor = surge
+            .plan_for(Platform::Windows, InstallationKind::Standard)
+            .and_then(|plan| plan.vendor_uninstaller.as_ref())
+            .expect("Surge XT on Windows has a vendor uninstaller");
+        assert_eq!(
+            vendor.remove_leftovers,
+            [
+                LeftoverRemoval::Junction(UninstallPath::new(
+                    "{common_program_files}/CLAP/Surge Synth Team/SurgeXTData"
+                )),
+                LeftoverRemoval::Junction(UninstallPath::new(
+                    "{common_program_files}/VST3/Surge Synth Team/SurgeXTData"
+                )),
+                LeftoverRemoval::EmptyDir(UninstallPath::new(
+                    "{common_program_files}/CLAP/Surge Synth Team"
+                )),
+                LeftoverRemoval::EmptyDir(UninstallPath::new(
+                    "{common_program_files}/VST3/Surge Synth Team"
+                )),
+            ]
+        );
     }
 
     #[test]
@@ -1788,6 +1926,51 @@ mod tests {
         );
     }
 
+    /// An NSIS block that takes `codes` as success exit codes, with or
+    /// without a `verify_gone` path.
+    fn nsis_with_success_codes(codes: &str, verify_gone: bool) -> String {
+        let verify_gone = if verify_gone {
+            r#", "verify_gone": ["{app_path}"]"#
+        } else {
+            ""
+        };
+        vendor_plans(&format!(
+            r#""vendor_uninstaller": {{
+                "kind": "nsis",
+                "locate": [{{ "registry": {{ "hive": "hklm", "key": "Demo", "value": "UninstallString" }} }}],
+                "install_location": {{
+                    "registry": {{ "hive": "hklm", "key": "Demo", "value": "InstallLocation" }},
+                    "must_equal": "{{app_dir}}"
+                }},
+                "must_be_in": {{ "under": "{{program_files}}" }},
+                "timeout_seconds": 600,
+                "success_exit_codes": {codes}{verify_gone}
+            }}"#
+        ))
+    }
+
+    #[test]
+    fn success_exit_codes_need_verify_gone_and_never_take_0_or_a_cancel() {
+        accepts("", &nsis_with_success_codes("[1223]", true));
+        accepts("", &nsis_with_success_codes("[]", false));
+        rejects(
+            "",
+            &nsis_with_success_codes("[1223]", false),
+            "success_exit_codes needs verify_gone",
+        );
+        rejects("", &nsis_with_success_codes("[0]", true), "needn't list 0");
+        rejects(
+            "",
+            &nsis_with_success_codes("[1]", true),
+            "may not list 1 for an nsis uninstaller",
+        );
+        rejects(
+            "",
+            &nsis_with_success_codes("[1223, 5, 1223]", true),
+            "lists 1223 twice",
+        );
+    }
+
     #[test]
     fn nsis_uninstallers_need_an_install_location_below_a_root() {
         rejects(
@@ -1921,6 +2104,109 @@ mod tests {
             ),
             "without separators",
         );
+    }
+
+    /// An Inno plan whose uninstaller leaves `leftovers` behind for RABBIT
+    /// to remove, with `elevation` spliced in.
+    fn leftover_plans(elevation: &str, leftovers: &str) -> String {
+        vendor_plans(&format!(
+            r#"{elevation} "vendor_uninstaller": {{
+                "kind": "inno",
+                "locate": [{{ "registry": {{ "hive": "hklm", "key": "Demo_is1", "value": "UninstallString" }} }}],
+                "must_be_in": {{ "dir": "{{program_data}}/Demo/uninstall", "only_files": "unins000.*" }},
+                "timeout_seconds": 600,
+                "remove_leftovers": [{leftovers}]
+            }}"#
+        ))
+    }
+
+    const ELEVATED: &str = r#""elevation": "required", "backup": "none","#;
+
+    #[test]
+    fn leftovers_are_junctions_or_empty_folders_in_machine_wide_folders() {
+        accepts(
+            "",
+            &leftover_plans(
+                ELEVATED,
+                r#"{ "junction": "{common_program_files}/CLAP/Demo/Data" },
+                   { "empty_dir": "{common_program_files}/CLAP/Demo" },
+                   { "empty_dir": "{program_files}/Demo" },
+                   { "junction": "{program_data}/Demo/Link" }"#,
+            ),
+        );
+        // Only these two kinds, each naming one path.
+        for unknown in [
+            r#"{ "tree": "{common_program_files}/CLAP/Demo" }"#,
+            r#"{ "file": "{common_program_files}/CLAP/Demo/a.dll" }"#,
+            r#"{ "junction": "{common_program_files}/CLAP/Demo/Data", "empty_dir": "{common_program_files}/CLAP/Demo" }"#,
+            r#""{common_program_files}/CLAP/Demo""#,
+        ] {
+            let source = format!(
+                r#"{{ "id": "demo", "display_name": "Demo", "display_name_key": "a",
+                     "display_description_key": "b", "recommended": false,
+                     "uninstall": {} }}"#,
+                leftover_plans(ELEVATED, unknown)
+            );
+            assert!(
+                parse_embedded_package_spec(&source).is_err(),
+                "{unknown} should not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn leftovers_need_the_elevated_helper_and_a_folder_below_a_machine_wide_root() {
+        rejects(
+            "",
+            &leftover_plans(
+                "",
+                r#"{ "junction": "{common_program_files}/CLAP/Demo/Data" }"#,
+            ),
+            "remove_leftovers needs elevation required",
+        );
+        for (leftover, expected) in [
+            // Per-user folders: the elevated helper never reads them.
+            (
+                r#"{ "junction": "{clap_dir}/Demo/Data" }"#,
+                "must start with {common_program_files}",
+            ),
+            (
+                r#"{ "empty_dir": "{resource}/Demo" }"#,
+                "must start with {common_program_files}",
+            ),
+            (
+                r#"{ "empty_dir": "{localappdata}/Demo" }"#,
+                "must start with {common_program_files}",
+            ),
+            (
+                r#"{ "empty_dir": "{app_dir}/Demo" }"#,
+                "only for comparison",
+            ),
+            (
+                r#"{ "junction": "{app_path}" }"#,
+                "allowed only in remove.trees and verify_gone",
+            ),
+            // The root itself, RABBIT's folder, patterns and odd paths.
+            (r#"{ "empty_dir": "{program_files}" }"#, "is a folder root"),
+            (
+                r#"{ "empty_dir": "{common_program_files}/Demo/RABBIT" }"#,
+                "RABBIT's own folder",
+            ),
+            (
+                r#"{ "junction": "{common_program_files}/Demo/*Data" }"#,
+                "may not use *",
+            ),
+            (
+                r#"{ "junction": "{common_program_files}/Demo/../Data" }"#,
+                "may not use . or ..",
+            ),
+            (
+                r#"{ "junction": "/Library/Audio/Plug-Ins/VST3/Demo" }"#,
+                "allowed only in plans with",
+            ),
+        ] {
+            rejects("", &leftover_plans(ELEVATED, leftover), expected);
+        }
     }
 
     /// One removal path in a plan for every platform.

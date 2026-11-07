@@ -234,6 +234,266 @@ fn platform_run_elevated_shell_lines(
     Err(ElevationError::Unsupported)
 }
 
+/// A program [`spawn_elevated`] started with administrator rights.
+///
+/// Dropping it closes RABBIT's handle to the process and leaves the process
+/// running: a non-elevated RABBIT can't end an elevated process anyway.
+#[derive(Debug)]
+pub struct ElevatedChild {
+    #[cfg(windows)]
+    process: std::os::windows::io::OwnedHandle,
+    /// Only Windows starts one, so elsewhere there is never a value.
+    #[cfg(not(windows))]
+    never: std::convert::Infallible,
+    pid: u32,
+    program: PathBuf,
+}
+
+impl ElevatedChild {
+    /// The process ID, which the elevated helper's pipe checks its client
+    /// against.
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub fn program(&self) -> &Path {
+        &self.program
+    }
+
+    /// The exit code if the process has ended, without waiting.
+    pub fn try_wait(&self) -> Result<Option<i32>, ElevationError> {
+        self.wait_timeout(std::time::Duration::ZERO)
+    }
+
+    /// Wait up to `timeout` for the process to end. `Some(exit code)` once it
+    /// has, `None` when it is still running. Timeouts beyond 49 days are cut
+    /// to that.
+    pub fn wait_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<i32>, ElevationError> {
+        #[cfg(windows)]
+        {
+            // INFINITE is u32::MAX, so a finite wait stops one below it.
+            let milliseconds = u32::try_from(timeout.as_millis())
+                .unwrap_or(u32::MAX - 1)
+                .min(u32::MAX - 1);
+            wait_for_exit(&self.process, milliseconds, &self.program)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = timeout;
+            match self.never {}
+        }
+    }
+}
+
+/// Start `program` with administrator rights and return at once, without
+/// waiting for it to end. Windows only; elsewhere `Unsupported`.
+///
+/// This raises the Windows permission (UAC) prompt and returns once the
+/// user has answered it. Declining is
+/// [`ElevationError::UserCancelledElevation`]. The arguments are quoted as
+/// for [`run_elevated_and_wait`]; `window` works the same way.
+///
+/// It refuses, before any prompt, when `program` isn't an absolute path, or
+/// when the running program isn't a RABBIT build by [`running_as_rabbit`]:
+/// test binaries never are, so no test can raise a real prompt through
+/// here, even by mistake.
+pub fn spawn_elevated(
+    program: &Path,
+    arguments: &[String],
+    working_directory: Option<&Path>,
+    window: ElevatedWindow,
+) -> Result<ElevatedChild, ElevationError> {
+    if !running_as_rabbit() {
+        return Err(ElevationError::RefusedCommand {
+            program: program.to_path_buf(),
+            reason: "only RABBIT itself may ask for administrator rights this way, and this program isn't named like a RABBIT build",
+        });
+    }
+    if !program.is_absolute() {
+        return Err(ElevationError::RefusedCommand {
+            program: program.to_path_buf(),
+            reason: "the program's path isn't absolute",
+        });
+    }
+    platform_spawn_elevated(program, arguments, working_directory, window)
+}
+
+#[cfg(windows)]
+fn platform_spawn_elevated(
+    program: &Path,
+    arguments: &[String],
+    working_directory: Option<&Path>,
+    window: ElevatedWindow,
+) -> Result<ElevatedChild, ElevationError> {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::System::Threading::GetProcessId;
+    use windows_sys::Win32::UI::Shell::{SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS};
+
+    // NOASYNC: the calling thread may be a worker without a message loop,
+    // and the launch must be complete before this returns.
+    let process = shell_execute_runas(
+        program,
+        arguments,
+        working_directory,
+        window,
+        SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+    )?;
+    // SAFETY: `process` is a live process handle owned by this function.
+    let pid = unsafe { GetProcessId(process.as_raw_handle()) };
+    if pid == 0 {
+        return Err(ElevationError::WaitFailed {
+            program: program.to_path_buf(),
+            message: "could not read the elevated process's ID".to_string(),
+        });
+    }
+    Ok(ElevatedChild {
+        process,
+        pid,
+        program: program.to_path_buf(),
+    })
+}
+
+#[cfg(not(windows))]
+fn platform_spawn_elevated(
+    _program: &Path,
+    _arguments: &[String],
+    _working_directory: Option<&Path>,
+    _window: ElevatedWindow,
+) -> Result<ElevatedChild, ElevationError> {
+    Err(ElevationError::Unsupported)
+}
+
+/// Whether the running program is a RABBIT build, judged by its file name
+/// with [`is_rabbit_file_stem`].
+pub fn running_as_rabbit() -> bool {
+    std::env::current_exe()
+        .ok()
+        .as_deref()
+        .and_then(Path::file_stem)
+        .and_then(|stem| stem.to_str())
+        .is_some_and(is_rabbit_file_stem)
+}
+
+/// Whether a program file stem (its name without `.exe`) is one a RABBIT
+/// build carries, ignoring case: `rabbit` as cargo builds it,
+/// `rabbit-windows-x86_64` and `rabbit-0.5.0-windows-aarch64` as releases
+/// publish it, and any of these with more after a space or a dash, such as
+/// a browser's ` (1)`.
+///
+/// Never a cargo test binary, which is named `<crate>-<16 hex digits>`
+/// (`rabbit-0123456789abcdef` for the `rabbit` crate's own tests,
+/// `rabbit_core-...` for the library's).
+pub fn is_rabbit_file_stem(stem: &str) -> bool {
+    let stem = stem.to_ascii_lowercase();
+    let Some(rest) = stem.strip_prefix("rabbit") else {
+        return false;
+    };
+    let named_like_rabbit = rest.is_empty() || rest.starts_with(['-', ' ', '(']);
+    named_like_rabbit && !is_cargo_test_binary_stem(&stem)
+}
+
+fn is_cargo_test_binary_stem(stem: &str) -> bool {
+    stem.rsplit_once('-').is_some_and(|(_, hash)| {
+        hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+/// Whether this process runs with administrator rights: elevated through
+/// UAC, or started by an account whose rights UAC doesn't split. Windows
+/// only; elsewhere `Unsupported`.
+pub fn is_current_process_elevated() -> std::io::Result<bool> {
+    platform_is_current_process_elevated()
+}
+
+#[cfg(windows)]
+fn platform_is_current_process_elevated() -> std::io::Result<bool> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut raw_token = std::ptr::null_mut();
+    // SAFETY: GetCurrentProcess returns a pseudo handle that needs no
+    // closing, and `raw_token` is a valid place for the token handle.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw_token) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: the call succeeded, so the handle is ours to close.
+    let token = unsafe { OwnedHandle::from_raw_handle(raw_token) };
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut returned = 0u32;
+    // SAFETY: `elevation` is a TOKEN_ELEVATION and the size passed is its
+    // size, so Windows writes only inside it.
+    let ok = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenElevation,
+            (&raw mut elevation).cast(),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut returned,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(elevation.TokenIsElevated != 0)
+}
+
+#[cfg(not(windows))]
+fn platform_is_current_process_elevated() -> std::io::Result<bool> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "only Windows has UAC elevation",
+    ))
+}
+
+/// Wait up to `milliseconds` (or `INFINITE`) for `process` to end: its exit
+/// code once it has, `None` while it runs.
+#[cfg(windows)]
+fn wait_for_exit(
+    process: &std::os::windows::io::OwnedHandle,
+    milliseconds: u32,
+    program: &Path,
+) -> Result<Option<i32>, ElevationError> {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Foundation::{GetLastError, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+
+    // SAFETY: `process` is a live process handle for the whole call.
+    let wait_status = unsafe { WaitForSingleObject(process.as_raw_handle(), milliseconds) };
+    if wait_status == WAIT_TIMEOUT {
+        return Ok(None);
+    }
+    if wait_status != WAIT_OBJECT_0 {
+        // SAFETY: no other call sits between the wait and this.
+        let code = unsafe { GetLastError() };
+        return Err(ElevationError::WaitFailed {
+            program: program.to_path_buf(),
+            message: format!("WaitForSingleObject failed (Win32 error {code})"),
+        });
+    }
+
+    let mut exit_code: u32 = 0;
+    // SAFETY: as above, and `exit_code` is a valid place for the code.
+    let ok = unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut exit_code) };
+    if ok == 0 {
+        // SAFETY: no other call sits between the failure and this.
+        let code = unsafe { GetLastError() };
+        return Err(ElevationError::WaitFailed {
+            program: program.to_path_buf(),
+            message: format!("GetExitCodeProcess failed (Win32 error {code})"),
+        });
+    }
+    Ok(Some(exit_code as i32))
+}
+
 #[cfg(windows)]
 fn platform_run_elevated_and_wait(
     program: &Path,
@@ -241,15 +501,35 @@ fn platform_run_elevated_and_wait(
     working_directory: Option<&Path>,
     window: ElevatedWindow,
 ) -> Result<Option<i32>, ElevationError> {
-    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::Threading::INFINITE;
+    use windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS;
 
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, GetLastError, WAIT_FAILED};
-    use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, INFINITE, WaitForSingleObject,
-    };
-    use windows_sys::Win32::UI::Shell::{
-        SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
-    };
+    let process = shell_execute_runas(
+        program,
+        arguments,
+        working_directory,
+        window,
+        SEE_MASK_NOCLOSEPROCESS,
+    )?;
+    wait_for_exit(&process, INFINITE, program)
+}
+
+/// Start `program` through `ShellExecuteExW` with the `runas` verb, which
+/// raises the permission prompt when RABBIT isn't elevated, and return the
+/// process handle. `mask` must include `SEE_MASK_NOCLOSEPROCESS`.
+#[cfg(windows)]
+fn shell_execute_runas(
+    program: &Path,
+    arguments: &[String],
+    working_directory: Option<&Path>,
+    window: ElevatedWindow,
+    mask: u32,
+) -> Result<std::os::windows::io::OwnedHandle, ElevationError> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+
+    use windows_sys::Win32::Foundation::{ERROR_CANCELLED, GetLastError};
+    use windows_sys::Win32::UI::Shell::{SHELLEXECUTEINFOW, ShellExecuteExW};
 
     let verb_w: Vec<u16> = OsStr::new("runas").encode_wide().chain(Some(0)).collect();
     let program_w: Vec<u16> = program.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -263,7 +543,7 @@ fn platform_run_elevated_and_wait(
 
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_NOCLOSEPROCESS,
+        fMask: mask,
         hwnd: std::ptr::null_mut(),
         lpVerb: verb_w.as_ptr(),
         lpFile: program_w.as_ptr(),
@@ -315,32 +595,9 @@ fn platform_run_elevated_and_wait(
         });
     }
 
-    let wait_status = unsafe { WaitForSingleObject(info.hProcess, INFINITE) };
-    if wait_status == WAIT_FAILED {
-        let code = unsafe { GetLastError() };
-        unsafe {
-            CloseHandle(info.hProcess);
-        }
-        return Err(ElevationError::WaitFailed {
-            program: program.to_path_buf(),
-            message: format!("WaitForSingleObject failed (Win32 error {code})"),
-        });
-    }
-
-    let mut exit_code: u32 = 0;
-    let ok = unsafe { GetExitCodeProcess(info.hProcess, &mut exit_code) };
-    unsafe {
-        CloseHandle(info.hProcess);
-    }
-    if ok == 0 {
-        let code = unsafe { GetLastError() };
-        return Err(ElevationError::WaitFailed {
-            program: program.to_path_buf(),
-            message: format!("GetExitCodeProcess failed (Win32 error {code})"),
-        });
-    }
-
-    Ok(Some(exit_code as i32))
+    // SAFETY: with SEE_MASK_NOCLOSEPROCESS the handle is the caller's to
+    // close, and nothing else holds it.
+    Ok(unsafe { OwnedHandle::from_raw_handle(info.hProcess) })
 }
 
 #[cfg(target_os = "macos")]
@@ -1140,6 +1397,67 @@ mod tests {
             super::run_elevated_shell_lines(&commands),
             Err(ElevationError::Unsupported)
         ));
+    }
+
+    #[test]
+    fn rabbit_builds_are_recognised_by_every_name_they_ship_under() {
+        for stem in [
+            "rabbit",
+            "RABBIT",
+            "rabbit-windows-x86_64",
+            "rabbit-windows-aarch64",
+            "rabbit-0.5.0-windows-x86_64",
+            "Rabbit-0.4.4-windows-aarch64",
+            "rabbit-windows-x86_64 (1)",
+            "rabbit (2)",
+        ] {
+            assert!(super::is_rabbit_file_stem(stem), "{stem}");
+        }
+    }
+
+    #[test]
+    fn test_binaries_and_other_programs_are_not_rabbit() {
+        for stem in [
+            // cargo's test binaries: the `rabbit` crate's own, the
+            // libraries', and an integration test's.
+            "rabbit-0123456789abcdef",
+            "rabbit-0123456789ABCDEF",
+            "rabbit_core-0123456789abcdef",
+            "rabbit_platform-fedcba9876543210",
+            "rabbit_ui_wxdragon-0011223344556677",
+            "uninstall_cli-0123456789abcdef",
+            // rustdoc's doctest binaries.
+            "rust_out",
+            "rabbitry",
+            "my-rabbit",
+            "",
+        ] {
+            assert!(!super::is_rabbit_file_stem(stem), "{stem}");
+        }
+    }
+
+    /// This test binary is `rabbit_platform-<hash>.exe`, so the guard in
+    /// `spawn_elevated` holds here. The test never calls `spawn_elevated`
+    /// itself: if the guard were broken, that would raise a real prompt.
+    #[test]
+    fn a_test_binary_never_counts_as_rabbit() {
+        assert!(!super::running_as_rabbit());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_current_process_can_tell_whether_it_is_elevated() {
+        // Either answer is right; the token has to be readable.
+        super::is_current_process_elevated().unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn elevation_state_is_windows_only() {
+        assert_eq!(
+            super::is_current_process_elevated().unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
     }
 
     /// The two values must map to different show commands, and `Hidden` must

@@ -7,15 +7,15 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::tests::{Fixture, detection, installed, write};
+use super::tests::{Fixture, FoundAt, detection, installed, write};
 use super::{
-    KeptReason, PlannedRegistryCleanup, Removability, RemovalReason, UNINSTALL_NOT_YET_KEY,
-    UninstallNote, UninstallPlan, UninstallPlanInput, UninstallPlanItem, UninstallWarning,
-    build_uninstall_plan,
+    KeptReason, NothingListed, PlannedRegistryCleanup, Removability, RemovalReason,
+    UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanInput, UninstallPlanItem,
+    UninstallWarning, VendorLookup, VendorRefusal, build_uninstall_plan,
 };
 use crate::detection::detect_component_with_probes;
 use crate::model::{ComponentDetection, InstallationKind, Platform};
-use crate::package::uninstall::{UninstallPostStep, UninstallStrategy};
+use crate::package::uninstall::{UninstallPostStep, UninstallStrategy, VendorUninstallerKind};
 use crate::package::{
     PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_JAWS_SCRIPTS, PACKAGE_OSARA, PACKAGE_REAKONTROL,
     PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS, PackageSpec,
@@ -60,6 +60,17 @@ impl<'f> Shipped<'f> {
         target: InstallationKind,
         remove_settings: bool,
     ) -> UninstallPlan {
+        self.plan_looking_up(detections, state, target, remove_settings, &NothingListed)
+    }
+
+    fn plan_looking_up(
+        &self,
+        detections: &[ComponentDetection],
+        state: Option<&InstallState>,
+        target: InstallationKind,
+        remove_settings: bool,
+        vendor_lookup: &dyn VendorLookup,
+    ) -> UninstallPlan {
         build_uninstall_plan(&UninstallPlanInput {
             roots: &self.fixture.roots,
             platform: self.platform,
@@ -68,6 +79,7 @@ impl<'f> Shipped<'f> {
             detections,
             state,
             remove_settings,
+            vendor_lookup,
         })
     }
 
@@ -198,6 +210,7 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
     }
 
     let remove_files = Some(UninstallStrategy::RemoveFiles);
+    let vendor = Some(UninstallStrategy::VendorUninstaller);
     let manual = Some(UninstallStrategy::Manual);
     let not_supported = Some(UninstallStrategy::NotSupported);
     let cases: &[(Platform, InstallationKind, Expected<'_>)] = &[
@@ -205,14 +218,14 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
             Platform::Windows,
             InstallationKind::Standard,
             &[
-                (PACKAGE_REAPER, not_supported),
+                (PACKAGE_REAPER, vendor),
                 (PACKAGE_OSARA, remove_files),
                 (PACKAGE_SWS, remove_files),
                 (PACKAGE_REAPACK, remove_files),
                 (PACKAGE_REAKONTROL, remove_files),
                 (PACKAGE_JAWS_SCRIPTS, manual),
                 (PACKAGE_FFMPEG, remove_files),
-                (PACKAGE_SURGE_XT, not_supported),
+                (PACKAGE_SURGE_XT, vendor),
                 (PACKAGE_APP2CLAP, remove_files),
                 (LANGPACK_ES, remove_files),
                 (LANGPACK_DE, remove_files),
@@ -223,9 +236,9 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
             Platform::Windows,
             InstallationKind::Portable,
             // The JAWS scripts, Surge XT and app2clap serve the whole
-            // computer, so a portable target can't remove them. Only
-            // app2clap has a removal it can't reach; the other two keep the
-            // standard REAPER's plan, which removes nothing.
+            // computer, so a portable target can't remove them. Surge XT
+            // and app2clap have a removal it can't reach; the JAWS scripts
+            // keep the standard REAPER's plan, which removes nothing.
             &[
                 (PACKAGE_REAPER, manual),
                 (PACKAGE_OSARA, remove_files),
@@ -234,7 +247,7 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
                 (PACKAGE_REAKONTROL, remove_files),
                 (PACKAGE_JAWS_SCRIPTS, manual),
                 (PACKAGE_FFMPEG, remove_files),
-                (PACKAGE_SURGE_XT, not_supported),
+                (PACKAGE_SURGE_XT, None),
                 (PACKAGE_APP2CLAP, None),
                 (LANGPACK_ES, remove_files),
                 (LANGPACK_DE, remove_files),
@@ -297,7 +310,7 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
     // The JAWS DLLs are in the standard REAPER's folder whatever the target,
     // so a portable target shows the same steps, rather than sending the
     // user to a standard REAPER that can't remove them either. Surge XT
-    // says it can't be uninstalled yet, as it does everywhere.
+    // comes off only from the standard REAPER, as app2clap does.
     assert_eq!(
         item(&plan, PACKAGE_JAWS_SCRIPTS).removability,
         Removability::Manual {
@@ -306,10 +319,25 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
     );
     assert_eq!(
         item(&plan, PACKAGE_SURGE_XT).removability,
-        Removability::NotSupported {
-            note_key: UNINSTALL_NOT_YET_KEY.to_string()
-        }
+        Removability::NeedsStandardTarget
     );
+    // On macOS, Surge XT and REAPER wait for a later version.
+    let macos = Shipped::new(&fixture, Platform::MacOs);
+    let everything: Vec<ComponentDetection> = macos
+        .specs
+        .iter()
+        .map(|spec| detection(&spec.id, true))
+        .collect();
+    let macos_plan = macos.plan(&everything, None);
+    for id in [PACKAGE_REAPER, PACKAGE_SURGE_XT] {
+        assert_eq!(
+            item(&macos_plan, id).removability,
+            Removability::NotSupported {
+                note_key: UNINSTALL_NOT_YET_KEY.to_string()
+            },
+            "{id}"
+        );
+    }
     assert_eq!(
         item(&plan, PACKAGE_APP2CLAP).removability,
         Removability::NeedsStandardTarget
@@ -1105,4 +1133,245 @@ fn osara_managed_by_reapack_is_reapacks_to_remove() {
     );
     assert!(osara.files.is_empty() && osara.dirs_if_empty.is_empty());
     assert!(osara.registry_cleanup.is_empty());
+}
+
+/// The Windows folders Surge XT's and REAPER's plans name, in the fixture:
+/// Common Files and ProgramData beside the resource folder, a Documents
+/// folder, and REAPER in a Program Files folder. Nothing here is a real
+/// Windows folder.
+fn vendor_fixture() -> Fixture {
+    let mut fixture = Fixture::new();
+    let root = fixture.dir.path().to_path_buf();
+    fixture.roots.common_program_files = Some(root.join("Common Files"));
+    fixture.roots.program_data = Some(root.join("ProgramData"));
+    fixture.roots.program_files = vec![root.join("Program Files")];
+    fixture.roots.documents = Some(root.join("Documents"));
+    let app = root
+        .join("Program Files")
+        .join("REAPER (x64)")
+        .join("reaper.exe");
+    fixture.roots.app_dir = app.parent().map(Path::to_path_buf);
+    fixture.roots.app_path = Some(app);
+    fixture
+}
+
+/// Surge XT on Windows: its own Inno Setup uninstaller removes it, with
+/// administrator rights and no backup, once RABBIT found it in HKLM and
+/// trusts it. Afterwards RABBIT removes the links into Surge's data folder
+/// and the vendor folders left empty, and checks that every plug-in format
+/// is gone. Its patches and fonts stay, Surge itself must be closed, and so
+/// must every REAPER.
+#[test]
+fn surge_xt_on_windows_runs_its_own_uninstaller() {
+    let fixture = vendor_fixture();
+    let common = fixture.roots.common_program_files.clone().unwrap();
+    let patches = write(
+        &fixture
+            .roots
+            .documents
+            .clone()
+            .unwrap()
+            .join("Surge XT")
+            .join("Patches")
+            .join("Mine.fxp"),
+        b"patch",
+    )
+    .parent()
+    .unwrap()
+    .parent()
+    .unwrap()
+    .to_path_buf();
+    let uninstaller = fixture
+        .roots
+        .program_data
+        .clone()
+        .unwrap()
+        .join("Surge XT")
+        .join("uninstall")
+        .join("unins000.exe");
+    let shipped = Shipped::new(&fixture, Platform::Windows);
+    let detections = installed(&[PACKAGE_SURGE_XT]);
+
+    // Without an uninstaller RABBIT trusts, Surge XT stays, and nothing asks
+    // for permission.
+    let plan = shipped.plan(&detections, None);
+    let surge = item(&plan, PACKAGE_SURGE_XT);
+    assert_eq!(
+        surge.removability,
+        Removability::NoTrustedUninstaller {
+            refusal: VendorRefusal::NotListed
+        }
+    );
+    assert!(!surge.can_remove());
+
+    let plan = shipped.plan_looking_up(
+        &detections,
+        None,
+        InstallationKind::Standard,
+        true,
+        &FoundAt(uninstaller.clone()),
+    );
+    let surge = item(&plan, PACKAGE_SURGE_XT);
+    assert_eq!(surge.removability, Removability::Removable);
+    assert!(surge.can_remove() && surge.needs_elevated_helper());
+    assert!(surge.requires_elevation && surge.unbacked && surge.confirm);
+    assert!(surge.every_reaper_closed);
+    assert_eq!(
+        surge.blocking_programs,
+        ["Surge XT.exe", "Surge XT Effects.exe"]
+    );
+    assert!(surge.files.is_empty(), "nothing moves into a backup");
+    let summary = surge.summary.as_ref().unwrap();
+    assert_eq!(summary.removes_key, "uninstall-summary-surge-removes");
+    assert_eq!(summary.keeps_key, "uninstall-summary-surge-keeps");
+    // Its summary already says it goes for every music program; the same
+    // thing isn't said twice.
+    assert!(!surge.warnings.contains(&UninstallWarning::MachineWide));
+    assert_eq!(
+        surge.notes,
+        vec![UninstallNote::Manifest {
+            note_key: "uninstall-note-surge-fonts-stay".to_string()
+        }]
+    );
+    // The patches stay, even with "Also remove settings".
+    assert_eq!(
+        kept_data(surge),
+        vec![(patches, "uninstall-kept-surge-user-data".to_string(), true)]
+    );
+    assert!(surge.kept.iter().all(|kept| !kept.removable_with_settings));
+
+    let run = surge.vendor_run.as_ref().unwrap();
+    assert_eq!(run.kind, VendorUninstallerKind::Inno);
+    assert_eq!(run.uninstaller, uninstaller);
+    assert_eq!(
+        run.arguments,
+        ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
+    );
+    assert_eq!(run.timeout_seconds, 600);
+    assert_eq!(run.still_waiting_seconds, 30);
+    let vst3 = common.join("VST3").join("Surge Synth Team");
+    let clap = common.join("CLAP").join("Surge Synth Team");
+    assert_eq!(
+        run.verify_gone,
+        [
+            vst3.join("Surge XT.vst3"),
+            vst3.join("Surge XT Effects.vst3"),
+            clap.join("Surge XT.clap"),
+            clap.join("Surge XT Effects.clap"),
+        ]
+    );
+    // The links first (named again as empty folders, in case a plain empty
+    // folder stands where a link was expected), then the vendor folders if
+    // nothing else is left in them. Each is listed once.
+    assert_eq!(
+        run.remove_leftovers,
+        [
+            clap.join("SurgeXTData"),
+            vst3.join("SurgeXTData"),
+            clap.clone(),
+            vst3.clone(),
+        ]
+    );
+    assert!(run.report_leftovers.is_empty());
+
+    // A portable REAPER can't remove it; the standard REAPER can.
+    let plan = shipped.plan_looking_up(
+        &detections,
+        None,
+        InstallationKind::Portable,
+        false,
+        &FoundAt(uninstaller),
+    );
+    let surge = item(&plan, PACKAGE_SURGE_XT);
+    assert_eq!(surge.removability, Removability::NeedsStandardTarget);
+    assert!(surge.vendor_run.is_none());
+}
+
+/// A standard REAPER on Windows: its own NSIS uninstaller removes the
+/// program, with administrator rights and no backup, and must leave the
+/// resource folder alone. RABBIT checks afterwards that reaper.exe is gone,
+/// warns that the extensions stay, and lists the resource folder as kept,
+/// never as something to remove. A portable REAPER stays manual.
+#[test]
+fn reaper_on_windows_runs_its_own_uninstaller_and_keeps_the_resource_folder() {
+    let fixture = vendor_fixture();
+    let app = fixture.roots.app_path.clone().unwrap();
+    let uninstaller = app.with_file_name("Uninstall.exe");
+    let shipped = Shipped::new(&fixture, Platform::Windows);
+    let detections = installed(&[PACKAGE_REAPER, PACKAGE_OSARA, PACKAGE_SWS]);
+
+    let plan = shipped.plan_looking_up(
+        &detections,
+        None,
+        InstallationKind::Standard,
+        true,
+        &FoundAt(uninstaller.clone()),
+    );
+    let reaper = item(&plan, PACKAGE_REAPER);
+    assert_eq!(reaper.removability, Removability::Removable);
+    assert!(reaper.needs_elevated_helper() && reaper.confirm);
+    assert!(reaper.every_reaper_closed);
+    assert!(reaper.blocking_programs.is_empty());
+    assert!(reaper.files.is_empty());
+    let summary = reaper.summary.as_ref().unwrap();
+    assert_eq!(
+        summary.removes_key,
+        "uninstall-summary-reaper-windows-removes"
+    );
+    assert_eq!(summary.keeps_key, "uninstall-summary-reaper-keeps");
+    let run = reaper.vendor_run.as_ref().unwrap();
+    assert_eq!(run.kind, VendorUninstallerKind::Nsis);
+    assert_eq!(run.uninstaller, uninstaller);
+    assert_eq!(run.arguments, ["/S"]);
+    assert_eq!(run.timeout_seconds, 600);
+    assert_eq!(run.verify_gone, [app]);
+    assert!(run.remove_leftovers.is_empty());
+
+    // The resource folder stays, whole, whatever the user asks for.
+    let resource = reaper
+        .kept
+        .iter()
+        .find(|kept| kept.path == fixture.resource)
+        .expect("the resource folder is listed as staying");
+    assert_eq!(resource.reason, KeptReason::FolderRoot);
+    assert_eq!(
+        resource.note_key.as_deref(),
+        Some("uninstall-kept-reaper-resource")
+    );
+    assert!(!resource.removable_with_settings);
+
+    // Its extensions stay, and the user is told so once, naming them
+    // (decision 16).
+    assert_eq!(
+        reaper.warnings,
+        [UninstallWarning::DependentsStay {
+            package_ids: vec![PACKAGE_OSARA.to_string(), PACKAGE_SWS.to_string()]
+        }]
+    );
+
+    // REAPER comes off last, after everything that installs on top of it.
+    let order: Vec<&str> = plan
+        .in_removal_order(&[
+            PACKAGE_REAPER.to_string(),
+            PACKAGE_SURGE_XT.to_string(),
+            PACKAGE_SWS.to_string(),
+        ])
+        .iter()
+        .map(|item| item.package_id.as_str())
+        .collect();
+    assert_eq!(order.last(), Some(&PACKAGE_REAPER));
+
+    let plan = shipped.plan_looking_up(
+        &detections,
+        None,
+        InstallationKind::Portable,
+        false,
+        &FoundAt(uninstaller),
+    );
+    assert_eq!(
+        item(&plan, PACKAGE_REAPER).removability,
+        Removability::Manual {
+            note_key: "uninstall-manual-reaper-portable".to_string()
+        }
+    );
 }

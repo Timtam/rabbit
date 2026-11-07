@@ -17,7 +17,8 @@ use rabbit_core::package::{PackageCategory, PackageSpec, builtin_package_specs};
 use rabbit_core::receipt::load_install_state;
 use rabbit_core::uninstall::{
     Removability, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanInput,
-    UninstallPlanItem, UninstallRoots, UninstallWarning, build_uninstall_plan,
+    UninstallPlanItem, UninstallRoots, UninstallWarning, VendorLookup, VendorRefusal,
+    build_uninstall_plan,
 };
 
 use super::bootstrap::localizer_from_options;
@@ -191,11 +192,14 @@ impl WizardUninstallList {
 /// receipt the way `rabbit uninstall` builds it. The target's kind and its
 /// REAPER come from the target row rather than from guessing by the folder,
 /// so the rows and a later run from the wizard agree about them. Reads which
-/// files exist and how big they are; hashes nothing and changes nothing.
+/// files exist and how big they are, and looks vendors' uninstallers up
+/// through `vendor_lookup` (HKLM in RABBIT, a stand-in in tests); hashes
+/// nothing and changes nothing.
 pub fn uninstall_plan_for_target(
     model: &WizardModel,
     target: &TargetRow,
     detections: &[ComponentDetection],
+    vendor_lookup: &dyn VendorLookup,
 ) -> Result<UninstallPlan> {
     let roots =
         UninstallRoots::for_target(model.platform, &target.path, target.app_path.as_deref());
@@ -212,6 +216,7 @@ pub fn uninstall_plan_for_target(
         detections,
         state: state.as_ref(),
         remove_settings: false,
+        vendor_lookup,
     }))
 }
 
@@ -222,11 +227,12 @@ pub fn uninstall_list_for_target(
     model: &WizardModel,
     target: &TargetRow,
     detections: &[ComponentDetection],
+    vendor_lookup: &dyn VendorLookup,
 ) -> WizardUninstallList {
     let Ok(localizer) = localizer_from_options(&model.bootstrap_options) else {
         return WizardUninstallList::default();
     };
-    match uninstall_plan_for_target(model, target, detections) {
+    match uninstall_plan_for_target(model, target, detections, vendor_lookup) {
         Ok(plan) => {
             uninstall_list_from_plan(&localizer, &builtin_package_specs(model.platform), &plan)
         }
@@ -291,9 +297,10 @@ fn uninstall_row(
         .map(|text| text.value)
         .unwrap_or_else(|| item.display_name.clone());
     let installed = version_text(localizer, item.installed_version.as_ref());
-    // The engine refuses a removal a backup can't undo until the phase that
-    // brings it, so a row for one would only lead to a refusal later on.
-    let can_tick = item.removability.is_removable() && !item.unbacked;
+    // The engine refuses a removal a backup can't undo unless this version
+    // carries it out (a vendor's uninstaller, through the elevated helper),
+    // so a row for one would only lead to a refusal later on.
+    let can_tick = item.can_remove();
     let unavailability_reason = (!can_tick).then(|| unavailability_reason(localizer, item));
     let label = |action_key: &str| {
         let action = localizer.text(action_key).value;
@@ -370,7 +377,7 @@ fn unavailability_reason(localizer: &Localizer, item: &UninstallPlanItem) -> Str
         // package a portable REAPER can't have.
         Removability::NeedsStandardTarget => "wizard-package-row-unavailable-portable",
         Removability::NoReceipt => "wizard-uninstall-row-unavailable-no-receipt",
-        Removability::NoTrustedUninstaller => {
+        Removability::NoTrustedUninstaller { .. } => {
             "wizard-uninstall-row-unavailable-no-trusted-uninstaller"
         }
         Removability::UnsafePath { .. } => "wizard-uninstall-row-unavailable-unsafe-path",
@@ -419,10 +426,20 @@ fn refusal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
         Removability::NoReceipt => {
             format("wizard-uninstall-details-no-receipt", &[("package", name)])
         }
-        Removability::NoTrustedUninstaller => format(
-            "wizard-uninstall-details-no-trusted-uninstaller",
-            &[("package", name)],
-        ),
+        // What was wrong, in the user's language, and how to remove the
+        // package without RABBIT.
+        Removability::NoTrustedUninstaller { refusal } => [
+            format(
+                "wizard-uninstall-details-no-trusted-uninstaller",
+                &[("package", name)],
+            ),
+            refusal_text(localizer, refusal, name),
+            format(
+                "wizard-uninstall-details-vendor-by-hand",
+                &[("package", name)],
+            ),
+        ]
+        .join("\n"),
         Removability::UnsafePath { path, .. } => format(
             "wizard-uninstall-details-unsafe-path",
             &[
@@ -436,6 +453,16 @@ fn refusal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
     }
 }
 
+/// Why RABBIT doesn't trust a vendor's uninstaller, in the user's language.
+pub fn refusal_text(localizer: &Localizer, refusal: &VendorRefusal, name: &str) -> String {
+    let arguments = refusal.fluent_arguments(name);
+    let borrowed: Vec<(&str, &str)> = arguments
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    localizer.format(refusal.fluent_key(), &borrowed).value
+}
+
 /// What uninstalling the package does, one short sentence per line, in the
 /// order the plan gives: warnings that always apply first, then what goes,
 /// what stays, the other warnings and the notes. No file lists or counts;
@@ -446,7 +473,13 @@ fn removal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
     if let Some(summary) = &item.summary {
         lines.push(text(&summary.removes_key));
     }
-    lines.push(text("wizard-uninstall-details-files"));
+    // Files go into a backup; a vendor's uninstaller works with
+    // administrator rights, after Windows asked.
+    lines.push(text(if item.needs_elevated_helper() {
+        "wizard-uninstall-details-vendor"
+    } else {
+        "wizard-uninstall-details-files"
+    }));
     if let Some(summary) = &item.summary {
         lines.push(text(&summary.keeps_key));
     }
@@ -621,11 +654,14 @@ pub struct WizardUninstallReviewPreview {
 /// 2. one line per package, with what goes and what stays, or, with "Also
 ///    remove settings" ticked, which of its settings go too;
 /// 3. the warnings, those the manifests always show first, and the notes;
-/// 4. "close other music programs" for a package that serves all of them;
-/// 5. the ticks on the Install tab, which this run leaves out
+/// 4. "close other music programs" for a package that serves all of them,
+///    or whose own uninstaller removes machine-wide parts;
+/// 5. the permission note: Windows asks once, before anything is removed,
+///    and a window from a vendor's uninstaller is to be answered;
+/// 6. the ticks on the Install tab, which this run leaves out
 ///    (`install_tab_ticked`, their package names);
-/// 6. that the packages can be installed again;
-/// 7. why the Uninstall button stays disabled, if it does.
+/// 7. that the packages can be installed again;
+/// 8. why the Uninstall button stays disabled, if it does.
 pub fn build_uninstall_review_preview(
     localizer: &Localizer,
     target: Option<&TargetRow>,
@@ -709,11 +745,27 @@ pub fn build_uninstall_review_preview(
             .chain(note_lines(localizer, item, &row.display_name))
             .for_each(&mut add_note);
     }
-    let machine_wide = planned
-        .iter()
-        .any(|(_, item)| item.warnings.contains(&UninstallWarning::MachineWide));
+    // REAPER's own uninstaller removes ReaRoute and the file associations
+    // every REAPER and other programs use, so it asks this too.
+    let machine_wide = planned.iter().any(|(_, item)| {
+        item.warnings.contains(&UninstallWarning::MachineWide) || item.needs_elevated_helper()
+    });
     if machine_wide {
         add_note(text("wizard-review-uninstall-close-programs-note"));
+    }
+    let vendor_runs: Vec<&&UninstallRow> = planned
+        .iter()
+        .filter(|(_, item)| item.needs_elevated_helper())
+        .map(|(row, _)| row)
+        .collect();
+    if !vendor_runs.is_empty() {
+        add_note(text("wizard-review-uninstall-elevation-note-windows"));
+        for row in vendor_runs {
+            add_note(format(
+                "wizard-review-uninstall-vendor-window-note",
+                &[("package", row.display_name.as_str())],
+            ));
+        }
     }
     if let Some(note) = inactive_tab_note(localizer, WizardMode::Uninstall, install_tab_ticked) {
         add_note(note);

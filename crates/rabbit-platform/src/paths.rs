@@ -25,6 +25,18 @@ pub fn user_home_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from)
 }
 
+/// The user's Documents folder: the one Windows names as such on Windows,
+/// wherever the user moved it, and `~/Documents` on macOS. `None` where it
+/// can't be told. Programs keep the user's own work there, such as Surge
+/// XT's patches.
+pub fn user_documents_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        crate::fs_security::windows_documents_dir().ok()
+    } else {
+        user_home_dir().map(|home| home.join("Documents"))
+    }
+}
+
 /// `%ProgramFiles%` and `%ProgramFiles(x86)%` (in that order) on Windows.
 /// Empty on hosts where neither variable is set.
 pub fn windows_program_files_dirs() -> Vec<PathBuf> {

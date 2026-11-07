@@ -572,6 +572,8 @@ pub(crate) fn update_self_update_progress_window(event: &ProgressEvent) {
                 ProgressEvent::ConfigurationStarted { .. }
                 | ProgressEvent::ConfigurationCompleted { .. }
                 | ProgressEvent::RemoveStarted { .. }
+                | ProgressEvent::VendorStillWaiting { .. }
+                | ProgressEvent::VendorWaitingForFiles { .. }
                 | ProgressEvent::RemoveCompleted { .. } => {}
             }
         });

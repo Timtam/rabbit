@@ -11,10 +11,20 @@
 mod crash_log;
 
 fn main() -> std::process::ExitCode {
+    let uninstall_helper = std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == rabbit_cli::UNINSTALL_HELPER_SUBCOMMAND);
+
     // First thing, before any dispatch: the release profile aborts on any
     // panic, so this hook is the only chance to leave a diagnosable trace
-    // behind (a crash-<ts>.log in the per-user log directory).
-    crash_log::install();
+    // behind (a crash-<ts>.log next to RABBIT, see crash_log.rs). Not in the
+    // elevated uninstall helper: it runs with administrator rights, and
+    // every place the hook writes to (RABBIT's own folder, %TEMP%,
+    // RABBIT_CRASH_LOG_DIR) may be one a standard user controls. A helper
+    // that dies is reported by the RABBIT that started it.
+    if !uninstall_helper {
+        crash_log::install();
+    }
 
     // No arguments → run the GUI wizard (when the gui feature is on).
     // Anything else, including `--help`, hands off to the CLI subcommand
@@ -28,7 +38,14 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    attach_parent_console_on_windows();
+    // RABBIT's elevated uninstall helper prints nothing, and never borrows
+    // the console of the RABBIT that started it, which runs without its
+    // rights and maybe as another account.
+    if uninstall_helper {
+        load_dlls_from_system32_only();
+    } else {
+        attach_parent_console_on_windows();
+    }
     match rabbit_cli::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -104,3 +121,24 @@ fn attach_parent_console_on_windows() {
 
 #[cfg(not(all(windows, not(debug_assertions), feature = "gui")))]
 fn attach_parent_console_on_windows() {}
+
+/// In the elevated uninstall helper, a DLL loaded by name while it runs
+/// comes from System32 only, as its imports already do (see build.rs), and
+/// never from the folder rabbit.exe sits in, which a standard user may be
+/// able to write to. Only the helper: it shows no window, so nothing a
+/// screen reader or a shell extension puts into the process needs to find
+/// its own DLLs elsewhere, as it may in the GUI.
+#[cfg(windows)]
+fn load_dlls_from_system32_only() {
+    use windows_sys::Win32::System::LibraryLoader::{
+        LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
+    };
+    // SAFETY: takes a flag and nothing else. If it fails, the helper still
+    // runs; its imports are already pinned to System32 at link time.
+    unsafe {
+        SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
+}
+
+#[cfg(not(windows))]
+fn load_dlls_from_system32_only() {}

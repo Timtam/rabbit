@@ -50,6 +50,12 @@ sevenz-rust2 = { version = "0.24", default-features = false, features = ["util",
 [target.'cfg(windows)'.dependencies]
 webpki-root-certs = "1"
 
+# GetCommandLineW, so a fixture uninstaller in the vendor runner's tests can
+# report the exact command line it got. Already in the tree through
+# rabbit-platform.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Environment"] }
+
 # macOS-only: renamex_np(RENAME_SWAP) for the atomic app-bundle exchange in
 # the self-updater.
 [target.'cfg(target_os = "macos")'.dependencies]

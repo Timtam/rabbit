@@ -63,6 +63,10 @@ uninstall-summary-langpack-keeps = Language packs you added yourself stay.
 uninstall-summary-osara-removes = Removes the OSARA extension, its translations, and the copy of its key map in the KeyMaps folder.
 uninstall-summary-osara-removes-windows = Removes the OSARA extension, its translations, its uninstaller, and the copy of its key map in the KeyMaps folder. If Windows lists this OSARA among your installed programs, RABBIT takes it off that list.
 uninstall-summary-osara-keeps = Your key map stays as it is, and so do OSARA's settings and the backups of your key map that OSARA made.
+uninstall-summary-surge-removes = Surge XT's own uninstaller removes it for every music program on this computer. A backup can't bring it back.
+uninstall-summary-surge-keeps = Your own patches, in the Surge XT folder in your Documents, stay.
+uninstall-summary-reaper-windows-removes = REAPER's own uninstaller removes the program. It also removes REAPER's file associations and ReaRoute for every REAPER on this computer.
+uninstall-summary-reaper-keeps = Your settings, extensions and projects stay.
 
 # A short description of a file or folder that stays, shown next to its path,
 # for example "Data\Grooves (your grooves)". Start in lower case where the
@@ -78,6 +82,8 @@ uninstall-kept-osara-key-map = your key map
 uninstall-kept-osara-replaced-key-map = your key map from before OSARA replaced it
 uninstall-kept-osara-merged-key-map = your key map from before OSARA added its keys to it
 uninstall-kept-osara-settings = OSARA's settings, in a file every extension shares
+uninstall-kept-surge-user-data = your patches and everything else you saved with Surge XT
+uninstall-kept-reaper-resource = REAPER's resource folder, with your settings, extensions and key maps
 
 # Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
 uninstall-warning-sws-osara-keymap = If you use OSARA's key map, some of its keys run SWS actions. Those keys stop working until you install SWS again.
@@ -85,6 +91,8 @@ uninstall-warning-sws-reapack-scripts = Many REAPER scripts, accessibility scrip
 
 # A note on what stays behind after ReaPack is uninstalled.
 uninstall-note-reapack-packages-stay = Scripts and extensions you installed with ReaPack stay, but nothing keeps them up to date.
+# A note on what stays behind after Surge XT is uninstalled.
+uninstall-note-surge-fonts-stay = The fonts Surge XT installed stay: its installer marks them never to be removed.
 
 # How to remove a package by hand where RABBIT doesn't, shown line by line.
 # Keep file names, folder paths and %APPDATA% exactly as they are.
@@ -97,6 +105,31 @@ uninstall-manual-reaper-portable = RABBIT doesn't remove a portable REAPER: REAP
     2. Copy anything you want to keep out of the portable REAPER folder, such as projects you saved there, your key maps and your settings.
     3. Delete the portable REAPER folder.
     The backups RABBIT made for this REAPER are in that folder too, in RABBIT\backups, and go with it.
+
+# Why RABBIT didn't start a program's own uninstaller, which it runs with
+# administrator rights. Nothing has changed at that point. RABBIT shows one
+# of these, then uninstall-vendor-refused-nothing-changed.
+# { $package } is the package's name, such as Surge XT or REAPER.
+# { $path } is a file, a folder or a value as Windows holds it; keep it as it
+# is.
+uninstall-vendor-refused-not-listed = Windows doesn't list { $package } among the programs installed for all users, so RABBIT can't find its uninstaller.
+uninstall-vendor-refused-unclear-command = RABBIT can't tell which program Windows names as { $package }'s uninstaller: { $path }
+uninstall-vendor-refused-not-a-full-path = Windows names { $package }'s uninstaller by a path RABBIT doesn't trust: { $path }
+uninstall-vendor-refused-unknown-folder = RABBIT can't find a folder it needs to check { $package }'s uninstaller.
+uninstall-vendor-refused-wrong-folder = { $package }'s uninstaller isn't in the folder it belongs in: { $path }
+uninstall-vendor-refused-foreign-file = Next to { $package }'s uninstaller is a file that doesn't belong there: { $path }
+uninstall-vendor-refused-folder-or-link = Next to { $package }'s uninstaller is a folder or a link that doesn't belong there: { $path }
+uninstall-vendor-refused-untrusted-owner = Next to { $package }'s uninstaller is a file an administrator didn't put there: { $path }
+uninstall-vendor-refused-install-location-missing = Windows doesn't say which folder { $package } is installed in.
+uninstall-vendor-refused-install-location-mismatch = Windows says { $package } is installed in { $path }, not in the REAPER you chose.
+uninstall-vendor-refused-not-in-install-folder = { $package }'s uninstaller isn't in its program folder: { $path }
+uninstall-vendor-refused-not-below-program-files = { $package } isn't installed in a folder of its own in Program Files: { $path }
+uninstall-vendor-refused-copy-differs = The copy RABBIT made of { $package }'s uninstaller isn't the same as the original.
+uninstall-vendor-refused-unreadable = RABBIT couldn't read { $path } to check { $package }'s uninstaller.
+uninstall-vendor-refused-not-a-vendor-plan = RABBIT has no uninstaller for { $package } that it may run.
+uninstall-vendor-refused-unsupported = RABBIT can run { $package }'s uninstaller only on Windows.
+# Follows each of the messages above. { $package } as above.
+uninstall-vendor-refused-nothing-changed = Nothing was changed. You can uninstall { $package } in Windows Settings, under Apps, Installed apps.
 
 # $reason is one of the localized "wizard-package-row-unavailable-*" strings
 # explaining *why* the row is unavailable. Appended to the row's main summary
@@ -221,12 +254,18 @@ wizard-uninstall-details-unsafe-path = RABBIT won't remove { $path }. It leaves 
 # line. $package is the localized package name, $packages a comma-separated
 # list of package names, and $reason an error message.
 wizard-uninstall-details-files = RABBIT moves the files into a backup rather than deleting them.
-wizard-uninstall-details-dependents-stay = These packages install on top of { $package } and stay: { $packages }. They may not work without it.
+wizard-uninstall-details-dependents-stay = These packages install on top of { $package } and stay: { $packages }. They work again once you install { $package } again.
 wizard-uninstall-details-machine-wide = { $package } serves every REAPER and every other program on this computer, so they all lose it.
 wizard-uninstall-details-reapack-owned-extensions = ReaPack installed these, and they stay without updates once it is gone: { $packages }.
 wizard-uninstall-details-reapack-records-unreadable = RABBIT couldn't read ReaPack's records to say what it still manages ({ $reason }).
 wizard-uninstall-details-no-receipt-note = RABBIT didn't install this copy. It removes the files { $package } is known to install.
 wizard-uninstall-details-reapack-orphan = ReaPack once installed { $package }. ReaPack is gone, so RABBIT can remove it; ReaPack's records of it stay.
+# The details text of an Uninstall row whose package its own uninstaller
+# removes, with administrator rights. The second line follows the reason
+# RABBIT can't trust a package's own uninstaller; $package is the localized
+# package name.
+wizard-uninstall-details-vendor = Windows asks for your permission before anything is removed.
+wizard-uninstall-details-vendor-by-hand = You can uninstall { $package } yourself in Windows Settings, under Apps, Installed apps.
 # The one row, without a checkbox, of an Uninstall list with nothing in it,
 # and its details text.
 wizard-uninstall-empty = RABBIT found nothing it can uninstall in this REAPER.
@@ -353,6 +392,11 @@ wizard-review-uninstall-package = { $package }: { $removes } { $stays }
 # settings".
 wizard-review-uninstall-settings-removed = Its settings go too, into the backup: { $settings }.
 wizard-review-uninstall-close-programs-note = Close other music programs first.
+# Review's permission note, when a ticked package needs administrator rights.
+# Then one line per ticked package its own uninstaller removes; $package is
+# the localized package name.
+wizard-review-uninstall-elevation-note-windows = Windows asks for your permission once, before anything is removed. If you don't allow it, nothing is uninstalled.
+wizard-review-uninstall-vendor-window-note = If a window from { $package }'s own uninstaller appears, answer it.
 # What is ticked on the tab that isn't running stays ticked, but isn't part of
 # this run. RABBIT leaves out what it ticked by itself, such as updates, but the
 # list can still hold a setting RABBIT ticked along with one of the user's
@@ -406,6 +450,13 @@ wizard-progress-log-install-completed = Installed { $package }.
 wizard-progress-log-remove-started = Uninstalling { $package }…
 wizard-progress-log-remove-completed = Uninstalled { $package }.
 wizard-progress-log-remove-failed = Couldn't uninstall { $package }.
+# For a package its own uninstaller removes: the status and log line while
+# it runs, the line said once when it runs for a long time, and the line
+# said once when its files are still there long after it ended. $package
+# is the localized package name. Name Alt+Tab as Windows does.
+wizard-progress-status-vendor-running = Running { $package }'s own uninstaller…
+wizard-progress-status-vendor-still-waiting = Still waiting for { $package }'s own uninstaller. It may be showing a question in another window; press Alt+Tab to find it.
+wizard-progress-status-vendor-waiting-for-files = { $package }'s own uninstaller has finished, and RABBIT is waiting for its files to go. If another music program has { $package } open, close it.
 wizard-progress-log-configuration-started = Applying { $step }…
 wizard-progress-log-configuration-completed = Applied { $step }.
 
@@ -425,6 +476,9 @@ wizard-reaper-running-uninstall-body = Close REAPER, then press Uninstall again.
 # The same, for packages every REAPER on the computer can load, such as
 # app2clap. $packages is a comma-separated list of localized package names.
 wizard-reaper-running-uninstall-every-body = Close every copy of REAPER on this computer, including portable ones, then press Uninstall again. Every REAPER on this computer can use { $packages }.
+# The same when REAPER itself is the only such package: its own uninstaller
+# needs every REAPER closed.
+wizard-reaper-running-uninstall-reaper-body = Close every copy of REAPER on this computer, including portable ones, then press Uninstall again. REAPER's own uninstaller doesn't run while any REAPER is open.
 # Shown instead of starting an uninstall while a program that has to be
 # closed first is running. $programs is a comma-separated list of program
 # names, such as "Surge XT.exe"; they are never translated.
@@ -447,6 +501,10 @@ wizard-done-uninstall-status-completed-with-errors = RABBIT uninstalled { $packa
 wizard-done-uninstall-status-error = Uninstalling failed.
 wizard-done-uninstall-status-cancelled = You stopped the uninstall. Packages RABBIT hadn't reached yet are still installed.
 wizard-done-uninstall-status-no-packages = Nothing was uninstalled.
+# The Done page's first line when a removal finishes only after a restart,
+# and when the Windows permission prompt was declined.
+wizard-done-uninstall-status-pending-restart = RABBIT uninstalled { $packages }. Restart your computer to finish.
+wizard-done-uninstall-status-declined = Nothing was uninstalled, because the Windows permission prompt was declined.
 wizard-done-uninstall-removed-before-stop = Before you stopped it, RABBIT uninstalled { $packages }.
 # There is no way back to the package list from the Done page. Name the tab
 # as wizard-packages-tab-install does.
@@ -459,6 +517,29 @@ wizard-done-uninstall-left-in-backup = Some files of { $package } couldn't be pu
 wizard-done-uninstall-leftovers = RABBIT still finds some of { $package } and leaves it alone. Show details lists what.
 wizard-done-uninstall-language-reset-failed = RABBIT couldn't set REAPER back to English after removing { $package }. Choose a language in REAPER's preferences.
 wizard-done-uninstall-registry-failed = RABBIT uninstalled { $package }, but Windows' list of installed programs may still show it. Show details names the entry.
+# After a package's own uninstaller ran, or was to run. $package is the
+# localized package name, $code a number, $error an error message in
+# English, $path a full path, and $paths a comma-separated list of full
+# paths. Name "Show details" as wizard-done-show-details does, and Alt+Tab
+# as Windows does.
+wizard-done-uninstall-pending-restart = Restart your computer to finish removing { $package }.
+wizard-done-uninstall-vendor-cancelled = { $package }'s own uninstaller was cancelled before it finished.
+wizard-done-uninstall-vendor-failed = { $package }'s own uninstaller ended with error code { $code }. Show details lists what is still there.
+wizard-done-uninstall-vendor-failed-unsure = { $package }'s own uninstaller ended with error code { $code }, so { $package } may not be fully removed.
+wizard-done-uninstall-vendor-still-there = { $package }'s own uninstaller finished, but { $package } is still installed. You can uninstall it in Windows Settings, under Apps, Installed apps.
+wizard-done-uninstall-vendor-still-open = { $package }'s own uninstaller is still open, so RABBIT stopped and left the packages after it alone. Press Alt+Tab to find its window, and answer it.
+wizard-done-uninstall-vendor-run-failed = RABBIT couldn't finish running { $package }'s own uninstaller ({ $error }), so it stopped there.
+wizard-done-uninstall-elevation-failed = RABBIT couldn't get administrator rights ({ $error }), so nothing was uninstalled.
+wizard-done-uninstall-resource-damaged = Important: after { $package }'s own uninstaller ran, these files were missing from REAPER's resource folder: { $paths }. RABBIT stopped and wrote its records again. It can't bring REAPER's settings back; if you have a copy of reaper.ini, put it back before you start REAPER.
+wizard-done-uninstall-receipt-not-saved = RABBIT uninstalled { $package }, but couldn't update its records. The next time RABBIT runs, it finds { $package } gone all the same.
+wizard-done-uninstall-vendor-lost = RABBIT lost track of { $package }'s own uninstaller after it started. It may still be running, so RABBIT can't tell what it removed, and stopped there.
+wizard-done-uninstall-vendor-lost-reaper = Once the uninstaller has finished, check that reaper.ini is still in REAPER's resource folder: it holds your REAPER settings.
+wizard-done-uninstall-vendor-files-left = { $package }'s own uninstaller finished, but some of its files are still there. Show details lists them.
+wizard-done-uninstall-vendor-not-confirmed = { $package }'s own uninstaller finished, but RABBIT can't confirm that { $package } is gone.
+wizard-done-uninstall-vendor-not-listed = Windows no longer lists { $package } among the installed programs, so it isn't in Windows Settings either.
+wizard-done-uninstall-working-folder-left = RABBIT couldn't remove { $path }, the folder it ran { $package }'s uninstaller from. Only an administrator can delete it.
+wizard-done-uninstall-restart-list-unreadable = RABBIT couldn't read which files Windows removes at the next restart, so it can't tell whether the files of { $package } that are left go then.
+wizard-done-uninstall-installed-list-unreadable = RABBIT couldn't read Windows' list of installed programs after { $package }'s uninstaller, so it couldn't check whether Windows still lists { $package }.
 wizard-done-show-details = Show details
 # Mnemonic messages are single-character native access keys. Choose a character
 # from the translated label when possible.
@@ -571,6 +652,11 @@ wizard-summary-kept-link = Kept, because it holds a link RABBIT never follows: {
 wizard-summary-kept-reapack = Kept, because ReaPack installed it and keeps track of it: { $path }
 wizard-summary-left-over = Still there: { $path }
 wizard-summary-left-in-backup = Couldn't be put back, still in the backup: { $path }
+# Below a package its own uninstaller removed: a file Windows removes at the
+# next restart, and the uninstaller itself. $path is a full path, never
+# translated.
+wizard-summary-pending-restart = Goes when you restart the computer: { $path }
+wizard-summary-vendor-uninstaller = Its own uninstaller: { $path }
 # What became of a package's entry in Windows' list of installed programs,
 # below the package's line. $key is the entry's registry key, such as
 # HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\OSARA, and is

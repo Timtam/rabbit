@@ -22,6 +22,7 @@ use crate::wx_app::globals::{AnnouncePriority, announce};
 use crate::wx_app::packages_page::{
     PackagesStateCell, PackagesView, UninstallStateCell, UninstallView, build_packages_page,
     build_uninstall_tab, focus_packages_list_top, reset_packages_list_caret_on_focus,
+    reset_uninstall_list_caret_on_focus,
 };
 use crate::wx_app::pages::{WizardPage, add_heading};
 use crate::wx_app::widgets::{INSTALL_TAB_NAME, UNINSTALL_TAB_NAME, WizardWidgets};
@@ -166,10 +167,11 @@ pub(crate) fn arrive_on_packages_page(
     // event, so the macOS handler doesn't focus a list and announce the tab
     // on top of what the screen reader is about to read.
     notebook.change_selection(INSTALL_TAB);
-    // The list's caret goes back to its top once the list gets focus, not
-    // now: on Windows, moving it while the tab strip has focus made NVDA
-    // read the list's row right after the tab.
+    // Each list's caret goes back to its top once that list gets focus,
+    // not now: on Windows, moving it while the tab strip has focus made
+    // NVDA read the list's row right after the tab.
     reset_packages_list_caret_on_focus();
+    reset_uninstall_list_caret_on_focus();
     notebook.set_focus();
     if !notebook.has_focus() {
         // An NSTabView most likely takes keyboard focus only with macOS's

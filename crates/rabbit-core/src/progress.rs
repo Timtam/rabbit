@@ -85,16 +85,38 @@ pub enum ProgressEvent {
     /// A configuration step finished. As with `InstallCompleted`, errors
     /// short-circuit instead of firing this variant.
     ConfigurationCompleted { step_id: String },
-    /// An uninstall is about to remove this package. Uninstalls run one
-    /// package at a time and download nothing, so their events never
-    /// interleave.
-    RemoveStarted { package_id: String },
+    /// An uninstall is about to remove this package, the way `method` says.
+    /// Uninstalls run one package at a time and download nothing, so their
+    /// events never interleave.
+    RemoveStarted {
+        package_id: String,
+        method: RemovalMethod,
+    },
+    /// The package's own uninstaller has run for `seconds` and hasn't
+    /// ended. It may be showing a question in a window of its own. Sent
+    /// once per uninstaller.
+    VendorStillWaiting { package_id: String, seconds: u64 },
+    /// The package's own uninstaller has ended, but `seconds` later what it
+    /// was to remove is still there, and RABBIT keeps checking until the
+    /// uninstaller's time limit. Another program may have the package
+    /// open. Sent at most once per uninstaller.
+    VendorWaitingForFiles { package_id: String, seconds: u64 },
     /// The uninstall is done with this package. It fires after every
     /// `RemoveStarted`, also when the removal failed or a check stopped it,
     /// so a progress page never waits on a package that is over.
     /// `removed` says whether the package's files are gone; the report says
     /// the rest.
     RemoveCompleted { package_id: String, removed: bool },
+}
+
+/// How an uninstall removes a package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovalMethod {
+    /// RABBIT moves the package's files into a backup set.
+    Files,
+    /// The package's own uninstaller removes it, started by RABBIT's
+    /// elevated helper.
+    VendorUninstaller,
 }
 
 /// A `Send + Sync` handle to the user-supplied progress callback. Cheap

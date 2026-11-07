@@ -1208,6 +1208,7 @@ dependencies = [
  "thiserror",
  "unic-langid",
  "webpki-root-certs",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
@@ -1215,6 +1216,7 @@ dependencies = [
 name = "rabbit-platform"
 version = "0.4.4"
 dependencies = [
+ "getrandom 0.4.3",
  "libc",
  "plist",
  "serde",

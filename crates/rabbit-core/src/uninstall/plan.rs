@@ -18,7 +18,7 @@ use crate::package::uninstall::{
     ReapackOwnedPolicy, UninstallBackup, UninstallElevation, UninstallPath, UninstallPathToken,
     UninstallPlanSpec, UninstallStrategy,
 };
-use crate::package::{InstallDestination, PACKAGE_REAPACK, PackageSpec};
+use crate::package::{InstallDestination, PACKAGE_REAPACK, PACKAGE_REAPER, PackageSpec};
 use crate::reapack::{ReapackOwnership, reapack_ownership, reapack_packages_with_files_under};
 use crate::receipt::{InstallState, PackageReceipt};
 
@@ -26,6 +26,7 @@ use super::paths::{
     RemovalGuard, ResolvedPath, UninstallRoots, check_removal, expand_wildcard, inside_or_same,
     is_in_rabbit_folder, resolve_path, same_ignoring_case,
 };
+use super::vendor::{VendorJob, VendorLookup, VendorRefusal, plan_vendor_run};
 use super::{
     KeptPath, KeptReason, PathRefusal, PlannedRegistryCleanup, PlannedRemoval, Removability,
     RemovalReason, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanItem,
@@ -45,6 +46,9 @@ pub struct UninstallPlanInput<'a> {
     pub state: Option<&'a InstallState>,
     /// "Also remove settings": each package's `kept_user_data` goes too.
     pub remove_settings: bool,
+    /// Finds and checks each vendor's uninstaller, read only: HKLM's list
+    /// of installed programs in RABBIT itself, a stand-in in tests.
+    pub vendor_lookup: &'a dyn VendorLookup,
 }
 
 /// Build the plan for every package offered on `input.platform`. Reads
@@ -165,6 +169,7 @@ fn plan_item(
         kept: Vec::new(),
         post: plan.map(|plan| plan.post.clone()).unwrap_or_default(),
         registry_cleanup: Vec::new(),
+        vendor_run: None,
         blocking_programs: plan
             .map(|plan| plan.blocking_programs.clone())
             .unwrap_or_default(),
@@ -176,7 +181,7 @@ fn plan_item(
         requires_elevation,
         unbacked,
         confirm: false,
-        warnings: package_warnings(input, spec),
+        warnings: package_warnings(input, spec, strategy),
         notes: Vec::new(),
     };
     item.confirm = item.unbacked
@@ -232,11 +237,41 @@ fn plan_item(
         receipt,
     };
     if plan.strategy == UninstallStrategy::VendorUninstaller {
-        // Locating a vendor uninstaller and deciding whether to trust it
-        // (HKLM only, exact folders, signatures) is the vendor runner's job,
-        // which doesn't exist yet. Until it does, no uninstaller is trusted.
-        item.kept = planner.user_data(false).1;
-        item.removability = Removability::NoTrustedUninstaller;
+        // The vendor's uninstaller removes what its installer put there, and
+        // none of it goes into a backup set, so "Also remove settings" never
+        // takes this package's data: it is only listed as kept.
+        let (_, mut kept) = planner.user_data(false);
+        for kept in &mut kept {
+            kept.removable_with_settings = false;
+        }
+        item.kept = kept;
+        // Found and checked here, read only, the way the elevated helper
+        // checks it again right before it starts it: a package RABBIT can't
+        // trust is refused before anything happens, and before any
+        // permission prompt.
+        let planned = match &plan.vendor_uninstaller {
+            Some(vendor) => plan_vendor_run(
+                &VendorJob {
+                    package_id: &spec.id,
+                    spec: vendor,
+                    roots: input.roots,
+                },
+                input.vendor_lookup,
+            ),
+            None => Err(VendorRefusal::NotAVendorPlan),
+        };
+        match planned {
+            Ok(run) => {
+                item.vendor_run = Some(run);
+                item.removability = Removability::Removable;
+                if let Some(note_key) = &plan.note_key {
+                    item.notes.push(UninstallNote::Manifest {
+                        note_key: note_key.clone(),
+                    });
+                }
+            }
+            Err(refusal) => item.removability = Removability::NoTrustedUninstaller { refusal },
+        }
         return item;
     }
 
@@ -290,8 +325,14 @@ fn plan_item(
     item
 }
 
-/// The warnings that don't depend on which files would go.
-fn package_warnings(input: &UninstallPlanInput<'_>, spec: &PackageSpec) -> Vec<UninstallWarning> {
+/// The warnings that don't depend on which files would go. Each thing is
+/// said once: a screen reader reads every sentence of the details and of
+/// Review in turn.
+fn package_warnings(
+    input: &UninstallPlanInput<'_>,
+    spec: &PackageSpec,
+    strategy: Option<UninstallStrategy>,
+) -> Vec<UninstallWarning> {
     let mut warnings: Vec<UninstallWarning> = spec
         .uninstall
         .always_warn
@@ -313,7 +354,8 @@ fn package_warnings(input: &UninstallPlanInput<'_>, spec: &PackageSpec) -> Vec<U
     );
     // Removing a package never removes what installs on top of it: REAPER's
     // extensions stay in the resource folder, and work again once REAPER is
-    // back. The user is told they stay.
+    // back. The user is told they stay, naming the ones installed; a
+    // manifest says no more about them.
     let dependents: Vec<String> = input
         .specs
         .iter()
@@ -325,7 +367,10 @@ fn package_warnings(input: &UninstallPlanInput<'_>, spec: &PackageSpec) -> Vec<U
             package_ids: dependents,
         });
     }
-    if spec.requires_standard_install {
+    // A vendor's uninstaller plan says in its own summary whom it takes the
+    // package from, as Surge XT's "for every music program on this
+    // computer" does.
+    if spec.requires_standard_install && strategy != Some(UninstallStrategy::VendorUninstaller) {
         warnings.push(UninstallWarning::MachineWide);
     }
     warnings
@@ -934,10 +979,21 @@ fn unreadable(path: &Path, error: &io::Error) -> Removability {
 }
 
 /// `items` in the order to remove them: every package before the packages it
-/// depends on, so nothing is removed from under a package still there.
-/// Packages with no dependency between them keep their order. A cycle, which
-/// the manifests never contain, leaves the packages in it in their order.
+/// depends on, so nothing is removed from under a package still there, and
+/// REAPER itself last of all, after machine-wide packages that don't name it
+/// too. Packages with no dependency between them keep their order. A cycle,
+/// which the manifests never contain, leaves the packages in it in their
+/// order.
 pub(super) fn removal_order(items: Vec<&UninstallPlanItem>) -> Vec<&UninstallPlanItem> {
+    let (reaper, others): (Vec<&UninstallPlanItem>, Vec<&UninstallPlanItem>) = items
+        .into_iter()
+        .partition(|item| item.package_id == PACKAGE_REAPER);
+    let mut ordered = dependency_order(others);
+    ordered.extend(reaper);
+    ordered
+}
+
+fn dependency_order(items: Vec<&UninstallPlanItem>) -> Vec<&UninstallPlanItem> {
     let mut remaining = items;
     let mut ordered = Vec::with_capacity(remaining.len());
     while !remaining.is_empty() {

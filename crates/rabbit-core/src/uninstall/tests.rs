@@ -8,10 +8,11 @@ use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
 
 use super::{
-    ANY_REAPER_PROCESS_CHECK, KeptReason, PROGRAMS_RUNNING_CHECK, PathRefusal, Removability,
-    RemovalReason, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanInput,
-    UninstallPlanItem, UninstallPreflightOptions, UninstallRoots, UninstallWarning,
-    build_uninstall_plan, run_uninstall_preflight_with_processes,
+    ANY_REAPER_PROCESS_CHECK, KeptReason, NothingListed, PROGRAMS_RUNNING_CHECK, PathRefusal,
+    Removability, RemovalReason, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan,
+    UninstallPlanInput, UninstallPlanItem, UninstallPreflightOptions, UninstallRoots,
+    UninstallWarning, VendorJob, VendorLookup, VendorRefusal, build_uninstall_plan,
+    run_uninstall_preflight_with_processes,
 };
 use crate::model::{ComponentDetection, Confidence, InstallationKind, Platform};
 use crate::package::uninstall::UninstallStrategy;
@@ -24,6 +25,16 @@ use crate::reapack::write_test_registry;
 use crate::receipt::{InstallState, InstalledFileReceipt, PackageReceipt};
 
 const SUMMARY: &str = r#""summary": { "removes_key": "test-removes", "keeps_key": "test-keeps" }"#;
+
+/// A vendor lookup that finds every uninstaller at `0`, checked and
+/// trusted, as Windows' list would name it. Nothing reads the registry.
+pub(super) struct FoundAt(pub(super) PathBuf);
+
+impl VendorLookup for FoundAt {
+    fn locate(&self, _job: &VendorJob<'_>) -> Result<PathBuf, VendorRefusal> {
+        Ok(self.0.clone())
+    }
+}
 
 /// A temporary folder holding a resource folder `REAPER` and roots that
 /// know it and a CLAP folder `CLAP` beside it.
@@ -75,6 +86,25 @@ impl Fixture {
         target: InstallationKind,
         remove_settings: bool,
     ) -> UninstallPlan {
+        self.plan_looking_up(
+            specs,
+            detections,
+            state,
+            target,
+            remove_settings,
+            &NothingListed,
+        )
+    }
+
+    pub(super) fn plan_looking_up(
+        &self,
+        specs: &[PackageSpec],
+        detections: &[ComponentDetection],
+        state: Option<&InstallState>,
+        target: InstallationKind,
+        remove_settings: bool,
+        vendor_lookup: &dyn VendorLookup,
+    ) -> UninstallPlan {
         build_uninstall_plan(&UninstallPlanInput {
             roots: &self.roots,
             platform: Platform::Windows,
@@ -83,6 +113,7 @@ impl Fixture {
             detections,
             state,
             remove_settings,
+            vendor_lookup,
         })
     }
 }
@@ -865,11 +896,12 @@ fn manual_and_not_supported_plans_say_why() {
     assert!(!item(&plan, "manual").removability.is_blocked());
 }
 
-/// Locating and trusting a vendor uninstaller comes with the vendor runner.
-/// Until then no vendor plan can go ahead, and the plan says what it would
-/// need: administrator rights, no backup, every REAPER closed.
+/// A vendor plan goes ahead only with an uninstaller the lookup found and
+/// trusts, and says what it needs either way: administrator rights, no
+/// backup, every REAPER closed, and the question before starting. Its
+/// package's data is listed as kept, never taken by "Also remove settings".
 #[test]
-fn vendor_plans_wait_for_an_uninstaller_rabbit_can_trust() {
+fn vendor_plans_need_an_uninstaller_rabbit_can_trust() {
     let fixture = Fixture::new();
     let specs = [spec(
         "vendor",
@@ -892,13 +924,45 @@ fn vendor_plans_wait_for_an_uninstaller_rabbit_can_trust() {
         ),
     )];
 
+    write(&fixture.resource.join("Vendor").join("data.txt"), b"mine");
     let plan = fixture.plan(&specs, &installed(&["vendor"]), None);
     let vendor = item(&plan, "vendor");
 
-    assert_eq!(vendor.removability, Removability::NoTrustedUninstaller);
+    assert_eq!(
+        vendor.removability,
+        Removability::NoTrustedUninstaller {
+            refusal: VendorRefusal::NotListed
+        }
+    );
+    assert!(!vendor.can_remove() && vendor.vendor_run.is_none());
     assert_eq!(vendor.strategy, Some(UninstallStrategy::VendorUninstaller));
     assert!(vendor.requires_elevation && vendor.unbacked && vendor.confirm);
     assert!(vendor.every_reaper_closed);
+    assert_eq!(
+        kept(vendor, KeptReason::UserData),
+        vec![fixture.resource.join("Vendor")]
+    );
+
+    let uninstaller = fixture.dir.path().join("unins000.exe");
+    let plan = fixture.plan_looking_up(
+        &specs,
+        &installed(&["vendor"]),
+        None,
+        InstallationKind::Standard,
+        true,
+        &FoundAt(uninstaller.clone()),
+    );
+    let vendor = item(&plan, "vendor");
+    assert_eq!(vendor.removability, Removability::Removable);
+    assert!(vendor.can_remove() && vendor.needs_elevated_helper());
+    let run = vendor.vendor_run.as_ref().expect("a planned vendor run");
+    assert_eq!(run.uninstaller, uninstaller);
+    assert_eq!(run.timeout_seconds, 600);
+    assert_eq!(run.still_waiting_seconds, 30);
+    // Nothing moves into a backup, settings included: they stay, and the
+    // option to remove them doesn't apply.
+    assert!(vendor.files.is_empty());
+    assert!(vendor.kept.iter().all(|kept| !kept.removable_with_settings));
     assert_eq!(
         kept(vendor, KeptReason::UserData),
         vec![fixture.resource.join("Vendor")]
@@ -1157,6 +1221,7 @@ fn a_resource_folder_reached_through_a_link_still_plans() {
         detections: &installed(&["demo"]),
         state: None,
         remove_settings: false,
+        vendor_lookup: &NothingListed,
     });
     let demo = item(&plan, "demo");
     assert_eq!(demo.removability, Removability::Removable);
@@ -1245,6 +1310,7 @@ fn every_shipped_manifest_plans() {
                 detections: &[],
                 state: None,
                 remove_settings: false,
+                vendor_lookup: &NothingListed,
             });
             assert_eq!(nothing.items.len(), specs.len());
             assert!(
@@ -1262,6 +1328,7 @@ fn every_shipped_manifest_plans() {
                 detections: &all_installed,
                 state: None,
                 remove_settings: true,
+                vendor_lookup: &NothingListed,
             });
             for (item, spec) in everything.items.iter().zip(&specs) {
                 let removes_files = spec

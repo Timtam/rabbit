@@ -447,6 +447,29 @@ mod tests {
     }
 
     #[test]
+    fn german_treats_reaper_as_neuter() {
+        // "das REAPER", "jedes REAPER": a masculine form crept into one
+        // sentence once ("für jeden REAPER"), which German users then heard
+        // on Review next to the neuter everywhere else. Only REAPER on its
+        // own counts; "jeden CLAP-Host" or "den REAPER-Ordner" are other
+        // words.
+        let source = embedded_locale_source("de-DE").unwrap();
+        let words: Vec<&str> = source
+            .split(|c: char| c.is_whitespace() || matches!(c, ',' | '.' | ';' | ':' | '(' | ')'))
+            .filter(|word| !word.is_empty())
+            .collect();
+        let masculine: Vec<String> = words
+            .windows(2)
+            .filter(|pair| {
+                pair[1] == "REAPER"
+                    && ["jeden", "einen", "keinen", "diesen", "welchen"].contains(&pair[0])
+            })
+            .map(|pair| pair.join(" "))
+            .collect();
+        assert!(masculine.is_empty(), "{masculine:?}");
+    }
+
+    #[test]
     fn self_update_notes_heading_formats_in_every_embedded_locale() {
         // Same exposure as the package heading below: composed with
         // .format() without a missing-key fallback, and it doubles as the

@@ -62,10 +62,8 @@ impl UninstallRoots {
     /// `app_path`, read from this computer. Windows folders resolve only on
     /// Windows and `{home}` only on macOS, as the manifest's validation
     /// expects: Git Bash sets `HOME` on Windows, but no plan means it there.
-    ///
-    /// `{documents}` stays unresolved for now. Windows keeps it as a known
-    /// folder that an environment variable can't name, and no package
-    /// RABBIT removes so far uses it.
+    /// `{documents}` is the user's Documents folder, which Windows keeps as a
+    /// known folder an environment variable can't name.
     pub fn for_target(platform: Platform, resource: &Path, app_path: Option<&Path>) -> Self {
         let windows = platform == Platform::Windows;
         let app_path = app_path.map(absolute);
@@ -93,7 +91,7 @@ impl UninstallRoots {
                 .then(rabbit_platform::windows_program_data_dir)
                 .flatten(),
             home: (!windows).then(rabbit_platform::user_home_dir).flatten(),
-            documents: None,
+            documents: rabbit_platform::user_documents_dir(),
         }
     }
 
@@ -307,6 +305,8 @@ pub enum PathRefusal {
     FolderRoot,
     #[error("it is a symbolic link or junction, which RABBIT never follows or removes")]
     Link,
+    #[error("it isn't the link RABBIT expected there")]
+    NotALink,
     #[error("it is in RABBIT's own folder, which holds receipts, backups and logs")]
     RabbitFolder,
     #[error("its name isn't what the package manifest expects")]
@@ -346,6 +346,35 @@ pub fn check_removal(
     path: &Path,
     guard: &RemovalGuard,
 ) -> Result<(), PathRefusal> {
+    check_removal_of(roots, path, guard, LastComponent::NotALink)
+}
+
+/// [`check_removal`] for a link that is to go as a link, such as a junction
+/// a vendor's uninstaller leaves behind: every check is the same, except
+/// that the last component must be a link rather than must not be one.
+/// Whatever removes it must still remove the link itself, never what it
+/// points to.
+pub fn check_link_removal(
+    roots: &UninstallRoots,
+    path: &Path,
+    guard: &RemovalGuard,
+) -> Result<(), PathRefusal> {
+    check_removal_of(roots, path, guard, LastComponent::Link)
+}
+
+/// What the last component of a path to remove must be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastComponent {
+    NotALink,
+    Link,
+}
+
+fn check_removal_of(
+    roots: &UninstallRoots,
+    path: &Path,
+    guard: &RemovalGuard,
+    last: LastComponent,
+) -> Result<(), PathRefusal> {
     if !is_plain_absolute(path) {
         return Err(PathRefusal::NotPlain);
     }
@@ -368,8 +397,11 @@ pub fn check_removal(
 
     let metadata =
         fs::symlink_metadata(path).map_err(|error| PathRefusal::unreadable(path, &error))?;
-    if metadata.file_type().is_symlink() {
-        return Err(PathRefusal::Link);
+    let is_link = metadata.file_type().is_symlink();
+    match last {
+        LastComponent::NotALink if is_link => return Err(PathRefusal::Link),
+        LastComponent::Link if !is_link => return Err(PathRefusal::NotALink),
+        _ => {}
     }
     let canonical_parent =
         fs::canonicalize(parent).map_err(|error| PathRefusal::unreadable(parent, &error))?;
@@ -488,7 +520,7 @@ fn real_path_so_far(path: &Path) -> Option<PathBuf> {
 
 /// Whether `path` is strictly below `root`, compared by text and ignoring
 /// case.
-fn strictly_inside(path: &Path, root: &Path) -> bool {
+pub(crate) fn strictly_inside(path: &Path, root: &Path) -> bool {
     match (folded_components(path), folded_components(root)) {
         (Some(path), Some(root)) => {
             !root.is_empty() && path.len() > root.len() && path.starts_with(&root)
@@ -499,7 +531,24 @@ fn strictly_inside(path: &Path, root: &Path) -> bool {
 
 /// `path` canonicalized, or made absolute when it doesn't exist yet.
 fn canonical_or_absolute(path: &Path) -> PathBuf {
+    if is_network_path(path) {
+        return absolute(path);
+    }
     fs::canonicalize(path).unwrap_or_else(|_| absolute(path))
+}
+
+/// Whether `path` is on a network share, `\\server\share\...` in either
+/// spelling. The guard never resolves such a root, it compares its text:
+/// resolving it connects to that server, and in the elevated helper, which
+/// is given the resource folder only to keep away from it, that would sign
+/// in there with an administrator's account, on a server the standard user
+/// who started RABBIT may have chosen.
+pub(crate) fn is_network_path(path: &Path) -> bool {
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
+    )
 }
 
 /// `path` made absolute, with no `.` or `..` left. A path that can't be made
@@ -586,6 +635,54 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, b"file").unwrap();
         path.to_path_buf()
+    }
+
+    /// A share in either spelling is a network path the guard never
+    /// resolves; a drive, local device paths and relative paths aren't.
+    #[cfg(windows)]
+    #[test]
+    fn shares_are_network_paths_and_drives_are_not() {
+        use super::is_network_path;
+        for path in [
+            "\\\\server\\share\\REAPER",
+            "\\\\?\\UNC\\server\\share\\REAPER",
+        ] {
+            assert!(is_network_path(Path::new(path)), "{path}");
+        }
+        for path in [
+            "C:\\REAPER",
+            "\\\\?\\C:\\REAPER",
+            "\\\\.\\C:\\REAPER",
+            "REAPER",
+        ] {
+            assert!(!is_network_path(Path::new(path)), "{path}");
+        }
+    }
+
+    /// The guard works with a resource folder on a share, as the elevated
+    /// helper gets it when `%APPDATA%` is redirected: a file in a local
+    /// folder may go, and one spelt inside the share's RABBIT folder is
+    /// still refused, by its text.
+    #[cfg(windows)]
+    #[test]
+    fn a_resource_folder_on_a_share_is_kept_away_from_by_its_text() {
+        let (dir, mut roots) = fixture();
+        let share = PathBuf::from("\\\\rabbit-test.invalid\\share\\REAPER");
+        roots.resource = share.clone();
+        let clap = dir.path().join("CLAP");
+        let plugin = write(&clap.join("demo.clap"));
+        assert_eq!(
+            check_removal(&roots, &plugin, &RemovalGuard::under(clap)),
+            Ok(())
+        );
+        assert_eq!(
+            check_removal(
+                &roots,
+                &share.join("RABBIT").join("install-state.json"),
+                &RemovalGuard::under(share.clone())
+            ),
+            Err(PathRefusal::RabbitFolder)
+        );
     }
 
     fn resolve(path: &str, roots: &UninstallRoots) -> Result<Vec<ResolvedPath>, PathRefusal> {

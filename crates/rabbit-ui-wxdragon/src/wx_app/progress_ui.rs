@@ -5,12 +5,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use rabbit_core::localization::Localizer;
-use rabbit_core::progress::ProgressEvent;
+use rabbit_core::progress::{ProgressEvent, RemovalMethod};
 
 use crate::{ProgressUiState, is_spoken};
 
 use crate::wx_app::globals::{AnnouncePriority, announce, with_ui_localizer};
 use crate::wx_app::widgets::WizardWidgets;
+use wxdragon::prelude::WxWidget;
 
 /// Aggregate status line for several concurrent downloads:
 /// "Downloading N packages… X / Y". Used whenever more than one download
@@ -198,7 +199,10 @@ pub(crate) fn apply_progress_event_to_ui(
             );
         }
         // Each removal holds the status line the way an install does.
-        ProgressEvent::RemoveStarted { package_id } => {
+        ProgressEvent::RemoveStarted {
+            package_id,
+            method: RemovalMethod::Files,
+        } => {
             status_line = Some(package_line(
                 localizer,
                 "wizard-progress-status-removing",
@@ -209,6 +213,40 @@ pub(crate) fn apply_progress_event_to_ui(
                 "wizard-progress-log-remove-started",
                 package_id,
             ));
+        }
+        ProgressEvent::RemoveStarted {
+            package_id,
+            method: RemovalMethod::VendorUninstaller,
+        } => {
+            let line = package_line(
+                localizer,
+                "wizard-progress-status-vendor-running",
+                package_id,
+            );
+            status_line = Some(line.clone());
+            log_line = Some(line);
+        }
+        // The uninstaller may be waiting for an answer in a window of its
+        // own, which the user has to go and find.
+        ProgressEvent::VendorStillWaiting { package_id, .. } => {
+            let line = package_line(
+                localizer,
+                "wizard-progress-status-vendor-still-waiting",
+                package_id,
+            );
+            status_line = Some(line.clone());
+            log_line = Some(line);
+        }
+        // The uninstaller has ended, but its files linger: most often a
+        // music program still has the package open.
+        ProgressEvent::VendorWaitingForFiles { package_id, .. } => {
+            let line = package_line(
+                localizer,
+                "wizard-progress-status-vendor-waiting-for-files",
+                package_id,
+            );
+            status_line = Some(line.clone());
+            log_line = Some(line);
         }
         // The end of a removal stays on the status line until the next one
         // starts, and is spoken: whether the package really went is what
@@ -229,6 +267,7 @@ pub(crate) fn apply_progress_event_to_ui(
     });
 
     widgets.progress_gauge.set_value(state.percentage());
+    let focus_log = state.moves_focus_to_log(&event);
     if let Some(line) = status_line
         && !status_frozen
     {
@@ -243,6 +282,13 @@ pub(crate) fn apply_progress_event_to_ui(
     drop(state);
     if let Some(line) = log_line {
         widgets.progress_details.append_text(&format!("\n{line}"));
+    }
+    // Windows has no announce(): focus on the log, whose caret now sits on
+    // the line just added, is what makes a screen reader read it, as when
+    // the user asked to stop. macOS heard it through announce() above and
+    // keeps its focus.
+    if focus_log && cfg!(not(target_os = "macos")) {
+        widgets.progress_details.set_focus();
     }
 }
 

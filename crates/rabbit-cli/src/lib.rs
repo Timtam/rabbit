@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -48,9 +49,10 @@ use rabbit_core::self_update::{
 };
 use rabbit_core::setup::{SetupOptions, SetupReport, execute_setup_operation};
 use rabbit_core::uninstall::{
-    KeptFileReason, KeptReason, RegistryEntryAction, Removability, RemovalReason, UninstallMessage,
-    UninstallNote, UninstallPlan, UninstallPlanItem, UninstallReport, UninstallReportItem,
-    UninstallRequest, UninstallStatus, UninstallWarning, execute_uninstall, plan_uninstall_at,
+    KeptFileReason, KeptReason, LeftoverKind, LeftoverResult, RegistryEntryAction, Removability,
+    RemovalReason, SystemVendorLookup, UninstallMessage, UninstallNote, UninstallPlan,
+    UninstallPlanItem, UninstallReport, UninstallReportItem, UninstallRequest, UninstallServices,
+    UninstallStatus, UninstallWarning, execute_uninstall, plan_uninstall_at,
 };
 use serde::Serialize;
 
@@ -600,7 +602,45 @@ enum Command {
         #[arg(long)]
         save_report: bool,
     },
+    /// RABBIT's elevated uninstall helper. RABBIT starts it itself, with
+    /// administrator rights, while it uninstalls something that needs them;
+    /// it takes its orders over the pipe it is given, from the RABBIT that
+    /// started it, and prints nothing.
+    #[command(name = "__uninstall-helper", hide = true)]
+    UninstallHelper {
+        /// The pipe the RABBIT that started the helper made for it.
+        #[arg(long)]
+        pipe: String,
+        /// That RABBIT's process ID, which must serve the pipe.
+        #[arg(long)]
+        parent_pid: u32,
+        /// The target REAPER's resource folder.
+        #[arg(long)]
+        resource_path: PathBuf,
+        /// The target REAPER's `reaper.exe`, for REAPER's own uninstaller.
+        #[arg(long)]
+        target_app_path: Option<PathBuf>,
+        /// Whether the target is a standard or a portable REAPER.
+        #[arg(long, value_enum)]
+        target_kind: HelperTargetKind,
+        /// A package the helper may run, repeatable, in the order it may run
+        /// them.
+        #[arg(long, required = true)]
+        package: Vec<String>,
+    },
 }
+
+/// The kind of REAPER the elevated uninstall helper works on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum HelperTargetKind {
+    Standard,
+    Portable,
+}
+
+/// The hidden command RABBIT's elevated uninstall helper runs as. The
+/// binary checks for it before anything else, so the helper never borrows a
+/// console.
+pub use rabbit_core::uninstall::HELPER_SUBCOMMAND as UNINSTALL_HELPER_SUBCOMMAND;
 
 /// Shown below `rabbit uninstall --help`. Every other command that changes
 /// files has `--allow-reaper-running`; this says why uninstall doesn't.
@@ -616,9 +656,15 @@ REAPER's language back.
 Removed files move into a backup set. `rabbit restore-backup --backup-id <id> \
 --package <id> --apply` brings one package back.
 
-Exit codes: 0 when every package asked for was removed or isn't installed; 2 \
-when one of them can't be uninstalled, and then nothing changes; 1 when a \
-removal failed or was stopped.";
+On Windows, Surge XT and a standard REAPER are removed by their own \
+uninstallers, which need administrator rights. Windows asks for permission \
+once per run, before anything changes; if you don't allow it, nothing is \
+uninstalled. A backup can't bring back what their uninstallers remove.
+
+Exit codes: 0 when every package asked for was removed or isn't installed, \
+also when a removal finishes only after a restart; 2 when one of them can't \
+be uninstalled, and then nothing changes; 1 when a removal failed or was \
+stopped, or the permission prompt was declined.";
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum OutputFormat {
@@ -743,7 +789,42 @@ fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         command @ Command::PortableCheck { .. } => run_portable_check(command),
         command @ Command::SelfUpdate { .. } => run_self_update(command),
         command @ Command::Plan { .. } => run_plan(command),
+        command @ Command::UninstallHelper { .. } => run_uninstall_helper(command),
     }
+}
+
+/// The elevated uninstall helper's command line, as `rabbit_core` reads it.
+fn uninstall_helper_args(command: Command) -> rabbit_core::uninstall::HelperArgs {
+    let Command::UninstallHelper {
+        pipe,
+        parent_pid,
+        resource_path,
+        target_app_path,
+        target_kind,
+        package,
+    } = command
+    else {
+        unreachable!("dispatched as Command::UninstallHelper");
+    };
+    rabbit_core::uninstall::HelperArgs {
+        pipe,
+        parent_pid,
+        resource_path,
+        target_app_path,
+        target: match target_kind {
+            HelperTargetKind::Standard => InstallationKind::Standard,
+            HelperTargetKind::Portable => InstallationKind::Portable,
+        },
+        package_ids: package,
+    }
+}
+
+/// Run as RABBIT's elevated uninstall helper and end with its exit code.
+/// It prints nothing: a release build started this way has no console, and
+/// the RABBIT that started it reads everything it needs over the pipe.
+fn run_uninstall_helper(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let code = rabbit_core::uninstall::run_elevated_helper(&uninstall_helper_args(command));
+    std::process::exit(code);
 }
 
 fn run_detect(command: Command) -> Result<(), Box<dyn std::error::Error>> {
@@ -775,7 +856,7 @@ fn run_components(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     let components = detect_components(&resource_path, platform)?;
     // What RABBIT could uninstall here. A receipt that can't be read only
     // costs these lines; detection has already said what is installed.
-    let plan = plan_uninstall_at(&resource_path, platform, &components).ok();
+    let plan = plan_uninstall_at(&resource_path, platform, &components, &SystemVendorLookup).ok();
     if json {
         let listed: Vec<ComponentListing<'_>> = components
             .iter()
@@ -815,7 +896,7 @@ struct UninstallAbility {
 impl UninstallAbility {
     fn of(item: &UninstallPlanItem) -> Self {
         Self {
-            can_uninstall: item.removability.is_removable() && !item.unbacked,
+            can_uninstall: item.can_remove(),
             removability: item.removability.clone(),
         }
     }
@@ -1403,6 +1484,7 @@ fn run_uninstall(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             target_app_path,
             target: None,
         },
+        &UninstallServices::system(platform),
         &cancel,
     )?;
     drop(ctrl_c);
@@ -1438,12 +1520,14 @@ const UNINSTALL_CTRL_C_NOTICE: &str =
 
 /// Carry out (or with `dry_run`, only plan) an uninstall, and narrow the
 /// report's plan to the packages asked for: the plan covers every package
-/// on the target, and the output is about these.
+/// on the target, and the output is about these. `services` are the real
+/// ones from `run_uninstall`, stand-ins in tests.
 fn uninstall_report(
     request: &UninstallRequest,
+    services: &UninstallServices<'_>,
     cancel: &CancelToken,
 ) -> Result<UninstallReport, Box<dyn std::error::Error>> {
-    let mut report = execute_uninstall(request, &ProgressReporter::noop(), cancel)?;
+    let mut report = execute_uninstall(request, services, &ProgressReporter::noop(), cancel)?;
     report
         .plan
         .items
@@ -2065,9 +2149,14 @@ fn uninstall_ability_text(item: &UninstallPlanItem) -> String {
     let name = &item.display_name;
     match &item.removability {
         Removability::NotInstalled => "nothing to remove, it isn't installed".to_string(),
-        removability if removability.is_removable() && item.unbacked => {
+        removability if removability.is_removable() && !item.can_remove() => {
             format!("not yet: removing {name} takes a step a backup can't undo")
         }
+        _ if item.needs_elevated_helper() => format!(
+            "yes, by its own uninstaller, with rabbit uninstall --package {}; Windows asks for \
+             permission",
+            item.package_id
+        ),
         removability if removability.is_removable() => {
             format!("yes, with rabbit uninstall --package {}", item.package_id)
         }
@@ -2811,34 +2900,42 @@ fn string_names(values: &[String]) -> String {
 /// example: the preflight, then one block per package with what goes, what
 /// stays, warnings and notes, then what to do next.
 fn print_uninstall_report(report: &UninstallReport, localizer: Option<&Localizer>) {
+    print!("{}", uninstall_report_text(report, localizer));
+}
+
+fn uninstall_report_text(report: &UninstallReport, localizer: Option<&Localizer>) -> String {
+    let mut out = String::new();
     let resource = report.resource_path.display();
     if report.dry_run {
-        println!("Uninstall plan for {resource} (dry run, nothing changed)");
+        let _ = writeln!(
+            out,
+            "Uninstall plan for {resource} (dry run, nothing changed)"
+        );
     } else {
-        println!("Uninstall from {resource}");
+        let _ = writeln!(out, "Uninstall from {resource}");
     }
     if report.target == InstallationKind::Portable {
-        println!("This is a portable REAPER.");
+        let _ = writeln!(out, "This is a portable REAPER.");
     }
     if report.remove_settings {
-        println!("Settings go too (--remove-settings).");
+        let _ = writeln!(out, "Settings go too (--remove-settings).");
     }
-    println!();
-    println!("Preflight");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Preflight");
     for check in &report.preflight.checks {
         let status = match check.status {
             PreflightStatus::Pass => "pass",
             PreflightStatus::Warn => "warn",
             PreflightStatus::Fail => "fail",
         };
-        println!("  {status:<8} {}", check.message);
+        let _ = writeln!(out, "  {status:<8} {}", check.message);
     }
     for item in &report.items {
-        println!();
-        print_uninstall_item(report, item, localizer);
+        let _ = writeln!(out);
+        write_uninstall_item(&mut out, report, item, localizer);
     }
 
-    println!();
+    let _ = writeln!(out);
     let blocked: Vec<&str> = report
         .items
         .iter()
@@ -2847,7 +2944,8 @@ fn print_uninstall_report(report: &UninstallReport, localizer: Option<&Localizer
         .collect();
     if report.dry_run {
         if !blocked.is_empty() {
-            println!(
+            let _ = writeln!(
+                out,
                 "Blocked: {}. Nothing would change with --apply until {} left out.",
                 blocked.join(", "),
                 if blocked.len() == 1 {
@@ -2861,27 +2959,82 @@ fn print_uninstall_report(report: &UninstallReport, localizer: Option<&Localizer
             .iter()
             .any(|item| item.status == UninstallStatus::WouldRemove)
         {
-            println!("Dry run: nothing changed. Pass --apply to uninstall.");
+            if let Some(note) = permission_note(report) {
+                let _ = writeln!(out, "{note}");
+            }
+            let _ = writeln!(out, "Dry run: nothing changed. Pass --apply to uninstall.");
         } else {
-            println!("Nothing to uninstall.");
+            let _ = writeln!(out, "Nothing to uninstall.");
         }
-        return;
+        return out;
+    }
+    if report.elevation_declined() {
+        let _ = writeln!(
+            out,
+            "Nothing was uninstalled, because the Windows permission prompt was declined. Run the \
+             command again and allow it to uninstall."
+        );
+    }
+    let restart: Vec<&str> = report
+        .items
+        .iter()
+        .filter(|item| item.status == UninstallStatus::RemovedPendingRestart)
+        .map(|item| item.display_name.as_str())
+        .collect();
+    if !restart.is_empty() {
+        let _ = writeln!(
+            out,
+            "Restart the computer to finish removing {}.",
+            restart.join(", ")
+        );
     }
     if let Some(set_id) = &report.backup_set_id {
-        println!("The removed files are in the backup set {set_id}. To put a package back:");
-        println!(
+        let _ = writeln!(
+            out,
+            "The removed files are in the backup set {set_id}. To put a package back:"
+        );
+        let _ = writeln!(
+            out,
             "  rabbit restore-backup --resource-path \"{resource}\" --backup-id {set_id} \
              --package <id> --apply"
         );
     } else if report.blocked_before_changes() {
-        println!(
+        let _ = writeln!(
+            out,
             "Nothing changed, because RABBIT can't uninstall {}.",
             blocked.join(", ")
         );
     }
+    out
 }
 
-fn print_uninstall_item(
+/// What a dry run says about the run's one permission prompt: which of the
+/// packages it would remove need administrator rights. `None` when none
+/// does.
+fn permission_note(report: &UninstallReport) -> Option<String> {
+    let elevated: Vec<&str> = report
+        .items
+        .iter()
+        .filter(|item| item.status == UninstallStatus::WouldRemove)
+        .filter(|item| {
+            report
+                .plan
+                .item(&item.package_id)
+                .is_some_and(UninstallPlanItem::needs_elevated_helper)
+        })
+        .map(|item| item.display_name.as_str())
+        .collect();
+    (!elevated.is_empty()).then(|| {
+        format!(
+            "Needs administrator rights: {}. Windows asks for permission once, before anything \
+             is removed. If you don't allow it, nothing is uninstalled.",
+            elevated.join(", ")
+        )
+    })
+}
+
+fn write_uninstall_item(
+    out: &mut String,
     report: &UninstallReport,
     item: &UninstallReportItem,
     localizer: Option<&Localizer>,
@@ -2896,20 +3049,26 @@ fn print_uninstall_item(
     if let UninstallMessage::NotRemovable { removability } = &item.message_code {
         match removability {
             Removability::Manual { note_key } => {
-                println!("{name}: can't uninstall automatically.");
+                let _ = writeln!(out, "{name}: can't uninstall automatically.");
                 for line in localized_text(localizer, note_key).lines() {
-                    println!("  {line}");
+                    let _ = writeln!(out, "  {line}");
                 }
                 return;
             }
             Removability::NotSupported { note_key } => {
-                println!("{name}: {}", localized_text(localizer, note_key));
+                let _ = writeln!(out, "{name}: {}", localized_text(localizer, note_key));
                 return;
             }
             _ => {}
         }
     }
+    let vendor = plan.and_then(|plan| plan.vendor_run.as_ref());
     let heading = match item.status {
+        UninstallStatus::WouldRemove if vendor.is_some() => {
+            "will uninstall. Its own uninstaller removes it, with administrator rights; a backup \
+             can't bring it back."
+                .to_string()
+        }
         UninstallStatus::WouldRemove => format!(
             "will uninstall. RABBIT moves its files into a backup set; {}.",
             if plan.is_some_and(|plan| plan.requires_elevation) {
@@ -2918,6 +3077,20 @@ fn print_uninstall_item(
                 "no permission prompt"
             }
         ),
+        // Only what happened: the lines below list what goes at the
+        // restart, what RABBIT still finds and any problem. The report's
+        // message has those lists too, so printing it here would read every
+        // path twice.
+        UninstallStatus::RemovedPendingRestart if item.vendor.is_some() => {
+            "removed by its own uninstaller; some of its files go when you restart the computer."
+                .to_string()
+        }
+        UninstallStatus::RemovedWithLeftovers if item.vendor.is_some() => {
+            "removed by its own uninstaller, but RABBIT still finds some of it.".to_string()
+        }
+        UninstallStatus::Removed if item.vendor.is_some() => {
+            "removed by its own uninstaller. A backup can't bring it back.".to_string()
+        }
         UninstallStatus::Removed => "removed.".to_string(),
         UninstallStatus::RemovedWithLeftovers => {
             "removed, but RABBIT still finds some of it.".to_string()
@@ -2933,14 +3106,62 @@ fn print_uninstall_item(
         UninstallStatus::Cancelled => format!("stopped. {}", item.message),
         UninstallStatus::NotReached => format!("not reached. {}", item.message),
     };
-    println!("{name}: {heading}");
+    let _ = writeln!(out, "{name}: {heading}");
     let would = item.status == UninstallStatus::WouldRemove;
     if !would && !item.status.is_removed() {
         return;
     }
 
     let shown = |path: &Path| display_path(&report.resource_path, path);
-    let detail = |label: &str, text: &str| println!("  {label:<8} {text}");
+    let detail = |out: &mut String, label: &str, text: &str| {
+        let _ = writeln!(out, "  {label:<8} {text}");
+    };
+    if let Some(vendor) = vendor.filter(|_| would) {
+        let mut command = vendor.uninstaller.display().to_string();
+        for argument in &vendor.arguments {
+            command.push(' ');
+            command.push_str(argument);
+        }
+        detail(out, "run", &command);
+        for path in &vendor.verify_gone {
+            detail(out, "check", &format!("{} is gone afterwards", shown(path)));
+        }
+        for path in &vendor.remove_leftovers {
+            detail(
+                out,
+                "remove",
+                &format!(
+                    "{} afterwards, if it is a link or an empty folder",
+                    shown(path)
+                ),
+            );
+        }
+    }
+    if let Some(outcome) = &item.vendor {
+        if let Some(uninstaller) = &outcome.uninstaller {
+            detail(out, "ran", &uninstaller.display().to_string());
+        }
+        for leftover in &outcome.removed_leftovers {
+            if leftover.result == LeftoverResult::Removed {
+                let what = match leftover.kind {
+                    LeftoverKind::Junction => "a link",
+                    LeftoverKind::EmptyDir => "an empty folder",
+                };
+                detail(
+                    out,
+                    "removed",
+                    &format!("{} ({what})", shown(&leftover.path)),
+                );
+            }
+        }
+    }
+    for path in &item.pending_restart {
+        detail(
+            out,
+            "restart",
+            &format!("{} goes when the computer restarts", shown(path)),
+        );
+    }
     for file in &item.removed {
         let label = match (file.reason == RemovalReason::Setting, would) {
             (true, true) => "remove setting",
@@ -2953,10 +3174,10 @@ fn print_uninstall_item(
         } else {
             ""
         };
-        detail(label, &format!("{}{changed}", shown(&file.path)));
+        detail(out, label, &format!("{}{changed}", shown(&file.path)));
     }
     for dir in &item.removed_dirs {
-        detail("removed", &format!("{} (an empty folder)", shown(dir)));
+        detail(out, "removed", &format!("{} (an empty folder)", shown(dir)));
     }
     let keep = if would { "keep" } else { "kept" };
     for kept in &item.kept {
@@ -2965,16 +3186,18 @@ fn print_uninstall_item(
             KeptFileReason::HoldsLink => "holds a link, which RABBIT never follows",
             KeptFileReason::InstalledByReaPack => REAPACK_KEEPS_TRACK,
         };
-        detail(keep, &format!("{} ({why})", shown(&kept.path)));
+        detail(out, keep, &format!("{} ({why})", shown(&kept.path)));
     }
     for entry in &item.registry_entries {
         let key = &entry.key;
         match &entry.action {
             RegistryEntryAction::Removed => detail(
+                out,
                 "removed",
                 &format!("{key} (its entry in Windows' list of installed programs)"),
             ),
             RegistryEntryAction::WouldRemove => detail(
+                out,
                 "remove",
                 &format!("{key} (its entry in Windows' list of installed programs)"),
             ),
@@ -2984,6 +3207,7 @@ fn print_uninstall_item(
                     None => "it doesn't say where its program is".to_string(),
                 };
                 detail(
+                    out,
                     keep,
                     &format!("{key} (in Windows' list of installed programs; {why})"),
                 );
@@ -3005,10 +3229,11 @@ fn print_uninstall_item(
                 }
                 _ => kept_reason_text(kept.reason).to_string(),
             };
-            detail(keep, &format!("{} ({note})", shown(&kept.path)));
+            detail(out, keep, &format!("{} ({note})", shown(&kept.path)));
         }
         if !report.remove_settings && plan.kept.iter().any(|kept| kept.removable_with_settings) {
             detail(
+                out,
                 "note",
                 "Pass --remove-settings to remove the settings too. They go into the same \
                  backup set, so a restore brings them back.",
@@ -3016,22 +3241,24 @@ fn print_uninstall_item(
         }
         for warning in &plan.warnings {
             detail(
+                out,
                 "warning",
                 &uninstall_warning_text(warning, &item.display_name, localizer),
             );
         }
         for note in &plan.notes {
             detail(
+                out,
                 "note",
                 &uninstall_note_text(note, &item.display_name, localizer),
             );
         }
     }
     for path in &item.leftovers {
-        detail("leftover", &shown(path));
+        detail(out, "leftover", &shown(path));
     }
     for problem in &item.problems {
-        detail("problem", &problem.message());
+        detail(out, "problem", &problem.message());
     }
 }
 
@@ -3078,7 +3305,8 @@ fn uninstall_warning_text(
             localized_text(localizer, message_key)
         }
         UninstallWarning::DependentsStay { package_ids } => format!(
-            "These packages install on top of {name} and stay: {}. They may not work without it.",
+            "These packages install on top of {name} and stay: {}. They work again once you \
+             install {name} again.",
             package_ids.join(", ")
         ),
         UninstallWarning::MachineWide => format!(
@@ -3316,6 +3544,93 @@ fn yes_no(value: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use rabbit_core::model::InstallationKind;
+
+    use super::uninstall_helper_args;
+
+    /// The helper's hidden command parses into exactly what RABBIT's
+    /// launcher writes, under the name the launcher uses, and stays out of
+    /// the help.
+    #[test]
+    fn the_uninstall_helper_command_is_hidden_and_reads_what_rabbit_writes() {
+        use rabbit_core::uninstall::{HELPER_SUBCOMMAND, HelperArgs};
+
+        let args = HelperArgs {
+            pipe: rabbit_platform::uninstall_pipe_name(4242, &[0x5a; 16]),
+            parent_pid: 4242,
+            resource_path: PathBuf::from("C:\\Users\\Someone\\AppData\\Roaming\\REAPER"),
+            target_app_path: Some(PathBuf::from("C:\\Program Files\\REAPER (x64)\\reaper.exe")),
+            target: InstallationKind::Standard,
+            package_ids: vec!["surge-xt".to_string(), "reaper".to_string()],
+        };
+        let mut argv = vec!["rabbit".to_string(), HELPER_SUBCOMMAND.to_string()];
+        argv.extend(args.to_arguments().unwrap());
+        let cli = Cli::try_parse_from(&argv).unwrap();
+        assert!(matches!(cli.command, Command::UninstallHelper { .. }));
+        assert_eq!(uninstall_helper_args(cli.command), args);
+
+        let portable = HelperArgs {
+            target_app_path: None,
+            target: InstallationKind::Portable,
+            package_ids: vec!["reaper".to_string()],
+            ..args
+        };
+        let mut argv = vec!["rabbit".to_string(), HELPER_SUBCOMMAND.to_string()];
+        argv.extend(portable.to_arguments().unwrap());
+        let cli = Cli::try_parse_from(&argv).unwrap();
+        assert_eq!(uninstall_helper_args(cli.command), portable);
+
+        // It needs a package, and only takes the kinds of REAPER there are.
+        let mut argv = vec!["rabbit".to_string(), HELPER_SUBCOMMAND.to_string()];
+        argv.extend(portable.to_arguments().unwrap());
+        let without_package: Vec<&String> = argv
+            .iter()
+            .take_while(|argument| argument.as_str() != "--package")
+            .collect();
+        assert!(Cli::try_parse_from(without_package).is_err());
+        let wrong_kind: Vec<String> = argv
+            .iter()
+            .map(|argument| argument.replace("portable", "network"))
+            .collect();
+        assert!(Cli::try_parse_from(wrong_kind).is_err());
+
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        assert!(!help.contains(HELPER_SUBCOMMAND), "{help}");
+        assert!(!help.contains("uninstall-helper"), "{help}");
+    }
+
+    /// From this crate's tests, as from any program not named like a
+    /// RABBIT build, the helper's entry point refuses to do anything: no
+    /// pipe, no registry, no program started.
+    #[test]
+    fn the_uninstall_helper_refuses_to_run_from_a_test() {
+        let args = rabbit_core::uninstall::HelperArgs {
+            pipe: rabbit_platform::uninstall_pipe_name(std::process::id(), &[0x5a; 16]),
+            parent_pid: std::process::id(),
+            resource_path: std::env::temp_dir(),
+            target_app_path: None,
+            target: InstallationKind::Standard,
+            package_ids: vec!["surge-xt".to_string()],
+        };
+        assert_eq!(
+            rabbit_core::uninstall::run_elevated_helper(&args),
+            rabbit_core::uninstall::helper::HELPER_EXIT_NOT_ALLOWED
+        );
+        use rabbit_core::uninstall::ElevatedHelper;
+        let started = rabbit_core::uninstall::SystemElevatedHelper.start(
+            &rabbit_core::uninstall::ElevatedRunRequest {
+                resource_path: std::env::temp_dir(),
+                target_app_path: None,
+                target: InstallationKind::Standard,
+                package_ids: vec!["surge-xt".to_string()],
+            },
+        );
+        assert!(matches!(
+            started,
+            Err(rabbit_core::uninstall::ElevationStartError::Failed(_))
+        ));
+    }
     use std::path::PathBuf;
 
     use clap::Parser;
@@ -4080,6 +4395,7 @@ mod tests {
         fn run(&self, ids: &[&str], apply: bool) -> rabbit_core::uninstall::UninstallReport {
             super::uninstall_report(
                 &self.request(ids, apply),
+                &rabbit_core::uninstall::UninstallServices::without_elevation(),
                 &rabbit_core::cancel::CancelToken::new(),
             )
             .unwrap()
@@ -4133,7 +4449,12 @@ mod tests {
         std::fs::write(&reaper.sws, b"SWS again").unwrap();
         let cancel = rabbit_core::cancel::CancelToken::new();
         cancel.cancel();
-        let stopped = super::uninstall_report(&reaper.request(&["sws"], true), &cancel).unwrap();
+        let stopped = super::uninstall_report(
+            &reaper.request(&["sws"], true),
+            &rabbit_core::uninstall::UninstallServices::without_elevation(),
+            &cancel,
+        )
+        .unwrap();
         assert_eq!(super::uninstall_exit_code(&stopped), 1);
         assert!(reaper.sws.is_file());
     }
@@ -4270,5 +4591,194 @@ mod tests {
             receipt.declined_packages.contains("langpack-de"),
             "the receipt is merged into, not replaced"
         );
+    }
+
+    /// Finds every vendor's uninstaller at one fixture path, as if HKLM
+    /// listed it and every check passed. Nothing reads the registry. Only
+    /// Windows has packages a vendor's uninstaller removes.
+    #[cfg(windows)]
+    struct FoundIt(PathBuf);
+
+    #[cfg(windows)]
+    impl rabbit_core::uninstall::VendorLookup for FoundIt {
+        fn locate(
+            &self,
+            _job: &rabbit_core::uninstall::VendorJob<'_>,
+        ) -> Result<PathBuf, rabbit_core::uninstall::VendorRefusal> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A dry run of REAPER on a fake standard REAPER whose uninstaller the
+    /// lookup finds, with REAPER's item set to `status` and `code` the way a
+    /// run would leave it. The engine itself is tested in rabbit-core; this
+    /// is about what the CLI makes of a report. No helper can start: the run
+    /// is a dry run, and its helper refuses anyway.
+    #[cfg(windows)]
+    fn reaper_report(
+        status: rabbit_core::uninstall::UninstallStatus,
+        code: rabbit_core::uninstall::UninstallMessage,
+        message: &str,
+    ) -> (FakeReaper, rabbit_core::uninstall::UninstallReport) {
+        use rabbit_core::uninstall::{NoElevatedHelper, UninstallServices};
+
+        let reaper = FakeReaper::new();
+        let app = reaper.resource.join("reaper.exe");
+        let lookup = FoundIt(reaper.resource.join("Uninstall.exe"));
+        let mut report = super::uninstall_report(
+            &rabbit_core::uninstall::UninstallRequest {
+                target_app_path: Some(app),
+                target: Some(InstallationKind::Standard),
+                ..reaper.request(&["reaper"], false)
+            },
+            &UninstallServices {
+                vendor_lookup: &lookup,
+                elevated_helper: &NoElevatedHelper,
+                installed_programs: None,
+            },
+            &rabbit_core::cancel::CancelToken::new(),
+        )
+        .unwrap();
+        // Whatever this computer runs right now, the item reads as asked.
+        report.dry_run = status == rabbit_core::uninstall::UninstallStatus::WouldRemove;
+        let item = &mut report.items[0];
+        item.status = status;
+        item.message_code = code;
+        item.message = message.to_string();
+        (reaper, report)
+    }
+
+    /// The dry run names the packages that need administrator rights and
+    /// says Windows asks once, before anything is removed, and shows the
+    /// uninstaller it would run.
+    #[cfg(windows)]
+    #[test]
+    fn uninstall_dry_run_names_what_needs_administrator_rights() {
+        use rabbit_core::uninstall::{UninstallMessage, UninstallStatus};
+
+        let (reaper, report) = reaper_report(
+            UninstallStatus::WouldRemove,
+            UninstallMessage::WouldRemove,
+            "RABBIT would remove REAPER.",
+        );
+        let plan = report.plan.item("reaper").unwrap();
+        assert!(plan.needs_elevated_helper());
+        assert!(
+            super::uninstall_ability_text(plan).contains("Windows asks for permission"),
+            "{}",
+            super::uninstall_ability_text(plan)
+        );
+        let text = super::uninstall_report_text(&report, None);
+        assert!(
+            text.contains("Its own uninstaller removes it, with administrator rights"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Needs administrator rights: REAPER."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Windows asks for permission once, before anything is removed."),
+            "{text}"
+        );
+        let uninstaller = reaper.resource.join("Uninstall.exe");
+        assert!(
+            text.contains(&format!("run      {} /S", uninstaller.display())),
+            "{text}"
+        );
+        assert!(text.contains("reaper.exe is gone afterwards"), "{text}");
+        assert_eq!(super::uninstall_exit_code(&report), 0);
+    }
+
+    /// A declined prompt is a cancel: exit 1, and the output says nothing
+    /// was uninstalled and why. A removal that finishes after a restart
+    /// exits 0, with the restart named. An uninstaller still open at its
+    /// time limit fails the run.
+    #[cfg(windows)]
+    #[test]
+    fn uninstall_vendor_outcomes_print_plainly_and_exit_per_the_table() {
+        use rabbit_core::uninstall::{
+            UninstallMessage, UninstallStatus, VendorOutcome, VendorStatus,
+        };
+
+        let (_reaper, declined) = reaper_report(
+            UninstallStatus::Cancelled,
+            UninstallMessage::ElevationDeclined,
+            "The Windows permission prompt was declined, so RABBIT uninstalled nothing.",
+        );
+        assert_eq!(super::uninstall_exit_code(&declined), 1);
+        let text = super::uninstall_report_text(&declined, None);
+        assert!(
+            text.contains(
+                "Nothing was uninstalled, because the Windows permission prompt was declined."
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(": stopped. The Windows permission prompt"),
+            "{text}"
+        );
+
+        let (reaper, mut restart) = reaper_report(
+            UninstallStatus::RemovedPendingRestart,
+            UninstallMessage::UninstalledByVendor,
+            "REAPER's own uninstaller removed it.",
+        );
+        let pending = reaper.resource.join("Plugins").join("reaper_host.dll");
+        let uninstaller = reaper.resource.join("Uninstall.exe");
+        // The message as the engine writes it, with the path list.
+        restart.items[0].message = format!(
+            "REAPER's own uninstaller removed it. Some of its files go when you restart the \
+             computer: {}.",
+            pending.display()
+        );
+        restart.items[0].pending_restart = vec![pending];
+        restart.items[0].vendor = Some(VendorOutcome {
+            status: VendorStatus::RemovedPendingRestart,
+            uninstaller: Some(uninstaller.clone()),
+            launched: true,
+            exit_code: Some(0),
+            ..VendorOutcome::new("reaper")
+        });
+        assert_eq!(super::uninstall_exit_code(&restart), 0);
+        let text = super::uninstall_report_text(&restart, None);
+        assert!(
+            text.contains("Restart the computer to finish removing REAPER."),
+            "{text}"
+        );
+        let shown = std::path::Path::new("Plugins").join("reaper_host.dll");
+        assert!(
+            text.contains(&format!(
+                "restart  {} goes when the computer restarts",
+                shown.display()
+            )),
+            "{text}"
+        );
+        // Said once: the heading doesn't repeat the message's path list,
+        // which a screen reader would otherwise read twice.
+        assert_eq!(
+            text.matches(&shown.display().to_string()).count(),
+            1,
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "REAPER: removed by its own uninstaller; some of its files go when you restart \
+                 the computer."
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("ran      {}", uninstaller.display())),
+            "{text}"
+        );
+
+        let (_reaper, still_open) = reaper_report(
+            UninstallStatus::Failed,
+            UninstallMessage::VendorStillOpen { seconds: 600 },
+            "REAPER's own uninstaller was still open after 600 seconds.",
+        );
+        assert_eq!(super::uninstall_exit_code(&still_open), 1);
+        assert!(super::uninstall_report_text(&still_open, None).contains("failed."));
     }
 }

@@ -629,8 +629,12 @@ pub fn run() {
                     };
                     // The Uninstall list from the same fresh detection.
                     // Rebuilt in place; the tab selection stays.
-                    *uninstall_list.borrow_mut() =
-                        uninstall_list_for_target(&model, &refreshed_target, &plan.detections);
+                    *uninstall_list.borrow_mut() = uninstall_list_for_target(
+                        &model,
+                        &refreshed_target,
+                        &plan.detections,
+                        &rabbit_core::uninstall::SystemVendorLookup,
+                    );
                     rebuild_uninstall_list_widgets(
                         &widgets,
                         &uninstall_items,

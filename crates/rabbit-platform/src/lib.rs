@@ -16,14 +16,20 @@ pub mod defender;
 pub mod disk_image;
 pub mod elevation;
 pub mod file_version;
+pub mod fs_security;
 pub mod jaws;
 pub mod komplete_kontrol;
+pub mod links;
 pub mod locale;
 pub mod paths;
+pub mod pipe;
 pub mod process;
 pub mod registry;
 pub mod signature;
+pub mod timed_process;
 pub mod volume;
+#[cfg(windows)]
+mod win_util;
 
 pub use arch::is_running_under_rosetta;
 pub use ctrl_c::{CtrlCGuard, catch_ctrl_c};
@@ -33,23 +39,36 @@ pub use disk_image::{
     install_app_bundle_from_disk_image, mount_disk_image, run_pkg_installer_from_disk_image,
 };
 pub use elevation::{
-    ElevatedWindow, ElevationError, ShellCommand, ShellLinesOutcome, is_nsis_destination_argument,
-    run_elevated_and_wait, run_elevated_shell_lines,
+    ElevatedChild, ElevatedWindow, ElevationError, ShellCommand, ShellLinesOutcome,
+    is_current_process_elevated, is_nsis_destination_argument, is_rabbit_file_stem,
+    run_elevated_and_wait, run_elevated_shell_lines, running_as_rabbit, spawn_elevated,
 };
 pub use file_version::{
     read_file_version_parts, read_file_version_string, read_string_file_info_key,
 };
+pub use fs_security::{
+    ADMINISTRATORS_ONLY_SDDL, LockedFile, TRUSTED_OWNER_SIDS, create_admin_only_directory,
+    file_owner_is_trusted, file_owner_sid, is_reparse_point, is_trusted_owner_sid,
+    machine_common_program_files_dir, machine_program_files_dirs, program_data_dir,
+};
 pub use jaws::{JawsInstall, detect_jaws_install, detect_jaws_install_under, is_jaws_installed};
 pub use komplete_kontrol::is_komplete_kontrol_installed;
+pub use links::{remove_empty_dir, remove_junction};
 pub use locale::os_default_locale;
 pub use paths::{
-    user_appdata_dir, user_home_dir, user_local_appdata_dir, windows_clap_dir,
+    user_appdata_dir, user_documents_dir, user_home_dir, user_local_appdata_dir, windows_clap_dir,
     windows_common_program_files_dir, windows_common_program_files_dirs, windows_program_data_dir,
     windows_program_files_dirs, windows_public_desktop_dir, windows_user_desktop_dir,
 };
+pub use pipe::{
+    MAX_PIPE_LINE_BYTES, PipeChannel, PipeServer, UNINSTALL_PIPE_PREFIX, is_uninstall_pipe_name,
+    new_uninstall_pipe_name, uninstall_pipe_name,
+};
 pub use registry::{
-    HkcuUninstallRoot, RegistryValue, UninstallEntry, read_uninstall_display_version,
-    read_uninstall_install_location, read_uninstall_value,
+    HkcuUninstallRoot, PendingFileRename, RegistryValue, RegistryView, UninstallEntry,
+    UninstallViews, ViewValues, parse_pending_file_renames, pending_file_renames,
+    read_uninstall_display_version, read_uninstall_install_location, read_uninstall_value,
 };
 pub use signature::{SignatureVerdict, verify_executable_signature};
+pub use timed_process::{NsisInPlaceArgument, RunningCommand, TimedCommand, TimedRunOutcome};
 pub use volume::{available_space, same_volume};

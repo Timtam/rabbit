@@ -335,6 +335,10 @@ fn expand_uninstall_groups(tree: &DataViewCtrl, model: &CustomDataViewTreeModel)
 /// list, a read-only details text and "Also remove settings". Ticking a row
 /// changes its text, the details and the settings option; the run reads the
 /// ticks when it starts.
+/// Non-Windows twin of the tree-based helper: nothing to do. A freshly
+/// rebuilt DataView has no selection, so reading starts at the top.
+pub(crate) fn reset_uninstall_list_caret_on_focus() {}
+
 pub(crate) fn build_uninstall_tab(
     page: &Panel,
     model: &WizardModel,

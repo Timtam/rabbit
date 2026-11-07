@@ -37,6 +37,11 @@ pub struct ProgressUiState {
     /// download ticks must not overwrite it: it is the foreground activity
     /// the user is waiting on.
     pub current_package: Option<String>,
+    /// How many times a vendor's uninstaller was reported still running.
+    pub still_waiting_count: usize,
+    /// How many times RABBIT was reported still waiting for an ended
+    /// uninstaller's files to go.
+    pub waiting_for_files_count: usize,
 }
 
 /// The phases one package goes through in a run of `mode`. An install
@@ -59,6 +64,8 @@ impl ProgressUiState {
             completed_phases: 0,
             active_downloads: HashMap::new(),
             current_package: None,
+            still_waiting_count: 0,
+            waiting_for_files_count: 0,
         }
     }
 
@@ -135,8 +142,14 @@ impl ProgressUiState {
                 self.completed_phases += 1;
             }
             ProgressEvent::InstallStarted { package_id }
-            | ProgressEvent::RemoveStarted { package_id } => {
+            | ProgressEvent::RemoveStarted { package_id, .. } => {
                 self.current_package = Some(package_id.clone());
+            }
+            ProgressEvent::VendorStillWaiting { .. } => {
+                self.still_waiting_count += 1;
+            }
+            ProgressEvent::VendorWaitingForFiles { .. } => {
+                self.waiting_for_files_count += 1;
             }
             ProgressEvent::InstallCompleted { .. } | ProgressEvent::RemoveCompleted { .. } => {
                 self.current_package = None;
@@ -150,6 +163,25 @@ impl ProgressUiState {
     }
 }
 
+impl ProgressUiState {
+    /// Whether the progress page moves focus to its log for `event`, once
+    /// [`ProgressUiState::record`] has counted it in, so that a screen
+    /// reader on Windows, which has no `announce()`, reads the line just
+    /// added: only for the first time a vendor's uninstaller is reported
+    /// still running in a run, and the first time RABBIT is still waiting
+    /// for an ended uninstaller's files to go. The first may be waiting for
+    /// an answer in a window of its own; the second for a program that has
+    /// the package open to be closed. The user has to hear each once, not
+    /// with every uninstaller.
+    pub fn moves_focus_to_log(&self, event: &ProgressEvent) -> bool {
+        match event {
+            ProgressEvent::VendorStillWaiting { .. } => self.still_waiting_count == 1,
+            ProgressEvent::VendorWaitingForFiles { .. } => self.waiting_for_files_count == 1,
+            _ => false,
+        }
+    }
+}
+
 /// Whether the status line `event` sets is spoken (politely, through
 /// `announce()` on macOS). Download lines change several times a second
 /// and would bury everything else, so only the start of each install,
@@ -157,7 +189,11 @@ impl ProgressUiState {
 /// says whether the package really went, which an uninstall's user waits
 /// to hear, and nothing else follows it until the next package. An
 /// install's end needs no line of its own: the next download or install,
-/// or the Done page, says what happens next.
+/// or the Done page, says what happens next. A vendor's uninstaller that
+/// keeps RABBIT waiting is spoken too: it may be asking a question in a
+/// window of its own. So are its files lingering after it ended: another
+/// program may have the package open, and nothing else is heard until the
+/// uninstaller's time limit.
 ///
 /// No wildcard arm, on purpose: a new event must not compile until someone
 /// decides whether it is heard. A `matches!` here once let the uninstall
@@ -167,7 +203,9 @@ pub fn is_spoken(event: &ProgressEvent) -> bool {
         ProgressEvent::InstallStarted { .. }
         | ProgressEvent::ConfigurationStarted { .. }
         | ProgressEvent::RemoveStarted { .. }
-        | ProgressEvent::RemoveCompleted { .. } => true,
+        | ProgressEvent::RemoveCompleted { .. }
+        | ProgressEvent::VendorStillWaiting { .. }
+        | ProgressEvent::VendorWaitingForFiles { .. } => true,
         ProgressEvent::DownloadStarted { .. }
         | ProgressEvent::DownloadProgress { .. }
         | ProgressEvent::DownloadCompleted { .. }

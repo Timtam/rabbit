@@ -27,6 +27,76 @@
   "uninstall": {
     "plans": [
       {
+        "platform": "windows",
+        "strategy": "vendor_uninstaller",
+        "elevation": "required",
+        "backup": "none",
+        "summary": {
+          "removes_key": "uninstall-summary-surge-removes",
+          "keeps_key": "uninstall-summary-surge-keeps"
+        },
+        "blocking_programs": [
+          "Surge XT.exe",
+          "Surge XT Effects.exe"
+        ],
+        "vendor_uninstaller": {
+          "kind": "inno",
+          "locate": [
+            {
+              "registry": {
+                "hive": "hklm",
+                "key": "69F3FE96-DEEC-4C7C-B72D-E8957EC8411B_is1",
+                "value": "UninstallString"
+              }
+            }
+          ],
+          "must_be_in": {
+            "dir": "{program_data}/Surge XT/uninstall",
+            "only_files": "unins000.*"
+          },
+          "arguments": [
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART"
+          ],
+          "timeout_seconds": 600,
+          "verify_gone": [
+            "{common_program_files}/VST3/Surge Synth Team/Surge XT.vst3",
+            "{common_program_files}/VST3/Surge Synth Team/Surge XT Effects.vst3",
+            "{common_program_files}/CLAP/Surge Synth Team/Surge XT.clap",
+            "{common_program_files}/CLAP/Surge Synth Team/Surge XT Effects.clap"
+          ],
+          "remove_leftovers": [
+            {
+              "junction": "{common_program_files}/CLAP/Surge Synth Team/SurgeXTData"
+            },
+            {
+              "junction": "{common_program_files}/VST3/Surge Synth Team/SurgeXTData"
+            },
+            {
+              "empty_dir": "{common_program_files}/CLAP/Surge Synth Team/SurgeXTData"
+            },
+            {
+              "empty_dir": "{common_program_files}/VST3/Surge Synth Team/SurgeXTData"
+            },
+            {
+              "empty_dir": "{common_program_files}/CLAP/Surge Synth Team"
+            },
+            {
+              "empty_dir": "{common_program_files}/VST3/Surge Synth Team"
+            }
+          ]
+        },
+        "kept_user_data": [
+          {
+            "path": "{documents}/Surge XT",
+            "note_key": "uninstall-kept-surge-user-data"
+          }
+        ],
+        "note_key": "uninstall-note-surge-fonts-stay"
+      },
+      {
+        "platform": "macos",
         "strategy": "not_supported",
         "note_key": "uninstall-not-yet"
       }

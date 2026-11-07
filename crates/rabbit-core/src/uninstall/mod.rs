@@ -25,10 +25,18 @@
 //!
 //! Removed files move into a backup set, so every removal can be undone one
 //! package at a time.
+//!
+//! Two packages come off through their vendor's own uninstaller instead, on
+//! Windows: Surge XT and a standard REAPER. That needs administrator rights,
+//! so a run that removes either starts one hidden elevated helper before the
+//! first change, and the helper runs both uninstallers when the run reaches
+//! them; see [`helper`] and [`vendor`]. Nothing a vendor's uninstaller
+//! removes goes into a backup.
 
 pub mod execute;
 #[cfg(test)]
 mod execute_tests;
+pub mod helper;
 #[cfg(test)]
 mod manifest_tests;
 pub mod paths;
@@ -38,9 +46,14 @@ pub mod preflight;
 mod registry;
 #[cfg(test)]
 mod tests;
+pub mod vendor;
+#[cfg(test)]
+mod vendor_run_tests;
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
+use rabbit_platform::HkcuUninstallRoot;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{InstallationKind, Platform};
@@ -52,17 +65,77 @@ use crate::report::{SavedReportPaths, default_report_path, save_json_and_text_re
 use crate::version::Version;
 
 pub use execute::{execute_uninstall, plan_uninstall_at};
-pub use paths::{PathRefusal, RemovalGuard, UninstallRoots, check_removal};
+pub use helper::{
+    ElevatedHelper, ElevatedRunRequest, ElevatedSession, ElevationStartError, HELPER_SUBCOMMAND,
+    HelperArgs, InProcessElevatedHelper, MachineFolders, NoElevatedHelper, SystemElevatedHelper,
+    run_elevated_helper,
+};
+pub use paths::{PathRefusal, RemovalGuard, UninstallRoots, check_link_removal, check_removal};
 pub use plan::{UninstallPlanInput, build_uninstall_plan};
 pub use preflight::{
     ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, BACKUP_SPACE_MARGIN, PROGRAMS_RUNNING_CHECK,
     UninstallPreflightOptions, run_uninstall_preflight, run_uninstall_preflight_with_processes,
 };
 pub(crate) use registry::{points_into, program_named_by};
+pub use vendor::{
+    LeftoverKind, LeftoverOutcome, LeftoverResult, NothingListed, PlannedVendorRun,
+    SystemVendorLookup, VendorEnvironment, VendorEvent, VendorJob, VendorLookup, VendorOutcome,
+    VendorProblem, VendorRefusal, VendorStatus, plan_vendor_run, run_vendor_uninstaller,
+};
 
 /// The note key a package without any plan for this target shows, the same
 /// one manifests use while a package's turn hasn't come.
 pub const UNINSTALL_NOT_YET_KEY: &str = "uninstall-not-yet";
+
+/// What an uninstall run reads or starts beyond the files of the target:
+/// where each vendor's uninstaller is, what starts the run's elevated
+/// helper (and with it the run's one Windows permission prompt), and
+/// Windows' per-user list of installed programs.
+///
+/// Only RABBIT's own entry points use [`UninstallServices::system`]. Tests
+/// hand in stand-ins, so none of them can reach Windows' real lists or the
+/// real helper; the real helper refuses to start from anything not named
+/// like RABBIT anyway.
+#[derive(Clone, Copy)]
+pub struct UninstallServices<'a> {
+    /// Finds and checks each vendor's uninstaller before the run, read only.
+    pub vendor_lookup: &'a dyn VendorLookup,
+    /// Starts the elevated helper once per run, when a package needs it.
+    pub elevated_helper: &'a dyn ElevatedHelper,
+    /// Windows' per-user list of installed programs, where a plan's
+    /// `registry_cleanup` names entries. `None` leaves every entry alone,
+    /// unread.
+    pub installed_programs: Option<&'a HkcuUninstallRoot>,
+}
+
+/// Windows' real per-user list of installed programs.
+static INSTALLED_PROGRAMS: LazyLock<HkcuUninstallRoot> =
+    LazyLock::new(HkcuUninstallRoot::installed_programs);
+
+impl UninstallServices<'static> {
+    /// The real ones, for RABBIT's own entry points on `platform`: HKLM's
+    /// list of programs installed for every user, read only, RABBIT's own
+    /// elevated helper, and on Windows the per-user list of installed
+    /// programs.
+    pub fn system(platform: Platform) -> Self {
+        Self {
+            vendor_lookup: &SystemVendorLookup,
+            elevated_helper: &SystemElevatedHelper,
+            installed_programs: (platform == Platform::Windows).then(|| &*INSTALLED_PROGRAMS),
+        }
+    }
+
+    /// None at all: no vendor uninstaller is found, no helper starts and no
+    /// list of installed programs is read. For listings, and for tests that
+    /// remove files only.
+    pub fn without_elevation() -> Self {
+        Self {
+            vendor_lookup: &NothingListed,
+            elevated_helper: &NoElevatedHelper,
+            installed_programs: None,
+        }
+    }
+}
 
 /// What uninstalling would do for every package on one REAPER target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +196,10 @@ pub struct UninstallPlanItem {
     /// once the files have, each only if it still points into this REAPER.
     /// Empty unless the package can be removed.
     pub registry_cleanup: Vec<PlannedRegistryCleanup>,
+    /// What the vendor's uninstaller would do, for a `vendor_uninstaller`
+    /// plan whose uninstaller RABBIT found and trusts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_run: Option<PlannedVendorRun>,
     /// Programs that must not be running, from the manifest.
     pub blocking_programs: Vec<String>,
     /// No REAPER at all may run, not only the target's: a vendor
@@ -171,8 +248,11 @@ pub enum Removability {
     /// The manifest only allows removing copies RABBIT installed, and there
     /// is no receipt: this copy is most likely the user's own.
     NoReceipt,
-    /// No vendor uninstaller RABBIT can trust was found.
-    NoTrustedUninstaller,
+    /// No vendor uninstaller RABBIT can trust was found; `refusal` says
+    /// what was wrong. The user can still uninstall it in Windows Settings.
+    NoTrustedUninstaller {
+        refusal: VendorRefusal,
+    },
     Manual {
         note_key: String,
     },
@@ -184,6 +264,25 @@ pub enum Removability {
         path: PathBuf,
         refusal: PathRefusal,
     },
+}
+
+impl UninstallPlanItem {
+    /// The package's own uninstaller removes it, through RABBIT's elevated
+    /// helper: a `vendor_uninstaller` plan RABBIT found an uninstaller for
+    /// and that needs administrator rights.
+    pub fn needs_elevated_helper(&self) -> bool {
+        self.strategy == Some(UninstallStrategy::VendorUninstaller)
+            && self.vendor_run.is_some()
+            && self.requires_elevation
+    }
+
+    /// RABBIT can remove the package, and this version takes every step it
+    /// needs: files into a backup set, or the vendor's uninstaller through
+    /// the elevated helper. Other steps a backup can't undo, such as a whole
+    /// folder going to the Trash on macOS, come in a later version.
+    pub fn can_remove(&self) -> bool {
+        self.removability.is_removable() && (!self.unbacked || self.needs_elevated_helper())
+    }
 }
 
 impl Removability {
@@ -223,9 +322,10 @@ impl Removability {
                 "RABBIT didn't install this copy of {name}, so it is most likely your own, and \
                  RABBIT leaves it alone."
             ),
-            Self::NoTrustedUninstaller => {
-                format!("RABBIT found no uninstaller for {name} it can trust.")
-            }
+            Self::NoTrustedUninstaller { refusal } => format!(
+                "RABBIT found no uninstaller for {name} it can trust: {refusal}. You can \
+                 uninstall {name} in Windows Settings, under Apps, Installed apps."
+            ),
             Self::Manual { .. } => {
                 format!("RABBIT can't remove {name} by itself; it has to be removed by hand.")
             }
@@ -427,7 +527,7 @@ pub enum UninstallStatus {
     /// Removed, but detection still finds some of it afterwards.
     RemovedWithLeftovers,
     /// Removed; some files go at the next restart. Only a vendor uninstaller
-    /// leaves that, and none runs yet.
+    /// leaves that.
     RemovedPendingRestart,
     /// A dry run: this is what would be removed.
     WouldRemove,
@@ -518,11 +618,27 @@ impl UninstallReport {
             }))
     }
 
-    /// The user stopped the run before every package was reached.
+    /// The user stopped the run before every package was reached, declined
+    /// the Windows permission prompt, or cancelled a vendor's uninstaller.
     pub fn was_cancelled(&self) -> bool {
         self.items
             .iter()
             .any(|item| item.status == UninstallStatus::Cancelled)
+    }
+
+    /// The Windows permission prompt was declined, so the whole run was
+    /// cancelled before anything changed.
+    pub fn elevation_declined(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.message_code == UninstallMessage::ElevationDeclined)
+    }
+
+    /// Some package finishes going only when the computer restarts.
+    pub fn needs_restart(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.status == UninstallStatus::RemovedPendingRestart)
     }
 
     /// Packages were removed, but something needs the user's attention:
@@ -569,6 +685,13 @@ pub struct UninstallReportItem {
     /// Steps after the removal that didn't work. The package is removed
     /// all the same.
     pub problems: Vec<UninstallProblem>,
+    /// Files Windows removes when the computer restarts, after a vendor's
+    /// uninstaller couldn't remove them because they were in use.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_restart: Vec<PathBuf>,
+    /// How the vendor's own uninstaller went, when one ran or was meant to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<VendorOutcome>,
     /// English, for the CLI and the saved report. A UI in another language
     /// goes by `message_code`.
     pub message: String,
@@ -652,9 +775,42 @@ pub enum UninstallProblem {
     /// An entry in Windows' list of installed programs pointed into this
     /// REAPER, but couldn't be removed.
     RegistryEntryNotRemoved { key: String, error: String },
+    /// A vendor's uninstaller removed the package, but RABBIT's receipt
+    /// couldn't be saved without it. Nothing can be put back; the next
+    /// detection finds the package gone all the same.
+    ReceiptNotSaved { error: String },
+    /// The folder under ProgramData that REAPER's uninstaller ran from, as
+    /// a copy, couldn't be removed afterwards. Only administrators can
+    /// change it, and nothing removes it later.
+    VendorWorkingFolderLeft { path: PathBuf, error: String },
+    /// Windows' list of files it removes at the next restart couldn't be
+    /// read, so RABBIT couldn't tell whether the files still there go then.
+    RestartListUnreadable { error: String },
+    /// Windows' list of installed programs couldn't be read after the
+    /// vendor's uninstaller, so RABBIT couldn't check whether it still
+    /// lists the package.
+    InstalledListUnreadable { error: String },
 }
 
 impl UninstallProblem {
+    /// The problems a vendor run reported, as the report's own.
+    pub fn from_vendor(problem: &VendorProblem) -> Self {
+        match problem {
+            VendorProblem::WorkingFolderNotRemoved { path, error } => {
+                Self::VendorWorkingFolderLeft {
+                    path: path.clone(),
+                    error: error.clone(),
+                }
+            }
+            VendorProblem::PendingRenamesUnreadable { error } => Self::RestartListUnreadable {
+                error: error.clone(),
+            },
+            VendorProblem::ListUnreadable { error } => Self::InstalledListUnreadable {
+                error: error.clone(),
+            },
+        }
+    }
+
     /// English, for the CLI and the saved report.
     pub fn message(&self) -> String {
         match self {
@@ -669,6 +825,23 @@ impl UninstallProblem {
             Self::RegistryEntryNotRemoved { key, error } => format!(
                 "RABBIT couldn't remove {key} from Windows' list of installed programs \
                  ({error}), so Windows still lists it."
+            ),
+            Self::ReceiptNotSaved { error } => format!(
+                "RABBIT couldn't update its receipt ({error}). The receipt still lists the \
+                 package; the next time RABBIT looks, it finds the package gone."
+            ),
+            Self::VendorWorkingFolderLeft { path, error } => format!(
+                "RABBIT couldn't remove {}, the folder it ran the uninstaller from ({error}). \
+                 Only an administrator can delete it.",
+                path.display()
+            ),
+            Self::RestartListUnreadable { error } => format!(
+                "RABBIT couldn't read which files Windows removes at the next restart \
+                 ({error}), so it couldn't tell whether the files still there go then."
+            ),
+            Self::InstalledListUnreadable { error } => format!(
+                "RABBIT couldn't read Windows' list of installed programs afterwards ({error}), \
+                 so it couldn't check whether Windows still lists the package."
             ),
         }
     }
@@ -739,6 +912,60 @@ pub enum UninstallMessage {
     /// put back.
     ReceiptSaveFailed {
         error: String,
+    },
+    /// The vendor's own uninstaller removed the package. The status says
+    /// whether anything is left over or goes at the next restart.
+    UninstalledByVendor,
+    /// The elevated helper checked the vendor's uninstaller again right
+    /// before starting it and didn't trust it. Nothing of the package
+    /// changed, and the run stopped there.
+    VendorRefused {
+        refusal: VendorRefusal,
+    },
+    /// The user cancelled the vendor's uninstaller.
+    VendorCancelled,
+    /// The vendor's uninstaller ended with this error code.
+    VendorFailed {
+        exit_code: i32,
+    },
+    /// The vendor's uninstaller said it succeeded, but the package is still
+    /// there: `still_present` names what is, and `still_listed` says
+    /// whether Windows still lists it, `None` when its list couldn't be
+    /// read.
+    VendorStillThere {
+        still_present: Vec<PathBuf>,
+        still_listed: Option<bool>,
+    },
+    /// The vendor's uninstaller was still open after `seconds`. RABBIT left
+    /// it running and stopped the run, so nothing else would collide with
+    /// it.
+    VendorStillOpen {
+        seconds: u64,
+    },
+    /// Starting the vendor's uninstaller, or talking to the elevated helper
+    /// before it started, went wrong. The run stopped there.
+    VendorRunFailed {
+        error: String,
+    },
+    /// RABBIT lost track of the vendor's uninstaller after it had started:
+    /// the helper went away, or waiting for the uninstaller failed. It may
+    /// still be running, so what it removed is unknown; the receipt stays
+    /// as it was, and the run stopped there.
+    VendorLost {
+        error: String,
+    },
+    /// The Windows permission prompt was declined, so nothing was
+    /// uninstalled at all.
+    ElevationDeclined,
+    /// The elevated helper couldn't start, so nothing was uninstalled.
+    ElevationFailed {
+        error: String,
+    },
+    /// After the vendor's uninstaller ran, these files were gone from the
+    /// resource folder: REAPER's own settings or RABBIT's receipt. RABBIT
+    /// wrote its receipt again from what it held in memory and stopped.
+    ResourceFolderDamaged {
+        missing: Vec<PathBuf>,
     },
 }
 

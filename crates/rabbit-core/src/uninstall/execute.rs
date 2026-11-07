@@ -29,6 +29,19 @@
 //! post helper or a registry entry that fails leaves the package removed,
 //! with a problem in the report. Packages removed earlier in the run stay
 //! removed; each can be restored from the backup set on its own.
+//!
+//! A package whose vendor's uninstaller removes it (Surge XT, a standard
+//! REAPER) needs administrator rights. Once every check has passed and
+//! before the first change, the run starts one elevated helper for all of
+//! them: the run's only Windows permission prompt. Declined, the whole run
+//! is cancelled with nothing changed; if the helper can't start, nothing
+//! changes either. When the run reaches such a package, the helper runs its
+//! uninstaller, and the package's status follows what the uninstaller did
+//! and what fresh detection finds afterwards; so does its receipt entry.
+//! An uninstaller still open at its time limit, a helper that stops
+//! answering, or a resource folder that lost REAPER's settings or RABBIT's
+//! receipt stops the run there. The helper is told to quit at the end of
+//! every run, however it ends.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
@@ -45,19 +58,21 @@ use crate::error::Result;
 use crate::lock::acquire_package_install_lock;
 use crate::model::{ComponentDetection, InstallationKind, Platform};
 use crate::package::uninstall::UninstallPostStep;
-use crate::package::{PackageSpec, builtin_package_specs};
+use crate::package::{PACKAGE_REAPER, PackageSpec, builtin_package_specs};
 use crate::preflight::{
     PreflightCheck, PreflightStatus, REAPER_PROCESS_CHECK, RunningProcess,
     ensure_resource_path_ready, portable_target_app_path, running_processes_named,
     running_reaper_processes,
 };
-use crate::progress::{ProgressEvent, ProgressReporter};
+use crate::progress::{ProgressEvent, ProgressReporter, RemovalMethod};
 use crate::receipt::{
-    InstallState, load_install_state, remove_package_receipt, save_install_state,
+    InstallState, RECEIPT_RELATIVE_PATH, load_install_state, remove_package_receipt,
+    save_install_state,
 };
 use crate::rollback::{BackupPackageRecord, BackupSetWriter, FileDigest, MoveFileError, MovedFile};
 
-use super::paths::{UninstallRoots, absolute, same_ignoring_case};
+use super::helper::{ElevatedHelper, ElevatedRunRequest, ElevatedSession, ElevationStartError};
+use super::paths::{UninstallRoots, absolute, inside_or_same, same_ignoring_case};
 use super::plan::{
     UninstallPlanInput, build_uninstall_plan, installed_by_reapack, reapack_counts_as_installed,
 };
@@ -68,10 +83,14 @@ use super::preflight::{
     blocking_programs, crosses_volumes, process_checks, run_uninstall_preflight_with,
 };
 use super::registry::clean_registry_entries;
+use super::vendor::{
+    VendorEvent, VendorLookup, VendorOutcome, VendorProblem, VendorRefusal, VendorStatus,
+};
 use super::{
     KeptFile, KeptFileReason, RegistryEntryAction, Removability, RemovalReason, RemovedFile,
     UninstallMessage, UninstallPlan, UninstallPlanItem, UninstallProblem, UninstallReport,
-    UninstallReportItem, UninstallRequest, UninstallStatus, save_uninstall_report,
+    UninstallReportItem, UninstallRequest, UninstallServices, UninstallStatus,
+    save_uninstall_report,
 };
 
 /// The reason an uninstall's backup set records.
@@ -88,7 +107,10 @@ const DIGEST_REUSE_MARGIN: Duration = Duration::from_secs(5);
 
 /// Uninstall `request.package_ids` from the REAPER at
 /// `request.resource_path`, or with `request.dry_run` only say what would
-/// happen. Runs on a worker thread: it hashes every file it removes.
+/// happen. Runs on a worker thread: it hashes every file it removes, and it
+/// waits for vendors' uninstallers. `services` says where vendor
+/// uninstallers are looked up and what starts the elevated helper:
+/// [`UninstallServices::system`] in RABBIT itself, stand-ins in tests.
 ///
 /// Returns `Err` only for a hard error before anything changed, such as
 /// another RABBIT holding the install lock or a receipt that can't be read.
@@ -96,6 +118,7 @@ const DIGEST_REUSE_MARGIN: Duration = Duration::from_secs(5);
 /// isn't a dry run saves its report under `RABBIT/logs`.
 pub fn execute_uninstall(
     request: &UninstallRequest,
+    services: &UninstallServices<'_>,
     progress: &ProgressReporter,
     cancel: &CancelToken,
 ) -> Result<UninstallReport> {
@@ -114,7 +137,6 @@ pub fn execute_uninstall(
     let detect = || detect_components(&roots.resource, request.platform);
     let reaper_processes = || running_reaper_processes(Platform::current());
     let named_processes = |names: &[String]| running_processes_named(names);
-    let installed_programs = installed_programs(request.platform);
     execute_uninstall_in(
         request,
         &UninstallEnvironment {
@@ -126,27 +148,13 @@ pub fn execute_uninstall(
             reaper_processes: &reaper_processes,
             named_processes: &named_processes,
             volumes: &SystemVolumes,
-            installed_programs: installed_programs.as_ref(),
+            installed_programs: services.installed_programs,
+            vendor_lookup: services.vendor_lookup,
+            elevated_helper: services.elevated_helper,
         },
         progress,
         cancel,
     )
-}
-
-/// Windows' per-user list of installed programs, which a plan's
-/// `registry_cleanup` names entries in. `None` off Windows, where there is
-/// no such list.
-#[cfg(not(test))]
-fn installed_programs(platform: Platform) -> Option<HkcuUninstallRoot> {
-    (platform == Platform::Windows).then(HkcuUninstallRoot::installed_programs)
-}
-
-/// Unit tests never reach the real list, whose entries belong to whoever
-/// uses this computer. The engine's tests hand it a throwaway key of their
-/// own instead.
-#[cfg(test)]
-fn installed_programs(_platform: Platform) -> Option<HkcuUninstallRoot> {
-    None
 }
 
 /// Everything [`execute_uninstall`] reads from the computer, so tests can
@@ -166,16 +174,22 @@ pub(crate) struct UninstallEnvironment<'a> {
     /// Windows' per-user list of installed programs, or a test's stand-in
     /// for it. `None` leaves every entry a plan names alone, unread.
     pub installed_programs: Option<&'a HkcuUninstallRoot>,
+    /// Finds and checks each vendor's uninstaller while planning.
+    pub vendor_lookup: &'a dyn VendorLookup,
+    /// Starts the run's elevated helper.
+    pub elevated_helper: &'a dyn ElevatedHelper,
 }
 
 /// The uninstall plan for every package at `resource_path`, built from
 /// `detections` and the receipt the way [`execute_uninstall`] builds it,
 /// for a listing of what RABBIT could uninstall there. Reads which files
-/// exist and how big they are; hashes nothing and changes nothing.
+/// exist and how big they are, and looks vendors' uninstallers up through
+/// `vendor_lookup`; hashes nothing and changes nothing.
 pub fn plan_uninstall_at(
     resource_path: &Path,
     platform: Platform,
     detections: &[ComponentDetection],
+    vendor_lookup: &dyn VendorLookup,
 ) -> Result<UninstallPlan> {
     let (target, target_app_path) = target_of(platform, resource_path, None, None);
     let roots = UninstallRoots::for_target(platform, resource_path, target_app_path.as_deref());
@@ -188,6 +202,7 @@ pub fn plan_uninstall_at(
         detections,
         state: state.as_ref(),
         remove_settings: false,
+        vendor_lookup,
     }))
 }
 
@@ -249,6 +264,7 @@ pub(crate) fn execute_uninstall_in(
         detections: &detections,
         state: state.as_ref(),
         remove_settings: request.remove_settings,
+        vendor_lookup: environment.vendor_lookup,
     });
 
     let mut requested: Vec<String> = Vec::new();
@@ -259,10 +275,7 @@ pub(crate) fn execute_uninstall_in(
     }
     let to_check: Vec<String> = requested
         .iter()
-        .filter(|id| {
-            plan.item(id)
-                .is_some_and(|item| item.removability.is_removable() && !item.unbacked)
-        })
+        .filter(|id| plan.item(id).is_some_and(UninstallPlanItem::can_remove))
         .cloned()
         .collect();
 
@@ -321,7 +334,7 @@ pub(crate) fn execute_uninstall_in(
                     removability: plan_item.removability.clone(),
                 },
             ))
-        } else if plan_item.unbacked {
+        } else if !plan_item.can_remove() {
             Some((UninstallStatus::Blocked, UninstallMessage::NotYetSupported))
         } else {
             let mut checks = run_failures.clone();
@@ -407,27 +420,32 @@ pub(crate) fn execute_uninstall_in(
             cancel,
         ) {
             Err(items) => outcomes = items,
-            Ok(digests) => {
-                let mut run = RemovalRun {
-                    plan: &plan,
-                    environment,
-                    request,
-                    backup_folder: &backup_folder,
-                    backups: BackupSetWriter::new(
-                        &resource,
-                        &uninstall_set_id(),
-                        UNINSTALL_BACKUP_REASON,
-                    ),
-                    state: state.unwrap_or_default(),
-                    digests,
-                    reapack_installed,
-                    progress,
-                };
-                outcomes = run.remove_all(&to_remove, cancel);
-                if !run.backups.discard_if_empty() {
-                    backup_set = Some((run.backups.set_id(), run.backups.path().to_path_buf()));
+            Ok(digests) => match start_helper(&to_remove, environment, &resource, cancel) {
+                Err(items) => outcomes = items,
+                Ok(session) => {
+                    let mut run = RemovalRun {
+                        plan: &plan,
+                        environment,
+                        request,
+                        backup_folder: &backup_folder,
+                        backups: BackupSetWriter::new(
+                            &resource,
+                            &uninstall_set_id(),
+                            UNINSTALL_BACKUP_REASON,
+                        ),
+                        state: state.unwrap_or_default(),
+                        digests,
+                        reapack_installed,
+                        progress,
+                        session,
+                    };
+                    outcomes = run.remove_all(&to_remove, cancel);
+                    run.session.finish();
+                    if !run.backups.discard_if_empty() {
+                        backup_set = Some((run.backups.set_id(), run.backups.path().to_path_buf()));
+                    }
                 }
-            }
+            },
         }
     }
 
@@ -470,6 +488,180 @@ pub(crate) fn execute_uninstall_in(
     Ok(report)
 }
 
+/// Start the run's elevated helper if a package needs it: the run's one
+/// Windows permission prompt, raised once every check has passed and before
+/// anything changes. Returns the report items of a run that can't go on: a
+/// declined prompt cancels every package, and a helper that can't start
+/// fails the packages that need it and leaves the rest unreached. Nothing
+/// has changed in either case.
+fn start_helper(
+    to_remove: &[&UninstallPlanItem],
+    environment: &UninstallEnvironment<'_>,
+    resource: &Path,
+    cancel: &CancelToken,
+) -> std::result::Result<HelperSession, Vec<UninstallReportItem>> {
+    let elevated: Vec<String> = to_remove
+        .iter()
+        .filter(|item| item.needs_elevated_helper())
+        .map(|item| item.package_id.clone())
+        .collect();
+    // A run stopped already ends at its first package; no prompt for it.
+    if elevated.is_empty() || cancel.is_cancelled() {
+        return Ok(HelperSession(None));
+    }
+    let request = ElevatedRunRequest {
+        resource_path: resource.to_path_buf(),
+        target_app_path: environment.target_app_path.clone(),
+        target: environment.target,
+        package_ids: elevated.clone(),
+    };
+    match environment.elevated_helper.start(&request) {
+        Ok(session) => Ok(HelperSession(Some(session))),
+        Err(ElevationStartError::Declined) => Err(to_remove
+            .iter()
+            .map(|item| {
+                new_item(
+                    item,
+                    UninstallStatus::Cancelled,
+                    UninstallMessage::ElevationDeclined,
+                )
+            })
+            .collect()),
+        Err(ElevationStartError::Failed(error)) => Err(to_remove
+            .iter()
+            .map(|item| {
+                if elevated.contains(&item.package_id) {
+                    new_item(
+                        item,
+                        UninstallStatus::Failed,
+                        UninstallMessage::ElevationFailed {
+                            error: error.clone(),
+                        },
+                    )
+                } else {
+                    new_item(
+                        item,
+                        UninstallStatus::NotReached,
+                        UninstallMessage::RunStopped {
+                            package_id: elevated[0].clone(),
+                        },
+                    )
+                }
+            })
+            .collect()),
+    }
+}
+
+/// The run's elevated helper, if it needs one. It is told to quit after the
+/// last package, and also when the run ends any other way, unwinding
+/// included: a helper is never left waiting for orders.
+struct HelperSession(Option<Box<dyn ElevatedSession>>);
+
+impl HelperSession {
+    fn run(&mut self, package_id: &str, on_event: &mut dyn FnMut(&VendorEvent)) -> VendorOutcome {
+        match &mut self.0 {
+            Some(session) => session.run(package_id, on_event),
+            None => {
+                VendorOutcome::failed(package_id, false, "RABBIT's elevated helper isn't running")
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        if let Some(session) = self.0.take() {
+            session.finish();
+        }
+    }
+}
+
+impl Drop for HelperSession {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// Whether a package's outcome ends the run: a check stopped it, or its
+/// vendor's uninstaller is still open, can't be followed any more, or took
+/// files it must never take. The next package could collide with an
+/// uninstaller still at work, so it isn't started.
+fn stops_the_run(item: &UninstallReportItem) -> bool {
+    item.status == UninstallStatus::Blocked
+        || matches!(
+            item.message_code,
+            UninstallMessage::VendorStillOpen { .. }
+                | UninstallMessage::VendorRunFailed { .. }
+                | UninstallMessage::VendorLost { .. }
+                | UninstallMessage::ResourceFolderDamaged { .. }
+        )
+}
+
+/// The files no vendor's uninstaller may take, which exist now: REAPER's
+/// own settings and RABBIT's receipt in the resource folder.
+fn guarded_files(resource: &Path) -> Vec<PathBuf> {
+    let receipt = RECEIPT_RELATIVE_PATH
+        .split('/')
+        .fold(resource.to_path_buf(), |path, part| path.join(part));
+    [resource.join("reaper.ini"), receipt]
+        .into_iter()
+        .filter(|path| fs::symlink_metadata(path).is_ok())
+        .collect()
+}
+
+/// Whether fresh detection finds the package only through what Windows
+/// removes at the next restart, after its uninstaller reported exactly
+/// that. Something detection found must be at or under a path the restart
+/// takes: one of `still_present`, each of which has a removal queued below
+/// it, or one of `pending_restart`. And nothing it found that the plan's
+/// `verify_gone` names may be anything else. Its other files, such as a
+/// vendor data folder a receipt lists next to the plug-in, don't place the
+/// package on their own: a receipt only counts while every file it lists is
+/// there.
+fn found_only_pending_files(
+    detection: &ComponentDetection,
+    outcome: &VendorOutcome,
+    plan_item: &UninstallPlanItem,
+) -> bool {
+    let pending = |path: &Path| {
+        outcome
+            .still_present
+            .iter()
+            .chain(&outcome.pending_restart)
+            .any(|going| inside_or_same(path, going))
+    };
+    let to_go = |path: &Path| {
+        plan_item.vendor_run.as_ref().is_some_and(|run| {
+            run.verify_gone
+                .iter()
+                .any(|gone| inside_or_same(path, gone))
+        })
+    };
+    let found: Vec<&PathBuf> = detection
+        .files
+        .iter()
+        .filter(|path| fs::symlink_metadata(path).is_ok())
+        .collect();
+    found.iter().any(|path| pending(path))
+        && found
+            .iter()
+            .filter(|path| to_go(path))
+            .all(|path| pending(path))
+}
+
+/// What a vendor run left behind that should have gone: what
+/// `report_leftovers` names, and what RABBIT meant to remove afterwards but
+/// couldn't.
+fn vendor_leftovers(outcome: &VendorOutcome) -> Vec<PathBuf> {
+    let mut leftovers: BTreeSet<PathBuf> = outcome.leftovers.iter().cloned().collect();
+    leftovers.extend(
+        outcome
+            .removed_leftovers
+            .iter()
+            .filter(|leftover| leftover.still_there())
+            .map(|leftover| leftover.path.clone()),
+    );
+    leftovers.into_iter().collect()
+}
+
 /// The packages of one run that is removing things, with what they share.
 struct RemovalRun<'a> {
     plan: &'a UninstallPlan,
@@ -484,6 +676,8 @@ struct RemovalRun<'a> {
     digests: Digests,
     reapack_installed: bool,
     progress: &'a ProgressReporter,
+    /// The elevated helper, for packages a vendor's uninstaller removes.
+    session: HelperSession,
 }
 
 impl RemovalRun<'_> {
@@ -515,7 +709,7 @@ impl RemovalRun<'_> {
                 }
                 None => {
                     let item = self.remove(plan_item);
-                    if item.status == UninstallStatus::Blocked {
+                    if stops_the_run(&item) {
                         stopped = Some(UninstallMessage::RunStopped {
                             package_id: plan_item.package_id.clone(),
                         });
@@ -551,14 +745,192 @@ impl RemovalRun<'_> {
             );
         }
 
+        let vendor = plan_item.needs_elevated_helper();
         self.progress.report(ProgressEvent::RemoveStarted {
             package_id: id.clone(),
+            method: if vendor {
+                RemovalMethod::VendorUninstaller
+            } else {
+                RemovalMethod::Files
+            },
         });
-        let item = self.remove_started(plan_item);
+        let item = if vendor {
+            self.remove_with_vendor(plan_item)
+        } else {
+            self.remove_started(plan_item)
+        };
         self.progress.report(ProgressEvent::RemoveCompleted {
             package_id: id,
             removed: item.status.is_removed(),
         });
+        item
+    }
+
+    /// Have the elevated helper run the package's own uninstaller, then
+    /// read what it did: the status follows the uninstaller's outcome and
+    /// fresh detection, and so does the receipt entry, which goes only once
+    /// the package is gone.
+    fn remove_with_vendor(&mut self, plan_item: &UninstallPlanItem) -> UninstallReportItem {
+        let id = plan_item.package_id.as_str();
+        let resource = self.plan.resource_path.clone();
+        let guarded = guarded_files(&resource);
+        let progress = self.progress;
+        let outcome = self.session.run(id, &mut |event| match event {
+            VendorEvent::Launched => {}
+            VendorEvent::StillWaiting { seconds } => {
+                progress.report(ProgressEvent::VendorStillWaiting {
+                    package_id: id.to_string(),
+                    seconds: *seconds,
+                });
+            }
+            VendorEvent::WaitingForFiles { seconds } => {
+                progress.report(ProgressEvent::VendorWaitingForFiles {
+                    package_id: id.to_string(),
+                    seconds: *seconds,
+                });
+            }
+        });
+        let missing: Vec<PathBuf> = guarded
+            .into_iter()
+            .filter(|path| fs::symlink_metadata(path).is_err())
+            .collect();
+        // `None` when detection itself fails: then nothing is concluded
+        // from it, and the receipt stays as it is.
+        let detected = (self.environment.detect)().ok().map(|detections| {
+            detections
+                .into_iter()
+                .find(|detection| detection.package_id == id && detection.installed)
+                // Detection still sees the files Windows removes at the
+                // next restart; finding the package only through them is
+                // what "removed pending a restart" means, not a failure.
+                .filter(|detection| {
+                    outcome.status != VendorStatus::RemovedPendingRestart
+                        || !found_only_pending_files(detection, &outcome, plan_item)
+                })
+        });
+        let still_installed = detected.as_ref().map(Option::is_some);
+        // Windows' list after the run, as far as RABBIT could read it.
+        let still_listed = (!outcome
+            .problems
+            .iter()
+            .any(|problem| matches!(problem, VendorProblem::ListUnreadable { .. })))
+        .then_some(outcome.still_listed);
+        // The uninstaller started and nobody saw it end: the helper went
+        // away, or waiting for it failed. It may still be at work.
+        let end_unknown = outcome.launched && outcome.exit_code.is_none();
+
+        let (status, code) = match outcome.status {
+            VendorStatus::Refused => (
+                UninstallStatus::Blocked,
+                UninstallMessage::VendorRefused {
+                    refusal: outcome
+                        .refusal
+                        .clone()
+                        .unwrap_or(VendorRefusal::NotAVendorPlan),
+                },
+            ),
+            VendorStatus::StillRunning => (
+                UninstallStatus::Failed,
+                UninstallMessage::VendorStillOpen {
+                    seconds: plan_item
+                        .vendor_run
+                        .as_ref()
+                        .map_or(0, |run| run.timeout_seconds),
+                },
+            ),
+            VendorStatus::Cancelled => (
+                UninstallStatus::Cancelled,
+                UninstallMessage::VendorCancelled,
+            ),
+            VendorStatus::Failed => (
+                UninstallStatus::Failed,
+                match (&outcome.error, outcome.exit_code) {
+                    (Some(error), _) if end_unknown => UninstallMessage::VendorLost {
+                        error: error.clone(),
+                    },
+                    (Some(error), _) => UninstallMessage::VendorRunFailed {
+                        error: error.clone(),
+                    },
+                    // It finished, by its exit code, and the package is
+                    // still there.
+                    (None, Some(exit_code))
+                        if exit_code == 0
+                            || plan_item
+                                .vendor_run
+                                .as_ref()
+                                .is_some_and(|run| run.success_exit_codes.contains(&exit_code)) =>
+                    {
+                        UninstallMessage::VendorStillThere {
+                            still_present: outcome.still_present.clone(),
+                            still_listed,
+                        }
+                    }
+                    (None, Some(exit_code)) => UninstallMessage::VendorFailed { exit_code },
+                    (None, None) => UninstallMessage::VendorRunFailed {
+                        error: "the uninstaller ended without saying how".to_string(),
+                    },
+                },
+            ),
+            VendorStatus::Removed
+            | VendorStatus::RemovedWithLeftovers
+            | VendorStatus::RemovedPendingRestart => match &detected {
+                // The uninstaller is done, but RABBIT still finds the
+                // package: it isn't removed, and its entry stays.
+                Some(Some(detection)) => (
+                    UninstallStatus::Failed,
+                    UninstallMessage::VendorStillThere {
+                        still_present: detection
+                            .files
+                            .iter()
+                            .filter(|path| fs::symlink_metadata(path).is_ok())
+                            .cloned()
+                            .collect(),
+                        // A removal is only reported once the entry is
+                        // gone from the list the runner read.
+                        still_listed: Some(false),
+                    },
+                ),
+                _ => (
+                    outcome.uninstall_status(),
+                    UninstallMessage::UninstalledByVendor,
+                ),
+            },
+        };
+
+        let mut item = new_item(plan_item, status, code);
+        item.pending_restart = outcome.pending_restart.clone();
+        item.leftovers = vendor_leftovers(&outcome);
+        item.problems
+            .extend(outcome.problems.iter().map(UninstallProblem::from_vendor));
+
+        // Once the uninstaller has ended, the receipt follows fresh
+        // detection: the entry goes when the package is gone, and stays
+        // while anything of it is found. An uninstaller that may still be
+        // at work, still open at its time limit or lost track of, leaves
+        // the receipt alone; nobody can say yet what it removes.
+        let follows_detection = outcome.launched && !end_unknown;
+        let mut receipt_changed = false;
+        if follows_detection && still_installed == Some(false) {
+            remove_package_receipt(&mut self.state, id);
+            receipt_changed = true;
+        }
+        // An uninstaller must never take REAPER's settings or RABBIT's
+        // receipt. If one did, the receipt is written again from the copy
+        // this run holds, which also knows what the run removed so far;
+        // REAPER's settings can't be brought back, and the report says so.
+        let damaged = outcome.launched && !missing.is_empty();
+        if (receipt_changed || damaged)
+            && let Err(error) = save_install_state(&resource, &self.state)
+        {
+            item.problems.push(UninstallProblem::ReceiptNotSaved {
+                error: error.to_string(),
+            });
+        }
+        if damaged {
+            item.status = UninstallStatus::Failed;
+            item.message_code = UninstallMessage::ResourceFolderDamaged { missing };
+        }
+        item.vendor = Some(outcome);
         item
     }
 
@@ -1111,6 +1483,8 @@ fn new_item_for(
         leftovers: Vec::new(),
         registry_entries: Vec::new(),
         problems: Vec::new(),
+        pending_restart: Vec::new(),
+        vendor: None,
         message: String::new(),
         message_code: code,
     }
@@ -1189,8 +1563,103 @@ fn english_message(item: &UninstallReportItem) -> String {
             "RABBIT couldn't save its receipt after moving {name}'s files, so it moved them \
              back: {error}"
         ),
+        UninstallMessage::UninstalledByVendor => match item.status {
+            UninstallStatus::RemovedPendingRestart => format!(
+                "{name}'s own uninstaller removed it. Some of its files go when you restart the \
+                 computer: {}.",
+                path_list(&item.pending_restart)
+            ),
+            _ => format!("{name}'s own uninstaller removed it. A backup can't bring it back."),
+        },
+        UninstallMessage::VendorRefused { refusal } => format!(
+            "RABBIT didn't start {name}'s own uninstaller: {refusal}. Nothing of {name} changed, \
+             and the run stopped there. You can uninstall {name} in Windows Settings, under \
+             Apps, Installed apps."
+        ),
+        UninstallMessage::VendorCancelled => {
+            format!("{name}'s own uninstaller was cancelled before it finished.")
+        }
+        UninstallMessage::VendorFailed { exit_code } => format!(
+            "{name}'s own uninstaller ended with error code {exit_code}, so {name} may not be \
+             fully removed."
+        ),
+        UninstallMessage::VendorStillThere {
+            still_present,
+            still_listed,
+        } => {
+            // Nothing found and Windows not listing it either, as far as
+            // RABBIT could tell: only the check fell short, as the wizard
+            // says too.
+            let mut message = if still_present.is_empty() && *still_listed != Some(true) {
+                format!(
+                    "{name}'s own uninstaller finished, but RABBIT can't confirm that {name} is gone."
+                )
+            } else {
+                format!("{name}'s own uninstaller finished, but {name} is still installed.")
+            };
+            if !still_present.is_empty() {
+                message.push_str(&format!(" Still there: {}.", path_list(still_present)));
+            }
+            // When the list couldn't be read, a problem says so.
+            match still_listed {
+                Some(true) => {
+                    message.push_str(" Windows still lists it among the installed programs.");
+                }
+                Some(false) => message.push_str(
+                    " Windows no longer lists it among the installed programs, so it isn't in \
+                     Windows Settings either.",
+                ),
+                None => {}
+            }
+            message
+        }
+        UninstallMessage::VendorStillOpen { seconds } => format!(
+            "{name}'s own uninstaller was still open after {seconds} seconds. RABBIT left it \
+             running and stopped, so the packages after it weren't touched. It may be showing \
+             a question in a window of its own."
+        ),
+        UninstallMessage::VendorRunFailed { error } => format!(
+            "RABBIT couldn't finish running {name}'s own uninstaller, so it stopped there: \
+             {error}"
+        ),
+        UninstallMessage::VendorLost { error } => {
+            let mut message = format!(
+                "RABBIT lost track of {name}'s own uninstaller after it started ({error}). It \
+                 may still be running, so RABBIT can't tell what it removed. RABBIT stopped \
+                 there, so the packages after it weren't touched, and its receipt still lists \
+                 {name}."
+            );
+            if item.package_id == PACKAGE_REAPER {
+                message.push_str(
+                    " Once the uninstaller has finished, check that reaper.ini is still in \
+                     REAPER's resource folder: it holds your REAPER settings.",
+                );
+            }
+            message
+        }
+        UninstallMessage::ElevationDeclined => format!(
+            "The Windows permission prompt was declined, so RABBIT uninstalled nothing; {name} \
+             is still installed."
+        ),
+        UninstallMessage::ElevationFailed { error } => format!(
+            "RABBIT couldn't get administrator rights to uninstall {name}, so it uninstalled \
+             nothing: {error}"
+        ),
+        UninstallMessage::ResourceFolderDamaged { missing } => format!(
+            "IMPORTANT: after {name}'s own uninstaller ran, these files were gone from REAPER's \
+             resource folder: {}. RABBIT stopped and wrote its receipt again. REAPER's settings \
+             in reaper.ini can't be brought back by RABBIT; if you have a copy, put it back \
+             before you start REAPER.",
+            path_list(missing)
+        ),
     };
-    if item.status == UninstallStatus::Failed && item.left_in_backup.is_empty() {
+    // Only a removal into the backup set can be put back; what a vendor's
+    // uninstaller did stays done.
+    if item.status == UninstallStatus::Failed
+        && item.left_in_backup.is_empty()
+        && item.vendor.is_none()
+        && !matches!(item.message_code, UninstallMessage::ElevationFailed { .. })
+    {
         message.push_str(&format!(" Everything of {name} is back in place."));
     }
     if !item.left_in_backup.is_empty() {

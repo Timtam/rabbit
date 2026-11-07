@@ -15,8 +15,8 @@ use rabbit_core::model::Platform;
 use rabbit_core::preflight::{running_processes_named, running_reaper_processes};
 use rabbit_core::progress::ProgressReporter;
 use rabbit_core::uninstall::{
-    UninstallPlan, UninstallPreflightOptions, UninstallReport, UninstallRequest, execute_uninstall,
-    run_uninstall_preflight_with_processes,
+    UninstallPlan, UninstallPreflightOptions, UninstallReport, UninstallRequest, UninstallServices,
+    execute_uninstall, run_uninstall_preflight_with_processes,
 };
 use wxdragon::prelude::*;
 use wxdragon::widgets::SimpleBook;
@@ -310,9 +310,18 @@ fn run_uninstall(
     let cancel = ui.install_run.begin(WizardMode::Uninstall);
     let install_run = Arc::clone(&ui.install_run);
     std::thread::spawn(move || {
-        let result = execute_uninstall(&request, &progress, &cancel);
+        // RABBIT's own entry point: the real vendor lookup, and the real
+        // elevated helper, whose one permission prompt comes up from here.
+        let services = UninstallServices::system(request.platform);
+        let result = execute_uninstall(&request, &services, &progress, &cancel);
         operation_finished.store(true, Ordering::Relaxed);
         wxdragon::call_after(Box::new(move || {
+            // The rescan first, as after an install: it rebuilds the hidden
+            // Packages page, and focus on Done's status must be the last
+            // focus change, or the screen reader reads something else.
+            if result.is_ok() {
+                fire_post_install_hook();
+            }
             show_uninstall_outcome(
                 &navigation,
                 &request.resource_path,
@@ -320,9 +329,6 @@ fn run_uninstall(
                 request.remove_settings,
                 &result,
             );
-            if result.is_ok() {
-                fire_post_install_hook();
-            }
             // The worker is done and everything it held has been dropped,
             // so the window can go now, if the user asked it to.
             let close_now = install_run.stop_requested();
@@ -380,7 +386,6 @@ fn show_uninstall_outcome(
         .done_details
         .set_value(&outcome.detail_lines.join("\n"));
     // A REAPER the run removed is gone from its path, and so is the button.
-    // No package RABBIT removes so far takes REAPER with it.
     widgets
         .done_launch_reaper
         .enable(can_launch_last_reaper_path(

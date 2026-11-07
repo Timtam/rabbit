@@ -14,14 +14,15 @@ use std::path::{Path, PathBuf};
 
 use rabbit_core::localization::Localizer;
 use rabbit_core::model::InstallationKind;
+use rabbit_core::package::PACKAGE_REAPER;
 use rabbit_core::preflight::{
     PreflightCheck, PreflightReport, PreflightStatus, REAPER_PROCESS_CHECK,
 };
 use rabbit_core::report::{default_report_path, save_json_and_text_reports};
 use rabbit_core::uninstall::{
-    ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, KeptFileReason, PROGRAMS_RUNNING_CHECK,
-    RegistryEntryAction, UninstallMessage, UninstallPlan, UninstallProblem, UninstallReport,
-    UninstallReportItem, UninstallRequest, UninstallStatus,
+    ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, KeptFileReason, LeftoverResult,
+    PROGRAMS_RUNNING_CHECK, RegistryEntryAction, UninstallMessage, UninstallPlan, UninstallProblem,
+    UninstallReport, UninstallReportItem, UninstallRequest, UninstallStatus,
 };
 use rabbit_core::{RabbitError, Result};
 use serde::Serialize;
@@ -29,7 +30,7 @@ use serde::Serialize;
 use super::model::{TargetRow, WizardModel};
 use super::outcome::wizard_error_reason;
 use super::packages::localized_package_display_name;
-use super::uninstall::WizardUninstallList;
+use super::uninstall::{WizardUninstallList, refusal_text};
 
 /// What the engine is asked to do when the Uninstall button is pressed: the
 /// ticked packages, from the target Review named, with "Also remove
@@ -115,19 +116,26 @@ pub fn uninstall_blocker(
     // A package every REAPER on the computer may load needs all of them
     // closed, which covers the target's REAPER too: one sentence, not two.
     let reaper = if failed(ANY_REAPER_PROCESS_CHECK) {
+        // REAPER is never among the packages every REAPER can use: its own
+        // uninstaller needs them all closed because it doesn't run while
+        // any REAPER is open, and alone it says so.
         let packages = ticked()
-            .filter(|item| item.every_reaper_closed)
+            .filter(|item| item.every_reaper_closed && item.package_id != PACKAGE_REAPER)
             .map(|item| localized_package_display_name(localizer, &item.package_id))
             .collect::<Vec<_>>()
             .join(", ");
-        lines.push(
+        lines.push(if packages.is_empty() {
+            localizer
+                .text("wizard-reaper-running-uninstall-reaper-body")
+                .value
+        } else {
             localizer
                 .format(
                     "wizard-reaper-running-uninstall-every-body",
                     &[("packages", packages.as_str())],
                 )
-                .value,
-        );
+                .value
+        });
         true
     } else if failed(REAPER_PROCESS_CHECK) {
         lines.push(localizer.text("wizard-reaper-running-uninstall-body").value);
@@ -241,17 +249,29 @@ pub enum UninstallOutcomeStatus {
     /// Nothing was uninstalled and nothing failed: a check stopped the run
     /// before anything changed, or nothing ticked was installed any more.
     NothingDone,
+    /// Everything ticked is gone, but some of it only once the computer
+    /// restarts.
+    PendingRestart,
+    /// The Windows permission prompt was declined, so nothing was
+    /// uninstalled at all.
+    PermissionDeclined,
 }
 
-/// The status of a run that returned a report. A stop outranks a problem,
-/// as for an install: "you stopped it" explains a half-finished run, where
-/// "finished with problems" would send the user looking for a fault.
+/// The status of a run that returned a report. A declined permission prompt
+/// comes first: it is why nothing happened at all. Then a stop outranks a
+/// problem, as for an install: "you stopped it" explains a half-finished
+/// run, where "finished with problems" would send the user looking for a
+/// fault.
 pub fn uninstall_outcome_status(report: &UninstallReport) -> UninstallOutcomeStatus {
-    if report.was_cancelled() {
+    if report.elevation_declined() {
+        UninstallOutcomeStatus::PermissionDeclined
+    } else if report.was_cancelled() {
         UninstallOutcomeStatus::Cancelled
     } else if report.changed_anything() {
         if report.has_failures() || report.finished_with_problems() {
             UninstallOutcomeStatus::CompletedWithProblems
+        } else if report.needs_restart() {
+            UninstallOutcomeStatus::PendingRestart
         } else {
             UninstallOutcomeStatus::Success
         }
@@ -316,9 +336,33 @@ pub fn wizard_uninstall_outcome(
         UninstallOutcomeStatus::Failed => format("wizard-done-uninstall-status-error"),
         UninstallOutcomeStatus::Cancelled => format("wizard-done-uninstall-status-cancelled"),
         UninstallOutcomeStatus::NothingDone => format("wizard-done-uninstall-status-no-packages"),
+        UninstallOutcomeStatus::PendingRestart => {
+            format("wizard-done-uninstall-status-pending-restart")
+        }
+        UninstallOutcomeStatus::PermissionDeclined => {
+            format("wizard-done-uninstall-status-declined")
+        }
     };
     let mut blocks = vec![heading.clone()];
-    let reasons = uninstall_reasons(localizer, report);
+    let mut reasons = uninstall_reasons(localizer, report);
+    // The heading already says to restart; read right after it, the same
+    // instruction per package only repeats it. Show details keeps it.
+    if status == UninstallOutcomeStatus::PendingRestart {
+        let restart_lines: Vec<String> = report
+            .items
+            .iter()
+            .filter(|item| item.status == UninstallStatus::RemovedPendingRestart)
+            .map(|item| {
+                localizer
+                    .format(
+                        "wizard-done-uninstall-pending-restart",
+                        &[("package", package_name(localizer, item).as_str())],
+                    )
+                    .value
+            })
+            .collect();
+        reasons.retain(|reason| !restart_lines.contains(reason));
+    }
     if !reasons.is_empty() {
         blocks.push(reasons.join("\n"));
     }
@@ -442,9 +486,92 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
             .format(key, &[("package", package.as_str())])
             .value
     };
+    let with = |key: &str, name: &str, value: &str| {
+        localizer
+            .format(key, &[("package", package.as_str()), (name, value)])
+            .value
+    };
     let mut reasons = Vec::new();
     match &item.message_code {
-        UninstallMessage::Removed { .. } | UninstallMessage::WouldRemove => {}
+        UninstallMessage::Removed { .. }
+        | UninstallMessage::WouldRemove
+        | UninstallMessage::UninstalledByVendor => {}
+        // Done's first line says the prompt was declined, for every package.
+        UninstallMessage::ElevationDeclined => {}
+        UninstallMessage::VendorRefused { refusal } => {
+            reasons.push(refusal_text(localizer, refusal, &package));
+            reasons.push(with_package("uninstall-vendor-refused-nothing-changed"));
+        }
+        UninstallMessage::VendorCancelled => {
+            reasons.push(with_package("wizard-done-uninstall-vendor-cancelled"));
+        }
+        // Show details is only worth naming when it lists something.
+        UninstallMessage::VendorFailed { exit_code } => reasons.push(with(
+            if vendor_still_present(item).is_empty() {
+                "wizard-done-uninstall-vendor-failed-unsure"
+            } else {
+                "wizard-done-uninstall-vendor-failed"
+            },
+            "code",
+            &exit_code.to_string(),
+        )),
+        // Windows Settings only helps while Windows still lists the
+        // package; once its entry is gone, sending the user there leads
+        // nowhere.
+        UninstallMessage::VendorStillThere { still_listed, .. } => {
+            let left = if vendor_still_present(item).is_empty() {
+                "wizard-done-uninstall-vendor-not-confirmed"
+            } else {
+                "wizard-done-uninstall-vendor-files-left"
+            };
+            match still_listed {
+                Some(true) => {
+                    reasons.push(with_package("wizard-done-uninstall-vendor-still-there"));
+                }
+                Some(false) => {
+                    reasons.push(with_package(left));
+                    reasons.push(with_package("wizard-done-uninstall-vendor-not-listed"));
+                }
+                // A problem below says the list couldn't be read.
+                None => reasons.push(with_package(left)),
+            }
+        }
+        UninstallMessage::VendorStillOpen { .. } => {
+            reasons.push(with_package("wizard-done-uninstall-vendor-still-open"));
+        }
+        UninstallMessage::VendorRunFailed { error } => reasons.push(with(
+            "wizard-done-uninstall-vendor-run-failed",
+            "error",
+            error,
+        )),
+        UninstallMessage::VendorLost { .. } => {
+            reasons.push(with_package("wizard-done-uninstall-vendor-lost"));
+            // Only REAPER's uninstaller works next to REAPER's settings.
+            if item.package_id == PACKAGE_REAPER {
+                reasons.push(
+                    localizer
+                        .text("wizard-done-uninstall-vendor-lost-reaper")
+                        .value,
+                );
+            }
+        }
+        UninstallMessage::ElevationFailed { error } => reasons.push(with(
+            "wizard-done-uninstall-elevation-failed",
+            "error",
+            error,
+        )),
+        UninstallMessage::ResourceFolderDamaged { missing } => {
+            let paths = missing
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            reasons.push(with(
+                "wizard-done-uninstall-resource-damaged",
+                "paths",
+                &paths,
+            ));
+        }
         UninstallMessage::NotInstalled => {
             reasons.push(with_package("wizard-done-uninstall-not-installed"));
         }
@@ -483,6 +610,9 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
         | UninstallMessage::BackupFailed { .. }
         | UninstallMessage::ReceiptSaveFailed { .. } => reasons.push(item.message.clone()),
     }
+    if item.status == UninstallStatus::RemovedPendingRestart {
+        reasons.push(with_package("wizard-done-uninstall-pending-restart"));
+    }
     if !item.left_in_backup.is_empty() {
         reasons.push(with_package("wizard-done-uninstall-left-in-backup"));
     }
@@ -497,6 +627,24 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
             UninstallProblem::RegistryEntryUnreadable { .. }
             | UninstallProblem::RegistryEntryNotRemoved { .. } => {
                 reasons.push(with_package("wizard-done-uninstall-registry-failed"));
+            }
+            UninstallProblem::ReceiptNotSaved { .. } => {
+                reasons.push(with_package("wizard-done-uninstall-receipt-not-saved"));
+            }
+            UninstallProblem::VendorWorkingFolderLeft { path, .. } => reasons.push(with(
+                "wizard-done-uninstall-working-folder-left",
+                "path",
+                &path.display().to_string(),
+            )),
+            UninstallProblem::RestartListUnreadable { .. } => {
+                reasons.push(with_package(
+                    "wizard-done-uninstall-restart-list-unreadable",
+                ));
+            }
+            UninstallProblem::InstalledListUnreadable { .. } => {
+                reasons.push(with_package(
+                    "wizard-done-uninstall-installed-list-unreadable",
+                ));
             }
         }
     }
@@ -514,6 +662,20 @@ fn check_reason(localizer: &Localizer, check: &PreflightCheck) -> String {
         _ => return check.message.clone(),
     };
     localizer.text(key).value
+}
+
+/// What RABBIT still found of a package after its own uninstaller ran and
+/// didn't remove it. Only the engine's message and the vendor run know
+/// this: the package's leftovers list only what a removal left behind.
+fn vendor_still_present(item: &UninstallReportItem) -> &[PathBuf] {
+    match &item.message_code {
+        UninstallMessage::VendorStillThere { still_present, .. } => still_present,
+        UninstallMessage::VendorFailed { .. } => item
+            .vendor
+            .as_ref()
+            .map_or(&[], |vendor| vendor.still_present.as_slice()),
+        _ => &[],
+    }
 }
 
 /// "Show details" after an uninstall: the target, then for each package
@@ -565,6 +727,28 @@ pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallRepor
                 .iter()
                 .map(|dir| file_line("wizard-summary-removed-file", dir)),
         );
+        // A vendor's uninstaller: which one ran, the links and empty folders
+        // RABBIT removed after it, and what goes at the next restart.
+        if let Some(vendor) = &item.vendor {
+            lines.extend(
+                vendor
+                    .uninstaller
+                    .iter()
+                    .map(|path| file_line("wizard-summary-vendor-uninstaller", path)),
+            );
+            lines.extend(
+                vendor
+                    .removed_leftovers
+                    .iter()
+                    .filter(|leftover| leftover.result == LeftoverResult::Removed)
+                    .map(|leftover| file_line("wizard-summary-removed-file", &leftover.path)),
+            );
+        }
+        lines.extend(
+            item.pending_restart
+                .iter()
+                .map(|path| file_line("wizard-summary-pending-restart", path)),
+        );
         lines.extend(item.kept.iter().map(|kept| {
             let key = match kept.reason {
                 KeptFileReason::ChangedSinceInstall => "wizard-summary-kept-file",
@@ -573,9 +757,17 @@ pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallRepor
             };
             file_line(key, &kept.path)
         }));
+        // What a vendor's uninstaller didn't remove, which Done points to,
+        // then what a removal left; a path in both is said once.
+        let still_present = vendor_still_present(item);
         lines.extend(
-            item.leftovers
+            still_present
                 .iter()
+                .chain(
+                    item.leftovers
+                        .iter()
+                        .filter(|path| !still_present.contains(path)),
+                )
                 .map(|path| file_line("wizard-summary-left-over", path)),
         );
         lines.extend(
@@ -654,7 +846,11 @@ fn registry_lines(localizer: &Localizer, item: &UninstallReportItem) -> Vec<Stri
             "wizard-summary-registry-failed",
             &[("key", key.as_str()), ("error", error.as_str())],
         )),
-        UninstallProblem::LanguageResetFailed { .. } => None,
+        UninstallProblem::LanguageResetFailed { .. }
+        | UninstallProblem::ReceiptNotSaved { .. }
+        | UninstallProblem::VendorWorkingFolderLeft { .. }
+        | UninstallProblem::RestartListUnreadable { .. }
+        | UninstallProblem::InstalledListUnreadable { .. } => None,
     }));
     lines
 }
