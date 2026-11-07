@@ -586,7 +586,13 @@ user can finish the install by pressing Next a few times.
      announces the tab's name instead. RABBIT changes the tab selection by
      itself only on this arrival, once the page shows: wxOSX moves focus
      into a tab on every selection change, even on a hidden page, so the
-     rebuild after a run leaves it alone. The tab showing when Next is
+     rebuild after a run leaves it alone. On Windows that rebuild clears a
+     list's selection before deleting its rows: wxMSW answers comctl32's
+     notice that the selected row went by focusing the list, hidden or not,
+     and after an uninstall that took focus off the Done page. After either
+     run the rebuild also happens before Done shows and takes focus, so
+     Done's status is the last focus change. Each list's caret goes to its
+     top row the first time the list gets focus after the page opens. The tab showing when Next is
      pressed decides what the run does; install and uninstall never mix.
      The Uninstall tab lists every installed package under the same groups,
      with headings that can't be ticked, nothing ticked by default, and rows

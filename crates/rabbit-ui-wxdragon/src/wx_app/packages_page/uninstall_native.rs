@@ -8,7 +8,7 @@
 //! checkbox: in the install tree, Space on a group ticks every row below it,
 //! and one keystroke must never mark everything for removal.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
 
@@ -19,7 +19,7 @@ use wxdragon::widgets::treectrl::{TreeCtrl, TreeItemId};
 
 use crate::{WizardModel, WizardUninstallList, apply_uninstall_checkbox};
 
-use super::native::{build_checkbox_tree, native_tree_handle};
+use super::native::{build_checkbox_tree, clear_tree_without_taking_focus, native_tree_handle};
 use super::native_tree_checkboxes;
 use super::{UninstallSideWidgets, WXK_SPACE, build_uninstall_settings};
 
@@ -56,6 +56,40 @@ impl UninstallItems {
 
 pub(crate) fn new_uninstall_state() -> UninstallStateCell {
     Rc::new(RefCell::new(UninstallItems::empty()))
+}
+
+thread_local! {
+    /// Set when the Packages page opens: the caret goes to the top once the
+    /// Uninstall list itself gets focus, as the install list's does.
+    static CARET_RESET_PENDING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Have the Uninstall list's caret go to its top row when the list next
+/// gets focus, not now: moving it while the tab strip has focus would have
+/// NVDA read the row right after the tab. Filling the native tree leaves
+/// its caret on a row a few down, so without this Tab from the tab strip
+/// landed in the middle of the list.
+pub(crate) fn reset_uninstall_list_caret_on_focus() {
+    CARET_RESET_PENDING.with(|pending| pending.set(true));
+}
+
+/// Put the caret on the list's top row: the first heading, or the row that
+/// says the list is empty.
+fn move_caret_to_top(tree: &TreeCtrl, items: &UninstallStateCell) {
+    // Clone the handle and drop the borrow before touching the tree:
+    // `select_item` runs the selection handler, which borrows `items` too.
+    let top = {
+        let items = items.borrow();
+        items
+            .placeholder
+            .clone()
+            .or_else(|| items.headings.first().cloned())
+    };
+    if let Some(top) = top {
+        tree.ensure_visible(&top);
+        tree.select_item(&top);
+        tree.set_focused_item(&top);
+    }
 }
 
 /// What a tree item is, by its native handle: wxdragon hands out a fresh
@@ -113,7 +147,7 @@ fn populate_uninstall_tree(
     // adding rows can run the selection handler, and a deleted handle's
     // value may come back for a new row.
     *items.borrow_mut() = UninstallItems::empty();
-    tree.delete_all_items();
+    clear_tree_without_taking_focus(tree);
     let mut fresh = UninstallItems::empty();
     let Some(root) = tree.add_root("", None, None) else {
         *items.borrow_mut() = fresh;
@@ -183,6 +217,18 @@ pub(crate) fn build_uninstall_tab(
         "rabbit-uninstall-list-label",
     );
     let tree = build_checkbox_tree(page, "rabbit-uninstall-list");
+    {
+        let items = Rc::clone(&items);
+        tree.on_set_focus(move |event| {
+            // wxMSW runs this before the tree's own focus handling, so the
+            // caret is on the top row by the time the tree reports focus,
+            // and that row is the one the screen reader reads.
+            if CARET_RESET_PENDING.with(|pending| pending.replace(false)) {
+                move_caret_to_top(&tree, &items);
+            }
+            event.skip(true);
+        });
+    }
     populate_uninstall_tree(&tree, &items, model, &list.borrow());
     sizer.add(&tree, 1, SizerFlag::All | SizerFlag::Expand, 6);
 

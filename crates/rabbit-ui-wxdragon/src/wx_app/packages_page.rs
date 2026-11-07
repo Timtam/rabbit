@@ -41,12 +41,12 @@ pub(crate) use dataview::*;
 #[cfg(not(target_os = "windows"))]
 pub(crate) use uninstall_dataview::{
     UninstallStateCell, UninstallView, build_uninstall_tab, new_uninstall_state,
-    rebuild_uninstall_list_widgets,
+    rebuild_uninstall_list_widgets, reset_uninstall_list_caret_on_focus,
 };
 #[cfg(target_os = "windows")]
 pub(crate) use uninstall_native::{
     UninstallStateCell, UninstallView, build_uninstall_tab, new_uninstall_state,
-    rebuild_uninstall_list_widgets,
+    rebuild_uninstall_list_widgets, reset_uninstall_list_caret_on_focus,
 };
 
 /// `wx/defs.h`: `WXK_SPACE = 32` (just the ASCII value). Kept around as a

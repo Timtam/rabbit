@@ -316,6 +316,12 @@ fn run_uninstall(
         let result = execute_uninstall(&request, &services, &progress, &cancel);
         operation_finished.store(true, Ordering::Relaxed);
         wxdragon::call_after(Box::new(move || {
+            // The rescan first, as after an install: it rebuilds the hidden
+            // Packages page, and focus on Done's status must be the last
+            // focus change, or the screen reader reads something else.
+            if result.is_ok() {
+                fire_post_install_hook();
+            }
             show_uninstall_outcome(
                 &navigation,
                 &request.resource_path,
@@ -323,9 +329,6 @@ fn run_uninstall(
                 request.remove_settings,
                 &result,
             );
-            if result.is_ok() {
-                fire_post_install_hook();
-            }
             // The worker is done and everything it held has been dropped,
             // so the window can go now, if the user asked it to.
             let close_now = install_run.stop_requested();
