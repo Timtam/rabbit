@@ -1400,17 +1400,22 @@ fn the_question_reads_in_every_locale() {
     }
 }
 
-/// Every package RABBIT can remove so far is a file removal that goes into
-/// a backup with no warning that asks, so none of them asks a question.
-/// That includes OSARA: the people who use RABBIT know that REAPER stops
-/// speaking without it. The question is for the packages later phases add.
-/// REAPER and Surge XT can't be ticked here: on Windows no uninstaller is
-/// found for them; on macOS these roots don't know where REAPER's app is,
-/// so `{app_path}` is refused, and Surge XT's turn hasn't come. Their
-/// questions are tested with their own plans.
+/// Every package RABBIT can remove whose files go into a backup, with no
+/// warning that asks, asks no question before it goes. That includes
+/// OSARA: the people who use RABBIT know that REAPER stops speaking
+/// without it. The question is for what a backup can't bring back. On
+/// Windows, REAPER and Surge XT can't be ticked here, as no uninstaller is
+/// found for them. On macOS these roots don't know where REAPER's app is,
+/// so `{app_path}` is refused; Surge XT, which the administrator command
+/// deletes for good, can be ticked, and is the one package that asks.
+/// REAPER's question is tested with its own plans.
 #[test]
-fn no_package_the_wizard_can_remove_yet_asks_a_question() {
+fn only_a_package_a_backup_cant_bring_back_asks_a_question() {
     let dir = tempdir().unwrap();
+    // Surge XT's trees are absolute macOS paths. They are planned below an
+    // empty temporary system root, never the host's real /, so what this
+    // computer has installed can't change the answer.
+    let system = tempdir().unwrap();
     for platform in [Platform::Windows, Platform::MacOs] {
         let specs = builtin_package_specs(platform);
         let detections: Vec<ComponentDetection> = specs
@@ -1431,7 +1436,8 @@ fn no_package_the_wizard_can_remove_yet_asks_a_question() {
                 .collect(),
             ..InstallState::default()
         };
-        let roots = UninstallRoots::for_target(platform, dir.path(), None);
+        let mut roots = UninstallRoots::for_target(platform, dir.path(), None);
+        roots.system_root = system.path().to_path_buf();
         let plan = build_uninstall_plan(&UninstallPlanInput {
             roots: &roots,
             platform,
@@ -1489,11 +1495,23 @@ fn no_package_the_wizard_can_remove_yet_asks_a_question() {
                 "{platform:?}: {id} isn't in {tickable:?}"
             );
         }
+        let (asks, backed_up): (Vec<String>, Vec<String>) =
+            tickable.into_iter().partition(|id| id == "surge-xt");
         assert_eq!(
-            uninstall_confirmation_body(&localizer, &plan, &tickable),
-            None,
-            "{platform:?}: {tickable:?}"
+            asks.len(),
+            usize::from(platform == Platform::MacOs),
+            "{platform:?}: {asks:?}"
         );
+        assert_eq!(
+            uninstall_confirmation_body(&localizer, &plan, &backed_up),
+            None,
+            "{platform:?}: {backed_up:?}"
+        );
+        if !asks.is_empty() {
+            let body = uninstall_confirmation_body(&localizer, &plan, &asks)
+                .expect("Surge XT asks before it goes");
+            assert!(body.contains("Surge XT"), "{body}");
+        }
     }
 }
 
@@ -2003,7 +2021,7 @@ pub(super) fn admin_surge() -> UninstallPlanItem {
         backup: UninstallBackup::None,
         files: vec![tree("/Applications/Surge XT.app")],
         kept: vec![kept(
-            "/Users/me/Library/Application Support/Surge XT",
+            "/Users/me/Library/Application Support/Surge Synth Team/Surge XT",
             "uninstall-kept-surge-settings-macos",
             false,
         )],
@@ -2080,7 +2098,7 @@ fn macos_rows_say_how_each_package_leaves() {
         "Removes Surge XT's apps and plug-ins, and its factory data in the Library folder. A \
          backup can't bring them back.",
         "macOS asks once for an administrator's name and password, before anything is removed. \
-         It doesn't go into a backup; to have it again, you install it again.",
+         To have it again, you install it again.",
         "Your own patches, in the Surge XT folder in your Documents, stay.",
         "Surge XT serves every REAPER and every other program on this computer",
     ] {
@@ -2090,6 +2108,14 @@ fn macos_rows_say_how_each_package_leaves() {
             surge.details
         );
     }
+    // The summary says a backup can't bring it back; the route's line
+    // doesn't say it again.
+    assert_eq!(
+        surge.details.matches("backup").count(),
+        1,
+        "{}",
+        surge.details
+    );
     // Root's removals never take the user's settings.
     assert!(surge.settings.is_empty(), "{:?}", surge.settings);
 
@@ -2506,9 +2532,114 @@ fn the_shipped_macos_reaper_can_be_ticked_and_reads_in_every_locale() {
     }
 }
 
+/// Surge XT from the shipped macOS plan, on a stand-in Mac in a temporary
+/// folder holding its app and its VST3: its row can be ticked, its details
+/// say what goes and what stays, that it goes for every program and that
+/// macOS asks for an administrator's password, and its row, Review and
+/// question read in every language. Nothing here deletes anything.
+#[test]
+fn the_shipped_macos_surge_xt_can_be_ticked_and_reads_in_every_locale() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    let system = dir.path().join("system");
+    for tree in [
+        system.join("Applications").join("Surge XT.app"),
+        system
+            .join("Library")
+            .join("Audio")
+            .join("Plug-Ins")
+            .join("VST3")
+            .join("Surge XT.vst3"),
+    ] {
+        std::fs::create_dir_all(tree.join("Contents")).unwrap();
+    }
+    std::fs::create_dir_all(&resource).unwrap();
+    let mut roots = UninstallRoots::new(&resource);
+    roots.system_root = system;
+    let specs = builtin_package_specs(Platform::MacOs);
+    let detections = vec![ComponentDetection {
+        installed: true,
+        version: Some(Version::parse("1.4.0").unwrap()),
+        ..ComponentDetection::not_installed("surge-xt", "Surge XT")
+    }];
+    let plan = build_uninstall_plan(&UninstallPlanInput {
+        roots: &roots,
+        platform: Platform::MacOs,
+        target: InstallationKind::Standard,
+        specs: &specs,
+        detections: &detections,
+        state: None,
+        remove_settings: false,
+        vendor_lookup: &NothingListed,
+        objects: &NoMacosObjects,
+    });
+    assert_eq!(
+        plan.item("surge-xt").map(|item| item.files.len()),
+        Some(2),
+        "{:?}",
+        plan.item("surge-xt")
+    );
+
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let mut list = uninstall_list_from_plan(&localizer, &specs, &plan);
+        let row = list
+            .rows
+            .iter()
+            .find(|row| row.package_id == "surge-xt")
+            .unwrap();
+        assert!(row.can_tick, "{locale}: {}", row.details);
+        for key in [
+            "uninstall-summary-surge-macos-removes",
+            "uninstall-summary-surge-keeps",
+            "wizard-uninstall-details-elevated-macos",
+        ] {
+            assert!(
+                row.details.contains(&localizer.text(key).value),
+                "{locale}: {key}: {}",
+                row.details
+            );
+        }
+        // Its root's data is never "Also remove settings" material.
+        assert!(row.settings.is_empty(), "{locale}: {:?}", row.settings);
+        let mut texts = vec![row.summary.clone(), row.details.clone()];
+        tick(&mut list, "surge-xt");
+        let preview =
+            build_uninstall_review_preview(&localizer, Some(&target(true)), &list, false, &[]);
+        assert!(preview.can_uninstall, "{locale}: {:?}", preview.lines);
+        texts.push(preview.lines.join("\n"));
+        let question = uninstall_confirmation_body(&localizer, &plan, &ids(&["surge-xt"]))
+            .expect("Surge XT asks before it goes");
+        texts.push(question);
+        for text in texts {
+            assert!(
+                !text.contains("wizard-") && !text.contains("uninstall-") && !text.contains('{'),
+                "{locale}: {text}"
+            );
+        }
+        if locale == DEFAULT_LOCALE {
+            let details = &list.rows[0].details;
+            assert!(
+                details.contains(
+                    "Surge XT serves every REAPER and every other program on this computer"
+                ),
+                "{details}"
+            );
+            let review = preview.lines.join("\n");
+            assert!(
+                review.contains("administrator's name and password"),
+                "{review}"
+            );
+            // Found by its places and names alone: nothing says RABBIT
+            // didn't install it.
+            assert!(!details.contains("didn't install"), "{details}");
+        }
+    }
+}
+
 /// Every macOS row, Review and question reads in every language, with no
-/// key or placeholder left over, the three manifest keys the shipped macOS
-/// plans are to name included.
+/// key or placeholder left over, the manifest keys only the shipped macOS
+/// plans name included.
 #[test]
 fn macos_rows_review_and_question_read_in_every_locale() {
     for &locale in embedded_locales() {
@@ -2547,9 +2678,14 @@ fn macos_rows_review_and_question_read_in_every_locale() {
             texts.push(list.rows[0].summary.clone());
             texts.push(list.rows[0].details.clone());
         }
-        let kept = localizer.text("uninstall-kept-surge-settings-macos");
-        assert!(!kept.missing, "{locale}");
-        texts.push(kept.value);
+        for key in [
+            "uninstall-kept-surge-settings-macos",
+            "uninstall-kept-surge-factory-copy-macos",
+        ] {
+            let kept = localizer.text(key);
+            assert!(!kept.missing && !kept.fallback_used, "{locale}: {key}");
+            texts.push(kept.value);
+        }
         for text in texts {
             assert!(
                 !text.contains("wizard-") && !text.contains("uninstall-") && !text.contains('{'),

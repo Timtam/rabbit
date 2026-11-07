@@ -91,6 +91,11 @@ uninstall-kept-surge-user-data = your patches and everything else you saved with
 uninstall-kept-reaper-resource = REAPER's resource folder, with your settings, extensions and key maps
 # On macOS, in the Library folder of your home folder.
 uninstall-kept-surge-settings-macos = your Surge XT settings
+# On macOS, in the Library folder of your home folder: a copy of Surge XT's
+# factory data put there by hand, which Surge XT reads instead of the one it
+# installs for everyone. Say "factory data" as in
+# uninstall-summary-surge-macos-removes.
+uninstall-kept-surge-factory-copy-macos = your own copy of Surge XT's factory data
 
 # Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
 uninstall-warning-sws-osara-keymap = If you use OSARA's key map, some of its keys run SWS actions. Those keys stop working until you install SWS again.
@@ -299,7 +304,9 @@ wizard-uninstall-details-vendor-by-hand = You can uninstall { $package } yoursel
 # language. The password window may offer Touch ID, so don't say a password
 # is the only way. The Trash line follows the package's own sentence, which
 # already says that it goes to the Trash, so it only says how to get it back.
-wizard-uninstall-details-elevated-macos = macOS asks once for an administrator's name and password, before anything is removed. It doesn't go into a backup; to have it again, you install it again.
+# The administrator line follows the package's own sentence, which already
+# says a backup can't bring it back, so it doesn't say that again.
+wizard-uninstall-details-elevated-macos = macOS asks once for an administrator's name and password, before anything is removed. To have it again, you install it again.
 wizard-uninstall-details-trash = Until you empty the Trash, you can drag it back from there.
 wizard-uninstall-details-trash-elevated-macos = Your account may not move it, so macOS asks once for an administrator's name and password, before anything is removed, and RABBIT then moves it into your Trash. It keeps the owner it had, so Finder offers no Put Back for it, and emptying the Trash may ask for an administrator's password.
 # The one row, without a checkbox, of an Uninstall list with nothing in it,
@@ -626,6 +633,7 @@ wizard-done-uninstall-trash-owner = It keeps the owner it had, so Finder offers 
 wizard-done-uninstall-trash-failed = RABBIT couldn't move { $package } to the Trash, so nothing of it changed ({ $error }).
 wizard-done-uninstall-trash-unclear = RABBIT asked macOS to move { $path } to the Trash, but can't confirm that it is there now. Look for { $package } in the Trash and in its folder in Finder. RABBIT stopped there.
 wizard-done-uninstall-admin-step-failed = The administrator command stopped at { $path }, so nothing of { $package } was removed. RABBIT stopped there.
+wizard-done-uninstall-admin-delete-failed = The administrator command stopped at { $path }, which may now be only partly there. Nothing else of { $package } was removed. RABBIT stopped there.
 wizard-done-uninstall-admin-stopped = The administrator command ended without saying where it stopped, and nothing of { $package } was removed. RABBIT stopped there.
 wizard-done-uninstall-partly-removed = The administrator command stopped at { $path }, so { $package } is only partly removed. Show details lists what is gone and what is still there. RABBIT stopped there.
 wizard-done-uninstall-partly-removed-unclear = The administrator command ended without saying where it stopped, and { $package } is only partly removed. Show details lists what is gone and what is still there. RABBIT stopped there.

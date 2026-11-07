@@ -2400,13 +2400,15 @@ fn a_partly_removed_package_is_never_nothing_uninstalled() {
         assert!(details.contains(&line), "{line}\n{details}");
     }
 
-    // Stopped before anything of it went: a plain failure, nothing removed.
+    // Stopped before any tree of it went: a plain failure. `rm -R -f`
+    // deletes all it can inside a tree before it fails, so the tree it
+    // stopped at is never said to be whole, only that nothing else went.
     for (path, sentence) in [
         (
             Some(SURGE_APP),
             format!(
-                "The administrator command stopped at {SURGE_APP}, so nothing of Surge XT was \
-                 removed. RABBIT stopped there."
+                "The administrator command stopped at {SURGE_APP}, which may now be only partly \
+                 there. Nothing else of Surge XT was removed. RABBIT stopped there."
             ),
         ),
         (
@@ -2872,6 +2874,12 @@ fn macos_done_reads_in_every_locale() {
         mac_report(
             vec![surge_step_failed(Some(SURGE_APP), &[], &[SURGE_APP], false)],
             vec![],
+            vec![],
+        ),
+        // A tree deleted for good, which may be partly gone.
+        mac_report(
+            vec![surge_step_failed(Some(SURGE_APP), &[], &[SURGE_APP], false)],
+            vec![admin_surge()],
             vec![],
         ),
         mac_report(

@@ -91,6 +91,11 @@ uninstall-kept-surge-user-data = le tue patch e tutto il resto che hai salvato c
 uninstall-kept-reaper-resource = la cartella delle risorse di REAPER, con le tue impostazioni, estensioni e mappe dei tasti
 # On macOS, in the Library folder of your home folder.
 uninstall-kept-surge-settings-macos = le tue impostazioni di Surge XT
+# On macOS, in the Library folder of your home folder: a copy of Surge XT's
+# factory data put there by hand, which Surge XT reads instead of the one it
+# installs for everyone. Say "factory data" as in
+# uninstall-summary-surge-macos-removes.
+uninstall-kept-surge-factory-copy-macos = la tua copia dei dati di fabbrica di Surge XT
 
 # Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
 uninstall-warning-sws-osara-keymap = Se usi la mappa dei tasti di OSARA, alcuni dei suoi tasti eseguono azioni di SWS. Quei tasti smettono di funzionare finché non reinstalli SWS.
@@ -294,7 +299,9 @@ wizard-uninstall-details-vendor-by-hand = Puoi disinstallare { $package } da sol
 # language. The password window may offer Touch ID, so don't say a password
 # is the only way. The Trash line follows the package's own sentence, which
 # already says that it goes to the Trash, so it only says how to get it back.
-wizard-uninstall-details-elevated-macos = macOS chiede una sola volta nome e password di un amministratore, prima di rimuovere qualcosa. Non finisce in un backup; per riaverlo, dovrai reinstallarlo.
+# The administrator line follows the package's own sentence, which already
+# says a backup can't bring it back, so it doesn't say that again.
+wizard-uninstall-details-elevated-macos = macOS chiede una sola volta nome e password di un amministratore, prima di rimuovere qualcosa. Per riaverlo, dovrai reinstallarlo.
 wizard-uninstall-details-trash = Finché non svuoti il Cestino, puoi trascinarlo fuori da lì.
 wizard-uninstall-details-trash-elevated-macos = Il tuo account non può spostarlo, quindi macOS chiede una sola volta nome e password di un amministratore, prima di rimuovere qualcosa, e RABBIT poi lo sposta nel tuo Cestino. Mantiene il proprietario che aveva, quindi il Finder non offre «Ripristina» per esso, e svuotare il Cestino potrebbe richiedere la password di un amministratore.
 # The one row, without a checkbox, of an Uninstall list with nothing in it,
@@ -605,6 +612,7 @@ wizard-done-uninstall-trash-owner = Mantiene il proprietario che aveva, quindi i
 wizard-done-uninstall-trash-failed = RABBIT non è riuscito a spostare { $package } nel Cestino, quindi di { $package } non è cambiato niente ({ $error }).
 wizard-done-uninstall-trash-unclear = RABBIT ha chiesto a macOS di spostare { $path } nel Cestino, ma non può confermare che ora sia lì. Cerca { $package } nel Cestino e nella sua cartella nel Finder. RABBIT si è fermato lì.
 wizard-done-uninstall-admin-step-failed = Il comando di amministratore si è fermato a { $path }, quindi non è stato rimosso niente di { $package }. RABBIT si è fermato lì.
+wizard-done-uninstall-admin-delete-failed = Il comando di amministratore si è fermato a { $path }, che ora potrebbe essere presente solo in parte. Non è stato rimosso nient'altro di { $package }. RABBIT si è fermato lì.
 wizard-done-uninstall-admin-stopped = Il comando di amministratore è terminato senza dire dove si è fermato, e non è stato rimosso niente di { $package }. RABBIT si è fermato lì.
 wizard-done-uninstall-partly-removed = Il comando di amministratore si è fermato a { $path }, quindi { $package } è stato rimosso solo in parte. «Mostra dettagli» indica cosa è stato rimosso e cosa è ancora presente. RABBIT si è fermato lì.
 wizard-done-uninstall-partly-removed-unclear = Il comando di amministratore è terminato senza dire dove si è fermato, e { $package } è stato rimosso solo in parte. «Mostra dettagli» indica cosa è stato rimosso e cosa è ancora presente. RABBIT si è fermato lì.

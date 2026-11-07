@@ -1856,21 +1856,47 @@ mod tests {
                         "removes_key": "uninstall-summary-surge-macos-removes",
                         "keeps_key": "uninstall-summary-surge-keeps"
                     },
-                    "blocking_programs": ["Surge XT", "Surge XT Effects"],
+                    "blocking_programs": ["Surge XT", "Surge XT Effects", "surge-xt-cli"],
                     "remove": {
                         "trees": [
                             { "path": "/Applications/Surge XT.app", "must_end_with": ".app", "name_contains": "Surge XT" },
                             { "path": "/Applications/Surge XT Effects.app", "must_end_with": ".app", "name_contains": "Surge XT" },
+                            { "path": "/Library/Audio/Plug-Ins/Components/Surge XT.component", "must_end_with": ".component", "name_contains": "Surge XT" },
+                            { "path": "/Library/Audio/Plug-Ins/Components/Surge XT Effects.component", "must_end_with": ".component", "name_contains": "Surge XT" },
+                            { "path": "/Library/Audio/Plug-Ins/CLAP/Surge XT.clap", "must_end_with": ".clap", "name_contains": "Surge XT" },
+                            { "path": "/Library/Audio/Plug-Ins/CLAP/Surge XT Effects.clap", "must_end_with": ".clap", "name_contains": "Surge XT" },
+                            { "path": "/Library/Audio/Plug-Ins/LV2/Surge XT.lv2", "must_end_with": ".lv2", "name_contains": "Surge XT" },
+                            { "path": "/Library/Audio/Plug-Ins/LV2/Surge XT Effects.lv2", "must_end_with": ".lv2", "name_contains": "Surge XT" },
                             { "path": "/Library/Application Support/Surge XT", "name_contains": "Surge XT" },
+                            { "path": "/Library/Audio/Plug-Ins/VST3/Surge XT Effects.vst3", "must_end_with": ".vst3", "name_contains": "Surge XT" },
                             { "path": "/Library/Audio/Plug-Ins/VST3/Surge XT.vst3", "must_end_with": ".vst3", "name_contains": "Surge XT" }
                         ]
                     },
-                    "kept_user_data": [
-                        { "path": "{documents}/Surge XT", "note_key": "uninstall-kept-surge-user-data" }
-                    ],
                     "macos_pkg_forget": [
                         "org.surge-synth-team.surge-xt.vst3.pkg",
-                        "org.surge-synth-team.surge-xt.app.pkg"
+                        "org.surge-synth-team.surge-xt.component.pkg",
+                        "org.surge-synth-team.surge-xt.clap.pkg",
+                        "org.surge-synth-team.surge-xt.lv2.pkg",
+                        "org.surge-synth-team.surge-xt.app.pkg",
+                        "org.surge-synth-team.surge-xt.resources.pkg",
+                        "org.surge-synth-team.surge-xt-fx.vst3.pkg",
+                        "org.surge-synth-team.surge-xt-fx.component.pkg",
+                        "org.surge-synth-team.surge-xt-fx.clap.pkg",
+                        "org.surge-synth-team.surge-xt-fx.lv2.pkg",
+                        "org.surge-synth-team.surge-xt-fx.app.pkg",
+                        "com.surge-synth-team.surge-xt.vst3.pkg",
+                        "com.surge-synth-team.surge-xt.component.pkg",
+                        "com.surge-synth-team.surge-xt.app.pkg",
+                        "com.surge-synth-team.surge-xt.resources.pkg",
+                        "com.surge-synth-team.surge-xt-fx.vst3.pkg",
+                        "com.surge-synth-team.surge-xt-fx.component.pkg",
+                        "com.surge-synth-team.surge-xt-fx.app.pkg"
+                    ],
+                    "kept_user_data": [
+                        { "path": "{documents}/Surge XT", "note_key": "uninstall-kept-surge-user-data" },
+                        { "path": "{documents}/Surge Synth Team/Surge XT", "note_key": "uninstall-kept-surge-user-data" },
+                        { "path": "{home}/Library/Application Support/Surge Synth Team/Surge XT", "note_key": "uninstall-kept-surge-settings-macos" },
+                        { "path": "{home}/Library/Application Support/Surge XT", "note_key": "uninstall-kept-surge-factory-copy-macos" }
                     ],
                     "post": [ { "refresh_audio_units": {} } ]
                 }
@@ -1927,6 +1953,20 @@ mod tests {
             .plan_for(Platform::MacOs, InstallationKind::Standard)
             .expect("Surge XT on macOS has a plan");
         assert_eq!(mac.post, [UninstallPostStep::RefreshAudioUnits {}]);
+        // It is the plan Surge XT ships with on macOS, word for word.
+        let shipped = embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == "surge-xt")
+            .expect("Surge XT is shipped")
+            .uninstall;
+        for target in [InstallationKind::Standard, InstallationKind::Portable] {
+            assert_eq!(
+                surge.plan_for(Platform::MacOs, target),
+                shipped.plan_for(Platform::MacOs, target),
+                "{target:?}"
+            );
+        }
         let vendor = surge
             .plan_for(Platform::Windows, InstallationKind::Standard)
             .and_then(|plan| plan.vendor_uninstaller.as_ref())

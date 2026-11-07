@@ -91,6 +91,11 @@ uninstall-kept-surge-user-data = Ihre Patches und alles andere, was Sie mit Surg
 uninstall-kept-reaper-resource = der Ressourcenordner von REAPER mit Ihren Einstellungen, Erweiterungen und Tastenzuordnungen
 # On macOS, in the Library folder of your home folder.
 uninstall-kept-surge-settings-macos = Ihre Einstellungen für Surge XT
+# On macOS, in the Library folder of your home folder: a copy of Surge XT's
+# factory data put there by hand, which Surge XT reads instead of the one it
+# installs for everyone. Say "factory data" as in
+# uninstall-summary-surge-macos-removes.
+uninstall-kept-surge-factory-copy-macos = Ihre eigene Kopie der Werksdaten von Surge XT
 
 # Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
 uninstall-warning-sws-osara-keymap = Wenn Sie die OSARA-Tastenzuordnung verwenden, führen einige ihrer Tasten SWS-Aktionen aus. Diese Tasten funktionieren erst wieder, wenn Sie SWS erneut installieren.
@@ -294,7 +299,9 @@ wizard-uninstall-details-vendor-by-hand = Sie können { $package } selbst in den
 # language. The password window may offer Touch ID, so don't say a password
 # is the only way. The Trash line follows the package's own sentence, which
 # already says that it goes to the Trash, so it only says how to get it back.
-wizard-uninstall-details-elevated-macos = macOS fragt einmal nach Name und Passwort eines Administrators, bevor etwas entfernt wird. Es kommt in keine Sicherung; um es wieder zu haben, installieren Sie es erneut.
+# The administrator line follows the package's own sentence, which already
+# says a backup can't bring it back, so it doesn't say that again.
+wizard-uninstall-details-elevated-macos = macOS fragt einmal nach Name und Passwort eines Administrators, bevor etwas entfernt wird. Um es wieder zu haben, installieren Sie es erneut.
 wizard-uninstall-details-trash = Bis Sie den Papierkorb entleeren, können Sie es von dort wieder herausziehen.
 wizard-uninstall-details-trash-elevated-macos = Ihr Benutzerkonto darf es nicht verschieben. Deshalb fragt macOS einmal nach Name und Passwort eines Administrators, bevor etwas entfernt wird, und RABBIT legt es dann in Ihren Papierkorb. Es behält seinen bisherigen Eigentümer, deshalb bietet der Finder dafür kein „Zurücklegen“ an, und das Entleeren des Papierkorbs kann nach dem Passwort eines Administrators fragen.
 # The one row, without a checkbox, of an Uninstall list with nothing in it,
@@ -605,6 +612,7 @@ wizard-done-uninstall-trash-owner = Es behält seinen bisherigen Eigentümer, de
 wizard-done-uninstall-trash-failed = RABBIT konnte { $package } nicht in den Papierkorb legen. Deshalb hat sich daran nichts geändert ({ $error }).
 wizard-done-uninstall-trash-unclear = RABBIT hat macOS gebeten, { $path } in den Papierkorb zu legen, kann aber nicht bestätigen, dass es jetzt dort liegt. Suchen Sie { $package } im Finder im Papierkorb und in seinem Ordner. RABBIT hat dort angehalten.
 wizard-done-uninstall-admin-step-failed = Der Administratorbefehl hat bei { $path } angehalten. Von { $package } wurde deshalb nichts entfernt. RABBIT hat dort angehalten.
+wizard-done-uninstall-admin-delete-failed = Der Administratorbefehl hat bei { $path } angehalten. Davon ist jetzt womöglich nur noch ein Teil vorhanden. Sonst wurde von { $package } nichts entfernt. RABBIT hat dort angehalten.
 wizard-done-uninstall-admin-stopped = Der Administratorbefehl hat geendet, ohne zu sagen, wo er angehalten hat, und von { $package } wurde nichts entfernt. RABBIT hat dort angehalten.
 wizard-done-uninstall-partly-removed = Der Administratorbefehl hat bei { $path } angehalten. { $package } ist deshalb nur zum Teil entfernt. „Details anzeigen“ listet auf, was entfernt und was noch vorhanden ist. RABBIT hat dort angehalten.
 wizard-done-uninstall-partly-removed-unclear = Der Administratorbefehl hat geendet, ohne zu sagen, wo er angehalten hat, und { $package } ist nur zum Teil entfernt. „Details anzeigen“ listet auf, was entfernt und was noch vorhanden ist. RABBIT hat dort angehalten.

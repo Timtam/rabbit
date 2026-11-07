@@ -91,6 +91,11 @@ uninstall-kept-surge-user-data = vos patches et tout ce que vous avez enregistr�
 uninstall-kept-reaper-resource = le dossier de ressources de REAPER, avec vos réglages, extensions et raccourcis clavier
 # On macOS, in the Library folder of your home folder.
 uninstall-kept-surge-settings-macos = vos réglages de Surge XT
+# On macOS, in the Library folder of your home folder: a copy of Surge XT's
+# factory data put there by hand, which Surge XT reads instead of the one it
+# installs for everyone. Say "factory data" as in
+# uninstall-summary-surge-macos-removes.
+uninstall-kept-surge-factory-copy-macos = votre propre copie des données d'usine de Surge XT
 
 # Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
 uninstall-warning-sws-osara-keymap = Si vous utilisez les raccourcis clavier d'OSARA, certains d'entre eux lancent des actions SWS. Ces raccourcis cessent de fonctionner jusqu'à ce que vous réinstalliez SWS.
@@ -294,7 +299,9 @@ wizard-uninstall-details-vendor-by-hand = Vous pouvez désinstaller { $package }
 # language. The password window may offer Touch ID, so don't say a password
 # is the only way. The Trash line follows the package's own sentence, which
 # already says that it goes to the Trash, so it only says how to get it back.
-wizard-uninstall-details-elevated-macos = macOS demande une seule fois le nom et le mot de passe d'un administrateur, avant de supprimer quoi que ce soit. Il ne va pas dans une sauvegarde ; pour l'avoir à nouveau, il faudra le réinstaller.
+# The administrator line follows the package's own sentence, which already
+# says a backup can't bring it back, so it doesn't say that again.
+wizard-uninstall-details-elevated-macos = macOS demande une seule fois le nom et le mot de passe d'un administrateur, avant de supprimer quoi que ce soit. Pour l'avoir à nouveau, il faudra le réinstaller.
 wizard-uninstall-details-trash = Tant que vous ne videz pas la Corbeille, vous pouvez l'en faire glisser pour le récupérer.
 wizard-uninstall-details-trash-elevated-macos = Votre compte ne peut pas le déplacer : macOS demande donc une seule fois le nom et le mot de passe d'un administrateur, avant de supprimer quoi que ce soit, puis RABBIT le place dans votre Corbeille. Il garde le propriétaire qu'il avait, le Finder ne propose donc pas « Remettre » pour lui, et vider la Corbeille peut demander le mot de passe d'un administrateur.
 # The one row, without a checkbox, of an Uninstall list with nothing in it,
@@ -605,6 +612,7 @@ wizard-done-uninstall-trash-owner = Il garde le propriétaire qu'il avait, le Fi
 wizard-done-uninstall-trash-failed = RABBIT n'a pas pu placer { $package } dans la Corbeille, rien n'a donc changé pour lui ({ $error }).
 wizard-done-uninstall-trash-unclear = RABBIT a demandé à macOS de placer { $path } dans la Corbeille, mais ne peut pas confirmer qu'il s'y trouve maintenant. Cherchez { $package } dans la Corbeille et dans son dossier, dans le Finder. RABBIT s'est arrêté là.
 wizard-done-uninstall-admin-step-failed = La commande administrateur s'est arrêtée à { $path }, rien de { $package } n'a donc été supprimé. RABBIT s'est arrêté là.
+wizard-done-uninstall-admin-delete-failed = La commande administrateur s'est arrêtée à { $path }, qui n'est peut-être plus là qu'en partie. Rien d'autre de { $package } n'a été supprimé. RABBIT s'est arrêté là.
 wizard-done-uninstall-admin-stopped = La commande administrateur s'est terminée sans indiquer où elle s'est arrêtée, et rien de { $package } n'a été supprimé. RABBIT s'est arrêté là.
 wizard-done-uninstall-partly-removed = La commande administrateur s'est arrêtée à { $path }, { $package } n'est donc supprimé qu'en partie. « Afficher les détails » indique ce qui a été supprimé et ce qui reste. RABBIT s'est arrêté là.
 wizard-done-uninstall-partly-removed-unclear = La commande administrateur s'est terminée sans indiquer où elle s'est arrêtée, et { $package } n'est supprimé qu'en partie. « Afficher les détails » indique ce qui a été supprimé et ce qui reste. RABBIT s'est arrêté là.

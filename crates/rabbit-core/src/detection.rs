@@ -1080,8 +1080,43 @@ fn detect_surge_xt_vendor_files(
             ],
         });
     }
-    let bundle = surge_xt_system_vst3_bundle(platform)?;
-    let version = surge_xt_version_from_bundle(&bundle)?;
+    surge_xt_bundle_detection(spec, platform, surge_xt_system_vst3_bundle(platform)?)
+}
+
+/// Surge XT as its system VST3 `bundle`, which exists, shows it.
+///
+/// On a Mac a bundle whose version can't be read still counts as
+/// installed. The version is only in its `Contents/Info.plist`, and the
+/// macOS uninstall deletes this VST3 last, with `rm -R`, which unlinks
+/// every file it can before it fails on a folder: a removal stopped there
+/// may have taken the plist with it. The bundle is still Surge's, so it
+/// stays detected and the uninstall is offered again, which is why the
+/// plan removes it last. On Windows nothing changes: no version, no
+/// detection.
+fn surge_xt_bundle_detection(
+    spec: &PackageSpec,
+    platform: Platform,
+    bundle: PathBuf,
+) -> Option<ComponentDetection> {
+    let Some(version) = surge_xt_version_from_bundle(&bundle) else {
+        if !matches!(platform, Platform::MacOs) {
+            return None;
+        }
+        return Some(ComponentDetection {
+            package_id: spec.id.clone(),
+            display_name: spec.display_name.clone(),
+            installed: true,
+            version: None,
+            detector: "surge-xt-vendor-vst3-bundle-unversioned".to_string(),
+            confidence: Confidence::Low,
+            files: vec![bundle],
+            notes: vec![
+                "The Surge XT VST3 bundle is there, but RABBIT couldn't read its version from \
+                 it. It may be partly removed."
+                    .to_string(),
+            ],
+        });
+    };
     Some(ComponentDetection {
         package_id: spec.id.clone(),
         display_name: spec.display_name.clone(),
@@ -1687,6 +1722,36 @@ mod tests {
                 .join("Surge XT.vst3"),
         ];
         assert_eq!(candidates, expected);
+    }
+
+    /// A Surge XT VST3 bundle that a stopped macOS removal emptied, its
+    /// Info.plist gone with the rest, is still Surge XT on a Mac, with no
+    /// version: the uninstall is offered again for what is left. On
+    /// Windows a bundle with no version is still not enough.
+    #[test]
+    fn a_surge_xt_vst3_bundle_with_no_version_is_still_detected_on_a_mac() {
+        let dir = tempdir().unwrap();
+        let bundle = dir.path().join("Surge XT.vst3");
+        fs::create_dir_all(bundle.join("Contents").join("MacOS")).unwrap();
+
+        let mac_spec = package_specs_by_id(Platform::MacOs)
+            .remove(PACKAGE_SURGE_XT)
+            .unwrap();
+        let mac = super::surge_xt_bundle_detection(&mac_spec, Platform::MacOs, bundle.clone())
+            .expect("a Mac still has Surge XT");
+        assert!(mac.installed);
+        assert_eq!(mac.version, None);
+        assert_eq!(mac.detector, "surge-xt-vendor-vst3-bundle-unversioned");
+        assert_eq!(mac.confidence, crate::model::Confidence::Low);
+        assert_eq!(mac.files, std::slice::from_ref(&bundle));
+
+        let windows_spec = package_specs_by_id(Platform::Windows)
+            .remove(PACKAGE_SURGE_XT)
+            .unwrap();
+        assert_eq!(
+            super::surge_xt_bundle_detection(&windows_spec, Platform::Windows, bundle),
+            None
+        );
     }
 
     #[test]

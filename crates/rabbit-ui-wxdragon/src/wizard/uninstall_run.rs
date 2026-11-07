@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use rabbit_core::localization::Localizer;
 use rabbit_core::model::{InstallationKind, Platform};
 use rabbit_core::package::PACKAGE_REAPER;
+use rabbit_core::package::uninstall::UninstallBackup;
 use rabbit_core::preflight::{
     PreflightCheck, PreflightReport, PreflightStatus, REAPER_PROCESS_CHECK,
 };
@@ -769,7 +770,16 @@ fn item_reasons(
             refused_by_macos,
             ..
         } => {
+            // `rm -R -f` deletes all it can inside a tree before it fails,
+            // so a tree deleted for good that it stopped at may be half
+            // gone. REAPER's move is one rename: its app went or it didn't.
+            let deleted_for_good = report.plan.item(&item.package_id).is_some_and(|planned| {
+                planned.needs_administrator() && planned.backup != UninstallBackup::ToTrash
+            });
             let (key, shown) = match (path, *ended_unclearly, gone.is_empty()) {
+                (Some(path), _, true) if deleted_for_good => {
+                    ("wizard-done-uninstall-admin-delete-failed", Some(path))
+                }
                 (Some(path), _, true) => ("wizard-done-uninstall-admin-step-failed", Some(path)),
                 (Some(path), _, false) => ("wizard-done-uninstall-partly-removed", Some(path)),
                 (None, true, true) => ("wizard-done-uninstall-admin-stopped", None),

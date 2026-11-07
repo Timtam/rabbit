@@ -123,8 +123,7 @@ fn plan_item(
     // REAPER's plan says what removing the package means. Only a plan that
     // removes something is out of reach here. One that removes nothing,
     // manual or not_supported, holds whatever the target: the JAWS DLLs'
-    // manual steps are the same from a portable REAPER, and Surge XT can't
-    // be uninstalled from the standard REAPER either.
+    // manual steps are the same from a portable REAPER.
     let (plan, needs_standard_target) =
         if spec.requires_standard_install && input.target == InstallationKind::Portable {
             match spec

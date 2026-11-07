@@ -84,4 +84,4 @@ pub use registry::{
 pub use signature::{SignatureVerdict, verify_executable_signature};
 pub use timed_process::{NsisInPlaceArgument, RunningCommand, TimedCommand, TimedRunOutcome};
 pub use trash::{TrashError, TrashErrorKind, move_to_trash};
-pub use volume::{available_space, same_volume};
+pub use volume::{available_space, same_volume, volume_id};

@@ -11,6 +11,7 @@
 //! careful case: a volume they can't compare counts as another volume, and
 //! space they can't measure isn't assumed to be there.
 
+use std::io;
 use std::path::Path;
 
 /// Whether `left` and `right`, which must both exist, are on the same
@@ -28,6 +29,18 @@ pub fn same_volume(left: &Path, right: &Path) -> Option<bool> {
 /// the blocks only the administrator may use.
 pub fn available_space(path: &Path) -> Option<u64> {
     platform_available_space(path)
+}
+
+/// The volume `path` itself is on (`st_dev`), read with `lstat`, so a link
+/// is never followed. A folder another volume is mounted on reads as that
+/// volume, unlike the folder holding it.
+///
+/// The macOS administrator command deletes with `rm -R -x`, which stays out
+/// of a volume mounted below the folder it is given but not out of one
+/// mounted on that folder itself: comparing a folder's volume with its
+/// parent's tells the two apart. Unix only; elsewhere `Unsupported`.
+pub fn volume_id(path: &Path) -> io::Result<u64> {
+    platform_volume_id(path)
 }
 
 #[cfg(windows)]
@@ -74,6 +87,21 @@ fn platform_same_volume(_left: &Path, _right: &Path) -> Option<bool> {
     None
 }
 
+#[cfg(unix)]
+fn platform_volume_id(path: &Path) -> io::Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+
+    Ok(std::fs::symlink_metadata(path)?.dev())
+}
+
+#[cfg(not(unix))]
+fn platform_volume_id(_path: &Path) -> io::Result<u64> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "only Unix names the volume a path is on by a device number",
+    ))
+}
+
 #[cfg(windows)]
 fn platform_available_space(path: &Path) -> Option<u64> {
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
@@ -118,7 +146,26 @@ fn platform_available_space(_path: &Path) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{available_space, same_volume};
+    use super::{available_space, same_volume, volume_id};
+
+    #[test]
+    fn a_folder_and_its_parent_share_a_volume_id_only_on_unix() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = dir.path().join("inner");
+        std::fs::create_dir(&inner).unwrap();
+        if cfg!(unix) {
+            assert_eq!(volume_id(&inner).unwrap(), volume_id(dir.path()).unwrap());
+            assert_eq!(
+                volume_id(&dir.path().join("missing")).unwrap_err().kind(),
+                std::io::ErrorKind::NotFound
+            );
+        } else {
+            assert_eq!(
+                volume_id(&inner).unwrap_err().kind(),
+                std::io::ErrorKind::Unsupported
+            );
+        }
+    }
 
     #[test]
     fn a_folder_is_on_its_own_volume_and_has_some_room() {

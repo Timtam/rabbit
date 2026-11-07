@@ -76,7 +76,7 @@ use crate::detection::{default_standard_installation, detect_components};
 use crate::error::{RabbitError, Result};
 use crate::lock::{acquire_package_install_lock, default_package_install_lock_path};
 use crate::model::{ComponentDetection, InstallationKind, Platform};
-use crate::package::uninstall::UninstallPostStep;
+use crate::package::uninstall::{UninstallBackup, UninstallPostStep};
 use crate::package::{PACKAGE_REAPER, PackageSpec, builtin_package_specs};
 use crate::preflight::{
     PreflightCheck, PreflightStatus, REAPER_PROCESS_CHECK, RunningProcess,
@@ -2143,11 +2143,25 @@ pub(super) fn english_message(item: &UninstallReportItem, plan: &UninstallPlan) 
             refused_by_macos,
             detail,
         } => {
+            // `rm -R -f` deletes all it can inside a tree before it fails on
+            // a folder, so the tree the command stopped at while deleting it
+            // for good may be half gone, though it is still there. REAPER's
+            // move is one rename: its app went or it didn't.
+            let partly_there = gone.is_empty()
+                && path.is_some()
+                && plan.item(&item.package_id).is_some_and(|planned| {
+                    planned.needs_administrator() && planned.backup != UninstallBackup::ToTrash
+                });
             // Where it stopped only when its step was this package's, and
             // "without saying" only when the command didn't say: otherwise it
             // stopped at another package's step, or ran to its end, and this
             // is still there all the same.
             let mut message = match (path, *ended_unclearly, left.first()) {
+                (Some(path), _, _) if partly_there => format!(
+                    "The administrator command stopped at {}, which may now be only partly \
+                     there. Nothing else of {name} was removed.",
+                    path.display()
+                ),
                 (Some(path), _, _) => format!(
                     "The administrator command stopped at {}, so {name} isn't fully removed.",
                     path.display()
@@ -2165,10 +2179,10 @@ pub(super) fn english_message(item: &UninstallReportItem, plan: &UninstallPlan) 
                     format!("The administrator command ran, and {name} isn't fully removed.")
                 }
             };
-            if gone.is_empty() {
-                message.push_str(&format!(" Nothing of {name} was removed."));
-            } else {
+            if !gone.is_empty() {
                 message.push_str(&format!(" Removed: {}.", path_list(gone)));
+            } else if !partly_there {
+                message.push_str(&format!(" Nothing of {name} was removed."));
             }
             if !left.is_empty() {
                 message.push_str(&format!(" Still there: {}.", path_list(left)));

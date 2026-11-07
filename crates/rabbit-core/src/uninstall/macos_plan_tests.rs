@@ -103,6 +103,26 @@ pub(super) fn extension() -> PackageSpec {
     )
 }
 
+/// The trees Surge XT's shipped macOS plan deletes, below `/`, in its
+/// order: the apps first, so that App Management refusing root stops the
+/// command before any plug-in goes; the VST3 that detection finds Surge by
+/// last, so that a command stopped anywhere leaves Surge detected and
+/// offered for removal again. Surge's own installer puts each there
+/// (make_installer.sh and its postinstall script).
+pub(super) const SURGE_XT_TREES: [&str; 11] = [
+    "Applications/Surge XT.app",
+    "Applications/Surge XT Effects.app",
+    "Library/Audio/Plug-Ins/Components/Surge XT.component",
+    "Library/Audio/Plug-Ins/Components/Surge XT Effects.component",
+    "Library/Audio/Plug-Ins/CLAP/Surge XT.clap",
+    "Library/Audio/Plug-Ins/CLAP/Surge XT Effects.clap",
+    "Library/Audio/Plug-Ins/LV2/Surge XT.lv2",
+    "Library/Audio/Plug-Ins/LV2/Surge XT Effects.lv2",
+    "Library/Application Support/Surge XT",
+    "Library/Audio/Plug-Ins/VST3/Surge XT Effects.vst3",
+    "Library/Audio/Plug-Ins/VST3/Surge XT.vst3",
+];
+
 /// A temporary folder holding a resource folder, a stand-in for `/` with
 /// REAPER.app in its Applications folder, and roots that know them all.
 pub(super) struct MacFixture {
@@ -141,6 +161,29 @@ impl MacFixture {
             app,
             roots,
         }
+    }
+
+    /// The shipped Surge XT's eleven trees below the stand-in for `/`, in
+    /// the order its macOS plan names them.
+    pub(super) fn surge_xt_trees(&self) -> Vec<PathBuf> {
+        SURGE_XT_TREES
+            .iter()
+            .map(|tree| join(&self.system, tree))
+            .collect()
+    }
+
+    /// The shipped Surge XT's eleven trees as real folders, each holding a
+    /// file, with the four plug-in format folders its installer fills.
+    /// Returns them in the plan's order.
+    pub(super) fn install_surge_xt(&self) -> Vec<PathBuf> {
+        for folder in ["Components", "CLAP", "LV2", "VST3"] {
+            fs::create_dir_all(join(&self.system, "Library/Audio/Plug-Ins").join(folder)).unwrap();
+        }
+        let trees = self.surge_xt_trees();
+        for tree in &trees {
+            write(&join(tree, "Contents/data"), b"surge");
+        }
+        trees
     }
 
     /// Surge's three trees, as real folders.

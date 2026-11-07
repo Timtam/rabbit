@@ -671,8 +671,11 @@ fn a_refused_step_leaves_surge_partly_removed_and_stops_the_run_there() {
     assert!(report.has_failures());
 }
 
+/// Root refused at Surge's first tree: nothing after it was touched, but
+/// `rm -R -f` deletes all it can inside a tree before it fails, so the
+/// message never claims that tree is whole.
 #[test]
-fn a_refusal_at_surges_first_step_removes_nothing_of_it() {
+fn a_refusal_at_surges_first_step_removes_nothing_after_it() {
     let mac = Mac::new();
     let run = Run::new(&mac, every_package(), mac.objects(owned_by_me()))
         .with_shell(|shell| shell.failing_at(1));
@@ -686,8 +689,14 @@ fn a_refusal_at_surges_first_step_removes_nothing_of_it() {
         UninstallMessage::AdministratorStepFailed { path: Some(path), gone, .. }
             if *path == mac.surge_tree(0) && gone.is_empty()
     ));
+    let stopped_at = format!(
+        "The administrator command stopped at {}, which may now be only partly there. Nothing \
+         else of surge was removed.",
+        mac.surge_tree(0).display()
+    );
+    assert!(surge.message.starts_with(&stopped_at), "{}", surge.message);
     assert!(
-        surge.message.contains("Nothing of surge was removed"),
+        !surge.message.contains("Nothing of surge"),
         "{}",
         surge.message
     );

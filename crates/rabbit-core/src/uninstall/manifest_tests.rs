@@ -2,9 +2,11 @@
 //! what each package RABBIT can uninstall would remove and keep, the
 //! warnings it shows, and the copies it refuses. Planning never removes
 //! anything, and every folder here is a fake one; the CLAP folder too.
-//! REAPER on macOS is planned on a stand-in Mac, where every fact macOS
-//! would give is handed in, and its dry runs and its one real run move
-//! nothing but a temporary app into a temporary Trash.
+//! REAPER and Surge XT on macOS are planned on a stand-in Mac, where every
+//! fact macOS would give is handed in. Their dry runs give root nothing,
+//! and their real runs move a temporary app into a temporary Trash and
+//! carry root's steps out on temporary folders, through a stand-in for the
+//! administrator command that never asks for a password.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -15,21 +17,23 @@ use std::time::SystemTime;
 use rabbit_platform::{ShellCommand, ShellStep};
 
 use super::admin_batch::{
-    AdministratorStepKind, AdministratorStepRecord, AdministratorStepVerdict, MV, PGREP, TEST,
-    administrator_steps, prepare_package, trash_name,
+    AdministratorStepKind, AdministratorStepRecord, AdministratorStepVerdict, MV, PGREP, PKGUTIL,
+    RM, TEST, administrator_steps, prepare_package, trash_name,
 };
 use super::execute::{UninstallEnvironment, execute_uninstall_in};
 use super::macos_plan_tests::{
-    DISK, MacFixture, OneVolume, join, my_trash, owned_by_me, owned_by_root, snapshot,
+    DISK, MacFixture, OneVolume, SURGE_XT_TREES, join, link_folder, my_trash, owned_by_me,
+    owned_by_root, snapshot,
 };
 use super::tests::{Fixture, FoundAt, detection, installed, write};
 use super::{
-    ByHandReason, FakeMacosObjects, KeptReason, MacosObjects, NoAdministratorShell,
-    NoElevatedHelper, NoMacosObjects, NothingListed, ObjectFacts, ObjectProbe,
-    PlannedRegistryCleanup, Removability, RemovalReason, RemovalRoute, TrashFolderFacts,
-    UNINSTALL_NOT_YET_KEY, UninstallMessage, UninstallNote, UninstallPlan, UninstallPlanInput,
-    UninstallPlanItem, UninstallReport, UninstallRequest, UninstallRoots, UninstallStatus,
-    UninstallWarning, VendorLookup, VendorRefusal, build_uninstall_plan,
+    AdministratorShell, ByHandReason, FakeMacosObjects, KeptReason, MacosObjects,
+    NoAdministratorShell, NoElevatedHelper, NoMacosObjects, NothingListed, ObjectFacts,
+    ObjectProbe, PathRefusal, PlannedRegistryCleanup, RecordingAdministratorShell, Removability,
+    RemovalReason, RemovalRoute, TrashFolderFacts, UNINSTALL_NOT_YET_KEY, UninstallMessage,
+    UninstallNote, UninstallPlan, UninstallPlanInput, UninstallPlanItem, UninstallProblem,
+    UninstallReport, UninstallRequest, UninstallRoots, UninstallStatus, UninstallWarning,
+    VendorLookup, VendorRefusal, build_uninstall_plan,
 };
 use crate::cancel::CancelToken;
 use crate::detection::detect_component_with_probes;
@@ -238,7 +242,7 @@ fn sorted(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
 type Expected<'a> = &'a [(&'a str, Option<UninstallStrategy>)];
 
 /// Which shipped packages RABBIT can uninstall, and how, on each platform
-/// and target. The packages whose turn hasn't come say so, and the two RABBIT
+/// and target. None waits for a later version any more, and the two RABBIT
 /// leaves to the user say how to do it by hand.
 #[test]
 fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
@@ -293,24 +297,47 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
         ),
     ];
     // On macOS one plan serves a standard and a portable REAPER: its app
-    // goes to the Trash wherever it is.
-    let macos = [
+    // goes to the Trash wherever it is. Surge XT serves the whole computer,
+    // as on Windows, so only the standard REAPER removes it.
+    let macos_standard = [
         (PACKAGE_REAPER, remove_files),
         (PACKAGE_OSARA, remove_files),
         (PACKAGE_SWS, remove_files),
         (PACKAGE_REAPACK, remove_files),
         (PACKAGE_REAKONTROL, remove_files),
-        (PACKAGE_SURGE_XT, not_supported),
+        (PACKAGE_SURGE_XT, remove_files),
+        (LANGPACK_ES, remove_files),
+        (LANGPACK_DE, remove_files),
+        (LANGPACK_FR, remove_files),
+    ];
+    let macos_portable = [
+        (PACKAGE_REAPER, remove_files),
+        (PACKAGE_OSARA, remove_files),
+        (PACKAGE_SWS, remove_files),
+        (PACKAGE_REAPACK, remove_files),
+        (PACKAGE_REAKONTROL, remove_files),
+        (PACKAGE_SURGE_XT, None),
         (LANGPACK_ES, remove_files),
         (LANGPACK_DE, remove_files),
         (LANGPACK_FR, remove_files),
     ];
     let cases = cases.iter().copied().chain([
-        (Platform::MacOs, InstallationKind::Standard, &macos[..]),
-        (Platform::MacOs, InstallationKind::Portable, &macos[..]),
+        (
+            Platform::MacOs,
+            InstallationKind::Standard,
+            &macos_standard[..],
+        ),
+        (
+            Platform::MacOs,
+            InstallationKind::Portable,
+            &macos_portable[..],
+        ),
     ]);
 
-    let fixture = Fixture::new();
+    // Surge XT's macOS trees are planned below an empty temporary system
+    // root, never the host's real /.
+    let mut fixture = Fixture::new();
+    fixture.roots.system_root = fixture.dir.path().join("system");
     for (platform, target, expected) in cases {
         let shipped = Shipped::new(&fixture, platform);
         let plan = shipped.plan_with(&[], None, target, false);
@@ -360,22 +387,41 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
         item(&plan, PACKAGE_SURGE_XT).removability,
         Removability::NeedsStandardTarget
     );
-    // On macOS, Surge XT waits for a later version.
+    assert_eq!(
+        item(&plan, PACKAGE_APP2CLAP).removability,
+        Removability::NeedsStandardTarget
+    );
+
+    // On macOS no package waits for a later version any more, on either
+    // target. A portable REAPER can't remove Surge XT, as on Windows.
     let macos = Shipped::new(&fixture, Platform::MacOs);
     let everything: Vec<ComponentDetection> = macos
         .specs
         .iter()
         .map(|spec| detection(&spec.id, true))
         .collect();
-    let macos_plan = macos.plan(&everything, None);
-    assert_eq!(
-        item(&macos_plan, PACKAGE_SURGE_XT).removability,
-        Removability::NotSupported {
-            note_key: UNINSTALL_NOT_YET_KEY.to_string()
+    for target in [InstallationKind::Standard, InstallationKind::Portable] {
+        let macos_plan = macos.plan_with(&everything, None, target, false);
+        for planned in &macos_plan.items {
+            assert_ne!(
+                planned.strategy, not_supported,
+                "{target:?}: {}",
+                planned.package_id
+            );
+            assert!(
+                !matches!(
+                    &planned.removability,
+                    Removability::NotSupported { note_key } if note_key == UNINSTALL_NOT_YET_KEY
+                ),
+                "{target:?}: {} {:?}",
+                planned.package_id,
+                planned.removability
+            );
         }
-    );
+    }
+    let macos_portable = macos.plan_with(&everything, None, InstallationKind::Portable, false);
     assert_eq!(
-        item(&plan, PACKAGE_APP2CLAP).removability,
+        item(&macos_portable, PACKAGE_SURGE_XT).removability,
         Removability::NeedsStandardTarget
     );
 }
@@ -2155,4 +2201,1220 @@ fn a_run_that_changes_nothing_leaves_no_folder_where_there_was_none() {
     assert!(!mac.resource.exists(), "the lock's folders went again");
     assert!(mac.resource.parent().unwrap().is_dir());
     assert!(objects.trashed().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Surge XT on macOS, from the shipped plan, on a stand-in Mac.
+// ---------------------------------------------------------------------------
+
+/// The installer receipts Surge XT's macOS installers leave, one for each
+/// of their packages (make_installer.sh), in the order its shipped plan
+/// names them. First the eleven of today's installer. Then the seven that
+/// Surge XT 1.0.0 and 1.0.1, and the 2021 nightlies, named
+/// com.surge-synth-team.*, with no CLAP or LV2 package yet: Surge renamed
+/// them to org. in #5867 (2022-02-07), and macOS keeps a receipt with
+/// another ID after an upgrade, so a Mac that ever had 1.0.x still lists
+/// them. Root forgets only the ones the installer lists.
+const SURGE_RECEIPTS: [&str; 18] = [
+    "org.surge-synth-team.surge-xt.vst3.pkg",
+    "org.surge-synth-team.surge-xt.component.pkg",
+    "org.surge-synth-team.surge-xt.clap.pkg",
+    "org.surge-synth-team.surge-xt.lv2.pkg",
+    "org.surge-synth-team.surge-xt.app.pkg",
+    "org.surge-synth-team.surge-xt.resources.pkg",
+    "org.surge-synth-team.surge-xt-fx.vst3.pkg",
+    "org.surge-synth-team.surge-xt-fx.component.pkg",
+    "org.surge-synth-team.surge-xt-fx.clap.pkg",
+    "org.surge-synth-team.surge-xt-fx.lv2.pkg",
+    "org.surge-synth-team.surge-xt-fx.app.pkg",
+    "com.surge-synth-team.surge-xt.vst3.pkg",
+    "com.surge-synth-team.surge-xt.component.pkg",
+    "com.surge-synth-team.surge-xt.app.pkg",
+    "com.surge-synth-team.surge-xt.resources.pkg",
+    "com.surge-synth-team.surge-xt-fx.vst3.pkg",
+    "com.surge-synth-team.surge-xt-fx.component.pkg",
+    "com.surge-synth-team.surge-xt-fx.app.pkg",
+];
+
+/// Another program's installer receipt, which removing Surge XT never
+/// touches.
+const OTHER_RECEIPT: &str = "org.example.other.pkg";
+
+/// The programs Surge XT's macOS plan names: its two apps, and the
+/// headless surge-xt-cli its build copies into Surge XT.app/Contents/MacOS
+/// (src/surge-xt/CMakeLists.txt, the if(APPLE) block), which plays Surge
+/// from the factory data root deletes.
+const SURGE_PROGRAMS: [&str; 3] = ["Surge XT", "Surge XT Effects", "surge-xt-cli"];
+
+/// What root's first step looks for: Surge XT's programs, and every
+/// REAPER, which may have Surge's plug-ins loaded.
+const SURGE_PGREP: &str = "Surge XT|Surge XT Effects|surge-xt-cli|REAPER|reaper64";
+
+/// One tree as a manifest names it: its path, the ending and the part its
+/// name must have, and the bundle ID it must carry.
+type TreeFields<'a> = (String, Option<&'a str>, Option<&'a str>, Option<&'a str>);
+
+/// Turns something on a stand-in Mac into a link: returns the path the
+/// administrator guard then refuses, why, and the folder the link leads to.
+type MakeLink = dyn Fn(&SurgeMac) -> (PathBuf, PathRefusal, PathBuf);
+
+/// A stand-in Mac with the shipped Surge XT installed: its eleven trees
+/// and REAPER.app below the stand-in for `/`, a file in each of the four
+/// folders of the user's that Surge's plan keeps, a folder standing in for
+/// the user's Trash, and RABBIT's receipt listing Surge XT and REAPER.
+struct SurgeMac {
+    fixture: MacFixture,
+    /// Surge's trees, in its plan's order.
+    trees: Vec<PathBuf>,
+    trash: PathBuf,
+}
+
+impl SurgeMac {
+    fn new() -> Self {
+        let fixture = MacFixture::new();
+        let trees = fixture.install_surge_xt();
+        let trash = fixture.dir.path().join("Trash");
+        fs::create_dir(&trash).unwrap();
+        let mac = Self {
+            fixture,
+            trees,
+            trash,
+        };
+        for (folder, _) in mac.kept() {
+            write(&folder.join("mine.txt"), b"mine");
+        }
+        let mut state = InstallState::default();
+        for id in [PACKAGE_SURGE_XT, PACKAGE_REAPER] {
+            state.packages.insert(
+                id.to_string(),
+                PackageReceipt {
+                    id: id.to_string(),
+                    version: None,
+                    source_url: None,
+                    source_sha256: None,
+                    variant: None,
+                    channel: None,
+                    installed_files: Vec::new(),
+                    installed_at: None,
+                    rabbit_version: None,
+                    architecture: None,
+                    vendor_added_files: Vec::new(),
+                },
+            );
+        }
+        crate::receipt::save_install_state(&mac.fixture.resource, &state).unwrap();
+        mac
+    }
+
+    /// `/Library/Audio/Plug-Ins/VST3/Surge XT.vst3`, which detection finds
+    /// Surge XT by.
+    fn anchor(&self) -> &Path {
+        self.trees.last().unwrap()
+    }
+
+    /// The trees still there, in the plan's order.
+    fn left(&self) -> Vec<PathBuf> {
+        self.trees
+            .iter()
+            .filter(|tree| tree.exists())
+            .cloned()
+            .collect()
+    }
+
+    /// The folders of the user's that Surge's plan keeps, with their notes.
+    fn kept(&self) -> Vec<(PathBuf, &'static str)> {
+        let documents = self.fixture.roots.documents.clone().unwrap();
+        let support = join(
+            self.fixture.roots.home.as_ref().unwrap(),
+            "Library/Application Support",
+        );
+        vec![
+            (documents.join("Surge XT"), "uninstall-kept-surge-user-data"),
+            (
+                join(&documents, "Surge Synth Team/Surge XT"),
+                "uninstall-kept-surge-user-data",
+            ),
+            (
+                join(&support, "Surge Synth Team/Surge XT"),
+                "uninstall-kept-surge-settings-macos",
+            ),
+            (
+                support.join("Surge XT"),
+                "uninstall-kept-surge-factory-copy-macos",
+            ),
+        ]
+    }
+
+    /// What macOS says: REAPER.app described by `app`, the user's Trash a
+    /// real folder of theirs that moves go into, and the installer listing
+    /// all eighteen of Surge's receipts and another program's.
+    fn objects(&self, app: ObjectFacts) -> FakeMacosObjects {
+        FakeMacosObjects::new()
+            .with_object(&self.fixture.app, app)
+            .with_trash(TrashFolderFacts {
+                path: self.trash.clone(),
+                ..my_trash()
+            })
+            .with_trash_bin(&self.trash)
+            .with_receipts(SURGE_RECEIPTS.into_iter().chain([OTHER_RECEIPT]))
+    }
+
+    /// What detection finds now: Surge XT whenever its VST3 bundle is
+    /// there, as its own probe does on a Mac, even once a stopped removal
+    /// took the bundle's Info.plist and with it its version; and REAPER by
+    /// its app.
+    fn installed_now(&self) -> Vec<ComponentDetection> {
+        let mut ids = Vec::new();
+        if self.anchor().exists() {
+            ids.push(PACKAGE_SURGE_XT);
+        }
+        if self.fixture.app.exists() {
+            ids.push(PACKAGE_REAPER);
+        }
+        installed(&ids)
+    }
+
+    /// Everything in the user's Documents and home folders, with each
+    /// file's contents.
+    fn users(&self) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+        let mut found = snapshot(self.fixture.roots.documents.as_ref().unwrap());
+        found.extend(snapshot(self.fixture.roots.home.as_ref().unwrap()));
+        found
+    }
+
+    /// Everything a run may change: the stand-in for `/`, the Trash, the
+    /// user's folders and RABBIT's receipt.
+    fn state(&self) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+        let mut found = snapshot(&self.fixture.system);
+        found.extend(snapshot(&self.trash));
+        found.extend(self.users());
+        let receipt = crate::receipt::receipt_path(&self.fixture.resource);
+        found.insert(receipt.clone(), fs::read(&receipt).ok());
+        found
+    }
+
+    fn receipt(&self) -> InstallState {
+        crate::receipt::load_install_state(&self.fixture.resource)
+            .unwrap()
+            .expect("RABBIT's receipt is there")
+    }
+}
+
+/// One engine run of the shipped macOS packages `ids` on `mac`, for a
+/// `target`, with `objects` answering for macOS and `shell` standing in for
+/// the administrator command. Detection finds what is there, before the
+/// run and after it, as on a Mac, and no program is running.
+fn run_on_surge_mac(
+    mac: &SurgeMac,
+    ids: &[&str],
+    target: InstallationKind,
+    objects: &dyn MacosObjects,
+    shell: &dyn AdministratorShell,
+    remove_settings: bool,
+    dry_run: bool,
+) -> UninstallReport {
+    let specs = builtin_package_specs(Platform::MacOs);
+    let detect = || Ok(mac.installed_now());
+    let reapers = Vec::<RunningProcess>::new;
+    let named = |_: &[String]| Vec::new();
+    let app = mac.fixture.app.clone();
+    execute_uninstall_in(
+        &UninstallRequest {
+            resource_path: mac.fixture.resource.clone(),
+            platform: Platform::MacOs,
+            package_ids: ids.iter().map(ToString::to_string).collect(),
+            remove_settings,
+            dry_run,
+            target_app_path: Some(app.clone()),
+            target: Some(target),
+        },
+        &UninstallEnvironment {
+            specs: &specs,
+            roots: &mac.fixture.roots,
+            target,
+            target_app_path: Some(app),
+            detect: &detect,
+            reaper_processes: &reapers,
+            named_processes: &named,
+            volumes: &OneVolume,
+            installed_programs: None,
+            vendor_lookup: &NothingListed,
+            elevated_helper: &NoElevatedHelper,
+            macos_objects: objects,
+            administrator_shell: shell,
+        },
+        &ProgressReporter::noop(),
+        &CancelToken::new(),
+    )
+    .unwrap()
+}
+
+/// The steps root is given for Surge XT, word for word: pgrep for every
+/// program that must be closed, one `rm -R -f -x` for each of `trees`, in
+/// order, then one `pkgutil --forget` for each of `receipts`, whose failure
+/// doesn't stop the command.
+fn surge_steps(trees: &[PathBuf], receipts: &[&str]) -> Vec<ShellStep> {
+    let command =
+        |program: &str, arguments: &[&str]| ShellCommand::new(program, arguments.iter().copied());
+    let mut steps = vec![ShellStep::RunExpectingNoMatch(command(
+        PGREP,
+        &["-x", "-i", "--", SURGE_PGREP],
+    ))];
+    steps.extend(
+        trees
+            .iter()
+            .map(|tree| ShellStep::Run(command(RM, &["-R", "-f", "-x", &text(tree)]))),
+    );
+    steps.extend(
+        receipts
+            .iter()
+            .map(|id| ShellStep::RunIgnoringFailure(command(PKGUTIL, &["--forget", id]))),
+    );
+    steps
+}
+
+/// The same steps as the report records them, each with `verdict`.
+fn surge_records(
+    trees: &[PathBuf],
+    receipts: &[&str],
+    verdict: AdministratorStepVerdict,
+) -> Vec<AdministratorStepRecord> {
+    let record = |package_id: Option<&str>, kind: AdministratorStepKind, target: String| {
+        AdministratorStepRecord {
+            package_id: package_id.map(str::to_string),
+            kind,
+            target,
+            destination: None,
+            verdict,
+        }
+    };
+    let mut records = vec![record(
+        None,
+        AdministratorStepKind::ProgramsClosed,
+        SURGE_PGREP.replace('|', ", "),
+    )];
+    records.extend(trees.iter().map(|tree| {
+        record(
+            Some(PACKAGE_SURGE_XT),
+            AdministratorStepKind::Delete,
+            text(tree),
+        )
+    }));
+    records.extend(receipts.iter().map(|id| {
+        record(
+            Some(PACKAGE_SURGE_XT),
+            AdministratorStepKind::Forget,
+            id.to_string(),
+        )
+    }));
+    records
+}
+
+/// Surge XT's macOS receipts and another program's, as a listed set.
+fn every_receipt() -> std::collections::BTreeSet<String> {
+    SURGE_RECEIPTS
+        .into_iter()
+        .chain([OTHER_RECEIPT])
+        .map(str::to_string)
+        .collect()
+}
+
+/// The shipped macOS plan for Surge XT, which has no uninstaller of its
+/// own there: root deletes its eleven bundles and folders for good, the
+/// apps first and the VST3 detection finds it by last, forgets the
+/// installer receipts of today's Surge and of Surge XT 1.0, and the Audio
+/// Unit list is read again; its patches and settings stay. One plan for
+/// every target, as a portable REAPER is turned away by
+/// `requires_standard_install`. Windows keeps Surge's own uninstaller.
+#[test]
+fn surge_xts_shipped_macos_plan_deletes_its_bundles_as_administrator_and_windows_keeps_its_own() {
+    let spec = embedded_package_manifest()
+        .packages
+        .into_iter()
+        .find(|spec| spec.id == PACKAGE_SURGE_XT)
+        .expect("Surge XT is shipped");
+    assert!(spec.requires_standard_install);
+    let surge = spec.uninstall;
+
+    let mac = surge
+        .plan_for(Platform::MacOs, InstallationKind::Standard)
+        .expect("Surge XT on macOS has a plan");
+    let portable = surge
+        .plan_for(Platform::MacOs, InstallationKind::Portable)
+        .expect("the plan names no target");
+    assert!(std::ptr::eq(mac, portable), "one plan for both");
+    assert_eq!(mac.strategy, UninstallStrategy::RemoveFiles);
+    assert_eq!(mac.elevation, UninstallElevation::Required);
+    assert_eq!(mac.backup, UninstallBackup::None);
+    let summary = mac.summary.as_ref().unwrap();
+    assert_eq!(summary.removes_key, "uninstall-summary-surge-macos-removes");
+    assert_eq!(summary.keeps_key, "uninstall-summary-surge-keeps");
+    assert_eq!(mac.blocking_programs, SURGE_PROGRAMS);
+    let trees: Vec<TreeFields<'_>> = mac
+        .remove
+        .trees
+        .iter()
+        .map(|tree| {
+            (
+                tree.path.as_str().to_string(),
+                tree.must_end_with.as_deref(),
+                tree.name_contains.as_deref(),
+                tree.bundle_id.as_deref(),
+            )
+        })
+        .collect();
+    let endings = [
+        Some(".app"),
+        Some(".app"),
+        Some(".component"),
+        Some(".component"),
+        Some(".clap"),
+        Some(".clap"),
+        Some(".lv2"),
+        Some(".lv2"),
+        None,
+        Some(".vst3"),
+        Some(".vst3"),
+    ];
+    // No bundle ID: nothing has confirmed what Surge's bundles say.
+    let expected: Vec<TreeFields<'_>> = SURGE_XT_TREES
+        .iter()
+        .zip(endings)
+        .map(|(tree, ending)| (format!("/{tree}"), ending, Some("Surge XT"), None))
+        .collect();
+    assert_eq!(trees, expected);
+    assert_eq!(
+        trees.last().unwrap().0,
+        "/Library/Audio/Plug-Ins/VST3/Surge XT.vst3"
+    );
+    assert!(
+        mac.remove.paths.is_empty()
+            && mac.remove.dirs_if_empty.is_empty()
+            && !mac.remove.receipt_files
+            && !mac.remove.matching_user_plugins
+    );
+    assert_eq!(mac.macos_pkg_forget, SURGE_RECEIPTS);
+    let kept: Vec<(&str, &str)> = mac
+        .kept_user_data
+        .iter()
+        .map(|kept| (kept.path.as_str(), kept.note_key.as_str()))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            ("{documents}/Surge XT", "uninstall-kept-surge-user-data"),
+            (
+                "{documents}/Surge Synth Team/Surge XT",
+                "uninstall-kept-surge-user-data"
+            ),
+            (
+                "{home}/Library/Application Support/Surge Synth Team/Surge XT",
+                "uninstall-kept-surge-settings-macos"
+            ),
+            (
+                "{home}/Library/Application Support/Surge XT",
+                "uninstall-kept-surge-factory-copy-macos"
+            ),
+        ]
+    );
+    assert_eq!(mac.post, [UninstallPostStep::RefreshAudioUnits {}]);
+    assert!(mac.keep.is_empty() && mac.note_key.is_none());
+    assert!(mac.vendor_uninstaller.is_none() && mac.registry_cleanup.is_empty());
+
+    let windows = surge
+        .plan_for(Platform::Windows, InstallationKind::Standard)
+        .expect("Surge XT on Windows has a plan");
+    assert_eq!(windows.strategy, UninstallStrategy::VendorUninstaller);
+    assert_eq!(windows.elevation, UninstallElevation::Required);
+    assert_eq!(windows.backup, UninstallBackup::None);
+    let summary = windows.summary.as_ref().unwrap();
+    assert_eq!(summary.removes_key, "uninstall-summary-surge-removes");
+    assert_eq!(summary.keeps_key, "uninstall-summary-surge-keeps");
+    assert_eq!(
+        windows.blocking_programs,
+        ["Surge XT.exe", "Surge XT Effects.exe"]
+    );
+    assert_eq!(
+        windows.vendor_uninstaller.as_ref().unwrap().kind,
+        VendorUninstallerKind::Inno
+    );
+    assert_eq!(
+        windows.note_key.as_deref(),
+        Some("uninstall-note-surge-fonts-stay")
+    );
+    let kept: Vec<(&str, &str)> = windows
+        .kept_user_data
+        .iter()
+        .map(|kept| (kept.path.as_str(), kept.note_key.as_str()))
+        .collect();
+    assert_eq!(
+        kept,
+        [("{documents}/Surge XT", "uninstall-kept-surge-user-data")]
+    );
+    assert!(windows.remove.trees.is_empty() && windows.macos_pkg_forget.is_empty());
+    assert!(windows.post.is_empty());
+}
+
+/// The sentences Review shows for Surge XT on macOS, and the note on each
+/// folder that stays, read in every language RABBIT ships, none of them
+/// borrowed from English.
+#[test]
+fn surge_xts_macos_plan_reads_in_every_language() {
+    let surge = embedded_package_manifest()
+        .packages
+        .into_iter()
+        .find(|spec| spec.id == PACKAGE_SURGE_XT)
+        .expect("Surge XT is shipped")
+        .uninstall;
+    let plan = surge
+        .plan_for(Platform::MacOs, InstallationKind::Standard)
+        .unwrap();
+    let summary = plan.summary.as_ref().unwrap();
+    let mut keys = vec![summary.removes_key.as_str(), summary.keeps_key.as_str()];
+    for kept in &plan.kept_user_data {
+        if !keys.contains(&kept.note_key.as_str()) {
+            keys.push(kept.note_key.as_str());
+        }
+    }
+    assert_eq!(
+        keys,
+        [
+            "uninstall-summary-surge-macos-removes",
+            "uninstall-summary-surge-keeps",
+            "uninstall-kept-surge-user-data",
+            "uninstall-kept-surge-settings-macos",
+            "uninstall-kept-surge-factory-copy-macos",
+        ]
+    );
+    assert_eq!(embedded_locales().len(), 5);
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        for key in &keys {
+            let text = localizer.text(key);
+            assert!(
+                !text.missing && !text.fallback_used && text.formatting_errors.is_empty(),
+                "{locale}: {key}: {text:?}"
+            );
+            assert_eq!(text.locale, locale);
+            assert!(
+                !text.value.trim().is_empty() && !text.value.contains('{'),
+                "{locale}: {key}: {}",
+                text.value
+            );
+        }
+    }
+}
+
+/// Surge XT on a Mac, from the shipped plan: the administrator command
+/// deletes every tree there for good, with no backup, a question first,
+/// and Surge's programs and every REAPER closed. The user's patches and
+/// settings are only listed as staying, even with "Also remove settings".
+/// A portable REAPER can't remove it, as on Windows.
+#[test]
+fn surge_xt_on_a_mac_is_planned_for_the_administrator_command_with_no_backup() {
+    let mac = SurgeMac::new();
+    let objects = mac.objects(owned_by_me());
+    let shipped = Shipped::on_mac(&mac.fixture, &objects);
+    let detections = installed(&[PACKAGE_SURGE_XT]);
+    let mut kept: Vec<(PathBuf, String, bool)> = mac
+        .kept()
+        .into_iter()
+        .map(|(path, note)| (path, note.to_string(), true))
+        .collect();
+    kept.sort();
+
+    for remove_settings in [false, true] {
+        let plan = shipped.plan_with(
+            &detections,
+            None,
+            InstallationKind::Standard,
+            remove_settings,
+        );
+        let surge = item(&plan, PACKAGE_SURGE_XT);
+
+        assert_eq!(surge.strategy, Some(UninstallStrategy::RemoveFiles));
+        assert_eq!(surge.removability, Removability::Removable);
+        assert_eq!(surge.route(), RemovalRoute::Administrator);
+        assert!(surge.needs_administrator() && surge.can_remove());
+        assert!(!surge.needs_elevated_helper() && surge.vendor_run.is_none());
+        assert!(surge.requires_elevation && surge.unbacked && surge.confirm);
+        assert_eq!(surge.backup, UninstallBackup::None);
+        assert!(surge.every_reaper_closed);
+        assert_eq!(surge.blocking_programs, SURGE_PROGRAMS);
+        assert_eq!(surge.macos_pkg_forget, SURGE_RECEIPTS);
+        assert_eq!(surge.post, [UninstallPostStep::RefreshAudioUnits {}]);
+        assert_eq!(
+            surge
+                .files
+                .iter()
+                .map(|file| (
+                    file.path.clone(),
+                    file.reason,
+                    file.is_dir,
+                    file.bundle_id.clone()
+                ))
+                .collect::<Vec<_>>(),
+            mac.trees
+                .iter()
+                .map(|tree| (tree.clone(), RemovalReason::Tree, true, None))
+                .collect::<Vec<_>>(),
+            "{remove_settings}"
+        );
+        let summary = surge.summary.as_ref().unwrap();
+        assert_eq!(summary.removes_key, "uninstall-summary-surge-macos-removes");
+        assert_eq!(summary.keeps_key, "uninstall-summary-surge-keeps");
+        // Said once: the summary leaves "for every music program" to this
+        // warning.
+        assert_eq!(surge.warnings, [UninstallWarning::MachineWide]);
+        // Found by its places and names alone, whoever installed it, so no
+        // note says RABBIT goes by what Surge is known to install.
+        assert!(surge.notes.is_empty(), "{:?}", surge.notes);
+        assert_eq!(kept_data(surge), kept, "{remove_settings}");
+        assert!(
+            surge.kept.iter().all(|kept| !kept.removable_with_settings),
+            "{:?}",
+            surge.kept
+        );
+    }
+
+    let plan = shipped.plan_with(&detections, None, InstallationKind::Portable, true);
+    let surge = item(&plan, PACKAGE_SURGE_XT);
+    assert_eq!(surge.removability, Removability::NeedsStandardTarget);
+    assert!(surge.strategy.is_none() && surge.files.is_empty());
+    assert!(!surge.can_remove() && !surge.requires_elevation);
+}
+
+/// A dry run of Surge XT on a Mac gives root exactly these steps and runs
+/// none of them: first pgrep, for Surge's programs and every REAPER;
+/// then one `rm -R -f -x` for each tree that is there, in the plan's
+/// order, the VST3 detection finds Surge by last; then one `pkgutil
+/// --forget` for each of Surge's receipts the installer lists, or for all
+/// eighteen when it can't list them. A tree that isn't there, such as the
+/// LV2 plug-ins Surge's installer leaves out unless they are chosen, is
+/// skipped and refuses nothing.
+#[test]
+fn a_dry_run_lists_roots_steps_for_surge_xt_and_skips_what_isnt_there() {
+    let mac = SurgeMac::new();
+    let shell = RecordingAdministratorShell::new();
+    let objects = mac.objects(owned_by_me());
+    let before = mac.state();
+    let dry_run = |objects: &FakeMacosObjects| {
+        run_on_surge_mac(
+            &mac,
+            &[PACKAGE_SURGE_XT],
+            InstallationKind::Standard,
+            objects,
+            &shell,
+            false,
+            true,
+        )
+    };
+
+    let report = dry_run(&objects);
+    let surge = report.item(PACKAGE_SURGE_XT).unwrap();
+    assert_eq!(
+        surge.status,
+        UninstallStatus::WouldRemove,
+        "{}",
+        surge.message
+    );
+    assert_eq!(
+        report.administrator_steps,
+        surge_records(
+            &mac.trees,
+            &SURGE_RECEIPTS,
+            AdministratorStepVerdict::WouldRun
+        )
+    );
+    assert_eq!(mac.state(), before);
+
+    // No Effects app and no LV2 plug-ins; the installer lists only four
+    // of Surge's receipts, one of them left by Surge XT 1.0.
+    for gone in [1, 6, 7] {
+        fs::remove_dir_all(&mac.trees[gone]).unwrap();
+    }
+    let there = mac.left();
+    assert_eq!(there.len(), 8);
+    assert_eq!(there.last().map(PathBuf::as_path), Some(mac.anchor()));
+    let listed = [
+        SURGE_RECEIPTS[0],
+        SURGE_RECEIPTS[4],
+        SURGE_RECEIPTS[5],
+        SURGE_RECEIPTS[13],
+    ];
+    assert!(listed[3].starts_with("com."), "{}", listed[3]);
+    let objects = mac
+        .objects(owned_by_me())
+        .with_receipts(listed.into_iter().chain([OTHER_RECEIPT]));
+    let before_missing = mac.state();
+    let report = dry_run(&objects);
+    let surge = report.item(PACKAGE_SURGE_XT).unwrap();
+    assert_eq!(
+        surge.status,
+        UninstallStatus::WouldRemove,
+        "{}",
+        surge.message
+    );
+    assert_eq!(
+        surge
+            .removed
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>(),
+        there
+    );
+    assert_eq!(
+        report.administrator_steps,
+        surge_records(&there, &listed, AdministratorStepVerdict::WouldRun)
+    );
+
+    // The installer's list can't be read: every receipt goes to root, and
+    // a failure to forget one is tolerated there.
+    let objects = mac.objects(owned_by_me()).with_unlistable_receipts();
+    let report = dry_run(&objects);
+    assert_eq!(
+        report.administrator_steps,
+        surge_records(&there, &SURGE_RECEIPTS, AdministratorStepVerdict::WouldRun)
+    );
+
+    assert_eq!(
+        shell.calls(),
+        0,
+        "a dry run never opens the password window"
+    );
+    assert_eq!(mac.state(), before_missing);
+    assert_eq!(objects.audio_unit_refreshes(), 0);
+}
+
+/// A real run of Surge XT on a Mac: one password window, and root deletes
+/// every tree and forgets every receipt, word for word as the dry run said.
+/// What the filesystem shows afterwards is the result. The Audio Unit list
+/// is read again, RABBIT's receipt lets Surge go, and the user's patches
+/// and settings are untouched, even with "Also remove settings".
+#[test]
+fn surge_xt_on_a_mac_goes_in_one_administrator_command_and_leaves_the_users_folders() {
+    let mac = SurgeMac::new();
+    let objects = mac.objects(owned_by_me());
+    let shell = RecordingAdministratorShell::new().forgetting_in(objects.receipt_list());
+    let users = mac.users();
+
+    let report = run_on_surge_mac(
+        &mac,
+        &[PACKAGE_SURGE_XT],
+        InstallationKind::Standard,
+        &objects,
+        &shell,
+        true,
+        false,
+    );
+
+    let surge = report.item(PACKAGE_SURGE_XT).unwrap();
+    assert_eq!(surge.status, UninstallStatus::Removed, "{}", surge.message);
+    assert_eq!(surge.message_code, UninstallMessage::RemovedAsAdministrator);
+    assert_eq!(
+        surge
+            .removed
+            .iter()
+            .map(|file| (
+                file.path.clone(),
+                file.reason,
+                file.backup_path.clone(),
+                file.trashed_to.clone()
+            ))
+            .collect::<Vec<_>>(),
+        mac.trees
+            .iter()
+            .map(|tree| (tree.clone(), RemovalReason::Tree, None, None))
+            .collect::<Vec<_>>()
+    );
+    assert!(surge.problems.is_empty(), "{:?}", surge.problems);
+    assert!(mac.left().is_empty());
+    assert_eq!(report.backup_set_id, None);
+
+    assert_eq!(shell.calls(), 1);
+    assert_eq!(shell.steps(), surge_steps(&mac.trees, &SURGE_RECEIPTS));
+    assert_eq!(
+        report.administrator_steps,
+        surge_records(&mac.trees, &SURGE_RECEIPTS, AdministratorStepVerdict::Ran)
+    );
+    // Only Surge's receipts are forgotten.
+    assert_eq!(
+        objects.receipts().unwrap().into_iter().collect::<Vec<_>>(),
+        [OTHER_RECEIPT]
+    );
+    assert_eq!(objects.audio_unit_refreshes(), 1);
+    assert!(objects.trashed().is_empty());
+
+    assert_eq!(mac.users(), users);
+    let receipt = mac.receipt();
+    assert!(!receipt.packages.contains_key(PACKAGE_SURGE_XT));
+    assert!(receipt.declined_packages.contains(PACKAGE_SURGE_XT));
+    assert!(receipt.packages.contains_key(PACKAGE_REAPER));
+    assert!(join(&mac.fixture.app, "Contents/MacOS/REAPER").is_file());
+    assert!(!report.has_failures());
+}
+
+/// A Mac that once had Surge XT 1.0 still lists a receipt of its com.
+/// name next to today's. Root is told to forget both, and when one is
+/// still listed afterwards, Done names it rather than calling the removal
+/// clean.
+#[test]
+fn a_receipt_left_by_surge_xt_1_0_is_forgotten_and_checked_again() {
+    let mac = SurgeMac::new();
+    let listed = [SURGE_RECEIPTS[4], SURGE_RECEIPTS[13]];
+    assert!(listed[1].starts_with("com."), "{}", listed[1]);
+    let objects = mac
+        .objects(owned_by_me())
+        .with_receipts(listed.into_iter().chain([OTHER_RECEIPT]));
+    // The command runs, but pkgutil forgets nothing.
+    let shell = RecordingAdministratorShell::new();
+
+    let report = run_on_surge_mac(
+        &mac,
+        &[PACKAGE_SURGE_XT],
+        InstallationKind::Standard,
+        &objects,
+        &shell,
+        false,
+        false,
+    );
+
+    let surge = report.item(PACKAGE_SURGE_XT).unwrap();
+    assert_eq!(surge.status, UninstallStatus::Removed, "{}", surge.message);
+    assert_eq!(shell.steps(), surge_steps(&mac.trees, &listed));
+    assert_eq!(
+        surge.problems,
+        [UninstallProblem::InstallerRecordsRemain {
+            ids: listed.iter().map(ToString::to_string).collect()
+        }]
+    );
+    assert!(mac.left().is_empty());
+}
+
+/// Cancelling the password window cancels Surge XT with nothing changed,
+/// not a byte, and so does a window that failed, such as after a wrong
+/// password three times.
+#[test]
+fn a_cancelled_or_failed_password_window_leaves_surge_xt_as_it_was() {
+    let declined = (
+        RecordingAdministratorShell::new().declining(),
+        UninstallStatus::Cancelled,
+        UninstallMessage::ElevationDeclined,
+    );
+    let failed = (
+        RecordingAdministratorShell::new().not_run("a wrong password three times"),
+        UninstallStatus::Failed,
+        UninstallMessage::ElevationFailed {
+            error: "a wrong password three times".to_string(),
+        },
+    );
+    for (shell, status, code) in [declined, failed] {
+        let mac = SurgeMac::new();
+        let objects = mac.objects(owned_by_me());
+        let before = mac.state();
+
+        let report = run_on_surge_mac(
+            &mac,
+            &[PACKAGE_SURGE_XT],
+            InstallationKind::Standard,
+            &objects,
+            &shell,
+            false,
+            false,
+        );
+
+        let surge = report.item(PACKAGE_SURGE_XT).unwrap();
+        assert_eq!(surge.status, status, "{}", surge.message);
+        assert_eq!(surge.message_code, code);
+        assert!(
+            !surge.message.contains("back in place"),
+            "{}",
+            surge.message
+        );
+        assert_eq!(mac.state(), before, "{status:?}");
+        assert!(!report.changed_anything());
+        assert_eq!(objects.receipts(), Some(every_receipt()));
+        assert_eq!(objects.audio_unit_refreshes(), 0);
+        assert_eq!(shell.calls(), 1);
+        assert!(
+            report
+                .administrator_steps
+                .iter()
+                .all(|record| record.verdict == AdministratorStepVerdict::NotRun),
+            "{:?}",
+            report.administrator_steps
+        );
+    }
+}
+
+/// App Management refusing root at one of Surge XT's apps, which go first
+/// for that reason: the command stops there, before any plug-in, and the
+/// report says what to change in System Settings. Refused at the first app,
+/// nothing of Surge is gone; at the second, the first is gone. Either way
+/// the VST3 is still there, so Surge is still detected, keeps its entry in
+/// RABBIT's receipt, and can be uninstalled again.
+#[test]
+fn app_management_refusing_a_surge_xt_app_stops_root_before_any_plug_in() {
+    for app in [0usize, 1] {
+        let mac = SurgeMac::new();
+        let objects = mac.objects(owned_by_me());
+        let refusal = format!("rm: {}: Operation not permitted", mac.trees[app].display());
+        // Step 0 is pgrep, so tree `k` is step `k + 1`.
+        let shell = RecordingAdministratorShell::new()
+            .forgetting_in(objects.receipt_list())
+            .failing_at(app + 1)
+            .saying(&refusal);
+        let users = mac.users();
+
+        let report = run_on_surge_mac(
+            &mac,
+            &[PACKAGE_SURGE_XT],
+            InstallationKind::Standard,
+            &objects,
+            &shell,
+            false,
+            false,
+        );
+
+        let surge = report.item(PACKAGE_SURGE_XT).unwrap();
+        assert_eq!(surge.status, UninstallStatus::Failed, "{app}");
+        assert_eq!(
+            surge.message_code,
+            UninstallMessage::AdministratorStepFailed {
+                path: Some(mac.trees[app].clone()),
+                ended_unclearly: false,
+                gone: mac.trees[..app].to_vec(),
+                left: mac.trees[app..].to_vec(),
+                refused_by_macos: true,
+                detail: Some(refusal.clone()),
+            }
+        );
+        assert!(
+            surge.message.contains("App Management") && !surge.message.contains("back in place"),
+            "{}",
+            surge.message
+        );
+        assert_eq!(mac.left(), mac.trees[app..]);
+        assert!(mac.anchor().exists());
+        let receipt = mac.receipt();
+        assert!(receipt.packages.contains_key(PACKAGE_SURGE_XT), "{app}");
+        assert!(!receipt.declined_packages.contains(PACKAGE_SURGE_XT));
+        // The forgets come after every tree, so none ran.
+        assert_eq!(objects.receipts(), Some(every_receipt()));
+        // A host may have lost the Audio Unit only once something went.
+        assert_eq!(objects.audio_unit_refreshes(), app);
+        assert_eq!(mac.users(), users);
+        assert!(report.has_failures());
+    }
+}
+
+/// A command stopped at a later step, after the apps and some plug-ins
+/// went: what the filesystem shows is the result, and with the VST3 still
+/// there, Surge XT is still detected, stays in RABBIT's receipt, and is
+/// offered again with what is left. That holds even when the stop is at
+/// that VST3 itself, the last tree, with everything else gone. The
+/// stand-in shell stops before it touches the failing tree, where a real
+/// `rm -R` unlinks every file it can before it fails on a folder, so it
+/// may take the bundle's Info.plist with it. Detection on a Mac still
+/// finds Surge XT by the bundle then, with no version.
+#[test]
+fn a_surge_xt_command_stopped_at_a_later_step_reports_what_is_gone_and_what_is_left() {
+    // The CLAP plug-in, and the VST3 detection finds Surge by.
+    for tree in [4usize, 10] {
+        let mac = SurgeMac::new();
+        let objects = mac.objects(owned_by_me());
+        let detail = format!("rm: {}: Directory not empty", mac.trees[tree].display());
+        let shell = RecordingAdministratorShell::new()
+            .forgetting_in(objects.receipt_list())
+            .failing_at(tree + 1)
+            .saying(&detail);
+
+        let report = run_on_surge_mac(
+            &mac,
+            &[PACKAGE_SURGE_XT],
+            InstallationKind::Standard,
+            &objects,
+            &shell,
+            false,
+            false,
+        );
+
+        let surge = report.item(PACKAGE_SURGE_XT).unwrap();
+        assert_eq!(surge.status, UninstallStatus::Failed, "{tree}");
+        assert_eq!(
+            surge.message_code,
+            UninstallMessage::AdministratorStepFailed {
+                path: Some(mac.trees[tree].clone()),
+                ended_unclearly: false,
+                gone: mac.trees[..tree].to_vec(),
+                left: mac.trees[tree..].to_vec(),
+                refused_by_macos: false,
+                detail: Some(detail.clone()),
+            }
+        );
+        assert!(
+            !surge.message.contains("App Management"),
+            "{}",
+            surge.message
+        );
+        assert_eq!(mac.left(), mac.trees[tree..]);
+        assert!(mac.anchor().exists());
+        assert!(mac.receipt().packages.contains_key(PACKAGE_SURGE_XT));
+        assert_eq!(objects.receipts(), Some(every_receipt()));
+        assert_eq!(objects.audio_unit_refreshes(), 1);
+        assert_eq!(
+            report
+                .administrator_steps
+                .iter()
+                .map(|record| record.verdict)
+                .collect::<Vec<_>>(),
+            (0..1 + mac.trees.len() + SURGE_RECEIPTS.len())
+                .map(|index| match index.cmp(&(tree + 1)) {
+                    std::cmp::Ordering::Less => AdministratorStepVerdict::Ran,
+                    std::cmp::Ordering::Equal => AdministratorStepVerdict::Failed,
+                    std::cmp::Ordering::Greater => AdministratorStepVerdict::NotRun,
+                })
+                .collect::<Vec<_>>()
+        );
+
+        // Offered again: what is left, and every receipt.
+        let report = run_on_surge_mac(
+            &mac,
+            &[PACKAGE_SURGE_XT],
+            InstallationKind::Standard,
+            &objects,
+            &shell,
+            false,
+            true,
+        );
+        assert_eq!(
+            report.item(PACKAGE_SURGE_XT).unwrap().status,
+            UninstallStatus::WouldRemove
+        );
+        assert_eq!(
+            report.administrator_steps,
+            surge_records(
+                &mac.trees[tree..],
+                &SURGE_RECEIPTS,
+                AdministratorStepVerdict::WouldRun
+            )
+        );
+    }
+}
+
+/// Root never follows a link: a plug-in folder that is a link, or one of
+/// Surge XT's trees that is a link itself, keeps Surge from the
+/// administrator command. The plan, the dry run and a real run all stop at
+/// it, with no step for root, no password window, and nothing changed.
+#[test]
+fn a_linked_plug_in_folder_or_a_linked_surge_xt_tree_keeps_root_away() {
+    // The CLAP folder is a link to a folder elsewhere, holding Surge's two
+    // CLAP plug-ins.
+    let linked_folder = |mac: &SurgeMac| {
+        let clap = join(&mac.fixture.system, "Library/Audio/Plug-Ins/CLAP");
+        let elsewhere = mac.fixture.dir.path().join("external CLAP");
+        fs::rename(&clap, &elsewhere).unwrap();
+        link_folder(&clap, &elsewhere);
+        (mac.trees[4].clone(), PathRefusal::LinkedAncestor, elsewhere)
+    };
+    // Surge's factory data is a link to a folder elsewhere.
+    let linked_tree = |mac: &SurgeMac| {
+        let support = mac.trees[8].clone();
+        let elsewhere = mac.fixture.dir.path().join("Surge data elsewhere");
+        fs::rename(&support, &elsewhere).unwrap();
+        link_folder(&support, &elsewhere);
+        (support, PathRefusal::Link, elsewhere)
+    };
+    let cases: [&MakeLink; 2] = [&linked_folder, &linked_tree];
+    for make_link in cases {
+        let mac = SurgeMac::new();
+        let (path, refusal, elsewhere) = make_link(&mac);
+        let objects = mac.objects(owned_by_me());
+        let shell = RecordingAdministratorShell::new().forgetting_in(objects.receipt_list());
+        let blocked = Removability::UnsafePath {
+            path: path.clone(),
+            refusal: refusal.clone(),
+        };
+
+        let plan =
+            Shipped::on_mac(&mac.fixture, &objects).plan(&installed(&[PACKAGE_SURGE_XT]), None);
+        let surge = item(&plan, PACKAGE_SURGE_XT);
+        assert_eq!(surge.removability, blocked);
+        assert!(!surge.can_remove() && surge.files.is_empty());
+        // What stays is still said, and still only listed.
+        assert_eq!(kept_data(surge).len(), 4, "{:?}", surge.kept);
+        assert!(surge.kept.iter().all(|kept| !kept.removable_with_settings));
+
+        let before = mac.state();
+        let elsewhere_before = snapshot(&elsewhere);
+        for dry_run in [true, false] {
+            let report = run_on_surge_mac(
+                &mac,
+                &[PACKAGE_SURGE_XT],
+                InstallationKind::Standard,
+                &objects,
+                &shell,
+                false,
+                dry_run,
+            );
+            let planned = report.item(PACKAGE_SURGE_XT).unwrap();
+            assert_eq!(
+                planned.status,
+                UninstallStatus::Blocked,
+                "{refusal:?}, {dry_run}: {}",
+                planned.message
+            );
+            assert_eq!(
+                planned.message_code,
+                UninstallMessage::NotRemovable {
+                    removability: blocked.clone()
+                }
+            );
+            assert!(report.administrator_steps.is_empty(), "{dry_run}");
+        }
+        assert_eq!(shell.calls(), 0, "{refusal:?}");
+        assert_eq!(mac.state(), before);
+        assert_eq!(snapshot(&elsewhere), elsewhere_before);
+        assert_eq!(objects.receipts(), Some(every_receipt()));
+    }
+}
+
+/// Surge XT and a REAPER.app only root may move, in one run: one password
+/// window and one command. pgrep looks for Surge's programs and every
+/// REAPER once; Surge's trees go and its receipts are forgotten first, in
+/// its plan's order; then root checks the user's Trash and moves REAPER
+/// into it, last, as REAPER always goes last. The report lists them in
+/// that order. A REAPER.app the user may move goes to the Trash as the
+/// user after the command, which then holds Surge's steps alone.
+#[test]
+fn surge_xt_and_reaper_share_one_administrator_command_with_reaper_last() {
+    let mac = SurgeMac::new();
+    let objects = mac.objects(owned_by_root());
+    let shell = RecordingAdministratorShell::new().forgetting_in(objects.receipt_list());
+    let users = mac.users();
+
+    let report = run_on_surge_mac(
+        &mac,
+        &[PACKAGE_REAPER, PACKAGE_SURGE_XT],
+        InstallationKind::Standard,
+        &objects,
+        &shell,
+        false,
+        false,
+    );
+
+    assert_eq!(
+        report
+            .items
+            .iter()
+            .map(|item| (item.package_id.as_str(), item.status))
+            .collect::<Vec<_>>(),
+        [
+            (PACKAGE_SURGE_XT, UninstallStatus::Removed),
+            (PACKAGE_REAPER, UninstallStatus::Removed),
+        ],
+        "{report:#?}"
+    );
+    assert_eq!(shell.calls(), 1);
+    let steps = shell.steps();
+    let surge_part = surge_steps(&mac.trees, &SURGE_RECEIPTS);
+    assert_eq!(steps[..surge_part.len()], surge_part[..]);
+    let in_trash: Vec<PathBuf> = fs::read_dir(&mac.trash)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    let [moved] = in_trash.as_slice() else {
+        panic!("one app in the Trash: {in_trash:?}");
+    };
+    let name = moved.file_name().unwrap().to_str().unwrap();
+    assert!(
+        name.starts_with("REAPER 20") && name.ends_with(".app"),
+        "{name}"
+    );
+    let command =
+        |program: &str, arguments: &[&str]| ShellCommand::new(program, arguments.iter().copied());
+    let trash = text(&mac.trash);
+    assert_eq!(
+        steps[surge_part.len()..],
+        [
+            ShellStep::Run(command(TEST, &["-d", &trash])),
+            ShellStep::Run(command(TEST, &["!", "-L", &trash])),
+            ShellStep::Run(command(
+                MV,
+                &["-h", "-n", &text(&mac.fixture.app), &text(moved)]
+            )),
+        ]
+    );
+    assert!(mac.left().is_empty() && !mac.fixture.app.exists());
+    assert!(join(moved, "Contents/MacOS/REAPER").is_file());
+    // Root moved it; RABBIT never asked macOS's Trash function.
+    assert!(objects.trashed().is_empty());
+    assert_eq!(mac.users(), users);
+
+    let mac = SurgeMac::new();
+    let objects = mac.objects(owned_by_me());
+    let shell = RecordingAdministratorShell::new().forgetting_in(objects.receipt_list());
+    let report = run_on_surge_mac(
+        &mac,
+        &[PACKAGE_REAPER, PACKAGE_SURGE_XT],
+        InstallationKind::Standard,
+        &objects,
+        &shell,
+        false,
+        false,
+    );
+    assert_eq!(
+        report
+            .items
+            .iter()
+            .map(|item| (item.package_id.as_str(), item.status))
+            .collect::<Vec<_>>(),
+        [
+            (PACKAGE_SURGE_XT, UninstallStatus::Removed),
+            (PACKAGE_REAPER, UninstallStatus::Removed),
+        ]
+    );
+    assert_eq!(shell.calls(), 1);
+    assert_eq!(shell.steps(), surge_steps(&mac.trees, &SURGE_RECEIPTS));
+    assert_eq!(objects.trashed(), std::slice::from_ref(&mac.fixture.app));
+}
+
+/// A portable REAPER can't remove Surge XT, which serves every program on
+/// the Mac: a dry run and a real run both say to use the standard REAPER,
+/// with no step for root, no password window and nothing changed.
+#[test]
+fn a_portable_reaper_cant_remove_surge_xt_on_a_mac() {
+    let mac = SurgeMac::new();
+    let objects = mac.objects(owned_by_me());
+    let shell = RecordingAdministratorShell::new().forgetting_in(objects.receipt_list());
+    let before = mac.state();
+
+    for dry_run in [true, false] {
+        let report = run_on_surge_mac(
+            &mac,
+            &[PACKAGE_SURGE_XT],
+            InstallationKind::Portable,
+            &objects,
+            &shell,
+            false,
+            dry_run,
+        );
+        let surge = report.item(PACKAGE_SURGE_XT).unwrap();
+        assert_eq!(
+            surge.status,
+            UninstallStatus::Blocked,
+            "{dry_run}: {}",
+            surge.message
+        );
+        assert_eq!(
+            surge.message_code,
+            UninstallMessage::NotRemovable {
+                removability: Removability::NeedsStandardTarget
+            }
+        );
+        assert!(report.administrator_steps.is_empty());
+    }
+    assert_eq!(shell.calls(), 0);
+    assert_eq!(mac.state(), before);
+    assert_eq!(objects.receipts(), Some(every_receipt()));
 }

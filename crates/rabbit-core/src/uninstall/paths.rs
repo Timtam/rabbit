@@ -376,6 +376,11 @@ pub enum PathRefusal {
     /// as text, which the administrator command needs.
     #[error("its name isn't valid text, so RABBIT can't name it to the administrator command")]
     NotUtf8,
+    /// For a removal with administrator rights: another volume is mounted
+    /// exactly there. `rm -R -x` only stays out of a volume mounted below
+    /// the folder it is given, so it would empty this one.
+    #[error("another disk or volume is mounted there, and RABBIT never lets root reach into it")]
+    MountPoint,
 }
 
 impl PathRefusal {
@@ -528,6 +533,8 @@ fn check_removal_of(
 /// - be reached through real folders only, from the system root down:
 ///   `lstat` of every folder on the way, so no link anywhere can send root
 ///   somewhere else;
+/// - be on the same volume as the folder holding it, so no volume is
+///   mounted exactly there;
 /// - be valid UTF-8, the only text the administrator command takes.
 pub fn check_administrator_removal(
     roots: &UninstallRoots,
@@ -540,7 +547,7 @@ pub fn check_administrator_removal(
         .as_deref()
         .filter(|root| roots.system_folders().any(|folder| folder == *root))
         .ok_or(PathRefusal::NotRootControlled)?;
-    check_root_reaches(roots, &planned.path, folder)
+    check_root_reaches(roots, &planned.path, folder, &rabbit_platform::volume_id)
 }
 
 /// Whether the run's administrator command may move `planned`, REAPER's
@@ -551,26 +558,34 @@ pub fn check_administrator_removal(
 /// [`check_removal`], which it runs first: the app must sit directly in
 /// `/Applications`, a folder only an administrator can change, never in a
 /// folder of the user's or on another volume; it must be a real folder, not
-/// a link; and every folder on the way to it from the system root must be a
-/// real folder too, read with `lstat`. Whether it is the app the manifest
-/// means, and whether the user's Trash may take it, is
-/// [`tree_route`](super::macos_objects::tree_route)'s to say.
+/// a link, with no volume mounted on it; and every folder on the way to it
+/// from the system root must be a real folder too, read with `lstat`.
+/// Whether it is the app the manifest means, and whether the user's Trash
+/// may take it, is [`tree_route`](super::macos_objects::tree_route)'s to
+/// say.
 pub fn check_administrator_trash_move(
     roots: &UninstallRoots,
     planned: &PlannedRemoval,
 ) -> Result<String, PathRefusal> {
     check_removal(roots, &planned.path, &planned.guard)?;
-    check_root_reaches(roots, &planned.path, &roots.system_applications())
+    check_root_reaches(
+        roots,
+        &planned.path,
+        &roots.system_applications(),
+        &rabbit_platform::volume_id,
+    )
 }
 
 /// The checks both administrator steps share: `path` sits directly in
-/// `folder`, is a real folder, and every folder from the system root down
-/// to `folder` is a real folder, not a link. Returns `path` as text,
-/// spelt exactly as `folder` and its name, which it must already be.
+/// `folder`, is a real folder, every folder from the system root down to
+/// `folder` is a real folder, not a link, and `path` is on `folder`'s
+/// volume, as `volume` reads them. Returns `path` as text, spelt exactly
+/// as `folder` and its name, which it must already be.
 fn check_root_reaches(
     roots: &UninstallRoots,
     path: &Path,
     folder: &Path,
+    volume: &dyn Fn(&Path) -> io::Result<u64>,
 ) -> Result<String, PathRefusal> {
     if path.parent() != Some(folder) {
         return Err(PathRefusal::NotRootControlled);
@@ -603,6 +618,21 @@ fn check_root_reaches(
         };
         on_the_way.push(name);
         real_folder(&on_the_way)?;
+    }
+    // `rm -R -x` stays on the volume of the folder it is given: it keeps
+    // out of a volume mounted below that folder, but empties one mounted
+    // on the folder itself. A mount there shows as a volume other than the
+    // holding folder's. Where volumes can't be read this way, as on
+    // Windows, which has no administrator command, nothing is compared.
+    match (volume(path), volume(folder)) {
+        (Ok(tree), Ok(holder)) if tree != holder => return Err(PathRefusal::MountPoint),
+        (Err(error), _) if error.kind() != io::ErrorKind::Unsupported => {
+            return Err(PathRefusal::unreadable(path, &error));
+        }
+        (_, Err(error)) if error.kind() != io::ErrorKind::Unsupported => {
+            return Err(PathRefusal::unreadable(folder, &error));
+        }
+        _ => {}
     }
     path.to_str()
         .map(str::to_string)
@@ -783,7 +813,8 @@ mod tests {
 
     use super::{
         PathRefusal, RemovalGuard, ResolvedPath, UninstallRoots, check_administrator_removal,
-        check_administrator_trash_move, check_removal, expand_wildcard, resolve_path,
+        check_administrator_trash_move, check_removal, check_root_reaches, expand_wildcard,
+        resolve_path,
     };
     use crate::model::Platform;
     use crate::package::uninstall::UninstallPath;
@@ -1094,6 +1125,72 @@ mod tests {
             target.is_dir() && mine.is_dir() && at_home.is_dir(),
             "checking removes nothing"
         );
+    }
+
+    /// `rm -R -x` stays out of a volume mounted below the folder it is
+    /// given, but not out of one mounted on that folder itself. A tree on
+    /// another volume than the folder holding it is such a mount, and root
+    /// never gets it, nor an app to move. One on the same volume passes,
+    /// and so does every tree where volumes can't be read, as on Windows.
+    #[test]
+    fn a_volume_mounted_exactly_at_a_tree_is_never_given_to_root() {
+        let (_dir, roots) = system_fixture();
+        let support = roots
+            .system_root
+            .join("Library")
+            .join("Application Support");
+        let tree = support.join("Demo");
+        fs::create_dir_all(tree.join("Contents")).unwrap();
+        let app = roots.system_root.join("Applications").join("REAPER.app");
+        fs::create_dir_all(app.join("Contents")).unwrap();
+        let applications = roots.system_root.join("Applications");
+        let text = |path: &Path| path.to_str().unwrap().to_string();
+
+        // The tree, or the app, is the root of another volume.
+        let mounted_on = |mounted: &Path| {
+            let mounted = mounted.to_path_buf();
+            move |path: &Path| -> std::io::Result<u64> { Ok(if path == mounted { 2 } else { 1 }) }
+        };
+        assert_eq!(
+            check_root_reaches(&roots, &tree, &support, &mounted_on(&tree)),
+            Err(PathRefusal::MountPoint)
+        );
+        assert_eq!(
+            check_root_reaches(&roots, &app, &applications, &mounted_on(&app)),
+            Err(PathRefusal::MountPoint)
+        );
+
+        // One volume for all: it passes.
+        let one_volume = |_: &Path| -> std::io::Result<u64> { Ok(1) };
+        assert_eq!(
+            check_root_reaches(&roots, &tree, &support, &one_volume),
+            Ok(text(&tree))
+        );
+        // Volumes RABBIT can't read this way are never compared.
+        let unsupported = |_: &Path| -> std::io::Result<u64> {
+            Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no"))
+        };
+        assert_eq!(
+            check_root_reaches(&roots, &tree, &support, &unsupported),
+            Ok(text(&tree))
+        );
+        // Any other failure to read one refuses.
+        let denied = |_: &Path| -> std::io::Result<u64> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            ))
+        };
+        assert!(matches!(
+            check_root_reaches(&roots, &tree, &support, &denied),
+            Err(PathRefusal::Unreadable { .. })
+        ));
+        // And the real reader passes a temporary folder, on one volume.
+        assert_eq!(
+            check_root_reaches(&roots, &tree, &support, &rabbit_platform::volume_id),
+            Ok(text(&tree))
+        );
+        assert!(tree.is_dir() && app.is_dir(), "checking removes nothing");
     }
 
     #[test]
