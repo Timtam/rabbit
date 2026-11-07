@@ -21,12 +21,15 @@ pub mod jaws;
 pub mod komplete_kontrol;
 pub mod links;
 pub mod locale;
+pub mod object_facts;
+pub mod package_receipts;
 pub mod paths;
 pub mod pipe;
 pub mod process;
 pub mod registry;
 pub mod signature;
 pub mod timed_process;
+pub mod trash;
 pub mod volume;
 #[cfg(windows)]
 mod win_util;
@@ -39,9 +42,10 @@ pub use disk_image::{
     install_app_bundle_from_disk_image, mount_disk_image, run_pkg_installer_from_disk_image,
 };
 pub use elevation::{
-    ElevatedChild, ElevatedWindow, ElevationError, ShellCommand, ShellLinesOutcome,
+    AdministratorShellReport, AdministratorShellRequest, ElevatedChild, ElevatedWindow,
+    ElevationError, ShellCommand, ShellLinesOutcome, ShellStep, administrator_shell_text,
     is_current_process_elevated, is_nsis_destination_argument, is_rabbit_file_stem,
-    run_elevated_and_wait, run_elevated_shell_lines, running_as_rabbit, spawn_elevated,
+    run_administrator_shell, run_elevated_and_wait, running_as_rabbit, spawn_elevated,
 };
 pub use file_version::{
     read_file_version_parts, read_file_version_string, read_string_file_info_key,
@@ -55,6 +59,11 @@ pub use jaws::{JawsInstall, detect_jaws_install, detect_jaws_install_under, is_j
 pub use komplete_kontrol::is_komplete_kontrol_installed;
 pub use links::{remove_empty_dir, remove_junction};
 pub use locale::os_default_locale;
+pub use object_facts::{
+    ObjectFacts, TrashFolderFacts, effective_uid_is_root, object_facts, user_trash_folder,
+    user_trash_folder_facts,
+};
+pub use package_receipts::{installed_package_ids, parse_pkgutil_pkgs, refresh_audio_units};
 pub use paths::{
     user_appdata_dir, user_documents_dir, user_home_dir, user_local_appdata_dir, windows_clap_dir,
     windows_common_program_files_dir, windows_common_program_files_dirs, windows_program_data_dir,
@@ -71,4 +80,5 @@ pub use registry::{
 };
 pub use signature::{SignatureVerdict, verify_executable_signature};
 pub use timed_process::{NsisInPlaceArgument, RunningCommand, TimedCommand, TimedRunOutcome};
+pub use trash::{TrashError, TrashErrorKind, move_to_trash};
 pub use volume::{available_space, same_volume};

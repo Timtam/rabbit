@@ -200,8 +200,9 @@ questions they cannot reasonably answer.
   word is POSIX single-quoted and the whole command is then put into one
   AppleScript string, after a `cd /`. Nothing is written to a script
   file, which another process of the same user could rewrite before root
-  runs it. `run_elevated_shell_lines` puts several commands behind one
-  prompt the same way and reports which one failed.
+  runs it. `run_administrator_shell` puts several commands behind one
+  prompt the same way and reports which one failed. Neither raises a
+  prompt from a test build or from a program not named like RABBIT.
 
 ## Recommended Technical Direction
 

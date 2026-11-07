@@ -48,7 +48,8 @@ pub enum DiskImageError {
     /// The macOS `installer` command (or its admin wrapper) returned a
     /// non-zero exit status. Distinct from `HdiutilFailed` so callers can
     /// surface a clearer message and so the elevation cancel signal can
-    /// bubble up unmodified.
+    /// bubble up unmodified. `code` is `None` when there is no status, as
+    /// when the password window failed and `installer` never ran.
     InstallerFailed {
         image: PathBuf,
         code: Option<i32>,
@@ -205,7 +206,8 @@ pub fn install_app_bundle_from_disk_image(
 /// Returns the absolute path of the `.pkg` that was run, so callers can
 /// log it in the saved report. Errors map onto the existing
 /// `DiskImageError` variants — `InstallerFailed` for non-zero installer
-/// exits, `UserCancelledElevation` when the user dismisses the auth
+/// exits and for a password window that failed (with no exit code then),
+/// `UserCancelledElevation` when the user dismisses the auth
 /// dialog, `PkgNotFound` when the DMG layout no longer matches.
 ///
 /// macOS-only. Other platforms return `Unsupported`.
@@ -275,6 +277,18 @@ fn platform_run_pkg_installer_from_disk_image(
             let _ = detach_result;
             return Err(DiskImageError::UserCancelledElevation {
                 image: image_path.to_path_buf(),
+            });
+        }
+        // The password window ended with an error rather than a cancel (a
+        // wrong password three times, an account that isn't an
+        // administrator), so `installer` never ran and has no exit status.
+        // Report it against the installer step, as before, not as a mount
+        // failure: the image mounted fine and has just been detached.
+        Err(ElevationError::PromptFailed { .. }) => {
+            let _ = detach_result;
+            return Err(DiskImageError::InstallerFailed {
+                image: image_path.to_path_buf(),
+                code: None,
             });
         }
         Err(error) => {
