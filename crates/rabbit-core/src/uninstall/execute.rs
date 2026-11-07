@@ -851,10 +851,20 @@ impl RemovalRun<'_> {
                     (Some(error), _) => UninstallMessage::VendorRunFailed {
                         error: error.clone(),
                     },
-                    (None, Some(0)) => UninstallMessage::VendorStillThere {
-                        still_present: outcome.still_present.clone(),
-                        still_listed,
-                    },
+                    // It finished, by its exit code, and the package is
+                    // still there.
+                    (None, Some(exit_code))
+                        if exit_code == 0
+                            || plan_item
+                                .vendor_run
+                                .as_ref()
+                                .is_some_and(|run| run.success_exit_codes.contains(&exit_code)) =>
+                    {
+                        UninstallMessage::VendorStillThere {
+                            still_present: outcome.still_present.clone(),
+                            still_listed,
+                        }
+                    }
                     (None, Some(exit_code)) => UninstallMessage::VendorFailed { exit_code },
                     (None, None) => UninstallMessage::VendorRunFailed {
                         error: "the uninstaller ended without saying how".to_string(),
@@ -1577,8 +1587,16 @@ fn english_message(item: &UninstallReportItem) -> String {
             still_present,
             still_listed,
         } => {
-            let mut message =
-                format!("{name}'s own uninstaller finished, but {name} is still installed.");
+            // Nothing found and Windows not listing it either, as far as
+            // RABBIT could tell: only the check fell short, as the wizard
+            // says too.
+            let mut message = if still_present.is_empty() && *still_listed != Some(true) {
+                format!(
+                    "{name}'s own uninstaller finished, but RABBIT can't confirm that {name} is gone."
+                )
+            } else {
+                format!("{name}'s own uninstaller finished, but {name} is still installed.")
+            };
             if !still_present.is_empty() {
                 message.push_str(&format!(" Still there: {}.", path_list(still_present)));
             }

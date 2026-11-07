@@ -312,6 +312,12 @@ pub struct PlannedVendorRun {
     pub arguments: Vec<String>,
     pub timeout_seconds: u64,
     pub still_waiting_seconds: u64,
+    /// The plan's `success_exit_codes`: besides 0, the exit codes with which
+    /// the uninstaller has done its work. Only the report reads them here,
+    /// to tell "finished, but still installed" from an error code; the
+    /// helper takes its own from the embedded manifests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub success_exit_codes: Vec<i32>,
     /// What must be gone afterwards.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verify_gone: Vec<PathBuf>,
@@ -348,6 +354,7 @@ pub fn plan_vendor_run(
         arguments: job.spec.arguments.clone(),
         timeout_seconds: job.spec.timeout_seconds,
         still_waiting_seconds: job.spec.still_waiting_seconds,
+        success_exit_codes: job.spec.success_exit_codes.clone(),
         verify_gone: paths.verify_gone,
         remove_leftovers,
         report_leftovers: paths
@@ -699,7 +706,8 @@ pub enum VendorExit {
     Failed,
 }
 
-/// What an exit code means for `kind`.
+/// What an exit code means for `kind`, where `success_codes`, the plan's
+/// `success_exit_codes`, also mean the uninstaller did its work.
 ///
 /// NSIS (Appendix D of its documentation): 0 is success, 1 means the user
 /// cancelled, 2 that the script aborted. Anything else is a failure too.
@@ -709,9 +717,13 @@ pub enum VendorExit {
 /// code means it didn't run to completion, and advises against checking
 /// for particular values ("Uninstaller Exit Codes" in its help). So 0 is
 /// success and anything else a failure; a cancel can't be told apart.
-pub fn vendor_exit(kind: VendorUninstallerKind, code: i32) -> VendorExit {
+///
+/// A success code only lets the checks afterwards decide: validation makes
+/// every plan that lists one check `verify_gone`.
+pub fn vendor_exit(kind: VendorUninstallerKind, success_codes: &[i32], code: i32) -> VendorExit {
     match (kind, code) {
         (_, 0) => VendorExit::Success,
+        _ if success_codes.contains(&code) => VendorExit::Success,
         (VendorUninstallerKind::Nsis, 1) => VendorExit::Cancelled,
         _ => VendorExit::Failed,
     }
@@ -1205,7 +1217,7 @@ pub fn run_vendor_uninstaller(
         }
     };
     outcome.exit_code = Some(code);
-    let exit = vendor_exit(job.spec.kind, code);
+    let exit = vendor_exit(job.spec.kind, &job.spec.success_exit_codes, code);
     // Inno may still be at work after it returns, so only its success is
     // waited for; any other ending gets one look, for the report.
     let poll = exit == VendorExit::Success && job.spec.kind == VendorUninstallerKind::Inno;

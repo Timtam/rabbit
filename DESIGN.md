@@ -939,7 +939,14 @@ names its uninstaller only through an HKLM `locate` value, where it must sit
 only `unins000.*`, REAPER's install folder strictly below `{program_files}`,
 whose HKLM `InstallLocation` must equal `{app_dir}`), its silent arguments,
 a `timeout_seconds` of 600, and `verify_gone` paths that must be gone
-afterwards. Surge's `remove_leftovers` lists the `SurgeXTData` junctions,
+afterwards. REAPER's also lists 1223 in `success_exit_codes`: the NSIS UAC
+plugin (v0.2.4) its uninstaller bundles sets that exit code whenever it runs
+elevated, as it always does under the helper, and REAPER's script never
+sets it back, so the code says nothing and `verify_gone` and the registry
+entry decide; a run that ends so with REAPER still there is reported like
+exit 0, as finished but still installed, never as an error code. A plan
+that lists such codes must have `verify_gone`, and may not list 0 or, for
+NSIS, 1. Surge's `remove_leftovers` lists the `SurgeXTData` junctions,
 removed as links, then its vendor folders, only when empty. They go also
 when Windows finishes the removal at the next restart, since nothing would
 remove them afterwards; a vendor folder still holding a bundle that waits
@@ -1340,7 +1347,8 @@ Extension files:
   vendor signs its uninstaller, so there is no signature to check. Every
   REAPER on the computer must be closed, and the programs the plan names;
   REAPER is always removed last. The status follows the uninstaller and
-  fresh detection: exit 0 with everything gone is Removed; with files
+  fresh detection: exit 0, or a code the plan's `success_exit_codes` lists,
+  with everything gone is Removed; with files
   Windows deletes at the next restart, RemovedPendingRestart, even while
   detection still finds the package through those very files; with
   leftovers, which are listed and never deleted, RemovedWithLeftovers; a

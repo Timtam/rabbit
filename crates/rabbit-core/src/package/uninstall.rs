@@ -340,6 +340,15 @@ pub struct VendorUninstallerSpec {
     /// After this long the progress page says RABBIT is still waiting.
     #[serde(default = "default_still_waiting_seconds")]
     pub still_waiting_seconds: u64,
+    /// Exit codes besides 0 with which this uninstaller ends when it has
+    /// done its work. The verdict then rests on `verify_gone` and the
+    /// registry entry alone, so a plan that lists any must have
+    /// `verify_gone`. REAPER's uninstaller needs it: the NSIS UAC plugin
+    /// (v0.2.4) it bundles sets the exit code to 1223 whenever it runs
+    /// elevated, whatever happens next, and REAPER's script never sets it
+    /// back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub success_exit_codes: Vec<i32>,
     /// Paths that must be gone afterwards. Only tested for existence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verify_gone: Vec<UninstallPath>,
@@ -993,6 +1002,7 @@ fn validate_vendor_uninstaller(
     for path in &vendor.verify_gone {
         check_path(plan, path, VERIFY_GONE)?;
     }
+    check_success_exit_codes(vendor)?;
     for path in &vendor.report_leftovers {
         check_path(plan, path, REPORT_LEFTOVERS)?;
     }
@@ -1040,6 +1050,39 @@ fn validate_vendor_uninstaller(
             return Err(
                 "an elevated vendor uninstaller reads install_location from HKLM only".to_string(),
             );
+        }
+    }
+    Ok(())
+}
+
+/// A code in `success_exit_codes` stands for "done", so something else has
+/// to say whether the uninstaller really removed anything: `verify_gone`.
+/// 0 always counts and NSIS's 1 always means the user cancelled.
+fn check_success_exit_codes(vendor: &VendorUninstallerSpec) -> Result<(), String> {
+    let codes = &vendor.success_exit_codes;
+    if codes.is_empty() {
+        return Ok(());
+    }
+    if vendor.verify_gone.is_empty() {
+        return Err(
+            "success_exit_codes needs verify_gone: only what is gone afterwards can tell such a \
+             code from a failure"
+                .to_string(),
+        );
+    }
+    for (index, code) in codes.iter().enumerate() {
+        if *code == 0 {
+            return Err("success_exit_codes needn't list 0, which always counts".to_string());
+        }
+        if *code == 1 && vendor.kind == VendorUninstallerKind::Nsis {
+            return Err(
+                "success_exit_codes may not list 1 for an nsis uninstaller: it means the user \
+                 cancelled"
+                    .to_string(),
+            );
+        }
+        if codes[..index].contains(code) {
+            return Err(format!("success_exit_codes lists {code} twice"));
         }
     }
     Ok(())
@@ -1880,6 +1923,51 @@ mod tests {
                 }"#,
             ),
             "must be a file name pattern",
+        );
+    }
+
+    /// An NSIS block that takes `codes` as success exit codes, with or
+    /// without a `verify_gone` path.
+    fn nsis_with_success_codes(codes: &str, verify_gone: bool) -> String {
+        let verify_gone = if verify_gone {
+            r#", "verify_gone": ["{app_path}"]"#
+        } else {
+            ""
+        };
+        vendor_plans(&format!(
+            r#""vendor_uninstaller": {{
+                "kind": "nsis",
+                "locate": [{{ "registry": {{ "hive": "hklm", "key": "Demo", "value": "UninstallString" }} }}],
+                "install_location": {{
+                    "registry": {{ "hive": "hklm", "key": "Demo", "value": "InstallLocation" }},
+                    "must_equal": "{{app_dir}}"
+                }},
+                "must_be_in": {{ "under": "{{program_files}}" }},
+                "timeout_seconds": 600,
+                "success_exit_codes": {codes}{verify_gone}
+            }}"#
+        ))
+    }
+
+    #[test]
+    fn success_exit_codes_need_verify_gone_and_never_take_0_or_a_cancel() {
+        accepts("", &nsis_with_success_codes("[1223]", true));
+        accepts("", &nsis_with_success_codes("[]", false));
+        rejects(
+            "",
+            &nsis_with_success_codes("[1223]", false),
+            "success_exit_codes needs verify_gone",
+        );
+        rejects("", &nsis_with_success_codes("[0]", true), "needn't list 0");
+        rejects(
+            "",
+            &nsis_with_success_codes("[1]", true),
+            "may not list 1 for an nsis uninstaller",
+        );
+        rejects(
+            "",
+            &nsis_with_success_codes("[1223, 5, 1223]", true),
+            "lists 1223 twice",
         );
     }
 

@@ -74,6 +74,9 @@
             "/S"
           ],
           "timeout_seconds": 600,
+          "success_exit_codes": [
+            1223
+          ],
           "verify_gone": [
             "{app_path}"
           ]

@@ -749,6 +749,85 @@ fn a_package_still_detected_afterwards_failed_and_keeps_its_entry() {
     assert!(computer.receipt().packages.contains_key(PACKAGE_SURGE_XT));
 }
 
+/// REAPER's uninstaller ends with 1223 under the helper whatever it did,
+/// and its plan lists that code as success. A run that ended so with REAPER
+/// still there reads like exit 0, "finished, but still installed", never as
+/// an error code; the same code from a plan that doesn't list it stays one.
+#[test]
+fn a_listed_success_code_with_the_package_still_there_reads_like_exit_0() {
+    let computer = Computer::new();
+    let helper = ScriptedHelper::new(vec![
+        (
+            PACKAGE_SURGE_XT,
+            Script::ends(outcome(PACKAGE_SURGE_XT, VendorStatus::Failed, Some(1223))),
+        ),
+        (
+            PACKAGE_REAPER,
+            Script::ends(VendorOutcome {
+                still_present: vec![computer.app()],
+                still_listed: true,
+                ..outcome(PACKAGE_REAPER, VendorStatus::Failed, Some(1223))
+            }),
+        ),
+    ]);
+    let report = Run::new(&computer, &helper).uninstall(&[PACKAGE_SURGE_XT, PACKAGE_REAPER]);
+
+    let surge = item(&report, PACKAGE_SURGE_XT);
+    assert_eq!(surge.status, UninstallStatus::Failed);
+    assert_eq!(
+        surge.message_code,
+        UninstallMessage::VendorFailed { exit_code: 1223 }
+    );
+    let reaper = item(&report, PACKAGE_REAPER);
+    assert_eq!(reaper.status, UninstallStatus::Failed);
+    assert_eq!(
+        reaper.message_code,
+        UninstallMessage::VendorStillThere {
+            still_present: vec![computer.app()],
+            still_listed: Some(true),
+        }
+    );
+    assert!(computer.receipt().packages.contains_key(PACKAGE_REAPER));
+}
+
+/// REAPER's program went, but Windows' list couldn't be read afterwards:
+/// the report says RABBIT can't confirm it is gone, never that it is still
+/// installed.
+#[test]
+fn a_listed_success_code_with_an_unreadable_list_says_it_cant_confirm() {
+    use super::vendor::VendorProblem;
+    let computer = Computer::new();
+    let helper = ScriptedHelper::new(vec![(
+        PACKAGE_REAPER,
+        Script::ends(VendorOutcome {
+            problems: vec![VendorProblem::ListUnreadable {
+                error: "access denied".to_string(),
+            }],
+            ..outcome(PACKAGE_REAPER, VendorStatus::Failed, Some(1223))
+        }),
+    )]);
+    let report = Run::new(&computer, &helper).uninstall(&[PACKAGE_REAPER]);
+    let reaper = item(&report, PACKAGE_REAPER);
+    assert_eq!(reaper.status, UninstallStatus::Failed);
+    assert_eq!(
+        reaper.message_code,
+        UninstallMessage::VendorStillThere {
+            still_present: Vec::new(),
+            still_listed: None,
+        }
+    );
+    assert!(
+        reaper.message.contains("can't confirm"),
+        "{}",
+        reaper.message
+    );
+    assert!(
+        !reaper.message.contains("still installed"),
+        "{}",
+        reaper.message
+    );
+}
+
 /// Exit 1 from REAPER's NSIS uninstaller is the user's cancel; exit 2, or
 /// any other code, a failure. Either way the receipt follows detection, and
 /// the run goes on with the next package.

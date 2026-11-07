@@ -1669,6 +1669,7 @@ pub(super) fn vendor_surge() -> UninstallPlanItem {
             arguments: vec!["/VERYSILENT".to_string()],
             timeout_seconds: 600,
             still_waiting_seconds: 30,
+            success_exit_codes: Vec::new(),
             verify_gone: Vec::new(),
             remove_leftovers: Vec::new(),
             report_leftovers: Vec::new(),

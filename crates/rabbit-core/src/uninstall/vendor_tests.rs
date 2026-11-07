@@ -235,16 +235,29 @@ impl VendorEnvironment for TestEnvironment {
 #[test]
 fn exit_codes_read_as_each_installer_documents_them() {
     use VendorUninstallerKind::{Inno, Nsis};
-    assert_eq!(vendor_exit(Nsis, 0), VendorExit::Success);
-    assert_eq!(vendor_exit(Nsis, 1), VendorExit::Cancelled);
-    assert_eq!(vendor_exit(Nsis, 2), VendorExit::Failed);
-    assert_eq!(vendor_exit(Nsis, 1223), VendorExit::Failed);
-    assert_eq!(vendor_exit(Nsis, -1), VendorExit::Failed);
+    assert_eq!(vendor_exit(Nsis, &[], 0), VendorExit::Success);
+    assert_eq!(vendor_exit(Nsis, &[], 1), VendorExit::Cancelled);
+    assert_eq!(vendor_exit(Nsis, &[], 2), VendorExit::Failed);
+    assert_eq!(vendor_exit(Nsis, &[], 1223), VendorExit::Failed);
+    assert_eq!(vendor_exit(Nsis, &[], -1), VendorExit::Failed);
     // Inno only promises that anything but 0 didn't finish.
-    assert_eq!(vendor_exit(Inno, 0), VendorExit::Success);
+    assert_eq!(vendor_exit(Inno, &[], 0), VendorExit::Success);
     for code in [1, 2, 3, 5, 6, 7, -1] {
-        assert_eq!(vendor_exit(Inno, code), VendorExit::Failed, "{code}");
+        assert_eq!(vendor_exit(Inno, &[], code), VendorExit::Failed, "{code}");
     }
+}
+
+#[test]
+fn a_manifests_success_codes_count_as_done_and_nothing_else_changes() {
+    use VendorUninstallerKind::{Inno, Nsis};
+    // REAPER's: the NSIS UAC plugin it bundles makes it end with 1223
+    // whenever it runs elevated.
+    assert_eq!(vendor_exit(Nsis, &[1223], 1223), VendorExit::Success);
+    assert_eq!(vendor_exit(Nsis, &[1223], 0), VendorExit::Success);
+    assert_eq!(vendor_exit(Nsis, &[1223], 1), VendorExit::Cancelled);
+    assert_eq!(vendor_exit(Nsis, &[1223], 2), VendorExit::Failed);
+    assert_eq!(vendor_exit(Inno, &[5], 5), VendorExit::Success);
+    assert_eq!(vendor_exit(Inno, &[5], 6), VendorExit::Failed);
 }
 
 #[test]
@@ -1299,6 +1312,49 @@ pub(crate) mod windows {
         }
     }
 
+    /// REAPER's uninstaller ends with 1223 whenever it runs elevated, as it
+    /// always does under the helper: the NSIS UAC plugin it bundles sets
+    /// that code and nothing sets it back. With the code in the plan's
+    /// `success_exit_codes`, what is gone afterwards decides.
+    #[test]
+    fn a_success_code_from_the_plan_lets_what_is_gone_decide() {
+        let fixture = Fixture::new();
+        let reaper = install_reaper(&fixture, b"nsis");
+        let roots = fixture.roots(Some(&reaper.app));
+        let spec = shipped_reaper_spec();
+        assert_eq!(spec.success_exit_codes, [1223]);
+
+        // Nothing went: a failure, as with exit 0.
+        let env = fixture.env(Runner::Fake(Box::new(|_| FakeRun::exits(1223))));
+        let (outcome, _) = run(&spec, &roots, &env);
+        assert_eq!(outcome.status, VendorStatus::Failed);
+        assert_eq!(outcome.exit_code, Some(1223));
+        assert!(outcome.still_listed);
+
+        // Without the code in the plan, even a REAPER that went is a failure,
+        // which is what the first real run reported.
+        let gone_on_run = |fixture: &Fixture, reaper: &Reaper| {
+            let (install, list) = (reaper.install.clone(), fixture.list.root());
+            fixture.env(Runner::Fake(Box::new(move |_| {
+                fs::remove_dir_all(&install).unwrap();
+                list.delete_entry(REAPER_KEY).unwrap();
+                FakeRun::exits(1223)
+            })))
+        };
+        let env = gone_on_run(&fixture, &reaper);
+        let (outcome, _) = run(&reaper_spec(&["/S"]), &roots, &env);
+        assert_eq!(outcome.status, VendorStatus::Failed);
+        assert!(outcome.still_present.is_empty() && !outcome.still_listed);
+
+        // With it, the same run is Removed.
+        let reaper = install_reaper(&fixture, b"nsis");
+        let env = gone_on_run(&fixture, &reaper);
+        let (outcome, events) = run(&spec, &roots, &env);
+        assert_eq!(outcome.status, VendorStatus::Removed, "{outcome:?}");
+        assert_eq!(outcome.exit_code, Some(1223));
+        assert_eq!(events, [VendorEvent::Launched]);
+    }
+
     #[test]
     fn exit_zero_with_reaper_still_there_is_a_failure() {
         let fixture = Fixture::new();
@@ -1395,17 +1451,29 @@ pub(crate) mod windows {
         assert!(surge.uninstaller.exists());
     }
 
-    /// The shipped Surge XT plan, with its key swapped for the fixture's.
-    fn shipped_surge_spec() -> VendorUninstallerSpec {
+    /// The shipped plan of `package_id` for a standard install.
+    fn shipped_spec(package_id: &str) -> VendorUninstallerSpec {
         let spec = crate::package::builtin_package_specs(crate::model::Platform::Windows)
             .into_iter()
-            .find(|spec| spec.id == crate::package::PACKAGE_SURGE_XT)
+            .find(|spec| spec.id == package_id)
             .unwrap();
-        let vendor = spec
-            .uninstall
+        spec.uninstall
             .plan_for(crate::model::Platform::Windows, InstallationKind::Standard)
             .and_then(|plan| plan.vendor_uninstaller.clone())
-            .unwrap();
+            .unwrap()
+    }
+
+    /// The shipped REAPER plan, with its key swapped for the fixture's.
+    fn shipped_reaper_spec() -> VendorUninstallerSpec {
+        let json = serde_json::to_string(&shipped_spec(crate::package::PACKAGE_REAPER)).unwrap();
+        let swapped = json.replace(r#""key":"REAPER""#, &format!(r#""key":"{REAPER_KEY}""#));
+        assert_eq!(swapped.matches(REAPER_KEY).count(), 2, "{json}");
+        serde_json::from_str(&swapped).unwrap()
+    }
+
+    /// The shipped Surge XT plan, with its key swapped for the fixture's.
+    fn shipped_surge_spec() -> VendorUninstallerSpec {
+        let vendor = shipped_spec(crate::package::PACKAGE_SURGE_XT);
         serde_json::from_str(
             &serde_json::to_string(&vendor)
                 .unwrap()
