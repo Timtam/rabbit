@@ -4627,7 +4627,9 @@ mod tests {
         code: rabbit_core::uninstall::UninstallMessage,
         message: &str,
     ) -> (FakeReaper, rabbit_core::uninstall::UninstallReport) {
-        use rabbit_core::uninstall::{NoElevatedHelper, NoMacosObjects, UninstallServices};
+        use rabbit_core::uninstall::{
+            NoAdministratorShell, NoElevatedHelper, NoMacosObjects, UninstallServices,
+        };
 
         let reaper = FakeReaper::new();
         let app = reaper.resource.join("reaper.exe");
@@ -4643,6 +4645,7 @@ mod tests {
                 elevated_helper: &NoElevatedHelper,
                 installed_programs: None,
                 macos_objects: &NoMacosObjects,
+                administrator_shell: &NoAdministratorShell,
             },
             &rabbit_core::cancel::CancelToken::new(),
         )

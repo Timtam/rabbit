@@ -319,6 +319,13 @@ fn plan_item(
             return item;
         }
     }
+    // Root's first step looks for every REAPER by name: pgrep can't tell
+    // the target from a portable one. So the checks RABBIT makes as the
+    // user first must ask the same, or the password window would open for
+    // a command that can only stop.
+    if spec.id == PACKAGE_REAPER && item.needs_administrator() {
+        item.every_reaper_closed = true;
+    }
     // Only now is the package known to be removable, so only now may "Also
     // remove settings" take its data. A settings file ReaPack installed
     // stays, like everything ReaPack installed; see `user_data`. What the

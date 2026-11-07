@@ -193,6 +193,12 @@ fn execute_program_plan_elevated(plan: &PlannedExecutionPlan, program: &str) -> 
         ElevationError::UserCancelledElevation { .. } => RabbitError::UserCancelledElevation {
             program: program.to_string(),
         },
+        // macOS's password window failed some other way: the program never
+        // ran, and the error says why that usually happens.
+        ElevationError::PromptFailed { number } => RabbitError::AdministratorPromptFailed {
+            program: program.to_string(),
+            number,
+        },
         other => RabbitError::InvalidPlannedExecution {
             message: other.to_string(),
         },

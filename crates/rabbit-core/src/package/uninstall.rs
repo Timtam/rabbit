@@ -1054,6 +1054,16 @@ fn validate_elevation_and_backup(plan: &UninstallPlanSpec) -> Result<(), String>
                 .to_string(),
         );
     }
+    // RABBIT moves one app to the Trash per package. A second that failed
+    // after the first went could not be reported as one outcome, and the
+    // administrator command takes only one.
+    if plan.backup == UninstallBackup::ToTrash && plan.remove.trees.len() != 1 {
+        return Err(
+            "backup to_trash moves exactly one app to the Trash, so it needs exactly one \
+             remove.trees entry"
+                .to_string(),
+        );
+    }
     if has_trees && plan.backup == UninstallBackup::Move {
         return Err(
             "remove.trees can't be moved into a backup set; use backup to_trash or none"
@@ -2467,6 +2477,27 @@ mod tests {
             &vendor_plans(&format!(r#""backup": "to_trash", {INNO_IN_PLACE}"#)),
             "backup to_trash needs remove.trees and \"platform\": \"macos\"",
         );
+    }
+
+    /// One app per package goes to the Trash: a second that failed after
+    /// the first went couldn't be reported as one outcome, and root's
+    /// command moves only one.
+    #[test]
+    fn a_trash_plan_moves_exactly_one_app() {
+        accepts("", &if_needed_app(REAPER_APP_TREE));
+        for elevation in ["never", "if_needed"] {
+            rejects(
+                "",
+                &macos_remove_plans(&format!(
+                    r#""elevation": "{elevation}", "backup": "to_trash",
+                       "remove": {{ "trees": [
+                           {{ {REAPER_APP_TREE} }},
+                           {{ "path": "/Applications/Other.app", "must_end_with": ".app", "name_contains": "Other" }}
+                       ] }}"#
+                )),
+                "backup to_trash moves exactly one app to the Trash",
+            );
+        }
     }
 
     /// Rule 6: only root deletes for good, so a plan without administrator

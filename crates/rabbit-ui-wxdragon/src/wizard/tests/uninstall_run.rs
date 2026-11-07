@@ -172,10 +172,111 @@ fn the_spoken_events_are_the_starts_and_both_ends_of_a_removal() {
         (waiting_for_files("surge-xt"), true),
         (completed("sws", true), true),
         (completed("sws", false), true),
+        (
+            ProgressEvent::RemoveStarted {
+                package_id: id(),
+                method: RemovalMethod::Trash,
+            },
+            true,
+        ),
+        (
+            ProgressEvent::RemoveStarted {
+                package_id: id(),
+                method: RemovalMethod::Administrator,
+            },
+            true,
+        ),
+        // What the password window is for, before it takes focus, and that
+        // it may be behind RABBIT.
+        (
+            ProgressEvent::AdministratorPrompt {
+                package_ids: vec!["surge-xt".to_string()],
+            },
+            true,
+        ),
+        (
+            ProgressEvent::AdministratorStillWaiting { seconds: 30 },
+            true,
+        ),
     ];
     for (event, spoken) in events {
         assert_eq!(is_spoken(&event), spoken, "{event:?}");
     }
+}
+
+/// The administrator prompt counts no phase of its own: a one-package
+/// run still reaches 100 when that package ends.
+#[test]
+fn the_administrator_prompt_counts_no_phase() {
+    let mut state = ProgressUiState::new(WizardMode::Uninstall, 1, 0);
+    for event in [
+        ProgressEvent::AdministratorPrompt {
+            package_ids: vec!["surge-xt".to_string()],
+        },
+        ProgressEvent::AdministratorStillWaiting { seconds: 30 },
+    ] {
+        state.record(&event);
+        assert_eq!(state.percentage(), 0);
+        assert!(!state.moves_focus_to_log(&event));
+    }
+    state.record(&ProgressEvent::RemoveStarted {
+        package_id: "surge-xt".to_string(),
+        method: RemovalMethod::Administrator,
+    });
+    state.record(&completed("surge-xt", true));
+    assert_eq!(state.percentage(), 100);
+}
+
+/// macOS's password window keeps its own text, so RABBIT says what it is
+/// for; Windows' permission prompt names RABBIT, and nothing new is said.
+#[test]
+fn the_page_says_what_macoss_password_window_is_for() {
+    let line = administrator_prompt_line(Some(Platform::MacOs), "Surge XT, REAPER").unwrap();
+    assert!(
+        line.contains("administrator's name and password") && line.contains("Surge XT, REAPER"),
+        "{line}"
+    );
+    assert_eq!(
+        administrator_prompt_line(Some(Platform::Windows), "Surge XT"),
+        None
+    );
+    assert!(administrator_still_waiting_line().contains("behind RABBIT"));
+}
+
+/// What macOS's Trash and administrator command left to look at is said
+/// on Done, in the engine's words for now.
+#[test]
+fn done_says_what_the_trash_and_the_administrator_command_left() {
+    let trash_failed = UninstallReportItem {
+        message: "RABBIT couldn't move REAPER to the Trash, so nothing of it changed: no."
+            .to_string(),
+        ..report_item(
+            "reaper",
+            UninstallStatus::Failed,
+            UninstallMessage::TrashFailed {
+                error: "no".to_string(),
+                refused_by_macos: false,
+            },
+        )
+    };
+    let surge = UninstallReportItem {
+        problems: vec![UninstallProblem::InstallerRecordsRemain {
+            ids: vec!["org.example.surge.pkg".to_string()],
+        }],
+        ..report_item(
+            "surge-xt",
+            UninstallStatus::Removed,
+            UninstallMessage::RemovedAsAdministrator,
+        )
+    };
+    let reasons = uninstall_reasons(&en(), &report(vec![surge, trash_failed.clone()]));
+    assert!(reasons.contains(&trash_failed.message), "{reasons:?}");
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.contains("org.example.surge.pkg")),
+        "{reasons:?}"
+    );
 }
 
 /// A vendor's uninstaller still running is heard once per run: the first
@@ -735,6 +836,7 @@ fn removed(package_id: &str, files: &[&str]) -> UninstallReportItem {
                 size: 3,
                 changed_since_install: false,
                 backup_path: None,
+                trashed_to: None,
             })
             .collect(),
         ..report_item(
@@ -779,6 +881,7 @@ fn report(items: Vec<UninstallReportItem>) -> UninstallReport {
         backup_set_id: changed.then(|| "uninstall-unix-1".to_string()),
         backup_set_path: None,
         items,
+        administrator_steps: Vec::new(),
         plan: plan(Vec::new()),
         saved_report: None,
     }

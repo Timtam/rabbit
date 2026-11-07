@@ -278,6 +278,11 @@ const SHELL_STOPPED_STATUS: i32 = 255;
 /// failed: statuses 101 to 254.
 const SHELL_MAX_STEPS: usize = (SHELL_STOPPED_STATUS - SHELL_FIRST_STEP_STATUS) as usize;
 
+/// The most steps one [`run_administrator_shell`] call takes: 154. Callers
+/// that build a request check against it before they announce a prompt,
+/// so a request that would be refused never gets that far.
+pub const ADMINISTRATOR_SHELL_MAX_STEPS: usize = SHELL_MAX_STEPS;
+
 /// The program that raises the macOS administrator password window.
 const OSASCRIPT: &str = "/usr/bin/osascript";
 
@@ -333,7 +338,11 @@ fn administrator_prompt_refusal() -> Option<&'static str> {
 ///
 /// Cancelling the window is [`ElevationError::UserCancelledElevation`],
 /// and any other failure of the window is [`ElevationError::PromptFailed`];
-/// in both cases nothing ran. A shell that ran gives an
+/// in both cases nothing ran, and neither did anything when `osascript`
+/// couldn't start ([`ElevationError::LaunchFailed`]). Once it has started,
+/// losing track of it is [`ElevationError::WaitFailed`]: the window may
+/// have been answered and the steps run, so only the filesystem can say
+/// what changed. A shell that ran gives an
 /// [`AdministratorShellReport`]. An empty request returns
 /// [`ShellLinesOutcome::Completed`] without a window.
 ///
@@ -374,16 +383,37 @@ fn platform_run_administrator_shell(
     still_waiting_after: Duration,
     on_still_waiting: &mut dyn FnMut(),
 ) -> Result<AdministratorShellReport, ElevationError> {
-    use std::process::Command;
+    use std::process::{Command, Stdio};
 
     let script = administrator_script(shell);
     let output = wait_with_notice(
         move || {
             let mut command = Command::new(OSASCRIPT);
-            command.arg("-e").arg(&script);
+            // `output()` would pipe these two by itself; `spawn()` inherits
+            // all three unless told.
+            command
+                .arg("-e")
+                .arg(&script)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
             // The root shell inherits this environment.
             crate::process::without_rabbit_secrets(&mut command);
-            command.output()
+            let child = command
+                .spawn()
+                .map_err(|err| ElevationError::LaunchFailed {
+                    program: PathBuf::from(OSASCRIPT),
+                    code: err.raw_os_error().unwrap_or(0) as u32,
+                })?;
+            // osascript has started: the window may have been answered and
+            // root's steps run, so a failure from here on only means RABBIT
+            // lost track of it, and the run must ask the filesystem.
+            child
+                .wait_with_output()
+                .map_err(|err| ElevationError::WaitFailed {
+                    program: PathBuf::from(OSASCRIPT),
+                    message: err.to_string(),
+                })
         },
         still_waiting_after,
         on_still_waiting,
@@ -391,11 +421,7 @@ fn platform_run_administrator_shell(
     .ok_or_else(|| ElevationError::WaitFailed {
         program: PathBuf::from(OSASCRIPT),
         message: "the thread waiting for osascript ended without an answer".to_string(),
-    })?
-    .map_err(|err| ElevationError::LaunchFailed {
-        program: PathBuf::from(OSASCRIPT),
-        code: err.raw_os_error().unwrap_or(0) as u32,
-    })?;
+    })??;
 
     administrator_shell_report(
         output.status.success(),
@@ -2433,6 +2459,93 @@ mod tests {
             let output = run_unprivileged_shell(&shell);
             assert_eq!(output.status.code(), Some(101), "{output:?}");
             assert!(!marker.exists());
+        }
+
+        /// An uninstall's pgrep step puts `--` before its pattern, so no
+        /// program name can ever be read as an option. pgrep takes that:
+        /// the pattern after it is a pattern even when it starts with a
+        /// dash, and it still matches as usual.
+        #[test]
+        fn pgrep_takes_its_pattern_after_a_double_dash() {
+            let pgrep = |pattern: &str| {
+                output_within_limit(
+                    Command::new("/usr/bin/pgrep").args(["-x", "-i", "--", pattern]),
+                )
+            };
+            // Nothing matches: 1, not a usage error (2).
+            let output = pgrep("-rabbitnosuchprog|rabbitnosuchprog");
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+
+            let _sleeper = EndOnDrop(
+                Command::new("/bin/sleep")
+                    .arg("120")
+                    .stdin(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            let output = pgrep("rabbitnosuchprog|SLEEP");
+            assert_eq!(output.status.code(), Some(0), "{output:?}");
+        }
+
+        /// The steps that move REAPER's app into the user's Trash, run as
+        /// the user on a temp folder: `test -d` and `test ! -L` stop at a
+        /// Trash that is a link to a folder, and `mv -h -n` never replaces
+        /// a file or a link that already has the name it was given, nor
+        /// follows the link. Whatever status mv gives then, nothing moves,
+        /// which is what the run checks afterwards.
+        #[test]
+        fn the_trash_move_steps_stop_at_a_linked_trash_and_never_replace_anything() {
+            let (_dir, root) = real_temp_dir();
+            let app = root.join("REAPER.app");
+            std::fs::create_dir_all(app.join("Contents")).unwrap();
+            let trash = root.join("Trash");
+            std::fs::create_dir(&trash).unwrap();
+            let elsewhere = root.join("elsewhere");
+            std::fs::create_dir(&elsewhere).unwrap();
+            let linked_trash = root.join("Linked Trash");
+            std::os::unix::fs::symlink(&elsewhere, &linked_trash).unwrap();
+
+            let steps = |trash: &Path, destination: &Path| {
+                administrator_shell_text(&[
+                    run("/bin/test", &["-d", text(trash)]),
+                    run("/bin/test", &["!", "-L", text(trash)]),
+                    run("/bin/mv", &["-h", "-n", text(&app), text(destination)]),
+                ])
+                .unwrap()
+            };
+
+            // A link to a folder passes `test -d`, and `test ! -L` stops it.
+            let output =
+                run_unprivileged_shell(&steps(&linked_trash, &linked_trash.join("REAPER x.app")));
+            assert_eq!(output.status.code(), Some(102), "{output:?}");
+            assert!(app.is_dir());
+            assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+
+            // The name is taken, by a file or by a link to a folder: nothing
+            // moves, nothing is replaced, and the link isn't followed.
+            let taken_by_file = trash.join("REAPER file.app");
+            std::fs::write(&taken_by_file, "mine").unwrap();
+            let output = run_unprivileged_shell(&steps(&trash, &taken_by_file));
+            assert!(app.is_dir(), "{output:?}");
+            assert_eq!(std::fs::read_to_string(&taken_by_file).unwrap(), "mine");
+            let taken_by_link = trash.join("REAPER link.app");
+            std::os::unix::fs::symlink(&elsewhere, &taken_by_link).unwrap();
+            let output = run_unprivileged_shell(&steps(&trash, &taken_by_link));
+            assert!(app.is_dir(), "{output:?}");
+            assert!(
+                std::fs::symlink_metadata(&taken_by_link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+
+            // A fresh name: the app moves, and only it.
+            let fresh = trash.join("REAPER 2026-11-07 15.30.12.app");
+            let output = run_unprivileged_shell(&steps(&trash, &fresh));
+            assert_eq!(output.status.code(), Some(0), "{output:?}");
+            assert!(!app.exists());
+            assert!(fresh.join("Contents").is_dir());
         }
 
         fn osascript_report(shell: &str, step_count: usize) -> super::AdministratorShellReport {

@@ -16,10 +16,11 @@ use super::execute::{UninstallEnvironment, execute_uninstall_in};
 use super::preflight::{VolumeProbe, backup_space_check, moves_resource_files};
 use super::tests::{installed, write};
 use super::{
-    ByHandReason, FakeMacosObjects, KeptReason, NoElevatedHelper, NothingListed, ObjectFacts,
-    ObjectProbe, PathRefusal, Removability, RemovalReason, RemovalRoute, RemovedFile,
-    TrashFolderFacts, UninstallMessage, UninstallPlan, UninstallPlanInput, UninstallPlanItem,
-    UninstallReport, UninstallRequest, UninstallRoots, UninstallStatus, build_uninstall_plan,
+    ByHandReason, FakeMacosObjects, KeptReason, MacosObjects, NoAdministratorShell,
+    NoElevatedHelper, NothingListed, ObjectFacts, ObjectProbe, PathRefusal, Removability,
+    RemovalReason, RemovalRoute, RemovedFile, TrashFolderFacts, UninstallPlan, UninstallPlanInput,
+    UninstallPlanItem, UninstallReport, UninstallRequest, UninstallRoots, UninstallStatus,
+    build_uninstall_plan,
 };
 use crate::cancel::CancelToken;
 use crate::model::{InstallationKind, Platform};
@@ -30,14 +31,14 @@ use crate::package::{
 use crate::progress::ProgressReporter;
 
 const SUMMARY: &str = r#""summary": { "removes_key": "test-removes", "keeps_key": "test-keeps" }"#;
-const REAPER_ID: &str = "com.cockos.reaper";
-const ME: u32 = 501;
-const DISK: u64 = 16_777_220;
+pub(super) const REAPER_ID: &str = "com.cockos.reaper";
+pub(super) const ME: u32 = 501;
+pub(super) const DISK: u64 = 16_777_220;
 
 /// A macOS package `id` with `extra` among its fields and one plan holding
 /// `plan`. It must pass the manifest's own validation, like every shipped
 /// manifest.
-fn mac_spec(id: &str, extra: &str, plan: &str) -> PackageSpec {
+pub(super) fn mac_spec(id: &str, extra: &str, plan: &str) -> PackageSpec {
     let source = format!(
         r#"{{
             "id": "{id}",
@@ -61,7 +62,7 @@ fn mac_spec(id: &str, extra: &str, plan: &str) -> PackageSpec {
 }
 
 /// REAPER's app as the shipped plan will have it, with `elevation`.
-fn reaper_spec(elevation: &str) -> PackageSpec {
+pub(super) fn reaper_spec(elevation: &str) -> PackageSpec {
     mac_spec(
         PACKAGE_REAPER,
         "",
@@ -76,7 +77,7 @@ fn reaper_spec(elevation: &str) -> PackageSpec {
 
 /// A package the administrator command deletes, shaped like Surge XT's
 /// macOS plan.
-fn surge() -> PackageSpec {
+pub(super) fn surge() -> PackageSpec {
     mac_spec(
         "surge",
         r#""requires_standard_install": true,"#,
@@ -94,7 +95,7 @@ fn surge() -> PackageSpec {
 }
 
 /// An extension whose plug-in goes into the backup set.
-fn extension() -> PackageSpec {
+pub(super) fn extension() -> PackageSpec {
     mac_spec(
         "ext",
         r#""depends_on": ["reaper"],"#,
@@ -104,16 +105,16 @@ fn extension() -> PackageSpec {
 
 /// A temporary folder holding a resource folder, a stand-in for `/` with
 /// REAPER.app in its Applications folder, and roots that know them all.
-struct MacFixture {
-    dir: TempDir,
-    resource: PathBuf,
-    system: PathBuf,
-    app: PathBuf,
-    roots: UninstallRoots,
+pub(super) struct MacFixture {
+    pub(super) dir: TempDir,
+    pub(super) resource: PathBuf,
+    pub(super) system: PathBuf,
+    pub(super) app: PathBuf,
+    pub(super) roots: UninstallRoots,
 }
 
 impl MacFixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let dir = tempdir().unwrap();
         let resource = dir.path().join("REAPER");
         fs::create_dir_all(&resource).unwrap();
@@ -143,7 +144,7 @@ impl MacFixture {
     }
 
     /// Surge's three trees, as real folders.
-    fn install_surge(&self) {
+    pub(super) fn install_surge(&self) {
         for tree in [
             "Applications/Surge.app/Contents/MacOS/Surge",
             "Library/Audio/Plug-Ins/VST3/Surge.vst3/Contents/Info.plist",
@@ -153,7 +154,7 @@ impl MacFixture {
         }
     }
 
-    fn plan(
+    pub(super) fn plan(
         &self,
         specs: &[PackageSpec],
         ids: &[&str],
@@ -175,7 +176,7 @@ impl MacFixture {
 
     /// The facts macOS would give for REAPER.app, and a Trash of the user's
     /// on the same volume.
-    fn objects(&self, app: ObjectFacts) -> FakeMacosObjects {
+    pub(super) fn objects(&self, app: ObjectFacts) -> FakeMacosObjects {
         FakeMacosObjects::new()
             .with_object(&self.app, app)
             .with_trash(my_trash())
@@ -183,14 +184,14 @@ impl MacFixture {
 }
 
 /// `relative`, with `/` between its components, below `base`.
-fn join(base: &Path, relative: &str) -> PathBuf {
+pub(super) fn join(base: &Path, relative: &str) -> PathBuf {
     relative
         .split('/')
         .fold(base.to_path_buf(), |path, part| path.join(part))
 }
 
 /// REAPER.app as a user who dragged it into /Applications owns it.
-fn owned_by_me() -> ObjectFacts {
+pub(super) fn owned_by_me() -> ObjectFacts {
     ObjectFacts {
         is_dir: true,
         is_symlink: false,
@@ -209,7 +210,7 @@ fn owned_by_me() -> ObjectFacts {
 }
 
 /// REAPER.app as an installer running as root left it.
-fn owned_by_root() -> ObjectFacts {
+pub(super) fn owned_by_root() -> ObjectFacts {
     ObjectFacts {
         owner_uid: 0,
         owned_by_me: false,
@@ -219,7 +220,7 @@ fn owned_by_root() -> ObjectFacts {
     }
 }
 
-fn my_trash() -> TrashFolderFacts {
+pub(super) fn my_trash() -> TrashFolderFacts {
     TrashFolderFacts {
         path: PathBuf::from("/Users/me/.Trash"),
         is_dir: true,
@@ -237,7 +238,7 @@ fn item<'a>(plan: &'a UninstallPlan, id: &str) -> &'a UninstallPlanItem {
 
 /// Make `link` point to the folder `target`: a junction on Windows, a
 /// symbolic link elsewhere. The guard sees both as links.
-fn link_folder(link: &Path, target: &Path) {
+pub(super) fn link_folder(link: &Path, target: &Path) {
     #[cfg(windows)]
     super::paths::make_junction(link, target);
     #[cfg(unix)]
@@ -259,6 +260,8 @@ fn an_app_the_user_may_move_goes_to_the_trash_without_a_prompt() {
     assert_eq!(reaper.route(), RemovalRoute::Trash);
     assert!(reaper.can_remove());
     assert!(!reaper.requires_elevation && !reaper.needs_administrator());
+    // Only the target's REAPER need be closed: no pgrep looks for others.
+    assert!(!reaper.every_reaper_closed);
     // Gone from its place all the same, so the question before starting.
     assert!(reaper.unbacked && reaper.confirm);
     let [app] = reaper.files.as_slice() else {
@@ -286,6 +289,9 @@ fn a_root_owned_app_in_applications_goes_through_the_administrator_command() {
     assert_eq!(reaper.route(), RemovalRoute::Administrator);
     assert!(reaper.needs_administrator() && reaper.can_remove());
     assert_eq!(reaper.files[0].path, fixture.app);
+    // Root's pgrep finds every REAPER by name, so RABBIT's own checks ask
+    // for every REAPER closed too.
+    assert!(reaper.every_reaper_closed);
 }
 
 #[test]
@@ -580,7 +586,7 @@ impl VolumeProbe for NoRoomElsewhere {
 }
 
 /// Volumes as a run sees them: one volume for everything, with room.
-struct OneVolume;
+pub(super) struct OneVolume;
 
 impl VolumeProbe for OneVolume {
     fn same_volume(&self, _left: &Path, _right: &Path) -> Option<bool> {
@@ -690,7 +696,7 @@ fn a_trash_route_packages_settings_still_count_for_the_backup_checks() {
 }
 
 /// Every file and folder below `root`, with each file's contents.
-fn snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+pub(super) fn snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     let mut found = BTreeMap::new();
     for entry in fs::read_dir(root).unwrap() {
         let path = entry.unwrap().path();
@@ -713,7 +719,7 @@ fn run(
     fixture: &MacFixture,
     specs: &[PackageSpec],
     ids: &[&str],
-    objects: &dyn ObjectProbe,
+    objects: &dyn MacosObjects,
     dry_run: bool,
 ) -> UninstallReport {
     let detections = Cell::new(0);
@@ -751,6 +757,7 @@ fn run(
             vendor_lookup: &NothingListed,
             elevated_helper: &NoElevatedHelper,
             macos_objects: objects,
+            administrator_shell: &NoAdministratorShell,
         },
         &ProgressReporter::noop(),
         &CancelToken::new(),
@@ -787,6 +794,7 @@ fn a_dry_run_reads_an_app_bundle_whole_and_never_walks_it() {
             size: 0,
             changed_since_install: false,
             backup_path: None,
+            trashed_to: None,
         }]
     );
     assert!(item.kept.is_empty(), "{:?}", item.kept);
@@ -798,58 +806,6 @@ fn a_dry_run_reads_an_app_bundle_whole_and_never_walks_it() {
             .join("REAPER")
             .is_file()
     );
-}
-
-/// The Trash and the administrator command come with a later version, so
-/// a real run refuses those packages before anything changes, and the
-/// packages beside them stay too.
-#[test]
-fn a_real_run_leaves_whole_object_routes_alone_for_now() {
-    let fixture = MacFixture::new();
-    fixture.install_surge();
-    write(
-        &join(&fixture.resource, "UserPlugins/reaper_ext.dylib"),
-        b"ext",
-    );
-    let specs = [reaper_spec("if_needed"), extension(), surge()];
-    let before = snapshot(&fixture.system);
-    let plug_in = join(&fixture.resource, "UserPlugins/reaper_ext.dylib");
-
-    let report = run(
-        &fixture,
-        &specs,
-        &[PACKAGE_REAPER, "ext", "surge"],
-        &fixture.objects(owned_by_me()),
-        false,
-    );
-
-    let codes: Vec<(&str, UninstallStatus, &UninstallMessage)> = report
-        .items
-        .iter()
-        .map(|item| (item.package_id.as_str(), item.status, &item.message_code))
-        .collect();
-    let not_reached = UninstallMessage::OtherPackageBlocked {
-        package_ids: vec!["surge".to_string(), PACKAGE_REAPER.to_string()],
-    };
-    assert_eq!(
-        codes,
-        [
-            (
-                "surge",
-                UninstallStatus::Blocked,
-                &UninstallMessage::NotYetSupported
-            ),
-            ("ext", UninstallStatus::NotReached, &not_reached),
-            (
-                PACKAGE_REAPER,
-                UninstallStatus::Blocked,
-                &UninstallMessage::NotYetSupported
-            ),
-        ]
-    );
-    assert_eq!(report.backup_set_id, None);
-    assert_eq!(snapshot(&fixture.system), before);
-    assert!(plug_in.is_file());
 }
 
 #[test]

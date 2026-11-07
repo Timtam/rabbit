@@ -495,7 +495,11 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
     match &item.message_code {
         UninstallMessage::Removed { .. }
         | UninstallMessage::WouldRemove
-        | UninstallMessage::UninstalledByVendor => {}
+        | UninstallMessage::UninstalledByVendor
+        | UninstallMessage::RemovedAsAdministrator => {}
+        // Where it went in the Trash is worth saying; in English until the
+        // macOS uninstall's own wording is translated.
+        UninstallMessage::MovedToTrash { .. } => reasons.push(item.message.clone()),
         // Done's first line says the prompt was declined, for every package.
         UninstallMessage::ElevationDeclined => {}
         UninstallMessage::VendorRefused { refusal } => {
@@ -609,6 +613,11 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
         | UninstallMessage::MoveFailed { .. }
         | UninstallMessage::BackupFailed { .. }
         | UninstallMessage::ReceiptSaveFailed { .. } => reasons.push(item.message.clone()),
+        // macOS's Trash and administrator command: the engine's English,
+        // which names the paths, until their wording is translated.
+        UninstallMessage::TrashFailed { .. }
+        | UninstallMessage::TrashUnclear { .. }
+        | UninstallMessage::AdministratorStepFailed { .. } => reasons.push(item.message.clone()),
     }
     if item.status == UninstallStatus::RemovedPendingRestart {
         reasons.push(with_package("wizard-done-uninstall-pending-restart"));
@@ -645,6 +654,12 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
                 reasons.push(with_package(
                     "wizard-done-uninstall-installed-list-unreadable",
                 ));
+            }
+            // macOS only, in the engine's English until translated.
+            UninstallProblem::InstallerRecordsRemain { .. }
+            | UninstallProblem::InstallerRecordsUnchecked { .. }
+            | UninstallProblem::AdministratorEndedUnclearly { .. } => {
+                reasons.push(problem.message());
             }
         }
     }
@@ -850,7 +865,10 @@ fn registry_lines(localizer: &Localizer, item: &UninstallReportItem) -> Vec<Stri
         | UninstallProblem::ReceiptNotSaved { .. }
         | UninstallProblem::VendorWorkingFolderLeft { .. }
         | UninstallProblem::RestartListUnreadable { .. }
-        | UninstallProblem::InstalledListUnreadable { .. } => None,
+        | UninstallProblem::InstalledListUnreadable { .. }
+        | UninstallProblem::InstallerRecordsRemain { .. }
+        | UninstallProblem::InstallerRecordsUnchecked { .. }
+        | UninstallProblem::AdministratorEndedUnclearly { .. } => None,
     }));
     lines
 }

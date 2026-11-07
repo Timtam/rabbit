@@ -551,6 +551,11 @@ fn userplugins_write_failure(name: String, path: &Path, error: &std::io::Error) 
     }
 }
 
+/// The process names a REAPER has on macOS, compared ignoring case. The
+/// uninstall's administrator command looks for the same names as root, so
+/// both stay in step through this one list.
+pub const MACOS_REAPER_PROCESS_NAMES: [&str; 2] = ["REAPER", "reaper64"];
+
 fn is_reaper_process_name(platform: Option<Platform>, name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     match platform {
@@ -560,7 +565,9 @@ fn is_reaper_process_name(platform: Option<Platform>, name: &str) -> bool {
                 "reaper.exe" | "reaper64.exe" | "reaper_host32.exe" | "reaper_host64.exe"
             )
         }
-        Some(Platform::MacOs) => lower == "reaper" || lower == "reaper64",
+        Some(Platform::MacOs) => MACOS_REAPER_PROCESS_NAMES
+            .iter()
+            .any(|reaper| reaper.eq_ignore_ascii_case(&lower)),
         None => lower.starts_with("reaper"),
     }
 }

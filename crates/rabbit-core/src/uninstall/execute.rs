@@ -46,9 +46,21 @@
 //! A macOS plan's trees, such as REAPER.app or Surge XT's bundles, leave
 //! whole: through the Trash or the run's administrator command, never into a
 //! backup set. The read before the run, and a dry run, check each one with
-//! the guard and see that it is there, and never list, hash or walk it. This
-//! version doesn't carry those removals out yet, so a real run refuses such
-//! a package before anything changes.
+//! the guard and see that it is there, and never list, hash or walk it.
+//!
+//! On macOS the run's one administrator command is its first change, once
+//! every check has passed: one password window, then root deletes what the
+//! packages that need it remove, and moves a REAPER.app only root can move
+//! into the user's Trash (see [`super::admin_batch`]). Cancelled, it
+//! cancels the whole run with nothing changed; if any of its packages isn't
+//! fully removed afterwards, the run stops there, before anything else
+//! changes. Its packages' receipt entries follow fresh detection. A
+//! REAPER.app the user may move goes to the Trash as the user, last, with
+//! no password; it can't come back from a backup set, only from the Trash.
+//!
+//! A real macOS uninstall refuses to start at all while RABBIT runs as root,
+//! as under `sudo`: the checks of what the user may do, the Trash and the
+//! backup set would all be root's.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
@@ -61,7 +73,7 @@ use rabbit_platform::HkcuUninstallRoot;
 
 use crate::cancel::CancelToken;
 use crate::detection::{default_standard_installation, detect_components};
-use crate::error::Result;
+use crate::error::{RabbitError, Result};
 use crate::lock::acquire_package_install_lock;
 use crate::model::{ComponentDetection, InstallationKind, Platform};
 use crate::package::uninstall::UninstallPostStep;
@@ -78,8 +90,12 @@ use crate::receipt::{
 };
 use crate::rollback::{BackupPackageRecord, BackupSetWriter, FileDigest, MoveFileError, MovedFile};
 
+use super::admin_batch::{
+    AdministratorShell, AdministratorStepRecord, dry_run_administrator_steps,
+    run_administrator_batch,
+};
 use super::helper::{ElevatedHelper, ElevatedRunRequest, ElevatedSession, ElevationStartError};
-use super::macos_objects::ObjectProbe;
+use super::macos_objects::{MacosObjects, ObjectProbe, TreeRoute, tree_route};
 use super::paths::{UninstallRoots, absolute, inside_or_same, same_ignoring_case};
 use super::plan::{
     UninstallPlanInput, build_uninstall_plan, installed_by_reapack, reapack_counts_as_installed,
@@ -95,9 +111,9 @@ use super::vendor::{
     VendorEvent, VendorLookup, VendorOutcome, VendorProblem, VendorRefusal, VendorStatus,
 };
 use super::{
-    KeptFile, KeptFileReason, RegistryEntryAction, Removability, RemovalReason, RemovedFile,
-    UninstallMessage, UninstallPlan, UninstallPlanItem, UninstallProblem, UninstallReport,
-    UninstallReportItem, UninstallRequest, UninstallServices, UninstallStatus,
+    KeptFile, KeptFileReason, RegistryEntryAction, Removability, RemovalReason, RemovalRoute,
+    RemovedFile, UninstallMessage, UninstallPlan, UninstallPlanItem, UninstallProblem,
+    UninstallReport, UninstallReportItem, UninstallRequest, UninstallServices, UninstallStatus,
     save_uninstall_report,
 };
 
@@ -121,9 +137,10 @@ const DIGEST_REUSE_MARGIN: Duration = Duration::from_secs(5);
 /// [`UninstallServices::system`] in RABBIT itself, stand-ins in tests.
 ///
 /// Returns `Err` only for a hard error before anything changed, such as
-/// another RABBIT holding the install lock or a receipt that can't be read.
-/// Everything after that, failures included, is in the report. A run that
-/// isn't a dry run saves its report under `RABBIT/logs`.
+/// another RABBIT holding the install lock, a receipt that can't be read,
+/// or a real macOS run while RABBIT runs as root. Everything after that,
+/// failures included, is in the report. A run that isn't a dry run saves
+/// its report under `RABBIT/logs`.
 pub fn execute_uninstall(
     request: &UninstallRequest,
     services: &UninstallServices<'_>,
@@ -160,6 +177,7 @@ pub fn execute_uninstall(
             vendor_lookup: services.vendor_lookup,
             elevated_helper: services.elevated_helper,
             macos_objects: services.macos_objects,
+            administrator_shell: services.administrator_shell,
         },
         progress,
         cancel,
@@ -167,7 +185,8 @@ pub fn execute_uninstall(
 }
 
 /// Everything [`execute_uninstall`] reads from the computer, so tests can
-/// stand in their own packages, detection, processes, volumes and registry.
+/// stand in their own packages, detection, processes, volumes and registry,
+/// and on macOS the Trash and the administrator command.
 pub(crate) struct UninstallEnvironment<'a> {
     pub specs: &'a [PackageSpec],
     pub roots: &'a UninstallRoots,
@@ -187,8 +206,12 @@ pub(crate) struct UninstallEnvironment<'a> {
     pub vendor_lookup: &'a dyn VendorLookup,
     /// Starts the run's elevated helper.
     pub elevated_helper: &'a dyn ElevatedHelper,
-    /// What this account may do with a macOS app, asked while planning.
-    pub macos_objects: &'a dyn ObjectProbe,
+    /// What this account may do with a macOS app, asked while planning and
+    /// again right before it moves, and what the run does there as the
+    /// user.
+    pub macos_objects: &'a dyn MacosObjects,
+    /// Runs the macOS administrator command.
+    pub administrator_shell: &'a dyn AdministratorShell,
 }
 
 /// The uninstall plan for every package at `resource_path`, built from
@@ -255,6 +278,15 @@ pub(crate) fn execute_uninstall_in(
     progress: &ProgressReporter,
     cancel: &CancelToken,
 ) -> Result<UninstallReport> {
+    // Before anything else, the lock included, which would leave a file of
+    // root's in the user's resource folder. A dry run changes nothing, so
+    // it may still say what a run would do.
+    if request.platform == Platform::MacOs
+        && !request.dry_run
+        && environment.macos_objects.runs_as_root()
+    {
+        return Err(RabbitError::UninstallAsRoot);
+    }
     let resource = environment.roots.resource.clone();
     ensure_resource_path_ready(&resource, request.dry_run)?;
     // Held from before the plan is built until the report is written, so an
@@ -349,12 +381,7 @@ pub(crate) fn execute_uninstall_in(
                     removability: plan_item.removability.clone(),
                 },
             ))
-        } else if !plan_item.can_remove()
-            || (!request.dry_run && plan_item.route().takes_whole_objects())
-        {
-            // A dry run reads what a whole-object route would take; this
-            // version can't yet move it to the Trash or hand it to the
-            // administrator command, so a real run leaves it alone.
+        } else if !plan_item.can_remove() {
             Some((UninstallStatus::Blocked, UninstallMessage::NotYetSupported))
         } else {
             let mut checks = run_failures.clone();
@@ -413,14 +440,17 @@ pub(crate) fn execute_uninstall_in(
     let backup_folder = backup_volume_folder(&resource);
     let mut backup_set = None;
     let mut outcomes: Vec<UninstallReportItem> = Vec::new();
+    let mut administrator_steps: Vec<AdministratorStepRecord> = Vec::new();
     if request.dry_run {
-        for plan_item in to_remove {
+        for plan_item in &to_remove {
             let (mut item, _) = survey(plan_item, environment, &backup_folder, reapack_installed);
             if item.status == UninstallStatus::WouldRemove {
                 clean_registry(&mut item, plan_item, environment, false);
             }
             outcomes.push(item);
         }
+        // What root would be given, from the same checks; never run.
+        administrator_steps = dry_run_administrator_steps(&to_remove, &mut outcomes, environment);
     } else if !blocked.is_empty() {
         for plan_item in to_remove {
             outcomes.push(new_item(
@@ -440,32 +470,63 @@ pub(crate) fn execute_uninstall_in(
             cancel,
         ) {
             Err(items) => outcomes = items,
-            Ok(digests) => match start_helper(&to_remove, environment, &resource, cancel) {
-                Err(items) => outcomes = items,
-                Ok(session) => {
-                    let mut run = RemovalRun {
-                        plan: &plan,
-                        environment,
-                        request,
-                        backup_folder: &backup_folder,
-                        backups: BackupSetWriter::new(
-                            &resource,
-                            &uninstall_set_id(),
-                            UNINSTALL_BACKUP_REASON,
-                        ),
-                        state: state.unwrap_or_default(),
-                        digests,
-                        reapack_installed,
-                        progress,
-                        session,
-                    };
-                    outcomes = run.remove_all(&to_remove, cancel);
-                    run.session.finish();
-                    if !run.backups.discard_if_empty() {
-                        backup_set = Some((run.backups.set_id(), run.backups.path().to_path_buf()));
+            Ok(digests) => {
+                // One receipt for the whole run, from before its first
+                // change: what the administrator command took out of it
+                // stays out when a later package saves it.
+                let mut state = state.unwrap_or_default();
+                match run_administrator_batch(
+                    &to_remove,
+                    &plan,
+                    environment,
+                    &mut state,
+                    progress,
+                    cancel,
+                    &mut administrator_steps,
+                ) {
+                    Err(items) => outcomes = items,
+                    Ok(batch_items) => {
+                        // The administrator command's packages are done and
+                        // come first in the report. No platform has both
+                        // that command and the elevated helper.
+                        outcomes = batch_items;
+                        let rest: Vec<&UninstallPlanItem> = to_remove
+                            .iter()
+                            .copied()
+                            .filter(|item| !item.needs_administrator())
+                            .collect();
+                        match start_helper(&rest, environment, &resource, progress, cancel) {
+                            Err(items) => outcomes.extend(items),
+                            Ok(session) => {
+                                let mut run = RemovalRun {
+                                    plan: &plan,
+                                    environment,
+                                    request,
+                                    backup_folder: &backup_folder,
+                                    backups: BackupSetWriter::new(
+                                        &resource,
+                                        &uninstall_set_id(),
+                                        UNINSTALL_BACKUP_REASON,
+                                    ),
+                                    state,
+                                    digests,
+                                    reapack_installed,
+                                    progress,
+                                    session,
+                                };
+                                outcomes.extend(run.remove_all(&rest, cancel));
+                                run.session.finish();
+                                if !run.backups.discard_if_empty() {
+                                    backup_set = Some((
+                                        run.backups.set_id(),
+                                        run.backups.path().to_path_buf(),
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
-            },
+            }
         }
     }
 
@@ -484,7 +545,7 @@ pub(crate) fn execute_uninstall_in(
         if let UninstallMessage::Removed { backup_set_id: id } = &mut item.message_code {
             id.clone_from(&backup_set_id);
         }
-        item.message = english_message(item);
+        item.message = english_message(item, &plan);
     }
 
     let mut report = UninstallReport {
@@ -497,6 +558,7 @@ pub(crate) fn execute_uninstall_in(
         backup_set_id,
         backup_set_path: backup_set.map(|(_, path)| path),
         items,
+        administrator_steps,
         plan,
         saved_report: None,
     };
@@ -518,6 +580,7 @@ fn start_helper(
     to_remove: &[&UninstallPlanItem],
     environment: &UninstallEnvironment<'_>,
     resource: &Path,
+    progress: &ProgressReporter,
     cancel: &CancelToken,
 ) -> std::result::Result<HelperSession, Vec<UninstallReportItem>> {
     let elevated: Vec<String> = to_remove
@@ -535,41 +598,103 @@ fn start_helper(
         target: environment.target,
         package_ids: elevated.clone(),
     };
-    match environment.elevated_helper.start(&request) {
-        Ok(session) => Ok(HelperSession(Some(session))),
-        Err(ElevationStartError::Declined) => Err(to_remove
-            .iter()
-            .map(|item| {
-                new_item(
-                    item,
-                    UninstallStatus::Cancelled,
-                    UninstallMessage::ElevationDeclined,
-                )
-            })
-            .collect()),
-        Err(ElevationStartError::Failed(error)) => Err(to_remove
-            .iter()
-            .map(|item| {
-                if elevated.contains(&item.package_id) {
-                    new_item(
-                        item,
-                        UninstallStatus::Failed,
-                        UninstallMessage::ElevationFailed {
-                            error: error.clone(),
-                        },
-                    )
-                } else {
-                    new_item(
-                        item,
-                        UninstallStatus::NotReached,
-                        UninstallMessage::RunStopped {
-                            package_id: elevated[0].clone(),
-                        },
-                    )
-                }
-            })
-            .collect()),
+    progress.report(ProgressEvent::AdministratorPrompt {
+        package_ids: elevated.clone(),
+    });
+    environment
+        .elevated_helper
+        .start(&request)
+        .map(|session| HelperSession(Some(session)))
+        .map_err(|error| refused_run_items(to_remove, &elevated, &error))
+}
+
+/// The report items of a run whose administrator prompt was refused, with
+/// nothing changed: declined, every package is Cancelled; otherwise
+/// `elevated`, the packages that needed it, are Failed with the error, and
+/// the rest weren't reached. For Windows' elevated helper and macOS's
+/// administrator command alike.
+pub(super) fn refused_run_items(
+    to_remove: &[&UninstallPlanItem],
+    elevated: &[String],
+    error: &ElevationStartError,
+) -> Vec<UninstallReportItem> {
+    to_remove
+        .iter()
+        .map(|item| match error {
+            ElevationStartError::Declined => new_item(
+                item,
+                UninstallStatus::Cancelled,
+                UninstallMessage::ElevationDeclined,
+            ),
+            ElevationStartError::Failed(error) if elevated.contains(&item.package_id) => new_item(
+                item,
+                UninstallStatus::Failed,
+                UninstallMessage::ElevationFailed {
+                    error: error.clone(),
+                },
+            ),
+            ElevationStartError::Failed(_) => new_item(
+                item,
+                UninstallStatus::NotReached,
+                UninstallMessage::RunStopped {
+                    package_id: elevated.first().cloned().unwrap_or_default(),
+                },
+            ),
+        })
+        .collect()
+}
+
+/// The report items of a run that stops before its first change because
+/// of `blocked`, packages with what stops each: those are Blocked, and
+/// every other package of `to_remove` wasn't reached.
+pub(super) fn blocked_run_items(
+    to_remove: &[&UninstallPlanItem],
+    blocked: Vec<(String, UninstallMessage)>,
+) -> Vec<UninstallReportItem> {
+    let package_ids: Vec<String> = blocked.iter().map(|(id, _)| id.clone()).collect();
+    to_remove
+        .iter()
+        .map(
+            |plan_item| match blocked.iter().find(|(id, _)| *id == plan_item.package_id) {
+                Some((_, code)) => new_item(plan_item, UninstallStatus::Blocked, code.clone()),
+                None => new_item(
+                    plan_item,
+                    UninstallStatus::NotReached,
+                    UninstallMessage::OtherPackageBlocked {
+                        package_ids: package_ids.clone(),
+                    },
+                ),
+            },
+        )
+        .collect()
+}
+
+/// After a removal RABBIT can't undo, the receipt follows fresh detection:
+/// the package's entry goes, and it is remembered as removed, once
+/// detection no longer finds it (`still_installed` is `Some(false)`).
+/// While anything of it is found, or detection couldn't say, the entry
+/// stays. Returns whether the receipt changed and needs saving.
+pub(super) fn receipt_follows_detection(
+    state: &mut InstallState,
+    package_id: &str,
+    still_installed: Option<bool>,
+) -> bool {
+    if still_installed == Some(false) {
+        remove_package_receipt(state, package_id);
+        true
+    } else {
+        false
     }
+}
+
+/// Whether fresh detection still finds `package_id`, `None` when it can't
+/// say.
+fn still_detected(environment: &UninstallEnvironment<'_>, package_id: &str) -> Option<bool> {
+    (environment.detect)().ok().map(|detections| {
+        detections
+            .iter()
+            .any(|detection| detection.package_id == package_id && detection.installed)
+    })
 }
 
 /// The run's elevated helper, if it needs one. It is told to quit after the
@@ -603,7 +728,11 @@ impl Drop for HelperSession {
 /// Whether a package's outcome ends the run: a check stopped it, or its
 /// vendor's uninstaller is still open, can't be followed any more, or took
 /// files it must never take. The next package could collide with an
-/// uninstaller still at work, so it isn't started.
+/// uninstaller still at work, so it isn't started. On macOS, so does a
+/// package the administrator command left half done, an app macOS may or
+/// may not have moved to the Trash, and a Trash move macOS itself refused:
+/// what refused that would refuse the next package too, and the user has
+/// something to do first.
 fn stops_the_run(item: &UninstallReportItem) -> bool {
     item.status == UninstallStatus::Blocked
         || matches!(
@@ -612,6 +741,12 @@ fn stops_the_run(item: &UninstallReportItem) -> bool {
                 | UninstallMessage::VendorRunFailed { .. }
                 | UninstallMessage::VendorLost { .. }
                 | UninstallMessage::ResourceFolderDamaged { .. }
+                | UninstallMessage::AdministratorStepFailed { .. }
+                | UninstallMessage::TrashUnclear { .. }
+                | UninstallMessage::TrashFailed {
+                    refused_by_macos: true,
+                    ..
+                }
         )
 }
 
@@ -765,19 +900,27 @@ impl RemovalRun<'_> {
             );
         }
 
-        let vendor = plan_item.needs_elevated_helper();
+        let route = plan_item.route();
         self.progress.report(ProgressEvent::RemoveStarted {
             package_id: id.clone(),
-            method: if vendor {
-                RemovalMethod::VendorUninstaller
-            } else {
-                RemovalMethod::Files
+            method: match route {
+                RemovalRoute::Vendor => RemovalMethod::VendorUninstaller,
+                RemovalRoute::Trash => RemovalMethod::Trash,
+                RemovalRoute::Administrator => RemovalMethod::Administrator,
+                RemovalRoute::BackupSet => RemovalMethod::Files,
             },
         });
-        let item = if vendor {
-            self.remove_with_vendor(plan_item)
-        } else {
-            self.remove_started(plan_item)
+        let item = match route {
+            RemovalRoute::Vendor => self.remove_with_vendor(plan_item),
+            RemovalRoute::Trash => self.remove_to_trash(plan_item),
+            // The administrator command took its packages before this run
+            // started; one reaching here would mean a step went missing.
+            RemovalRoute::Administrator => new_item(
+                plan_item,
+                UninstallStatus::Failed,
+                UninstallMessage::NotYetSupported,
+            ),
+            RemovalRoute::BackupSet => self.remove_started(plan_item),
         };
         self.progress.report(ProgressEvent::RemoveCompleted {
             package_id: id,
@@ -929,11 +1072,8 @@ impl RemovalRun<'_> {
         // at work, still open at its time limit or lost track of, leaves
         // the receipt alone; nobody can say yet what it removes.
         let follows_detection = outcome.launched && !end_unknown;
-        let mut receipt_changed = false;
-        if follows_detection && still_installed == Some(false) {
-            remove_package_receipt(&mut self.state, id);
-            receipt_changed = true;
-        }
+        let receipt_changed =
+            follows_detection && receipt_follows_detection(&mut self.state, id, still_installed);
         // An uninstaller must never take REAPER's settings or RABBIT's
         // receipt. If one did, the receipt is written again from the copy
         // this run holds, which also knows what the run removed so far;
@@ -1001,7 +1141,18 @@ impl RemovalRun<'_> {
                 backup_set_id: None,
             },
         );
+        self.run_post_steps(plan_item, &mut item);
+        // Only once the receipt no longer claims the package: an entry that
+        // can't go is a problem to report, never a reason to put the files
+        // back.
+        clean_registry(&mut item, plan_item, self.environment, true);
+        item
+    }
 
+    /// The plan's post helpers, after the package is removed. One that
+    /// fails is a problem to report, never a reason to undo the removal.
+    fn run_post_steps(&mut self, plan_item: &UninstallPlanItem, item: &mut UninstallReportItem) {
+        let id = plan_item.package_id.as_str();
         for step in &plan_item.post {
             match step {
                 UninstallPostStep::ResetReaperLangpackIfSelected {} => {
@@ -1025,16 +1176,204 @@ impl RemovalRun<'_> {
                 // plug-in that is gone until it next looks: never a reason
                 // to undo the removal, nor one to report.
                 UninstallPostStep::RefreshAudioUnits {} => {
-                    let _ = rabbit_platform::refresh_audio_units();
+                    let _ = self.environment.macos_objects.refresh_audio_units();
                 }
             }
         }
-        // Only once the receipt no longer claims the package: an entry that
-        // can't go is a problem to report, never a reason to put the files
-        // back.
-        clean_registry(&mut item, plan_item, self.environment, true);
+    }
+
+    /// Move a package's app to the Trash as the user, on macOS: REAPER.app
+    /// when this account may move it, last in the run.
+    ///
+    /// Anything of the package that goes into the backup set, such as its
+    /// settings with "Also remove settings", goes first, the usual way, so
+    /// it can still be put back. Then each app: the guard and the question
+    /// of who may move it are asked again, and the answer must still be
+    /// that the user may, or nothing more happens; then macOS moves it.
+    /// It counts as moved only once its old place is empty and macOS named
+    /// where it went: a refusal is TrashFailed, anything less certain
+    /// TrashUnclear. On either, what went into the backup set goes back.
+    /// An app gone since the plan isn't moved, and the package is reported
+    /// as removed, not as moved to the Trash.
+    ///
+    /// The receipt then follows fresh detection, as after a vendor's
+    /// uninstaller: a move to the Trash can't be put back by RABBIT, so a
+    /// receipt that can't be saved is only a problem to report.
+    fn remove_to_trash(&mut self, plan_item: &UninstallPlanItem) -> UninstallReportItem {
+        let id = plan_item.package_id.as_str();
+        let environment = self.environment;
+        let into_backup = plan_item
+            .files
+            .iter()
+            .any(|file| file.reason != RemovalReason::Tree);
+        if into_backup {
+            let record = BackupPackageRecord {
+                receipt: self.state.packages.get(id).cloned(),
+                langpack_before: None,
+            };
+            if let Err(error) = self.backups.record_package(id, record) {
+                return new_item(
+                    plan_item,
+                    UninstallStatus::Failed,
+                    UninstallMessage::BackupFailed {
+                        error: error.to_string(),
+                    },
+                );
+            }
+        }
+
+        let mut removal = PackageRemoval::new(
+            plan_item,
+            environment,
+            self.backup_folder,
+            Some(&mut self.backups),
+            &mut self.digests,
+            self.reapack_installed,
+        );
+        let mut trashed = Vec::new();
+        let mut outcome = removal.remove_files();
+        if outcome.is_ok() {
+            outcome = trash_trees(plan_item, environment, &mut trashed);
+        }
+        if let Err(code) = outcome {
+            let (put_back, left_in_backup) = removal.put_everything_back();
+            let mut item = removal.into_item(UninstallStatus::Failed, code);
+            item.removed.clear();
+            item.removed_dirs.clear();
+            item.put_back = put_back;
+            if into_backup && left_in_backup.is_empty() {
+                let _ = self.backups.forget_package(id);
+            }
+            item.left_in_backup = left_in_backup;
+            // An app macOS may have moved after all: what is gone is for
+            // detection to say.
+            if matches!(item.message_code, UninstallMessage::TrashUnclear { .. })
+                && receipt_follows_detection(&mut self.state, id, still_detected(environment, id))
+                && let Err(error) = save_install_state(&self.plan.resource_path, &self.state)
+            {
+                item.problems.push(UninstallProblem::ReceiptNotSaved {
+                    error: error.to_string(),
+                });
+            }
+            return item;
+        }
+        removal.remove_dirs_if_empty();
+        // Every app was gone before its turn: nothing went to the Trash, so
+        // nothing may be said to have moved there. The run fills in the
+        // backup set for settings that went into one.
+        let code = match trashed.first() {
+            Some(file) => UninstallMessage::MovedToTrash {
+                trashed_to: file.trashed_to.clone(),
+            },
+            None => UninstallMessage::Removed {
+                backup_set_id: None,
+            },
+        };
+        let mut item = removal.into_item(UninstallStatus::Removed, code);
+        item.removed.extend(trashed);
+        if receipt_follows_detection(&mut self.state, id, still_detected(environment, id))
+            && let Err(error) = save_install_state(&self.plan.resource_path, &self.state)
+        {
+            item.problems.push(UninstallProblem::ReceiptNotSaved {
+                error: error.to_string(),
+            });
+        }
+        self.run_post_steps(plan_item, &mut item);
+        clean_registry(&mut item, plan_item, environment, true);
         item
     }
+}
+
+/// Move each tree of `plan_item` to the Trash as the user, noting each on
+/// `trashed`. Stops at the first that doesn't go, with why; see
+/// [`RemovalRun::remove_to_trash`].
+fn trash_trees(
+    plan_item: &UninstallPlanItem,
+    environment: &UninstallEnvironment<'_>,
+    trashed: &mut Vec<RemovedFile>,
+) -> std::result::Result<(), UninstallMessage> {
+    let objects = environment.macos_objects;
+    for file in plan_item
+        .files
+        .iter()
+        .filter(|file| file.reason == RemovalReason::Tree)
+    {
+        // Gone since the plan was built: nothing left to move.
+        if matches!(fs::symlink_metadata(&file.path), Err(error) if error.kind() == io::ErrorKind::NotFound)
+        {
+            continue;
+        }
+        file.check(environment.roots)
+            .map_err(|refusal| UninstallMessage::PathRefused {
+                path: file.path.clone(),
+                refusal,
+            })?;
+        let route = tree_route(
+            &file.path,
+            &objects.facts(&file.path),
+            &objects.user_trash_folder_facts(),
+            file.bundle_id.as_deref(),
+            &environment.roots.system_root,
+        );
+        if route != TreeRoute::Trash {
+            let why = match route {
+                TreeRoute::ByHand(reason) => reason.message(),
+                _ => "only an administrator may move it now".to_string(),
+            };
+            return Err(UninstallMessage::TrashFailed {
+                error: format!(
+                    "{} changed since RABBIT checked it: {why}",
+                    file.path.display()
+                ),
+                refused_by_macos: false,
+            });
+        }
+        let moved = objects.move_to_trash(&file.path);
+        let original_gone = matches!(
+            fs::symlink_metadata(&file.path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        );
+        match moved {
+            // macOS named where it went. The Trash is a place macOS may keep
+            // private, so a place RABBIT can't read is taken at macOS's
+            // word; only one that plainly isn't there makes it unclear.
+            Ok(resulting)
+                if original_gone
+                    && !matches!(
+                        fs::symlink_metadata(&resulting),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound
+                    ) =>
+            {
+                trashed.push(RemovedFile {
+                    path: file.path.clone(),
+                    reason: RemovalReason::Tree,
+                    size: 0,
+                    changed_since_install: false,
+                    backup_path: None,
+                    trashed_to: Some(resulting),
+                });
+            }
+            Ok(_) => {
+                return Err(UninstallMessage::TrashUnclear {
+                    path: file.path.clone(),
+                });
+            }
+            // macOS says it failed, but the app has left its place.
+            Err(_) if original_gone => {
+                return Err(UninstallMessage::TrashUnclear {
+                    path: file.path.clone(),
+                });
+            }
+            Err(error) => {
+                return Err(UninstallMessage::TrashFailed {
+                    refused_by_macos: error.kind
+                        == rabbit_platform::TrashErrorKind::PermissionDenied,
+                    error: error.message,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Remove the plan's entries in Windows' list of installed programs that
@@ -1137,22 +1476,7 @@ fn survey_before_removal(
     if blocked.is_empty() {
         return Ok(digests);
     }
-    let package_ids: Vec<String> = blocked.iter().map(|(id, _)| id.clone()).collect();
-    Err(to_remove
-        .iter()
-        .map(
-            |plan_item| match blocked.iter().find(|(id, _)| *id == plan_item.package_id) {
-                Some((_, code)) => new_item(plan_item, UninstallStatus::Blocked, code.clone()),
-                None => new_item(
-                    plan_item,
-                    UninstallStatus::NotReached,
-                    UninstallMessage::OtherPackageBlocked {
-                        package_ids: package_ids.clone(),
-                    },
-                ),
-            },
-        )
-        .collect())
+    Err(blocked_run_items(to_remove, blocked))
 }
 
 /// What the read before a run found about one file: its size and hash, and
@@ -1269,9 +1593,9 @@ impl<'a> PackageRemoval<'a> {
     /// size isn't counted either, so the report gives it none.
     fn take_whole(&mut self, path: &Path) -> std::result::Result<(), UninstallMessage> {
         // Never into the backup set: a real run removes such a tree through
-        // its own route, which this version doesn't have yet.
+        // its own route, after the files that do go into the set.
         if self.backups.is_some() {
-            return Err(UninstallMessage::NotYetSupported);
+            return Ok(());
         }
         self.removed.push(RemovedFile {
             path: path.to_path_buf(),
@@ -1279,6 +1603,7 @@ impl<'a> PackageRemoval<'a> {
             size: 0,
             changed_since_install: false,
             backup_path: None,
+            trashed_to: None,
         });
         Ok(())
     }
@@ -1329,6 +1654,7 @@ impl<'a> PackageRemoval<'a> {
             size,
             changed_since_install: changed,
             backup_path,
+            trashed_to: None,
         });
         Ok(())
     }
@@ -1507,7 +1833,7 @@ fn report_leftovers(items: &mut [UninstallReportItem], environment: &UninstallEn
     }
 }
 
-fn new_item(
+pub(super) fn new_item(
     plan_item: &UninstallPlanItem,
     status: UninstallStatus,
     code: UninstallMessage,
@@ -1542,10 +1868,29 @@ fn new_item_for(
     }
 }
 
-/// The item's English message: what happened, then anything kept, left
-/// over or gone wrong afterwards.
-fn english_message(item: &UninstallReportItem) -> String {
+/// What to do when macOS itself refused a step: App Management protects
+/// apps from changes by programs the user hasn't allowed, root's included.
+const APP_MANAGEMENT_HINT: &str = "If macOS refused it, turn RABBIT on under System Settings, \
+     Privacy & Security, App Management (or the app you run rabbit from, such as Terminal), quit \
+     RABBIT, start it again and uninstall again.";
+
+/// `text` closed as a sentence: macOS's own words (rm's error output, an
+/// NSError's description) seldom end in a full stop, and RABBIT's next
+/// sentence follows them, which a screen reader would read as one.
+fn closed_sentence(text: &str) -> String {
+    let text = text.trim_end();
+    if text.ends_with(['.', '!', '?']) {
+        text.to_string()
+    } else {
+        format!("{text}.")
+    }
+}
+
+/// The item's English message, for `plan`'s platform: what happened, then
+/// anything kept, left over or gone wrong afterwards.
+pub(super) fn english_message(item: &UninstallReportItem, plan: &UninstallPlan) -> String {
     let name = &item.display_name;
+    let mac = plan.platform == Platform::MacOs;
     let mut message = match &item.message_code {
         UninstallMessage::Removed { backup_set_id } => {
             match (item.removed.is_empty(), backup_set_id) {
@@ -1689,6 +2034,10 @@ fn english_message(item: &UninstallReportItem) -> String {
             }
             message
         }
+        UninstallMessage::ElevationDeclined if mac => format!(
+            "The administrator password prompt was cancelled, so RABBIT uninstalled nothing; \
+             {name} is still installed."
+        ),
         UninstallMessage::ElevationDeclined => format!(
             "The Windows permission prompt was declined, so RABBIT uninstalled nothing; {name} \
              is still installed."
@@ -1697,6 +2046,90 @@ fn english_message(item: &UninstallReportItem) -> String {
             "RABBIT couldn't get administrator rights to uninstall {name}, so it uninstalled \
              nothing: {error}"
         ),
+        UninstallMessage::MovedToTrash { trashed_to } => {
+            let mut message = match trashed_to {
+                Some(path) => format!(
+                    "RABBIT moved {name} to the Trash, as {}. Until you empty the Trash, you can \
+                     drag it back.",
+                    path.display()
+                ),
+                None => format!(
+                    "RABBIT moved {name} to the Trash. Until you empty the Trash, you can drag it \
+                     back."
+                ),
+            };
+            if plan
+                .item(&item.package_id)
+                .is_some_and(UninstallPlanItem::needs_administrator)
+            {
+                // The move keeps the owner it had, which RABBIT never
+                // checked: root, another account, or this one.
+                message.push_str(
+                    " It keeps the owner it had in Applications, which may not be you, so \
+                     emptying the Trash may ask for an administrator's password, and so may \
+                     dragging it back to Applications. Finder offers no Put Back for it.",
+                );
+            }
+            message
+        }
+        UninstallMessage::TrashFailed {
+            error,
+            refused_by_macos,
+        } => {
+            let mut message = format!(
+                "RABBIT couldn't move {name} to the Trash, so nothing of it changed: {}",
+                closed_sentence(error)
+            );
+            if *refused_by_macos {
+                message.push(' ');
+                message.push_str(APP_MANAGEMENT_HINT);
+            }
+            message
+        }
+        UninstallMessage::TrashUnclear { path } => format!(
+            "RABBIT asked macOS to move {} to the Trash, and can't confirm that it is there now. \
+             Look for {name} in the Trash and in its folder in Finder. RABBIT stopped there.",
+            path.display()
+        ),
+        UninstallMessage::RemovedAsAdministrator => format!(
+            "RABBIT removed {name} with administrator rights. A backup can't bring it back; to \
+             have it again, install it again."
+        ),
+        UninstallMessage::AdministratorStepFailed {
+            path,
+            gone,
+            left,
+            refused_by_macos,
+            detail,
+        } => {
+            let mut message = match path {
+                Some(path) => format!(
+                    "The administrator command stopped at {}, so {name} isn't fully removed.",
+                    path.display()
+                ),
+                None => format!(
+                    "The administrator command ended without saying where it stopped, and \
+                     {name} isn't fully removed."
+                ),
+            };
+            if gone.is_empty() {
+                message.push_str(&format!(" Nothing of {name} was removed."));
+            } else {
+                message.push_str(&format!(" Removed: {}.", path_list(gone)));
+            }
+            if !left.is_empty() {
+                message.push_str(&format!(" Still there: {}.", path_list(left)));
+            }
+            if let Some(detail) = detail {
+                message.push_str(&format!(" macOS said: {}", closed_sentence(detail)));
+            }
+            if *refused_by_macos {
+                message.push(' ');
+                message.push_str(APP_MANAGEMENT_HINT);
+            }
+            message.push_str(" RABBIT stopped there.");
+            message
+        }
         UninstallMessage::ResourceFolderDamaged { missing } => format!(
             "IMPORTANT: after {name}'s own uninstaller ran, these files were gone from REAPER's \
              resource folder: {}. RABBIT stopped and wrote its receipt again. REAPER's settings \
@@ -1706,11 +2139,19 @@ fn english_message(item: &UninstallReportItem) -> String {
         ),
     };
     // Only a removal into the backup set can be put back; what a vendor's
-    // uninstaller did stays done.
+    // uninstaller, the Trash or the administrator command did stays done,
+    // and their messages say what is where.
     if item.status == UninstallStatus::Failed
         && item.left_in_backup.is_empty()
-        && item.vendor.is_none()
-        && !matches!(item.message_code, UninstallMessage::ElevationFailed { .. })
+        && matches!(
+            item.message_code,
+            UninstallMessage::MoveFailed { .. }
+                | UninstallMessage::FileInUse { .. }
+                | UninstallMessage::BackupFailed { .. }
+                | UninstallMessage::ReceiptSaveFailed { .. }
+                | UninstallMessage::PathRefused { .. }
+                | UninstallMessage::Unreadable { .. }
+        )
     {
         message.push_str(&format!(" Everything of {name} is back in place."));
     }

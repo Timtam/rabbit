@@ -184,6 +184,12 @@ fn rabbit_error_from_disk_image_error(error: DiskImageError) -> RabbitError {
         DiskImageError::UserCancelledElevation { image } => RabbitError::UserCancelledElevation {
             program: format!("/usr/sbin/installer (from {})", image.display()),
         },
+        DiskImageError::AdministratorPromptFailed { image, number } => {
+            RabbitError::AdministratorPromptFailed {
+                program: format!("/usr/sbin/installer (from {})", image.display()),
+                number,
+            }
+        }
         DiskImageError::Unsupported { image, message } => {
             RabbitError::DiskImageMount { image, message }
         }
@@ -238,5 +244,53 @@ mod tests {
             .unwrap();
         let found = find_user_plugin_in_directory(dir.path(), &spec).unwrap();
         assert!(found.is_none());
+    }
+
+    /// A password window that failed during Surge XT's install says so,
+    /// and that nothing was installed, rather than "exit code None".
+    #[test]
+    fn a_failed_password_prompt_says_nothing_was_installed() {
+        let error = super::rabbit_error_from_disk_image_error(
+            rabbit_platform::DiskImageError::AdministratorPromptFailed {
+                image: std::path::PathBuf::from("/tmp/surge-xt.dmg"),
+                number: -60005,
+            },
+        );
+        assert!(
+            matches!(
+                &error,
+                crate::error::RabbitError::AdministratorPromptFailed { number: -60005, .. }
+            ),
+            "{error:?}"
+        );
+        let message = error.to_string();
+        for words in [
+            "administrator password prompt",
+            "/usr/sbin/installer (from /tmp/surge-xt.dmg)",
+            "error -60005",
+            "nothing was installed",
+        ] {
+            assert!(message.contains(words), "{words}: {message}");
+        }
+    }
+
+    /// The cancel is the same error on both platforms, so it names none.
+    #[test]
+    fn a_cancelled_prompt_names_no_platform() {
+        let error = super::rabbit_error_from_disk_image_error(
+            rabbit_platform::DiskImageError::UserCancelledElevation {
+                image: std::path::PathBuf::from("/tmp/surge-xt.dmg"),
+            },
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("administrator permission prompt") && !message.contains("Windows"),
+            "{message}"
+        );
+        assert!(
+            !crate::uninstall::ElevationStartError::Declined
+                .to_string()
+                .contains("Windows")
+        );
     }
 }

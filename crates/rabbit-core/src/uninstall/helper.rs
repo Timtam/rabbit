@@ -626,9 +626,9 @@ pub struct ElevatedRunRequest {
 /// Why the helper didn't start.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ElevationStartError {
-    /// The user declined the Windows permission prompt. The whole run is
-    /// cancelled, and nothing has changed.
-    #[error("the Windows permission prompt was declined")]
+    /// The user declined the administrator permission prompt. The whole
+    /// run is cancelled, and nothing has changed.
+    #[error("the administrator permission prompt was declined")]
     Declined,
     /// Something else went wrong; nothing has changed either.
     #[error("RABBIT couldn't start its helper with administrator rights: {0}")]

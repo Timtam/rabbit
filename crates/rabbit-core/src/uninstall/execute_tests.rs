@@ -21,9 +21,9 @@ use super::execute::{
 use super::preflight::VolumeProbe;
 use super::tests::{Fixture, installed, remove_files, remove_files_with, running, spec, write};
 use super::{
-    BACKUP_SPACE_CHECK, KeptFile, KeptFileReason, KeptReason, NoElevatedHelper, NoMacosObjects,
-    NothingListed, RemovalReason, UninstallMessage, UninstallProblem, UninstallReport,
-    UninstallRequest, UninstallStatus,
+    BACKUP_SPACE_CHECK, KeptFile, KeptFileReason, KeptReason, NoAdministratorShell,
+    NoElevatedHelper, NoMacosObjects, NothingListed, RemovalReason, UninstallMessage,
+    UninstallProblem, UninstallReport, UninstallRequest, UninstallStatus,
 };
 #[cfg(windows)]
 use super::{RegistryEntryAction, RegistryEntryOutcome};
@@ -160,6 +160,7 @@ impl<'f> Harness<'f> {
                 vendor_lookup: &NothingListed,
                 elevated_helper: &NoElevatedHelper,
                 macos_objects: &NoMacosObjects,
+                administrator_shell: &NoAdministratorShell,
             },
             &self.progress,
             &self.cancel,

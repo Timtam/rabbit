@@ -38,8 +38,14 @@
 //! into the backup set, through a vendor's uninstaller, to the Trash, or
 //! through the run's one administrator command. Which way REAPER.app goes is
 //! decided while planning, from what this account may do with it; see
-//! [`macos_objects`].
+//! [`macos_objects`]. The administrator command is the run's first change,
+//! behind its one password window; see [`admin_batch`].
 
+pub mod admin_batch;
+#[cfg(test)]
+mod admin_batch_tests;
+#[cfg(test)]
+mod admin_run_tests;
 pub mod execute;
 #[cfg(test)]
 mod execute_tests;
@@ -74,6 +80,11 @@ use crate::preflight::{PreflightCheck, PreflightReport};
 use crate::report::{SavedReportPaths, default_report_path, save_json_and_text_reports};
 use crate::version::Version;
 
+pub use admin_batch::{
+    AdminShellEvent, AdminShellRun, AdministratorShell, AdministratorStepKind,
+    AdministratorStepRecord, AdministratorStepVerdict, NoAdministratorShell,
+    RecordingAdministratorShell, SystemAdministratorShell,
+};
 pub use execute::{execute_uninstall, plan_uninstall_at};
 pub use helper::{
     ElevatedHelper, ElevatedRunRequest, ElevatedSession, ElevationStartError, HELPER_SUBCOMMAND,
@@ -81,8 +92,8 @@ pub use helper::{
     run_elevated_helper,
 };
 pub use macos_objects::{
-    FakeMacosObjects, NoMacosObjects, ObjectFacts, ObjectProbe, SystemMacosObjects,
-    TrashFolderFacts, TreeRoute, tree_route,
+    FakeMacosObjects, FakeReceipts, MacosObjects, NoMacosObjects, ObjectFacts, ObjectProbe,
+    SystemMacosObjects, TrashError, TrashErrorKind, TrashFolderFacts, TreeRoute, tree_route,
 };
 pub use paths::{
     PathRefusal, RemovalGuard, SYSTEM_ROOT, UninstallRoots, check_administrator_removal,
@@ -107,13 +118,14 @@ pub const UNINSTALL_NOT_YET_KEY: &str = "uninstall-not-yet";
 /// What an uninstall run reads or starts beyond the files of the target:
 /// where each vendor's uninstaller is, what starts the run's elevated
 /// helper (and with it the run's one Windows permission prompt), Windows'
-/// per-user list of installed programs, and what macOS says this account
-/// may do with an app.
+/// per-user list of installed programs, what macOS says this account may do
+/// with an app and what the run does there as the user, and what runs the
+/// macOS administrator command (and with it the run's one password window).
 ///
 /// Only RABBIT's own entry points use [`UninstallServices::system`]. Tests
-/// hand in stand-ins, so none of them can reach Windows' real lists or the
-/// real helper; the real helper refuses to start from anything not named
-/// like RABBIT anyway.
+/// hand in stand-ins, so none of them can reach Windows' real lists, the
+/// real helper, the real Trash or a real password window; the real ones
+/// refuse to start from anything not named like RABBIT anyway.
 #[derive(Clone, Copy)]
 pub struct UninstallServices<'a> {
     /// Finds and checks each vendor's uninstaller before the run, read only.
@@ -124,9 +136,14 @@ pub struct UninstallServices<'a> {
     /// `registry_cleanup` names entries. `None` leaves every entry alone,
     /// unread.
     pub installed_programs: Option<&'a HkcuUninstallRoot>,
-    /// What this account may do with a macOS app, read only, which decides
-    /// how a `to_trash` plan's app leaves.
-    pub macos_objects: &'a dyn ObjectProbe,
+    /// What this account may do with a macOS app, which decides how a
+    /// `to_trash` plan's app leaves, and what the run does there as the
+    /// user: the Trash, the installer's receipts, the Audio Unit list, and
+    /// whether RABBIT runs as root.
+    pub macos_objects: &'a dyn MacosObjects,
+    /// Runs the macOS administrator command once per run, when a package
+    /// needs it.
+    pub administrator_shell: &'a dyn AdministratorShell,
 }
 
 /// Windows' real per-user list of installed programs.
@@ -136,26 +153,29 @@ static INSTALLED_PROGRAMS: LazyLock<HkcuUninstallRoot> =
 impl UninstallServices<'static> {
     /// The real ones, for RABBIT's own entry points on `platform`: HKLM's
     /// list of programs installed for every user, read only, RABBIT's own
-    /// elevated helper, and on Windows the per-user list of installed
-    /// programs.
+    /// elevated helper, on Windows the per-user list of installed programs,
+    /// and macOS itself with its administrator password window.
     pub fn system(platform: Platform) -> Self {
         Self {
             vendor_lookup: &SystemVendorLookup,
             elevated_helper: &SystemElevatedHelper,
             installed_programs: (platform == Platform::Windows).then(|| &*INSTALLED_PROGRAMS),
             macos_objects: &SystemMacosObjects,
+            administrator_shell: &SystemAdministratorShell,
         }
     }
 
     /// None at all: no vendor uninstaller is found, no helper starts, no
-    /// list of installed programs is read and nothing is asked about a
-    /// macOS app. For tests that remove files only.
+    /// list of installed programs is read, nothing is asked about a macOS
+    /// app or moved to the Trash, and no administrator command runs. For
+    /// tests that remove files only.
     pub fn without_elevation() -> Self {
         Self {
             vendor_lookup: &NothingListed,
             elevated_helper: &NoElevatedHelper,
             installed_programs: None,
             macos_objects: &NoMacosObjects,
+            administrator_shell: &NoAdministratorShell,
         }
     }
 }
@@ -702,7 +722,8 @@ pub enum UninstallStatus {
     /// RABBIT won't remove it, or a check stopped it before anything of it
     /// changed.
     Blocked,
-    /// Removing it went wrong. Whatever had moved was put back.
+    /// Removing it went wrong. Whatever had moved into the backup set was
+    /// put back; the message says what else, if anything, is gone.
     Failed,
     /// The user stopped the run before this package.
     Cancelled,
@@ -734,6 +755,11 @@ pub struct UninstallReport {
     pub backup_set_path: Option<PathBuf>,
     /// One item per requested package, in the order they were removed.
     pub items: Vec<UninstallReportItem>,
+    /// Every step the macOS administrator command was given, or in a dry
+    /// run would be given, in order, and how each went: what root was asked
+    /// to do, for the record. Empty when no package needed it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub administrator_steps: Vec<AdministratorStepRecord>,
     /// The plan the run carried out, built from fresh detection once the
     /// run held the lock.
     pub plan: UninstallPlan,
@@ -785,15 +811,16 @@ impl UninstallReport {
     }
 
     /// The user stopped the run before every package was reached, declined
-    /// the Windows permission prompt, or cancelled a vendor's uninstaller.
+    /// the administrator permission prompt, or cancelled a vendor's
+    /// uninstaller.
     pub fn was_cancelled(&self) -> bool {
         self.items
             .iter()
             .any(|item| item.status == UninstallStatus::Cancelled)
     }
 
-    /// The Windows permission prompt was declined, so the whole run was
-    /// cancelled before anything changed.
+    /// The administrator permission prompt was declined, Windows' or
+    /// macOS's, so the whole run was cancelled before anything changed.
     pub fn elevation_declined(&self) -> bool {
         self.items
             .iter()
@@ -864,7 +891,8 @@ pub struct UninstallReportItem {
     pub message_code: UninstallMessage,
 }
 
-/// A file the run removed into the backup set.
+/// A file or folder the run removed: into the backup set, or on macOS to
+/// the Trash or through the administrator command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemovedFile {
     pub path: PathBuf,
@@ -873,8 +901,12 @@ pub struct RemovedFile {
     /// The receipt recorded another hash. Only files the manifest names go
     /// even then, such as a newer plug-in copied in by hand.
     pub changed_since_install: bool,
-    /// Where it is in the backup set. `None` in a dry run.
+    /// Where it is in the backup set. `None` in a dry run, and for what
+    /// went to the Trash or through the administrator command.
     pub backup_path: Option<PathBuf>,
+    /// Where it is in the Trash, when it went there and RABBIT knows where.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trashed_to: Option<PathBuf>,
 }
 
 /// A file the plan listed that the run kept.
@@ -956,6 +988,18 @@ pub enum UninstallProblem {
     /// vendor's uninstaller, so RABBIT couldn't check whether it still
     /// lists the package.
     InstalledListUnreadable { error: String },
+    /// macOS's installer still lists these receipts of the package after
+    /// the administrator command told it to forget them. They do no harm:
+    /// the package's files are gone.
+    InstallerRecordsRemain { ids: Vec<String> },
+    /// macOS's installer receipts couldn't be listed after the
+    /// administrator command, so RABBIT couldn't check that it forgot the
+    /// package's.
+    InstallerRecordsUnchecked { error: String },
+    /// The administrator command ended without saying where it stopped:
+    /// `status` is its exit status, `None` when it had none RABBIT could
+    /// read. Everything of the package is gone all the same.
+    AdministratorEndedUnclearly { status: Option<i32> },
 }
 
 impl UninstallProblem {
@@ -1009,6 +1053,24 @@ impl UninstallProblem {
                 "RABBIT couldn't read Windows' list of installed programs afterwards ({error}), \
                  so it couldn't check whether Windows still lists the package."
             ),
+            Self::InstallerRecordsRemain { ids } => format!(
+                "macOS's installer still lists {}, though the package's files are gone. That \
+                 does no harm.",
+                ids.join(", ")
+            ),
+            Self::InstallerRecordsUnchecked { error } => format!(
+                "RABBIT couldn't read macOS's list of installer receipts afterwards ({error}), \
+                 so it couldn't check that macOS forgot the package's."
+            ),
+            Self::AdministratorEndedUnclearly { status } => match status {
+                Some(status) => format!(
+                    "The administrator command ended with status {status} without saying \
+                     where it stopped, but everything of the package is gone."
+                ),
+                None => "The administrator command ended without a status, but everything of \
+                         the package is gone."
+                    .to_string(),
+            },
         }
     }
 }
@@ -1030,9 +1092,8 @@ pub enum UninstallMessage {
     NotRemovable {
         removability: Removability,
     },
-    /// The removal needs a step this version can't carry out yet: a vendor
-    /// uninstaller, administrator rights, or a whole folder going to the
-    /// Trash. None of these can be undone from a backup.
+    /// The removal needs a step a backup can't undo, and this version has
+    /// no way to carry it out for this plan.
     NotYetSupported,
     /// Checks failed for this package: REAPER or a program it names is
     /// running, the resource folder isn't writable, or the backup lacks
@@ -1120,12 +1181,50 @@ pub enum UninstallMessage {
     VendorLost {
         error: String,
     },
-    /// The Windows permission prompt was declined, so nothing was
-    /// uninstalled at all.
+    /// The administrator permission prompt was declined, so nothing was
+    /// uninstalled at all: Windows' prompt for the elevated helper, or the
+    /// macOS administrator password window, which was cancelled.
     ElevationDeclined,
-    /// The elevated helper couldn't start, so nothing was uninstalled.
+    /// The elevated helper couldn't start, or the macOS administrator
+    /// command didn't run, so nothing was uninstalled.
     ElevationFailed {
         error: String,
+    },
+    /// Moved to the Trash on macOS, by RABBIT as the user or by the
+    /// administrator command. `trashed_to` is where it is now, when RABBIT
+    /// knows: macOS named it, or RABBIT could see it there.
+    MovedToTrash {
+        trashed_to: Option<PathBuf>,
+    },
+    /// macOS didn't move it to the Trash, so nothing of the package
+    /// changed. `refused_by_macos` when macOS refused for lack of
+    /// permission, which App Management can be behind.
+    TrashFailed {
+        error: String,
+        refused_by_macos: bool,
+    },
+    /// macOS said the app moved to the Trash, but `path` is still there,
+    /// or RABBIT can't find it where macOS said it went. What became of it
+    /// is for the user to check in Finder; the run stopped there.
+    TrashUnclear {
+        path: PathBuf,
+    },
+    /// The run's administrator command removed the package for good on
+    /// macOS. A backup can't bring it back.
+    RemovedAsAdministrator,
+    /// The administrator command stopped before the package was fully
+    /// removed, and the run stopped there. `path` is what the failing step
+    /// worked on, `None` when the command didn't say which step stopped it.
+    /// `gone` and `left` say, from the filesystem afterwards, which of the
+    /// package's paths are gone and which are still there.
+    /// `refused_by_macos` when macOS said "Operation not permitted", which
+    /// App Management can be behind; `detail` is the step's own message.
+    AdministratorStepFailed {
+        path: Option<PathBuf>,
+        gone: Vec<PathBuf>,
+        left: Vec<PathBuf>,
+        refused_by_macos: bool,
+        detail: Option<String>,
     },
     /// After the vendor's uninstaller ran, these files were gone from the
     /// resource folder: REAPER's own settings or RABBIT's receipt. RABBIT

@@ -16,12 +16,19 @@
 //! The planner reaches them through [`ObjectProbe`], so its rules run on
 //! every platform with stand-ins, and [`tree_route`] makes the decision
 //! from them without reading anything itself.
+//!
+//! The run does a little more as the user, through [`MacosObjects`]: it
+//! moves an app to the Trash, lists the installer's receipts before and
+//! after the administrator command forgets some, asks hosts to read the
+//! Audio Unit list again, and checks that RABBIT doesn't run as root.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-pub use rabbit_platform::{ObjectFacts, TrashFolderFacts};
+pub use rabbit_platform::{ObjectFacts, TrashError, TrashErrorKind, TrashFolderFacts};
 
 use super::ByHandReason;
 
@@ -38,9 +45,35 @@ pub trait ObjectProbe {
     fn user_trash_folder_facts(&self) -> io::Result<TrashFolderFacts>;
 }
 
+/// What a macOS uninstall run does as the user, beyond the planner's
+/// questions. Never anything with administrator rights: that is the
+/// administrator command's, see [`super::admin_batch`].
+pub trait MacosObjects: ObjectProbe {
+    /// Move `path` to the Trash as this user, the way Finder does, and say
+    /// where it is now.
+    fn move_to_trash(&self, path: &Path) -> Result<PathBuf, TrashError>;
+
+    /// Every receipt macOS's installer lists (`pkgutil --pkgs`), read as
+    /// this user.
+    fn installed_package_ids(&self) -> io::Result<BTreeSet<String>>;
+
+    /// Make this user's hosts read the Audio Unit list again, after
+    /// plug-ins went.
+    fn refresh_audio_units(&self) -> io::Result<()>;
+
+    /// Whether RABBIT itself runs as root, as it does under `sudo`. A
+    /// computer that can't tell, which is any but a Mac, answers `false`:
+    /// the rule about root is macOS's alone.
+    fn runs_as_root(&self) -> bool;
+}
+
 /// This computer, through `rabbit-platform`. Off macOS every question is
 /// answered `Unsupported`, which leaves an app the user would have to move
 /// by hand; no plan for another platform asks.
+///
+/// What changes something, the Trash and ending the Audio Unit registrar,
+/// refuses in a test build and in any program not named like RABBIT, as
+/// the elevated helper does; `rabbit-platform` refuses again.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemMacosObjects;
 
@@ -51,6 +84,49 @@ impl ObjectProbe for SystemMacosObjects {
 
     fn user_trash_folder_facts(&self) -> io::Result<TrashFolderFacts> {
         rabbit_platform::user_trash_folder_facts()
+    }
+}
+
+/// Why this program may not change anything of the user's through
+/// [`SystemMacosObjects`], or `None` when it may.
+fn change_refusal() -> Option<&'static str> {
+    if cfg!(test) {
+        Some("a test build never changes anything of the user's")
+    } else if !rabbit_platform::running_as_rabbit() {
+        Some(
+            "only RABBIT itself changes things of the user's, and this program isn't named like RABBIT",
+        )
+    } else {
+        None
+    }
+}
+
+impl MacosObjects for SystemMacosObjects {
+    fn move_to_trash(&self, path: &Path) -> Result<PathBuf, TrashError> {
+        if let Some(reason) = change_refusal() {
+            return Err(TrashError {
+                kind: TrashErrorKind::Refused,
+                message: reason.to_string(),
+            });
+        }
+        rabbit_platform::move_to_trash(path)
+    }
+
+    fn installed_package_ids(&self) -> io::Result<BTreeSet<String>> {
+        rabbit_platform::installed_package_ids()
+    }
+
+    fn refresh_audio_units(&self) -> io::Result<()> {
+        if let Some(reason) = change_refusal() {
+            return Err(io::Error::other(reason));
+        }
+        rabbit_platform::refresh_audio_units()
+    }
+
+    fn runs_as_root(&self) -> bool {
+        // getuid can't fail on macOS; elsewhere the answer is Unsupported,
+        // and no rule about root applies there.
+        rabbit_platform::effective_uid_is_root().unwrap_or(false)
     }
 }
 
@@ -76,17 +152,157 @@ impl ObjectProbe for NoMacosObjects {
     }
 }
 
+impl MacosObjects for NoMacosObjects {
+    fn move_to_trash(&self, _path: &Path) -> Result<PathBuf, TrashError> {
+        Err(TrashError {
+            kind: TrashErrorKind::Unsupported,
+            message: "this run moves nothing to the Trash".to_string(),
+        })
+    }
+
+    fn installed_package_ids(&self) -> io::Result<BTreeSet<String>> {
+        Err(unsupported())
+    }
+
+    fn refresh_audio_units(&self) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    fn runs_as_root(&self) -> bool {
+        false
+    }
+}
+
+/// The installer receipts a [`FakeMacosObjects`] lists, shared with a
+/// [`RecordingAdministratorShell`](super::admin_batch::RecordingAdministratorShell)
+/// whose `pkgutil --forget` steps take them out. `None` makes listing fail.
+pub type FakeReceipts = Arc<Mutex<Option<BTreeSet<String>>>>;
+
+/// How a [`FakeMacosObjects`] answers a move to the Trash.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum FakeTrashAnswer {
+    /// Move it into the test's Trash folder and say where.
+    #[default]
+    Move,
+    /// Move nothing, and fail like this.
+    Fail(TrashErrorKind, String),
+    /// Say it moved to the Trash, but leave it where it is.
+    ClaimWithoutMoving,
+    /// Move it, and say nothing RABBIT can use about where.
+    MoveWithoutSaying,
+}
+
+/// What a [`FakeMacosObjects`] was asked to change.
+#[derive(Debug, Clone, Default)]
+struct FakeCalls {
+    trashed: Vec<PathBuf>,
+    audio_unit_refreshes: usize,
+}
+
 /// Facts a test hands in, for paths it names and for the user's Trash.
 /// A path it doesn't name, and a Trash it wasn't given, are `NotFound`.
-#[derive(Debug, Clone, Default)]
+///
+/// For a run, a temporary folder stands in for the Trash that moves go
+/// into, a list stands in for the installer's receipts, and every change
+/// it was asked for is recorded. It changes nothing outside the folders a
+/// test gives it. It starts with no receipts listed and no Trash folder to
+/// move things into.
+#[derive(Debug, Clone)]
 pub struct FakeMacosObjects {
     objects: HashMap<PathBuf, Result<ObjectFacts, io::ErrorKind>>,
     trash: Option<Result<TrashFolderFacts, io::ErrorKind>>,
+    trash_bin: Option<PathBuf>,
+    trash_answer: FakeTrashAnswer,
+    receipts: FakeReceipts,
+    calls: Arc<Mutex<FakeCalls>>,
+    as_root: bool,
+}
+
+impl Default for FakeMacosObjects {
+    fn default() -> Self {
+        Self {
+            objects: HashMap::new(),
+            trash: None,
+            trash_bin: None,
+            trash_answer: FakeTrashAnswer::default(),
+            receipts: Arc::new(Mutex::new(Some(BTreeSet::new()))),
+            calls: Arc::default(),
+            as_root: false,
+        }
+    }
 }
 
 impl FakeMacosObjects {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Moves to the Trash go into `folder`, which the test made.
+    pub fn with_trash_bin(mut self, folder: impl Into<PathBuf>) -> Self {
+        self.trash_bin = Some(folder.into());
+        self
+    }
+
+    /// A move to the Trash moves nothing and fails with `kind`.
+    pub fn failing_to_trash(mut self, kind: TrashErrorKind, message: &str) -> Self {
+        self.trash_answer = FakeTrashAnswer::Fail(kind, message.to_string());
+        self
+    }
+
+    /// A move to the Trash says it worked, names a place in the Trash, and
+    /// leaves the app where it was.
+    pub fn claiming_to_trash_without_moving(mut self) -> Self {
+        self.trash_answer = FakeTrashAnswer::ClaimWithoutMoving;
+        self
+    }
+
+    /// A move to the Trash moves the app, and then answers that it can't
+    /// say where it went.
+    pub fn trashing_without_saying_where(mut self) -> Self {
+        self.trash_answer = FakeTrashAnswer::MoveWithoutSaying;
+        self
+    }
+
+    /// The installer lists these receipts.
+    pub fn with_receipts<I, S>(self, ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        *self.receipts.lock().unwrap() = Some(ids.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Listing the installer's receipts fails.
+    pub fn with_unlistable_receipts(self) -> Self {
+        *self.receipts.lock().unwrap() = None;
+        self
+    }
+
+    /// RABBIT runs as root.
+    pub fn running_as_root(mut self) -> Self {
+        self.as_root = true;
+        self
+    }
+
+    /// The receipts, for a recording administrator shell to forget.
+    pub fn receipt_list(&self) -> FakeReceipts {
+        Arc::clone(&self.receipts)
+    }
+
+    /// The receipts listed now, `None` while listing fails.
+    pub fn receipts(&self) -> Option<BTreeSet<String>> {
+        self.receipts.lock().unwrap().clone()
+    }
+
+    /// Every path the run asked to move to the Trash, in order.
+    pub fn trashed(&self) -> Vec<PathBuf> {
+        self.calls.lock().unwrap().trashed.clone()
+    }
+
+    /// How often the run asked for the Audio Unit list to be read again.
+    pub fn audio_unit_refreshes(&self) -> usize {
+        self.calls.lock().unwrap().audio_unit_refreshes
     }
 
     /// `path` is described by `facts`.
@@ -138,6 +354,68 @@ impl ObjectProbe for FakeMacosObjects {
                 "the test has no Trash",
             )),
         }
+    }
+}
+
+impl MacosObjects for FakeMacosObjects {
+    /// Renames `path` into the test's Trash folder, under its own name, or
+    /// with a number added when that is taken, as macOS does; or answers
+    /// the way the test asked.
+    fn move_to_trash(&self, path: &Path) -> Result<PathBuf, TrashError> {
+        self.calls.lock().unwrap().trashed.push(path.to_path_buf());
+        let fail = |kind: TrashErrorKind, message: &str| TrashError {
+            kind,
+            message: message.to_string(),
+        };
+        if let FakeTrashAnswer::Fail(kind, message) = &self.trash_answer {
+            return Err(fail(*kind, message));
+        }
+        let Some(bin) = &self.trash_bin else {
+            return Err(fail(TrashErrorKind::Unsupported, "the test has no Trash"));
+        };
+        let Some(name) = path.file_name() else {
+            return Err(fail(TrashErrorKind::Other, "the path has no name"));
+        };
+        if fs::symlink_metadata(path).is_err() {
+            return Err(fail(TrashErrorKind::NotFound, "nothing is there"));
+        }
+        let mut destination = bin.join(name);
+        let mut number = 2;
+        while fs::symlink_metadata(&destination).is_ok() {
+            let mut numbered = name.to_os_string();
+            numbered.push(format!(" {number}"));
+            destination = bin.join(numbered);
+            number += 1;
+        }
+        if self.trash_answer == FakeTrashAnswer::ClaimWithoutMoving {
+            return Ok(destination);
+        }
+        fs::rename(path, &destination)
+            .map_err(|error| fail(TrashErrorKind::Other, &error.to_string()))?;
+        match self.trash_answer {
+            FakeTrashAnswer::MoveWithoutSaying => Err(fail(
+                TrashErrorKind::Unclear,
+                "macOS gave no new path RABBIT could read",
+            )),
+            _ => Ok(destination),
+        }
+    }
+
+    fn installed_package_ids(&self) -> io::Result<BTreeSet<String>> {
+        self.receipts
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| io::Error::other("the test made the receipts unlistable"))
+    }
+
+    fn refresh_audio_units(&self) -> io::Result<()> {
+        self.calls.lock().unwrap().audio_unit_refreshes += 1;
+        Ok(())
+    }
+
+    fn runs_as_root(&self) -> bool {
+        self.as_root
     }
 }
 

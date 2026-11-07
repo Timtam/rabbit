@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 use rabbit_core::localization::Localizer;
 use rabbit_core::progress::{ProgressEvent, RemovalMethod};
 
-use crate::{ProgressUiState, is_spoken};
+use crate::{
+    ProgressUiState, administrator_prompt_line, administrator_still_waiting_line, is_spoken,
+};
 
 use crate::wx_app::globals::{AnnouncePriority, announce, with_ui_localizer};
 use crate::wx_app::widgets::WizardWidgets;
@@ -198,10 +200,12 @@ pub(crate) fn apply_progress_event_to_ui(
                     .value,
             );
         }
-        // Each removal holds the status line the way an install does.
+        // Each removal holds the status line the way an install does. A
+        // move to the Trash and the administrator command's removals read
+        // the same way for now.
         ProgressEvent::RemoveStarted {
             package_id,
-            method: RemovalMethod::Files,
+            method: RemovalMethod::Files | RemovalMethod::Trash | RemovalMethod::Administrator,
         } => {
             status_line = Some(package_line(
                 localizer,
@@ -245,6 +249,28 @@ pub(crate) fn apply_progress_event_to_ui(
                 "wizard-progress-status-vendor-waiting-for-files",
                 package_id,
             );
+            status_line = Some(line.clone());
+            log_line = Some(line);
+        }
+        // Said right before the password window takes focus, on the status
+        // label and in the log as well, in case VoiceOver cuts it off.
+        ProgressEvent::AdministratorPrompt { package_ids } => {
+            let packages = package_ids
+                .iter()
+                .map(|id| package_display_name(package_display_names, id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if let Some(line) =
+                administrator_prompt_line(rabbit_core::model::Platform::current(), &packages)
+            {
+                status_line = Some(line.clone());
+                log_line = Some(line);
+            }
+        }
+        // The password window may be behind RABBIT, where the user can't
+        // hear it.
+        ProgressEvent::AdministratorStillWaiting { .. } => {
+            let line = administrator_still_waiting_line();
             status_line = Some(line.clone());
             log_line = Some(line);
         }

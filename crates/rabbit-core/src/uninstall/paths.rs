@@ -78,7 +78,17 @@ impl UninstallRoots {
     /// known folder an environment variable can't name.
     pub fn for_target(platform: Platform, resource: &Path, app_path: Option<&Path>) -> Self {
         let windows = platform == Platform::Windows;
-        let app_path = app_path.map(absolute);
+        // A trailing slash, which shell completion adds to a folder such as
+        // `/Applications/REAPER.app/`, makes `lstat` and `rename` follow a
+        // link in the last place, so it never gets into a plan: rebuilding
+        // the path from its components drops it.
+        let app_path = app_path.map(absolute).map(|path| {
+            if windows {
+                path
+            } else {
+                path.components().collect::<PathBuf>()
+            }
+        });
         Self {
             resource: absolute(resource),
             app_dir: app_path
@@ -555,7 +565,8 @@ pub fn check_administrator_trash_move(
 
 /// The checks both administrator steps share: `path` sits directly in
 /// `folder`, is a real folder, and every folder from the system root down
-/// to `folder` is a real folder, not a link. Returns `path` as text.
+/// to `folder` is a real folder, not a link. Returns `path` as text,
+/// spelt exactly as `folder` and its name, which it must already be.
 fn check_root_reaches(
     roots: &UninstallRoots,
     path: &Path,
@@ -564,6 +575,15 @@ fn check_root_reaches(
     if path.parent() != Some(folder) {
         return Err(PathRefusal::NotRootControlled);
     }
+    let name = path.file_name().ok_or(PathRefusal::NotPlain)?;
+    let exact = folder.join(name);
+    // A trailing slash makes `lstat` and `rename` follow a link in the last
+    // place, though `Path` compares as if it weren't there. Root gets only
+    // folder/name, spelt exactly so, and so is everything checked here.
+    if path.as_os_str() != exact.as_os_str() {
+        return Err(PathRefusal::NotPlain);
+    }
+    let path = exact.as_path();
     let metadata =
         fs::symlink_metadata(path).map_err(|error| PathRefusal::unreadable(path, &error))?;
     if metadata.file_type().is_symlink() {
@@ -765,6 +785,7 @@ mod tests {
         PathRefusal, RemovalGuard, ResolvedPath, UninstallRoots, check_administrator_removal,
         check_administrator_trash_move, check_removal, expand_wildcard, resolve_path,
     };
+    use crate::model::Platform;
     use crate::package::uninstall::UninstallPath;
     use crate::uninstall::{PlannedRemoval, RemovalReason};
 
@@ -1116,6 +1137,64 @@ mod tests {
             Err(PathRefusal::LinkedAncestor)
         );
         assert!(real.join("REAPER.app").is_dir(), "checking removes nothing");
+    }
+
+    /// `path` with a separator added at its end, as shell completion types
+    /// a folder.
+    fn with_trailing_separator(path: &Path) -> PathBuf {
+        let mut text = path.as_os_str().to_os_string();
+        text.push(std::path::MAIN_SEPARATOR_STR);
+        PathBuf::from(text)
+    }
+
+    /// A trailing slash makes `lstat` and `rename` follow a link in the last
+    /// place on macOS, so a macOS target's app path loses it, and root is
+    /// never handed a path spelt with one.
+    #[test]
+    fn a_trailing_slash_never_reaches_root() {
+        let (dir, mut roots) = system_fixture();
+        let applications = roots.system_root.join("Applications");
+        let app = applications.join("REAPER.app");
+        fs::create_dir_all(app.join("Contents")).unwrap();
+
+        let target = UninstallRoots::for_target(
+            Platform::MacOs,
+            &roots.resource,
+            Some(&with_trailing_separator(&app)),
+        );
+        let normalized = target.app_path.unwrap();
+        assert_eq!(normalized.as_os_str(), app.as_os_str());
+
+        let tree = |roots: &UninstallRoots| PlannedRemoval {
+            guard: RemovalGuard {
+                must_end_with: Some(".app".to_string()),
+                name_contains: Some("REAPER".to_string()),
+                ..resolve_one("{app_path}", roots).guard
+            },
+            ..planned_tree("{app_path}", roots)
+        };
+        // Spelt with the slash, even a real folder is refused.
+        roots.app_path = Some(with_trailing_separator(&app));
+        assert_eq!(
+            check_administrator_trash_move(&roots, &tree(&roots)),
+            Err(PathRefusal::NotPlain)
+        );
+
+        // REAPER.app a link to an app elsewhere: refused as a link where
+        // `lstat` sees one, and for its spelling where the slash hides it.
+        let elsewhere = dir.path().join("elsewhere").join("REAPER.app");
+        fs::create_dir_all(elsewhere.join("Contents")).unwrap();
+        fs::remove_dir_all(&app).unwrap();
+        link_folder(&app, &elsewhere);
+        let refusal = check_administrator_trash_move(&roots, &tree(&roots));
+        assert!(
+            matches!(refusal, Err(PathRefusal::Link | PathRefusal::NotPlain)),
+            "{refusal:?}"
+        );
+        assert!(
+            elsewhere.join("Contents").is_dir(),
+            "checking moves nothing"
+        );
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub mod fs_security;
 pub mod jaws;
 pub mod komplete_kontrol;
 pub mod links;
+pub mod local_time;
 pub mod locale;
 pub mod object_facts;
 pub mod package_receipts;
@@ -42,10 +43,11 @@ pub use disk_image::{
     install_app_bundle_from_disk_image, mount_disk_image, run_pkg_installer_from_disk_image,
 };
 pub use elevation::{
-    AdministratorShellReport, AdministratorShellRequest, ElevatedChild, ElevatedWindow,
-    ElevationError, ShellCommand, ShellLinesOutcome, ShellStep, administrator_shell_text,
-    is_current_process_elevated, is_nsis_destination_argument, is_rabbit_file_stem,
-    run_administrator_shell, run_elevated_and_wait, running_as_rabbit, spawn_elevated,
+    ADMINISTRATOR_SHELL_MAX_STEPS, AdministratorShellReport, AdministratorShellRequest,
+    ElevatedChild, ElevatedWindow, ElevationError, ShellCommand, ShellLinesOutcome, ShellStep,
+    administrator_shell_text, is_current_process_elevated, is_nsis_destination_argument,
+    is_rabbit_file_stem, run_administrator_shell, run_elevated_and_wait, running_as_rabbit,
+    spawn_elevated,
 };
 pub use file_version::{
     read_file_version_parts, read_file_version_string, read_string_file_info_key,
@@ -58,6 +60,7 @@ pub use fs_security::{
 pub use jaws::{JawsInstall, detect_jaws_install, detect_jaws_install_under, is_jaws_installed};
 pub use komplete_kontrol::is_komplete_kontrol_installed;
 pub use links::{remove_empty_dir, remove_junction};
+pub use local_time::local_utc_offset_seconds;
 pub use locale::os_default_locale;
 pub use object_facts::{
     ObjectFacts, TrashFolderFacts, effective_uid_is_root, object_facts, user_trash_folder,

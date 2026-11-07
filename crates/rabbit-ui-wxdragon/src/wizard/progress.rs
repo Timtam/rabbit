@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use rabbit_core::model::Platform;
 use rabbit_core::progress::ProgressEvent;
 
 use super::uninstall::WizardMode;
@@ -155,12 +156,43 @@ impl ProgressUiState {
                 self.current_package = None;
                 self.completed_phases += 1;
             }
-            ProgressEvent::ConfigurationStarted { .. } => {}
+            // The prompt itself counts no phase; the removals after it do.
+            ProgressEvent::ConfigurationStarted { .. }
+            | ProgressEvent::AdministratorPrompt { .. }
+            | ProgressEvent::AdministratorStillWaiting { .. } => {}
             ProgressEvent::ConfigurationCompleted { .. } => {
                 self.completed_phases += 1;
             }
         }
     }
+}
+
+/// The status line said right before an administrator prompt appears, for
+/// the packages named `packages`, on `platform`, or `None` where the page
+/// says nothing new then. macOS's password window keeps macOS's own text,
+/// and VoiceOver may cut off what RABBIT says once the window takes focus,
+/// so the page puts the line on its status label and in its log as well.
+/// Windows' permission prompt names RABBIT itself, so nothing more is said
+/// there.
+///
+/// English for now; the wording in every language comes with the
+/// translations of the macOS uninstall.
+pub fn administrator_prompt_line(platform: Option<Platform>, packages: &str) -> Option<String> {
+    (platform == Some(Platform::MacOs)).then(|| {
+        format!(
+            "macOS now asks for an administrator's name and password, once, to uninstall \
+             {packages}. If you cancel, nothing is uninstalled."
+        )
+    })
+}
+
+/// The status line when macOS's password window has been open for a while
+/// without an answer. English for now, as
+/// [`administrator_prompt_line`].
+pub fn administrator_still_waiting_line() -> String {
+    "Still waiting for the administrator password window. If you don't hear it, check whether \
+     it is behind RABBIT."
+        .to_string()
 }
 
 impl ProgressUiState {
@@ -193,7 +225,9 @@ impl ProgressUiState {
 /// keeps RABBIT waiting is spoken too: it may be asking a question in a
 /// window of its own. So are its files lingering after it ended: another
 /// program may have the package open, and nothing else is heard until the
-/// uninstaller's time limit.
+/// uninstaller's time limit. So is the line right before an administrator
+/// prompt, which says what the window is for, and the line when its
+/// password window has waited a while, which may be behind RABBIT.
 ///
 /// No wildcard arm, on purpose: a new event must not compile until someone
 /// decides whether it is heard. A `matches!` here once let the uninstall
@@ -205,7 +239,9 @@ pub fn is_spoken(event: &ProgressEvent) -> bool {
         | ProgressEvent::RemoveStarted { .. }
         | ProgressEvent::RemoveCompleted { .. }
         | ProgressEvent::VendorStillWaiting { .. }
-        | ProgressEvent::VendorWaitingForFiles { .. } => true,
+        | ProgressEvent::VendorWaitingForFiles { .. }
+        | ProgressEvent::AdministratorPrompt { .. }
+        | ProgressEvent::AdministratorStillWaiting { .. } => true,
         ProgressEvent::DownloadStarted { .. }
         | ProgressEvent::DownloadProgress { .. }
         | ProgressEvent::DownloadCompleted { .. }
