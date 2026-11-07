@@ -623,7 +623,7 @@ mod windows_tests {
 
     use super::*;
     use crate::win_util::current_user_sid;
-    use crate::win_util::test_support::{aces, dacl_sddl_of, descriptor_sddl};
+    use crate::win_util::test_support::{aces, dacl_sddl_of, descriptor_sddl, sddl_trustee};
 
     /// The DACL of `path` in SDDL, read through a handle that doesn't
     /// follow links.
@@ -673,7 +673,7 @@ mod windows_tests {
             [
                 "A;OICI;FA;;;SY".to_string(),
                 "A;OICI;FA;;;BA".to_string(),
-                format!("A;OICI;FA;;;{user}"),
+                format!("A;OICI;FA;;;{}", sddl_trustee(&user)),
             ],
             "{read_back}"
         );

@@ -878,7 +878,11 @@ mod windows_tests {
             .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(started.elapsed() >= Duration::from_millis(300));
+        // It really waited. accept is one timed wait in Windows, which ends
+        // on a clock tick and so can end up to about 16 ms before the time
+        // asked for, as the clock behind Instant measures it.
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_millis(250), "{waited:?}");
     }
 
     #[test]
@@ -903,14 +907,14 @@ mod windows_tests {
     fn only_system_administrators_and_this_account_may_open_the_pipe() {
         use windows_sys::Win32::Security::Authorization::SE_KERNEL_OBJECT;
 
-        use crate::win_util::test_support::{aces, dacl_sddl_of};
+        use crate::win_util::test_support::{aces, dacl_sddl_of, sddl_trustee};
 
         let server = PipeServer::create(&new_uninstall_pipe_name().unwrap()).unwrap();
         let dacl = dacl_sddl_of(server.inner.raw_handle(), SE_KERNEL_OBJECT);
 
         // Protected, so nothing else is added, such as Everyone's read.
         assert!(dacl.starts_with("D:P"), "{dacl}");
-        let user = crate::win_util::current_user_sid().unwrap();
+        let user = sddl_trustee(&crate::win_util::current_user_sid().unwrap());
         assert_eq!(
             aces(&dacl),
             [

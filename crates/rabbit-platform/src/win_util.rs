@@ -291,6 +291,18 @@ pub(crate) mod test_support {
         }
     }
 
+    /// How Windows names `sid` in an SDDL string it writes. For a few
+    /// well-known accounts that is a two-letter alias, not the `S-1-…`
+    /// form: the built-in Administrator account (RID 500), which GitHub's
+    /// Windows runners run as, comes back as `LA`.
+    pub(crate) fn sddl_trustee(sid: &str) -> String {
+        let descriptor = super::security_descriptor_from_sddl(&format!("D:(A;;FA;;;{sid})"))
+            .unwrap_or_else(|error| panic!("{sid}: {error}"));
+        let sddl = descriptor_sddl(descriptor.as_ptr(), DACL_SECURITY_INFORMATION);
+        let ace = aces(&sddl).pop().unwrap_or_else(|| panic!("{sddl}"));
+        ace.rsplit(';').next().unwrap().to_string()
+    }
+
     /// The access control entries of an SDDL DACL, in order.
     pub(crate) fn aces(sddl: &str) -> Vec<String> {
         sddl.split('(')
