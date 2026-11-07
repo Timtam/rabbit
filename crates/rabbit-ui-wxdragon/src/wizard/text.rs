@@ -150,6 +150,7 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         reaper_running_body: localizer.text("wizard-reaper-running-body").value,
         error_reaper_running: localizer.text("wizard-error-reaper-running").value,
         error_lock_held: localizer.text("wizard-error-lock-held").value,
+        error_uninstall_as_root: localizer.text("wizard-error-uninstall-as-root").value,
         done_status_cancelled: localizer.text("wizard-done-status-cancelled").value,
         done_status_no_packages: localizer.text("wizard-done-status-no-packages").value,
         done_show_details_label: localizer.text("wizard-done-show-details").value,

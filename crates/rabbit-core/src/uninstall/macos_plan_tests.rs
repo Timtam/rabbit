@@ -869,6 +869,15 @@ fn a_by_hand_app_says_how_to_move_it_in_finder() {
         "{}",
         locked.message("REAPER")
     );
+    // Get Info's Locked clears only the lock a user sets.
+    assert!(
+        locked.message("REAPER").ends_with(
+            "If Locked isn't ticked, or Finder still can't move it, it has a lock that Finder \
+             can't remove."
+        ),
+        "{}",
+        locked.message("REAPER")
+    );
     // The report and `--json` name the route and the reason.
     let json = serde_json::to_value(&locked).unwrap();
     assert_eq!(json["kind"], "by-hand");

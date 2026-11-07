@@ -131,7 +131,9 @@ pub enum RemovalMethod {
     Trash,
     /// The run's one administrator command on macOS removed it. That
     /// command runs before every other removal of the run, so its packages'
-    /// start and end are sent together, once it has ended.
+    /// start and end are sent together, once it has ended. Sent only for a
+    /// package root had steps for; one whose files were all gone before
+    /// root's turn is sent as `Files`.
     Administrator,
 }
 

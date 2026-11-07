@@ -1870,7 +1870,9 @@ fn new_item_for(
 
 /// What to do when macOS itself refused a step: App Management protects
 /// apps from changes by programs the user hasn't allowed, root's included.
-const APP_MANAGEMENT_HINT: &str = "If macOS refused it, turn RABBIT on under System Settings, \
+/// The report's English names both RABBIT and the app the CLI runs from;
+/// the CLI swaps in a sentence of its own, which only names the latter.
+pub const APP_MANAGEMENT_HINT: &str = "If macOS refused it, turn RABBIT on under System Settings, \
      Privacy & Security, App Management (or the app you run rabbit from, such as Terminal), quit \
      RABBIT, start it again and uninstall again.";
 
@@ -2097,20 +2099,33 @@ pub(super) fn english_message(item: &UninstallReportItem, plan: &UninstallPlan) 
         ),
         UninstallMessage::AdministratorStepFailed {
             path,
+            ended_unclearly,
             gone,
             left,
             refused_by_macos,
             detail,
         } => {
-            let mut message = match path {
-                Some(path) => format!(
+            // Where it stopped only when its step was this package's, and
+            // "without saying" only when the command didn't say: otherwise it
+            // stopped at another package's step, or ran to its end, and this
+            // is still there all the same.
+            let mut message = match (path, *ended_unclearly, left.first()) {
+                (Some(path), _, _) => format!(
                     "The administrator command stopped at {}, so {name} isn't fully removed.",
                     path.display()
                 ),
-                None => format!(
+                (None, true, _) => format!(
                     "The administrator command ended without saying where it stopped, and \
                      {name} isn't fully removed."
                 ),
+                (None, false, Some(first)) => format!(
+                    "The administrator command ran, but {} is still there, or RABBIT can't see \
+                     that it is gone, so {name} isn't fully removed.",
+                    first.display()
+                ),
+                (None, false, None) => {
+                    format!("The administrator command ran, and {name} isn't fully removed.")
+                }
             };
             if gone.is_empty() {
                 message.push_str(&format!(" Nothing of {name} was removed."));

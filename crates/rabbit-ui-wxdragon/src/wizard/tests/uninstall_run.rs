@@ -13,18 +13,22 @@ use rabbit_core::preflight::{
 use rabbit_core::progress::{ProgressEvent, ProgressReporter, RemovalMethod};
 use rabbit_core::report::SavedReportPaths;
 use rabbit_core::uninstall::{
-    ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, KeptFile, KeptFileReason, LeftoverKind,
-    LeftoverOutcome, LeftoverResult, NoMacosObjects, NothingListed, PROGRAMS_RUNNING_CHECK,
-    RegistryEntryAction, RegistryEntryOutcome, Removability, RemovalReason, RemovedFile,
-    UninstallMessage, UninstallPlanItem, UninstallProblem, UninstallReport, UninstallReportItem,
-    UninstallRequest, UninstallServices, UninstallStatus, VendorOutcome, VendorRefusal,
-    VendorStatus, execute_uninstall,
+    ANY_REAPER_PROCESS_CHECK, AdministratorStepKind, AdministratorStepRecord,
+    AdministratorStepVerdict, BACKUP_SPACE_CHECK, ByHandReason, KeptFile, KeptFileReason,
+    LeftoverKind, LeftoverOutcome, LeftoverResult, NoMacosObjects, NothingListed,
+    PROGRAMS_RUNNING_CHECK, RegistryEntryAction, RegistryEntryOutcome, Removability, RemovalReason,
+    RemovedFile, UninstallMessage, UninstallPlanItem, UninstallProblem, UninstallReport,
+    UninstallReportItem, UninstallRequest, UninstallServices, UninstallStatus, VendorOutcome,
+    VendorRefusal, VendorStatus, execute_uninstall,
 };
 use rabbit_core::version::Version;
 use tempfile::tempdir;
 
 use super::support::*;
-use super::uninstall::{item, list_for, plan, removable_sws, sws_with_settings, target, tick};
+use super::uninstall::{
+    MAC_REAPER_APP, MAC_RESOURCE, admin_surge, item, list_for, mac_plan, plan, removable_sws,
+    root_moved_reaper, sws_with_settings, target, tick, trash_reaper,
+};
 use crate::wizard::*;
 
 fn en() -> Localizer {
@@ -227,56 +231,100 @@ fn the_administrator_prompt_counts_no_phase() {
     assert_eq!(state.percentage(), 100);
 }
 
-/// macOS's password window keeps its own text, so RABBIT says what it is
-/// for; Windows' permission prompt names RABBIT, and nothing new is said.
+/// macOS's password window keeps its own text, which names osascript, so
+/// RABBIT says what it is for, in the user's language; Windows' permission
+/// prompt names RABBIT, and nothing new is said there.
 #[test]
 fn the_page_says_what_macoss_password_window_is_for() {
-    let line = administrator_prompt_line(Some(Platform::MacOs), "Surge XT, REAPER").unwrap();
-    assert!(
-        line.contains("administrator's name and password") && line.contains("Surge XT, REAPER"),
-        "{line}"
+    let line = administrator_prompt_line(&en(), Some(Platform::MacOs), "Surge XT, REAPER").unwrap();
+    assert_eq!(
+        line,
+        "macOS now asks for an administrator's name and password, once. With it, RABBIT runs \
+         one administrator command that uninstalls Surge XT, REAPER. If you cancel, nothing is \
+         uninstalled."
     );
     assert_eq!(
-        administrator_prompt_line(Some(Platform::Windows), "Surge XT"),
+        administrator_prompt_line(&en(), Some(Platform::Windows), "Surge XT"),
         None
     );
-    assert!(administrator_still_waiting_line().contains("behind RABBIT"));
+    assert_eq!(
+        administrator_still_waiting_line(&en(), Some(Platform::MacOs)).as_deref(),
+        Some(
+            "Still waiting for the administrator password window. If you don't hear it, check \
+             whether it is behind RABBIT."
+        )
+    );
+    assert_eq!(
+        administrator_still_waiting_line(&en(), Some(Platform::Windows)),
+        None
+    );
+    let german = Localizer::embedded("de-DE").unwrap();
+    let line = administrator_prompt_line(&german, Some(Platform::MacOs), "Surge XT").unwrap();
+    assert!(
+        line.contains("Administrators") && line.contains("Surge XT"),
+        "{line}"
+    );
 }
 
-/// What macOS's Trash and administrator command left to look at is said
-/// on Done, in the engine's words for now.
+/// Each way a removal starts has its own status and log line. A move to the
+/// Trash says so; the administrator command's packages only get a log line,
+/// since the command has ended by then and each one's end follows at once.
+/// The Windows lines stay as they were.
 #[test]
-fn done_says_what_the_trash_and_the_administrator_command_left() {
-    let trash_failed = UninstallReportItem {
-        message: "RABBIT couldn't move REAPER to the Trash, so nothing of it changed: no."
-            .to_string(),
-        ..report_item(
-            "reaper",
-            UninstallStatus::Failed,
-            UninstallMessage::TrashFailed {
-                error: "no".to_string(),
-                refused_by_macos: false,
-            },
+fn each_removal_says_how_it_goes_on_the_progress_page() {
+    let lines = |method| removal_started_lines(&en(), method, "REAPER");
+    assert_eq!(
+        lines(RemovalMethod::Files),
+        (
+            Some("Uninstalling REAPER…".to_string()),
+            "Uninstalling REAPER…".to_string()
         )
-    };
-    let surge = UninstallReportItem {
-        problems: vec![UninstallProblem::InstallerRecordsRemain {
-            ids: vec!["org.example.surge.pkg".to_string()],
-        }],
-        ..report_item(
-            "surge-xt",
-            UninstallStatus::Removed,
-            UninstallMessage::RemovedAsAdministrator,
-        )
-    };
-    let reasons = uninstall_reasons(&en(), &report(vec![surge, trash_failed.clone()]));
-    assert!(reasons.contains(&trash_failed.message), "{reasons:?}");
-    assert!(
-        reasons
-            .iter()
-            .any(|reason| reason.contains("org.example.surge.pkg")),
-        "{reasons:?}"
     );
+    assert_eq!(
+        lines(RemovalMethod::VendorUninstaller),
+        (
+            Some("Running REAPER's own uninstaller…".to_string()),
+            "Running REAPER's own uninstaller…".to_string()
+        )
+    );
+    assert_eq!(
+        lines(RemovalMethod::Trash),
+        (
+            Some("Moving REAPER to the Trash…".to_string()),
+            "Moving REAPER to the Trash…".to_string()
+        )
+    );
+    assert_eq!(
+        lines(RemovalMethod::Administrator),
+        (
+            None,
+            "The administrator command has finished with REAPER.".to_string()
+        )
+    );
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        for method in [
+            RemovalMethod::Files,
+            RemovalMethod::VendorUninstaller,
+            RemovalMethod::Trash,
+            RemovalMethod::Administrator,
+        ] {
+            let (status, log) = removal_started_lines(&localizer, method, "REAPER");
+            assert_reads(locale, &log);
+            assert!(log.contains("REAPER"), "{locale}: {log}");
+            if let Some(status) = status {
+                assert_reads(locale, &status);
+            }
+        }
+        assert_reads(
+            locale,
+            &administrator_prompt_line(&localizer, Some(Platform::MacOs), "Surge XT").unwrap(),
+        );
+        assert_reads(
+            locale,
+            &administrator_still_waiting_line(&localizer, Some(Platform::MacOs)).unwrap(),
+        );
+    }
 }
 
 /// A vendor's uninstaller still running is heard once per run: the first
@@ -826,6 +874,8 @@ fn report_item(
     }
 }
 
+/// `package_id` removed into the run's backup set, as a real run leaves a
+/// package whose files moved: each file has its place in the set.
 fn removed(package_id: &str, files: &[&str]) -> UninstallReportItem {
     UninstallReportItem {
         removed: files
@@ -835,7 +885,10 @@ fn removed(package_id: &str, files: &[&str]) -> UninstallReportItem {
                 reason: RemovalReason::Receipt,
                 size: 3,
                 changed_since_install: false,
-                backup_path: None,
+                backup_path: Some(
+                    Path::new("C:/REAPER/RABBIT/backups/uninstall-unix-1/files")
+                        .join(Path::new(path).file_name().unwrap()),
+                ),
                 trashed_to: None,
             })
             .collect(),
@@ -2032,4 +2085,920 @@ fn each_vendor_outcome_reads_as_a_sentence() {
         UninstallOutcomeStatus::Cancelled,
         "REAPER's uninstaller was cancelled by the user"
     );
+}
+
+// ---------------------------------------------------------------------------
+// After a macOS removal: the Trash and the administrator command.
+// ---------------------------------------------------------------------------
+
+const SURGE_APP: &str = "/Applications/Surge XT.app";
+const SURGE_VST3_MAC: &str = "/Library/Audio/Plug-Ins/VST3/Surge XT.vst3";
+const IN_TRASH: &str = "/Users/me/.Trash/REAPER 2026-11-07 15.30.12.app";
+
+/// A macOS report of `items`, with the steps the administrator command was
+/// given and the plan items they came from.
+fn mac_report(
+    items: Vec<UninstallReportItem>,
+    plan_items: Vec<UninstallPlanItem>,
+    steps: Vec<AdministratorStepRecord>,
+) -> UninstallReport {
+    UninstallReport {
+        resource_path: PathBuf::from(MAC_RESOURCE),
+        platform: Platform::MacOs,
+        target: InstallationKind::Standard,
+        backup_set_id: None,
+        administrator_steps: steps,
+        plan: mac_plan(plan_items),
+        ..report(items)
+    }
+}
+
+fn step(
+    package_id: Option<&str>,
+    kind: AdministratorStepKind,
+    target: &str,
+    verdict: AdministratorStepVerdict,
+) -> AdministratorStepRecord {
+    AdministratorStepRecord {
+        package_id: package_id.map(str::to_string),
+        kind,
+        target: target.to_string(),
+        destination: None,
+        verdict,
+    }
+}
+
+fn whole(path: &str, trashed_to: Option<&str>) -> RemovedFile {
+    RemovedFile {
+        path: PathBuf::from(path),
+        reason: RemovalReason::Tree,
+        size: 0,
+        changed_since_install: false,
+        backup_path: None,
+        trashed_to: trashed_to.map(PathBuf::from),
+    }
+}
+
+/// REAPER moved to the Trash, `trashed_to` where RABBIT saw it there.
+fn trashed_reaper(trashed_to: Option<&str>) -> UninstallReportItem {
+    UninstallReportItem {
+        removed: vec![whole(MAC_REAPER_APP, trashed_to)],
+        ..report_item(
+            "reaper",
+            UninstallStatus::Removed,
+            UninstallMessage::MovedToTrash {
+                trashed_to: trashed_to.map(PathBuf::from),
+            },
+        )
+    }
+}
+
+fn surge_removed_as_administrator() -> UninstallReportItem {
+    UninstallReportItem {
+        removed: vec![whole(SURGE_APP, None), whole(SURGE_VST3_MAC, None)],
+        ..report_item(
+            "surge-xt",
+            UninstallStatus::Removed,
+            UninstallMessage::RemovedAsAdministrator,
+        )
+    }
+}
+
+/// Surge XT, which the administrator command stopped at `path`, or with no
+/// `path`, ended without saying where it stopped.
+fn surge_step_failed(
+    path: Option<&str>,
+    gone: &[&str],
+    left: &[&str],
+    refused_by_macos: bool,
+) -> UninstallReportItem {
+    report_item(
+        "surge-xt",
+        UninstallStatus::Failed,
+        UninstallMessage::AdministratorStepFailed {
+            path: path.map(PathBuf::from),
+            ended_unclearly: path.is_none(),
+            gone: gone.iter().map(PathBuf::from).collect(),
+            left: left.iter().map(PathBuf::from).collect(),
+            refused_by_macos,
+            detail: Some("rm: Surge XT.vst3: Operation not permitted".to_string()),
+        },
+    )
+}
+
+const APP_MANAGEMENT: &str = "If macOS refused it: in System Settings > Privacy & Security > App \
+                              Management, turn on RABBIT. Then quit RABBIT, start it again and \
+                              uninstall again.";
+
+/// Cancelling macOS's password window says so in macOS's terms; Windows
+/// keeps its own sentence.
+#[test]
+fn a_cancelled_password_window_says_nothing_was_uninstalled_on_macos() {
+    let report = mac_report(
+        vec![declined("surge-xt"), declined("reaper")],
+        vec![admin_surge(), trash_reaper()],
+        Vec::new(),
+    );
+    let outcome = outcome(&report);
+    assert_eq!(outcome.status, UninstallOutcomeStatus::PermissionDeclined);
+    assert_eq!(
+        outcome.heading,
+        "Nothing was uninstalled, because the administrator password window was cancelled."
+    );
+    assert_eq!(outcome.status_text, outcome.heading);
+}
+
+/// An app moved to the Trash says where it is there only when RABBIT saw
+/// it there, and that it can come back until the Trash is emptied. Show
+/// details names where it was and where it is now. Nothing of it is in the
+/// backup set, so no restore command is offered for it, even when another
+/// package's files went into one.
+#[test]
+fn an_app_in_the_trash_says_where_it_is_only_when_rabbit_saw_it() {
+    let report = UninstallReport {
+        backup_set_id: Some("uninstall-unix-1".to_string()),
+        ..mac_report(
+            vec![
+                removed(
+                    "sws",
+                    &["/Users/me/REAPER/UserPlugins/reaper_sws-arm64.dylib"],
+                ),
+                trashed_reaper(Some(IN_TRASH)),
+            ],
+            vec![removable_sws(), trash_reaper()],
+            Vec::new(),
+        )
+    };
+    let outcome = outcome(&report);
+    assert_eq!(outcome.status, UninstallOutcomeStatus::Success);
+    assert!(
+        outcome.status_text.contains(&format!(
+            "RABBIT moved REAPER to the Trash. It is there as {IN_TRASH}. Until you empty the \
+             Trash, you can drag it back from there."
+        )),
+        "{}",
+        outcome.status_text
+    );
+    assert!(
+        !outcome.status_text.contains("Put Back"),
+        "{}",
+        outcome.status_text
+    );
+    let details = outcome.detail_lines.join("\n");
+    for line in [
+        format!("REAPER: Uninstalled\n  Moved to the Trash: {MAC_REAPER_APP}"),
+        format!("  Now in the Trash: {IN_TRASH}"),
+        "--package sws --apply".to_string(),
+    ] {
+        assert!(details.contains(&line), "{line}\n{details}");
+    }
+    assert!(!details.contains("--package reaper"), "{details}");
+
+    // macOS didn't say where, and RABBIT couldn't see it: no place named.
+    let outcome = self::outcome(&mac_report(
+        vec![trashed_reaper(None)],
+        vec![trash_reaper()],
+        Vec::new(),
+    ));
+    assert_eq!(
+        uninstall_reasons(
+            &en(),
+            &mac_report(vec![trashed_reaper(None)], vec![], vec![])
+        ),
+        [
+            "RABBIT moved REAPER to the Trash. Until you empty the Trash, you can drag it back from \
+          there."
+        ]
+    );
+    let details = outcome.detail_lines.join("\n");
+    assert!(!details.contains("Now in the Trash"), "{details}");
+    assert!(!details.contains("restore-backup"), "{details}");
+}
+
+/// An app the administrator command moved into the Trash keeps the owner it
+/// had: Finder offers no Put Back for it, and taking it out or emptying the
+/// Trash may ask for a password. Only that app is said to.
+#[test]
+fn an_app_the_administrator_command_moved_keeps_its_owner() {
+    let owner = "It keeps the owner it had, so Finder offers no Put Back for it. Emptying the \
+                 Trash may ask for an administrator's password, and so may dragging it back.";
+    let moved_by_root = mac_report(
+        vec![trashed_reaper(None)],
+        vec![root_moved_reaper()],
+        vec![step(
+            Some("reaper"),
+            AdministratorStepKind::MoveToTrash,
+            MAC_REAPER_APP,
+            AdministratorStepVerdict::Ran,
+        )],
+    );
+    let reasons = uninstall_reasons(&en(), &moved_by_root);
+    assert!(reasons.contains(&owner.to_string()), "{reasons:#?}");
+
+    let moved_as_user = mac_report(vec![trashed_reaper(None)], vec![trash_reaper()], Vec::new());
+    let reasons = uninstall_reasons(&en(), &moved_as_user);
+    assert!(
+        !reasons.iter().any(|reason| reason.contains("owner")),
+        "{reasons:#?}"
+    );
+}
+
+/// A move to the Trash that didn't happen changed nothing; one macOS
+/// refused points to App Management. A move RABBIT can't confirm says where
+/// to look, and that the run stopped.
+#[test]
+fn a_trash_move_that_failed_or_is_unclear_says_what_to_do() {
+    let failed = |refused_by_macos| {
+        report_item(
+            "reaper",
+            UninstallStatus::Failed,
+            UninstallMessage::TrashFailed {
+                error: "You don't have permission.".to_string(),
+                refused_by_macos,
+            },
+        )
+    };
+    let reasons = uninstall_reasons(&en(), &mac_report(vec![failed(true)], vec![], vec![]));
+    assert_eq!(
+        reasons,
+        [
+            "RABBIT couldn't move REAPER to the Trash, so nothing of it changed (You don't have \
+             permission.)."
+                .to_string(),
+            APP_MANAGEMENT.to_string(),
+        ]
+    );
+    let reasons = uninstall_reasons(&en(), &mac_report(vec![failed(false)], vec![], vec![]));
+    assert_eq!(reasons.len(), 1, "{reasons:#?}");
+
+    let unclear = report_item(
+        "reaper",
+        UninstallStatus::Failed,
+        UninstallMessage::TrashUnclear {
+            path: PathBuf::from(MAC_REAPER_APP),
+        },
+    );
+    let outcome = outcome(&mac_report(vec![unclear], vec![], vec![]));
+    assert_eq!(outcome.status, UninstallOutcomeStatus::Failed);
+    assert!(
+        outcome.status_text.contains(
+            "RABBIT asked macOS to move /Applications/REAPER.app to the Trash, but can't confirm \
+             that it is there now. Look for REAPER in the Trash and in its folder in Finder. \
+             RABBIT stopped there."
+        ),
+        "{}",
+        outcome.status_text
+    );
+}
+
+/// A package the administrator command removed only in part is never
+/// "nothing was uninstalled": Done says what is gone and what is left
+/// sits in Show details, with macOS's own words, how to get past App
+/// Management, and how to get the package back. Nothing of it is said to
+/// be put back.
+#[test]
+fn a_partly_removed_package_is_never_nothing_uninstalled() {
+    let report = mac_report(
+        vec![
+            surge_step_failed(Some(SURGE_VST3_MAC), &[SURGE_APP], &[SURGE_VST3_MAC], true),
+            report_item(
+                "reaper",
+                UninstallStatus::NotReached,
+                UninstallMessage::RunStopped {
+                    package_id: "surge-xt".to_string(),
+                },
+            ),
+        ],
+        vec![admin_surge(), trash_reaper()],
+        Vec::new(),
+    );
+    let outcome = outcome(&report);
+    assert_eq!(outcome.status, UninstallOutcomeStatus::PartlyRemoved);
+    assert_eq!(outcome.heading, "RABBIT removed only part of Surge XT.");
+    assert_eq!(
+        outcome.status_text,
+        format!(
+            "RABBIT removed only part of Surge XT.\n\nThe administrator command stopped at \
+             {SURGE_VST3_MAC}, so Surge XT is only partly removed. Show details lists what is \
+             gone and what is still there. RABBIT stopped there.\n{APP_MANAGEMENT}\n\nTo get \
+             one back, run RABBIT again and tick it on the Install or update tab."
+        )
+    );
+    assert!(
+        !outcome.status_text.contains("put back"),
+        "{}",
+        outcome.status_text
+    );
+    let details = outcome.detail_lines.join("\n");
+    for line in [
+        format!(
+            "Surge XT: Couldn't be uninstalled\n  Removed with administrator rights: {SURGE_APP}"
+        ),
+        format!("  Still there: {SURGE_VST3_MAC}"),
+        "  macOS said: rm: Surge XT.vst3: Operation not permitted".to_string(),
+    ] {
+        assert!(details.contains(&line), "{line}\n{details}");
+    }
+
+    // Stopped before anything of it went: a plain failure, nothing removed.
+    for (path, sentence) in [
+        (
+            Some(SURGE_APP),
+            format!(
+                "The administrator command stopped at {SURGE_APP}, so nothing of Surge XT was \
+                 removed. RABBIT stopped there."
+            ),
+        ),
+        (
+            None,
+            "The administrator command ended without saying where it stopped, and nothing of \
+             Surge XT was removed. RABBIT stopped there."
+                .to_string(),
+        ),
+    ] {
+        let outcome = self::outcome(&mac_report(
+            vec![surge_step_failed(path, &[], &[SURGE_APP], false)],
+            vec![admin_surge()],
+            Vec::new(),
+        ));
+        assert_eq!(outcome.status, UninstallOutcomeStatus::Failed);
+        assert_eq!(
+            outcome.status_text,
+            format!("Uninstalling failed.\n\n{sentence}")
+        );
+    }
+    let reasons = uninstall_reasons(
+        &en(),
+        &mac_report(
+            vec![surge_step_failed(
+                None,
+                &[SURGE_APP],
+                &[SURGE_VST3_MAC],
+                false,
+            )],
+            vec![],
+            vec![],
+        ),
+    );
+    assert_eq!(
+        reasons,
+        [
+            "The administrator command ended without saying where it stopped, and Surge XT is only \
+          partly removed. Show details lists what is gone and what is still there. RABBIT \
+          stopped there."
+        ]
+    );
+}
+
+/// What the administrator command removed is listed path by path, and only
+/// a package in the backup set gets a restore command. Receipts macOS still
+/// lists, ones RABBIT couldn't check, and a command that ended unclearly
+/// are each said plainly, with no harm claimed where there is none.
+#[test]
+fn removed_as_administrator_lists_each_path_and_offers_no_restore() {
+    let surge = UninstallReportItem {
+        problems: vec![
+            UninstallProblem::InstallerRecordsRemain {
+                ids: vec!["org.surge-synth-team.surge-xt.app.pkg".to_string()],
+            },
+            UninstallProblem::AdministratorEndedUnclearly { status: Some(255) },
+        ],
+        ..surge_removed_as_administrator()
+    };
+    let report = UninstallReport {
+        backup_set_id: Some("uninstall-unix-1".to_string()),
+        ..mac_report(
+            vec![
+                surge,
+                removed(
+                    "sws",
+                    &["/Users/me/REAPER/UserPlugins/reaper_sws-arm64.dylib"],
+                ),
+            ],
+            vec![admin_surge(), removable_sws()],
+            Vec::new(),
+        )
+    };
+    let outcome = outcome(&report);
+    assert_eq!(
+        outcome.status,
+        UninstallOutcomeStatus::CompletedWithProblems
+    );
+    for sentence in [
+        "macOS's installer still lists receipts of Surge XT, though its files are gone. That does \
+         no harm; Show details names them.",
+        "The administrator command ended without saying how, but everything of Surge XT is gone.",
+    ] {
+        assert!(
+            outcome.status_text.contains(sentence),
+            "{sentence}\n{}",
+            outcome.status_text
+        );
+    }
+    let details = outcome.detail_lines.join("\n");
+    for line in [
+        format!("  Removed with administrator rights: {SURGE_APP}"),
+        format!("  Removed with administrator rights: {SURGE_VST3_MAC}"),
+        "  Still listed by macOS's installer: org.surge-synth-team.surge-xt.app.pkg".to_string(),
+        "--package sws --apply".to_string(),
+    ] {
+        assert!(details.contains(&line), "{line}\n{details}");
+    }
+    assert!(!details.contains("--package surge-xt"), "{details}");
+
+    let unchecked = UninstallReportItem {
+        problems: vec![UninstallProblem::InstallerRecordsUnchecked {
+            error: "pkgutil failed".to_string(),
+        }],
+        ..surge_removed_as_administrator()
+    };
+    assert_eq!(
+        uninstall_reasons(&en(), &mac_report(vec![unchecked], vec![], vec![])),
+        [
+            "RABBIT couldn't check that macOS's installer forgot Surge XT (pkgutil failed). That \
+          does no harm: its files are gone."
+        ]
+    );
+}
+
+/// The restore list names only packages whose files went into the backup
+/// set. On Windows too: a vendor's uninstaller in the same run as SWS
+/// leaves nothing in the set to restore.
+#[test]
+fn the_restore_list_names_only_packages_in_the_backup_set() {
+    let surge = report_item(
+        "surge-xt",
+        UninstallStatus::Removed,
+        UninstallMessage::UninstalledByVendor,
+    );
+    let outcome = outcome(&report(vec![
+        removed("sws", &["C:/REAPER/UserPlugins/reaper_sws-x64.dll"]),
+        surge,
+    ]));
+    let restores: Vec<&String> = outcome
+        .detail_lines
+        .iter()
+        .filter(|line| line.contains("restore-backup"))
+        .collect();
+    assert_eq!(restores.len(), 1, "{restores:#?}");
+    assert!(restores[0].contains("--package sws"), "{restores:#?}");
+}
+
+/// The administrator command's first step found a program it looks for
+/// running, or pgrep couldn't check, so the command changed nothing: Done
+/// says so once, naming every program root looked for, rather than as a
+/// check made before the run, and claims no cause it can't know.
+#[test]
+fn a_failed_program_check_by_the_administrator_command_names_the_programs() {
+    let blocked = |package_id: &str| {
+        report_item(
+            package_id,
+            UninstallStatus::Blocked,
+            UninstallMessage::ChecksFailed {
+                checks: vec![check(PROGRAMS_RUNNING_CHECK, PreflightStatus::Fail)],
+            },
+        )
+    };
+    let report = mac_report(
+        vec![blocked("surge-xt"), blocked("reaper")],
+        vec![admin_surge(), root_moved_reaper()],
+        vec![step(
+            None,
+            AdministratorStepKind::ProgramsClosed,
+            "Surge XT, Surge XT Effects, REAPER, reaper64",
+            AdministratorStepVerdict::Failed,
+        )],
+    );
+    let outcome = outcome(&report);
+    assert_eq!(outcome.status, UninstallOutcomeStatus::NothingDone);
+    assert_eq!(
+        outcome.status_text,
+        "Nothing was uninstalled.\n\nThe administrator command found one of these programs \
+         running, or couldn't check for them, so it changed nothing: Surge XT, Surge XT \
+         Effects, REAPER, reaper64. Close any that is open, then run RABBIT again."
+    );
+}
+
+/// A package still there although the administrator command didn't stop at
+/// its step is never said to be where the command stopped, nor to have
+/// ended without saying where: the command stopped at another package's
+/// step, or ran to its end, and this one is still there all the same.
+#[test]
+fn a_package_left_by_a_command_that_stopped_elsewhere_says_what_is_still_there() {
+    let left_by_command = |package_id: &str, gone: &[&str], left: &str| {
+        report_item(
+            package_id,
+            UninstallStatus::Failed,
+            UninstallMessage::AdministratorStepFailed {
+                path: None,
+                ended_unclearly: false,
+                gone: gone.iter().map(PathBuf::from).collect(),
+                left: vec![PathBuf::from(left)],
+                refused_by_macos: false,
+                detail: None,
+            },
+        )
+    };
+    // Surge XT's steps ran, and RABBIT can't see that its app is gone; then
+    // the step that moves REAPER stopped the command.
+    let reaper_stopped_it = report_item(
+        "reaper",
+        UninstallStatus::Failed,
+        UninstallMessage::AdministratorStepFailed {
+            path: Some(PathBuf::from(MAC_REAPER_APP)),
+            ended_unclearly: false,
+            gone: Vec::new(),
+            left: vec![PathBuf::from(MAC_REAPER_APP)],
+            refused_by_macos: false,
+            detail: None,
+        },
+    );
+    let report = mac_report(
+        vec![
+            left_by_command("surge-xt", &[SURGE_VST3_MAC], SURGE_APP),
+            reaper_stopped_it,
+        ],
+        vec![admin_surge(), root_moved_reaper()],
+        vec![
+            step(
+                Some("surge-xt"),
+                AdministratorStepKind::Delete,
+                SURGE_APP,
+                AdministratorStepVerdict::Ran,
+            ),
+            step(
+                Some("reaper"),
+                AdministratorStepKind::MoveToTrash,
+                MAC_REAPER_APP,
+                AdministratorStepVerdict::Failed,
+            ),
+        ],
+    );
+    let reasons = uninstall_reasons(&en(), &report);
+    assert_eq!(
+        reasons,
+        [
+            format!(
+                "The administrator command ran, but {SURGE_APP} is still there, or RABBIT can't \
+                 see that it is gone, so Surge XT isn't fully removed. Show details lists what is \
+                 gone and what is still there. RABBIT stopped there."
+            ),
+            format!(
+                "The administrator command stopped at {MAC_REAPER_APP}, so nothing of REAPER was \
+                 removed. RABBIT stopped there."
+            ),
+        ]
+    );
+
+    // `mv -n` found the name taken in the Trash and left the app where it
+    // was, with success: the command ran to its end and never stopped.
+    let report = mac_report(
+        vec![left_by_command("reaper", &[], MAC_REAPER_APP)],
+        vec![root_moved_reaper()],
+        vec![step(
+            Some("reaper"),
+            AdministratorStepKind::MoveToTrash,
+            MAC_REAPER_APP,
+            AdministratorStepVerdict::Ran,
+        )],
+    );
+    let reasons = uninstall_reasons(&en(), &report);
+    assert_eq!(
+        reasons,
+        [format!(
+            "The administrator command ran, but {MAC_REAPER_APP} is still there, or RABBIT can't \
+             see that it is gone, so REAPER isn't fully removed. Show details lists what is gone \
+             and what is still there. RABBIT stopped there."
+        )]
+    );
+    for reason in &reasons {
+        assert!(!reason.contains("stopped at"), "{reason}");
+        assert!(!reason.contains("without saying"), "{reason}");
+    }
+}
+
+/// The administrator command that couldn't be put together asked for no
+/// password at all; one whose password window failed got no rights. Each
+/// says which, and that nothing was uninstalled.
+#[test]
+fn an_administrator_command_that_never_ran_says_why() {
+    let elevation_failed = |status| {
+        report_item(
+            "surge-xt",
+            status,
+            UninstallMessage::ElevationFailed {
+                error: "too many steps".to_string(),
+            },
+        )
+    };
+    assert_eq!(
+        uninstall_reasons(
+            &en(),
+            &mac_report(
+                vec![elevation_failed(UninstallStatus::Blocked)],
+                vec![],
+                vec![]
+            )
+        ),
+        [
+            "RABBIT couldn't put the administrator command for Surge XT together (too many steps), \
+          so it asked for no password and uninstalled nothing."
+        ]
+    );
+    assert_eq!(
+        uninstall_reasons(
+            &en(),
+            &mac_report(
+                vec![elevation_failed(UninstallStatus::Failed)],
+                vec![],
+                vec![]
+            )
+        ),
+        ["RABBIT couldn't get administrator rights (too many steps), so nothing was uninstalled."]
+    );
+}
+
+/// An app that changed between Review and the run, so that only Finder can
+/// move it now, gets the same reason and Finder steps as its row would.
+#[test]
+fn an_app_only_finder_can_move_now_gets_the_finder_steps_on_done() {
+    let item = report_item(
+        "reaper",
+        UninstallStatus::Blocked,
+        UninstallMessage::NotRemovable {
+            removability: Removability::ByHand {
+                path: PathBuf::from(MAC_REAPER_APP),
+                reason: ByHandReason::Locked,
+            },
+        },
+    );
+    let reasons = uninstall_reasons(&en(), &mac_report(vec![item], vec![], vec![]));
+    assert_eq!(reasons[0], "/Applications/REAPER.app is locked.");
+    assert!(reasons[1].contains("Untick Locked"), "{reasons:#?}");
+}
+
+/// Running as root under sudo uninstalls nothing, and Done says what to do
+/// instead, in the user's language.
+#[test]
+fn running_as_root_says_to_start_rabbit_as_yourself() {
+    let (_, model) = langpack_model(PlanActionKind::Install);
+    let outcome = wizard_uninstall_outcome_from_error(
+        &model,
+        &en(),
+        Path::new(MAC_RESOURCE),
+        &ids(&["reaper"]),
+        false,
+        &RabbitError::UninstallAsRoot,
+    );
+    assert_eq!(
+        outcome.status_text,
+        "Uninstalling failed.\n\nRABBIT is running as root, as it does under sudo, so it \
+         uninstalls nothing. Quit RABBIT and start it as yourself. It asks for an \
+         administrator's password by itself when it needs one."
+    );
+}
+
+/// The refusal to run as root leaves nothing in the user's resource
+/// folder: Done saves no report of its own for it, which would be root's,
+/// as would any RABBIT or logs folder made for it. Any other refusal
+/// before the lock still gets one.
+#[test]
+fn running_as_root_saves_no_report_into_the_resource_folder() {
+    let dir = tempdir().unwrap();
+    let (_, model) = langpack_model(PlanActionKind::Install);
+    let localizer = en();
+    let error = RabbitError::UninstallAsRoot;
+    let mut outcome = wizard_uninstall_outcome_from_error(
+        &model,
+        &localizer,
+        dir.path(),
+        &ids(&["reaper"]),
+        false,
+        &error,
+    );
+    // What Done does with the outcome of a run that ended in `error`.
+    if saves_report_after_error(&error) {
+        save_wizard_uninstall_outcome(&localizer, &mut outcome).unwrap();
+    }
+    assert!(!saves_report_after_error(&error));
+    assert!(saves_report_after_error(
+        &RabbitError::PackageInstallInProgress {
+            lock_path: dir.path().join("RABBIT/locks/package-install.lock"),
+            pid: 42,
+        }
+    ));
+    assert_eq!(outcome.report_path, None);
+    assert!(!dir.path().join("RABBIT").exists());
+}
+
+/// REAPER alone needs every REAPER closed on macOS too, when the
+/// administrator command moves its app, for a reason of its own; the
+/// Windows reason, its uninstaller, never comes up there.
+#[test]
+fn reaper_alone_on_macos_says_why_every_reaper_must_close() {
+    let report = preflight(vec![check(ANY_REAPER_PROCESS_CHECK, PreflightStatus::Fail)]);
+    let blocker = uninstall_blocker(
+        &en(),
+        &mac_plan(vec![root_moved_reaper()]),
+        &ids(&["reaper"]),
+        &report,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        blocker.body,
+        "Close every copy of REAPER on this computer, including portable ones, then press \
+         Uninstall again. The administrator command that moves REAPER can't tell one REAPER from \
+         another, so all of them have to be closed."
+    );
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let blocker = uninstall_blocker(
+            &localizer,
+            &mac_plan(vec![root_moved_reaper()]),
+            &ids(&["reaper"]),
+            &report,
+            &[],
+        )
+        .unwrap();
+        assert_reads(locale, &blocker.body);
+    }
+}
+
+/// Every macOS Done text reads in every language, with no key or
+/// placeholder left over.
+#[test]
+fn macos_done_reads_in_every_locale() {
+    let reports = [
+        mac_report(
+            vec![declined("surge-xt"), declined("reaper")],
+            vec![],
+            vec![],
+        ),
+        mac_report(
+            vec![
+                trashed_reaper(Some(IN_TRASH)),
+                surge_removed_as_administrator(),
+            ],
+            vec![],
+            vec![step(
+                Some("reaper"),
+                AdministratorStepKind::MoveToTrash,
+                MAC_REAPER_APP,
+                AdministratorStepVerdict::Ran,
+            )],
+        ),
+        mac_report(vec![trashed_reaper(None)], vec![], vec![]),
+        mac_report(
+            vec![surge_step_failed(
+                Some(SURGE_VST3_MAC),
+                &[SURGE_APP],
+                &[SURGE_VST3_MAC],
+                true,
+            )],
+            vec![],
+            vec![],
+        ),
+        mac_report(
+            vec![surge_step_failed(
+                None,
+                &[SURGE_APP],
+                &[SURGE_VST3_MAC],
+                false,
+            )],
+            vec![],
+            vec![],
+        ),
+        mac_report(
+            vec![surge_step_failed(Some(SURGE_APP), &[], &[SURGE_APP], false)],
+            vec![],
+            vec![],
+        ),
+        mac_report(
+            vec![surge_step_failed(None, &[], &[SURGE_APP], false)],
+            vec![],
+            vec![],
+        ),
+        mac_report(
+            vec![report_item(
+                "reaper",
+                UninstallStatus::Failed,
+                UninstallMessage::AdministratorStepFailed {
+                    path: None,
+                    ended_unclearly: false,
+                    gone: Vec::new(),
+                    left: vec![PathBuf::from(MAC_REAPER_APP)],
+                    refused_by_macos: false,
+                    detail: None,
+                },
+            )],
+            vec![],
+            vec![],
+        ),
+        mac_report(
+            vec![
+                report_item(
+                    "reaper",
+                    UninstallStatus::Failed,
+                    UninstallMessage::TrashFailed {
+                        error: "denied".to_string(),
+                        refused_by_macos: true,
+                    },
+                ),
+                report_item(
+                    "sws",
+                    UninstallStatus::Failed,
+                    UninstallMessage::TrashUnclear {
+                        path: PathBuf::from(MAC_REAPER_APP),
+                    },
+                ),
+                report_item(
+                    "surge-xt",
+                    UninstallStatus::Blocked,
+                    UninstallMessage::ElevationFailed {
+                        error: "too many steps".to_string(),
+                    },
+                ),
+            ],
+            vec![],
+            vec![],
+        ),
+        mac_report(
+            vec![UninstallReportItem {
+                problems: vec![
+                    UninstallProblem::InstallerRecordsRemain {
+                        ids: vec!["org.surge-synth-team.surge-xt.app.pkg".to_string()],
+                    },
+                    UninstallProblem::InstallerRecordsUnchecked {
+                        error: "pkgutil failed".to_string(),
+                    },
+                    UninstallProblem::AdministratorEndedUnclearly { status: None },
+                ],
+                ..surge_removed_as_administrator()
+            }],
+            vec![],
+            vec![],
+        ),
+        mac_report(
+            vec![report_item(
+                "surge-xt",
+                UninstallStatus::Blocked,
+                UninstallMessage::ChecksFailed {
+                    checks: vec![check(PROGRAMS_RUNNING_CHECK, PreflightStatus::Fail)],
+                },
+            )],
+            vec![],
+            vec![step(
+                None,
+                AdministratorStepKind::ProgramsClosed,
+                "Surge XT",
+                AdministratorStepVerdict::Failed,
+            )],
+        ),
+        mac_report(
+            vec![report_item(
+                "reaper",
+                UninstallStatus::Blocked,
+                UninstallMessage::NotRemovable {
+                    removability: Removability::ByHand {
+                        path: PathBuf::from(MAC_REAPER_APP),
+                        reason: ByHandReason::NotTheExpectedApp,
+                    },
+                },
+            )],
+            vec![],
+            vec![],
+        ),
+    ];
+    let (_, model) = langpack_model(PlanActionKind::Install);
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        for report in &reports {
+            let package_ids = vec!["surge-xt".to_string()];
+            let outcome = wizard_uninstall_outcome(&localizer, &package_ids, report);
+            assert_reads(locale, &outcome.heading);
+            assert_reads(locale, &outcome.status_text);
+            for line in &outcome.detail_lines {
+                assert_reads(locale, line);
+            }
+        }
+        let model = WizardModel {
+            text: crate::wizard::text::wizard_text(&localizer),
+            ..model.clone()
+        };
+        let outcome = wizard_uninstall_outcome_from_error(
+            &model,
+            &localizer,
+            Path::new(MAC_RESOURCE),
+            &ids(&["reaper"]),
+            false,
+            &RabbitError::UninstallAsRoot,
+        );
+        assert_reads(locale, &outcome.status_text);
+        assert!(
+            outcome.status_text.contains("sudo"),
+            "{locale}: {}",
+            outcome.status_text
+        );
+    }
 }

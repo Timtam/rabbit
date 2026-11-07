@@ -85,7 +85,7 @@ pub use admin_batch::{
     AdministratorStepRecord, AdministratorStepVerdict, NoAdministratorShell,
     RecordingAdministratorShell, SystemAdministratorShell,
 };
-pub use execute::{execute_uninstall, plan_uninstall_at};
+pub use execute::{APP_MANAGEMENT_HINT, execute_uninstall, plan_uninstall_at};
 pub use helper::{
     ElevatedHelper, ElevatedRunRequest, ElevatedSession, ElevationStartError, HELPER_SUBCOMMAND,
     HelperArgs, InProcessElevatedHelper, MachineFolders, NoElevatedHelper, SystemElevatedHelper,
@@ -505,16 +505,25 @@ impl Removability {
                  remove only part of it.",
                 path.display()
             ),
+            // Get Info's Locked clears only the lock a user sets; the other
+            // locks RABBIT counts as Locked stay, so the steps can't promise
+            // to work every time.
             Self::ByHand { path, reason } => format!(
                 "RABBIT can't move {} to the Trash, because {}. To remove {name}, {} in Finder and \
                  press Command-Delete; Finder asks for an administrator's password if it needs \
-                 one.",
+                 one.{}",
                 path.display(),
                 reason.message(),
                 if *reason == ByHandReason::Locked {
                     "untick Locked in its Get Info window, then select it"
                 } else {
                     "select it"
+                },
+                if *reason == ByHandReason::Locked {
+                    " If Locked isn't ticked, or Finder still can't move it, it has a lock that \
+                     Finder can't remove."
+                } else {
+                    ""
                 }
             ),
             Self::NotInstalled => format!("{name} isn't installed."),
@@ -1213,14 +1222,20 @@ pub enum UninstallMessage {
     /// macOS. A backup can't bring it back.
     RemovedAsAdministrator,
     /// The administrator command stopped before the package was fully
-    /// removed, and the run stopped there. `path` is what the failing step
-    /// worked on, `None` when the command didn't say which step stopped it.
-    /// `gone` and `left` say, from the filesystem afterwards, which of the
-    /// package's paths are gone and which are still there.
-    /// `refused_by_macos` when macOS said "Operation not permitted", which
-    /// App Management can be behind; `detail` is the step's own message.
+    /// removed, or ran and left some of it, and the run stopped there.
+    /// `path` is what the failing step worked on, only when that step was
+    /// one of this package's. `ended_unclearly` when the command ended
+    /// without saying which step stopped it; with neither, the command
+    /// stopped at another package's step or ran to its end, and the package
+    /// is still there all the same. `gone` and `left` say, from the
+    /// filesystem afterwards, which of the package's paths are gone and
+    /// which are still there. `refused_by_macos` when macOS said "Operation
+    /// not permitted", which App Management can be behind; `detail` is the
+    /// step's own message.
     AdministratorStepFailed {
         path: Option<PathBuf>,
+        #[serde(default)]
+        ended_unclearly: bool,
         gone: Vec<PathBuf>,
         left: Vec<PathBuf>,
         refused_by_macos: bool,

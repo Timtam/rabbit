@@ -578,8 +578,12 @@ pub enum AdminPackageResult {
         ended_unclearly: Option<Option<i32>>,
     },
     /// Some or all of it is still there after its steps ran, or may have.
+    /// `path` is what the failing step worked on, only when that step was
+    /// this package's; `ended_unclearly` when the command didn't say which
+    /// step stopped it.
     Failed {
         path: Option<PathBuf>,
+        ended_unclearly: bool,
         gone: Vec<PathBuf>,
         left: Vec<PathBuf>,
         refused_by_macos: bool,
@@ -718,14 +722,14 @@ pub fn administrator_results(
                 stopped_at: stop.to_string(),
             }
         } else {
+            // Only the step that stopped the command is named as where it
+            // stopped. A package still there after a command that ran to its
+            // end, or stopped at another package's step, names none: what is
+            // left says the rest.
             let path = if here {
                 failed_step
                     .and_then(AdminStepMeaning::path)
                     .map(Path::to_path_buf)
-            } else if !some_steps_unrun {
-                // Every step ran, and this is still there: its own step is
-                // the one that didn't do its job.
-                left.first().cloned()
             } else {
                 None
             };
@@ -733,6 +737,7 @@ pub fn administrator_results(
             stopped_at.get_or_insert(id.as_str());
             AdminPackageResult::Failed {
                 path,
+                ended_unclearly: ended_unclearly.is_some(),
                 gone,
                 left,
                 refused_by_macos: says && step_error.refused_by_macos,
@@ -1408,15 +1413,26 @@ pub(super) fn run_administrator_batch(
         }
     }
     // The command ran as one, but the progress page counts packages: each
-    // that root worked on gets its start and its end.
+    // gets its start and its end. Only a package root had steps for is said
+    // to have gone through the administrator command; one whose files were
+    // all gone before root's turn, with no window at all or with none of the
+    // command for it, reads like any other removal.
     for item in &items {
         if matches!(
             item.status,
             UninstallStatus::Removed | UninstallStatus::Failed
         ) {
+            let by_root = batch
+                .meaning
+                .iter()
+                .any(|meaning| meaning.package_id() == Some(item.package_id.as_str()));
             progress.report(ProgressEvent::RemoveStarted {
                 package_id: item.package_id.clone(),
-                method: RemovalMethod::Administrator,
+                method: if by_root {
+                    RemovalMethod::Administrator
+                } else {
+                    RemovalMethod::Files
+                },
             });
             progress.report(ProgressEvent::RemoveCompleted {
                 package_id: item.package_id.clone(),
@@ -1506,8 +1522,9 @@ fn programs_running_items(
             name: PROGRAMS_RUNNING_CHECK.to_string(),
             status: PreflightStatus::Fail,
             message: format!(
-                "One of these programs was running when the administrator command started, so \
-                 it changed nothing: {names}. Close it before uninstalling."
+                "One of these programs was running when the administrator command started, or \
+                 it couldn't check for them, so it changed nothing: {names}. Close any that is \
+                 open before uninstalling."
             ),
         };
         blocked = batch_items
@@ -1573,6 +1590,7 @@ fn batch_item(
         }
         AdminPackageResult::Failed {
             path,
+            ended_unclearly,
             gone,
             left,
             refused_by_macos,
@@ -1582,6 +1600,7 @@ fn batch_item(
             UninstallStatus::Failed,
             UninstallMessage::AdministratorStepFailed {
                 path,
+                ended_unclearly,
                 gone,
                 left,
                 refused_by_macos,

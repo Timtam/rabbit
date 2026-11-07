@@ -434,7 +434,9 @@ fn a_trash_place_rabbit_cant_see_is_never_claimed() {
 }
 
 /// `mv -n` leaves both alone, successfully, when the name is taken: the
-/// filesystem, not the status, says REAPER is still there.
+/// filesystem, not the status, says REAPER is still there. The command
+/// never stopped, so no step is named as where it stopped, and it said how
+/// it ended.
 #[test]
 fn a_move_that_completed_but_left_the_app_failed() {
     let batch = administrator_steps(&[reaper_move()], None).unwrap();
@@ -447,7 +449,8 @@ fn a_move_that_completed_but_left_the_app_failed() {
     assert_eq!(
         results[0].1,
         AdminPackageResult::Failed {
-            path: Some(PathBuf::from(REAPER_APP)),
+            path: None,
+            ended_unclearly: false,
             gone: Vec::new(),
             left: paths(&[REAPER_APP]),
             refused_by_macos: false,
@@ -575,6 +578,7 @@ fn a_step_failing_partway_fails_its_package_and_leaves_the_rest_unreached() {
                 "surge".to_string(),
                 AdminPackageResult::Failed {
                     path: Some(PathBuf::from(SURGE_EFFECTS)),
+                    ended_unclearly: false,
                     gone: paths(&[SURGE_APP]),
                     left: paths(&[SURGE_EFFECTS, SURGE_VST3]),
                     refused_by_macos: true,
@@ -685,6 +689,7 @@ fn a_command_that_ended_unclearly_is_judged_by_the_filesystem() {
                 "surge".to_string(),
                 AdminPackageResult::Failed {
                     path: None,
+                    ended_unclearly: true,
                     gone: Vec::new(),
                     left: paths(&[SURGE_APP, SURGE_EFFECTS, SURGE_VST3]),
                     refused_by_macos: false,

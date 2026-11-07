@@ -605,6 +605,7 @@ fn a_refused_step_leaves_surge_partly_removed_and_stops_the_run_there() {
         surge.message_code,
         UninstallMessage::AdministratorStepFailed {
             path: Some(mac.surge_tree(1)),
+            ended_unclearly: false,
             gone: vec![mac.surge_tree(0)],
             left: mac.surge_trees()[1..].to_vec(),
             refused_by_macos: true,
@@ -967,6 +968,7 @@ fn root_moves_nothing_into_a_trash_folder_that_became_a_link() {
         reaper.message_code,
         UninstallMessage::AdministratorStepFailed {
             path: Some(mac.trash.clone()),
+            ended_unclearly: false,
             gone: Vec::new(),
             left: vec![mac.app()],
             refused_by_macos: false,
@@ -1475,6 +1477,30 @@ fn an_app_gone_before_roots_turn_needs_no_password_and_isnt_reported_as_moved() 
         "{:?}",
         run.events()
     );
+    // No command ran, so none may be said to have finished with REAPER: it
+    // reads like any other removal.
+    assert!(
+        !run.events().iter().any(|event| matches!(
+            event,
+            ProgressEvent::RemoveStarted {
+                method: RemovalMethod::Administrator,
+                ..
+            }
+        )),
+        "{:?}",
+        run.events()
+    );
+    assert!(
+        run.events()
+            .contains(&started(PACKAGE_REAPER, RemovalMethod::Files)),
+        "{:?}",
+        run.events()
+    );
+    assert!(
+        run.events().contains(&completed(PACKAGE_REAPER, true)),
+        "{:?}",
+        run.events()
+    );
     assert!(report.administrator_steps.is_empty());
     assert_eq!(fs::read_dir(&mac.trash).unwrap().count(), 0);
     assert!(!mac.receipt().packages.contains_key(PACKAGE_REAPER));
@@ -1846,6 +1872,7 @@ fn only_a_backup_set_failure_says_everything_is_back_in_place() {
         UninstallMessage::TrashUnclear { path: path.clone() },
         UninstallMessage::AdministratorStepFailed {
             path: None,
+            ended_unclearly: false,
             gone: Vec::new(),
             left: vec![path.clone()],
             refused_by_macos: false,

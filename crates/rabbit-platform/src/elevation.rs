@@ -383,6 +383,7 @@ fn platform_run_administrator_shell(
     still_waiting_after: Duration,
     on_still_waiting: &mut dyn FnMut(),
 ) -> Result<AdministratorShellReport, ElevationError> {
+    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
     let script = administrator_script(shell);
@@ -397,6 +398,15 @@ fn platform_run_administrator_shell(
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            // A process group of its own: the first Ctrl+C in Terminal goes
+            // to RABBIT's group only, so it can't end the password window or
+            // root's steps halfway, and RABBIT reads the stop once osascript
+            // has returned. The second Ctrl+C is passed on to this group
+            // before RABBIT ends (see ctrl_c.rs), so a password window is
+            // never left open with nobody waiting for its answer. osascript
+            // never needs the terminal: its input is empty and its output
+            // piped.
+            command.process_group(0);
             // The root shell inherits this environment.
             crate::process::without_rabbit_secrets(&mut command);
             let child = command
@@ -405,6 +415,10 @@ fn platform_run_administrator_shell(
                     program: PathBuf::from(OSASCRIPT),
                     code: err.raw_os_error().unwrap_or(0) as u32,
                 })?;
+            // Its pid is its group's id, as process_group(0) made it.
+            let _forward = i32::try_from(child.id())
+                .ok()
+                .map(crate::ctrl_c::forward_second_ctrl_c_to);
             // osascript has started: the window may have been answered and
             // root's steps run, so a failure from here on only means RABBIT
             // lost track of it, and the run must ask the filesystem.
