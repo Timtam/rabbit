@@ -20,8 +20,8 @@ use super::preflight::VolumeProbe;
 use super::tests::{FoundAt, installed, write};
 use super::vendor::{VendorEvent, VendorLookup, VendorOutcome, VendorRefusal, VendorStatus};
 use super::{
-    ANY_REAPER_PROCESS_CHECK, NothingListed, Removability, UninstallMessage, UninstallReport,
-    UninstallRequest, UninstallRoots, UninstallStatus,
+    ANY_REAPER_PROCESS_CHECK, NoMacosObjects, NothingListed, Removability, UninstallMessage,
+    UninstallReport, UninstallRequest, UninstallRoots, UninstallStatus,
 };
 use crate::cancel::CancelToken;
 use crate::model::{ComponentDetection, InstallationKind, Platform};
@@ -367,6 +367,7 @@ impl<'c> Run<'c> {
                 installed_programs: None,
                 vendor_lookup: self.lookup.as_ref(),
                 elevated_helper: self.helper,
+                macos_objects: &NoMacosObjects,
             },
             &self.progress,
             &self.cancel,
@@ -1545,6 +1546,7 @@ fn surge_end_to_end(
             installed_programs: None,
             vendor_lookup: &FoundAt(surge.uninstaller.clone()),
             elevated_helper: &helper,
+            macos_objects: &NoMacosObjects,
         },
         &ProgressReporter::noop(),
         &CancelToken::new(),

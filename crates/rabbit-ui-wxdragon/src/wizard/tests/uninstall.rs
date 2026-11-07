@@ -7,10 +7,10 @@ use rabbit_core::package::{PACKAGE_REAPACK, PackageCategory, builtin_package_spe
 use rabbit_core::plan::{InstallPlan, PlanAction, PlanActionKind};
 use rabbit_core::receipt::{InstallState, PackageReceipt};
 use rabbit_core::uninstall::{
-    KeptPath, KeptReason, NothingListed, PlannedRemoval, PlannedVendorRun, Removability,
-    RemovalReason, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanInput,
-    UninstallPlanItem, UninstallRoots, UninstallWarning, VendorJob, VendorLookup, VendorRefusal,
-    build_uninstall_plan,
+    KeptPath, KeptReason, NoMacosObjects, NothingListed, PlannedRemoval, PlannedVendorRun,
+    Removability, RemovalReason, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan,
+    UninstallPlanInput, UninstallPlanItem, UninstallRoots, UninstallWarning, VendorJob,
+    VendorLookup, VendorRefusal, build_uninstall_plan,
 };
 use rabbit_core::version::Version;
 use tempfile::tempdir;
@@ -39,6 +39,7 @@ pub(super) fn item(package_id: &str, removability: Removability) -> UninstallPla
         registry_cleanup: Vec::new(),
         vendor_run: None,
         blocking_programs: Vec::new(),
+        macos_pkg_forget: Vec::new(),
         every_reaper_closed: false,
         requires_elevation: false,
         unbacked: false,
@@ -417,7 +418,13 @@ fn a_target_with_nothing_installed_lists_nothing() {
         .map(|spec| ComponentDetection::not_installed(&spec.id, &spec.display_name))
         .collect();
 
-    let list = uninstall_list_for_target(&model, &target, &detections, &NothingListed);
+    let list = uninstall_list_for_target(
+        &model,
+        &target,
+        &detections,
+        &NothingListed,
+        &NoMacosObjects,
+    );
 
     assert!(list.rows.is_empty());
     assert_eq!(list.unreadable, None);
@@ -439,7 +446,7 @@ fn a_receipt_that_cant_be_read_says_so_instead_of_listing_nothing() {
         ..model.target_rows[0].clone()
     };
 
-    let list = uninstall_list_for_target(&model, &target, &[], &NothingListed);
+    let list = uninstall_list_for_target(&model, &target, &[], &NothingListed, &NoMacosObjects);
 
     assert!(list.rows.is_empty());
     let (label, _) = list.placeholder(&model.text).unwrap();
@@ -459,7 +466,8 @@ fn the_target_row_decides_whether_the_plan_is_for_a_portable_reaper() {
             portable,
             ..model.target_rows[0].clone()
         };
-        let plan = uninstall_plan_for_target(&model, &target, &[], &NothingListed).unwrap();
+        let plan = uninstall_plan_for_target(&model, &target, &[], &NothingListed, &NoMacosObjects)
+            .unwrap();
         let expected = if portable {
             InstallationKind::Portable
         } else {
@@ -730,6 +738,7 @@ fn review_says_what_goes_and_what_stays_without_listing_files() {
                 size: Some(4_000_000),
                 is_dir: false,
                 receipt_sha256: None,
+                bundle_id: None,
                 guard: Default::default(),
             }],
             ..removable_sws()
@@ -1253,6 +1262,7 @@ fn the_real_sws_plan_offers_its_existing_settings() {
         state: None,
         remove_settings: false,
         vendor_lookup: &NothingListed,
+        objects: &NoMacosObjects,
     });
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
     let list = uninstall_list_from_plan(&localizer, &specs, &plan);
@@ -1426,6 +1436,7 @@ fn no_package_the_wizard_can_remove_yet_asks_a_question() {
             state: Some(&state),
             remove_settings: false,
             vendor_lookup: &NothingListed,
+            objects: &NoMacosObjects,
         });
         let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
         let tickable: Vec<String> = uninstall_list_from_plan(&localizer, &specs, &plan)
@@ -1494,6 +1505,7 @@ fn osara_says_what_goes_and_what_stays() {
             state: None,
             remove_settings: false,
             vendor_lookup: &NothingListed,
+            objects: &NoMacosObjects,
         });
         let mut list = uninstall_list_from_plan(&localizer, &specs, &plan);
         let row = list
@@ -1897,6 +1909,7 @@ fn the_shipped_vendor_plans_read_in_every_locale() {
         state: None,
         remove_settings: false,
         vendor_lookup: &FoundIt(dir.path().join("uninstall.exe")),
+        objects: &NoMacosObjects,
     });
     for &locale in embedded_locales() {
         let localizer = Localizer::embedded(locale).unwrap();

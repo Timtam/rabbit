@@ -16,9 +16,9 @@ use rabbit_core::model::{ComponentDetection, InstallationKind};
 use rabbit_core::package::{PackageCategory, PackageSpec, builtin_package_specs};
 use rabbit_core::receipt::load_install_state;
 use rabbit_core::uninstall::{
-    Removability, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanInput,
-    UninstallPlanItem, UninstallRoots, UninstallWarning, VendorLookup, VendorRefusal,
-    build_uninstall_plan,
+    ObjectProbe, Removability, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan,
+    UninstallPlanInput, UninstallPlanItem, UninstallRoots, UninstallWarning, VendorLookup,
+    VendorRefusal, build_uninstall_plan,
 };
 
 use super::bootstrap::localizer_from_options;
@@ -192,14 +192,16 @@ impl WizardUninstallList {
 /// receipt the way `rabbit uninstall` builds it. The target's kind and its
 /// REAPER come from the target row rather than from guessing by the folder,
 /// so the rows and a later run from the wizard agree about them. Reads which
-/// files exist and how big they are, and looks vendors' uninstallers up
-/// through `vendor_lookup` (HKLM in RABBIT, a stand-in in tests); hashes
-/// nothing and changes nothing.
+/// files exist and how big they are, looks vendors' uninstallers up through
+/// `vendor_lookup` (HKLM in RABBIT, a stand-in in tests), and asks `objects`
+/// who may move a macOS app (macOS itself in RABBIT, a stand-in in tests);
+/// hashes nothing and changes nothing.
 pub fn uninstall_plan_for_target(
     model: &WizardModel,
     target: &TargetRow,
     detections: &[ComponentDetection],
     vendor_lookup: &dyn VendorLookup,
+    objects: &dyn ObjectProbe,
 ) -> Result<UninstallPlan> {
     let roots =
         UninstallRoots::for_target(model.platform, &target.path, target.app_path.as_deref());
@@ -217,6 +219,7 @@ pub fn uninstall_plan_for_target(
         state: state.as_ref(),
         remove_settings: false,
         vendor_lookup,
+        objects,
     }))
 }
 
@@ -228,11 +231,12 @@ pub fn uninstall_list_for_target(
     target: &TargetRow,
     detections: &[ComponentDetection],
     vendor_lookup: &dyn VendorLookup,
+    objects: &dyn ObjectProbe,
 ) -> WizardUninstallList {
     let Ok(localizer) = localizer_from_options(&model.bootstrap_options) else {
         return WizardUninstallList::default();
     };
-    match uninstall_plan_for_target(model, target, detections, vendor_lookup) {
+    match uninstall_plan_for_target(model, target, detections, vendor_lookup, objects) {
         Ok(plan) => {
             uninstall_list_from_plan(&localizer, &builtin_package_specs(model.platform), &plan)
         }
@@ -365,7 +369,11 @@ fn details_text(summary: &str, explanation: &str) -> String {
 /// The short phrase a row that can't be ticked ends with.
 fn unavailability_reason(localizer: &Localizer, item: &UninstallPlanItem) -> String {
     let key = match &item.removability {
-        Removability::Manual { .. } => "wizard-uninstall-row-unavailable-manual",
+        // A macOS app RABBIT can't move to the Trash is the user's to move in
+        // Finder: removed by hand, too.
+        Removability::Manual { .. } | Removability::ByHand { .. } => {
+            "wizard-uninstall-row-unavailable-manual"
+        }
         Removability::NotSupported { note_key } if note_key != UNINSTALL_NOT_YET_KEY => {
             "wizard-uninstall-row-unavailable-not-supported"
         }
@@ -447,7 +455,10 @@ fn refusal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
                 ("path", path.display().to_string().as_str()),
             ],
         ),
-        Removability::Removable
+        // The Finder steps for a macOS app come with the macOS removal's own
+        // text; no shipped plan reaches this yet.
+        Removability::ByHand { .. }
+        | Removability::Removable
         | Removability::RemovableOrphanedFromReaPack
         | Removability::NotInstalled => localizer.text(UNINSTALL_NOT_YET_KEY).value,
     }

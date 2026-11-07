@@ -555,6 +555,9 @@ pub fn helper_roots(args: &HelperArgs, folders: &MachineFolders) -> UninstallRoo
         program_data: Some(folders.program_data.clone()),
         home: None,
         documents: None,
+        // Only Windows has this helper, and no Windows plan names an
+        // absolute macOS path, so this is never resolved.
+        system_root: PathBuf::from(super::paths::SYSTEM_ROOT),
     }
 }
 

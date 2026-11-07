@@ -51,6 +51,10 @@ pub struct ObjectFacts {
     /// root's included: `uchg` (Finder's Locked), `schg`, `uappnd` or
     /// `sappnd`.
     pub locked: bool,
+    /// The folder holding the path carries `uchg`, `schg`, `uappnd` or
+    /// `sappnd`. That stops any move out of it, root's included: macOS
+    /// checks the folder's flags before it lets root past anything else.
+    pub parent_locked: bool,
     /// The volume the object is on (`st_dev`). A move within one volume is
     /// a rename; a move to another is not.
     pub dev: u64,
@@ -200,6 +204,7 @@ mod macos {
             parent_sticky: parent_metadata.mode() & u32::from(libc::S_ISVTX) != 0,
             parent_owned_by_me: parent_metadata.uid() == me,
             locked: metadata.st_flags() & LOCKING_FLAGS != 0,
+            parent_locked: parent_metadata.st_flags() & LOCKING_FLAGS != 0,
             dev: metadata.dev(),
             bundle_identifier: if is_dir {
                 bundle_identifier(path)
@@ -463,6 +468,7 @@ mod tests {
                     parent_sticky: false,
                     parent_owned_by_me: true,
                     locked: false,
+                    parent_locked: false,
                     dev: std::fs::symlink_metadata(&bundle).unwrap().dev(),
                     bundle_identifier: Some(BUNDLE_ID.to_string()),
                 }
@@ -538,6 +544,7 @@ mod tests {
             assert!(facts.parent_writable_searchable);
             assert!(!facts.removable_by_me);
             assert!(!facts.locked, "the flag is the folder's, not the bundle's");
+            assert!(facts.parent_locked);
         }
 
         /// Takes every ACL entry off a folder when the test ends, however it
@@ -610,7 +617,12 @@ mod tests {
             chflags("uchg", &bundle);
             let _unlock = Unlock(&bundle);
 
-            assert!(object_facts(&bundle).unwrap().locked);
+            let facts = object_facts(&bundle).unwrap();
+            assert!(facts.locked);
+            assert!(
+                !facts.parent_locked,
+                "the flag is the bundle's, not the folder's"
+            );
         }
 
         #[test]

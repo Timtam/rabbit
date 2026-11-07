@@ -634,6 +634,7 @@ pub fn run() {
                         &refreshed_target,
                         &plan.detections,
                         &rabbit_core::uninstall::SystemVendorLookup,
+                        &rabbit_core::uninstall::SystemMacosObjects,
                     );
                     rebuild_uninstall_list_widgets(
                         &widgets,

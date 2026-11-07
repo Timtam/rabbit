@@ -42,6 +42,13 @@
 //! answering, or a resource folder that lost REAPER's settings or RABBIT's
 //! receipt stops the run there. The helper is told to quit at the end of
 //! every run, however it ends.
+//!
+//! A macOS plan's trees, such as REAPER.app or Surge XT's bundles, leave
+//! whole: through the Trash or the run's administrator command, never into a
+//! backup set. The read before the run, and a dry run, check each one with
+//! the guard and see that it is there, and never list, hash or walk it. This
+//! version doesn't carry those removals out yet, so a real run refuses such
+//! a package before anything changes.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
@@ -72,6 +79,7 @@ use crate::receipt::{
 use crate::rollback::{BackupPackageRecord, BackupSetWriter, FileDigest, MoveFileError, MovedFile};
 
 use super::helper::{ElevatedHelper, ElevatedRunRequest, ElevatedSession, ElevationStartError};
+use super::macos_objects::ObjectProbe;
 use super::paths::{UninstallRoots, absolute, inside_or_same, same_ignoring_case};
 use super::plan::{
     UninstallPlanInput, build_uninstall_plan, installed_by_reapack, reapack_counts_as_installed,
@@ -151,6 +159,7 @@ pub fn execute_uninstall(
             installed_programs: services.installed_programs,
             vendor_lookup: services.vendor_lookup,
             elevated_helper: services.elevated_helper,
+            macos_objects: services.macos_objects,
         },
         progress,
         cancel,
@@ -178,18 +187,22 @@ pub(crate) struct UninstallEnvironment<'a> {
     pub vendor_lookup: &'a dyn VendorLookup,
     /// Starts the run's elevated helper.
     pub elevated_helper: &'a dyn ElevatedHelper,
+    /// What this account may do with a macOS app, asked while planning.
+    pub macos_objects: &'a dyn ObjectProbe,
 }
 
 /// The uninstall plan for every package at `resource_path`, built from
 /// `detections` and the receipt the way [`execute_uninstall`] builds it,
 /// for a listing of what RABBIT could uninstall there. Reads which files
-/// exist and how big they are, and looks vendors' uninstallers up through
-/// `vendor_lookup`; hashes nothing and changes nothing.
+/// exist and how big they are, looks vendors' uninstallers up through
+/// `vendor_lookup`, and asks `objects` who may move a macOS app; hashes
+/// nothing and changes nothing.
 pub fn plan_uninstall_at(
     resource_path: &Path,
     platform: Platform,
     detections: &[ComponentDetection],
     vendor_lookup: &dyn VendorLookup,
+    objects: &dyn ObjectProbe,
 ) -> Result<UninstallPlan> {
     let (target, target_app_path) = target_of(platform, resource_path, None, None);
     let roots = UninstallRoots::for_target(platform, resource_path, target_app_path.as_deref());
@@ -203,6 +216,7 @@ pub fn plan_uninstall_at(
         state: state.as_ref(),
         remove_settings: false,
         vendor_lookup,
+        objects,
     }))
 }
 
@@ -265,6 +279,7 @@ pub(crate) fn execute_uninstall_in(
         state: state.as_ref(),
         remove_settings: request.remove_settings,
         vendor_lookup: environment.vendor_lookup,
+        objects: environment.macos_objects,
     });
 
     let mut requested: Vec<String> = Vec::new();
@@ -317,10 +332,10 @@ pub(crate) fn execute_uninstall_in(
         .collect();
 
     // Every requested package gets its verdict before anything changes. The
-    // ones still open are removed below, and the report keeps the order of
-    // removal throughout.
+    // ones still open are removed below, and the report keeps the order the
+    // run takes them in throughout.
     let mut slots: Vec<(&UninstallPlanItem, Option<UninstallReportItem>)> = Vec::new();
-    for plan_item in plan.in_removal_order(&requested) {
+    for plan_item in plan.in_run_order(&requested) {
         let id = plan_item.package_id.as_str();
         let verdict = if plan_item.removability == Removability::NotInstalled {
             Some((
@@ -334,7 +349,12 @@ pub(crate) fn execute_uninstall_in(
                     removability: plan_item.removability.clone(),
                 },
             ))
-        } else if !plan_item.can_remove() {
+        } else if !plan_item.can_remove()
+            || (!request.dry_run && plan_item.route().takes_whole_objects())
+        {
+            // A dry run reads what a whole-object route would take; this
+            // version can't yet move it to the Trash or hand it to the
+            // administrator command, so a real run leaves it alone.
             Some((UninstallStatus::Blocked, UninstallMessage::NotYetSupported))
         } else {
             let mut checks = run_failures.clone();
@@ -999,6 +1019,14 @@ impl RemovalRun<'_> {
                         });
                     }
                 }
+                // Asked as the user, after the files are gone. macOS starts
+                // the registrar again when a host next needs it, so a
+                // refresh that can't happen only means a host may list a
+                // plug-in that is gone until it next looks: never a reason
+                // to undo the removal, nor one to report.
+                UninstallPostStep::RefreshAudioUnits {} => {
+                    let _ = rabbit_platform::refresh_audio_units();
+                }
             }
         }
         // Only once the receipt no longer claims the package: an entry that
@@ -1209,6 +1237,7 @@ impl<'a> PackageRemoval<'a> {
     /// settings when "Also remove settings" was asked for.
     fn remove_files(&mut self) -> std::result::Result<(), UninstallMessage> {
         let item = self.item;
+        let whole_objects = item.route().takes_whole_objects();
         for file in &item.files {
             // Gone since the plan was built: nothing left to remove.
             if matches!(fs::symlink_metadata(&file.path), Err(error) if error.kind() == io::ErrorKind::NotFound)
@@ -1222,12 +1251,35 @@ impl<'a> PackageRemoval<'a> {
                     path: file.path.clone(),
                     refusal,
                 })?;
-            if file.is_dir {
+            if whole_objects && file.reason == RemovalReason::Tree {
+                self.take_whole(&file.path)?;
+            } else if file.is_dir {
                 self.remove_folder(&file.path, file.reason)?;
             } else {
                 self.remove_file(&file.path, file.reason, file.receipt_sha256.as_deref())?;
             }
         }
+        Ok(())
+    }
+
+    /// A tree that leaves whole, through the Trash or the administrator
+    /// command: the guard has checked it and it is there, and that is all.
+    /// It is never listed, hashed or walked: an app bundle holds thousands
+    /// of files and often links, none of which goes into a backup set. Its
+    /// size isn't counted either, so the report gives it none.
+    fn take_whole(&mut self, path: &Path) -> std::result::Result<(), UninstallMessage> {
+        // Never into the backup set: a real run removes such a tree through
+        // its own route, which this version doesn't have yet.
+        if self.backups.is_some() {
+            return Err(UninstallMessage::NotYetSupported);
+        }
+        self.removed.push(RemovedFile {
+            path: path.to_path_buf(),
+            reason: RemovalReason::Tree,
+            size: 0,
+            changed_since_install: false,
+            backup_path: None,
+        });
         Ok(())
     }
 

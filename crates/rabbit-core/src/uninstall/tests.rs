@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
 
 use super::{
-    ANY_REAPER_PROCESS_CHECK, KeptReason, NothingListed, PROGRAMS_RUNNING_CHECK, PathRefusal,
-    Removability, RemovalReason, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan,
+    ANY_REAPER_PROCESS_CHECK, KeptReason, NoMacosObjects, NothingListed, PROGRAMS_RUNNING_CHECK,
+    PathRefusal, Removability, RemovalReason, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan,
     UninstallPlanInput, UninstallPlanItem, UninstallPreflightOptions, UninstallRoots,
     UninstallWarning, VendorJob, VendorLookup, VendorRefusal, build_uninstall_plan,
     run_uninstall_preflight_with_processes,
@@ -114,6 +114,7 @@ impl Fixture {
             state,
             remove_settings,
             vendor_lookup,
+            objects: &NoMacosObjects,
         })
     }
 }
@@ -1222,6 +1223,7 @@ fn a_resource_folder_reached_through_a_link_still_plans() {
         state: None,
         remove_settings: false,
         vendor_lookup: &NothingListed,
+        objects: &NoMacosObjects,
     });
     let demo = item(&plan, "demo");
     assert_eq!(demo.removability, Removability::Removable);
@@ -1311,6 +1313,7 @@ fn every_shipped_manifest_plans() {
                 state: None,
                 remove_settings: false,
                 vendor_lookup: &NothingListed,
+                objects: &NoMacosObjects,
             });
             assert_eq!(nothing.items.len(), specs.len());
             assert!(
@@ -1329,6 +1332,7 @@ fn every_shipped_manifest_plans() {
                 state: None,
                 remove_settings: true,
                 vendor_lookup: &NothingListed,
+                objects: &NoMacosObjects,
             });
             for (item, spec) in everything.items.iter().zip(&specs) {
                 let removes_files = spec

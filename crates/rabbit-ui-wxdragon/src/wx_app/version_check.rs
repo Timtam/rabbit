@@ -182,6 +182,7 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
                             &ui.target,
                             &plan.detections,
                             &rabbit_core::uninstall::SystemVendorLookup,
+                            &rabbit_core::uninstall::SystemMacosObjects,
                         );
                         *ui.package_rows.borrow_mut() = plan.package_rows;
                         *ui.package_notes.borrow_mut() = plan.notes;

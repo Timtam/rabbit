@@ -50,9 +50,9 @@ use rabbit_core::self_update::{
 use rabbit_core::setup::{SetupOptions, SetupReport, execute_setup_operation};
 use rabbit_core::uninstall::{
     KeptFileReason, KeptReason, LeftoverKind, LeftoverResult, RegistryEntryAction, Removability,
-    RemovalReason, SystemVendorLookup, UninstallMessage, UninstallNote, UninstallPlan,
-    UninstallPlanItem, UninstallReport, UninstallReportItem, UninstallRequest, UninstallServices,
-    UninstallStatus, UninstallWarning, execute_uninstall, plan_uninstall_at,
+    RemovalReason, SystemMacosObjects, SystemVendorLookup, UninstallMessage, UninstallNote,
+    UninstallPlan, UninstallPlanItem, UninstallReport, UninstallReportItem, UninstallRequest,
+    UninstallServices, UninstallStatus, UninstallWarning, execute_uninstall, plan_uninstall_at,
 };
 use serde::Serialize;
 
@@ -856,7 +856,14 @@ fn run_components(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     let components = detect_components(&resource_path, platform)?;
     // What RABBIT could uninstall here. A receipt that can't be read only
     // costs these lines; detection has already said what is installed.
-    let plan = plan_uninstall_at(&resource_path, platform, &components, &SystemVendorLookup).ok();
+    let plan = plan_uninstall_at(
+        &resource_path,
+        platform,
+        &components,
+        &SystemVendorLookup,
+        &SystemMacosObjects,
+    )
+    .ok();
     if json {
         let listed: Vec<ComponentListing<'_>> = components
             .iter()
@@ -4620,7 +4627,7 @@ mod tests {
         code: rabbit_core::uninstall::UninstallMessage,
         message: &str,
     ) -> (FakeReaper, rabbit_core::uninstall::UninstallReport) {
-        use rabbit_core::uninstall::{NoElevatedHelper, UninstallServices};
+        use rabbit_core::uninstall::{NoElevatedHelper, NoMacosObjects, UninstallServices};
 
         let reaper = FakeReaper::new();
         let app = reaper.resource.join("reaper.exe");
@@ -4635,6 +4642,7 @@ mod tests {
                 vendor_lookup: &lookup,
                 elevated_helper: &NoElevatedHelper,
                 installed_programs: None,
+                macos_objects: &NoMacosObjects,
             },
             &rabbit_core::cancel::CancelToken::new(),
         )

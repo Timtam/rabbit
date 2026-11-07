@@ -14,11 +14,11 @@ use rabbit_core::progress::{ProgressEvent, ProgressReporter, RemovalMethod};
 use rabbit_core::report::SavedReportPaths;
 use rabbit_core::uninstall::{
     ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, KeptFile, KeptFileReason, LeftoverKind,
-    LeftoverOutcome, LeftoverResult, NothingListed, PROGRAMS_RUNNING_CHECK, RegistryEntryAction,
-    RegistryEntryOutcome, Removability, RemovalReason, RemovedFile, UninstallMessage,
-    UninstallPlanItem, UninstallProblem, UninstallReport, UninstallReportItem, UninstallRequest,
-    UninstallServices, UninstallStatus, VendorOutcome, VendorRefusal, VendorStatus,
-    execute_uninstall,
+    LeftoverOutcome, LeftoverResult, NoMacosObjects, NothingListed, PROGRAMS_RUNNING_CHECK,
+    RegistryEntryAction, RegistryEntryOutcome, Removability, RemovalReason, RemovedFile,
+    UninstallMessage, UninstallPlanItem, UninstallProblem, UninstallReport, UninstallReportItem,
+    UninstallRequest, UninstallServices, UninstallStatus, VendorOutcome, VendorRefusal,
+    VendorStatus, execute_uninstall,
 };
 use rabbit_core::version::Version;
 use tempfile::tempdir;
@@ -322,7 +322,13 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
                 detection
             })
             .collect();
-    let mut list = uninstall_list_for_target(&model, &target, &detections, &NothingListed);
+    let mut list = uninstall_list_for_target(
+        &model,
+        &target,
+        &detections,
+        &NothingListed,
+        &NoMacosObjects,
+    );
     tick(&mut list, "sws");
 
     let request = uninstall_request_for_target(&model, &target, &list, true).unwrap();
@@ -397,7 +403,13 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
     let sws_row = |target: &TargetRow| {
         let plan = wizard_package_plan_for_target_with_available(&model, Some(target), &available)
             .unwrap();
-        let list = uninstall_list_for_target(&model, target, &plan.detections, &NothingListed);
+        let list = uninstall_list_for_target(
+            &model,
+            target,
+            &plan.detections,
+            &NothingListed,
+            &NoMacosObjects,
+        );
         assert!(list.rows.iter().all(|row| row.package_id != "sws"));
         plan.package_rows
             .into_iter()

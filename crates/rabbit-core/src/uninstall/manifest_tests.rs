@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use super::tests::{Fixture, FoundAt, detection, installed, write};
 use super::{
-    KeptReason, NothingListed, PlannedRegistryCleanup, Removability, RemovalReason,
+    KeptReason, NoMacosObjects, NothingListed, PlannedRegistryCleanup, Removability, RemovalReason,
     UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanInput, UninstallPlanItem,
     UninstallWarning, VendorLookup, VendorRefusal, build_uninstall_plan,
 };
@@ -80,6 +80,7 @@ impl<'f> Shipped<'f> {
             state,
             remove_settings,
             vendor_lookup,
+            objects: &NoMacosObjects,
         })
     }
 

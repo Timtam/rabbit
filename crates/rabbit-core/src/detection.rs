@@ -902,20 +902,40 @@ fn standard_macos_installation(require_existing: bool) -> Option<Installation> {
     })
 }
 
-fn discover_portable_macos(root: &Path) -> Option<Installation> {
-    let app_path = fs::read_dir(root)
+/// The REAPER app bundle in a portable macOS folder: an `.app` directly in
+/// `root` whose name contains "reaper", ignoring case. With more than one,
+/// the choice is the same every time, so Review and the run that follows
+/// name the same app: `REAPER.app` first, then `REAPER64.app` and
+/// `REAPER-ARM.app`, the order a standard install is looked for in, then
+/// any other by name. The wizard's custom portable target uses it as well,
+/// so the GUI and `rabbit uninstall` name the same app in one folder.
+pub fn portable_macos_app_bundle(root: &Path) -> Option<PathBuf> {
+    const PREFERRED: [&str; 3] = ["reaper.app", "reaper64.app", "reaper-arm.app"];
+    let mut bundles: Vec<(usize, PathBuf)> = fs::read_dir(root)
         .ok()?
         .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
-        .find(|path| {
-            path.extension()
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?.to_ascii_lowercase();
+            let is_app = path
+                .extension()
                 .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.to_ascii_lowercase().contains("reaper"))
-        })?;
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"));
+            (is_app && name.contains("reaper")).then(|| {
+                let rank = PREFERRED
+                    .iter()
+                    .position(|preferred| *preferred == name)
+                    .unwrap_or(PREFERRED.len());
+                (rank, path)
+            })
+        })
+        .collect();
+    bundles.sort();
+    bundles.into_iter().next().map(|(_, path)| path)
+}
+
+fn discover_portable_macos(root: &Path) -> Option<Installation> {
+    let app_path = portable_macos_app_bundle(root)?;
 
     let ini_path = root.join("reaper.ini");
     let mut evidence = vec![Evidence::new(

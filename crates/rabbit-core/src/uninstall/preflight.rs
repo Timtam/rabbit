@@ -14,13 +14,13 @@
 //! One check is about room rather than programs. Removed files move into a
 //! backup set in the resource folder. A file on another volume can't be
 //! renamed there; it is copied, checked and deleted, and the copy needs
-//! room first.
+//! room first. Only files that go into the backup set count: a tree the
+//! Trash or the administrator command takes whole never does.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::model::Platform;
-use crate::package::uninstall::UninstallStrategy;
 use crate::preflight::{
     PreflightCheck, PreflightReport, PreflightStatus, REAPER_PROCESS_CHECK, RunningProcess,
     macos_userplugins_write_check, resource_path_check, running_processes_named,
@@ -28,7 +28,7 @@ use crate::preflight::{
 };
 
 use super::paths::inside_or_same;
-use super::{UninstallPlan, UninstallPlanItem};
+use super::{PlannedRemoval, RemovalReason, RemovalRoute, UninstallPlan, UninstallPlanItem};
 
 /// The check that fails while any REAPER at all runs, for packages that
 /// need every REAPER closed.
@@ -117,18 +117,37 @@ pub fn run_uninstall_preflight_with_processes(
     // macOS can refuse to move files out of UserPlugins for reasons that
     // have nothing to do with REAPER (Full Disk Access, App Management).
     // Install rehearses that before it changes anything; so does uninstall.
-    let moves_resource_files = items.iter().any(|item| {
-        item.strategy == Some(UninstallStrategy::RemoveFiles)
-            && item
-                .files
-                .iter()
-                .any(|file| inside_or_same(&file.path, &plan.resource_path))
-    });
-    if !options.dry_run && moves_resource_files && Platform::current() == Some(Platform::MacOs) {
+    if !options.dry_run
+        && Platform::current() == Some(Platform::MacOs)
+        && moves_resource_files(plan, &items)
+    {
         checks.push(macos_userplugins_write_check(&plan.resource_path));
     }
 
     preflight_report(checks)
+}
+
+/// Whether any of `items` moves files out of the resource folder into the
+/// backup set, which the macOS write rehearsal is for. A portable REAPER's
+/// app sits in its resource folder too, but it goes to the Trash whole, so
+/// it doesn't count.
+pub(crate) fn moves_resource_files(plan: &UninstallPlan, items: &[&UninstallPlanItem]) -> bool {
+    items.iter().any(|item| {
+        backup_set_files(item).any(|file| inside_or_same(&file.path, &plan.resource_path))
+    })
+}
+
+/// The files of `item` that go into the backup set, decided per file as
+/// `PackageRemoval::remove_files` decides: every file except a tree that
+/// the Trash or the administrator command takes whole. A Trash-route
+/// package's other files, such as its settings, still go into the backup
+/// set. A vendor's uninstaller puts nothing there.
+fn backup_set_files(item: &UninstallPlanItem) -> impl Iterator<Item = &PlannedRemoval> {
+    let route = item.route();
+    item.files.iter().filter(move |file| {
+        route != RemovalRoute::Vendor
+            && !(route.takes_whole_objects() && file.reason == RemovalReason::Tree)
+    })
 }
 
 /// The whole preflight, with the processes and the volumes given.
@@ -278,9 +297,7 @@ pub(crate) fn backup_space_check(
     let mut needed: u64 = 0;
     let mut packages = Vec::new();
     for item in checked_items(plan, package_ids) {
-        let crossing: Vec<u64> = item
-            .files
-            .iter()
+        let crossing: Vec<u64> = backup_set_files(item)
             .filter(|file| crosses_volumes(&file.path, &backup_folder, volumes))
             .map(|file| file.size.unwrap_or_else(|| size_on_disk(&file.path)))
             .collect();
