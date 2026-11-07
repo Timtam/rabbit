@@ -940,7 +940,10 @@ only `unins000.*`, REAPER's install folder strictly below `{program_files}`,
 whose HKLM `InstallLocation` must equal `{app_dir}`), its silent arguments,
 a `timeout_seconds` of 600, and `verify_gone` paths that must be gone
 afterwards. Surge's `remove_leftovers` lists the `SurgeXTData` junctions,
-removed as links, then its vendor folders, only when empty; its
+removed as links, then its vendor folders, only when empty. They go also
+when Windows finishes the removal at the next restart, since nothing would
+remove them afterwards; a vendor folder still holding a bundle that waits
+for the restart isn't empty and stays. Surge's
 `kept_user_data` is `{documents}/Surge XT`. REAPER's `kept_user_data` is
 `{resource}`, shown as kept and never removed; the engine's warning about
 installed packages that depend on REAPER says its extensions stay and work

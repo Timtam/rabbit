@@ -347,9 +347,10 @@ pub struct VendorUninstallerSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub report_leftovers: Vec<UninstallPath>,
     /// What the vendor's uninstaller leaves behind that RABBIT removes
-    /// itself, in this order, once `verify_gone` has passed: links as links
-    /// and folders only when empty. Only the elevated helper removes them,
-    /// so only plans with `elevation: required` may list them.
+    /// itself, in this order, once `verify_gone` has passed, also when what
+    /// is still there goes at the next restart: links as links and folders
+    /// only when empty. Only the elevated helper removes them, so only plans
+    /// with `elevation: required` may list them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove_leftovers: Vec<LeftoverRemoval>,
 }

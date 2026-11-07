@@ -1568,13 +1568,17 @@ pub(crate) mod windows {
         assert!(fs::symlink_metadata(&surge.clap_junction).is_ok());
     }
 
-    #[test]
-    fn files_windows_removes_at_the_next_restart_count_as_pending() {
-        let fixture = Fixture::new();
-        let surge = install_surge(&fixture);
+    /// Surge's uninstaller as it runs while another music program has the
+    /// VST3 loaded: it removes the CLAP and its entry in the list of
+    /// installed programs, and Windows deletes the VST3's plug-in file at
+    /// the next restart, so the bundle stays until then. Returns the
+    /// environment and that file.
+    pub(crate) fn surge_with_its_vst3_in_use(
+        fixture: &Fixture,
+        surge: &Surge,
+    ) -> (TestEnvironment, PathBuf) {
         let (clap, list) = (surge.clap.clone(), fixture.list.root());
         let mut env = fixture.env(Runner::Fake(Box::new(move |_| {
-            // The VST3 is in use: it goes at the next restart.
             fs::remove_file(&clap).unwrap();
             list.delete_entry(SURGE_KEY).unwrap();
             FakeRun::exits(0)
@@ -1595,25 +1599,96 @@ pub(crate) mod windows {
             },
         ];
         env.clock = Some(VirtualClock::new(|_| {}));
+        (env, in_use)
+    }
+
+    /// The leftovers go with a removal Windows finishes at the next
+    /// restart too: after it, nothing would remove them. The junctions go
+    /// as links, beside the bundle waiting for the restart and without
+    /// touching what they point to; the vendor folder holding that bundle
+    /// isn't empty, so it stays, and nothing counts as left over.
+    #[test]
+    fn files_windows_removes_at_the_next_restart_count_as_pending() {
+        let fixture = Fixture::new();
+        let surge = install_surge(&fixture);
+        let (env, in_use) = surge_with_its_vst3_in_use(&fixture, &surge);
 
         let (outcome, _) = run(&surge_spec(60), &fixture.roots(None), &env);
 
         assert_eq!(outcome.status, VendorStatus::RemovedPendingRestart);
-        assert_eq!(outcome.pending_restart, [in_use]);
+        assert_eq!(outcome.pending_restart, std::slice::from_ref(&in_use));
         assert!(!outcome.still_listed);
         assert_eq!(
             env.clock.as_ref().unwrap().elapsed(),
             Duration::ZERO,
             "no need to keep checking"
         );
-        // Leftovers wait until everything is gone.
+        let results: Vec<(&PathBuf, &LeftoverResult)> = outcome
+            .removed_leftovers
+            .iter()
+            .map(|leftover| (&leftover.path, &leftover.result))
+            .collect();
+        assert_eq!(
+            results,
+            [
+                (&surge.clap_junction, &LeftoverResult::Removed),
+                (&surge.vst3_junction, &LeftoverResult::Removed),
+                (&surge.clap_vendor_dir, &LeftoverResult::Removed),
+                (&surge.vst3_vendor_dir, &LeftoverResult::NotEmpty),
+            ]
+        );
         assert!(
-            outcome
+            !outcome
                 .removed_leftovers
                 .iter()
-                .all(|leftover| leftover.result == LeftoverResult::Skipped)
+                .any(LeftoverOutcome::still_there)
         );
-        assert!(fs::symlink_metadata(&surge.clap_junction).is_ok());
+        assert!(outcome.leftovers.is_empty());
+        assert!(fs::symlink_metadata(&surge.clap_junction).is_err());
+        assert!(fs::symlink_metadata(&surge.vst3_junction).is_err());
+        assert!(in_use.exists(), "the restart removes it, not RABBIT");
+        assert_eq!(fs::read(&surge.data_file).unwrap(), b"patch");
+    }
+
+    /// The same with the shipped Surge XT plan, whose list also names the
+    /// `SurgeXTData` folders, for computers where they aren't junctions.
+    #[test]
+    fn the_shipped_plan_removes_the_links_beside_a_bundle_waiting_for_the_restart() {
+        let fixture = Fixture::new();
+        let surge = install_surge(&fixture);
+        let (env, in_use) = surge_with_its_vst3_in_use(&fixture, &surge);
+
+        let (outcome, _) = run(&shipped_surge_spec(), &fixture.roots(None), &env);
+
+        assert_eq!(
+            outcome.status,
+            VendorStatus::RemovedPendingRestart,
+            "{outcome:#?}"
+        );
+        let results: Vec<(&PathBuf, &LeftoverResult)> = outcome
+            .removed_leftovers
+            .iter()
+            .map(|leftover| (&leftover.path, &leftover.result))
+            .collect();
+        assert_eq!(
+            results,
+            [
+                (&surge.clap_junction, &LeftoverResult::Removed),
+                (&surge.vst3_junction, &LeftoverResult::Removed),
+                (&surge.clap_junction, &LeftoverResult::NotFound),
+                (&surge.vst3_junction, &LeftoverResult::NotFound),
+                (&surge.clap_vendor_dir, &LeftoverResult::Removed),
+                (&surge.vst3_vendor_dir, &LeftoverResult::NotEmpty),
+            ]
+        );
+        assert!(
+            !outcome
+                .removed_leftovers
+                .iter()
+                .any(LeftoverOutcome::still_there)
+        );
+        assert!(in_use.exists());
+        assert_eq!(fs::read(&surge.data_file).unwrap(), b"patch");
     }
 
     #[test]

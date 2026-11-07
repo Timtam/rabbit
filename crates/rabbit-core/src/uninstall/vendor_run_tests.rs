@@ -1333,28 +1333,96 @@ fn no_trusted_uninstaller_blocks_the_run_before_any_prompt() {
 #[cfg(windows)]
 #[test]
 fn surge_goes_through_the_helper_and_the_vendor_runner_end_to_end() {
-    use super::InProcessElevatedHelper;
-    use super::helper::tests::elevated_surge;
     use super::vendor::tests::windows::{Fixture, install_surge, surge_uninstaller};
 
     let fixture = Fixture::new();
     let surge = install_surge(&fixture);
-    let spec = elevated_surge("surge-test");
     let env = fixture.env(surge_uninstaller(&fixture, &surge));
+    let report = surge_end_to_end(&fixture, &surge, env);
+
+    let item = item(&report, "surge-test");
+    assert_eq!(item.status, UninstallStatus::Removed, "{report:#?}");
+    assert_eq!(item.message_code, UninstallMessage::UninstalledByVendor);
+    assert!(!surge.vst3.exists() && !surge.clap.exists());
+    assert!(!surge.clap_junction.exists() && !surge.vst3_junction.exists());
+    assert!(!surge.clap_vendor_dir.exists() && !surge.vst3_vendor_dir.exists());
+    assert_eq!(
+        fs::read(&surge.data_file).unwrap(),
+        b"patch",
+        "the junctions went as links; what they pointed to stays"
+    );
+    let receipt = load_install_state(&fixture.resource).unwrap().unwrap();
+    assert!(receipt.declined_packages.contains("surge-test"));
+}
+
+/// The usual restart case the whole way on Windows: another music program
+/// has Surge's VST3 loaded, so Windows deletes it at the next restart, and
+/// detection still finds Surge through that bundle until then. The helper
+/// removes the junctions and the emptied CLAP folder all the same, since
+/// nothing would after the restart, so the run only asks for the restart:
+/// nothing is left over, and nothing went wrong.
+#[cfg(windows)]
+#[test]
+fn surge_finishing_at_the_restart_leaves_nothing_over_end_to_end() {
+    use super::vendor::tests::windows::{Fixture, install_surge, surge_with_its_vst3_in_use};
+
+    let fixture = Fixture::new();
+    let surge = install_surge(&fixture);
+    let (env, in_use) = surge_with_its_vst3_in_use(&fixture, &surge);
+    let report = surge_end_to_end(&fixture, &surge, env);
+
+    let item = item(&report, "surge-test");
+    assert_eq!(
+        item.status,
+        UninstallStatus::RemovedPendingRestart,
+        "{report:#?}"
+    );
+    assert_eq!(item.message_code, UninstallMessage::UninstalledByVendor);
+    assert_eq!(item.pending_restart, [in_use]);
+    assert!(item.leftovers.is_empty(), "{:#?}", item.leftovers);
+    assert!(report.needs_restart());
+    assert!(!report.finished_with_problems() && !report.has_failures());
+    assert!(fs::symlink_metadata(&surge.clap_junction).is_err());
+    assert!(fs::symlink_metadata(&surge.vst3_junction).is_err());
+    assert!(!surge.clap_vendor_dir.exists());
+    assert!(surge.vst3.exists(), "the restart removes it, not RABBIT");
+    assert_eq!(fs::read(&surge.data_file).unwrap(), b"patch");
+    let receipt = load_install_state(&fixture.resource).unwrap().unwrap();
+    assert!(receipt.declined_packages.contains("surge-test"));
+}
+
+/// Uninstall the fixture's Surge XT, as the package `surge-test`, through
+/// the helper loop on a thread and the vendor runner in `env`. Detection
+/// finds it through its VST3 bundle while that is there.
+#[cfg(windows)]
+fn surge_end_to_end(
+    fixture: &super::vendor::tests::windows::Fixture,
+    surge: &super::vendor::tests::windows::Surge,
+    env: super::vendor::tests::TestEnvironment,
+) -> UninstallReport {
+    use super::InProcessElevatedHelper;
+    use super::helper::tests::elevated_surge;
+
+    let spec = elevated_surge("surge-test");
     let helper =
         InProcessElevatedHelper::new(Arc::new(env), vec![spec.clone()], fixture.folders.clone());
     let roots = fixture.roots(None);
     let vst3 = surge.vst3.clone();
     let detect = || -> crate::error::Result<Vec<ComponentDetection>> {
-        Ok(if vst3.exists() {
-            installed(&["surge-test"])
-        } else {
-            installed(&[])
-        })
+        if !vst3.exists() {
+            return Ok(installed(&[]));
+        }
+        let mut detections = installed(&["surge-test"]);
+        for detection in &mut detections {
+            if detection.package_id == "surge-test" {
+                detection.files = vec![vst3.clone()];
+            }
+        }
+        Ok(detections)
     };
     let nothing = || Vec::new();
     let named = |_: &[String]| Vec::new();
-    let report = execute_uninstall_in(
+    execute_uninstall_in(
         &UninstallRequest {
             resource_path: fixture.resource.clone(),
             platform: Platform::Windows,
@@ -1380,19 +1448,5 @@ fn surge_goes_through_the_helper_and_the_vendor_runner_end_to_end() {
         &ProgressReporter::noop(),
         &CancelToken::new(),
     )
-    .unwrap();
-
-    let item = item(&report, "surge-test");
-    assert_eq!(item.status, UninstallStatus::Removed, "{report:#?}");
-    assert_eq!(item.message_code, UninstallMessage::UninstalledByVendor);
-    assert!(!surge.vst3.exists() && !surge.clap.exists());
-    assert!(!surge.clap_junction.exists() && !surge.vst3_junction.exists());
-    assert!(!surge.clap_vendor_dir.exists() && !surge.vst3_vendor_dir.exists());
-    assert_eq!(
-        fs::read(&surge.data_file).unwrap(),
-        b"patch",
-        "the junctions went as links; what they pointed to stays"
-    );
-    let receipt = load_install_state(&fixture.resource).unwrap().unwrap();
-    assert!(receipt.declined_packages.contains("surge-test"));
+    .unwrap()
 }

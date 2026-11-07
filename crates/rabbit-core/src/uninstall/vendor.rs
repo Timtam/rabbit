@@ -41,10 +41,11 @@
 //!    go once the checks have failed for `still_waiting_seconds`. Files
 //!    Windows removes at the next restart count as removed, pending a
 //!    restart.
-//! 5. **Leftovers.** Only once everything is gone does RABBIT remove
-//!    `remove_leftovers`, in order, each through the guard again: junctions
-//!    as links, never followed, and folders only when empty. What
-//!    `report_leftovers` names is only reported.
+//! 5. **Leftovers.** Only once the package is gone, or goes at the next
+//!    restart, does RABBIT remove `remove_leftovers`, in order, each through
+//!    the guard again: junctions as links, never followed, and folders only
+//!    when empty, so a folder holding a bundle that waits for the restart
+//!    stays. What `report_leftovers` names is only reported.
 
 use std::cell::RefCell;
 use std::fs;
@@ -650,7 +651,8 @@ pub enum LeftoverResult {
     /// It wasn't there.
     NotFound,
     /// A folder that still holds something, such as another program from
-    /// the same vendor. It stays, as it should.
+    /// the same vendor, or a bundle Windows deletes at the next restart. It
+    /// stays, as it should.
     NotEmpty,
     /// The guard refused it, or it isn't the link it should be. It stays.
     Refused {
@@ -660,17 +662,12 @@ pub enum LeftoverResult {
     Failed {
         error: String,
     },
-    /// Not tried: the uninstaller hadn't finished removing the package.
-    Skipped,
 }
 
 impl LeftoverResult {
     /// Whether the thing is still there and shouldn't be.
     pub fn is_left_over(&self) -> bool {
-        matches!(
-            self,
-            Self::Refused { .. } | Self::Failed { .. } | Self::Skipped
-        )
+        matches!(self, Self::Refused { .. } | Self::Failed { .. })
     }
 }
 
@@ -1240,19 +1237,17 @@ pub fn run_vendor_uninstaller(
     };
     let removed = exit == VendorExit::Success && verdict != Verdict::StillThere;
     if removed {
+        // Also when Windows finishes the removal at the next restart: after
+        // it, nothing would remove these. A junction goes as a link and
+        // never touches the bundle waiting beside it, and a folder that
+        // still holds that bundle isn't empty, so it stays.
         outcome.removed_leftovers = paths
             .remove_leftovers
             .iter()
             .map(|(kind, resolved)| LeftoverOutcome {
                 path: resolved.path.clone(),
                 kind: *kind,
-                // Only once everything is gone, as the plan's
-                // `remove_leftovers` promises.
-                result: if verdict == Verdict::Gone {
-                    remove_leftover(job.roots, *kind, resolved)
-                } else {
-                    LeftoverResult::Skipped
-                },
+                result: remove_leftover(job.roots, *kind, resolved),
             })
             .collect();
         outcome.leftovers = paths
@@ -1265,11 +1260,10 @@ pub fn run_vendor_uninstaller(
         // have removed what an earlier one couldn't, such as a plain empty
         // folder where a junction was expected.
         let left_over = !outcome.leftovers.is_empty()
-            || (verdict == Verdict::Gone
-                && outcome
-                    .removed_leftovers
-                    .iter()
-                    .any(LeftoverOutcome::still_there));
+            || outcome
+                .removed_leftovers
+                .iter()
+                .any(LeftoverOutcome::still_there);
         if outcome.status == VendorStatus::Removed && left_over {
             outcome.status = VendorStatus::RemovedWithLeftovers;
         }
