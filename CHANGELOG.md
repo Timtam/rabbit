@@ -109,8 +109,7 @@ from this file and posts it as the GitHub release body.
   Surge XT open, the progress page says RABBIT is waiting for them and asks
   you to close that program; screen readers hear this once too. A removal
   that finishes only after a restart says so, and `rabbit uninstall` then
-  exits with 0. A portable
-  REAPER stays yours to remove by hand.
+  exits with 0. A portable REAPER stays yours to remove by hand.
 
 ### Changed
 

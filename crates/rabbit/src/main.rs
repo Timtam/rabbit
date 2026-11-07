@@ -11,10 +11,20 @@
 mod crash_log;
 
 fn main() -> std::process::ExitCode {
+    let uninstall_helper = std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == rabbit_cli::UNINSTALL_HELPER_SUBCOMMAND);
+
     // First thing, before any dispatch: the release profile aborts on any
     // panic, so this hook is the only chance to leave a diagnosable trace
-    // behind (a crash-<ts>.log in the per-user log directory).
-    crash_log::install();
+    // behind (a crash-<ts>.log next to RABBIT, see crash_log.rs). Not in the
+    // elevated uninstall helper: it runs with administrator rights, and
+    // every place the hook writes to (RABBIT's own folder, %TEMP%,
+    // RABBIT_CRASH_LOG_DIR) may be one a standard user controls. A helper
+    // that dies is reported by the RABBIT that started it.
+    if !uninstall_helper {
+        crash_log::install();
+    }
 
     // No arguments → run the GUI wizard (when the gui feature is on).
     // Anything else, including `--help`, hands off to the CLI subcommand
@@ -31,9 +41,6 @@ fn main() -> std::process::ExitCode {
     // RABBIT's elevated uninstall helper prints nothing, and never borrows
     // the console of the RABBIT that started it, which runs without its
     // rights and maybe as another account.
-    let uninstall_helper = std::env::args_os()
-        .nth(1)
-        .is_some_and(|argument| argument == rabbit_cli::UNINSTALL_HELPER_SUBCOMMAND);
     if uninstall_helper {
         load_dlls_from_system32_only();
     } else {
