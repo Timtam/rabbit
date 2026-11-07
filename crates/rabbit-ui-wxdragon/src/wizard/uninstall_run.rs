@@ -505,23 +505,37 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
         UninstallMessage::VendorCancelled => {
             reasons.push(with_package("wizard-done-uninstall-vendor-cancelled"));
         }
+        // Show details is only worth naming when it lists something.
         UninstallMessage::VendorFailed { exit_code } => reasons.push(with(
-            "wizard-done-uninstall-vendor-failed",
+            if vendor_still_present(item).is_empty() {
+                "wizard-done-uninstall-vendor-failed-unsure"
+            } else {
+                "wizard-done-uninstall-vendor-failed"
+            },
             "code",
             &exit_code.to_string(),
         )),
         // Windows Settings only helps while Windows still lists the
         // package; once its entry is gone, sending the user there leads
         // nowhere.
-        UninstallMessage::VendorStillThere { still_listed, .. } => match still_listed {
-            Some(true) => reasons.push(with_package("wizard-done-uninstall-vendor-still-there")),
-            Some(false) => {
-                reasons.push(with_package("wizard-done-uninstall-vendor-files-left"));
-                reasons.push(with_package("wizard-done-uninstall-vendor-not-listed"));
+        UninstallMessage::VendorStillThere { still_listed, .. } => {
+            let left = if vendor_still_present(item).is_empty() {
+                "wizard-done-uninstall-vendor-not-confirmed"
+            } else {
+                "wizard-done-uninstall-vendor-files-left"
+            };
+            match still_listed {
+                Some(true) => {
+                    reasons.push(with_package("wizard-done-uninstall-vendor-still-there"));
+                }
+                Some(false) => {
+                    reasons.push(with_package(left));
+                    reasons.push(with_package("wizard-done-uninstall-vendor-not-listed"));
+                }
+                // A problem below says the list couldn't be read.
+                None => reasons.push(with_package(left)),
             }
-            // A problem below says the list couldn't be read.
-            None => reasons.push(with_package("wizard-done-uninstall-vendor-files-left")),
-        },
+        }
         UninstallMessage::VendorStillOpen { .. } => {
             reasons.push(with_package("wizard-done-uninstall-vendor-still-open"));
         }
@@ -650,6 +664,20 @@ fn check_reason(localizer: &Localizer, check: &PreflightCheck) -> String {
     localizer.text(key).value
 }
 
+/// What RABBIT still found of a package after its own uninstaller ran and
+/// didn't remove it. Only the engine's message and the vendor run know
+/// this: the package's leftovers list only what a removal left behind.
+fn vendor_still_present(item: &UninstallReportItem) -> &[PathBuf] {
+    match &item.message_code {
+        UninstallMessage::VendorStillThere { still_present, .. } => still_present,
+        UninstallMessage::VendorFailed { .. } => item
+            .vendor
+            .as_ref()
+            .map_or(&[], |vendor| vendor.still_present.as_slice()),
+        _ => &[],
+    }
+}
+
 /// "Show details" after an uninstall: the target, then for each package
 /// what became of it, the files it removed, kept and left behind, its
 /// entries in Windows' list of installed programs, and why it stayed; then
@@ -729,9 +757,17 @@ pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallRepor
             };
             file_line(key, &kept.path)
         }));
+        // What a vendor's uninstaller didn't remove, which Done points to,
+        // then what a removal left; a path in both is said once.
+        let still_present = vendor_still_present(item);
         lines.extend(
-            item.leftovers
+            still_present
                 .iter()
+                .chain(
+                    item.leftovers
+                        .iter()
+                        .filter(|path| !still_present.contains(path)),
+                )
                 .map(|path| file_line("wizard-summary-left-over", path)),
         );
         lines.extend(

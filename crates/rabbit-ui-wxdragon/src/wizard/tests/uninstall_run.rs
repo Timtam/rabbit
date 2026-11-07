@@ -1265,6 +1265,11 @@ fn done_reads_in_every_locale() {
         ]),
         report(vendor_outcomes()),
         report(vendor_outcomes_to_check()),
+        report(vec![
+            surge_files_left(&[SURGE_VST3], Some(false)),
+            reaper_failed(&[REAPER_EXE]),
+        ]),
+        report(vec![surge_files_left(&[], Some(false)), reaper_failed(&[])]),
         report(vec![pending_restart_surge()]),
         report(vec![
             declined("sws"),
@@ -1646,6 +1651,138 @@ fn a_package_windows_no_longer_lists_isnt_sent_to_windows_settings() {
     );
 }
 
+const SURGE_VST3: &str = "C:/Program Files/Common Files/VST3/Surge Synth Team/Surge XT.vst3";
+const REAPER_EXE: &str = "C:/Program Files/REAPER (x64)/reaper.exe";
+
+/// A vendor run that didn't remove `package_id`, as the engine reports it:
+/// the uninstaller it ran, how it ended, and what it found still there.
+fn vendor_run_left(
+    package_id: &str,
+    exit_code: i32,
+    still_present: &[&str],
+    message_code: UninstallMessage,
+) -> UninstallReportItem {
+    let uninstaller = if package_id == "reaper" {
+        "C:/Program Files/REAPER (x64)/Uninstall.exe"
+    } else {
+        "C:/ProgramData/Surge XT/uninstall/unins000.exe"
+    };
+    UninstallReportItem {
+        vendor: Some(VendorOutcome {
+            status: VendorStatus::Failed,
+            uninstaller: Some(PathBuf::from(uninstaller)),
+            launched: true,
+            exit_code: Some(exit_code),
+            still_present: still_present.iter().map(PathBuf::from).collect(),
+            ..VendorOutcome::new(package_id)
+        }),
+        ..report_item(package_id, UninstallStatus::Failed, message_code)
+    }
+}
+
+/// Surge XT's uninstaller said it succeeded, but files are still there.
+fn surge_files_left(still_present: &[&str], still_listed: Option<bool>) -> UninstallReportItem {
+    vendor_run_left(
+        "surge-xt",
+        0,
+        still_present,
+        UninstallMessage::VendorStillThere {
+            still_present: still_present.iter().map(PathBuf::from).collect(),
+            still_listed,
+        },
+    )
+}
+
+/// REAPER's uninstaller ended with an error code.
+fn reaper_failed(still_present: &[&str]) -> UninstallReportItem {
+    vendor_run_left(
+        "reaper",
+        2,
+        still_present,
+        UninstallMessage::VendorFailed { exit_code: 2 },
+    )
+}
+
+/// Done sends the user to Show details for what a vendor's uninstaller left
+/// only when Show details lists it: there, each path is "Still there", once.
+/// With nothing to list, Done doesn't point there at all.
+#[test]
+fn show_details_lists_what_a_vendor_uninstaller_left() {
+    let leftover = |item: UninstallReportItem| {
+        let leftovers = vec![PathBuf::from(SURGE_VST3)];
+        UninstallReportItem { leftovers, ..item }
+    };
+    for (item, paths) in [
+        (
+            surge_files_left(&[SURGE_VST3], Some(false)),
+            vec![SURGE_VST3],
+        ),
+        (surge_files_left(&[SURGE_VST3], None), vec![SURGE_VST3]),
+        (reaper_failed(&[REAPER_EXE]), vec![REAPER_EXE]),
+        // Said once, also when the same path is a leftover too.
+        (
+            leftover(surge_files_left(&[SURGE_VST3], Some(false))),
+            vec![SURGE_VST3],
+        ),
+    ] {
+        let outcome = outcome(&report(vec![item]));
+        assert!(
+            outcome.status_text.contains("Show details lists"),
+            "{}",
+            outcome.status_text
+        );
+        for path in paths {
+            let line = format!("  Still there: {path}");
+            assert_eq!(
+                outcome
+                    .detail_lines
+                    .iter()
+                    .filter(|detail| **detail == line)
+                    .count(),
+                1,
+                "{line}: {:#?}",
+                outcome.detail_lines
+            );
+        }
+    }
+
+    for item in [
+        reaper_failed(&[]),
+        report_item(
+            "reaper",
+            UninstallStatus::Failed,
+            UninstallMessage::VendorFailed { exit_code: 2 },
+        ),
+        surge_files_left(&[], Some(false)),
+        surge_files_left(&[], None),
+    ] {
+        let outcome = outcome(&report(vec![item]));
+        assert!(
+            !outcome.status_text.contains("Show details"),
+            "{}",
+            outcome.status_text
+        );
+        assert!(
+            !outcome
+                .detail_lines
+                .iter()
+                .any(|line| line.contains("Still there")),
+            "{:#?}",
+            outcome.detail_lines
+        );
+    }
+    let reasons = uninstall_reasons(&en(), &report(vec![reaper_failed(&[])]));
+    assert_eq!(
+        reasons,
+        ["REAPER's own uninstaller ended with error code 2, so REAPER may not be fully removed."]
+    );
+    let reasons = uninstall_reasons(&en(), &report(vec![surge_files_left(&[], Some(false))]));
+    assert_eq!(
+        reasons[0],
+        "Surge XT's own uninstaller finished, but RABBIT can't confirm that Surge XT is gone."
+    );
+}
+
 /// An uninstaller RABBIT lost track of may still be running: Done says so,
 /// and for REAPER's, to check that REAPER's settings survived. A working
 /// folder RABBIT couldn't remove is named, so the user can find it.
@@ -1760,7 +1897,8 @@ fn each_vendor_outcome_reads_as_a_sentence() {
          C:/ProgramData/Surge XT/uninstall/unins001.exe",
         "Nothing was changed. You can uninstall Surge XT in Windows Settings",
         "REAPER's own uninstaller was cancelled before it finished.",
-        "SWS Extension's own uninstaller ended with error code 2.",
+        "SWS Extension's own uninstaller ended with error code 2, so SWS Extension may not be \
+         fully removed.",
         "OSARA's own uninstaller finished, but OSARA is still installed.",
         "ReaPack's own uninstaller is still open, so RABBIT stopped and left the packages after \
          it alone. Press Alt+Tab to find its window, and answer it.",
