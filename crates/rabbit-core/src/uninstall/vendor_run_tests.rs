@@ -31,7 +31,8 @@ use crate::package::{
 use crate::preflight::RunningProcess;
 use crate::progress::{ProgressEvent, ProgressReporter, RemovalMethod};
 use crate::receipt::{
-    InstallState, InstalledFileReceipt, PackageReceipt, load_install_state, save_install_state,
+    InstallState, InstalledFileReceipt, PackageReceipt, ReceiptVerification, load_install_state,
+    save_install_state, verify_package_receipt,
 };
 
 /// Everything on one volume, with room to spare.
@@ -519,19 +520,26 @@ fn files_left_for_the_next_restart_still_count_as_removed() {
 }
 
 /// What RABBIT's own detection says about `id` on `computer` right now,
-/// starting from its receipt, as a real run asks. Windows' list of
-/// installed programs is never read.
+/// through its receipt, as a real run asks first. Only the receipt: once it
+/// no longer vouches for the package, detection would go on to probes that
+/// look in this computer's real folders, never in the fixture's, so a test
+/// would pass or fail by what the machine running it has installed. That
+/// case reads as not installed here. Windows' list of installed programs is
+/// never read.
 fn detected_now(computer: &Computer, id: &str) -> ComponentDetection {
     let spec = computer.specs.iter().find(|spec| spec.id == id).unwrap();
     let state = load_install_state(computer.resource()).unwrap();
-    crate::detection::detect_component_with_probes(
-        computer.resource(),
-        Platform::Windows,
-        spec,
-        state.as_ref(),
-        |_| None,
-    )
-    .unwrap()
+    match verify_package_receipt(computer.resource(), state.as_ref(), id).unwrap() {
+        ReceiptVerification::Verified(_) => crate::detection::detect_component_with_probes(
+            computer.resource(),
+            Platform::Windows,
+            spec,
+            state.as_ref(),
+            |_| None,
+        )
+        .unwrap(),
+        _ => ComponentDetection::not_installed(spec.id.clone(), spec.display_name.clone()),
+    }
 }
 
 /// The usual restart case: another music program has Surge's VST3 loaded,
@@ -560,10 +568,16 @@ fn a_bundle_waiting_for_the_restart_is_still_removed_pending_the_restart() {
             )
         }),
     )]);
+    // What the check right after the uninstaller saw. The run asks again at
+    // its end, for leftovers, once the receipt entry is already gone; that
+    // later answer doesn't matter here.
+    let first_after: std::cell::RefCell<Option<ComponentDetection>> = Default::default();
     let mut run = Run::new(&computer, &helper);
     run.detections_after = Some(Box::new(|| {
         let surge = detected_now(&computer, PACKAGE_SURGE_XT);
-        assert!(surge.installed, "the bundle is still there: {surge:#?}");
+        first_after
+            .borrow_mut()
+            .get_or_insert_with(|| surge.clone());
         let mut detections = installed(&[PACKAGE_SWS, PACKAGE_REAPER]);
         detections.push(surge);
         detections
@@ -571,6 +585,14 @@ fn a_bundle_waiting_for_the_restart_is_still_removed_pending_the_restart() {
 
     let report = run.uninstall(&[PACKAGE_SURGE_XT]);
 
+    let seen = first_after
+        .borrow()
+        .clone()
+        .expect("detection ran after the uninstaller");
+    assert!(
+        seen.installed && seen.detector == "rabbit-receipt",
+        "the bundle is still there, and the receipt vouches for it: {seen:#?}"
+    );
     let surge = item(&report, PACKAGE_SURGE_XT);
     assert_eq!(
         surge.status,
