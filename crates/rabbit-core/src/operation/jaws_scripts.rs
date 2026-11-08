@@ -38,7 +38,9 @@
 //! a later uninstall: the manifest lists the JAWS settings folders and the
 //! REAPER `UserPlugins` folder under `uninstall.install_snapshot`, and the
 //! generic snapshot in `super::snapshot` puts every file the installer added
-//! or changed there on the receipt (`vendor_added_files`).
+//! or changed there on the receipt (`vendor_added_files`). The installer
+//! always runs elevated, so the snapshot applies its ownership rule to new
+//! files (`InstallSnapshot::new_files_only_from_administrators`).
 
 use std::path::{Path, PathBuf};
 

@@ -17,10 +17,32 @@
 //! changed are hashed, plus the few an earlier install recorded, so RABBIT
 //! can tell whether those still held what that install left.
 //!
+//! An installer that runs with administrator rights, as the JAWS scripts'
+//! always does, isn't the only thing writing meanwhile. JAWS keeps running
+//! while its scripts install, and the files it creates in those folders are
+//! new too. They belong to the user's account, though, while the files the
+//! elevated installer creates belong to the Administrators group. So after
+//! such an installer a new file is recorded only when Administrators,
+//! SYSTEM or TrustedInstaller own it
+//! ([`InstallSnapshot::new_files_only_from_administrators`]). The owner is
+//! read here, while it still tells who created the file: a later restore
+//! from a backup copies files back, and the copies belong to whoever
+//! restored them. A changed file is recorded as described at
+//! [`InstallSnapshot::record`] whoever owns it, because writing over a file
+//! doesn't change its owner.
+//!
+//! Owners don't always tell the installer's files from JAWS's. With UAC
+//! turned off both can run with full administrator rights, and a policy can
+//! make the account that created a file its owner even when it ran
+//! elevated. The rule then records every new file, as without it, or leaves
+//! the installer's files out too. It only ever leaves files out, so a later
+//! uninstall removes fewer files, never more.
+//!
 //! Nothing here may fail an install. By the time the second listing runs
 //! the files are on disk, and the record only helps a later uninstall. So
 //! every problem leaves files out of the record rather than putting wrong
-//! ones in: a file RABBIT can't hash isn't recorded, and nothing below a
+//! ones in: a file RABBIT can't hash isn't recorded, nor is a new file whose
+//! owner RABBIT can't read when the owner counts, and nothing below a
 //! folder RABBIT couldn't list before the run is recorded either, because
 //! otherwise everything in it, the user's own files included, would look
 //! new afterwards. Links are never followed, so a junction can't pull files
@@ -46,6 +68,10 @@ pub(super) struct InstallSnapshot {
     /// The files an earlier install recorded, each with its hash right
     /// before this run: `None` when it was gone or couldn't be read.
     recorded: Vec<(VendorAddedFile, Option<String>)>,
+    /// Whether a new file's owner is Administrators, SYSTEM or
+    /// TrustedInstaller, when only those count; see
+    /// [`Self::new_files_only_from_administrators`].
+    owner_is_trusted: Option<fn(&Path) -> io::Result<bool>>,
 }
 
 impl InstallSnapshot {
@@ -66,6 +92,24 @@ impl InstallSnapshot {
             paths,
             before,
             recorded,
+            owner_is_trusted: None,
+        }
+    }
+
+    /// Record a file that is new since the first listing only when
+    /// `owner_is_trusted` says Administrators, SYSTEM or TrustedInstaller
+    /// own it. Any other answer, an error included, leaves it out. Use it
+    /// for an installer that runs elevated: Administrators normally own the
+    /// files it creates, while the files other programs create meanwhile
+    /// belong to the user. Changed files are recorded as before, whoever
+    /// owns them.
+    pub(super) fn new_files_only_from_administrators(
+        self,
+        owner_is_trusted: fn(&Path) -> io::Result<bool>,
+    ) -> Self {
+        Self {
+            owner_is_trusted: Some(owner_is_trusted),
+            ..self
         }
     }
 
@@ -79,6 +123,12 @@ impl InstallSnapshot {
     /// file all along and keeps its earlier mark. Recorded files this run
     /// didn't touch stay as they were, even when the user changed or deleted
     /// them since, because an uninstall checks each file's hash anyway.
+    ///
+    /// When only new files Administrators own count, a new file someone
+    /// else owns is left out. If an earlier install recorded it, the earlier
+    /// entry stays as it was, as for any recorded file this run didn't
+    /// write: a later uninstall removes the file only if it still holds
+    /// exactly what that install left.
     pub(super) fn record(&self) -> Vec<VendorAddedFile> {
         let after = Listing::of(&self.roots, &self.paths);
         let mut record: BTreeMap<PathBuf, VendorAddedFile> = self
@@ -91,6 +141,7 @@ impl InstallSnapshot {
                 continue;
             }
             let existed_before = match self.before.files.get(path) {
+                None if !self.new_file_counts(path) => continue,
                 None => false,
                 Some(before) if before == stamp => continue,
                 Some(_) => self.earlier_mark(path).unwrap_or(true),
@@ -121,6 +172,14 @@ impl InstallSnapshot {
                 file.path == path && hash_before.as_deref() == Some(file.sha256.as_str())
             })
             .map(|(file, _)| file.existed_before)
+    }
+
+    /// Whether a new file at `path` counts as the installer's by its owner:
+    /// always, unless only files Administrators own count, and then only
+    /// when its owner could be read and is one of them.
+    fn new_file_counts(&self, path: &Path) -> bool {
+        self.owner_is_trusted
+            .is_none_or(|owner_is_trusted| matches!(owner_is_trusted(path), Ok(true)))
     }
 }
 
@@ -291,6 +350,7 @@ fn hash_regular_file(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io;
     use std::path::{Path, PathBuf};
 
     use tempfile::{TempDir, tempdir};
@@ -571,6 +631,167 @@ mod tests {
         fixture.write("REAPER/RABBIT/logs/install.json", "{}");
         let plugin = fixture.write("REAPER/UserPlugins/reaper_demo.dll", "demo");
         assert_eq!(snapshot.record(), [entry(&plugin, "demo", false)]);
+    }
+
+    /// Stands in for the owner check after an elevated installer: the fake
+    /// installer's files are named `reaper*`, and Administrators own them,
+    /// while every other file belongs to the user. No real owner is read.
+    fn administrators_own_reaper_files(path: &Path) -> io::Result<bool> {
+        let name = path.file_name().unwrap().to_string_lossy();
+        Ok(name.to_ascii_lowercase().starts_with("reaper"))
+    }
+
+    /// Stands in for owners nobody trusts.
+    fn nobody_trusted(_: &Path) -> io::Result<bool> {
+        Ok(false)
+    }
+
+    /// Stands in for owners RABBIT can't read.
+    fn owner_unreadable(_: &Path) -> io::Result<bool> {
+        Err(io::Error::from(io::ErrorKind::PermissionDenied))
+    }
+
+    /// What JAWS itself creates in its settings folders while the scripts
+    /// install: new files, but the user's.
+    fn jaws_writes_its_own_files(fixture: &Fixture) -> Vec<PathBuf> {
+        vec![
+            fixture.write(&fixture.jaws("2026/Settings/deu/DEFAULT.JCF"), "jaws"),
+            fixture.write(
+                &fixture.jaws("2026/Settings/deu/SettingsCenter.ini"),
+                "jaws",
+            ),
+            fixture.write(
+                &fixture.jaws("2026/Settings/Notifications/rules.json"),
+                "jaws",
+            ),
+        ]
+    }
+
+    #[test]
+    fn after_an_elevated_install_a_new_file_administrators_dont_own_is_not_recorded() {
+        let fixture = Fixture::new();
+        let snapshot = InstallSnapshot::take(&jaws_roots(), fixture.paths(), &[])
+            .new_files_only_from_administrators(administrators_own_reaper_files);
+        let script = fixture.write(&fixture.jaws("2026/Settings/deu/reaper.jss"), "script");
+        jaws_writes_its_own_files(&fixture);
+        assert_eq!(snapshot.record(), [entry(&script, "script", false)]);
+
+        // An owner RABBIT can't read counts as one it doesn't trust, even
+        // for the installer's own files.
+        let fixture = Fixture::new();
+        let snapshot = InstallSnapshot::take(&jaws_roots(), fixture.paths(), &[])
+            .new_files_only_from_administrators(owner_unreadable);
+        fixture.write(&fixture.jaws("2026/Settings/deu/reaper.jss"), "script");
+        fixture.write("REAPER/UserPlugins/Reaper_ComAccess64.dll", "com");
+        jaws_writes_its_own_files(&fixture);
+        assert!(snapshot.record().is_empty());
+    }
+
+    #[test]
+    fn after_an_elevated_install_a_new_file_administrators_own_is_recorded() {
+        let fixture = Fixture::new();
+        fixture.write(&fixture.jaws("2026/Settings/deu/default.jkm"), "mine");
+        let snapshot = InstallSnapshot::take(&jaws_roots(), fixture.paths(), &[])
+            .new_files_only_from_administrators(administrators_own_reaper_files);
+
+        // New files in a folder that was there and in one the installer
+        // creates, and the REAPER side DLL.
+        let script = fixture.write(&fixture.jaws("2026/Settings/deu/reaper.jss"), "script");
+        let sound = fixture.write(
+            &fixture.jaws("2026/Settings/deu/Sounds/reaper_record.wav"),
+            "wave",
+        );
+        let older = fixture.write(&fixture.jaws("2025/Settings/enu/reaper.jss"), "old script");
+        let dll = fixture.write("REAPER/UserPlugins/Reaper_ComAccess64.dll", "com");
+        jaws_writes_its_own_files(&fixture);
+
+        let mut expected = vec![
+            entry(&script, "script", false),
+            entry(&sound, "wave", false),
+            entry(&older, "old script", false),
+            entry(&dll, "com", false),
+        ];
+        expected.sort_by(|left, right| left.path.cmp(&right.path));
+        assert_eq!(snapshot.record(), expected);
+    }
+
+    #[test]
+    fn without_elevation_every_new_file_is_recorded_as_before() {
+        let fixture = Fixture::new();
+        let snapshot = InstallSnapshot::take(&jaws_roots(), fixture.paths(), &[]);
+        let script = fixture.write(&fixture.jaws("2026/Settings/deu/reaper.jss"), "script");
+        let dll = fixture.write("REAPER/UserPlugins/Reaper_ComAccess64.dll", "com");
+        let jaws_files = jaws_writes_its_own_files(&fixture);
+
+        let mut expected = vec![entry(&script, "script", false), entry(&dll, "com", false)];
+        expected.extend(jaws_files.iter().map(|path| entry(path, "jaws", false)));
+        expected.sort_by(|left, right| left.path.cmp(&right.path));
+        assert_eq!(snapshot.record(), expected);
+    }
+
+    /// Writing over a file keeps its owner, so the owner says nothing about
+    /// who changed it. A changed file is recorded as without the rule: marked
+    /// as there before, unless an earlier install recorded it unmarked and it
+    /// still held exactly that.
+    #[test]
+    fn a_changed_file_keeps_its_existed_before_rule_whoever_owns_it() {
+        let probes: [fn(&Path) -> io::Result<bool>; 2] = [nobody_trusted, owner_unreadable];
+        for owner_is_trusted in probes {
+            let fixture = Fixture::new();
+            let deu = |name: &str| fixture.jaws(&format!("2026/Settings/deu/{name}"));
+            let script = fixture.write(&deu("reaper.jss"), "v1");
+            let keys = fixture.write(&deu("reaper.jkm"), "keys v1");
+            let users = fixture.write(&deu("default.jkm"), "mine");
+            let earlier = vec![entry(&script, "v1", false), entry(&keys, "keys v1", false)];
+            // Since then the user changed the scripts' keys.
+            fs::write(&keys, "my own keys").unwrap();
+
+            let snapshot = InstallSnapshot::take(&jaws_roots(), fixture.paths(), &earlier)
+                .new_files_only_from_administrators(owner_is_trusted);
+            fs::write(&script, "v2, longer").unwrap();
+            fs::write(&keys, "keys v2, longer").unwrap();
+            fs::write(&users, "replaced by the installer").unwrap();
+
+            let mut expected = vec![
+                entry(&script, "v2, longer", false),
+                entry(&keys, "keys v2, longer", true),
+                entry(&users, "replaced by the installer", true),
+            ];
+            expected.sort_by(|left, right| left.path.cmp(&right.path));
+            assert_eq!(snapshot.record(), expected);
+        }
+    }
+
+    /// On a reinstall after an elevated installer, a recorded file the user
+    /// had deleted and someone else creates again is left out, so its earlier
+    /// entry stays as it was, as for any recorded file this run didn't write:
+    /// a later uninstall checks its hash. One the installer writes again is
+    /// brought up to date as before.
+    #[test]
+    fn an_elevated_reinstall_keeps_the_earlier_entry_of_a_file_someone_else_brought_back() {
+        let fixture = Fixture::new();
+        let deu = |name: &str| fixture.jaws(&format!("2026/Settings/deu/{name}"));
+        let docs = fixture.path(&deu("reaper.jsd"));
+        let uia = fixture.path(&deu("UIA.jsh"));
+        let config = fixture.write(&deu("reaper.jcf"), "config v1");
+        let earlier = vec![
+            entry(&docs, "docs v1", false),
+            entry(&uia, "uia v1", false),
+            entry(&config, "config v1", false),
+        ];
+
+        let snapshot = InstallSnapshot::take(&jaws_roots(), fixture.paths(), &earlier)
+            .new_files_only_from_administrators(administrators_own_reaper_files);
+        fixture.write(&deu("reaper.jsd"), "docs v2");
+        fixture.write(&deu("UIA.jsh"), "made by someone else");
+
+        let mut expected = vec![
+            entry(&docs, "docs v2", false),
+            entry(&uia, "uia v1", false),
+            entry(&config, "config v1", false),
+        ];
+        expected.sort_by(|left, right| left.path.cmp(&right.path));
+        assert_eq!(snapshot.record(), expected);
     }
 
     #[cfg(windows)]

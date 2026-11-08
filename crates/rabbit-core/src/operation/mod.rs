@@ -879,6 +879,7 @@ fn execute_operation_with(
                 options.target_app_path.as_deref(),
                 unattended_state.as_ref(),
                 snapshot_source,
+                rabbit_platform::file_owner_is_trusted,
             );
             // The unattended runner (vendor installer, archive extractor,
             // dmg mount + copy) is the work the user is waiting on for
@@ -1677,19 +1678,39 @@ fn executed_unattended_item(
 /// is the receipt as this run holds it, whose earlier record of the
 /// package's files the snapshot brings up to date. `source` says where to
 /// look; see [`manifest_snapshot_source`].
+///
+/// When the installer runs elevated on Windows, the snapshot applies
+/// [`InstallSnapshot::new_files_only_from_administrators`] with
+/// `owner_is_trusted`. Every real run passes
+/// [`rabbit_platform::file_owner_is_trusted`]. Tests that call this directly
+/// pass a stand-in, and the pipeline tests use `.cmd` installers, which
+/// never run elevated, so no test reads the owner of its temporary files.
 fn take_install_snapshot(
     artifact: &ArtifactDescriptor,
     resource_path: &Path,
     target_app_path: Option<&Path>,
     state: Option<&InstallState>,
     source: &SnapshotSource<'_>,
+    owner_is_trusted: fn(&Path) -> std::io::Result<bool>,
 ) -> Option<InstallSnapshot> {
     let (roots, paths) = source(artifact, resource_path, target_app_path)?;
     let recorded = state
         .and_then(|state| state.packages.get(&artifact.package_id))
         .map(|receipt| receipt.vendor_added_files.as_slice())
         .unwrap_or_default();
-    Some(InstallSnapshot::take(&roots, paths, recorded))
+    let snapshot = InstallSnapshot::take(&roots, paths, recorded);
+    // The same decision `planned_execution_for_artifact` makes for the
+    // runner, so the rule applies exactly when the installer is elevated.
+    let elevated = package_requires_elevation(
+        artifact,
+        resource_path,
+        effective_target_app_path(artifact, resource_path, target_app_path).as_deref(),
+    );
+    Some(if cfg!(windows) && elevated {
+        snapshot.new_files_only_from_administrators(owner_is_trusted)
+    } else {
+        snapshot
+    })
 }
 
 /// The snapshot roots `package_id`'s manifest declares.
@@ -2336,8 +2357,8 @@ mod tests {
     use crate::model::{Architecture, ComponentDetection, Confidence, Platform};
     use crate::package::uninstall::UninstallPath;
     use crate::package::{
-        PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT,
-        PACKAGE_SWS,
+        PACKAGE_JAWS_SCRIPTS, PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK, PACKAGE_REAPER,
+        PACKAGE_SURGE_XT, PACKAGE_SWS,
     };
     use crate::plan::PlanActionKind;
     use crate::preflight::RunningProcess;
@@ -4560,7 +4581,8 @@ mod tests {
                 &resource_path,
                 None,
                 None,
-                &manifest_snapshot_source
+                &manifest_snapshot_source,
+                |_| panic!("no snapshot, so no owner is asked for"),
             )
             .is_none()
         );
@@ -4603,6 +4625,68 @@ mod tests {
         )
         .unwrap();
         assert_eq!(state.packages[PACKAGE_SWS].vendor_added_files, expected);
+    }
+
+    /// After an elevated installer on Windows, the snapshot records a new
+    /// file only when its owner is trusted; after any other installer it
+    /// records every new file. The JAWS scripts' `.exe` installer always
+    /// runs elevated, while a `.cmd` stand-in never does. Nothing is run
+    /// here: the snapshot is taken and recorded by hand, with a stand-in
+    /// owner check that trusts files named `installer*` only, so no real
+    /// owner is read.
+    #[test]
+    fn the_snapshot_asks_who_owns_new_files_only_after_an_elevated_installer() {
+        fn installer_owns(path: &std::path::Path) -> std::io::Result<bool> {
+            let name = path.file_name().and_then(|name| name.to_str());
+            Ok(name.is_some_and(|name| name.starts_with("installer")))
+        }
+
+        let dir = tempdir().unwrap();
+        let resource_path = dir.path().join("REAPER");
+        let settings = dir.path().join("Settings");
+        fs::create_dir_all(&settings).unwrap();
+        let installer_file = settings.join("installer.jss");
+        let jaws_file = settings.join("jaws.ini");
+        let source =
+            |_: &ArtifactDescriptor, resource: &std::path::Path, _: Option<&std::path::Path>| {
+                Some((
+                    vec![UninstallPath::new("{appdata}/Settings")],
+                    UninstallRoots {
+                        appdata: Some(dir.path().to_path_buf()),
+                        ..UninstallRoots::new(resource)
+                    },
+                ))
+            };
+        let recorded = |file_name: &str| -> Vec<std::path::PathBuf> {
+            let artifact = artifact(PACKAGE_JAWS_SCRIPTS, ArtifactKind::Installer, file_name);
+            let snapshot = take_install_snapshot(
+                &artifact,
+                &resource_path,
+                Some(&resource_path.join("reaper.exe")),
+                None,
+                &source,
+                installer_owns,
+            )
+            .unwrap();
+            fs::write(&installer_file, file_name).unwrap();
+            fs::write(&jaws_file, file_name).unwrap();
+            let recorded = snapshot
+                .record()
+                .into_iter()
+                .map(|file| file.path)
+                .collect();
+            fs::remove_file(&installer_file).unwrap();
+            fs::remove_file(&jaws_file).unwrap();
+            recorded
+        };
+
+        let everything = [installer_file.as_path(), jaws_file.as_path()];
+        if cfg!(windows) {
+            assert_eq!(recorded("jaws-scripts.exe"), [installer_file.as_path()]);
+        } else {
+            assert_eq!(recorded("jaws-scripts.exe"), everything);
+        }
+        assert_eq!(recorded("jaws-scripts.cmd"), everything);
     }
 
     /// The pipeline lists a package's snapshot folders right before its
