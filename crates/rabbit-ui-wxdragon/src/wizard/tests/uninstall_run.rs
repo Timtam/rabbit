@@ -448,6 +448,11 @@ fn no_request_without_a_writable_target_or_a_tick() {
 /// page's details name the backup and the command that brings SWS back,
 /// and the rebuilt Install tab offers SWS again, unticked. Once SWS is put
 /// back by hand, its update is ticked.
+///
+/// The rows are planned on temporary folders alone. The engine and the
+/// Install tab read this computer's own detection and folders, which find
+/// the JAWS scripts wherever they are really installed, so the target is
+/// a portable REAPER, where nothing of theirs can be planned.
 #[test]
 fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
     let dir = tempdir().unwrap();
@@ -475,9 +480,11 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
                 detection
             })
             .collect();
-    let mut list = uninstall_list_for_target(
+    let roots = |target: &TargetRow| fixture_roots(model.platform, &target.path, dir.path());
+    let mut list = uninstall_list_with_roots(
         &model,
         &target,
+        &roots(&target),
         &detections,
         &NothingListed,
         &NoMacosObjects,
@@ -487,6 +494,7 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
     let request = uninstall_request_for_target(&model, &target, &list, true).unwrap();
     assert_eq!(request.package_ids, ["sws"]);
     assert!(request.remove_settings);
+    assert_eq!(request.target, Some(InstallationKind::Portable));
 
     let dry_run = UninstallRequest {
         dry_run: true,
@@ -504,6 +512,13 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
         UninstallStatus::WouldRemove
     );
     assert!(plugin.exists(), "a dry run changes nothing");
+    let jaws = preview.plan.item("jaws-scripts");
+    assert!(
+        jaws.is_none_or(|jaws| jaws.files.is_empty()
+            && jaws.machine_cleanup.is_none()
+            && !jaws.can_remove()),
+        "{jaws:?}"
+    );
 
     let report = execute_uninstall(
         &request,
@@ -557,9 +572,10 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
     let sws_rows = |target: &TargetRow| {
         let plan = wizard_package_plan_for_target_with_available(&model, Some(target), &available)
             .unwrap();
-        let list = uninstall_list_for_target(
+        let list = uninstall_list_with_roots(
             &model,
             target,
+            &roots(target),
             &plan.detections,
             &NothingListed,
             &NoMacosObjects,
@@ -2461,9 +2477,11 @@ fn show_details_lists_files_kept_because_they_were_there_before_and_the_by_hand_
             format!("  {}", en().text(SCRIPTS_NOTE_KEY).value),
         ]
     );
+    // The note names reaper.ini by itself, so look for the paths.
     let details = lines.join("\n");
     for name in ["reaper.jsb", "reaper.ini"] {
-        assert!(!details.contains(name), "{name}\n{details}");
+        let path = format!("{settings}/{name}");
+        assert!(!details.contains(&path), "{path}\n{details}");
     }
 
     // A package that stayed keeps all of its files, so listing some as

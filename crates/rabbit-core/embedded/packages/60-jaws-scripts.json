@@ -33,6 +33,7 @@
     "run_upstream_installer"
   ],
   "uninstall": {
+    "machine_wide_warning": false,
     "install_snapshot": [
       "{appdata}/Freedom Scientific/JAWS/*/Settings/*",
       "{appdata}/REAPER/UserPlugins"
@@ -40,8 +41,40 @@
     "plans": [
       {
         "platform": "windows",
-        "strategy": "manual",
-        "note_key": "uninstall-manual-jaws-scripts"
+        "strategy": "remove_files",
+        "summary": {
+          "removes_key": "uninstall-summary-jaws-scripts-removes",
+          "keeps_key": "uninstall-summary-jaws-scripts-keeps"
+        },
+        "remove": {
+          "paths": [
+            "{appdata}/REAPER/UserPlugins/Reaper_ComAccess32.dll",
+            "{appdata}/REAPER/UserPlugins/Reaper_ComAccess64.dll"
+          ],
+          "vendor_added_files": {
+            "files": [
+              "{appdata}/Freedom Scientific/JAWS/*/Settings/*/*"
+            ],
+            "by_hand_note_key": "uninstall-note-jaws-scripts-by-hand"
+          }
+        },
+        "machine_cleanup": {
+          "dir": "{program_files_x86}/Reaper_JawsScripts",
+          "files": [
+            "Uninstall.dat",
+            "Uninstall.exe"
+          ],
+          "registry": {
+            "hive": "hklm",
+            "key": "Reaper_JawsScripts",
+            "view": "bit32",
+            "values": {
+              "UninstallDirectory": "{program_files_x86}/Reaper_JawsScripts",
+              "Uninstall.dat": "{program_files_x86}/Reaper_JawsScripts/Uninstall.dat"
+            }
+          },
+          "by_hand_key": "uninstall-by-hand-jaws-scripts"
+        }
       }
     ]
   },

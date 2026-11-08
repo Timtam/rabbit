@@ -3904,7 +3904,8 @@ fn uninstall_note_text(note: &UninstallNote, name: &str, localizer: Option<&Loca
             localized_text(localizer, note_key)
         }
         UninstallNote::NoVendorRecord => format!(
-            "RABBIT has no record of which files {name}'s installer added, so all of them stay."
+            "RABBIT has no record of which files {name}'s installer added outside REAPER's \
+             folder, so all of those stay."
         ),
     }
 }
@@ -4839,12 +4840,12 @@ mod tests {
         );
         // Manual instructions keep their lines, indented under the plan's.
         let manual = plan(
-            r#"{ "platform": "windows", "strategy": "manual",
-                 "note_key": "uninstall-manual-jaws-scripts" }"#,
+            r#"{ "platform": "windows", "target": "portable", "strategy": "manual",
+                 "note_key": "uninstall-manual-reaper-portable" }"#,
         );
         let described = super::describe_uninstall_plan(&manual, Some(&english));
         let lines: Vec<&str> = described.lines().collect();
-        assert!(lines[0].starts_with("manual: RABBIT can't remove the JAWS scripts yet."));
+        assert!(lines[0].starts_with("manual: RABBIT doesn't remove a portable REAPER:"));
         assert_eq!(lines[1], "      1. Close REAPER.");
         assert!(lines.len() > 3);
         assert!(lines[1..].iter().all(|line| line.starts_with("      ")));
@@ -5001,6 +5002,12 @@ mod tests {
     /// is the user's to remove by hand. On macOS its app could go to the
     /// Trash, but these runs read nothing about macOS apps, so RABBIT can't
     /// check who may move it and leaves it to Finder.
+    ///
+    /// The engine reads this computer's own detection and folders, which
+    /// find the JAWS scripts wherever they are really installed. So every
+    /// run here goes through [`FakeReaper::report`], which keeps it on a
+    /// portable target, where nothing of theirs can be planned, and never
+    /// asks for them.
     struct FakeReaper {
         _dir: tempfile::TempDir,
         resource: PathBuf,
@@ -5038,17 +5045,42 @@ mod tests {
                 remove_settings: false,
                 dry_run: !apply,
                 target_app_path: None,
-                target: None,
+                target: Some(InstallationKind::Portable),
             }
         }
 
         fn run(&self, ids: &[&str], apply: bool) -> rabbit_core::uninstall::UninstallReport {
-            super::uninstall_report(
+            self.report(
                 &self.request(ids, apply),
                 &rabbit_core::uninstall::UninstallServices::without_elevation(),
                 &rabbit_core::cancel::CancelToken::new(),
             )
             .unwrap()
+        }
+
+        /// The CLI's report for `request` on this folder, refused before the
+        /// engine runs unless the request names a portable target and leaves
+        /// out the JAWS scripts, and checked to have been planned for a
+        /// portable one.
+        fn report(
+            &self,
+            request: &rabbit_core::uninstall::UninstallRequest,
+            services: &rabbit_core::uninstall::UninstallServices<'_>,
+            cancel: &rabbit_core::cancel::CancelToken,
+        ) -> Result<rabbit_core::uninstall::UninstallReport, Box<dyn std::error::Error>> {
+            assert_eq!(request.resource_path, self.resource);
+            assert_eq!(request.target, Some(InstallationKind::Portable));
+            assert!(
+                !request
+                    .package_ids
+                    .iter()
+                    .any(|id| id == rabbit_core::package::PACKAGE_JAWS_SCRIPTS),
+                "{:?}",
+                request.package_ids
+            );
+            let report = super::uninstall_report(request, services, cancel)?;
+            assert_eq!(report.target, InstallationKind::Portable);
+            Ok(report)
         }
 
         fn receipt(&self) -> rabbit_core::receipt::InstallState {
@@ -5099,12 +5131,13 @@ mod tests {
         std::fs::write(&reaper.sws, b"SWS again").unwrap();
         let cancel = rabbit_core::cancel::CancelToken::new();
         cancel.cancel();
-        let stopped = super::uninstall_report(
-            &reaper.request(&["sws"], true),
-            &rabbit_core::uninstall::UninstallServices::without_elevation(),
-            &cancel,
-        )
-        .unwrap();
+        let stopped = reaper
+            .report(
+                &reaper.request(&["sws"], true),
+                &rabbit_core::uninstall::UninstallServices::without_elevation(),
+                &cancel,
+            )
+            .unwrap();
         assert_eq!(super::uninstall_exit_code(&stopped), 1);
         assert!(reaper.sws.is_file());
     }
@@ -5301,46 +5334,73 @@ mod tests {
         }
     }
 
-    /// A dry run of REAPER on a fake standard REAPER whose uninstaller the
+    /// A report on REAPER for a fake standard REAPER whose uninstaller the
     /// lookup finds, with REAPER's item set to `status` and `code` the way a
-    /// run would leave it. The engine itself is tested in rabbit-core; this
-    /// is about what the CLI makes of a report. No helper can start: the run
-    /// is a dry run, and its helper refuses anyway.
+    /// run would leave it; it is a dry run's when `status` says REAPER would
+    /// go. REAPER's plan is the shipped one, built on temporary folders
+    /// alone rather than by the engine, which reads this computer's own
+    /// detection and folders and so finds the JAWS scripts wherever they are
+    /// really installed. The engine is tested in rabbit-core; this is about
+    /// what the CLI makes of a report.
     #[cfg(windows)]
     fn reaper_report(
         status: rabbit_core::uninstall::UninstallStatus,
         code: rabbit_core::uninstall::UninstallMessage,
         message: &str,
     ) -> (FakeReaper, rabbit_core::uninstall::UninstallReport) {
+        use rabbit_core::model::{ComponentDetection, Platform};
+        use rabbit_core::package::{PACKAGE_REAPER, builtin_package_specs};
         use rabbit_core::uninstall::{
-            NoAdministratorShell, NoElevatedHelper, NoMacosObjects, UninstallServices,
+            NoMacosObjects, UninstallPlanInput, UninstallReport, UninstallRoots, UninstallStatus,
+            build_uninstall_plan,
         };
 
         let reaper = FakeReaper::new();
-        let app = reaper.resource.join("reaper.exe");
-        let lookup = FoundIt::new(reaper.resource.join("Uninstall.exe"));
-        let mut report = super::uninstall_report(
-            &rabbit_core::uninstall::UninstallRequest {
-                target_app_path: Some(app),
-                target: Some(InstallationKind::Standard),
-                ..reaper.request(&["reaper"], false)
-            },
-            &UninstallServices {
-                vendor_lookup: &lookup,
-                elevated_helper: &NoElevatedHelper,
-                installed_programs: None,
-                macos_objects: &NoMacosObjects,
-                administrator_shell: &NoAdministratorShell,
-            },
-            &rabbit_core::cancel::CancelToken::new(),
-        )
-        .unwrap();
-        // Whatever this computer runs right now, the item reads as asked.
-        report.dry_run = status == rabbit_core::uninstall::UninstallStatus::WouldRemove;
-        let item = &mut report.items[0];
-        item.status = status;
-        item.message_code = code;
-        item.message = message.to_string();
+        // Every folder a plan could name outside the fake REAPER is a
+        // temporary one beside it, and REAPER is the one package detected.
+        let outside = reaper.resource.parent().unwrap();
+        let roots = UninstallRoots {
+            app_path: Some(reaper.resource.join("reaper.exe")),
+            app_dir: Some(reaper.resource.clone()),
+            appdata: Some(outside.join("Roaming")),
+            localappdata: Some(outside.join("Local")),
+            clap_dir: Some(outside.join("CLAP")),
+            common_program_files: Some(outside.join("Common Files")),
+            program_files: vec![outside.join("Program Files")],
+            program_files_x86: Some(outside.join("Program Files (x86)")),
+            program_data: Some(outside.join("ProgramData")),
+            documents: Some(outside.join("Documents")),
+            system_root: outside.join("system"),
+            ..UninstallRoots::new(&reaper.resource)
+        };
+        let detections = [ComponentDetection {
+            installed: true,
+            ..ComponentDetection::not_installed(PACKAGE_REAPER, "REAPER")
+        }];
+        let mut plan = build_uninstall_plan(&UninstallPlanInput {
+            roots: &roots,
+            platform: Platform::Windows,
+            target: InstallationKind::Standard,
+            specs: &builtin_package_specs(Platform::Windows),
+            detections: &detections,
+            state: None,
+            remove_settings: false,
+            vendor_lookup: &FoundIt::new(reaper.resource.join("Uninstall.exe")),
+            objects: &NoMacosObjects,
+        });
+        plan.items.retain(|item| item.package_id == PACKAGE_REAPER);
+        let item = mac_report_item(&plan.items[0], status, code, message);
+        let report = UninstallReport {
+            resource_path: reaper.resource.clone(),
+            backup_set_id: None,
+            plan,
+            ..win_report(
+                status == UninstallStatus::WouldRemove,
+                InstallationKind::Standard,
+                Vec::new(),
+                vec![item],
+            )
+        };
         (reaper, report)
     }
 
@@ -5496,12 +5556,10 @@ mod tests {
     const JAWS_UNINSTALL_EXE: &str = "C:/Program Files (x86)/Reaper_JawsScripts/Uninstall.exe";
     const JAWS_KEY: &str =
         r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Reaper_JawsScripts";
-    /// Steps over several lines, standing in for a package's steps to
-    /// remove it by hand.
-    const BY_HAND_KEY: &str = "uninstall-manual-reaper-portable";
-    /// One sentence, standing in for the note on removing by hand the
-    /// script files that stay.
-    const SCRIPTS_NOTE_KEY: &str = "uninstall-note-reapack-packages-stay";
+    /// The JAWS scripts' steps to remove them by hand, over several lines.
+    const BY_HAND_KEY: &str = "uninstall-by-hand-jaws-scripts";
+    /// The note on removing by hand the script files that stay.
+    const SCRIPTS_NOTE_KEY: &str = "uninstall-note-jaws-scripts-by-hand";
 
     /// The uninstaller folder, its two files and the registry entry, as the
     /// plan found them.
@@ -5940,7 +5998,7 @@ mod tests {
                     "paths": ["{appdata}/REAPER/UserPlugins/Reaper_ComAccess64.dll"],
                     "vendor_added_files": {
                         "files": ["{appdata}/Freedom Scientific/JAWS/*/Settings/*/*"],
-                        "by_hand_note_key": "uninstall-note-reapack-packages-stay"
+                        "by_hand_note_key": "uninstall-note-jaws-scripts-by-hand"
                     }
                 },
                 "machine_cleanup": {
@@ -5954,18 +6012,28 @@ mod tests {
                             "UninstallDirectory": "{program_files_x86}/Reaper_JawsScripts"
                         }
                     },
-                    "by_hand_key": "uninstall-manual-reaper-portable"
+                    "by_hand_key": "uninstall-by-hand-jaws-scripts"
                 }
             }"#,
         )
         .unwrap();
-        assert_eq!(
-            super::describe_uninstall_plan(&plan, None),
-            format!(
-                "remove_files (backup move, administrator cleanup of \
-                 {{program_files_x86}}/Reaper_JawsScripts and {JAWS_KEY})"
-            )
+        let expected = format!(
+            "remove_files (backup move, administrator cleanup of \
+             {{program_files_x86}}/Reaper_JawsScripts and {JAWS_KEY})"
         );
+        assert_eq!(super::describe_uninstall_plan(&plan, None), expected);
+
+        // The shipped JAWS scripts' plan for a standard REAPER reads the same.
+        let windows = rabbit_core::model::Platform::Windows;
+        let shipped = super::builtin_package_specs(windows)
+            .into_iter()
+            .find(|spec| spec.id == "jaws-scripts")
+            .unwrap();
+        let shipped = shipped
+            .uninstall
+            .plan_for(windows, InstallationKind::Standard)
+            .unwrap();
+        assert_eq!(super::describe_uninstall_plan(shipped, None), expected);
     }
 
     /// A package RABBIT leaves alone because of its uninstaller folder and
@@ -6502,20 +6570,21 @@ mod tests {
                     owned_by_me: true,
                     dev: 1,
                 });
-            super::uninstall_report(
-                &rabbit_core::uninstall::UninstallRequest {
-                    platform: rabbit_core::model::Platform::MacOs,
-                    target_app_path: Some(app.clone()),
-                    target: Some(InstallationKind::Portable),
-                    ..reaper.request(&["reaper"], false)
-                },
-                &UninstallServices {
-                    macos_objects: &objects,
-                    ..UninstallServices::without_elevation()
-                },
-                &rabbit_core::cancel::CancelToken::new(),
-            )
-            .unwrap()
+            reaper
+                .report(
+                    &rabbit_core::uninstall::UninstallRequest {
+                        platform: rabbit_core::model::Platform::MacOs,
+                        target_app_path: Some(app.clone()),
+                        target: Some(InstallationKind::Portable),
+                        ..reaper.request(&["reaper"], false)
+                    },
+                    &UninstallServices {
+                        macos_objects: &objects,
+                        ..UninstallServices::without_elevation()
+                    },
+                    &rabbit_core::cancel::CancelToken::new(),
+                )
+                .unwrap()
         };
 
         let english = rabbit_core::localization::Localizer::embedded("en-US").unwrap();
@@ -6579,20 +6648,21 @@ mod tests {
         let mistyped = reaper.resource.join("REAPER64.app");
         let objects = FakeMacosObjects::new();
         for apply in [false, true] {
-            let report = super::uninstall_report(
-                &rabbit_core::uninstall::UninstallRequest {
-                    platform: rabbit_core::model::Platform::MacOs,
-                    target_app_path: Some(mistyped.clone()),
-                    target: Some(InstallationKind::Portable),
-                    ..reaper.request(&["reaper"], apply)
-                },
-                &UninstallServices {
-                    macos_objects: &objects,
-                    ..UninstallServices::without_elevation()
-                },
-                &rabbit_core::cancel::CancelToken::new(),
-            )
-            .unwrap();
+            let report = reaper
+                .report(
+                    &rabbit_core::uninstall::UninstallRequest {
+                        platform: rabbit_core::model::Platform::MacOs,
+                        target_app_path: Some(mistyped.clone()),
+                        target: Some(InstallationKind::Portable),
+                        ..reaper.request(&["reaper"], apply)
+                    },
+                    &UninstallServices {
+                        macos_objects: &objects,
+                        ..UninstallServices::without_elevation()
+                    },
+                    &rabbit_core::cancel::CancelToken::new(),
+                )
+                .unwrap();
             let item = report.item("reaper").unwrap();
             assert_eq!(
                 item.status,
@@ -7027,19 +7097,20 @@ mod tests {
     fn uninstall_under_sudo_refuses_in_the_clis_words() {
         let reaper = FakeReaper::new();
         let objects = rabbit_core::uninstall::FakeMacosObjects::new().running_as_root();
-        let error = super::uninstall_report(
-            &rabbit_core::uninstall::UninstallRequest {
-                platform: rabbit_core::model::Platform::MacOs,
-                ..reaper.request(&["sws"], true)
-            },
-            &rabbit_core::uninstall::UninstallServices {
-                macos_objects: &objects,
-                ..rabbit_core::uninstall::UninstallServices::without_elevation()
-            },
-            &rabbit_core::cancel::CancelToken::new(),
-        )
-        .map_err(super::cli_uninstall_error)
-        .unwrap_err();
+        let error = reaper
+            .report(
+                &rabbit_core::uninstall::UninstallRequest {
+                    platform: rabbit_core::model::Platform::MacOs,
+                    ..reaper.request(&["sws"], true)
+                },
+                &rabbit_core::uninstall::UninstallServices {
+                    macos_objects: &objects,
+                    ..rabbit_core::uninstall::UninstallServices::without_elevation()
+                },
+                &rabbit_core::cancel::CancelToken::new(),
+            )
+            .map_err(super::cli_uninstall_error)
+            .unwrap_err();
         assert_eq!(error.to_string(), super::UNINSTALL_AS_ROOT_TEXT);
         assert!(error.to_string().contains("without sudo"), "{error}");
         // Any other error is printed as it is.

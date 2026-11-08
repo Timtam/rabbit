@@ -6,8 +6,12 @@
 //! fact macOS would give is handed in. Their dry runs give root nothing,
 //! and their real runs move a temporary app into a temporary Trash and
 //! carry root's steps out on temporary folders, through a stand-in for the
-//! administrator command that never asks for a password.
+//! administrator command that never asks for a password. The JAWS scripts'
+//! uninstaller folder and registry entry are only ever looked up by a
+//! stand-in, except in one ignored check, run by hand, that reads this
+//! computer's real ones and changes nothing.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -25,23 +29,29 @@ use super::macos_plan_tests::{
     DISK, MacFixture, OneVolume, SURGE_XT_TREES, join, link_folder, my_trash, owned_by_me,
     owned_by_root, snapshot,
 };
-use super::tests::{Fixture, FoundAt, detection, installed, write};
+use super::paths::pattern_matches;
+use super::tests::{
+    Fixture, FoundAt, cleanup_found, detection, installed, script_file, script_path,
+    script_plugins, scripts_fixture, write,
+};
 use super::{
-    AdministratorShell, ByHandReason, FakeMacosObjects, KeptReason, MacosObjects,
+    AdministratorShell, ByHandReason, CleanupJob, FakeMacosObjects, KeptReason, MacosObjects,
     NoAdministratorShell, NoElevatedHelper, NoMacosObjects, NothingListed, ObjectFacts,
-    ObjectProbe, PathRefusal, PlannedRegistryCleanup, RecordingAdministratorShell, Removability,
-    RemovalReason, RemovalRoute, TrashFolderFacts, UNINSTALL_NOT_YET_KEY, UninstallMessage,
-    UninstallNote, UninstallPlan, UninstallPlanInput, UninstallPlanItem, UninstallProblem,
-    UninstallReport, UninstallRequest, UninstallRoots, UninstallStatus, UninstallWarning,
-    VendorLookup, VendorRefusal, build_uninstall_plan,
+    ObjectProbe, PathRefusal, PlannedMachineCleanup, PlannedRegistryCleanup,
+    RecordingAdministratorShell, Removability, RemovalReason, RemovalRoute, TrashFolderFacts,
+    UNINSTALL_NOT_YET_KEY, UninstallMessage, UninstallNote, UninstallPlan, UninstallPlanInput,
+    UninstallPlanItem, UninstallProblem, UninstallReport, UninstallRequest, UninstallRoots,
+    UninstallStatus, UninstallWarning, VendorJob, VendorLookup, VendorRefusal,
+    build_uninstall_plan,
 };
 use crate::cancel::CancelToken;
 use crate::detection::detect_component_with_probes;
+use crate::install::outside_restore_rules_with;
 use crate::localization::{Localizer, embedded_locales};
 use crate::model::{ComponentDetection, InstallationKind, Platform};
 use crate::package::uninstall::{
-    UninstallBackup, UninstallElevation, UninstallPostStep, UninstallStrategy,
-    VendorUninstallerKind,
+    MachineCleanupSpec, RegistryHive, RegistryViewSpec, UninstallBackup, UninstallElevation,
+    UninstallPath, UninstallPostStep, UninstallStrategy, VendorUninstallerKind,
 };
 use crate::package::{
     PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_JAWS_SCRIPTS, PACKAGE_OSARA, PACKAGE_REAKONTROL,
@@ -51,12 +61,16 @@ use crate::package::{
 use crate::preflight::{MACOS_REAPER_PROCESS_NAMES, RunningProcess};
 use crate::progress::ProgressReporter;
 use crate::reapack::write_test_registry;
-use crate::receipt::{InstallState, InstalledFileReceipt, PackageReceipt};
+use crate::receipt::{InstallState, InstalledFileReceipt, PackageReceipt, VendorAddedFile};
 
 const LANGPACK_DE: &str = "langpack-de";
 const LANGPACK_ES: &str = "langpack-es";
 const LANGPACK_FR: &str = "langpack-fr";
 const SWS_IN_REAPACK: &str = "SWS/S&M extension";
+/// The JAWS scripts' steps to remove them by hand.
+const JAWS_BY_HAND: &str = "uninstall-by-hand-jaws-scripts";
+/// The note on removing by hand the JAWS script files that stay.
+const JAWS_SCRIPT_FILES_BY_HAND: &str = "uninstall-note-jaws-scripts-by-hand";
 
 /// The shipped packages for one platform, planned on a fixture.
 struct Shipped<'f> {
@@ -242,8 +256,9 @@ fn sorted(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
 type Expected<'a> = &'a [(&'a str, Option<UninstallStrategy>)];
 
 /// Which shipped packages RABBIT can uninstall, and how, on each platform
-/// and target. None waits for a later version any more, and the two RABBIT
-/// leaves to the user say how to do it by hand.
+/// and target. None waits for a later version any more, and the one RABBIT
+/// leaves to the user, a portable REAPER, says how to do it by hand. So do
+/// the JAWS scripts wherever RABBIT can't remove them.
 #[test]
 fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
     for spec in embedded_package_manifest().packages {
@@ -264,7 +279,7 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
                 (PACKAGE_SWS, remove_files),
                 (PACKAGE_REAPACK, remove_files),
                 (PACKAGE_REAKONTROL, remove_files),
-                (PACKAGE_JAWS_SCRIPTS, manual),
+                (PACKAGE_JAWS_SCRIPTS, remove_files),
                 (PACKAGE_FFMPEG, remove_files),
                 (PACKAGE_SURGE_XT, vendor),
                 (PACKAGE_APP2CLAP, remove_files),
@@ -277,16 +292,15 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
             Platform::Windows,
             InstallationKind::Portable,
             // The JAWS scripts, Surge XT and app2clap serve the whole
-            // computer, so a portable target can't remove them. Surge XT
-            // and app2clap have a removal it can't reach; the JAWS scripts
-            // keep the standard REAPER's plan, which removes nothing.
+            // computer, so a portable target can't remove them: each has a
+            // removal only the standard REAPER can reach.
             &[
                 (PACKAGE_REAPER, manual),
                 (PACKAGE_OSARA, remove_files),
                 (PACKAGE_SWS, remove_files),
                 (PACKAGE_REAPACK, remove_files),
                 (PACKAGE_REAKONTROL, remove_files),
-                (PACKAGE_JAWS_SCRIPTS, manual),
+                (PACKAGE_JAWS_SCRIPTS, None),
                 (PACKAGE_FFMPEG, remove_files),
                 (PACKAGE_SURGE_XT, None),
                 (PACKAGE_APP2CLAP, None),
@@ -335,9 +349,11 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
     ]);
 
     // Surge XT's macOS trees are planned below an empty temporary system
-    // root, never the host's real /.
+    // root, never the host's real /, and the JAWS scripts' `{appdata}` is
+    // the fixture's own folder, never the real one.
     let mut fixture = Fixture::new();
     fixture.roots.system_root = fixture.dir.path().join("system");
+    fixture.roots.appdata = Some(fixture.dir.path().to_path_buf());
     for (platform, target, expected) in cases {
         let shipped = Shipped::new(&fixture, platform);
         let plan = shipped.plan_with(&[], None, target, false);
@@ -351,8 +367,10 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
         assert_eq!(strategies, expected, "{platform:?}, {target:?}");
     }
 
-    // The two packages RABBIT leaves to the user say how, in their own
-    // words rather than "not yet".
+    // The package RABBIT leaves to the user says how, in its own words
+    // rather than "not yet". The JAWS scripts need their uninstaller folder
+    // and registry entry looked up, which a lookup that never looked can't
+    // do, so it refuses them and they too say how to remove them by hand.
     let windows = Shipped::new(&fixture, Platform::Windows);
     let everything: Vec<ComponentDetection> = windows
         .specs
@@ -362,8 +380,9 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
     let plan = windows.plan(&everything, None);
     assert_eq!(
         item(&plan, PACKAGE_JAWS_SCRIPTS).removability,
-        Removability::Manual {
-            note_key: "uninstall-manual-jaws-scripts".to_string()
+        Removability::CleanupNotTrusted {
+            refusal: VendorRefusal::NotListed,
+            by_hand_key: JAWS_BY_HAND.to_string(),
         }
     );
     let plan = windows.plan_with(&everything, None, InstallationKind::Portable, false);
@@ -373,16 +392,18 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
             note_key: "uninstall-manual-reaper-portable".to_string()
         }
     );
-    // The JAWS DLLs are in the standard REAPER's folder whatever the target,
-    // so a portable target shows the same steps, rather than sending the
-    // user to a standard REAPER that can't remove them either. Surge XT
-    // comes off only from the standard REAPER, as app2clap does.
+    // The JAWS scripts, Surge XT and app2clap come off only from the
+    // standard REAPER. The JAWS scripts lend the standard plan's steps to
+    // remove them by hand, so a portable target still says how.
+    let jaws = item(&plan, PACKAGE_JAWS_SCRIPTS);
+    assert_eq!(jaws.removability, Removability::NeedsStandardTarget);
     assert_eq!(
-        item(&plan, PACKAGE_JAWS_SCRIPTS).removability,
-        Removability::Manual {
-            note_key: "uninstall-manual-jaws-scripts".to_string()
-        }
+        jaws.notes,
+        vec![UninstallNote::Manifest {
+            note_key: JAWS_BY_HAND.to_string(),
+        }]
     );
+    assert!(jaws.files.is_empty() && jaws.machine_cleanup.is_none());
     assert_eq!(
         item(&plan, PACKAGE_SURGE_XT).removability,
         Removability::NeedsStandardTarget
@@ -1456,6 +1477,466 @@ fn reaper_on_windows_runs_its_own_uninstaller_and_keeps_the_resource_folder() {
             note_key: "uninstall-manual-reaper-portable".to_string()
         }
     );
+}
+
+// ---------------------------------------------------------------------------
+// The JAWS scripts on Windows, from the shipped plan. `{appdata}` is the
+// fixture's own folder, so the resource folder is `{appdata}/REAPER`, and
+// only a stand-in lookup ever answers for their uninstaller folder and
+// registry entry: nothing reads the real ones.
+// ---------------------------------------------------------------------------
+
+/// A fixture whose `{appdata}` is its own temporary folder, with a 32-bit
+/// Program Files folder in it.
+fn jaws_fixture() -> Fixture {
+    let mut fixture = scripts_fixture();
+    fixture.roots.program_files_x86 = Some(fixture.dir.path().join("Program Files (x86)"));
+    fixture
+}
+
+/// A receipt for the JAWS scripts naming the 64-bit plug-in, as their
+/// installer leaves one, and `records` as the files it added or changed:
+/// (path, hash, whether it was there before).
+fn jaws_receipt(fixture: &Fixture, records: &[(&Path, &str, bool)]) -> InstallState {
+    let mut state = receipt(
+        fixture,
+        &[(
+            PACKAGE_JAWS_SCRIPTS,
+            &["UserPlugins/Reaper_ComAccess64.dll"],
+        )],
+    );
+    state
+        .packages
+        .get_mut(PACKAGE_JAWS_SCRIPTS)
+        .unwrap()
+        .vendor_added_files = records
+        .iter()
+        .map(|(path, sha256, existed_before)| VendorAddedFile {
+            path: path.to_path_buf(),
+            sha256: sha256.to_string(),
+            size: 15,
+            existed_before: *existed_before,
+        })
+        .collect();
+    state
+}
+
+/// A stand-in for the lookup of the JAWS scripts' uninstaller folder and
+/// registry entry: it answers `cleanup`, and keeps each cleanup it was
+/// asked about, so a test sees the shipped manifest's own. It reads
+/// nothing.
+struct JawsLookup {
+    cleanup: Result<Option<PlannedMachineCleanup>, VendorRefusal>,
+    asked: RefCell<Vec<(String, MachineCleanupSpec)>>,
+}
+
+impl JawsLookup {
+    fn answering(cleanup: Result<Option<PlannedMachineCleanup>, VendorRefusal>) -> Self {
+        Self {
+            cleanup,
+            asked: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl VendorLookup for JawsLookup {
+    fn locate(&self, _job: &VendorJob<'_>) -> Result<PathBuf, VendorRefusal> {
+        Err(VendorRefusal::NotListed)
+    }
+
+    fn machine_cleanup(
+        &self,
+        job: &CleanupJob<'_>,
+    ) -> Result<Option<PlannedMachineCleanup>, VendorRefusal> {
+        self.asked
+            .borrow_mut()
+            .push((job.package_id.to_string(), job.spec.clone()));
+        self.cleanup.clone()
+    }
+}
+
+/// The JAWS scripts on Windows, from the shipped plan: both plug-ins go
+/// from UserPlugins, the 64-bit one with the hash the receipt lends it,
+/// and so does every script file the receipt records as new from the
+/// installer, with its own hash, guarded by JAWS's settings folder. A
+/// script file that was there before the installer ran stays and is
+/// listed, even with "Also remove settings"; files the receipt doesn't
+/// record, or records outside the manifest's pattern, stay unlisted. No
+/// folder goes. Everything goes into the backup set, nothing asks while
+/// the uninstaller folder and registry entry are gone, and a note says how
+/// to remove by hand the script files that stay.
+#[test]
+fn shipped_jaws_plan_removes_both_dlls_and_the_recorded_scripts() {
+    let fixture = jaws_fixture();
+    let [plugin32, plugin64] = script_plugins(&fixture);
+    let english = script_file(&fixture, "2025", "enu", "reaper.jss");
+    let german = script_file(&fixture, "2026", "deu", "reaper.jkm");
+    let there_before = script_file(&fixture, "2025", "enu", "reaper.jcf");
+    let not_recorded = script_file(&fixture, "2025", "enu", "DEFAULT.JCF");
+    let too_deep = write(
+        &script_path(fixture.dir.path(), "2025", "enu", "sounds").join("click.wav"),
+        b"sound",
+    );
+    let state = jaws_receipt(
+        &fixture,
+        &[
+            (&english, "aa", false),
+            (&german, "bb", false),
+            (&there_before, "cc", true),
+            (&too_deep, "dd", false),
+            // The same snapshot records the plug-ins in UserPlugins; the
+            // manifest names those by path.
+            (&plugin32, "ee", false),
+        ],
+    );
+    let shipped = Shipped::new(&fixture, Platform::Windows);
+    let detections = installed(&[PACKAGE_JAWS_SCRIPTS]);
+
+    for remove_settings in [false, true] {
+        let plan = shipped.plan_looking_up(
+            &detections,
+            Some(&state),
+            InstallationKind::Standard,
+            remove_settings,
+            &JawsLookup::answering(Ok(None)),
+        );
+        let jaws = item(&plan, PACKAGE_JAWS_SCRIPTS);
+        assert_eq!(jaws.removability, Removability::Removable);
+        assert_eq!(jaws.strategy, Some(UninstallStrategy::RemoveFiles));
+        assert_eq!(
+            jaws.summary
+                .as_ref()
+                .map(|summary| (summary.removes_key.as_str(), summary.keeps_key.as_str())),
+            Some((
+                "uninstall-summary-jaws-scripts-removes",
+                "uninstall-summary-jaws-scripts-keeps"
+            ))
+        );
+        assert_eq!(
+            removed(jaws),
+            sorted(vec![
+                plugin32.clone(),
+                plugin64.clone(),
+                english.clone(),
+                german.clone()
+            ])
+        );
+        assert_eq!(reason_of(jaws, &plugin32), RemovalReason::ManifestPath);
+        assert_eq!(reason_of(jaws, &plugin64), RemovalReason::ManifestPath);
+        let lent = jaws
+            .files
+            .iter()
+            .find(|file| file.path == plugin64)
+            .unwrap();
+        assert_eq!(
+            lent.receipt_sha256.as_deref(),
+            Some("sha256 of UserPlugins/Reaper_ComAccess64.dll")
+        );
+        let guard_root = fixture.dir.path().join("Freedom Scientific").join("JAWS");
+        for (path, sha256) in [(&english, "aa"), (&german, "bb")] {
+            let file = jaws.files.iter().find(|file| file.path == *path).unwrap();
+            assert_eq!(file.reason, RemovalReason::VendorAdded);
+            assert_eq!(file.receipt_sha256.as_deref(), Some(sha256));
+            assert_eq!(file.guard.root.as_deref(), Some(guard_root.as_path()));
+        }
+        for file in &jaws.files {
+            assert_eq!(
+                file.check(&fixture.roots),
+                Ok(()),
+                "{}",
+                file.path.display()
+            );
+        }
+        assert_eq!(
+            jaws.kept
+                .iter()
+                .map(|kept| (kept.path.clone(), kept.reason))
+                .collect::<Vec<_>>(),
+            vec![(there_before.clone(), KeptReason::ThereBeforeInstall)]
+        );
+        for path in [&not_recorded, &too_deep] {
+            assert!(
+                !jaws.files.iter().any(|file| file.path == *path)
+                    && !jaws.kept.iter().any(|kept| kept.path == *path),
+                "{}",
+                path.display()
+            );
+        }
+        assert!(jaws.dirs_if_empty.is_empty(), "{:?}", jaws.dirs_if_empty);
+        assert_eq!(
+            jaws.notes,
+            vec![UninstallNote::VendorFilesByHand {
+                note_key: JAWS_SCRIPT_FILES_BY_HAND.to_string(),
+            }]
+        );
+
+        // Into the backup set, with every REAPER closed, and nothing else.
+        assert_eq!(jaws.route(), RemovalRoute::BackupSet);
+        assert_eq!(jaws.backup, UninstallBackup::Move);
+        assert!(!jaws.unbacked && !jaws.requires_elevation);
+        assert!(jaws.every_reaper_closed);
+        assert!(jaws.warnings.is_empty(), "{:?}", jaws.warnings);
+        assert_eq!(jaws.machine_cleanup, None);
+        assert!(!jaws.needs_elevated_helper() && !jaws.confirm);
+        assert!(jaws.can_remove());
+    }
+}
+
+/// The shipped plan asks the lookup about the uninstaller folder and
+/// registry entry the JAWS scripts' installer leaves: `Reaper_JawsScripts`
+/// in the 32-bit Program Files, holding `Uninstall.dat` and
+/// `Uninstall.exe`, and its entry in HKLM's 32-bit list. Only while the
+/// lookup finds them there does the package need the elevated helper and
+/// ask first; it stays on the backup set's route either way, its files
+/// the same. A lookup that refuses, or one that never looked, blocks the
+/// whole package, which then says how to remove it by hand. With no
+/// receipt and none of its files here, it is left to the account that
+/// installed it.
+#[test]
+fn shipped_jaws_plan_asks_for_elevation_only_when_its_vendor_folder_is_there() {
+    let fixture = jaws_fixture();
+    script_plugins(&fixture);
+    let script = script_file(&fixture, "2025", "enu", "reaper.jss");
+    let state = jaws_receipt(&fixture, &[(&script, "aa", false)]);
+    let shipped = Shipped::new(&fixture, Platform::Windows);
+    let detections = installed(&[PACKAGE_JAWS_SCRIPTS]);
+    let plan_with = |state: Option<&InstallState>, lookup: &dyn VendorLookup| {
+        shipped.plan_looking_up(
+            &detections,
+            state,
+            InstallationKind::Standard,
+            false,
+            lookup,
+        )
+    };
+
+    let gone = JawsLookup::answering(Ok(None));
+    let plan = plan_with(Some(&state), &gone);
+    let without = item(&plan, PACKAGE_JAWS_SCRIPTS);
+    assert_eq!(without.removability, Removability::Removable);
+    assert_eq!(without.machine_cleanup, None);
+    assert!(!without.needs_elevated_helper() && !without.confirm);
+
+    // What the lookup was asked about is the shipped manifest's cleanup.
+    let asked = gone.asked.borrow();
+    let [(package_id, cleanup)] = asked.as_slice() else {
+        panic!("{asked:?}");
+    };
+    assert_eq!(package_id, PACKAGE_JAWS_SCRIPTS);
+    let folder = "{program_files_x86}/Reaper_JawsScripts";
+    assert_eq!(cleanup.dir, UninstallPath::new(folder));
+    assert_eq!(cleanup.files, ["Uninstall.dat", "Uninstall.exe"]);
+    assert_eq!(cleanup.registry.hive, RegistryHive::Hklm);
+    assert_eq!(cleanup.registry.key, "Reaper_JawsScripts");
+    assert_eq!(cleanup.registry.view, RegistryViewSpec::Bit32);
+    assert_eq!(
+        cleanup.registry.values,
+        BTreeMap::from([
+            (
+                "Uninstall.dat".to_string(),
+                UninstallPath::new(format!("{folder}/Uninstall.dat"))
+            ),
+            ("UninstallDirectory".to_string(), UninstallPath::new(folder)),
+        ])
+    );
+    assert_eq!(cleanup.by_hand_key, JAWS_BY_HAND);
+
+    let found = cleanup_found(&fixture, JAWS_BY_HAND);
+    let plan = plan_with(
+        Some(&state),
+        &JawsLookup::answering(Ok(Some(found.clone()))),
+    );
+    let with = item(&plan, PACKAGE_JAWS_SCRIPTS);
+    assert_eq!(with.removability, Removability::Removable);
+    assert_eq!(with.machine_cleanup, Some(found.clone()));
+    assert!(with.needs_elevated_helper() && with.confirm && with.can_remove());
+    assert!(!with.runs_vendor_uninstaller());
+    assert_eq!(with.route(), RemovalRoute::BackupSet);
+    assert!(!with.unbacked && !with.requires_elevation && !with.needs_administrator());
+    assert_eq!(removed(with), removed(without));
+
+    let refusal = VendorRefusal::UntrustedFolder {
+        path: found.folder.clone().unwrap(),
+    };
+    for (lookup, refusal) in [
+        (
+            &JawsLookup::answering(Err(refusal.clone())) as &dyn VendorLookup,
+            refusal,
+        ),
+        (&NothingListed, VendorRefusal::NotListed),
+    ] {
+        let plan = plan_with(Some(&state), lookup);
+        let blocked = item(&plan, PACKAGE_JAWS_SCRIPTS);
+        assert_eq!(
+            blocked.removability,
+            Removability::CleanupNotTrusted {
+                refusal,
+                by_hand_key: JAWS_BY_HAND.to_string(),
+            }
+        );
+        assert!(blocked.files.is_empty() && blocked.machine_cleanup.is_none());
+        assert!(!blocked.needs_elevated_helper() && !blocked.can_remove());
+    }
+
+    let elsewhere = jaws_fixture();
+    let shipped = Shipped::new(&elsewhere, Platform::Windows);
+    let plan = shipped.plan_looking_up(
+        &detections,
+        None,
+        InstallationKind::Standard,
+        false,
+        &JawsLookup::answering(Ok(Some(cleanup_found(&elsewhere, JAWS_BY_HAND)))),
+    );
+    let left = item(&plan, PACKAGE_JAWS_SCRIPTS);
+    assert_eq!(
+        left.removability,
+        Removability::NoFilesForThisAccount {
+            by_hand_key: JAWS_BY_HAND.to_string(),
+        }
+    );
+    assert!(!left.needs_elevated_helper() && !left.can_remove());
+}
+
+/// The shipped JAWS plan's script-file pattern is what lets
+/// `restore-backup --package jaws-scripts` put those files back: it is the
+/// one pattern of a shipped package a restore may write by, for the JAWS
+/// scripts alone, guarded by JAWS's settings folder.
+#[test]
+fn the_shipped_jaws_pattern_is_the_only_vendor_pattern_a_restore_allows() {
+    let fixture = jaws_fixture();
+    let appdata = fixture.dir.path();
+    let rules = outside_restore_rules_with(
+        &builtin_package_specs(Platform::Windows),
+        Platform::Windows,
+        &fixture.roots,
+        Vec::new(),
+    );
+    let [(owner, pattern)] = rules.vendor_added.as_slice() else {
+        panic!("{:?}", rules.vendor_added);
+    };
+    assert_eq!(owner, PACKAGE_JAWS_SCRIPTS);
+    assert_eq!(
+        pattern.guard.root.as_deref(),
+        Some(appdata.join("Freedom Scientific").join("JAWS").as_path())
+    );
+    assert!(pattern_matches(
+        pattern,
+        &script_path(appdata, "2025", "enu", "reaper.jss")
+    ));
+}
+
+/// Checks this computer's real JAWS scripts' uninstaller folder and
+/// registry entry against the shipped manifest, as the plan's lookup and
+/// the elevated helper would, and deletes nothing: it only calls the
+/// check, through the lookup's environment, which refuses every delete,
+/// and nothing here asks for permission. With the folder or the entry
+/// there, every check must pass; with neither, there is nothing to remove.
+/// Ignored, because it depends on what is installed; run it by hand with
+/// `--ignored` before a hardware test.
+#[cfg(windows)]
+#[test]
+#[ignore = "reads this computer's real JAWS uninstaller folder and registry entry; run it by hand"]
+fn the_real_jaws_cleanup_passes_the_checks_without_running() {
+    use rabbit_platform::{RegistryView, UninstallViews};
+
+    use super::check_machine_cleanup;
+    use super::helper::{HelperArgs, MachineFolders, helper_roots};
+    use super::vendor::LookupOnly;
+
+    let spec = builtin_package_specs(Platform::Windows)
+        .into_iter()
+        .find(|spec| spec.id == PACKAGE_JAWS_SCRIPTS)
+        .unwrap();
+    let cleanup = spec
+        .uninstall
+        .plan_for(Platform::Windows, InstallationKind::Standard)
+        .and_then(|plan| plan.machine_cleanup.clone())
+        .expect("the shipped JAWS plan has a machine cleanup");
+    let lookup = LookupOnly {
+        views: UninstallViews::local_machine(),
+    };
+    let key_there = lookup
+        .views
+        .read_entry_in_view(&cleanup.registry.key, RegistryView::Bit32)
+        .unwrap()
+        .is_some();
+
+    // The plan's roots, as the planner reads this computer's folders, and
+    // the elevated helper's, from the known folders alone.
+    let resource = rabbit_platform::user_appdata_dir().unwrap().join("REAPER");
+    let planning = UninstallRoots::for_target(Platform::Windows, &resource, None);
+    let helper = helper_roots(
+        &HelperArgs {
+            pipe: String::new(),
+            parent_pid: 0,
+            resource_path: resource.clone(),
+            target_app_path: None,
+            target: InstallationKind::Standard,
+            package_ids: Vec::new(),
+        },
+        &MachineFolders::of_this_computer().unwrap(),
+    );
+    for (who, roots) in [("planning", &planning), ("helper", &helper)] {
+        let folder = roots
+            .program_files_x86
+            .clone()
+            .unwrap()
+            .join("Reaper_JawsScripts");
+        let folder_there = fs::symlink_metadata(&folder).is_ok();
+        let checked = check_machine_cleanup(
+            &CleanupJob {
+                package_id: PACKAGE_JAWS_SCRIPTS,
+                spec: &cleanup,
+                roots,
+            },
+            &lookup,
+        );
+        eprintln!(
+            "{who}: folder {} there: {folder_there}; key there: {key_there}; {checked:?}",
+            folder.display()
+        );
+        if !folder_there && !key_there {
+            assert_eq!(checked, Ok(None), "{who}");
+            continue;
+        }
+        let planned = match checked {
+            Ok(Some(planned)) => planned,
+            other => panic!("{who}: {other:?}"),
+        };
+        assert_eq!(
+            planned.folder,
+            folder_there.then(|| folder.clone()),
+            "{who}"
+        );
+        // Every file the manifest names that is there, in the manifest's
+        // order, so Uninstall.exe, which detection looks for, goes last.
+        let expected: Vec<PathBuf> = cleanup
+            .files
+            .iter()
+            .map(|name| folder.join(name))
+            .filter(|path| folder_there && path.is_file())
+            .collect();
+        assert!(
+            planned.files.len() == expected.len()
+                && planned
+                    .files
+                    .iter()
+                    .zip(&expected)
+                    .all(|(file, name)| super::paths::same_ignoring_case(file, name)),
+            "{who}: {:?}, expected {expected:?}",
+            planned.files
+        );
+        assert_eq!(
+            planned.registry_key,
+            key_there.then(|| {
+                lookup
+                    .views
+                    .display_key(&cleanup.registry.key, RegistryView::Bit32)
+            }),
+            "{who}"
+        );
+        assert_eq!(planned.by_hand_key, JAWS_BY_HAND, "{who}");
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1348,8 +1348,10 @@ fn packages_without_a_dependency_between_them_keep_manifest_order() {
 /// tripping over anything. With nothing on disk, a package whose plan
 /// removes files is removable unless it needs a receipt, or moves its app
 /// to the Trash: that app isn't where the target says, so moving nothing
-/// would only claim it removed, and the user is pointed at the path. Every
-/// other installed package says why RABBIT won't remove it.
+/// would only claim it removed, and the user is pointed at the path. A
+/// plan with a machine cleanup is refused too, because a lookup that never
+/// looked can't say its folder and registry entry are gone. Every other
+/// installed package says why RABBIT won't remove it.
 #[test]
 fn every_shipped_manifest_plans() {
     let fixture = Fixture::new();
@@ -1360,11 +1362,14 @@ fn every_shipped_manifest_plans() {
         // A Mac target from the GUI knows where its REAPER app is, because
         // detection finds REAPER only by its app; the CLI takes whatever
         // --target-app-path says. Here it would sit in the resource folder,
-        // as a portable REAPER's does, and isn't there.
+        // as a portable REAPER's does, and isn't there. On Windows,
+        // `{appdata}` is the fixture's own folder, never the real one.
         let mut roots = fixture.roots.clone();
         if platform == Platform::MacOs {
             roots.app_path = Some(fixture.resource.join("REAPER.app"));
             roots.app_dir = Some(fixture.resource.clone());
+        } else {
+            roots.appdata = Some(fixture.dir.path().to_path_buf());
         }
         for target in [InstallationKind::Standard, InstallationKind::Portable] {
             let nothing = build_uninstall_plan(&UninstallPlanInput {
@@ -1402,6 +1407,7 @@ fn every_shipped_manifest_plans() {
                 let removes_files =
                     plan.is_some_and(|plan| plan.strategy == UninstallStrategy::RemoveFiles);
                 let moves_an_app = plan.is_some_and(|plan| plan.backup == UninstallBackup::ToTrash);
+                let cleans_up = plan.is_some_and(|plan| plan.machine_cleanup.is_some());
                 let standard_removes = spec
                     .uninstall
                     .plan_for(platform, InstallationKind::Standard)
@@ -1424,6 +1430,19 @@ fn every_shipped_manifest_plans() {
                                 path,
                                 reason: ByHandReason::CouldNotCheck { .. },
                             } if roots.app_path.as_ref() == Some(path)
+                        ),
+                        "{}: {:?}",
+                        item.package_id,
+                        item.removability
+                    );
+                } else if cleans_up {
+                    assert!(
+                        matches!(
+                            &item.removability,
+                            Removability::CleanupNotTrusted {
+                                refusal: VendorRefusal::NotListed,
+                                ..
+                            }
                         ),
                         "{}: {:?}",
                         item.package_id,
@@ -1517,7 +1536,7 @@ pub(super) fn scripts_spec_with(id: &str, machine_cleanup: &str) -> PackageSpec 
 }
 
 /// A fixture whose `{appdata}` is its own temporary folder.
-fn scripts_fixture() -> Fixture {
+pub(super) fn scripts_fixture() -> Fixture {
     let mut fixture = Fixture::new();
     fixture.roots.appdata = Some(fixture.dir.path().to_path_buf());
     fixture
@@ -1536,7 +1555,7 @@ pub(super) fn script_path(appdata: &Path, version: &str, language: &str, name: &
 }
 
 /// [`script_path`], written.
-fn script_file(fixture: &Fixture, version: &str, language: &str, name: &str) -> PathBuf {
+pub(super) fn script_file(fixture: &Fixture, version: &str, language: &str, name: &str) -> PathBuf {
     write(
         &script_path(fixture.dir.path(), version, language, name),
         b"script contents",
@@ -1544,7 +1563,7 @@ fn script_file(fixture: &Fixture, version: &str, language: &str, name: &str) -> 
 }
 
 /// Both plug-ins, written.
-fn script_plugins(fixture: &Fixture) -> [PathBuf; 2] {
+pub(super) fn script_plugins(fixture: &Fixture) -> [PathBuf; 2] {
     [
         fixture.file("UserPlugins/Reaper_ComAccess32.dll"),
         fixture.file("UserPlugins/Reaper_ComAccess64.dll"),
@@ -1576,23 +1595,31 @@ fn nothing_there() -> FoundAt {
     FoundAt::new(PathBuf::from("unused"))
 }
 
-/// A lookup that finds the scripts' uninstaller folder and registry entry,
-/// and trusts them.
-fn cleanup_there(fixture: &Fixture) -> (FoundAt, PlannedMachineCleanup) {
+/// The scripts' uninstaller folder and registry entry as a lookup that
+/// found and trusted them describes them, in the 32-bit Program Files
+/// folder in the fixture, with `by_hand_key` as the steps to remove them by
+/// hand.
+pub(super) fn cleanup_found(fixture: &Fixture, by_hand_key: &str) -> PlannedMachineCleanup {
     let folder = fixture
         .dir
         .path()
         .join("Program Files (x86)")
         .join("Reaper_JawsScripts");
-    let planned = PlannedMachineCleanup {
+    PlannedMachineCleanup {
         files: vec![folder.join("Uninstall.dat"), folder.join("Uninstall.exe")],
         folder: Some(folder),
         registry_key: Some(
             r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Reaper_JawsScripts"
                 .to_string(),
         ),
-        by_hand_key: SCRIPTS_BY_HAND.to_string(),
-    };
+        by_hand_key: by_hand_key.to_string(),
+    }
+}
+
+/// A lookup that finds the scripts' uninstaller folder and registry entry,
+/// and trusts them.
+fn cleanup_there(fixture: &Fixture) -> (FoundAt, PlannedMachineCleanup) {
+    let planned = cleanup_found(fixture, SCRIPTS_BY_HAND);
     let lookup = FoundAt {
         cleanup: Ok(Some(planned.clone())),
         ..nothing_there()

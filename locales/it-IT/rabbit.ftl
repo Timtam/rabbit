@@ -67,6 +67,12 @@ uninstall-summary-surge-removes = Il programma di disinstallazione di Surge XT l
 uninstall-summary-surge-keeps = Le tue patch, nella cartella Surge XT dei tuoi Documenti, restano.
 uninstall-summary-reaper-windows-removes = Il programma di disinstallazione di REAPER rimuove il programma. Rimuove anche le associazioni dei file di REAPER e ReaRoute per tutti i REAPER di questo computer.
 uninstall-summary-reaper-keeps = Le tue impostazioni, estensioni e progetti restano.
+# The JAWS scripts: two plug-in files in REAPER's UserPlugins folder, and
+# script files their installer adds to JAWS's settings folder, which RABBIT
+# removes only while they are as the installer left them. Keep
+# %APPDATA%\Freedom Scientific\JAWS as it is.
+uninstall-summary-jaws-scripts-removes = Rimuove i due file di plug-in degli script dalla cartella UserPlugins di REAPER e i file di script che RABBIT ha visto aggiungere dal loro programma di installazione alla cartella delle impostazioni di JAWS.
+uninstall-summary-jaws-scripts-keeps = I file di script che RABBIT non è sicuro siano stati aggiunti dal programma di installazione, e quelli modificati da allora, come le tue assegnazioni dei tasti, restano nella cartella delle impostazioni di JAWS, %APPDATA%\Freedom Scientific\JAWS.
 # The same two sentences on macOS, where Surge XT has no uninstaller of its
 # own and REAPER is an app. Name the Trash and the Library folder as Finder
 # does in your language.
@@ -104,13 +110,30 @@ uninstall-warning-sws-reapack-scripts = Molti script di REAPER, tra cui script p
 # A note on what stays behind after ReaPack is uninstalled.
 uninstall-note-reapack-packages-stay = Gli script e le estensioni che hai installato con ReaPack restano, ma niente li tiene più aggiornati.
 uninstall-note-surge-fonts-stay = I font installati da Surge XT restano: il suo programma di installazione li segna come da non rimuovere mai.
+# A note on the JAWS script files that stay after the JAWS scripts are
+# uninstalled, and how to remove them by hand. Keep %APPDATA%, the folder
+# and file names, and "reaper" (the start of the file names) exactly as they
+# are. For the example language folder, use JAWS's folder for your language:
+# enu for English, deu for German, esn for Spanish, fra for French, ita for
+# Italian.
+uninstall-note-jaws-scripts-by-hand = Per rimuovere i file di script che restano, elimina i file il cui nome inizia con reaper dalle cartelle delle lingue in %APPDATA%\Freedom Scientific\JAWS, per esempio 2025\Settings\ita. Prima copia reaper.jkm, reaper.jcf e reaper.ini in un altro posto se vuoi conservare le tue assegnazioni dei tasti e le tue impostazioni.
 
 # How to remove a package by hand where RABBIT doesn't, shown line by line.
 # Keep file names, folder paths and %APPDATA% exactly as they are.
-uninstall-manual-jaws-scripts = RABBIT non può ancora rimuovere gli script di JAWS. Per rimuoverli a mano:
+#
+# The JAWS scripts' steps, shown where RABBIT can't remove them: from a
+# portable REAPER, when it doesn't trust their uninstaller folder or
+# registry entry, when it finds none of their files for this account, and
+# after an uninstall in which it couldn't remove that folder and entry.
+# %ProgramFiles(x86)% is how Windows names the Program Files (x86) folder
+# in a path: keep it exactly as it is, and "reaper" too. For the example
+# language folder, use JAWS's folder for your language, as in
+# uninstall-note-jaws-scripts-by-hand.
+uninstall-by-hand-jaws-scripts = Per rimuovere a mano gli script di JAWS:
     1. Chiudi REAPER.
     2. Elimina Reaper_ComAccess32.dll e Reaper_ComAccess64.dll da %APPDATA%\REAPER\UserPlugins.
-    I file degli script restano nella cartella delle impostazioni di JAWS, %APPDATA%\Freedom Scientific\JAWS. Alcuni contengono le tue modifiche, come le tue assegnazioni dei tasti.
+    3. Elimina la cartella %ProgramFiles(x86)%\Reaper_JawsScripts. Windows chiede il permesso di un amministratore.
+    4. Per rimuovere anche i file di script, elimina i file il cui nome inizia con reaper dalle cartelle delle lingue in %APPDATA%\Freedom Scientific\JAWS, per esempio 2025\Settings\ita. Prima copia reaper.jkm, reaper.jcf e reaper.ini in un altro posto se vuoi conservare le tue assegnazioni dei tasti e le tue impostazioni.
 uninstall-manual-reaper-portable = RABBIT non rimuove un REAPER portable: i file di REAPER e i tuoi stanno nella stessa cartella. Per rimuoverlo a mano:
     1. Chiudi REAPER.
     2. Copia fuori dalla cartella del REAPER portable tutto quello che vuoi conservare, come i progetti che hai salvato lì, le tue mappe dei tasti e le tue impostazioni.
@@ -316,7 +339,7 @@ wizard-uninstall-details-reapack-orphan = { $package } è stato installato a suo
 # A note on a package whose installer added files outside REAPER's folder,
 # when RABBIT has no record of which ones. $package is the localized
 # package name.
-wizard-uninstall-details-no-vendor-record = RABBIT non ha traccia di quali file abbia aggiunto il programma di installazione di { $package }, quindi restano tutti.
+wizard-uninstall-details-no-vendor-record = RABBIT non ha traccia di quali file abbia aggiunto il programma di installazione di { $package } fuori dalla cartella REAPER, quindi quelli restano tutti.
 wizard-uninstall-details-vendor = Windows ti chiede il permesso prima di rimuovere qualcosa.
 wizard-uninstall-details-vendor-by-hand = Puoi disinstallare { $package } da solo nelle Impostazioni di Windows, in App, App installate.
 # The details text of an Uninstall row whose package's installer left an

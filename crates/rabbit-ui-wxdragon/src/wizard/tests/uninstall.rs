@@ -203,9 +203,9 @@ fn a_row_that_cant_be_removed_cant_be_ticked_and_says_why() {
 #[test]
 fn a_manual_row_shows_the_instructions_to_remove_it_by_hand() {
     let row = rows_for(vec![item(
-        "jaws-scripts",
+        "reaper",
         Removability::Manual {
-            note_key: "uninstall-manual-jaws-scripts".to_string(),
+            note_key: "uninstall-manual-reaper-portable".to_string(),
         },
     )])
     .remove(0);
@@ -216,7 +216,12 @@ fn a_manual_row_shows_the_instructions_to_remove_it_by_hand() {
         "{}",
         row.summary
     );
-    assert!(row.details.contains("Delete Reaper_ComAccess32.dll"));
+    assert!(
+        row.details
+            .contains("3. Delete the portable REAPER folder."),
+        "{}",
+        row.details
+    );
 }
 
 #[test]
@@ -270,10 +275,10 @@ fn every_reason_a_package_stays_reads_as_a_sentence() {
         },
         Removability::CleanupNotTrusted {
             refusal: VendorRefusal::RegistryKeyHasSubkeys,
-            by_hand_key: "uninstall-manual-reaper-portable".to_string(),
+            by_hand_key: BY_HAND_KEY.to_string(),
         },
         Removability::NoFilesForThisAccount {
-            by_hand_key: "uninstall-manual-reaper-portable".to_string(),
+            by_hand_key: BY_HAND_KEY.to_string(),
         },
     ];
     for removability in reasons {
@@ -427,9 +432,10 @@ fn a_target_with_nothing_installed_lists_nothing() {
         .map(|spec| ComponentDetection::not_installed(&spec.id, &spec.display_name))
         .collect();
 
-    let list = uninstall_list_for_target(
+    let list = uninstall_list_with_roots(
         &model,
         &target,
+        &fixture_roots(model.platform, &target.path, dir.path()),
         &detections,
         &NothingListed,
         &NoMacosObjects,
@@ -455,7 +461,14 @@ fn a_receipt_that_cant_be_read_says_so_instead_of_listing_nothing() {
         ..model.target_rows[0].clone()
     };
 
-    let list = uninstall_list_for_target(&model, &target, &[], &NothingListed, &NoMacosObjects);
+    let list = uninstall_list_with_roots(
+        &model,
+        &target,
+        &fixture_roots(model.platform, &target.path, dir.path()),
+        &[],
+        &NothingListed,
+        &NoMacosObjects,
+    );
 
     assert!(list.rows.is_empty());
     let (label, _) = list.placeholder(&model.text).unwrap();
@@ -475,8 +488,15 @@ fn the_target_row_decides_whether_the_plan_is_for_a_portable_reaper() {
             portable,
             ..model.target_rows[0].clone()
         };
-        let plan = uninstall_plan_for_target(&model, &target, &[], &NothingListed, &NoMacosObjects)
-            .unwrap();
+        let plan = uninstall_plan_with_roots(
+            &model,
+            &target,
+            &fixture_roots(model.platform, &target.path, dir.path()),
+            &[],
+            &NothingListed,
+            &NoMacosObjects,
+        )
+        .unwrap();
         let expected = if portable {
             InstallationKind::Portable
         } else {
@@ -492,9 +512,9 @@ fn rows_build_in_every_locale_without_missing_text() {
         vec![
             removable_sws(),
             item(
-                "jaws-scripts",
+                "reaper",
                 Removability::Manual {
-                    note_key: "uninstall-manual-jaws-scripts".to_string(),
+                    note_key: "uninstall-manual-reaper-portable".to_string(),
                 },
             ),
             item("app2clap", Removability::NeedsStandardTarget),
@@ -1299,7 +1319,8 @@ fn the_real_sws_plan_offers_its_existing_settings() {
             detection
         })
         .collect();
-    let roots = UninstallRoots::for_target(Platform::Windows, resource, None);
+    let outside = tempdir().unwrap();
+    let roots = fixture_roots(Platform::Windows, resource, outside.path());
     let plan = build_uninstall_plan(&UninstallPlanInput {
         roots: &roots,
         platform: Platform::Windows,
@@ -1453,17 +1474,20 @@ fn the_question_reads_in_every_locale() {
 /// OSARA: the people who use RABBIT know that REAPER stops speaking
 /// without it. The question is for what a backup can't bring back. On
 /// Windows, REAPER and Surge XT can't be ticked here, as no uninstaller is
-/// found for them. On macOS these roots don't know where REAPER's app is,
-/// so `{app_path}` is refused; Surge XT, which the administrator command
-/// deletes for good, can be ticked, and is the one package that asks.
-/// REAPER's question is tested with its own plans.
+/// found for them, and the JAWS scripts can't either, as a lookup that
+/// finds nothing can't vouch for the uninstaller folder and registry entry
+/// their installer left. On macOS these roots don't know where REAPER's
+/// app is, so `{app_path}` is refused; Surge XT, which the administrator
+/// command deletes for good, can be ticked, and is the one package that
+/// asks. REAPER's question is tested with its own plans.
 #[test]
 fn only_a_package_a_backup_cant_bring_back_asks_a_question() {
     let dir = tempdir().unwrap();
-    // Surge XT's trees are absolute macOS paths. They are planned below an
-    // empty temporary system root, never the host's real /, so what this
-    // computer has installed can't change the answer.
-    let system = tempdir().unwrap();
+    // Every folder outside the resource folder is a temporary one, so what
+    // this computer has installed can't change the answer, and nothing is
+    // planned on it: not the JAWS scripts in its real %APPDATA%, nor Surge
+    // XT's trees, absolute macOS paths, below its real /.
+    let outside = tempdir().unwrap();
     for platform in [Platform::Windows, Platform::MacOs] {
         let specs = builtin_package_specs(platform);
         let detections: Vec<ComponentDetection> = specs
@@ -1484,8 +1508,7 @@ fn only_a_package_a_backup_cant_bring_back_asks_a_question() {
                 .collect(),
             ..InstallState::default()
         };
-        let mut roots = UninstallRoots::for_target(platform, dir.path(), None);
-        roots.system_root = system.path().to_path_buf();
+        let roots = fixture_roots(platform, dir.path(), outside.path());
         let plan = build_uninstall_plan(&UninstallPlanInput {
             roots: &roots,
             platform,
@@ -1530,17 +1553,32 @@ fn only_a_package_a_backup_cant_bring_back_asks_a_question() {
         ];
         if platform == Platform::Windows {
             removable.push("ffmpeg");
-            // app2clap lives in Windows' own CLAP folder, which only a
-            // Windows machine can name; planning for Windows elsewhere
-            // rightly blocks it.
-            if cfg!(windows) {
-                removable.push("app2clap");
-            }
+            // In Windows' own CLAP folder, a temporary one here.
+            removable.push("app2clap");
         }
         for id in removable {
             assert!(
                 tickable.iter().any(|ticked| ticked == id),
                 "{platform:?}: {id} isn't in {tickable:?}"
+            );
+        }
+        // A lookup that never looked can't say the JAWS scripts' uninstaller
+        // folder and registry entry are gone, so it refuses them.
+        assert!(
+            !tickable.iter().any(|ticked| ticked == "jaws-scripts"),
+            "{platform:?}: {tickable:?}"
+        );
+        if platform == Platform::Windows {
+            assert!(
+                matches!(
+                    plan.item("jaws-scripts").map(|item| &item.removability),
+                    Some(Removability::CleanupNotTrusted {
+                        refusal: VendorRefusal::NotListed,
+                        ..
+                    })
+                ),
+                "{:?}",
+                plan.item("jaws-scripts")
             );
         }
         let (asks, backed_up): (Vec<String>, Vec<String>) =
@@ -1571,6 +1609,7 @@ fn only_a_package_a_backup_cant_bring_back_asks_a_question() {
 #[test]
 fn osara_says_what_goes_and_what_stays() {
     let dir = tempdir().unwrap();
+    let outside = tempdir().unwrap();
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
     for (platform, names_the_list) in [(Platform::Windows, true), (Platform::MacOs, false)] {
         let specs = builtin_package_specs(platform);
@@ -1579,7 +1618,7 @@ fn osara_says_what_goes_and_what_stays() {
             version: Some(Version::parse("2025.3.6.1234").unwrap()),
             ..ComponentDetection::not_installed("osara", "OSARA")
         }];
-        let roots = UninstallRoots::for_target(platform, dir.path(), None);
+        let roots = fixture_roots(platform, dir.path(), outside.path());
         let plan = build_uninstall_plan(&UninstallPlanInput {
             roots: &roots,
             platform,
@@ -1894,13 +1933,11 @@ fn an_uninstaller_rabbit_cant_trust_says_why_and_how_to_remove_it_by_hand() {
 // notes on the script files that stay, Review and the question.
 // ---------------------------------------------------------------------------
 
-/// Steps over several lines, standing in for a package's steps to remove it
-/// by hand.
-pub(super) const BY_HAND_KEY: &str = "uninstall-manual-reaper-portable";
+/// The JAWS scripts' steps to remove them by hand, over several lines.
+pub(super) const BY_HAND_KEY: &str = "uninstall-by-hand-jaws-scripts";
 
-/// One sentence, standing in for the note on removing by hand the script
-/// files that stay.
-pub(super) const SCRIPTS_NOTE_KEY: &str = "uninstall-note-reapack-packages-stay";
+/// The note on removing by hand the script files that stay.
+pub(super) const SCRIPTS_NOTE_KEY: &str = "uninstall-note-jaws-scripts-by-hand";
 
 pub(super) const JAWS: &str = "Snowman's JAWS Scripts for REAPER";
 pub(super) const JAWS_DLL: &str = "C:/REAPER/UserPlugins/Reaper_ComAccess64.dll";
@@ -1933,8 +1970,7 @@ const PERMISSION_NOTE: &str = "Windows asks for your permission once, before any
 /// The JAWS scripts as planned while their installer's uninstaller folder
 /// and registry entry are there: a plug-in from the receipt and a script
 /// file their installer added go into the backup, then the elevated helper
-/// removes both files of the folder, the folder and the entry. Its two
-/// sentences are SWS's, standing in for the scripts' own.
+/// removes both files of the folder, the folder and the entry.
 pub(super) fn jaws_with_cleanup() -> UninstallPlanItem {
     let file = |path: &str, reason| PlannedRemoval {
         path: PathBuf::from(path),
@@ -1947,8 +1983,8 @@ pub(super) fn jaws_with_cleanup() -> UninstallPlanItem {
     };
     UninstallPlanItem {
         summary: Some(UninstallSummary {
-            removes_key: "uninstall-summary-sws-removes".to_string(),
-            keeps_key: "uninstall-summary-sws-keeps".to_string(),
+            removes_key: "uninstall-summary-jaws-scripts-removes".to_string(),
+            keeps_key: "uninstall-summary-jaws-scripts-keeps".to_string(),
         }),
         files: vec![
             file(JAWS_DLL, RemovalReason::Receipt),
@@ -2003,8 +2039,8 @@ fn jaws_without_cleanup() -> UninstallPlanItem {
 fn a_jaws_row_with_a_cleanup_says_windows_asks_and_a_backup_cant_bring_those_back() {
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
     let text = |key: &str| localizer.text(key).value;
-    let removes = text("uninstall-summary-sws-removes");
-    let keeps = text("uninstall-summary-sws-keeps");
+    let removes = text("uninstall-summary-jaws-scripts-removes");
+    let keeps = text("uninstall-summary-jaws-scripts-keeps");
     let note = text(SCRIPTS_NOTE_KEY);
     let backup = "RABBIT moves the files into a backup rather than deleting them.".to_string();
     let cleanup = format!(
@@ -2037,7 +2073,7 @@ fn a_jaws_row_with_a_cleanup_says_windows_asks_and_a_backup_cant_bring_those_bac
     }
 }
 
-/// Each line of the stand-in steps to remove a package by hand, in English.
+/// Each line of the JAWS scripts' steps to remove them by hand, in English.
 pub(super) fn by_hand_lines_en() -> Vec<String> {
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
     let text = localizer.text(BY_HAND_KEY).value;
@@ -2161,7 +2197,7 @@ fn a_jaws_row_without_a_record_says_all_script_files_stay_and_how_to_remove_them
         .value;
     let expected = format!(
         "RABBIT has no record of which files Snowman's JAWS Scripts for REAPER's installer \
-         added, so all of them stay.\n{note}"
+         added outside REAPER's folder, so all of those stay.\n{note}"
     );
     assert!(row.details.ends_with(&expected), "{}", row.details);
 }

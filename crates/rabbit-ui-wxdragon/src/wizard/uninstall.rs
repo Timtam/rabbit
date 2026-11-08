@@ -198,19 +198,20 @@ impl WizardUninstallList {
 /// files exist and how big they are, looks vendors' uninstallers up through
 /// `vendor_lookup` (HKLM in RABBIT, a stand-in in tests), and asks `objects`
 /// who may move a macOS app (macOS itself in RABBIT, a stand-in in tests);
-/// hashes nothing and changes nothing.
-pub fn uninstall_plan_for_target(
+/// hashes nothing and changes nothing. RABBIT passes
+/// `UninstallRoots::for_target` as `roots`; tests pass folders of their own,
+/// so they never plan on what is really installed here.
+pub(crate) fn uninstall_plan_with_roots(
     model: &WizardModel,
     target: &TargetRow,
+    roots: &UninstallRoots,
     detections: &[ComponentDetection],
     vendor_lookup: &dyn VendorLookup,
     objects: &dyn ObjectProbe,
 ) -> Result<UninstallPlan> {
-    let roots =
-        UninstallRoots::for_target(model.platform, &target.path, target.app_path.as_deref());
     let state = load_install_state(&target.path)?;
     Ok(build_uninstall_plan(&UninstallPlanInput {
-        roots: &roots,
+        roots,
         platform: model.platform,
         target: if target.portable {
             InstallationKind::Portable
@@ -236,10 +237,26 @@ pub fn uninstall_list_for_target(
     vendor_lookup: &dyn VendorLookup,
     objects: &dyn ObjectProbe,
 ) -> WizardUninstallList {
+    let roots =
+        UninstallRoots::for_target(model.platform, &target.path, target.app_path.as_deref());
+    uninstall_list_with_roots(model, target, &roots, detections, vendor_lookup, objects)
+}
+
+/// [`uninstall_list_for_target`] with the folders the plans name taken
+/// from `roots` instead of this computer. See
+/// [`uninstall_plan_with_roots`] for how the plan is built.
+pub(crate) fn uninstall_list_with_roots(
+    model: &WizardModel,
+    target: &TargetRow,
+    roots: &UninstallRoots,
+    detections: &[ComponentDetection],
+    vendor_lookup: &dyn VendorLookup,
+    objects: &dyn ObjectProbe,
+) -> WizardUninstallList {
     let Ok(localizer) = localizer_from_options(&model.bootstrap_options) else {
         return WizardUninstallList::default();
     };
-    match uninstall_plan_for_target(model, target, detections, vendor_lookup, objects) {
+    match uninstall_plan_with_roots(model, target, roots, detections, vendor_lookup, objects) {
         Ok(plan) => {
             uninstall_list_from_plan(&localizer, &builtin_package_specs(model.platform), &plan)
         }

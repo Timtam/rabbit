@@ -1,6 +1,6 @@
 //! Fixtures shared by the wizard tests.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rabbit_core::localization::{DEFAULT_LOCALE, Localizer};
 use rabbit_core::model::{Architecture, Confidence, Installation, InstallationKind, Platform};
@@ -10,6 +10,7 @@ use rabbit_core::plan::{InstallPlan, PlanAction, PlanActionKind};
 use rabbit_core::preflight::PreflightReport;
 use rabbit_core::resource::ResourceInitReport;
 use rabbit_core::setup::SetupReport;
+use rabbit_core::uninstall::UninstallRoots;
 use rabbit_core::version::Version;
 
 use crate::wizard::*;
@@ -90,6 +91,30 @@ pub(super) fn sample_apply_report(
         skipped_files: Vec::new(),
         signature_verdicts,
         status_message: "applied".to_string(),
+    }
+}
+
+/// Roots for a REAPER at `resource`, planned for `platform`, with every
+/// folder outside it that a plan can name inside `fixture` instead of on
+/// this computer. Planning on this computer's real folders would plan the
+/// removal of what is really installed here, such as the JAWS scripts in
+/// `%APPDATA%`. As on a real computer, the Windows folders resolve only
+/// for Windows and the home folder only for macOS.
+pub(super) fn fixture_roots(platform: Platform, resource: &Path, fixture: &Path) -> UninstallRoots {
+    let windows = platform == Platform::Windows;
+    let windows_folder = |name: &str| windows.then(|| fixture.join(name));
+    UninstallRoots {
+        appdata: windows_folder("Roaming"),
+        localappdata: windows_folder("Local"),
+        clap_dir: windows_folder("CLAP"),
+        common_program_files: windows_folder("Common Files"),
+        program_files: windows_folder("Program Files").into_iter().collect(),
+        program_files_x86: windows_folder("Program Files (x86)"),
+        program_data: windows_folder("ProgramData"),
+        home: (!windows).then(|| fixture.join("home")),
+        documents: Some(fixture.join("Documents")),
+        system_root: fixture.join("system"),
+        ..UninstallRoots::new(resource)
     }
 }
 
