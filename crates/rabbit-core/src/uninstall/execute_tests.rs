@@ -19,7 +19,9 @@ use super::execute::{
     SurveyedDigest, UNINSTALL_BACKUP_REASON, UninstallEnvironment, execute_uninstall_in,
 };
 use super::preflight::VolumeProbe;
-use super::tests::{Fixture, installed, remove_files, remove_files_with, running, spec, write};
+use super::tests::{
+    Fixture, installed, remove_files, remove_files_with, running, script_path, spec, write,
+};
 use super::{
     BACKUP_SPACE_CHECK, KeptFile, KeptFileReason, KeptReason, NoAdministratorShell,
     NoElevatedHelper, NoMacosObjects, NothingListed, RemovalReason, UninstallMessage,
@@ -38,7 +40,8 @@ use crate::preflight::RunningProcess;
 use crate::progress::{ProgressEvent, ProgressReporter, RemovalMethod};
 use crate::reapack::write_test_registry;
 use crate::receipt::{
-    InstallState, InstalledFileReceipt, PackageReceipt, load_install_state, save_install_state,
+    InstallState, InstalledFileReceipt, PackageReceipt, VendorAddedFile, load_install_state,
+    save_install_state,
 };
 use crate::rollback::{
     BACKUP_MANIFEST_FILE, BackupEntryState, BackupManifest, FileDigest, RestoreBackupOptions,
@@ -481,11 +484,14 @@ fn a_failed_move_puts_back_what_already_moved() {
 
     let demo = report.item("demo").unwrap();
     assert_eq!(demo.status, UninstallStatus::Failed);
-    assert!(
-        matches!(&demo.message_code, UninstallMessage::MoveFailed { path, .. } if *path == at(&fixture, "Scripts/demo.py")),
-        "{:?}",
-        demo.message_code
-    );
+    // Windows says another program has the file open. Elsewhere the folder
+    // that can't be written stands in, and the move just fails.
+    let held_path = at(&fixture, "Scripts/demo.py");
+    #[cfg(windows)]
+    let expected = matches!(&demo.message_code, UninstallMessage::FileInUse { path, .. } if *path == held_path);
+    #[cfg(unix)]
+    let expected = matches!(&demo.message_code, UninstallMessage::MoveFailed { path, .. } if *path == held_path);
+    assert!(expected, "{:?}", demo.message_code);
     assert_eq!(demo.put_back, vec![plugin.clone()]);
     assert!(demo.left_in_backup.is_empty() && demo.removed.is_empty());
     assert!(demo.message.contains("back in place"), "{}", demo.message);
@@ -552,6 +558,126 @@ fn a_file_in_use_on_another_volume_stays_where_it_was() {
         fs::read(demo.removed[0].backup_path.as_ref().unwrap()).unwrap(),
         b"file contents"
     );
+}
+
+/// JAWS holds its script files open now and then, and the user can't simply
+/// close their screen reader. A script file the installer added that is in
+/// use gets a sentence of its own: wait, try again, restart JAWS if that
+/// doesn't help. Everything goes back as for any file in use, and a file in
+/// use of the same package that isn't one of those keeps the usual wording.
+///
+/// JAWS's settings folder and the backup set are on one drive, where the
+/// move is a rename that Windows refuses for a file held open. Unix lets
+/// anyone rename an open file, so only a move to another drive, a copy
+/// whose original can't be deleted, can stand in there.
+#[test]
+fn a_jaws_file_in_use_on_another_drive_gets_the_jaws_wording() {
+    a_jaws_file_in_use_gets_the_jaws_wording(false);
+}
+
+/// [`a_jaws_file_in_use_on_another_drive_gets_the_jaws_wording`] on the one
+/// drive JAWS's folder and the backup set always share.
+#[cfg(windows)]
+#[test]
+fn a_jaws_file_in_use_on_the_same_drive_gets_the_jaws_wording() {
+    a_jaws_file_in_use_gets_the_jaws_wording(true);
+}
+
+fn a_jaws_file_in_use_gets_the_jaws_wording(same_volume: bool) {
+    // Not the scripts' own manifest: its plug-ins are in UserPlugins, where
+    // `hold` can't keep a file, so a script in Scripts stands in for them.
+    let scripts = || {
+        spec(
+            "scripts",
+            r#""requires_standard_install": true,"#,
+            r#"{
+                "install_snapshot": ["{appdata}/Freedom Scientific/JAWS/*/Settings/*"],
+                "plans": [{
+                    "platform": "windows",
+                    "strategy": "remove_files",
+                    "summary": { "removes_key": "test-removes", "keeps_key": "test-keeps" },
+                    "remove": {
+                        "paths": ["{appdata}/REAPER/Scripts/scripts.lua"],
+                        "vendor_added_files": {
+                            "files": ["{appdata}/Freedom Scientific/JAWS/*/Settings/*/*"],
+                            "by_hand_note_key": "test-script-files-by-hand"
+                        }
+                    }
+                }]
+            }"#,
+        )
+    };
+    let mut fixture = Fixture::new();
+    fixture.roots.appdata = Some(fixture.dir.path().to_path_buf());
+    let lua = fixture.file("Scripts/scripts.lua");
+    let script = write(
+        &script_path(fixture.dir.path(), "2025", "enu", "reaper.jss"),
+        b"script",
+    );
+    let mut state = save_receipt(&fixture, &[("scripts", &[])]);
+    state
+        .packages
+        .get_mut("scripts")
+        .unwrap()
+        .vendor_added_files
+        .push(VendorAddedFile {
+            path: script.clone(),
+            sha256: sha256_file(&script).unwrap(),
+            size: 6,
+            existed_before: false,
+        });
+    save_install_state(&fixture.resource, &state).unwrap();
+    let harness = Harness {
+        volumes: Volumes {
+            same: same_volume,
+            free: Some(u64::MAX),
+        },
+        ..Harness::new(&fixture, vec![scripts()], &["scripts"])
+    };
+
+    let held = hold(&script);
+    let report = harness.apply(&["scripts"]);
+    drop(held);
+
+    let item = report.item("scripts").unwrap();
+    assert_eq!(item.status, UninstallStatus::Failed, "{report:#?}");
+    assert!(
+        matches!(&item.message_code, UninstallMessage::FileInUse { path, .. } if *path == script),
+        "{:?}",
+        item.message_code
+    );
+    assert!(
+        item.message.starts_with(&format!(
+            "JAWS or another program is using {}, so RABBIT couldn't remove scripts. Wait a \
+             moment, then run RABBIT again; if that doesn't help, restart JAWS first.",
+            script.display()
+        )),
+        "{}",
+        item.message
+    );
+    assert!(
+        item.message
+            .ends_with("Everything of scripts is back in place.")
+    );
+    assert_eq!(fs::read(&lua).unwrap(), b"file contents");
+    assert_eq!(fs::read(&script).unwrap(), b"script");
+
+    // The same package's own file in use reads as before.
+    let held = hold(&lua);
+    let report = harness.apply(&["scripts"]);
+    drop(held);
+    let item = report.item("scripts").unwrap();
+    assert!(
+        matches!(&item.message_code, UninstallMessage::FileInUse { path, .. } if *path == lua),
+        "{:?}",
+        item.message_code
+    );
+    assert!(
+        item.message.contains("is in use by another program"),
+        "{}",
+        item.message
+    );
+    assert!(!item.message.contains("JAWS"), "{}", item.message);
 }
 
 /// Before anything moves to another drive, the backup's drive must have room

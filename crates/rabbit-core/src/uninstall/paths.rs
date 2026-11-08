@@ -290,6 +290,114 @@ pub fn resolve_path(
     }
 }
 
+/// A `vendor_added_files` pattern resolved for this computer, such as
+/// `{appdata}/Freedom Scientific/JAWS/*/Settings/*/*`. RABBIT never lists a
+/// folder for it: it only decides whether a path the receipt records
+/// matches; see [`pattern_matches`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedPattern {
+    /// The folder the pattern's token stands for.
+    pub base: PathBuf,
+    /// The components below `base`, in order. A `*` in one stands for any
+    /// part of a name.
+    pub components: Vec<String>,
+    /// What every match must pass: it stays inside `base` and the plain
+    /// names before the first `*`, such as `%APPDATA%\Freedom
+    /// Scientific\JAWS`.
+    pub guard: RemovalGuard,
+}
+
+/// Resolve a `vendor_added_files` pattern, one [`ResolvedPattern`] per
+/// folder its token stands for. A token that stands for nothing here is
+/// refused, as [`resolve_path`] refuses it. Validation lets only
+/// `{appdata}` and `{localappdata}` through; a hand-built spec with any
+/// other root that isn't a plain folder root is refused too.
+pub(crate) fn resolve_pattern(
+    path: &UninstallPath,
+    roots: &UninstallRoots,
+) -> Result<Vec<ResolvedPattern>, PathRefusal> {
+    let parsed = path.parse_pattern().map_err(|_| PathRefusal::NotPlain)?;
+    let token = match parsed.root {
+        UninstallPathRoot::Token(token) if token.kind() == UninstallTokenKind::FolderRoot => token,
+        _ => return Err(PathRefusal::OutsideRoot),
+    };
+    if parsed.components.is_empty() {
+        return Err(PathRefusal::FolderRoot);
+    }
+    let bases = roots.resolve(token);
+    if bases.is_empty() {
+        return Err(PathRefusal::UnknownRoot {
+            token: format!("{{{}}}", token.name()),
+        });
+    }
+    // The plain names before the first `*`, and never the last component:
+    // that is the file itself, which can't be its own guard.
+    let plain = parsed
+        .components
+        .iter()
+        .take(parsed.components.len() - 1)
+        .take_while(|component| !component.contains('*'))
+        .collect::<Vec<_>>();
+    Ok(bases
+        .into_iter()
+        .map(|base| {
+            let guard_root = plain
+                .iter()
+                .fold(base.clone(), |path, component| path.join(component));
+            ResolvedPattern {
+                base,
+                components: parsed
+                    .components
+                    .iter()
+                    .map(|component| component.to_string())
+                    .collect(),
+                guard: RemovalGuard::under(guard_root),
+            }
+        })
+        .collect())
+}
+
+/// Whether `path` matches `pattern`: it is plain and absolute, starts with
+/// the pattern's base (compared ignoring case), and then has exactly one
+/// name for each of the pattern's components, each the same name ignoring
+/// ASCII case or matching its `*`. A name holding `:` never matches: on
+/// Windows that names an alternate data stream, not a file of its own.
+pub(crate) fn pattern_matches(pattern: &ResolvedPattern, path: &Path) -> bool {
+    if !is_plain_absolute(path) {
+        return false;
+    }
+    let Some(base) = folded_components(&pattern.base) else {
+        return false;
+    };
+    let components: Vec<Component<'_>> = path.components().collect();
+    if components.len() != base.len() + pattern.components.len() {
+        return false;
+    }
+    let (start, rest) = components.split_at(base.len());
+    let same_base = start
+        .iter()
+        .zip(&base)
+        .all(|(component, folded)| fold_component(*component).as_ref() == Some(folded));
+    same_base
+        && rest
+            .iter()
+            .zip(&pattern.components)
+            .all(|(component, wanted)| {
+                let Component::Normal(name) = component else {
+                    return false;
+                };
+                let Some(name) = name.to_str() else {
+                    return false;
+                };
+                !name.contains(':')
+                    && if wanted.contains('*') {
+                        wildcard_matches_ignoring_case(wanted, name)
+                    } else {
+                        name.eq_ignore_ascii_case(wanted)
+                    }
+            })
+}
+
 /// The files in a wildcard path's folder whose names match its last
 /// component, ignoring case, in name order. Only names are compared; the
 /// guard checks each match afterwards. A folder that doesn't exist holds
@@ -772,26 +880,29 @@ fn is_plain_absolute(path: &Path) -> bool {
 
 /// The components of `path`, lowercased, with `\\?\C:\` read like `C:\`.
 /// `None` when the path holds `.` or `..`: its text can't say where it ends.
-fn folded_components(path: &Path) -> Option<Vec<String>> {
-    path.components()
-        .map(|component| match component {
-            Component::Prefix(prefix) => Some(match prefix.kind() {
-                Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
-                    format!("{}:", char::from(letter))
-                }
-                Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => format!(
-                    r"\\{}\{}",
-                    server.to_string_lossy(),
-                    share.to_string_lossy()
-                ),
-                _ => prefix.as_os_str().to_string_lossy().into_owned(),
-            }),
-            Component::RootDir => Some("/".to_string()),
-            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-            Component::CurDir | Component::ParentDir => None,
-        })
-        .map(|part| part.map(|part| part.to_lowercase()))
-        .collect()
+pub(crate) fn folded_components(path: &Path) -> Option<Vec<String>> {
+    path.components().map(fold_component).collect()
+}
+
+/// One component as [`folded_components`] compares it.
+fn fold_component(component: Component<'_>) -> Option<String> {
+    let part = match component {
+        Component::Prefix(prefix) => match prefix.kind() {
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                format!("{}:", char::from(letter))
+            }
+            Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => format!(
+                r"\\{}\{}",
+                server.to_string_lossy(),
+                share.to_string_lossy()
+            ),
+            _ => prefix.as_os_str().to_string_lossy().into_owned(),
+        },
+        Component::RootDir => "/".to_string(),
+        Component::Normal(part) => part.to_string_lossy().into_owned(),
+        Component::CurDir | Component::ParentDir => return None,
+    };
+    Some(part.to_lowercase())
 }
 
 /// Make `link` a junction to the folder `target` with `mklink /J`, which
@@ -821,9 +932,9 @@ mod tests {
     use tempfile::{TempDir, tempdir};
 
     use super::{
-        PathRefusal, RemovalGuard, ResolvedPath, UninstallRoots, check_administrator_removal,
-        check_administrator_trash_move, check_removal, check_root_reaches, expand_wildcard,
-        resolve_path,
+        PathRefusal, RemovalGuard, ResolvedPath, ResolvedPattern, UninstallRoots,
+        check_administrator_removal, check_administrator_trash_move, check_removal,
+        check_root_reaches, expand_wildcard, pattern_matches, resolve_path, resolve_pattern,
     };
     use crate::model::Platform;
     use crate::package::uninstall::UninstallPath;
@@ -1456,6 +1567,178 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// A `vendor_added_files` pattern keeps its components as written, and
+    /// its guard stops at the last plain folder before the first `*`: for
+    /// the JAWS scripts, the vendor's JAWS folder.
+    #[test]
+    fn a_vendor_pattern_is_guarded_by_its_last_plain_folder() {
+        let (dir, mut roots) = fixture();
+        roots.appdata = Some(dir.path().to_path_buf());
+        let pattern = UninstallPath::new("{appdata}/Freedom Scientific/JAWS/*/Settings/*/*");
+        let resolved = resolve_pattern(&pattern, &roots).unwrap();
+        assert_eq!(
+            resolved,
+            vec![ResolvedPattern {
+                base: dir.path().to_path_buf(),
+                components: ["Freedom Scientific", "JAWS", "*", "Settings", "*", "*"]
+                    .map(str::to_string)
+                    .to_vec(),
+                guard: RemovalGuard::under(dir.path().join("Freedom Scientific").join("JAWS")),
+            }]
+        );
+
+        // With no `*` at all the guard is the file's own folder, never the
+        // file itself.
+        let plain = resolve_pattern(&UninstallPath::new("{appdata}/Vendor/data.ini"), &roots)
+            .unwrap()
+            .remove(0);
+        assert_eq!(plain.guard, RemovalGuard::under(dir.path().join("Vendor")));
+    }
+
+    /// A token RABBIT can't place refuses the pattern, as it refuses any
+    /// manifest path; so does a root that isn't a plain folder root.
+    #[test]
+    fn a_vendor_pattern_needs_a_folder_root_rabbit_can_place() {
+        let (_dir, roots) = fixture();
+        assert_eq!(
+            resolve_pattern(
+                &UninstallPath::new("{appdata}/Freedom Scientific/JAWS/*/Settings/*/*"),
+                &roots
+            ),
+            Err(PathRefusal::UnknownRoot {
+                token: "{appdata}".to_string()
+            })
+        );
+        for refused in [
+            "{app_path}",
+            "{app_dir}/Vendor/*",
+            "/Library/Application Support/Vendor/*",
+        ] {
+            assert_eq!(
+                resolve_pattern(&UninstallPath::new(refused), &roots),
+                Err(PathRefusal::OutsideRoot),
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            resolve_pattern(&UninstallPath::new("{resource}"), &roots),
+            Err(PathRefusal::FolderRoot)
+        );
+    }
+
+    /// A path matches only with one name per component of the pattern
+    /// below its base: the base and plain names compared ignoring case,
+    /// `*` standing for any name. A relative path, one with `..`, and a
+    /// name holding `:`, which on Windows names a stream of another file,
+    /// never match.
+    #[test]
+    fn a_vendor_pattern_matches_one_name_per_component() {
+        let (dir, mut roots) = fixture();
+        roots.appdata = Some(dir.path().to_path_buf());
+        let pattern = resolve_pattern(
+            &UninstallPath::new("{appdata}/Freedom Scientific/JAWS/*/Settings/*/reaper*"),
+            &roots,
+        )
+        .unwrap()
+        .remove(0);
+        let below = |parts: &[&str]| {
+            parts
+                .iter()
+                .fold(dir.path().to_path_buf(), |path, part| path.join(part))
+        };
+
+        for matching in [
+            below(&[
+                "Freedom Scientific",
+                "JAWS",
+                "2025",
+                "Settings",
+                "enu",
+                "reaper.jss",
+            ]),
+            below(&[
+                "FREEDOM SCIENTIFIC",
+                "jaws",
+                "2026",
+                "settings",
+                "deu",
+                "REAPER.JKM",
+            ]),
+        ] {
+            assert!(
+                pattern_matches(&pattern, &matching),
+                "{}",
+                matching.display()
+            );
+        }
+        let shouted_base = PathBuf::from(dir.path().to_string_lossy().to_uppercase())
+            .join("Freedom Scientific/JAWS/2025/Settings/enu/reaper.jss");
+        assert!(pattern_matches(&pattern, &shouted_base));
+
+        for other in [
+            // Too shallow, too deep.
+            below(&[
+                "Freedom Scientific",
+                "JAWS",
+                "2025",
+                "Settings",
+                "reaper.ini",
+            ]),
+            below(&[
+                "Freedom Scientific",
+                "JAWS",
+                "2025",
+                "Settings",
+                "enu",
+                "x",
+                "reaper.jss",
+            ]),
+            // A plain name or the file's pattern that doesn't match.
+            below(&[
+                "Freedom Scientific",
+                "JAWS",
+                "2025",
+                "Other",
+                "enu",
+                "reaper.jss",
+            ]),
+            below(&[
+                "Freedom Scientific",
+                "JAWS",
+                "2025",
+                "Settings",
+                "enu",
+                "default.jcf",
+            ]),
+            // A stream of a file that would match.
+            below(&[
+                "Freedom Scientific",
+                "JAWS",
+                "2025",
+                "Settings",
+                "enu",
+                "reaper.jss:x",
+            ]),
+            // Through `..`, and relative.
+            below(&[
+                "Freedom Scientific",
+                "JAWS",
+                "..",
+                "JAWS",
+                "Settings",
+                "enu",
+                "reaper.jss",
+            ]),
+            PathBuf::from("Freedom Scientific/JAWS/2025/Settings/enu/reaper.jss"),
+            // As deep, but below a folder beside the base.
+            dir.path()
+                .with_file_name("elsewhere")
+                .join("Freedom Scientific/JAWS/2025/Settings/enu/reaper.jss"),
+        ] {
+            assert!(!pattern_matches(&pattern, &other), "{}", other.display());
+        }
     }
 
     /// Rust reports a junction as a link, so the guard never removes one as

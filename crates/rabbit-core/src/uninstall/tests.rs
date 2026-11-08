@@ -8,11 +8,12 @@ use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
 
 use super::{
-    ANY_REAPER_PROCESS_CHECK, ByHandReason, CleanupJob, KeptReason, NoMacosObjects, NothingListed,
-    PROGRAMS_RUNNING_CHECK, PathRefusal, PlannedMachineCleanup, Removability, RemovalReason,
-    UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanInput, UninstallPlanItem,
-    UninstallPreflightOptions, UninstallRoots, UninstallWarning, VendorJob, VendorLookup,
-    VendorRefusal, build_uninstall_plan, run_uninstall_preflight_with_processes,
+    ANY_REAPER_PROCESS_CHECK, ByHandReason, CleanupJob, KeptPath, KeptReason, NoMacosObjects,
+    NothingListed, PROGRAMS_RUNNING_CHECK, PathRefusal, PlannedMachineCleanup, Removability,
+    RemovalReason, RemovalRoute, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan,
+    UninstallPlanInput, UninstallPlanItem, UninstallPreflightOptions, UninstallRoots,
+    UninstallWarning, VendorJob, VendorLookup, VendorRefusal, build_uninstall_plan,
+    run_uninstall_preflight_with_processes,
 };
 use crate::model::{ComponentDetection, Confidence, InstallationKind, Platform};
 use crate::package::uninstall::{UninstallBackup, UninstallStrategy};
@@ -22,7 +23,7 @@ use crate::package::{
 };
 use crate::preflight::{PreflightReport, PreflightStatus, REAPER_PROCESS_CHECK, RunningProcess};
 use crate::reapack::write_test_registry;
-use crate::receipt::{InstallState, InstalledFileReceipt, PackageReceipt};
+use crate::receipt::{InstallState, InstalledFileReceipt, PackageReceipt, VendorAddedFile};
 
 const SUMMARY: &str = r#""summary": { "removes_key": "test-removes", "keeps_key": "test-keeps" }"#;
 
@@ -1446,6 +1447,755 @@ fn every_shipped_manifest_plans() {
                 assert!(item.files.is_empty());
             }
         }
+    }
+}
+
+// A package laid out like the JAWS scripts: two plug-ins in UserPlugins,
+// script files its installer adds to a vendor's settings folders, and an
+// uninstaller folder and registry entry for the elevated helper. Every
+// folder is the fixture's: `{appdata}` is its temporary folder, so the
+// resource folder is `{appdata}/REAPER`, and the machine cleanup is only
+// ever answered by a stand-in lookup.
+
+const SCRIPTS: &str = "scripts";
+const SCRIPTS_BY_HAND: &str = "test-scripts-by-hand";
+const SCRIPT_FILES_BY_HAND: &str = "test-script-files-by-hand";
+
+/// The scripts' manifest: both plug-ins by path, the script files by
+/// pattern, and the uninstaller folder and registry entry their installer
+/// leaves, as the JAWS scripts' own manifest names them.
+fn scripts_spec() -> PackageSpec {
+    let cleanup = format!(
+        r#"{{
+            "dir": "{{program_files_x86}}/Reaper_JawsScripts",
+            "files": ["Uninstall.dat", "Uninstall.exe"],
+            "registry": {{
+                "hive": "hklm",
+                "key": "Reaper_JawsScripts",
+                "view": "bit32",
+                "values": {{
+                    "UninstallDirectory": "{{program_files_x86}}/Reaper_JawsScripts",
+                    "Uninstall.dat": "{{program_files_x86}}/Reaper_JawsScripts/Uninstall.dat"
+                }}
+            }},
+            "by_hand_key": "{SCRIPTS_BY_HAND}"
+        }}"#
+    );
+    scripts_spec_with(SCRIPTS, &cleanup)
+}
+
+/// A package laid out like the JAWS scripts, as `id`: both plug-ins by
+/// path, the script files by pattern, and `machine_cleanup`, the JSON
+/// object that names the uninstaller folder and registry entry.
+pub(super) fn scripts_spec_with(id: &str, machine_cleanup: &str) -> PackageSpec {
+    let uninstall = format!(
+        r#"{{
+            "machine_wide_warning": false,
+            "install_snapshot": [
+                "{{appdata}}/Freedom Scientific/JAWS/*/Settings/*",
+                "{{appdata}}/REAPER/UserPlugins"
+            ],
+            "plans": [{{
+                "platform": "windows",
+                "strategy": "remove_files",
+                {SUMMARY},
+                "remove": {{
+                    "paths": [
+                        "{{appdata}}/REAPER/UserPlugins/Reaper_ComAccess32.dll",
+                        "{{appdata}}/REAPER/UserPlugins/Reaper_ComAccess64.dll"
+                    ],
+                    "vendor_added_files": {{
+                        "files": ["{{appdata}}/Freedom Scientific/JAWS/*/Settings/*/*"],
+                        "by_hand_note_key": "{SCRIPT_FILES_BY_HAND}"
+                    }}
+                }},
+                "machine_cleanup": {machine_cleanup}
+            }}]
+        }}"#
+    );
+    spec(id, r#""requires_standard_install": true,"#, &uninstall)
+}
+
+/// A fixture whose `{appdata}` is its own temporary folder.
+fn scripts_fixture() -> Fixture {
+    let mut fixture = Fixture::new();
+    fixture.roots.appdata = Some(fixture.dir.path().to_path_buf());
+    fixture
+}
+
+/// The script file `name` in JAWS `version`'s settings folder for
+/// `language`, below `appdata`; not written.
+pub(super) fn script_path(appdata: &Path, version: &str, language: &str, name: &str) -> PathBuf {
+    appdata
+        .join("Freedom Scientific")
+        .join("JAWS")
+        .join(version)
+        .join("Settings")
+        .join(language)
+        .join(name)
+}
+
+/// [`script_path`], written.
+fn script_file(fixture: &Fixture, version: &str, language: &str, name: &str) -> PathBuf {
+    write(
+        &script_path(fixture.dir.path(), version, language, name),
+        b"script contents",
+    )
+}
+
+/// Both plug-ins, written.
+fn script_plugins(fixture: &Fixture) -> [PathBuf; 2] {
+    [
+        fixture.file("UserPlugins/Reaper_ComAccess32.dll"),
+        fixture.file("UserPlugins/Reaper_ComAccess64.dll"),
+    ]
+}
+
+fn record(path: &Path, sha256: &str, existed_before: bool) -> VendorAddedFile {
+    VendorAddedFile {
+        path: path.to_path_buf(),
+        sha256: sha256.to_string(),
+        size: 15,
+        existed_before,
+    }
+}
+
+/// A receipt for the scripts naming the 64-bit plug-in, as their installer
+/// leaves one, and `records` as the files it added.
+fn scripts_receipt(records: Vec<VendorAddedFile>) -> InstallState {
+    let mut state = receipt(
+        SCRIPTS,
+        &[("UserPlugins/Reaper_ComAccess64.dll", Some("dll64"))],
+    );
+    state.packages.get_mut(SCRIPTS).unwrap().vendor_added_files = records;
+    state
+}
+
+/// A lookup that finds no uninstaller folder and no registry entry.
+fn nothing_there() -> FoundAt {
+    FoundAt::new(PathBuf::from("unused"))
+}
+
+/// A lookup that finds the scripts' uninstaller folder and registry entry,
+/// and trusts them.
+fn cleanup_there(fixture: &Fixture) -> (FoundAt, PlannedMachineCleanup) {
+    let folder = fixture
+        .dir
+        .path()
+        .join("Program Files (x86)")
+        .join("Reaper_JawsScripts");
+    let planned = PlannedMachineCleanup {
+        files: vec![folder.join("Uninstall.dat"), folder.join("Uninstall.exe")],
+        folder: Some(folder),
+        registry_key: Some(
+            r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Reaper_JawsScripts"
+                .to_string(),
+        ),
+        by_hand_key: SCRIPTS_BY_HAND.to_string(),
+    };
+    let lookup = FoundAt {
+        cleanup: Ok(Some(planned.clone())),
+        ..nothing_there()
+    };
+    (lookup, planned)
+}
+
+fn plan_scripts(
+    fixture: &Fixture,
+    state: Option<&InstallState>,
+    lookup: &dyn VendorLookup,
+) -> UninstallPlan {
+    plan_scripts_with(fixture, state, lookup, InstallationKind::Standard, false)
+}
+
+fn plan_scripts_with(
+    fixture: &Fixture,
+    state: Option<&InstallState>,
+    lookup: &dyn VendorLookup,
+    target: InstallationKind,
+    remove_settings: bool,
+) -> UninstallPlan {
+    fixture.plan_looking_up(
+        &[scripts_spec()],
+        &installed(&[SCRIPTS]),
+        state,
+        target,
+        remove_settings,
+        lookup,
+    )
+}
+
+fn by_hand_note() -> UninstallNote {
+    UninstallNote::VendorFilesByHand {
+        note_key: SCRIPT_FILES_BY_HAND.to_string(),
+    }
+}
+
+/// Recorded files the pattern matches are candidates, each with the hash
+/// its record holds, and guarded by the vendor's folder. Both plug-ins go
+/// too, the 64-bit one with the hash the receipt lends it.
+#[test]
+fn recorded_vendor_files_under_the_pattern_are_candidates_with_their_hash() {
+    let fixture = scripts_fixture();
+    let [plugin32, plugin64] = script_plugins(&fixture);
+    let english = script_file(&fixture, "2025", "enu", "reaper.jss");
+    let german = script_file(&fixture, "2026", "deu", "reaper.jkm");
+    let state = scripts_receipt(vec![
+        record(&english, "aa", false),
+        record(&german, "bb", false),
+    ]);
+
+    let plan = plan_scripts(&fixture, Some(&state), &nothing_there());
+    let scripts = item(&plan, SCRIPTS);
+
+    assert_eq!(scripts.removability, Removability::Removable);
+    assert_eq!(
+        removed(scripts),
+        sorted(vec![
+            plugin32.clone(),
+            plugin64.clone(),
+            english.clone(),
+            german.clone()
+        ])
+    );
+    let guard_root = fixture.dir.path().join("Freedom Scientific").join("JAWS");
+    for (path, sha256) in [(&english, "aa"), (&german, "bb")] {
+        let file = scripts
+            .files
+            .iter()
+            .find(|file| file.path == *path)
+            .unwrap();
+        assert_eq!(file.reason, RemovalReason::VendorAdded);
+        assert_eq!(file.receipt_sha256.as_deref(), Some(sha256));
+        assert_eq!(file.guard.root.as_deref(), Some(guard_root.as_path()));
+        assert_eq!(file.check(&fixture.roots), Ok(()));
+    }
+    let lent = scripts
+        .files
+        .iter()
+        .find(|file| file.path == plugin64)
+        .unwrap();
+    assert_eq!(lent.reason, RemovalReason::ManifestPath);
+    assert_eq!(lent.receipt_sha256.as_deref(), Some("dll64"));
+    assert!(scripts.kept.is_empty(), "{:?}", scripts.kept);
+    assert_eq!(scripts.notes, vec![by_hand_note()]);
+    assert!(scripts.dirs_if_empty.is_empty(), "no folder goes");
+}
+
+/// A file a record says was there before the installer ran may be the
+/// user's own: it stays and is listed, even with "Also remove settings".
+/// One that is gone since isn't listed.
+#[test]
+fn vendor_files_there_before_the_installer_are_kept_and_listed() {
+    let fixture = scripts_fixture();
+    script_plugins(&fixture);
+    let added = script_file(&fixture, "2025", "enu", "reaper.jss");
+    let before = script_file(&fixture, "2025", "enu", "reaper.jkm");
+    let gone = script_path(fixture.dir.path(), "2025", "enu", "reaper.jcf");
+    let state = scripts_receipt(vec![
+        record(&added, "aa", false),
+        record(&before, "bb", true),
+        record(&gone, "cc", true),
+    ]);
+
+    for remove_settings in [false, true] {
+        let plan = plan_scripts_with(
+            &fixture,
+            Some(&state),
+            &nothing_there(),
+            InstallationKind::Standard,
+            remove_settings,
+        );
+        let scripts = item(&plan, SCRIPTS);
+        assert_eq!(scripts.removability, Removability::Removable);
+        assert!(removed(scripts).contains(&added));
+        assert!(!removed(scripts).contains(&before));
+        assert_eq!(
+            scripts.kept,
+            vec![KeptPath {
+                path: before.clone(),
+                reason: KeptReason::ThereBeforeInstall,
+                note_key: None,
+                exists: true,
+                removable_with_settings: false,
+            }]
+        );
+    }
+}
+
+/// Two spellings of one path are one file. If either record says it was
+/// there before, it stays.
+#[test]
+fn two_spellings_of_one_vendor_file_with_one_there_before_keep_it() {
+    let fixture = scripts_fixture();
+    script_plugins(&fixture);
+    let file = script_file(&fixture, "2025", "enu", "reaper.jss");
+    let shouted = script_path(fixture.dir.path(), "2025", "ENU", "REAPER.JSS");
+    let state = scripts_receipt(vec![
+        record(&file, "aa", false),
+        record(&shouted, "aa", true),
+    ]);
+
+    let plan = plan_scripts(&fixture, Some(&state), &nothing_there());
+    let scripts = item(&plan, SCRIPTS);
+    assert!(
+        scripts
+            .files
+            .iter()
+            .all(|planned| planned.reason != RemovalReason::VendorAdded),
+        "{:?}",
+        scripts.files
+    );
+    assert_eq!(kept(scripts, KeptReason::ThereBeforeInstall), vec![file]);
+    assert!(scripts.notes.contains(&UninstallNote::NoVendorRecord));
+}
+
+/// Records of one file that disagree on its hash can't both be right, so
+/// RABBIT trusts neither and keeps the file.
+#[test]
+fn vendor_records_that_disagree_on_the_hash_keep_the_file() {
+    let fixture = scripts_fixture();
+    script_plugins(&fixture);
+    let file = script_file(&fixture, "2025", "enu", "reaper.jss");
+    let other_spelling = script_path(fixture.dir.path(), "2025", "Enu", "Reaper.jss");
+    let state = scripts_receipt(vec![
+        record(&file, "aa", false),
+        record(&other_spelling, "bb", false),
+    ]);
+
+    let plan = plan_scripts(&fixture, Some(&state), &nothing_there());
+    let scripts = item(&plan, SCRIPTS);
+    assert!(!removed(scripts).contains(&file));
+    let unclear = scripts
+        .kept
+        .iter()
+        .find(|kept| kept.reason == KeptReason::RecordUnclear)
+        .expect("the file is kept");
+    assert_eq!(unclear.path, file);
+    assert!(unclear.exists && !unclear.removable_with_settings);
+}
+
+/// A receipt is a file anyone can edit, so a record counts only where the
+/// manifest's pattern matches it. Every other record is passed by without
+/// a word, the plug-ins the same snapshot records in UserPlugins included:
+/// those go by the manifest's own paths, with no hash from the record.
+#[test]
+fn vendor_files_outside_every_pattern_are_ignored() {
+    let fixture = scripts_fixture();
+    let [_, plugin64] = script_plugins(&fixture);
+    let vendor = fixture.dir.path().join("Freedom Scientific");
+    let outside = [
+        // Not below Settings.
+        write(
+            &vendor
+                .join("JAWS")
+                .join("2025")
+                .join("Other")
+                .join("enu")
+                .join("a.jss"),
+            b"x",
+        ),
+        // Directly in Settings, a level too shallow.
+        write(
+            &vendor
+                .join("JAWS")
+                .join("2025")
+                .join("Settings")
+                .join("b.ini"),
+            b"x",
+        ),
+        // Another vendor folder.
+        write(&vendor.join("Other").join("c.jss"), b"x"),
+        // The resource folder.
+        fixture.file("reaper-kb.ini"),
+        fixture.file("Scripts/d.lua"),
+    ];
+    let mut records: Vec<VendorAddedFile> = outside
+        .iter()
+        .map(|path| record(path, "aa", false))
+        .collect();
+    records.push(record(&plugin64, "other", false));
+    // A relative path isn't a plain absolute one.
+    records.push(record(
+        Path::new("Freedom Scientific/JAWS/2025/Settings/enu/e.jss"),
+        "aa",
+        false,
+    ));
+    let state = scripts_receipt(records);
+
+    let plan = plan_scripts(&fixture, Some(&state), &nothing_there());
+    let scripts = item(&plan, SCRIPTS);
+    assert_eq!(scripts.removability, Removability::Removable);
+    assert!(
+        scripts
+            .files
+            .iter()
+            .all(|file| file.reason == RemovalReason::ManifestPath),
+        "{:?}",
+        scripts.files
+    );
+    let lent = scripts
+        .files
+        .iter()
+        .find(|file| file.path == plugin64)
+        .unwrap();
+    assert_eq!(lent.receipt_sha256.as_deref(), Some("dll64"));
+    assert!(scripts.kept.is_empty(), "{:?}", scripts.kept);
+    assert_eq!(
+        scripts.notes,
+        vec![UninstallNote::NoVendorRecord, by_hand_note()]
+    );
+}
+
+/// The pattern names a file directly in a language folder. One a folder
+/// deeper, such as in a transient session folder, isn't the installer's.
+#[test]
+fn vendor_files_one_folder_too_deep_are_ignored() {
+    let fixture = scripts_fixture();
+    script_plugins(&fixture);
+    let deep = write(
+        &script_path(fixture.dir.path(), "2025", "deu", "transient-session").join("reaper.jss"),
+        b"x",
+    );
+    let state = scripts_receipt(vec![record(&deep, "aa", false)]);
+
+    let plan = plan_scripts(&fixture, Some(&state), &nothing_there());
+    let scripts = item(&plan, SCRIPTS);
+    assert!(!removed(scripts).contains(&deep));
+    assert!(scripts.kept.is_empty(), "{:?}", scripts.kept);
+}
+
+/// A name with a colon names an alternate data stream on Windows, never a
+/// file of its own, so such a record matches nothing, and the file whose
+/// stream it would be stays. The stream is there, so only the rule on
+/// colons keeps it out (on macOS it is a file with a colon in its name).
+#[test]
+fn a_vendor_record_with_a_stream_name_is_ignored() {
+    let fixture = scripts_fixture();
+    script_plugins(&fixture);
+    let file = script_file(&fixture, "2025", "enu", "reaper.jss");
+    let stream = write(
+        &script_path(fixture.dir.path(), "2025", "enu", "reaper.jss:hidden"),
+        b"hidden",
+    );
+    let state = scripts_receipt(vec![record(&stream, "aa", false)]);
+
+    let plan = plan_scripts(&fixture, Some(&state), &nothing_there());
+    let scripts = item(&plan, SCRIPTS);
+    assert!(!removed(scripts).contains(&file));
+    assert!(!removed(scripts).contains(&stream));
+    assert!(scripts.kept.is_empty(), "{:?}", scripts.kept);
+}
+
+/// A recorded file that is gone since is neither removed nor listed.
+#[test]
+fn vendor_files_already_gone_are_skipped() {
+    let fixture = scripts_fixture();
+    script_plugins(&fixture);
+    let present = script_file(&fixture, "2025", "enu", "reaper.jss");
+    let gone = script_path(fixture.dir.path(), "2025", "enu", "reaper.jsb");
+    let state = scripts_receipt(vec![
+        record(&present, "aa", false),
+        record(&gone, "bb", false),
+    ]);
+
+    let plan = plan_scripts(&fixture, Some(&state), &nothing_there());
+    let scripts = item(&plan, SCRIPTS);
+    assert!(removed(scripts).contains(&present));
+    assert!(!removed(scripts).contains(&gone));
+    assert!(scripts.kept.is_empty(), "{:?}", scripts.kept);
+}
+
+/// A JAWS version folder that is a junction leading out of the vendor's
+/// folder blocks the whole package, and nothing outside is touched.
+#[cfg(windows)]
+#[test]
+fn a_vendor_folder_reached_through_a_junction_blocks_the_package() {
+    use super::paths::make_junction;
+
+    let fixture = scripts_fixture();
+    script_plugins(&fixture);
+    let elsewhere = fixture.dir.path().join("Elsewhere");
+    let outside = write(
+        &elsewhere.join("Settings").join("enu").join("reaper.jss"),
+        b"not the vendor's",
+    );
+    let jaws = fixture.dir.path().join("Freedom Scientific").join("JAWS");
+    fs::create_dir_all(&jaws).unwrap();
+    make_junction(&jaws.join("2025"), &elsewhere);
+    let through = script_path(fixture.dir.path(), "2025", "enu", "reaper.jss");
+    let state = scripts_receipt(vec![record(&through, "aa", false)]);
+
+    let plan = plan_scripts(&fixture, Some(&state), &nothing_there());
+    let scripts = item(&plan, SCRIPTS);
+    assert_eq!(
+        scripts.removability,
+        Removability::UnsafePath {
+            path: through,
+            refusal: PathRefusal::OutsideRoot,
+        }
+    );
+    assert!(scripts.files.is_empty());
+    assert!(!scripts.can_remove());
+    assert!(outside.is_file());
+}
+
+/// The notes say exactly what RABBIT knows: with a record nothing more
+/// than how to remove by hand what stays, also when every recorded file is
+/// gone or its records disagree; with a receipt but no record that all
+/// script files stay; without a receipt that RABBIT didn't install this
+/// copy. The by-hand note comes every time.
+#[test]
+fn the_notes_are_exact_for_recorded_unrecorded_and_receiptless_installs() {
+    let fixture = scripts_fixture();
+    script_plugins(&fixture);
+    let file = script_file(&fixture, "2025", "enu", "reaper.jss");
+    let notes = |state: Option<&InstallState>| {
+        let plan = plan_scripts(&fixture, state, &nothing_there());
+        let scripts = item(&plan, SCRIPTS);
+        assert_eq!(scripts.removability, Removability::Removable);
+        scripts.notes.clone()
+    };
+
+    let recorded = scripts_receipt(vec![record(&file, "aa", false)]);
+    assert_eq!(notes(Some(&recorded)), vec![by_hand_note()]);
+
+    // Recorded, and gone since: nothing of it stays.
+    let gone = script_path(fixture.dir.path(), "2025", "enu", "reaper.jsb");
+    let all_gone = scripts_receipt(vec![record(&gone, "bb", false)]);
+    assert_eq!(notes(Some(&all_gone)), vec![by_hand_note()]);
+
+    // Recorded twice with different hashes: kept, and listed as such.
+    let other_spelling = script_path(fixture.dir.path(), "2025", "ENU", "REAPER.JSS");
+    let unclear = scripts_receipt(vec![
+        record(&file, "aa", false),
+        record(&other_spelling, "bb", false),
+    ]);
+    assert_eq!(notes(Some(&unclear)), vec![by_hand_note()]);
+
+    let unrecorded = scripts_receipt(Vec::new());
+    assert_eq!(
+        notes(Some(&unrecorded)),
+        vec![UninstallNote::NoVendorRecord, by_hand_note()]
+    );
+
+    let all_there_before = scripts_receipt(vec![record(&file, "aa", true)]);
+    assert_eq!(
+        notes(Some(&all_there_before)),
+        vec![UninstallNote::NoVendorRecord, by_hand_note()]
+    );
+
+    assert_eq!(notes(None), vec![UninstallNote::NoReceipt, by_hand_note()]);
+}
+
+/// The elevated step is planned only when the lookup finds the folder or
+/// the registry entry there, and trusts it; with neither there nothing
+/// needs the helper and nothing is asked.
+#[test]
+fn machine_cleanup_is_planned_only_when_its_folder_or_key_is_there() {
+    let fixture = scripts_fixture();
+    script_plugins(&fixture);
+    let state = scripts_receipt(Vec::new());
+
+    let plan = plan_scripts(&fixture, Some(&state), &nothing_there());
+    let gone = item(&plan, SCRIPTS);
+    assert_eq!(gone.removability, Removability::Removable);
+    assert_eq!(gone.machine_cleanup, None);
+    assert!(!gone.needs_elevated_helper() && !gone.confirm);
+
+    let (lookup, planned) = cleanup_there(&fixture);
+    let plan = plan_scripts(&fixture, Some(&state), &lookup);
+    let there = item(&plan, SCRIPTS);
+    assert_eq!(there.removability, Removability::Removable);
+    assert_eq!(there.machine_cleanup, Some(planned));
+    assert!(there.needs_elevated_helper() && there.confirm);
+    // The files go all the same.
+    assert_eq!(removed(there), removed(gone));
+}
+
+/// A folder or registry entry RABBIT doesn't trust blocks the whole
+/// package, before any permission prompt: nothing of it goes, and the row
+/// says how to remove it by hand. What stays is still listed.
+#[test]
+fn an_untrusted_vendor_folder_blocks_the_whole_package_and_keeps_the_kept_list() {
+    let fixture = scripts_fixture();
+    script_plugins(&fixture);
+    let before = script_file(&fixture, "2025", "enu", "reaper.jkm");
+    let state = scripts_receipt(vec![record(&before, "aa", true)]);
+    let refusal = VendorRefusal::UntrustedFolder {
+        path: fixture.dir.path().join("Program Files (x86)"),
+    };
+    let lookup = FoundAt {
+        cleanup: Err(refusal.clone()),
+        ..nothing_there()
+    };
+
+    let plan = plan_scripts(&fixture, Some(&state), &lookup);
+    let scripts = item(&plan, SCRIPTS);
+    assert_eq!(
+        scripts.removability,
+        Removability::CleanupNotTrusted {
+            refusal,
+            by_hand_key: SCRIPTS_BY_HAND.to_string(),
+        }
+    );
+    assert!(scripts.removability.is_blocked() && !scripts.can_remove());
+    assert!(scripts.files.is_empty());
+    assert_eq!(scripts.machine_cleanup, None);
+    assert!(!scripts.needs_elevated_helper());
+    assert_eq!(kept(scripts, KeptReason::ThereBeforeInstall), vec![before]);
+}
+
+/// The cleanup is the helper's step after the files went into the backup
+/// set. So the package asks first and raises the permission prompt, but
+/// stays on the backup set's route, its files backed up, and never takes
+/// the administrator route.
+#[test]
+fn a_planned_cleanup_asks_and_needs_the_helper_but_stays_on_the_backup_route_and_backed_up() {
+    let fixture = scripts_fixture();
+    script_plugins(&fixture);
+    let state = scripts_receipt(Vec::new());
+    let (lookup, _) = cleanup_there(&fixture);
+
+    let plan = plan_scripts(&fixture, Some(&state), &lookup);
+    let scripts = item(&plan, SCRIPTS);
+    assert_eq!(scripts.route(), RemovalRoute::BackupSet);
+    assert_eq!(scripts.backup, UninstallBackup::Move);
+    assert!(!scripts.unbacked);
+    assert!(!scripts.requires_elevation && !scripts.needs_administrator());
+    assert!(!scripts.runs_vendor_uninstaller());
+    assert!(scripts.needs_elevated_helper());
+    assert!(scripts.confirm);
+    assert!(scripts.can_remove());
+    assert!(scripts.every_reaper_closed);
+    assert!(
+        !scripts.warnings.contains(&UninstallWarning::MachineWide),
+        "{:?}",
+        scripts.warnings
+    );
+}
+
+/// Without a receipt and with none of the package's files in this
+/// account, the uninstaller folder and registry entry most likely serve
+/// another account's copy, so RABBIT leaves the package to that account.
+/// A lookup that refused says so instead. With a receipt the copy is this
+/// account's, and the cleanup is planned even with no file left.
+#[test]
+fn without_a_receipt_or_files_the_package_is_left_for_the_account_that_installed_it() {
+    let fixture = scripts_fixture();
+    let (lookup, planned) = cleanup_there(&fixture);
+
+    let plan = plan_scripts(&fixture, None, &lookup);
+    let scripts = item(&plan, SCRIPTS);
+    assert_eq!(
+        scripts.removability,
+        Removability::NoFilesForThisAccount {
+            by_hand_key: SCRIPTS_BY_HAND.to_string(),
+        }
+    );
+    assert!(scripts.removability.is_blocked() && !scripts.can_remove());
+    assert_eq!(scripts.machine_cleanup, None);
+    assert!(!scripts.needs_elevated_helper());
+
+    let refused = FoundAt {
+        cleanup: Err(VendorRefusal::RegistryKeyHasSubkeys),
+        ..nothing_there()
+    };
+    let plan = plan_scripts(&fixture, None, &refused);
+    assert!(matches!(
+        item(&plan, SCRIPTS).removability,
+        Removability::CleanupNotTrusted {
+            refusal: VendorRefusal::RegistryKeyHasSubkeys,
+            ..
+        }
+    ));
+
+    let state = scripts_receipt(Vec::new());
+    let plan = plan_scripts(&fixture, Some(&state), &lookup);
+    let scripts = item(&plan, SCRIPTS);
+    assert_eq!(scripts.removability, Removability::Removable);
+    assert!(scripts.files.is_empty());
+    assert_eq!(scripts.machine_cleanup, Some(planned));
+    assert!(scripts.can_remove() && scripts.confirm);
+}
+
+/// A lookup that never looked can't say the folder and entry are gone, so
+/// it refuses the cleanup rather than plan a removal without it.
+#[test]
+fn nothing_listed_refuses_a_machine_cleanup() {
+    let fixture = scripts_fixture();
+    script_plugins(&fixture);
+    let state = scripts_receipt(Vec::new());
+
+    let plan = plan_scripts(&fixture, Some(&state), &NothingListed);
+    let scripts = item(&plan, SCRIPTS);
+    assert_eq!(
+        scripts.removability,
+        Removability::CleanupNotTrusted {
+            refusal: VendorRefusal::NotListed,
+            by_hand_key: SCRIPTS_BY_HAND.to_string(),
+        }
+    );
+    assert!(scripts.files.is_empty());
+}
+
+/// A portable target can't remove the package, but it still says how to
+/// remove it by hand, with the standard plan's steps. A machine-wide
+/// package with no machine cleanup has no such steps to lend.
+#[test]
+fn a_portable_target_shows_the_by_hand_steps() {
+    let fixture = scripts_fixture();
+    script_plugins(&fixture);
+    let state = scripts_receipt(Vec::new());
+    let (lookup, _) = cleanup_there(&fixture);
+    let specs = [
+        scripts_spec(),
+        spec(
+            "wide",
+            r#""requires_standard_install": true, "install_destination": "windows_clap_dir","#,
+            &remove_files(r#""remove": { "matching_user_plugins": true }"#),
+        ),
+    ];
+
+    let plan = fixture.plan_looking_up(
+        &specs,
+        &installed(&[SCRIPTS, "wide"]),
+        Some(&state),
+        InstallationKind::Portable,
+        false,
+        &lookup,
+    );
+    let scripts = item(&plan, SCRIPTS);
+    assert_eq!(scripts.removability, Removability::NeedsStandardTarget);
+    assert_eq!(scripts.strategy, None);
+    assert_eq!(
+        scripts.notes,
+        vec![UninstallNote::Manifest {
+            note_key: SCRIPTS_BY_HAND.to_string(),
+        }]
+    );
+    assert_eq!(scripts.machine_cleanup, None);
+    assert!(scripts.files.is_empty() && !scripts.needs_elevated_helper());
+
+    let wide = item(&plan, "wide");
+    assert_eq!(wide.removability, Removability::NeedsStandardTarget);
+    assert!(wide.notes.is_empty(), "{:?}", wide.notes);
+}
+
+/// Only what the manifest itself names goes even when it changed. A file
+/// the receipt records as the installer's, like one the receipt lists,
+/// goes only while it is unchanged.
+#[test]
+fn vendor_added_is_never_named_by_the_manifest() {
+    for (reason, named) in [
+        (RemovalReason::Receipt, false),
+        (RemovalReason::VendorAdded, false),
+        (RemovalReason::ManifestPath, true),
+        (RemovalReason::MatchingUserPlugin, true),
+        (RemovalReason::Tree, true),
+        (RemovalReason::Setting, true),
+    ] {
+        assert_eq!(reason.named_by_manifest(), named, "{reason:?}");
     }
 }
 

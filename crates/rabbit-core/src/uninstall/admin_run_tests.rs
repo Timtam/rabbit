@@ -1816,6 +1816,7 @@ fn report_item(status: UninstallStatus, code: UninstallMessage) -> UninstallRepo
         problems: Vec::new(),
         pending_restart: Vec::new(),
         vendor: None,
+        cleanup: None,
         message: String::new(),
         message_code: code,
     }

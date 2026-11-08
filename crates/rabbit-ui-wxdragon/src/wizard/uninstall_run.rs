@@ -653,6 +653,25 @@ fn item_reasons(
                 );
             }
         }
+        // Nothing of the folder or registry entry went, and what had moved
+        // is back: why RABBIT didn't trust them, then the manifest's steps
+        // to remove the package by hand, as the row said them.
+        UninstallMessage::CleanupRefused { refusal } => {
+            reasons.push(with_package("wizard-done-uninstall-cleanup-refused"));
+            reasons.push(refusal_text(localizer, refusal, &package));
+            reasons.extend(cleanup_by_hand_lines(localizer, report, item));
+        }
+        // What had moved is back, but part of the folder or entry may be
+        // gone. Without a receipt, that can leave RABBIT nothing to find the
+        // package by, so the steps to remove it by hand follow here too.
+        UninstallMessage::CleanupFailed { error } => {
+            reasons.push(with("wizard-done-uninstall-cleanup-failed", "error", error));
+            reasons.extend(cleanup_by_hand_lines(localizer, report, item));
+        }
+        UninstallMessage::CleanupLost { error } => {
+            reasons.push(with("wizard-done-uninstall-cleanup-lost", "error", error));
+            reasons.extend(cleanup_by_hand_lines(localizer, report, item));
+        }
         // Refused before any password window: the administrator command
         // couldn't be put together, so macOS was never asked.
         UninstallMessage::ElevationFailed { error }
@@ -714,10 +733,17 @@ fn item_reasons(
                 }
             }
         }
+        // A file the package's installer added outside REAPER's folder may
+        // be held open by JAWS, the user's screen reader, which is no
+        // program to close: that sentence says to wait and try again.
         UninstallMessage::FileInUse { path, .. } => reasons.push(
             localizer
                 .format(
-                    "wizard-error-uninstall-file-in-use",
+                    if vendor_added(report, item, path) {
+                        "wizard-error-uninstall-vendor-file-in-use"
+                    } else {
+                        "wizard-error-uninstall-file-in-use"
+                    },
                     &[
                         ("package", package.as_str()),
                         ("path", path.display().to_string().as_str()),
@@ -861,6 +887,38 @@ fn check_reason(localizer: &Localizer, check: &PreflightCheck) -> String {
         _ => return check.message.clone(),
     };
     localizer.text(key).value
+}
+
+/// Whether the plan lists `path` among the files `item`'s installer added
+/// outside REAPER's folder.
+fn vendor_added(report: &UninstallReport, item: &UninstallReportItem, path: &Path) -> bool {
+    report
+        .plan
+        .item(&item.package_id)
+        .is_some_and(|planned| planned.lists_vendor_added(path))
+}
+
+/// The manifest's steps to remove `item`'s package by hand, one line each,
+/// when its plan had the elevated helper clean up an uninstaller folder and
+/// registry entry.
+fn cleanup_by_hand_lines(
+    localizer: &Localizer,
+    report: &UninstallReport,
+    item: &UninstallReportItem,
+) -> Vec<String> {
+    report
+        .plan
+        .item(&item.package_id)
+        .and_then(|planned| planned.machine_cleanup.as_ref())
+        .map(|cleanup| {
+            localizer
+                .text(&cleanup.by_hand_key)
+                .value
+                .lines()
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// What RABBIT still found of a package after its own uninstaller ran and

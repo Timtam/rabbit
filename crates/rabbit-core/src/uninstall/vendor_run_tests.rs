@@ -1,12 +1,16 @@
-//! The uninstall engine with packages their vendor's own uninstaller
-//! removes: one elevated helper per run, started before anything changes,
-//! and each row of the partial-failure table for vendor runs.
+//! The uninstall engine with packages that need the elevated helper: those
+//! their vendor's own uninstaller removes, and those whose uninstaller
+//! folder and registry entry the helper cleans up after their files went
+//! into the backup set. One helper per run, started before anything
+//! changes; each row of the partial-failure table for both; and restoring
+//! such packages' files from a backup set.
 //!
 //! No test here can reach Windows' real lists or start a real program with
-//! administrator rights: the helper is a scripted stand-in (or, in the one
-//! end-to-end test, the helper loop on a thread of this process against a
-//! throwaway registry key and fixture uninstallers), the vendor lookup finds
-//! fixture paths, and every folder is a temporary one.
+//! administrator rights: the helper is a scripted stand-in (or, in the two
+//! end-to-end tests, Surge XT and the JAWS-like `jaws-test`, the helper
+//! loop on a thread of this process against a throwaway registry key and
+//! fixture folders), the vendor lookup finds fixture paths, and every
+//! folder is a temporary one.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -14,17 +18,24 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use super::cleanup::{CleanupJob, CleanupOutcome, PlannedMachineCleanup};
+use super::cleanup::tests::{FOLDER as CLEANUP_FOLDER, KEY as CLEANUP_KEY, spec as cleanup_spec};
+use super::cleanup::{
+    CleanupJob, CleanupOutcome, CleanupResult, CleanupStatus, CleanupStep, CleanupTarget,
+    PlannedMachineCleanup,
+};
 use super::execute::{UninstallEnvironment, execute_uninstall_in};
 use super::helper::{ElevatedHelper, ElevatedRunRequest, ElevatedSession, ElevationStartError};
 use super::preflight::VolumeProbe;
-use super::tests::{FoundAt, installed, write};
+use super::tests::{FoundAt, installed, script_path, scripts_spec_with, write};
 use super::vendor::{VendorEvent, VendorLookup, VendorOutcome, VendorRefusal, VendorStatus};
 use super::{
-    ANY_REAPER_PROCESS_CHECK, NoAdministratorShell, NoMacosObjects, NothingListed, Removability,
-    UninstallMessage, UninstallReport, UninstallRequest, UninstallRoots, UninstallStatus,
+    ANY_REAPER_PROCESS_CHECK, KeptFileReason, KeptReason, NoAdministratorShell, NoMacosObjects,
+    NothingListed, Removability, RemovalReason, UninstallMessage, UninstallProblem,
+    UninstallReport, UninstallRequest, UninstallRoots, UninstallStatus,
 };
 use crate::cancel::CancelToken;
+use crate::hash::sha256_file;
+use crate::install::outside_restore_rules_with;
 use crate::model::{ComponentDetection, InstallationKind, Platform};
 use crate::package::{
     PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS, PackageSpec, builtin_package_specs,
@@ -32,8 +43,11 @@ use crate::package::{
 use crate::preflight::RunningProcess;
 use crate::progress::{ProgressEvent, ProgressReporter, RemovalMethod};
 use crate::receipt::{
-    InstallState, InstalledFileReceipt, PackageReceipt, ReceiptVerification, load_install_state,
-    save_install_state, verify_package_receipt,
+    InstallState, InstalledFileReceipt, PackageReceipt, ReceiptVerification, VendorAddedFile,
+    load_install_state, save_install_state, verify_package_receipt,
+};
+use crate::rollback::{
+    BACKUP_MANIFEST_FILE, BackupManifest, RestoreBackupOptions, restore_backup_set_within,
 };
 
 /// Everything on one volume, with room to spare.
@@ -88,13 +102,20 @@ fn outcome(package_id: &str, status: VendorStatus, exit_code: Option<i32>) -> Ve
     }
 }
 
+/// What one scripted machine cleanup does: a check of what the run did
+/// before it, then its outcome.
+struct CleanupScript {
+    before: Box<dyn FnOnce()>,
+    outcome: CleanupOutcome,
+}
+
 /// A stand-in for the elevated helper: it starts, declines or fails as told,
 /// runs each package's script once, answers each package's machine cleanup
 /// once with its scripted outcome, and writes down every call.
 struct ScriptedHelper {
     start: Result<(), ElevationStartError>,
     scripts: Mutex<HashMap<String, Script>>,
-    cleanups: Mutex<HashMap<String, CleanupOutcome>>,
+    cleanups: Mutex<HashMap<String, CleanupScript>>,
     log: Arc<Mutex<Vec<String>>>,
 }
 
@@ -115,12 +136,19 @@ impl ScriptedHelper {
 
     /// Answer `outcome` when the run asks for its package's machine
     /// cleanup.
-    #[expect(dead_code, reason = "no engine test runs a machine cleanup yet")]
     fn cleaning_up(self, outcome: CleanupOutcome) -> Self {
-        self.cleanups
-            .lock()
-            .unwrap()
-            .insert(outcome.package_id.clone(), outcome);
+        self.cleaning_up_after(outcome, || {})
+    }
+
+    /// [`Self::cleaning_up`], running `before` first, when the run asks.
+    fn cleaning_up_after(self, outcome: CleanupOutcome, before: impl FnOnce() + 'static) -> Self {
+        self.cleanups.lock().unwrap().insert(
+            outcome.package_id.clone(),
+            CleanupScript {
+                before: Box::new(before),
+                outcome,
+            },
+        );
         self
     }
 
@@ -156,7 +184,7 @@ impl ElevatedHelper for ScriptedHelper {
 
 struct ScriptedSession {
     scripts: HashMap<String, Script>,
-    cleanups: HashMap<String, CleanupOutcome>,
+    cleanups: HashMap<String, CleanupScript>,
     log: Arc<Mutex<Vec<String>>>,
 }
 
@@ -192,9 +220,12 @@ impl ElevatedSession for ScriptedSession {
             .lock()
             .unwrap()
             .push(format!("cleanup {package_id}"));
-        self.cleanups
+        let script = self
+            .cleanups
             .remove(package_id)
-            .unwrap_or_else(|| panic!("no cleanup scripted for {package_id}"))
+            .unwrap_or_else(|| panic!("no cleanup scripted for {package_id}"));
+        (script.before)();
+        script.outcome
     }
 
     fn finish(self: Box<Self>) {
@@ -312,6 +343,163 @@ impl Computer {
     fn receipt(&self) -> InstallState {
         load_install_state(self.resource()).unwrap().unwrap()
     }
+
+    /// The scripts' 64-bit plug-in, through which detection finds them.
+    fn scripts_plugin(&self) -> PathBuf {
+        self.resource()
+            .join("UserPlugins")
+            .join("Reaper_ComAccess64.dll")
+    }
+
+    /// A [`Computer`] whose `{appdata}` holds its resource folder, as on a
+    /// real one, with the scripts installed too: both plug-ins, and two
+    /// script files their receipt records as added by their installer. Its
+    /// 32-bit Program Files is a folder of its own, where nothing is.
+    fn with_scripts() -> (Self, Scripts) {
+        let mut computer = Self::new();
+        let appdata = computer.resource().parent().unwrap().to_path_buf();
+        computer.roots.appdata = Some(appdata.clone());
+        computer.roots.program_files_x86 = Some(computer.dir.path().join("Program Files (x86)"));
+        computer.specs.push(scripts_spec());
+        let plugins = computer.resource().join("UserPlugins");
+        let plugins = [
+            write(&plugins.join("Reaper_ComAccess32.dll"), b"dll32"),
+            write(&plugins.join("Reaper_ComAccess64.dll"), b"dll64"),
+        ];
+        let added = vec![
+            write(
+                &script_path(&appdata, "2025", "enu", "reaper.jss"),
+                b"script",
+            ),
+            write(&script_path(&appdata, "2025", "deu", "reaper.jkm"), b"keys"),
+        ];
+        let mut state = computer.receipt();
+        state.packages.insert(
+            SCRIPTS.to_string(),
+            PackageReceipt {
+                id: SCRIPTS.to_string(),
+                version: None,
+                variant: None,
+                channel: None,
+                source_url: None,
+                source_sha256: None,
+                installed_files: vec![InstalledFileReceipt {
+                    path: PathBuf::from("UserPlugins").join("Reaper_ComAccess64.dll"),
+                    sha256: Some(sha256_file(&plugins[1]).unwrap()),
+                    size: Some(5),
+                }],
+                installed_at: None,
+                rabbit_version: None,
+                architecture: None,
+                vendor_added_files: added.iter().map(|path| record(path, false)).collect(),
+            },
+        );
+        save_install_state(computer.resource(), &state).unwrap();
+        (computer, Scripts { plugins, added })
+    }
+
+    /// Add `records` to the scripts' receipt entry.
+    fn record_script_files(&self, records: Vec<VendorAddedFile>) {
+        let mut state = self.receipt();
+        state
+            .packages
+            .get_mut(SCRIPTS)
+            .unwrap()
+            .vendor_added_files
+            .extend(records);
+        save_install_state(self.resource(), &state).unwrap();
+    }
+
+    /// What the lookup finds while the scripts' uninstaller folder and
+    /// registry entry are there and RABBIT trusts them.
+    fn planned_cleanup(&self) -> PlannedMachineCleanup {
+        let folder = self
+            .dir
+            .path()
+            .join("Program Files (x86)")
+            .join(CLEANUP_FOLDER);
+        PlannedMachineCleanup {
+            files: vec![folder.join("Uninstall.dat"), folder.join("Uninstall.exe")],
+            folder: Some(folder),
+            registry_key: Some(format!(
+                r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{CLEANUP_KEY}"
+            )),
+            by_hand_key: cleanup_spec().by_hand_key,
+        }
+    }
+}
+
+/// The JAWS scripts' kind of package, by a name no shipped package has: two
+/// plug-ins in UserPlugins, the script files its installer adds to JAWS's
+/// settings folders, and the uninstaller folder and registry entry the
+/// cleanup's tests use, which no real installer does.
+const SCRIPTS: &str = "jaws-test";
+
+/// The scripts' manifest, like the JAWS scripts' own but for the names of
+/// the uninstaller folder and registry entry.
+fn scripts_spec() -> PackageSpec {
+    scripts_spec_with(SCRIPTS, &serde_json::to_string(&cleanup_spec()).unwrap())
+}
+
+/// The scripts on a [`Computer`].
+struct Scripts {
+    /// The 32-bit plug-in, then the 64-bit one.
+    plugins: [PathBuf; 2],
+    /// The script files the receipt records as added by the installer,
+    /// unchanged since.
+    added: Vec<PathBuf>,
+}
+
+impl Scripts {
+    /// Every file the run moves into the backup set.
+    fn files(&self) -> Vec<PathBuf> {
+        self.plugins.iter().chain(&self.added).cloned().collect()
+    }
+}
+
+/// The record of `path` as its installer added it, with its hash now.
+fn record(path: &Path, existed_before: bool) -> VendorAddedFile {
+    VendorAddedFile {
+        path: path.to_path_buf(),
+        sha256: sha256_file(path).unwrap(),
+        size: fs::metadata(path).unwrap().len(),
+        existed_before,
+    }
+}
+
+/// A cleanup of the scripts that removed everything `planned` names.
+fn cleaned_up(planned: &PlannedMachineCleanup) -> CleanupOutcome {
+    let mut targets: Vec<CleanupTarget> = planned
+        .files
+        .iter()
+        .map(|path| CleanupTarget::File { path: path.clone() })
+        .collect();
+    targets.extend(
+        planned
+            .folder
+            .iter()
+            .map(|path| CleanupTarget::Folder { path: path.clone() }),
+    );
+    targets.extend(
+        planned
+            .registry_key
+            .iter()
+            .map(|key| CleanupTarget::RegistryKey { key: key.clone() }),
+    );
+    CleanupOutcome {
+        package_id: SCRIPTS.to_string(),
+        status: CleanupStatus::Removed,
+        refusal: None,
+        steps: targets
+            .into_iter()
+            .map(|target| CleanupStep {
+                target,
+                result: CleanupResult::Removed,
+            })
+            .collect(),
+        still_present: Vec::new(),
+        error: None,
+    }
 }
 
 /// One run of the engine on a [`Computer`].
@@ -348,6 +536,9 @@ impl<'c> Run<'c> {
                 if computer.app().exists() {
                     ids.push(PACKAGE_REAPER);
                 }
+                if computer.scripts_plugin().exists() {
+                    ids.push(SCRIPTS);
+                }
                 ids
             }),
             detections_after: None,
@@ -361,9 +552,15 @@ impl<'c> Run<'c> {
     fn uninstall(&self, ids: &[&str]) -> UninstallReport {
         let first = Cell::new(true);
         let detect = || -> crate::error::Result<Vec<ComponentDetection>> {
-            // Everything asked for is installed before the run.
+            // Everything asked for is installed before the run. A computer
+            // without the scripts has no package of that name.
             if first.replace(false) {
-                return Ok(installed(&[PACKAGE_SWS, PACKAGE_SURGE_XT, PACKAGE_REAPER]));
+                return Ok(installed(&[
+                    PACKAGE_SWS,
+                    PACKAGE_SURGE_XT,
+                    PACKAGE_REAPER,
+                    SCRIPTS,
+                ]));
             }
             if let Some(detections) = &self.detections_after {
                 return Ok(detections());
@@ -1606,4 +1803,1000 @@ fn surge_end_to_end(
         &CancelToken::new(),
     )
     .unwrap()
+}
+
+/// A run on `computer` whose lookup finds the scripts' uninstaller folder
+/// and registry entry, and trusts them.
+fn with_cleanup_there<'c>(computer: &'c Computer, helper: &'c dyn ElevatedHelper) -> Run<'c> {
+    let mut run = Run::new(computer, helper);
+    run.lookup = Box::new(FoundAtEach {
+        computer,
+        cleanup: Ok(Some(computer.planned_cleanup())),
+    });
+    run
+}
+
+/// The manifest of the backup set `report`'s run wrote.
+fn backup_manifest(report: &UninstallReport) -> BackupManifest {
+    let set = report.backup_set_path.as_ref().expect("a backup set");
+    serde_json::from_str(&fs::read_to_string(set.join(BACKUP_MANIFEST_FILE)).unwrap()).unwrap()
+}
+
+fn sorted(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths.sort();
+    paths
+}
+
+/// The scripts' files move into the backup set first, the script files as
+/// ones their installer added; only then does the helper remove the
+/// uninstaller folder and registry entry, after the run's one permission
+/// prompt. The receipt then no longer claims the scripts, and the set
+/// records their entry, the files their installer added included.
+#[test]
+fn a_jaws_run_moves_files_into_the_backup_then_has_the_helper_clean_up() {
+    let (computer, scripts) = Computer::with_scripts();
+    let planned = computer.planned_cleanup();
+    let moved_first = scripts.files();
+    let helper =
+        ScriptedHelper::new(Vec::new()).cleaning_up_after(cleaned_up(&planned), move || {
+            for path in &moved_first {
+                assert!(!path.exists(), "{} is still there", path.display());
+            }
+        });
+    let (progress, events) = recorded_events();
+    let mut run = with_cleanup_there(&computer, &helper);
+    run.progress = progress;
+
+    let report = run.uninstall(&[SCRIPTS]);
+
+    let scripts_item = item(&report, SCRIPTS);
+    assert_eq!(scripts_item.status, UninstallStatus::Removed, "{report:#?}");
+    let set_id = report.backup_set_id.clone().expect("a backup set");
+    assert_eq!(
+        scripts_item.message_code,
+        UninstallMessage::Removed {
+            backup_set_id: Some(set_id)
+        }
+    );
+    assert_eq!(scripts_item.cleanup, Some(cleaned_up(&planned)));
+    assert_eq!(
+        helper.log(),
+        ["start jaws-test", "cleanup jaws-test", "finish"]
+    );
+
+    assert_eq!(
+        sorted(
+            scripts_item
+                .removed
+                .iter()
+                .map(|file| file.path.clone())
+                .collect()
+        ),
+        sorted(scripts.files())
+    );
+    for file in &scripts_item.removed {
+        assert!(!file.path.exists(), "{}", file.path.display());
+        assert!(
+            file.backup_path.as_ref().is_some_and(|copy| copy.is_file()),
+            "{file:?}"
+        );
+        let expected = if scripts.added.contains(&file.path) {
+            RemovalReason::VendorAdded
+        } else {
+            RemovalReason::ManifestPath
+        };
+        assert_eq!(file.reason, expected, "{}", file.path.display());
+    }
+    let manifest = backup_manifest(&report);
+    let recorded = manifest.packages[SCRIPTS].receipt.as_ref().unwrap();
+    assert_eq!(recorded.vendor_added_files.len(), scripts.added.len());
+
+    let receipt = computer.receipt();
+    assert!(!receipt.packages.contains_key(SCRIPTS));
+    assert!(receipt.declined_packages.contains(SCRIPTS));
+
+    // One sentence per step the helper took, and that a backup can't undo
+    // them.
+    for file in &planned.files {
+        assert!(
+            scripts_item
+                .message
+                .contains(&format!("RABBIT removed {}.", file.display())),
+            "{}",
+            scripts_item.message
+        );
+    }
+    assert!(
+        scripts_item.message.contains(&format!(
+            "removed the registry entry {}.",
+            planned.registry_key.as_ref().unwrap()
+        )),
+        "{}",
+        scripts_item.message
+    );
+    assert!(
+        scripts_item
+            .message
+            .contains("A backup can't bring these back.")
+    );
+    assert!(!report.has_failures() && !report.finished_with_problems());
+
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events.first(),
+        Some(&ProgressEvent::AdministratorPrompt {
+            package_ids: vec![SCRIPTS.to_string()],
+        })
+    );
+    assert!(events.contains(&ProgressEvent::RemoveStarted {
+        package_id: SCRIPTS.to_string(),
+        method: RemovalMethod::Files,
+    }));
+}
+
+/// The scripts' cleanup and REAPER's own uninstaller share the run's one
+/// permission prompt, and the scripts go first.
+#[test]
+fn one_permission_prompt_covers_a_cleanup_and_a_vendor_uninstaller() {
+    let (computer, _scripts) = Computer::with_scripts();
+    let planned = computer.planned_cleanup();
+    let helper = ScriptedHelper::new(vec![(
+        PACKAGE_REAPER,
+        Script::ends(outcome(PACKAGE_REAPER, VendorStatus::Removed, Some(0)))
+            .removing(&[&computer.app()]),
+    )])
+    .cleaning_up(cleaned_up(&planned));
+
+    let report = with_cleanup_there(&computer, &helper).uninstall(&[PACKAGE_REAPER, SCRIPTS]);
+
+    assert_eq!(
+        report
+            .items
+            .iter()
+            .map(|item| (item.package_id.as_str(), item.status))
+            .collect::<Vec<_>>(),
+        [
+            (SCRIPTS, UninstallStatus::Removed),
+            (PACKAGE_REAPER, UninstallStatus::Removed),
+        ],
+        "{report:#?}"
+    );
+    assert_eq!(
+        helper.log(),
+        [
+            "start jaws-test,reaper",
+            "cleanup jaws-test",
+            "run reaper",
+            "finish"
+        ]
+    );
+}
+
+/// Declining the prompt cancels the scripts with the rest of the run before
+/// anything changes: every file stays, and so does the receipt.
+#[test]
+fn a_declined_prompt_cancels_a_jaws_run_and_changes_nothing() {
+    let (computer, scripts) = Computer::with_scripts();
+    let receipt_before = fs::read(crate::receipt::receipt_path(computer.resource())).unwrap();
+    let helper = ScriptedHelper::failing_to_start(ElevationStartError::Declined);
+
+    let report = with_cleanup_there(&computer, &helper).uninstall(&[PACKAGE_SWS, SCRIPTS]);
+
+    for id in [PACKAGE_SWS, SCRIPTS] {
+        let item = item(&report, id);
+        assert_eq!(item.status, UninstallStatus::Cancelled, "{id}");
+        assert_eq!(
+            item.message_code,
+            UninstallMessage::ElevationDeclined,
+            "{id}"
+        );
+    }
+    for path in scripts.files() {
+        assert!(path.is_file(), "{}", path.display());
+    }
+    assert!(computer.sws.is_file());
+    assert_eq!(
+        fs::read(crate::receipt::receipt_path(computer.resource())).unwrap(),
+        receipt_before
+    );
+    assert!(report.backup_set_id.is_none() && !report.changed_anything());
+    assert_eq!(helper.log(), ["start jaws-test"]);
+}
+
+/// With neither the uninstaller folder nor its registry entry there, as
+/// after a restore, nothing needs administrator rights: no question, no
+/// prompt, and every file goes into the backup set as usual.
+#[test]
+fn no_prompt_when_the_jaws_vendor_folder_and_key_are_gone() {
+    let (computer, scripts) = Computer::with_scripts();
+    let helper = ScriptedHelper::new(Vec::new());
+
+    let report = Run::new(&computer, &helper).uninstall(&[SCRIPTS]);
+
+    let planned = report.plan.item(SCRIPTS).unwrap();
+    assert!(planned.machine_cleanup.is_none());
+    assert!(!planned.needs_elevated_helper() && !planned.confirm);
+    let scripts_item = item(&report, SCRIPTS);
+    assert_eq!(scripts_item.status, UninstallStatus::Removed, "{report:#?}");
+    assert!(scripts_item.cleanup.is_none());
+    assert!(helper.log().is_empty());
+    for path in scripts.files() {
+        assert!(!path.exists(), "{}", path.display());
+    }
+    assert!(computer.receipt().declined_packages.contains(SCRIPTS));
+}
+
+/// The helper checks the folder and the registry entry again right before
+/// it deletes, and refuses when something changed since the plan. Every
+/// file goes back, the receipt stays as it was, and the run stops there, as
+/// for a vendor's uninstaller the helper refuses.
+#[test]
+fn a_refused_cleanup_puts_every_file_back_and_stops_the_run() {
+    let (computer, scripts) = Computer::with_scripts();
+    let receipt_before = fs::read(crate::receipt::receipt_path(computer.resource())).unwrap();
+    let planned = computer.planned_cleanup();
+    let refusal = VendorRefusal::UntrustedFolder {
+        path: planned.folder.clone().unwrap(),
+    };
+    let refused = CleanupOutcome::refused(SCRIPTS, refusal.clone());
+    let helper = ScriptedHelper::new(vec![(
+        PACKAGE_REAPER,
+        Script::ends(outcome(PACKAGE_REAPER, VendorStatus::Removed, Some(0))),
+    )])
+    .cleaning_up(refused.clone());
+
+    let report = with_cleanup_there(&computer, &helper).uninstall(&[SCRIPTS, PACKAGE_REAPER]);
+
+    let scripts_item = item(&report, SCRIPTS);
+    assert_eq!(scripts_item.status, UninstallStatus::Failed, "{report:#?}");
+    assert_eq!(
+        scripts_item.message_code,
+        UninstallMessage::CleanupRefused { refusal }
+    );
+    assert_eq!(scripts_item.cleanup, Some(refused));
+    assert!(scripts_item.removed.is_empty());
+    assert_eq!(
+        sorted(scripts_item.put_back.clone()),
+        sorted(scripts.files())
+    );
+    assert!(
+        scripts_item
+            .message
+            .ends_with("Everything of jaws-test is back in place."),
+        "{}",
+        scripts_item.message
+    );
+    for path in scripts.files() {
+        assert!(path.is_file(), "{}", path.display());
+    }
+    assert_eq!(
+        fs::read(crate::receipt::receipt_path(computer.resource())).unwrap(),
+        receipt_before
+    );
+    let reaper = item(&report, PACKAGE_REAPER);
+    assert_eq!(reaper.status, UninstallStatus::NotReached);
+    assert_eq!(
+        reaper.message_code,
+        UninstallMessage::RunStopped {
+            package_id: SCRIPTS.to_string()
+        }
+    );
+    assert!(computer.app().exists());
+    assert_eq!(
+        helper.log(),
+        ["start jaws-test,reaper", "cleanup jaws-test", "finish"]
+    );
+    assert!(report.backup_set_id.is_none() && report.has_failures());
+}
+
+/// A delete fails part way: what it removed stays removed, which a backup
+/// can't undo, so the report lists it. Every file goes back and the
+/// receipt keeps the scripts, which the registry entry still names, so a
+/// later uninstall can try again. The run goes on with the next package.
+#[test]
+fn a_failed_cleanup_puts_every_file_back_keeps_the_receipt_and_goes_on() {
+    let (computer, scripts) = Computer::with_scripts();
+    let planned = computer.planned_cleanup();
+    let [dat, exe] = [planned.files[0].clone(), planned.files[1].clone()];
+    let error = format!("{}: access denied", exe.display());
+    let failed = CleanupOutcome {
+        package_id: SCRIPTS.to_string(),
+        status: CleanupStatus::Failed,
+        refusal: None,
+        steps: vec![
+            CleanupStep {
+                target: CleanupTarget::File { path: dat.clone() },
+                result: CleanupResult::Removed,
+            },
+            CleanupStep {
+                target: CleanupTarget::File { path: exe },
+                result: CleanupResult::Failed {
+                    error: "access denied".to_string(),
+                },
+            },
+        ],
+        still_present: vec![
+            planned.folder.as_ref().unwrap().display().to_string(),
+            planned.registry_key.clone().unwrap(),
+        ],
+        error: Some(error.clone()),
+    };
+    let helper = ScriptedHelper::new(vec![(
+        PACKAGE_REAPER,
+        Script::ends(outcome(PACKAGE_REAPER, VendorStatus::Removed, Some(0)))
+            .removing(&[&computer.app()]),
+    )])
+    .cleaning_up(failed.clone());
+
+    let report = with_cleanup_there(&computer, &helper).uninstall(&[SCRIPTS, PACKAGE_REAPER]);
+
+    let scripts_item = item(&report, SCRIPTS);
+    assert_eq!(scripts_item.status, UninstallStatus::Failed, "{report:#?}");
+    assert_eq!(
+        scripts_item.message_code,
+        UninstallMessage::CleanupFailed { error }
+    );
+    assert_eq!(scripts_item.cleanup, Some(failed));
+    assert_eq!(
+        sorted(scripts_item.put_back.clone()),
+        sorted(scripts.files())
+    );
+    for path in scripts.files() {
+        assert!(path.is_file(), "{}", path.display());
+    }
+    let message = &scripts_item.message;
+    assert!(
+        message.contains(&format!(
+            "With administrator rights, RABBIT removed {}.",
+            dat.display()
+        )),
+        "{message}"
+    );
+    assert!(message.contains("Still there: "), "{message}");
+    assert!(!message.contains("back in place"), "{message}");
+
+    let receipt = computer.receipt();
+    assert!(receipt.packages.contains_key(SCRIPTS));
+    assert!(!receipt.declined_packages.contains(SCRIPTS));
+    assert_eq!(
+        item(&report, PACKAGE_REAPER).status,
+        UninstallStatus::Removed
+    );
+    assert!(!receipt.packages.contains_key(PACKAGE_REAPER));
+    assert_eq!(
+        helper.log(),
+        [
+            "start jaws-test,reaper",
+            "cleanup jaws-test",
+            "run reaper",
+            "finish"
+        ]
+    );
+}
+
+/// Contact with the helper lost during the cleanup: nobody can say what it
+/// removed. Every file goes back, the receipt stays, and the run stops.
+#[test]
+fn a_lost_helper_during_a_cleanup_stops_the_run_and_puts_files_back() {
+    let (computer, scripts) = Computer::with_scripts();
+    let lost = CleanupOutcome::lost(SCRIPTS, "RABBIT lost contact with its helper (it ended)");
+    let helper = ScriptedHelper::new(vec![(
+        PACKAGE_REAPER,
+        Script::ends(outcome(PACKAGE_REAPER, VendorStatus::Removed, Some(0))),
+    )])
+    .cleaning_up(lost.clone());
+
+    let report = with_cleanup_there(&computer, &helper).uninstall(&[SCRIPTS, PACKAGE_REAPER]);
+
+    let scripts_item = item(&report, SCRIPTS);
+    assert_eq!(scripts_item.status, UninstallStatus::Failed, "{report:#?}");
+    assert_eq!(
+        scripts_item.message_code,
+        UninstallMessage::CleanupLost {
+            error: "RABBIT lost contact with its helper (it ended)".to_string()
+        }
+    );
+    assert_eq!(scripts_item.cleanup, Some(lost));
+    for path in scripts.files() {
+        assert!(path.is_file(), "{}", path.display());
+    }
+    assert!(
+        scripts_item.message.contains("may be gone"),
+        "{}",
+        scripts_item.message
+    );
+    assert!(!scripts_item.message.contains("back in place"));
+    assert_eq!(
+        item(&report, PACKAGE_REAPER).status,
+        UninstallStatus::NotReached
+    );
+    let receipt = computer.receipt();
+    assert!(receipt.packages.contains_key(SCRIPTS));
+    assert!(!receipt.declined_packages.contains(SCRIPTS));
+    assert_eq!(
+        helper.log(),
+        ["start jaws-test,reaper", "cleanup jaws-test", "finish"]
+    );
+    assert!(report.has_failures());
+}
+
+/// Once the cleanup removed anything, a backup can't undo the package, so a
+/// receipt that can't be saved afterwards is a problem to report and
+/// nothing goes back. The run's receipt keeps the scripts out and declined,
+/// so the next package's save, here REAPER's once a save works again,
+/// doesn't bring them back.
+#[test]
+fn a_receipt_that_cant_be_saved_after_the_cleanup_is_a_problem_and_stays_declined() {
+    let (computer, scripts) = Computer::with_scripts();
+    let planned = computer.planned_cleanup();
+    // A folder where the receipt's temporary file goes makes every save
+    // fail, while the receipt itself still loads. REAPER's uninstaller,
+    // which runs next, takes it away.
+    let blocker = write(
+        &computer
+            .resource()
+            .join("RABBIT")
+            .join("install-state.json.rabbit-tmp")
+            .join("blocker"),
+        b"blocker",
+    )
+    .parent()
+    .unwrap()
+    .to_path_buf();
+    let helper = ScriptedHelper::new(vec![(
+        PACKAGE_REAPER,
+        Script::ends(outcome(PACKAGE_REAPER, VendorStatus::Removed, Some(0)))
+            .removing(&[&computer.app(), &blocker]),
+    )])
+    .cleaning_up(cleaned_up(&planned));
+
+    let report = with_cleanup_there(&computer, &helper).uninstall(&[SCRIPTS, PACKAGE_REAPER]);
+
+    let scripts_item = item(&report, SCRIPTS);
+    assert_eq!(scripts_item.status, UninstallStatus::Removed, "{report:#?}");
+    assert!(
+        matches!(
+            scripts_item.problems.as_slice(),
+            [UninstallProblem::ReceiptNotSaved { .. }]
+        ),
+        "{:?}",
+        scripts_item.problems
+    );
+    assert!(scripts_item.put_back.is_empty());
+    for path in scripts.files() {
+        assert!(!path.exists(), "{}", path.display());
+    }
+    assert!(
+        scripts_item.message.contains("couldn't update its receipt"),
+        "{}",
+        scripts_item.message
+    );
+    assert_eq!(
+        item(&report, PACKAGE_REAPER).status,
+        UninstallStatus::Removed
+    );
+    let receipt = computer.receipt();
+    assert!(!receipt.packages.contains_key(SCRIPTS));
+    assert!(receipt.declined_packages.contains(SCRIPTS));
+    assert!(!receipt.packages.contains_key(PACKAGE_REAPER));
+    assert!(report.finished_with_problems() && !report.has_failures());
+}
+
+/// A cleanup that found neither the folder nor the registry entry when it
+/// checked again, removed by hand since the plan, say.
+fn nothing_there_any_more() -> CleanupOutcome {
+    CleanupOutcome {
+        package_id: SCRIPTS.to_string(),
+        status: CleanupStatus::NothingThere,
+        refusal: None,
+        steps: Vec::new(),
+        still_present: Vec::new(),
+        error: None,
+    }
+}
+
+/// The folder and the registry entry are gone by the time the helper checks
+/// again. Nothing was left for it to remove, so the run goes on: the
+/// scripts' files are in the backup set, their receipt entry goes and they
+/// are declined, and nothing says a backup can't bring something back.
+#[test]
+fn a_cleanup_with_nothing_there_any_more_still_removes_the_scripts() {
+    let (computer, scripts) = Computer::with_scripts();
+    let helper = ScriptedHelper::new(Vec::new()).cleaning_up(nothing_there_any_more());
+
+    let report = with_cleanup_there(&computer, &helper).uninstall(&[SCRIPTS]);
+
+    let scripts_item = item(&report, SCRIPTS);
+    assert_eq!(scripts_item.status, UninstallStatus::Removed, "{report:#?}");
+    assert_eq!(scripts_item.cleanup, Some(nothing_there_any_more()));
+    for path in scripts.files() {
+        assert!(!path.exists(), "{}", path.display());
+    }
+    assert!(
+        !scripts_item
+            .message
+            .contains("A backup can't bring these back."),
+        "{}",
+        scripts_item.message
+    );
+    let receipt = computer.receipt();
+    assert!(!receipt.packages.contains_key(SCRIPTS));
+    assert!(receipt.declined_packages.contains(SCRIPTS));
+    assert_eq!(
+        helper.log(),
+        ["start jaws-test", "cleanup jaws-test", "finish"]
+    );
+    assert!(!report.has_failures() && !report.finished_with_problems());
+}
+
+/// With nothing removed by the helper, a backup can still undo the whole
+/// package. So a receipt that can't be saved afterwards puts every file
+/// back, as for any package in the backup set, and the receipt keeps the
+/// scripts.
+#[test]
+fn a_receipt_that_cant_be_saved_after_a_cleanup_with_nothing_there_puts_every_file_back() {
+    let (computer, scripts) = Computer::with_scripts();
+    let receipt_before = fs::read(crate::receipt::receipt_path(computer.resource())).unwrap();
+    // A folder where the receipt's temporary file goes makes every save
+    // fail, while the receipt itself still loads.
+    write(
+        &computer
+            .resource()
+            .join("RABBIT")
+            .join("install-state.json.rabbit-tmp")
+            .join("blocker"),
+        b"blocker",
+    );
+    let helper = ScriptedHelper::new(Vec::new()).cleaning_up(nothing_there_any_more());
+
+    let report = with_cleanup_there(&computer, &helper).uninstall(&[SCRIPTS]);
+
+    let scripts_item = item(&report, SCRIPTS);
+    assert_eq!(scripts_item.status, UninstallStatus::Failed, "{report:#?}");
+    assert!(
+        matches!(
+            scripts_item.message_code,
+            UninstallMessage::ReceiptSaveFailed { .. }
+        ),
+        "{:?}",
+        scripts_item.message_code
+    );
+    assert_eq!(scripts_item.cleanup, Some(nothing_there_any_more()));
+    assert!(scripts_item.removed.is_empty() && scripts_item.problems.is_empty());
+    assert_eq!(
+        sorted(scripts_item.put_back.clone()),
+        sorted(scripts.files())
+    );
+    for path in scripts.files() {
+        assert!(path.is_file(), "{}", path.display());
+    }
+    assert_eq!(
+        fs::read(crate::receipt::receipt_path(computer.resource())).unwrap(),
+        receipt_before
+    );
+    assert!(report.has_failures());
+}
+
+/// A script file changed since the installer added it, such as the user's
+/// own settings, stays and is reported; so does one that was there before
+/// the installer ran, which may be the user's own. The rest go.
+#[test]
+fn changed_and_there_before_jaws_files_stay_and_are_reported() {
+    let (computer, scripts) = Computer::with_scripts();
+    let appdata = computer.roots.appdata.clone().unwrap();
+    let changed = write(
+        &script_path(&appdata, "2025", "enu", "reaper.jcf"),
+        b"as installed",
+    );
+    let before = write(
+        &script_path(&appdata, "2025", "enu", "reaper.ini"),
+        b"the user's own",
+    );
+    computer.record_script_files(vec![record(&changed, false), record(&before, true)]);
+    fs::write(&changed, b"the user's settings").unwrap();
+    let helper = ScriptedHelper::new(Vec::new());
+
+    let report = Run::new(&computer, &helper).uninstall(&[SCRIPTS]);
+
+    let scripts_item = item(&report, SCRIPTS);
+    assert_eq!(scripts_item.status, UninstallStatus::Removed, "{report:#?}");
+    assert_eq!(fs::read(&changed).unwrap(), b"the user's settings");
+    assert_eq!(fs::read(&before).unwrap(), b"the user's own");
+    assert!(
+        scripts_item
+            .kept
+            .iter()
+            .any(|kept| kept.path == changed && kept.reason == KeptFileReason::ChangedSinceInstall),
+        "{:?}",
+        scripts_item.kept
+    );
+    assert!(
+        scripts_item.message.contains(&format!(
+            "because they changed since RABBIT installed them: {}.",
+            changed.display()
+        )),
+        "{}",
+        scripts_item.message
+    );
+    let planned = report.plan.item(SCRIPTS).unwrap();
+    assert!(
+        planned
+            .kept
+            .iter()
+            .any(|kept| kept.path == before && kept.reason == KeptReason::ThereBeforeInstall),
+        "{:?}",
+        planned.kept
+    );
+    for path in scripts.files() {
+        assert!(!path.exists(), "{}", path.display());
+    }
+}
+
+/// A dry run lists the files and, from the plan, what the helper would
+/// remove, one sentence each; it asks for no permission and changes
+/// nothing.
+#[test]
+fn a_dry_run_lists_the_cleanup_and_raises_no_prompt() {
+    let (computer, scripts) = Computer::with_scripts();
+    let planned = computer.planned_cleanup();
+    let helper = ScriptedHelper::new(Vec::new());
+    let mut run = with_cleanup_there(&computer, &helper);
+    run.dry_run = true;
+
+    let report = run.uninstall(&[SCRIPTS]);
+
+    let scripts_item = item(&report, SCRIPTS);
+    assert_eq!(scripts_item.status, UninstallStatus::WouldRemove);
+    assert!(scripts_item.cleanup.is_none());
+    let plan_item = report.plan.item(SCRIPTS).unwrap();
+    assert_eq!(plan_item.machine_cleanup.as_ref(), Some(&planned));
+    assert!(plan_item.needs_elevated_helper() && plan_item.confirm);
+    assert_eq!(
+        sorted(
+            scripts_item
+                .removed
+                .iter()
+                .map(|file| file.path.clone())
+                .collect()
+        ),
+        sorted(scripts.files())
+    );
+    let message = &scripts_item.message;
+    for file in &planned.files {
+        assert!(
+            message.contains(&format!(
+                "With administrator rights, RABBIT would also remove {}.",
+                file.display()
+            )),
+            "{message}"
+        );
+    }
+    assert!(
+        message.contains(&format!(
+            "remove the folder {} once it is empty.",
+            planned.folder.as_ref().unwrap().display()
+        )),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!(
+            "remove the registry entry {}.",
+            planned.registry_key.as_ref().unwrap()
+        )),
+        "{message}"
+    );
+    assert!(
+        message
+            .ends_with("Windows asks for permission first, and a backup can't bring these back."),
+        "{message}"
+    );
+    assert!(helper.log().is_empty());
+    for path in scripts.files() {
+        assert!(path.is_file(), "{}", path.display());
+    }
+}
+
+/// The restore rules for a computer's packages: the shared folders for any
+/// package, and the scripts' own pattern for the scripts alone, guarded by
+/// JAWS's folder. A pattern whose token stands for nothing allows nothing.
+#[test]
+fn the_outside_restore_rules_are_the_clap_folder_and_each_packages_vendor_patterns() {
+    let (computer, _scripts) = Computer::with_scripts();
+    let clap = computer.dir.path().join("CLAP");
+    let appdata = computer.roots.appdata.clone().unwrap();
+
+    let rules = outside_restore_rules_with(
+        &computer.specs,
+        Platform::Windows,
+        &computer.roots,
+        vec![clap.clone()],
+    );
+
+    assert_eq!(rules.shared_roots, vec![clap]);
+    let [(owner, pattern)] = rules.vendor_added.as_slice() else {
+        panic!("{:?}", rules.vendor_added);
+    };
+    assert_eq!(owner, SCRIPTS);
+    assert_eq!(pattern.base, appdata);
+    assert_eq!(
+        pattern.guard.root.as_deref(),
+        Some(appdata.join("Freedom Scientific").join("JAWS").as_path())
+    );
+    assert!(crate::uninstall::paths::pattern_matches(
+        pattern,
+        &script_path(&appdata, "2025", "enu", "reaper.jss")
+    ));
+
+    let mut without_appdata = computer.roots.clone();
+    without_appdata.appdata = None;
+    let rules = outside_restore_rules_with(
+        &computer.specs,
+        Platform::Windows,
+        &without_appdata,
+        Vec::new(),
+    );
+    assert!(rules.vendor_added.is_empty());
+}
+
+/// Restoring the scripts alone brings back both plug-ins and the script
+/// files, each where it was, and their receipt entry with the record of the
+/// files their installer added; they are no longer declined. The
+/// uninstaller folder, which the stand-in helper removes, doesn't come
+/// back: nothing of it is in the backup set.
+#[test]
+fn restoring_jaws_brings_back_both_dlls_and_the_script_files() {
+    let (computer, scripts) = Computer::with_scripts();
+    let planned = computer.planned_cleanup();
+    let folder = planned.folder.clone().unwrap();
+    for file in &planned.files {
+        write(file, b"uninstaller");
+    }
+    let entry_before = computer.receipt().packages[SCRIPTS].clone();
+    let contents: Vec<Vec<u8>> = scripts
+        .files()
+        .iter()
+        .map(|path| fs::read(path).unwrap())
+        .collect();
+    let removed_by_helper = folder.clone();
+    let helper =
+        ScriptedHelper::new(Vec::new()).cleaning_up_after(cleaned_up(&planned), move || {
+            fs::remove_dir_all(&removed_by_helper).unwrap();
+        });
+    let report = with_cleanup_there(&computer, &helper).uninstall(&[SCRIPTS]);
+    let set_id = report.backup_set_id.clone().expect("a backup set");
+    let rules = outside_restore_rules_with(
+        &computer.specs,
+        Platform::Windows,
+        &computer.roots,
+        Vec::new(),
+    );
+
+    let restored = restore_backup_set_within(
+        computer.resource(),
+        &set_id,
+        &RestoreBackupOptions {
+            dry_run: false,
+            allow_reaper_running: true,
+            package_id: Some(SCRIPTS.to_string()),
+        },
+        &rules,
+    )
+    .unwrap();
+
+    for (path, contents) in scripts.files().iter().zip(&contents) {
+        assert_eq!(&fs::read(path).unwrap(), contents, "{}", path.display());
+    }
+    assert!(restored.packages[0].receipt_merged);
+    let receipt = computer.receipt();
+    assert_eq!(receipt.packages.get(SCRIPTS), Some(&entry_before));
+    assert!(!receipt.declined_packages.contains(SCRIPTS));
+    assert!(!folder.exists());
+}
+
+/// A whole set holding the scripts and another package restores both, the
+/// script files from outside the resource folder included.
+#[test]
+fn a_whole_set_restore_with_jaws_files_restores_every_package() {
+    let (computer, scripts) = Computer::with_scripts();
+    let planned = computer.planned_cleanup();
+    let helper = ScriptedHelper::new(Vec::new()).cleaning_up(cleaned_up(&planned));
+    let report = with_cleanup_there(&computer, &helper).uninstall(&[PACKAGE_SWS, SCRIPTS]);
+    assert!(!report.has_failures(), "{report:#?}");
+    let set_id = report.backup_set_id.clone().expect("a backup set");
+    assert!(!computer.sws.exists());
+    let rules = outside_restore_rules_with(
+        &computer.specs,
+        Platform::Windows,
+        &computer.roots,
+        Vec::new(),
+    );
+
+    let restored = restore_backup_set_within(
+        computer.resource(),
+        &set_id,
+        &RestoreBackupOptions {
+            dry_run: false,
+            allow_reaper_running: true,
+            package_id: None,
+        },
+        &rules,
+    )
+    .unwrap();
+
+    assert_eq!(restored.packages.len(), 2);
+    assert!(computer.sws.is_file());
+    for path in scripts.files() {
+        assert!(path.is_file(), "{}", path.display());
+    }
+    let receipt = computer.receipt();
+    for id in [PACKAGE_SWS, SCRIPTS] {
+        assert!(receipt.packages.contains_key(id), "{id}");
+        assert!(!receipt.declined_packages.contains(id), "{id}");
+    }
+}
+
+/// Looks every machine cleanup up through a test environment, as RABBIT
+/// itself does through HKLM's list, and finds no vendor's uninstaller.
+#[cfg(windows)]
+struct LookedUpIn(super::vendor::tests::TestEnvironment);
+
+#[cfg(windows)]
+impl VendorLookup for LookedUpIn {
+    fn locate(&self, _job: &super::VendorJob<'_>) -> Result<PathBuf, VendorRefusal> {
+        Err(VendorRefusal::NotListed)
+    }
+
+    fn machine_cleanup(
+        &self,
+        job: &CleanupJob<'_>,
+    ) -> Result<Option<PlannedMachineCleanup>, VendorRefusal> {
+        super::cleanup::check_machine_cleanup(job, &self.0)
+    }
+}
+
+/// The whole way on Windows: the engine plans the scripts, checking their
+/// uninstaller folder and registry entry through the lookup, moves their
+/// files into the backup set, and starts the helper loop (on a thread
+/// here), which checks again and deletes the folder's files, the folder and
+/// the entry. A restore then brings the files back, but not the folder or
+/// the entry. The folder is a fixture's, the entry is in a throwaway key
+/// standing in for HKLM, and both have names no installer uses.
+#[cfg(windows)]
+#[test]
+fn jaws_end_to_end() {
+    use super::InProcessElevatedHelper;
+    use super::cleanup::tests::windows::install;
+    use super::vendor::tests::windows::{Fixture, never_runs};
+
+    let fixture = Fixture::new();
+    let uninstaller = install(&fixture);
+    let appdata = fixture.resource.parent().unwrap().to_path_buf();
+    let mut roots = fixture.roots(None);
+    roots.appdata = Some(appdata.clone());
+    let spec = scripts_spec();
+
+    let plugins = fixture.resource.join("UserPlugins");
+    let plugin64 = write(&plugins.join("Reaper_ComAccess64.dll"), b"dll64");
+    let files = vec![
+        write(&plugins.join("Reaper_ComAccess32.dll"), b"dll32"),
+        plugin64.clone(),
+        write(
+            &script_path(&appdata, "2025", "enu", "reaper.jss"),
+            b"script",
+        ),
+        write(&script_path(&appdata, "2025", "deu", "reaper.jkm"), b"keys"),
+    ];
+    let mut state = InstallState::default();
+    state.packages.insert(
+        SCRIPTS.to_string(),
+        PackageReceipt {
+            id: SCRIPTS.to_string(),
+            version: None,
+            variant: None,
+            channel: None,
+            source_url: None,
+            source_sha256: None,
+            installed_files: vec![InstalledFileReceipt {
+                path: PathBuf::from("UserPlugins").join("Reaper_ComAccess64.dll"),
+                sha256: Some(sha256_file(&plugin64).unwrap()),
+                size: Some(5),
+            }],
+            installed_at: None,
+            rabbit_version: None,
+            architecture: None,
+            vendor_added_files: files[2..].iter().map(|path| record(path, false)).collect(),
+        },
+    );
+    save_install_state(&fixture.resource, &state).unwrap();
+
+    let helper = InProcessElevatedHelper::new(
+        Arc::new(fixture.env(never_runs())),
+        vec![spec.clone()],
+        fixture.folders.clone(),
+    );
+    let lookup = LookedUpIn(fixture.env(never_runs()));
+    let detect = || -> crate::error::Result<Vec<ComponentDetection>> {
+        Ok(installed(if plugin64.exists() { &[SCRIPTS] } else { &[] }))
+    };
+    let nothing = || Vec::new();
+    let named = |_: &[String]| Vec::new();
+    let report = execute_uninstall_in(
+        &UninstallRequest {
+            resource_path: fixture.resource.clone(),
+            platform: Platform::Windows,
+            package_ids: vec![SCRIPTS.to_string()],
+            remove_settings: false,
+            dry_run: false,
+            target_app_path: None,
+            target: Some(InstallationKind::Standard),
+        },
+        &UninstallEnvironment {
+            specs: std::slice::from_ref(&spec),
+            roots: &roots,
+            target: InstallationKind::Standard,
+            target_app_path: None,
+            detect: &detect,
+            reaper_processes: &nothing,
+            named_processes: &named,
+            volumes: &OneVolume,
+            installed_programs: None,
+            vendor_lookup: &lookup,
+            elevated_helper: &helper,
+            macos_objects: &NoMacosObjects,
+            administrator_shell: &NoAdministratorShell,
+        },
+        &ProgressReporter::noop(),
+        &CancelToken::new(),
+    )
+    .unwrap();
+
+    let scripts_item = item(&report, SCRIPTS);
+    assert_eq!(scripts_item.status, UninstallStatus::Removed, "{report:#?}");
+    let cleanup = scripts_item
+        .cleanup
+        .as_ref()
+        .expect("the helper cleaned up");
+    assert_eq!(cleanup.status, CleanupStatus::Removed, "{cleanup:?}");
+    assert_eq!(cleanup.steps.len(), 4, "{cleanup:?}");
+    assert!(
+        cleanup
+            .steps
+            .iter()
+            .all(|step| step.result == CleanupResult::Removed)
+    );
+    assert!(fs::symlink_metadata(&uninstaller.folder).is_err());
+    assert!(!fixture.list.views().key_exists(CLEANUP_KEY).unwrap());
+    for path in &files {
+        assert!(!path.exists(), "{}", path.display());
+    }
+    let receipt = load_install_state(&fixture.resource).unwrap().unwrap();
+    assert!(!receipt.packages.contains_key(SCRIPTS));
+    assert!(receipt.declined_packages.contains(SCRIPTS));
+
+    let set_id = report.backup_set_id.clone().expect("a backup set");
+    let rules = outside_restore_rules_with(
+        std::slice::from_ref(&spec),
+        Platform::Windows,
+        &roots,
+        Vec::new(),
+    );
+    restore_backup_set_within(
+        &fixture.resource,
+        &set_id,
+        &RestoreBackupOptions {
+            dry_run: false,
+            allow_reaper_running: true,
+            package_id: Some(SCRIPTS.to_string()),
+        },
+        &rules,
+    )
+    .unwrap();
+    for path in &files {
+        assert!(path.is_file(), "{}", path.display());
+    }
+    let receipt = load_install_state(&fixture.resource).unwrap().unwrap();
+    assert_eq!(receipt.packages.get(SCRIPTS), state.packages.get(SCRIPTS));
+    assert!(!receipt.declined_packages.contains(SCRIPTS));
+    assert!(fs::symlink_metadata(&uninstaller.folder).is_err());
+    assert!(!fixture.list.views().key_exists(CLEANUP_KEY).unwrap());
 }

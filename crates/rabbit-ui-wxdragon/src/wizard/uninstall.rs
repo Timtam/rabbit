@@ -373,7 +373,12 @@ fn details_text(summary: &str, explanation: &str) -> String {
 /// The short phrase a row that can't be ticked ends with.
 fn unavailability_reason(localizer: &Localizer, item: &UninstallPlanItem) -> String {
     let key = match &item.removability {
-        Removability::Manual { .. } => "wizard-uninstall-row-unavailable-manual",
+        // The details give the steps to remove it by hand: a manual plan's,
+        // or those of a package whose uninstaller folder and registry entry
+        // RABBIT leaves alone.
+        Removability::Manual { .. }
+        | Removability::CleanupNotTrusted { .. }
+        | Removability::NoFilesForThisAccount { .. } => "wizard-uninstall-row-unavailable-manual",
         // A macOS app RABBIT can't move to the Trash is the user's to move
         // there in Finder, which the row says as plainly.
         Removability::ByHand { .. } => "wizard-uninstall-row-unavailable-by-hand-macos",
@@ -431,8 +436,18 @@ fn refusal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
                 ("reason", reason.as_str()),
             ],
         ),
+        // Then the manifest's steps to remove the package by hand, which a
+        // standard plan with a machine cleanup lends a portable target.
         Removability::NeedsStandardTarget => {
-            format("wizard-uninstall-details-portable", &[("package", name)])
+            let mut lines = vec![format(
+                "wizard-uninstall-details-portable",
+                &[("package", name)],
+            )];
+            lines.extend(item.notes.iter().filter_map(|note| match note {
+                UninstallNote::Manifest { note_key } => Some(localizer.text(note_key).value),
+                _ => None,
+            }));
+            lines.join("\n")
         }
         Removability::NoReceipt => {
             format("wizard-uninstall-details-no-receipt", &[("package", name)])
@@ -449,6 +464,29 @@ fn refusal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
                 "wizard-uninstall-details-vendor-by-hand",
                 &[("package", name)],
             ),
+        ]
+        .join("\n"),
+        // What was wrong with the uninstaller folder or registry entry, in
+        // the user's language, then the manifest's steps to remove the
+        // package by hand.
+        Removability::CleanupNotTrusted {
+            refusal,
+            by_hand_key,
+        } => [
+            format(
+                "wizard-uninstall-details-cleanup-refused",
+                &[("package", name)],
+            ),
+            refusal_text(localizer, refusal, name),
+            localizer.text(by_hand_key).value,
+        ]
+        .join("\n"),
+        Removability::NoFilesForThisAccount { by_hand_key } => [
+            format(
+                "wizard-uninstall-details-no-files-for-this-account",
+                &[("package", name)],
+            ),
+            localizer.text(by_hand_key).value,
         ]
         .join("\n"),
         Removability::UnsafePath { path, .. } => format(
@@ -649,7 +687,12 @@ fn note_lines(localizer: &Localizer, item: &UninstallPlanItem, name: &str) -> Ve
                 "wizard-uninstall-details-reapack-orphan",
                 &[("package", name)],
             ),
-            UninstallNote::Manifest { note_key } => localizer.text(note_key).value,
+            UninstallNote::NoVendorRecord => format(
+                "wizard-uninstall-details-no-vendor-record",
+                &[("package", name)],
+            ),
+            UninstallNote::Manifest { note_key }
+            | UninstallNote::VendorFilesByHand { note_key } => localizer.text(note_key).value,
         })
         .collect()
 }
@@ -859,20 +902,20 @@ pub fn build_uninstall_review_preview(
     // nothing else, and the check before the run names the REAPERs to close.
     let machine_wide = planned.iter().any(|(_, item)| {
         item.warnings.contains(&UninstallWarning::MachineWide)
-            || item.needs_elevated_helper()
+            || item.runs_vendor_uninstaller()
             || (item.needs_administrator() && item.backup != UninstallBackup::ToTrash)
     });
     if machine_wide {
         add_note(text("wizard-review-uninstall-close-programs-note"));
     }
-    let vendor_runs: Vec<&&UninstallRow> = planned
-        .iter()
-        .filter(|(_, item)| item.needs_elevated_helper())
-        .map(|(row, _)| row)
-        .collect();
-    if !vendor_runs.is_empty() {
+    // One permission prompt covers every package the elevated helper works
+    // on. Only a vendor's own uninstaller opens a window of its own; the
+    // helper's cleanup of an uninstaller folder and registry entry doesn't.
+    if planned.iter().any(|(_, item)| item.needs_elevated_helper()) {
         add_note(text("wizard-review-uninstall-elevation-note-windows"));
-        for row in vendor_runs {
+    }
+    for (row, item) in &planned {
+        if item.runs_vendor_uninstaller() {
             add_note(format(
                 "wizard-review-uninstall-vendor-window-note",
                 &[("package", row.display_name.as_str())],

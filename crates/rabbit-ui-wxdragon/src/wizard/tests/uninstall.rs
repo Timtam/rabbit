@@ -39,6 +39,7 @@ pub(super) fn item(package_id: &str, removability: Removability) -> UninstallPla
         post: Vec::new(),
         registry_cleanup: Vec::new(),
         vendor_run: None,
+        machine_cleanup: None,
         blocking_programs: Vec::new(),
         macos_pkg_forget: Vec::new(),
         every_reaper_closed: false,
@@ -266,6 +267,13 @@ fn every_reason_a_package_stays_reads_as_a_sentence() {
         },
         Removability::NotSupported {
             note_key: "uninstall-manual-reaper-portable".to_string(),
+        },
+        Removability::CleanupNotTrusted {
+            refusal: VendorRefusal::RegistryKeyHasSubkeys,
+            by_hand_key: "uninstall-manual-reaper-portable".to_string(),
+        },
+        Removability::NoFilesForThisAccount {
+            by_hand_key: "uninstall-manual-reaper-portable".to_string(),
         },
     ];
     for removability in reasons {
@@ -506,6 +514,39 @@ fn rows_build_in_every_locale_without_missing_text() {
                     },
                 },
             ),
+            // The JAWS scripts: removable with the notes on script files
+            // that stay, refused for their uninstaller folder or registry
+            // entry, left to another account, and from a portable REAPER.
+            UninstallPlanItem {
+                notes: vec![
+                    UninstallNote::NoVendorRecord,
+                    UninstallNote::VendorFilesByHand {
+                        note_key: SCRIPTS_NOTE_KEY.to_string(),
+                    },
+                ],
+                ..item("jaws-scripts", Removability::Removable)
+            },
+            item(
+                "jaws-scripts",
+                Removability::CleanupNotTrusted {
+                    refusal: VendorRefusal::UntrustedFolder {
+                        path: PathBuf::from("C:/Program Files (x86)/Reaper_JawsScripts"),
+                    },
+                    by_hand_key: BY_HAND_KEY.to_string(),
+                },
+            ),
+            item(
+                "jaws-scripts",
+                Removability::NoFilesForThisAccount {
+                    by_hand_key: BY_HAND_KEY.to_string(),
+                },
+            ),
+            UninstallPlanItem {
+                notes: vec![UninstallNote::Manifest {
+                    note_key: BY_HAND_KEY.to_string(),
+                }],
+                ..item("jaws-scripts", Removability::NeedsStandardTarget)
+            },
         ]
     };
     for &locale in embedded_locales() {
@@ -1841,6 +1882,149 @@ fn an_uninstaller_rabbit_cant_trust_says_why_and_how_to_remove_it_by_hand() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The JAWS scripts: rows RABBIT leaves alone because of the uninstaller
+// folder and registry entry their installer left, and the notes on the
+// script files that stay.
+// ---------------------------------------------------------------------------
+
+/// Steps over several lines, standing in for a package's steps to remove it
+/// by hand.
+pub(super) const BY_HAND_KEY: &str = "uninstall-manual-reaper-portable";
+
+/// One sentence, standing in for the note on removing by hand the script
+/// files that stay.
+const SCRIPTS_NOTE_KEY: &str = "uninstall-note-reapack-packages-stay";
+
+/// Each line of the stand-in steps to remove a package by hand, in English.
+pub(super) fn by_hand_lines_en() -> Vec<String> {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let text = localizer.text(BY_HAND_KEY).value;
+    assert!(text.lines().count() > 2, "{text}");
+    text.lines().map(str::to_string).collect()
+}
+
+/// A JAWS row whose uninstaller folder or registry entry RABBIT doesn't
+/// trust can't be ticked. Its details say so, then why in the user's
+/// language, then how to remove the scripts by hand.
+#[test]
+fn a_refused_jaws_cleanup_row_says_how_to_remove_it_by_hand() {
+    let row = rows_for(vec![item(
+        "jaws-scripts",
+        Removability::CleanupNotTrusted {
+            refusal: VendorRefusal::RegistryValueMismatch {
+                found: "C:/Program Files/Reaper_JawsScripts".to_string(),
+            },
+            by_hand_key: BY_HAND_KEY.to_string(),
+        },
+    )])
+    .remove(0);
+    assert!(!row.can_tick);
+    assert_eq!(
+        row.unavailability_reason.as_deref(),
+        Some("remove it by hand")
+    );
+    let refused = "RABBIT doesn't trust what it found in Snowman's JAWS Scripts for REAPER's \
+                   uninstaller folder in Program Files or in its registry entry, so it leaves \
+                   Snowman's JAWS Scripts for REAPER alone.";
+    let reason = "Snowman's JAWS Scripts for REAPER's registry entry points somewhere RABBIT \
+                  doesn't expect: C:/Program Files/Reaper_JawsScripts";
+    let expected = [refused.to_string(), reason.to_string()]
+        .into_iter()
+        .chain(by_hand_lines_en())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(row.details.ends_with(&expected), "{}", row.details);
+}
+
+/// A JAWS row with no receipt and none of its files in this account can't
+/// be ticked: its details say to uninstall from the account that installed
+/// it, then how to remove the scripts by hand.
+#[test]
+fn a_jaws_row_with_no_files_for_this_account_says_where_to_uninstall_it() {
+    let row = rows_for(vec![item(
+        "jaws-scripts",
+        Removability::NoFilesForThisAccount {
+            by_hand_key: BY_HAND_KEY.to_string(),
+        },
+    )])
+    .remove(0);
+    assert!(!row.can_tick);
+    assert_eq!(
+        row.unavailability_reason.as_deref(),
+        Some("remove it by hand")
+    );
+    let account = "RABBIT doesn't find any of Snowman's JAWS Scripts for REAPER's files for your \
+                   account. If another account installed Snowman's JAWS Scripts for REAPER, \
+                   uninstall it from that account; until then RABBIT leaves its uninstaller \
+                   folder in Program Files and its registry entry alone.";
+    let expected = std::iter::once(account.to_string())
+        .chain(by_hand_lines_en())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(row.details.ends_with(&expected), "{}", row.details);
+}
+
+/// From a portable REAPER the JAWS row reads like any package a portable
+/// REAPER can't remove, then gives the steps to remove the scripts by hand
+/// that the standard plan lends it.
+#[test]
+fn a_portable_jaws_row_shows_the_by_hand_steps() {
+    let row = rows_for(vec![UninstallPlanItem {
+        strategy: None,
+        notes: vec![UninstallNote::Manifest {
+            note_key: BY_HAND_KEY.to_string(),
+        }],
+        ..item("jaws-scripts", Removability::NeedsStandardTarget)
+    }])
+    .remove(0);
+    assert!(!row.can_tick);
+    assert!(
+        row.summary
+            .ends_with("(not available: portable REAPER target)"),
+        "{}",
+        row.summary
+    );
+    let portable = Localizer::embedded(DEFAULT_LOCALE)
+        .unwrap()
+        .format(
+            "wizard-uninstall-details-portable",
+            &[("package", "Snowman's JAWS Scripts for REAPER")],
+        )
+        .value;
+    let expected = std::iter::once(portable)
+        .chain(by_hand_lines_en())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(row.details.ends_with(&expected), "{}", row.details);
+}
+
+/// With a receipt that records none of the script files the installer
+/// added, the row says they all stay, then how to remove them by hand.
+#[test]
+fn a_jaws_row_without_a_record_says_all_script_files_stay_and_how_to_remove_them() {
+    let row = rows_for(vec![UninstallPlanItem {
+        notes: vec![
+            UninstallNote::NoVendorRecord,
+            UninstallNote::VendorFilesByHand {
+                note_key: SCRIPTS_NOTE_KEY.to_string(),
+            },
+        ],
+        ..item("jaws-scripts", Removability::Removable)
+    }])
+    .remove(0);
+    assert!(row.can_tick);
+    let note = Localizer::embedded(DEFAULT_LOCALE)
+        .unwrap()
+        .text(SCRIPTS_NOTE_KEY)
+        .value;
+    let expected = format!(
+        "RABBIT has no record of which files Snowman's JAWS Scripts for REAPER's installer \
+         added, so all of them stay.\n{note}"
+    );
+    assert!(row.details.ends_with(&expected), "{}", row.details);
+}
+
 /// Review names the run's one permission prompt, and asks to answer a
 /// window from each vendor's uninstaller, once per package. It asks to
 /// close other music programs, for REAPER's own uninstaller too. And the
@@ -1898,6 +2082,42 @@ fn review_names_the_one_permission_prompt_and_the_question_covers_each_package()
         "{body}"
     );
     assert!(question(&plan, &["sws"]).is_none());
+}
+
+/// A package whose uninstaller folder and registry entry the elevated
+/// helper removes raises the run's one permission prompt too. But no window
+/// of a vendor's own uninstaller appears, and nothing it removes serves
+/// other music programs, so Review asks for neither.
+#[test]
+fn review_names_the_permission_prompt_for_a_cleanup_but_no_vendor_window_or_music_programs() {
+    let jaws = UninstallPlanItem {
+        machine_cleanup: Some(PlannedMachineCleanup {
+            folder: Some(PathBuf::from("C:/Program Files (x86)/Reaper_JawsScripts")),
+            files: Vec::new(),
+            registry_key: None,
+            by_hand_key: BY_HAND_KEY.to_string(),
+        }),
+        confirm: true,
+        ..item("jaws-scripts", Removability::Removable)
+    };
+    assert!(jaws.needs_elevated_helper() && !jaws.runs_vendor_uninstaller());
+    let mut list = list_for(vec![jaws]);
+    tick(&mut list, "jaws-scripts");
+    let text = review(&list, Some(&target(true)), false, &[])
+        .lines
+        .join("\n");
+    assert!(
+        text.contains(
+            "Windows asks for your permission once, before anything is removed. If you don't \
+             allow it, nothing is uninstalled."
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("own uninstaller appears"), "{text}");
+    assert!(
+        !text.contains("Close other music programs first."),
+        "{text}"
+    );
 }
 
 /// Finds every vendor's uninstaller at one made-up path, as if HKLM listed
