@@ -163,7 +163,7 @@ fn non_recommended_package_install_row_starts_unticked() {
 }
 
 #[test]
-fn a_declined_package_does_not_auto_tick_its_updates_either() {
+fn a_declined_language_pack_does_not_auto_tick_its_updates_either() {
     // Someone who stopped using a language pack and turned it down has
     // said no to the package, not merely to one version of it. Ticking
     // its next update for them would re-offer it every time the
@@ -172,54 +172,7 @@ fn a_declined_package_does_not_auto_tick_its_updates_either() {
     let localizer = Localizer::embedded("de-DE").unwrap();
     let text = wizard_text(&localizer);
     let specs = builtin_package_specs(Platform::Windows);
-    let declined: std::collections::BTreeSet<String> =
-        ["langpack-de".to_string()].into_iter().collect();
-
-    let rows = package_rows(
-        &localizer,
-        &text,
-        Platform::Windows,
-        Architecture::X64,
-        &specs,
-        &[PlanAction {
-            package_id: "langpack-de".to_string(),
-            action: PlanActionKind::Update,
-            installed_version: None,
-            available_version: None,
-            reason: "upstream file changed".to_string(),
-        }],
-        &[],
-        &HostCapabilities::default(),
-        &declined,
-        &Default::default(),
-    );
-    assert!(
-        !rows[0].selected,
-        "a refused package must not have its update ticked for the user"
-    );
-    assert!(
-        rows[0].available_for_target,
-        "the update must still be listed so it can be taken deliberately"
-    );
-}
-
-#[test]
-fn a_package_the_user_uninstalled_starts_unticked_whatever_it_is() {
-    // Uninstalling records a "no" for any package, not only the ones that
-    // remember an unticked row. A recommended SWS would otherwise come back
-    // ticked on the very next run after the user removed it.
-    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
-    let text = wizard_text(&localizer);
-    let specs = builtin_package_specs(Platform::Windows);
-    assert!(
-        specs
-            .iter()
-            .any(|spec| spec.id == PACKAGE_SWS && spec.recommended && !spec.remember_opt_out),
-        "this test only means anything while SWS is recommended and remembers no opt-out"
-    );
-    let rows = |kind: PlanActionKind, declined: &[&str]| {
-        let declined: std::collections::BTreeSet<String> =
-            declined.iter().map(ToString::to_string).collect();
+    let rows = |declined: &std::collections::BTreeSet<String>| {
         package_rows(
             &localizer,
             &text,
@@ -227,28 +180,99 @@ fn a_package_the_user_uninstalled_starts_unticked_whatever_it_is() {
             Architecture::X64,
             &specs,
             &[PlanAction {
-                package_id: PACKAGE_SWS.to_string(),
-                action: kind,
+                package_id: "langpack-de".to_string(),
+                action: PlanActionKind::Update,
                 installed_version: None,
                 available_version: None,
-                reason: "test".to_string(),
+                reason: "upstream file changed".to_string(),
             }],
             &[],
             &HostCapabilities::default(),
-            &declined,
+            declined,
             &Default::default(),
         )
     };
 
-    assert!(rows(PlanActionKind::Install, &[])[0].selected);
-    for kind in [PlanActionKind::Install, PlanActionKind::Update] {
-        let row = &rows(kind, &[PACKAGE_SWS])[0];
-        assert!(!row.selected, "{kind:?} must not be ticked for the user");
-        assert!(
-            row.available_for_target,
-            "it must stay listed so it can be ticked again"
-        );
-    }
+    // Without a refusal, a language pack's update is ticked like any other.
+    let rows_without_refusal = rows(&Default::default());
+    assert!(rows_without_refusal[0].selected, "{rows_without_refusal:?}");
+    assert_eq!(rows_without_refusal[0].action, PlanActionKind::Update);
+
+    let rows = rows(&["langpack-de".to_string()].into_iter().collect());
+    assert!(
+        !rows[0].selected,
+        "a refused language pack must not have its update ticked for the user"
+    );
+    assert!(
+        rows[0].available_for_target,
+        "the update must still be listed so it can be taken deliberately"
+    );
+}
+
+/// One SWS row, planned as `kind`, with `declined` as the refusals the
+/// target remembers.
+fn sws_row(kind: PlanActionKind, declined: &[&str]) -> PackageRow {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let text = wizard_text(&localizer);
+    let specs = builtin_package_specs(Platform::Windows);
+    assert!(
+        specs
+            .iter()
+            .any(|spec| spec.id == PACKAGE_SWS && spec.recommended && !spec.remember_opt_out),
+        "these tests only mean anything while SWS is recommended and remembers no opt-out"
+    );
+    let declined: std::collections::BTreeSet<String> =
+        declined.iter().map(ToString::to_string).collect();
+    package_rows(
+        &localizer,
+        &text,
+        Platform::Windows,
+        Architecture::X64,
+        &specs,
+        &[PlanAction {
+            package_id: PACKAGE_SWS.to_string(),
+            action: kind,
+            installed_version: None,
+            available_version: None,
+            reason: "test".to_string(),
+        }],
+        &[],
+        &HostCapabilities::default(),
+        &declined,
+        &Default::default(),
+    )
+    .remove(0)
+}
+
+#[test]
+fn a_package_the_user_uninstalled_starts_unticked_while_it_is_gone() {
+    // Uninstalling records a "no" for any package, not only the ones that
+    // remember an unticked row. A recommended SWS would otherwise come back
+    // ticked on the very next run after the user removed it.
+    assert!(sws_row(PlanActionKind::Install, &[]).selected);
+    let row = sws_row(PlanActionKind::Install, &[PACKAGE_SWS]);
+    assert!(
+        !row.selected,
+        "a removed SWS must not be ticked for the user"
+    );
+    assert_eq!(row.original_action, PlanActionKind::Install);
+    assert!(
+        row.available_for_target,
+        "it must stay listed so it can be ticked again"
+    );
+}
+
+#[test]
+fn a_package_the_user_uninstalled_and_put_back_gets_its_update_ticked() {
+    // An Update row means the package is on disk again: dragged back from
+    // the Trash, say, or installed by hand. The removal record doesn't
+    // count any more, so its update is ticked as for any package you have.
+    // The language packs keep their refusal (see
+    // `a_declined_language_pack_does_not_auto_tick_its_updates_either`).
+    let row = sws_row(PlanActionKind::Update, &[PACKAGE_SWS]);
+    assert!(row.selected, "{row:?}");
+    assert_eq!(row.action, PlanActionKind::Update);
+    assert!(row.available_for_target, "{row:?}");
 }
 
 #[test]

@@ -443,7 +443,8 @@ fn no_request_without_a_writable_target_or_a_tick() {
 /// From the Uninstall tab to the engine and back, in a temporary REAPER
 /// folder: the wizard's request is one the engine carries out, the Done
 /// page's details name the backup and the command that brings SWS back,
-/// and the rebuilt Install tab offers SWS again, unticked.
+/// and the rebuilt Install tab offers SWS again, unticked. Once SWS is put
+/// back by hand, its update is ticked.
 #[test]
 fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
     let dir = tempdir().unwrap();
@@ -549,7 +550,8 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
         whats_new: None,
         channel: None,
     }];
-    let sws_row = |target: &TargetRow| {
+    // SWS's row on the Install tab, and whether the Uninstall tab lists it.
+    let sws_rows = |target: &TargetRow| {
         let plan = wizard_package_plan_for_target_with_available(&model, Some(target), &available)
             .unwrap();
         let list = uninstall_list_for_target(
@@ -559,24 +561,37 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
             &NothingListed,
             &NoMacosObjects,
         );
-        assert!(list.rows.iter().all(|row| row.package_id != "sws"));
-        plan.package_rows
+        let listed = list.rows.iter().any(|row| row.package_id == "sws");
+        let row = plan
+            .package_rows
             .into_iter()
             .find(|row| row.package_id == "sws")
-            .unwrap()
+            .unwrap();
+        (row, listed)
     };
-    let row = sws_row(&target);
+    let (row, listed) = sws_rows(&target);
+    assert!(!listed);
     assert_eq!(row.original_action, PlanActionKind::Install, "{row:?}");
     assert!(!row.selected, "{row:?}");
-    let state = rabbit_core::receipt::load_install_state(&resource)
-        .unwrap()
-        .unwrap();
-    assert!(state.declined_packages.contains("sws"));
+    let declined = || rabbit_core::receipt::declined_packages(&resource);
+    assert!(declined().contains("sws"));
     let fresh = TargetRow {
         path: dir.path().join("Fresh"),
         ..target.clone()
     };
-    assert!(sws_row(&fresh).selected);
+    let (fresh_row, fresh_listed) = sws_rows(&fresh);
+    assert!(!fresh_listed);
+    assert!(fresh_row.selected, "{fresh_row:?}");
+
+    // Put back by hand, SWS is an Update again, and its update is ticked:
+    // the removal record only keeps an Install row unticked. The record
+    // itself stays until a run with SWS ticked clears it.
+    std::fs::write(&plugin, b"sws").unwrap();
+    let (row, listed) = sws_rows(&target);
+    assert!(listed, "the Uninstall tab lists SWS again");
+    assert_eq!(row.original_action, PlanActionKind::Update, "{row:?}");
+    assert!(row.selected, "{row:?}");
+    assert!(declined().contains("sws"));
 }
 
 // ---------------------------------------------------------------------------

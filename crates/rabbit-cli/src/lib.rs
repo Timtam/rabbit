@@ -333,8 +333,8 @@ enum Command {
         target_app_path: Option<PathBuf>,
         /// Package id to act on, repeatable. Defaults to every package that
         /// needs installing or updating, except the ones you uninstalled or
-        /// turned down. Naming one of those installs it and takes it off
-        /// that list.
+        /// turned down, unless they are installed again. Naming one of those
+        /// installs it and takes it off that list.
         #[arg(long)]
         package: Vec<String>,
         /// Install for this architecture instead of the one detected for the
@@ -416,7 +416,8 @@ enum Command {
         portable: bool,
         /// Package id to install, repeatable. Defaults to the recommended set
         /// for this host, except the packages you uninstalled or turned
-        /// down. Naming one of those installs it and takes it off that list.
+        /// down, unless they are installed again. Naming one of those
+        /// installs it and takes it off that list.
         #[arg(long)]
         package: Vec<String>,
         /// Install for this architecture instead of the one detected for the
@@ -1324,7 +1325,7 @@ fn run_apply_packages(command: Command) -> Result<(), Box<dyn std::error::Error>
     };
     let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
     let architecture = architecture.map_or_else(Architecture::current, Into::into);
-    let selection = select_packages(package, Some(&resource_path));
+    let selection = select_packages(package, Some((&resource_path, platform)));
     note_skipped_packages(&selection, platform);
     let packages = selection.package_ids.clone();
     ensure_reapack_donation_acknowledged(&packages, accept_reapack_donation_notice)?;
@@ -1408,7 +1409,7 @@ fn run_setup(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     };
     let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
     let architecture = architecture.map_or_else(Architecture::current, Into::into);
-    let selection = select_packages(package, Some(&resource_path));
+    let selection = select_packages(package, Some((&resource_path, platform)));
     note_skipped_packages(&selection, platform);
     let packages = selection.package_ids.clone();
     ensure_reapack_donation_acknowledged(&packages, accept_reapack_donation_notice)?;
@@ -1898,19 +1899,33 @@ struct PackageSelection {
     /// The user named them with `--package`.
     named: bool,
     /// Packages the default list left out, because the user uninstalled
-    /// them or turned them down.
+    /// them or turned them down and detection doesn't find them.
     skipped: Vec<String>,
 }
 
-/// The packages an operation should act on.
+/// The packages an operation should act on. `target` is the REAPER
+/// resource folder and its platform, for the commands that have one.
 ///
 /// An explicit `--package` list is taken as given — it is the user telling
 /// us exactly what they want, and second-guessing it would be worse than
 /// useless. Only the implicit default set is filtered against the packages
-/// this install remembers the user uninstalling or turning down, every one
-/// of them, so neither a refusal recorded in the wizard nor an uninstall is
-/// undone by a later bare `rabbit setup`.
-fn select_packages(package_ids: Vec<String>, resource_path: Option<&Path>) -> PackageSelection {
+/// this install remembers the user uninstalling or turning down, so neither
+/// a refusal recorded in the wizard nor an uninstall is undone by a later
+/// bare `rabbit setup`.
+///
+/// A refused package that is installed again stays in the list, though,
+/// unless it remembers an opt-out (the language packs). That matches the
+/// wizard, which ticks such a package's Update row. So a bare `rabbit setup
+/// --apply` updates a REAPER dragged back from the Trash. A package that is
+/// still gone stays out. "Installed" means `detect_components` finds it.
+/// The operation plans from that same detection: it installs what
+/// detection doesn't find, and updates or keeps what it finds. So a
+/// package kept here is one the run updates or keeps, never one it
+/// installs. Detection only runs when a refusal touches the default list.
+fn select_packages(
+    package_ids: Vec<String>,
+    target: Option<(&Path, Platform)>,
+) -> PackageSelection {
     if !package_ids.is_empty() {
         return PackageSelection {
             package_ids,
@@ -1918,12 +1933,17 @@ fn select_packages(package_ids: Vec<String>, resource_path: Option<&Path>) -> Pa
             skipped: Vec::new(),
         };
     }
-    let declined = resource_path
-        .map(rabbit_core::receipt::declined_packages)
-        .unwrap_or_default();
-    let (skipped, package_ids) = default_desired_package_ids()
-        .into_iter()
-        .partition(|id| declined.contains(id));
+    let mut package_ids = default_desired_package_ids();
+    let mut skipped = Vec::new();
+    if let Some((resource_path, platform)) = target {
+        let declined = rabbit_core::receipt::declined_packages(resource_path);
+        if package_ids.iter().any(|id| declined.contains(id)) {
+            let back = installed_packages_without_lasting_refusal(resource_path, platform);
+            (skipped, package_ids) = package_ids
+                .into_iter()
+                .partition(|id| declined.contains(id) && !back.contains(id));
+        }
+    }
     PackageSelection {
         package_ids,
         named: false,
@@ -1931,8 +1951,37 @@ fn select_packages(package_ids: Vec<String>, resource_path: Option<&Path>) -> Pa
     }
 }
 
+/// The packages detection finds for `resource_path`, less those that
+/// remember an opt-out. For any of these a refusal can only come from an
+/// uninstall, so finding it means it is back. Detection that fails finds
+/// nothing here, so every refusal stands. The run's own detection then
+/// meets the same error and reports it.
+fn installed_packages_without_lasting_refusal(
+    resource_path: &Path,
+    platform: Platform,
+) -> std::collections::BTreeSet<String> {
+    use std::collections::BTreeSet;
+    let remembers_opt_out: BTreeSet<String> = builtin_package_specs(platform)
+        .into_iter()
+        .filter(|spec| spec.remember_opt_out)
+        .map(|spec| spec.id)
+        .collect();
+    detect_components(resource_path, platform)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|detection| detection.installed)
+        .map(|detection| detection.package_id)
+        .filter(|id| !remembers_opt_out.contains(id))
+        .collect()
+}
+
 /// Say which packages the default list left out, and how to get each one
-/// back. On stderr, like the other notes, so `--json` stays JSON.
+/// back. On stderr, like the other notes, so `--json` stays JSON. Each one
+/// is a package detection didn't find, so "install" is the right word. A
+/// refused package that is installed again stays in the list, and the only
+/// packages that stay out while installed, the language packs, are never in
+/// the default list (a test checks that). Only when detection fails can an
+/// installed package end up here, because then every refusal stands.
 fn note_skipped_packages(selection: &PackageSelection, platform: Platform) {
     let specs = builtin_package_specs(platform);
     for id in &selection.skipped {
@@ -4351,15 +4400,16 @@ mod tests {
         assert!(explicit.iter().any(|id| id == language_step));
     }
     /// A package the user uninstalled or turned down stays out of a later
-    /// bare `rabbit setup`, whichever package it is, and the run says so.
-    /// An explicit `--package` is the user telling us exactly what they want
-    /// and always wins.
+    /// bare `rabbit setup` while it is gone, whichever package it is, and
+    /// the run says so. An explicit `--package` is the user telling us
+    /// exactly what they want and always wins.
     #[test]
-    fn the_default_package_set_honours_every_recorded_refusal() {
+    fn the_default_package_set_leaves_out_a_refused_package_that_is_gone() {
         use rabbit_core::package::PACKAGE_SWS;
         let dir = tempfile::tempdir().unwrap();
+        let target = Some((dir.path(), rabbit_core::model::Platform::Windows));
 
-        let baseline = super::select_packages(Vec::new(), Some(dir.path()));
+        let baseline = super::select_packages(Vec::new(), target);
         assert!(!baseline.named && baseline.skipped.is_empty());
         assert!(
             baseline.package_ids.iter().any(|id| id == PACKAGE_SWS),
@@ -4375,7 +4425,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        let after = super::select_packages(Vec::new(), Some(dir.path()));
+        let after = super::select_packages(Vec::new(), target);
         assert_eq!(after.skipped, vec![PACKAGE_SWS.to_string()]);
         let mut expected = baseline.package_ids.clone();
         expected.retain(|id| id != PACKAGE_SWS);
@@ -4384,7 +4434,7 @@ mod tests {
         // An explicit request wins over a recorded refusal.
         let explicit = super::select_packages(
             vec![PACKAGE_SWS.to_string(), "langpack-de".to_string()],
-            Some(dir.path()),
+            target,
         );
         assert!(explicit.named && explicit.skipped.is_empty());
         assert_eq!(
@@ -4394,6 +4444,89 @@ mod tests {
         // Without a resource folder there is nothing to remember.
         let nowhere = super::select_packages(Vec::new(), None);
         assert_eq!(nowhere.package_ids, baseline.package_ids);
+    }
+
+    /// A removed SWS that is installed again, say put back by hand, stays
+    /// in the default set. A bare `rabbit setup --apply` then updates
+    /// it, as the wizard ticks its Update row. Choosing the list leaves the
+    /// record alone: only naming SWS takes it off.
+    #[test]
+    fn the_default_package_set_keeps_a_refused_package_that_is_back() {
+        use rabbit_core::package::PACKAGE_SWS;
+        let dir = tempfile::tempdir().unwrap();
+        let target = Some((dir.path(), rabbit_core::model::Platform::Windows));
+        let plugins = dir.path().join("UserPlugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(plugins.join("reaper_sws-x64.dll"), b"sws").unwrap();
+        let baseline = super::select_packages(Vec::new(), target);
+        rabbit_core::receipt::record_package_opt_outs(dir.path(), &[PACKAGE_SWS.to_string()], &[])
+            .unwrap();
+
+        let selection = super::select_packages(Vec::new(), target);
+        assert!(selection.skipped.is_empty(), "{:?}", selection.skipped);
+        assert!(selection.package_ids.iter().any(|id| id == PACKAGE_SWS));
+        assert_eq!(selection.package_ids, baseline.package_ids);
+        assert!(rabbit_core::receipt::declined_packages(dir.path()).contains(PACKAGE_SWS));
+
+        // Gone again, it is left out again.
+        std::fs::remove_file(plugins.join("reaper_sws-x64.dll")).unwrap();
+        let selection = super::select_packages(Vec::new(), target);
+        assert_eq!(selection.skipped, vec![PACKAGE_SWS.to_string()]);
+    }
+
+    /// The note for a skipped package says to install it, which is only
+    /// right for a package that isn't there. A refused package that is back
+    /// stays out of the default list only if it remembers an opt-out, so no
+    /// such package may ever be in that list, on any host.
+    #[test]
+    fn no_package_that_remembers_an_opt_out_is_a_default() {
+        for platform in [
+            rabbit_core::model::Platform::Windows,
+            rabbit_core::model::Platform::MacOs,
+        ] {
+            for spec in super::builtin_package_specs(platform) {
+                let can_be_default = spec.recommended || spec.recommended_when.is_some();
+                assert!(
+                    !(can_be_default && spec.remember_opt_out),
+                    "{} is a default and remembers an opt-out",
+                    spec.id
+                );
+            }
+        }
+    }
+
+    /// A language pack's refusal lasts while it is installed, so the CLI
+    /// must not count an installed one as back. SWS, which remembers no
+    /// opt-out, counts once detection finds it.
+    #[test]
+    fn an_installed_language_pack_does_not_count_as_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("RABBIT")).unwrap();
+        std::fs::create_dir_all(root.join("LangPack")).unwrap();
+        std::fs::create_dir_all(root.join("UserPlugins")).unwrap();
+        std::fs::write(root.join("LangPack").join("de_DE.ReaperLangPack"), b"x").unwrap();
+        std::fs::write(root.join("UserPlugins").join("reaper_sws-x64.dll"), b"sws").unwrap();
+        std::fs::write(
+            root.join("RABBIT").join("install-state.json"),
+            r#"{"schema_version":1,"packages":{"langpack-de":{"id":"langpack-de","version":null,"source_url":null,"source_sha256":null,"installed_files":[{"path":"LangPack/de_DE.ReaperLangPack","sha256":null,"size":null}],"installed_at":null,"rabbit_version":null,"architecture":null}}}"#,
+        )
+        .unwrap();
+        let platform = rabbit_core::model::Platform::Windows;
+        let detected: Vec<String> = super::detect_components(root, platform)
+            .unwrap()
+            .into_iter()
+            .filter(|detection| detection.installed)
+            .map(|detection| detection.package_id)
+            .collect();
+        assert!(
+            detected.iter().any(|id| id == "langpack-de"),
+            "this test only means anything while the pack is detected: {detected:?}"
+        );
+
+        let back = super::installed_packages_without_lasting_refusal(root, platform);
+        assert!(back.contains(rabbit_core::package::PACKAGE_SWS), "{back:?}");
+        assert!(!back.contains("langpack-de"), "{back:?}");
     }
 
     /// Naming a package is the user's verdict: a run that installs takes

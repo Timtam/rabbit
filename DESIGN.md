@@ -932,19 +932,37 @@ RABBIT's own changes: what each configuration step found or changed
 (`applied_configuration`: the ReaPack repository and whether RABBIT added it,
 or the `langpack=` value the language step replaced). A package the user
 removes through RABBIT goes into `declined_packages`, the same set that holds
-the packages they left unticked. Both readers honour the set for every
-package: the wizard doesn't tick a package listed there, and `apply-packages`
-and `setup` without `--package` leave it out and say so. Leaving a row
-unticked only records a "no" for packages that set `remember_opt_out`, so an
-optional package skipped once still has its updates offered. Only the user's
-own verdict takes a package out of the set again: ticking it in the wizard,
-naming it with `--package` in a CLI run that installs (`setup`,
-`apply-packages` or `install-extension`), or restoring it with
-`restore-backup --package`. An install that comes without a verdict, such as
-a package the CLI picked from its default list, leaves the set alone. These
-fields are optional and left out when
-empty, so older RABBIT versions still read the file. OSARA's key map is always
-kept when OSARA is removed, so the receipt doesn't track a key map backup.
+the packages they left unticked. Both readers honour the set for every package
+that isn't installed: the wizard doesn't tick its Install row, and
+`apply-packages` and `setup` without `--package` leave it out and say so. A
+package in the set that is installed again, say dragged back from the Trash or
+installed by hand, gets its updates as usual: the wizard ticks its Update row,
+and those commands keep it in their default list. "Installed" means what each
+reader plans from: the wizard's plan, and for the CLI the detection its run
+plans from. Only a `remember_opt_out` package (the language packs) keeps its
+refusal while installed, so a language pack whose update was turned down isn't
+ticked again. Leaving a row unticked only records a "no" for packages that set
+`remember_opt_out`, so an optional package skipped once still has its updates
+offered. Only the user's own verdict takes a package out of the set again:
+ticking it in the wizard, naming it with `--package` in a CLI run that installs
+(`setup`, `apply-packages` or `install-extension`), or restoring it with
+`restore-backup --package`. An install that comes without a verdict, such as a
+package the CLI picked from its default list, leaves the set alone. These
+fields are optional and left out when empty, so older RABBIT versions still
+read the file. OSARA's key map is always kept when OSARA is removed, so the
+receipt doesn't track a key map backup.
+
+Two packages can look odd on Windows. The uninstall of FFmpeg and app2clap
+removes only the files RABBIT's receipt lists, plus `app2clap.clap` for
+app2clap. It also keeps an FFmpeg file that changed since RABBIT installed it.
+But any `avformat*`, `avcodec*` or similar DLL in `UserPlugins` counts as
+FFmpeg, and any `app2clap*.clap` in the CLAP folder counts as app2clap. So
+such a file still counts as the package right after the removal, and the
+uninstall reports it as left behind. The package's Update row is then ticked,
+unless RABBIT can read the file's version and it is already the latest.
+Without a receipt, RABBIT can't read app2clap's version at all. This is left
+as it is: such a file is most likely the user's own, and RABBIT can't tell it
+from one put back by hand.
 
 Some vendor installers write where no receipt path reaches. For those, the
 manifest's `uninstall` block lists the folders under `install_snapshot`:

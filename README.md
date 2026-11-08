@@ -313,7 +313,10 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
   usage). Surge XT and REAPER don't go into one: install them again. On a
   Mac, you can also drag REAPER back from the Trash until you empty it; if an
   administrator's password moved it there, dragging it back may ask for one
-  again.
+  again. A package you put back from the Trash, or installed again yourself,
+  gets its updates offered as usual: when one is out, RABBIT ticks it.
+  Language packs are the exception: one you removed or turned down stays
+  unticked.
 
 ### Switching the language
 
@@ -454,6 +457,8 @@ you left out as "don't offer this again". It works the other way round,
 though: a package you uninstalled, or turned down in the wizard, is skipped
 by `apply-packages` and `setup` with a note, and naming it with `--package`
 in a run that installs takes it off that list, so later runs offer it again.
+A package you uninstalled but put back yourself, from the Trash or with its
+own installer, isn't skipped: those commands update it as usual.
 
 ### Pre-release builds
 
@@ -646,7 +651,9 @@ RABBIT uninstall --resource-path "$HOME/Library/Application Support/REAPER" \
   and run `RABBIT uninstall` again to remove the rest.
 - **Removed packages stay removed.** The wizard no longer ticks them, and
   `apply-packages` and `setup` skip them with a note. Name one with
-  `--package` to install it again.
+  `--package` to install it again. If you put one back yourself, from the
+  Trash or with its own installer, RABBIT offers its updates as usual.
+  Language packs are the exception: one you removed stays unticked.
 
 `--json` prints the plan in a dry run and the report with `--apply`, both with
 message codes instead of sentences. The exit code follows one table for the

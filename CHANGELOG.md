@@ -167,13 +167,16 @@ from this file and posts it as the GitHub release body.
   the Done page now says so in plain words, in your language, instead of
   naming a lock file and a process number.
 - A package you uninstalled, or turned down in the wizard, is no longer
-  offered again by itself: the wizard doesn't tick it, and `rabbit
-  apply-packages` and `rabbit setup` without `--package` skip it and say so.
-  Before, only the language packs were remembered this way. Ticking any
-  package in the wizard, or naming it with `--package` in a run that
-  installs, takes it off that list again; before, `--package` installed it
-  just for that run. Leaving an optional package unticked once still doesn't
-  hide its updates.
+  offered again by itself while it is gone: the wizard doesn't tick it, and
+  `rabbit apply-packages` and `rabbit setup` without `--package` skip it and
+  say so. Before, only the language packs were remembered this way. If you
+  put an uninstalled package back yourself, from the Trash or with its own
+  installer, its updates are offered as usual: the wizard ticks them, and
+  those commands update it. Language packs are the exception, as before:
+  one you removed or turned down stays unticked. Ticking any package in the
+  wizard, or naming it with `--package` in a run that installs, takes it off
+  that list again; before, `--package` installed it just for that run.
+  Leaving an optional package unticked once still doesn't hide its updates.
 
 - RABBIT now uses wxDragon 0.9.23, which brings wxWidgets 3.3.4. On macOS,
   text fields, dropdowns and the packages list now take their VoiceOver
