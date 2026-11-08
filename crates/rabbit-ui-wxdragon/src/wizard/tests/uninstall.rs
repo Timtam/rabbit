@@ -528,6 +528,7 @@ fn rows_build_in_every_locale_without_missing_text() {
         for label in [
             &text.packages_tab_install,
             &text.packages_tab_uninstall,
+            &text.packages_tabs_switch_hint_macos,
             &text.uninstall_list_label,
             &text.uninstall_empty,
             &text.uninstall_empty_details,

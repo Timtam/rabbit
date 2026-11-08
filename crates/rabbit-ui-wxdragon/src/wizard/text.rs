@@ -44,6 +44,9 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         packages_heading: localizer.text("wizard-packages-heading").value,
         packages_tab_install: localizer.text("wizard-packages-tab-install").value,
         packages_tab_uninstall: localizer.text("wizard-packages-tab-uninstall").value,
+        packages_tabs_switch_hint_macos: localizer
+            .text("wizard-packages-tabs-switch-hint-macos")
+            .value,
         packages_list_label: localizer.text("wizard-packages-list-label").value,
         uninstall_list_label: localizer.text("wizard-uninstall-list-label").value,
         uninstall_empty: localizer.text("wizard-uninstall-empty").value,

@@ -540,20 +540,33 @@ CLI and UI expectations:
   Windows, Ctrl+Tab and Ctrl+Shift+Tab or Ctrl+Page Down and Ctrl+Page Up
   from inside it, and the arrow keys on its tab strip; on macOS, physical
   Ctrl+Tab and Ctrl+Shift+Tab, which RABBIT reads itself because wxWidgets
-  takes Command for Control there, and VoiceOver's own navigation of the
-  tab group. After a switch on macOS, focus moves into the new tab and
-  RABBIT announces the tab's name. Two Windows quirks of the native control
-  are documented rather than worked around: Ctrl+Tab does nothing from the
-  wizard's buttons, which sit outside the tab control, and plain Page Up or
-  Page Down on a checkbox or button inside a tab switches tabs. That switch
-  moves focus into the new tab's list, whose label names the tab, and
-  Review names the mode and the ticks the run leaves out.
+  takes Command for Control there, the arrow keys on its tab strip, and
+  VoiceOver's own navigation of the tab group. A moment after the Packages
+  page first opens, VoiceOver says once that Control-Tab switches tabs. The
+  tab strip is a Tab stop on both: Tab from it enters the selected tab,
+  Shift+Tab from the tab's list comes back to it, and Tab from the last
+  button goes round to it. wxMSW does this itself. wxOSX's notebook passes
+  its focus straight on into the selected tab and its Tab order skips the
+  strip, so on macOS RABBIT keeps focus on the strip and handles those
+  three keys itself. An NSTabView takes focus only with Full Keyboard
+  Access (keyboard navigation in System Settings); without it, Tab skips
+  the strip and Ctrl+Tab is how to switch. After a switch on macOS, focus
+  moves into the new tab and RABBIT announces the tab's name. Two Windows
+  quirks of the native tab control are documented rather than worked
+  around: Ctrl+Tab does nothing from the wizard's buttons, which sit
+  outside the tab control, and plain Page Up or Page Down on a checkbox or
+  button inside a tab switches tabs. That switch moves focus into the new
+  tab's list, whose label names the tab, and Review names the mode and the
+  ticks the run leaves out.
 - Avoid custom drawing, canvas controls, owner-drawn lists, and grid controls in
   the main workflow.
 - Every control needs an accessible name, role, state, keyboard focus, and
   visible label.
 - Every screen must work by keyboard only, with a predictable tab order and
   mnemonic accelerators.
+- On macOS, wxWidgets gives each scrolling wizard page real scroll bar
+  controls, which Tab stopped on. RABBIT takes them out of the Tab order;
+  VoiceOver still reaches them with its own keys.
 - Progress must be exposed as both a progress bar and a text status line.
 - Errors must be plain text, selectable/copyable, and available in a final
   report.
@@ -592,16 +605,30 @@ user can finish the install by pressing Next a few times.
      the tab and its position first, and Tab moves into the package list.
      Where macOS can't focus the tab strip (an NSTabView takes focus only
      with Full Keyboard Access), focus goes to the install list and RABBIT
-     announces the tab's name instead. RABBIT changes the tab selection by
-     itself only on this arrival, once the page shows: wxOSX moves focus
-     into a tab on every selection change, even on a hidden page, so the
-     rebuild after a run leaves it alone. On Windows that rebuild clears a
-     list's selection before deleting its rows: wxMSW answers comctl32's
-     notice that the selected row went by focusing the list, hidden or not,
-     and after an uninstall that took focus off the Done page. After either
-     run the rebuild also happens before Done shows and takes focus, so
-     Done's status is the last focus change. Each list's caret goes to its
-     top row the first time the list gets focus after the page opens. The tab showing when Next is
+     announces the tab's name instead. Either way, a moment after the first
+     arrival in a run, VoiceOver says that Control-Tab switches tabs. The
+     hint waits so that VoiceOver's reading of the new focus can't cut it
+     off; if the page is gone by then, the next arrival tries again. RABBIT
+     changes the tab selection by itself only on the arrival from the
+     version check, once the page shows: wxOSX moves focus into a tab on
+     every selection change, even on a hidden page, so the rebuild after a
+     run leaves it alone. On Windows that rebuild clears a list's selection
+     before deleting its rows: wxMSW answers comctl32's notice that the
+     selected row went by focusing the list, hidden or not, and after an
+     uninstall that took focus off the Done page. After either run the
+     rebuild also happens before Done shows and takes focus, so Done's
+     status is the last focus change. Back from Review or from the ReaPack
+     page lands on the strip as well, on Windows and on macOS with Full
+     Keyboard Access: showing the page refocuses the control it last had
+     focus in, which is the notebook, even if the user left from the list.
+     In uninstall mode, Back from Review puts focus back in the Uninstall
+     list instead, on every platform. On macOS, adding the first tab while
+     the window is built also counts as a selection change, and that put
+     the start focus in the hidden Install list: VoiceOver began at the top
+     of the window and Tab did nothing. So after building all pages, RABBIT
+     focuses the target choice again on macOS, and the wizard opens there.
+     Each list's caret goes to its top row the first time the list gets
+     focus after the page opens. The tab showing when Next is
      pressed decides what the run does; install and uninstall never mix.
      The Uninstall tab lists every installed package under the same groups,
      with headings that can't be ticked, nothing ticked by default, and rows

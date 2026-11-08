@@ -36,9 +36,13 @@ from this file and posts it as the GitHub release body.
 - The wizard can now uninstall: the **Packages** page has an **Uninstall**
   tab beside **Install or update**. The page opens on **Install or update**
   with focus on the tabs, so screen readers read "Install or update, tab, 1
-  of 2" first; press Tab to reach the package list, which works as before.
-  Switch tabs with Ctrl+Tab or Ctrl+Page Down on Windows, and with Ctrl+Tab
-  or VoiceOver's tab navigation on macOS. The **Uninstall** tab lists what
+  of 2" first; press Tab to reach the package list, which works as before,
+  and Shift+Tab from the list to get back to the tabs. On a Mac the tabs
+  take focus only with keyboard navigation on; without it, the page opens
+  in the package list. Switch tabs with Ctrl+Tab or Ctrl+Page Down on
+  Windows, and on macOS with Ctrl+Tab, the arrow keys on the tabs, or
+  VoiceOver's tab navigation. VoiceOver mentions Ctrl+Tab the first time
+  the page opens. The **Uninstall** tab lists what
   is installed in the chosen REAPER, with nothing ticked. RABBIT can remove
   SWS, ReaPack, ReaKontrol, FFmpeg, app2clap and the language packs, and a
   row it can't tick says why. Your settings stay unless you tick **Also
@@ -215,6 +219,10 @@ from this file and posts it as the GitHub release body.
   **Additional software**, **Language packs**, **Configuration**) now show
   their names, and VoiceOver reads them. Before, a group row had only its
   checkbox, so VoiceOver read it as a checkbox without a name.
+- On macOS, Tab and Shift+Tab no longer stop on a wizard page's scroll bar.
+  When a page was too tall for the window, its scroll bar sat in the Tab
+  order: on the **Packages** page, Shift+Tab from the package list went to
+  the scroll bar. VoiceOver still reaches the scroll bar with its own keys.
 - Installing OSARA into a portable REAPER no longer leaves Windows' list of
   installed programs pointing at an uninstaller that isn't there. OSARA's
   installer replaced the list's OSARA entry with one for the portable copy,

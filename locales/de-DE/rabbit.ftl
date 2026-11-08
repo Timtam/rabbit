@@ -235,6 +235,10 @@ wizard-configuration-tree-group-label = Konfiguration
 # name when the page opens, so keep both short.
 wizard-packages-tab-install = Installieren oder aktualisieren
 wizard-packages-tab-uninstall = Deinstallieren
+# macOS only: VoiceOver says this once, the first time the Packages page opens.
+# Name the Tab and Shift keys as Apple's page of Mac keyboard shortcuts does,
+# and write Control out in full.
+wizard-packages-tabs-switch-hint-macos = Drücken Sie Control-Tabulatortaste oder Control-Umschalttaste-Tabulatortaste, um zwischen den Registerkarten zu wechseln.
 # The label right before the Uninstall tab's list. Screen readers read it when
 # focus enters the list, so it names the tab first.
 wizard-uninstall-list-label = Deinstallieren: Software, die RABBIT entfernen kann

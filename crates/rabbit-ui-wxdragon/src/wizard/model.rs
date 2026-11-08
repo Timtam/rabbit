@@ -81,6 +81,9 @@ pub struct WizardText {
     /// The Packages page's two tabs.
     pub packages_tab_install: String,
     pub packages_tab_uninstall: String,
+    /// macOS only: what VoiceOver says the first time the Packages page
+    /// opens, that Control-Tab switches between the tabs.
+    pub packages_tabs_switch_hint_macos: String,
     pub packages_list_label: String,
     /// The label right before the Uninstall tab's list, naming the tab.
     pub uninstall_list_label: String,

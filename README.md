@@ -197,7 +197,12 @@ Launch the downloaded executable. The wizard walks you through:
    *configuration* steps (e.g. adding the REAPER Accessibility ReaPack
    repository). Sensible defaults are already checked. The page has two
    tabs, **Install or update** and **Uninstall**, and opens with focus on the
-   tabs: press Tab to reach the list.
+   tabs: press Tab to reach the list, and Shift+Tab from the list to get
+   back to the tabs. On a Mac the tabs can take focus only with keyboard
+   navigation on (System Settings > Keyboard > Keyboard navigation; on
+   macOS 11 and 12, System Preferences > Keyboard > Shortcuts > Use
+   keyboard navigation to move focus between controls); without it, the
+   page opens in the list.
 4. **Review and install.** RABBIT downloads, verifies, and installs everything
    without further prompts.
 
@@ -212,7 +217,9 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
 - **Switching tabs:** on Windows, Ctrl+Tab or Ctrl+Page Down from the tabs or
   anything on them, and Ctrl+Shift+Tab or Ctrl+Page Up to go back; the arrow
   keys work while the tabs have focus. On macOS, Ctrl+Tab and Ctrl+Shift+Tab
-  anywhere on the page, or VoiceOver's own navigation of the tab group.
+  anywhere on the page, the arrow keys while the tabs have focus, or
+  VoiceOver's own navigation of the tab group. VoiceOver mentions Ctrl+Tab
+  the first time the page opens.
 - **What RABBIT can remove:** OSARA, SWS, ReaPack, ReaKontrol, FFmpeg and
   app2clap (both Windows only), the language packs, Surge XT and REAPER (see
   below). On Windows that means a standard REAPER; on a Mac, the REAPER app
