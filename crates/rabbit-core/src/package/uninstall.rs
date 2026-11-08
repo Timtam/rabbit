@@ -247,9 +247,14 @@ pub enum UninstallStrategy {
 pub enum UninstallElevation {
     #[default]
     Never,
+    /// Administrator rights. On Windows a vendor's uninstaller runs with
+    /// them, through the elevated helper; on macOS the run's one
+    /// administrator command deletes a `remove_files` plan's trees for
+    /// good, so that plan needs `backup: none`.
     Required,
-    /// Only for `trees` with `backup: to_trash`: the object goes into the
-    /// run's administrator command only when RABBIT can't move it itself.
+    /// Only for a macOS app, `{app_path}` with `backup: to_trash`: the app
+    /// goes into the user's Trash through the run's administrator command
+    /// only when RABBIT can't move it there itself.
     IfNeeded,
 }
 
@@ -309,6 +314,13 @@ pub struct UninstallTree {
     pub must_end_with: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_contains: Option<String>,
+    /// The `CFBundleIdentifier` a macOS app bundle here must have, such as
+    /// `com.cockos.reaper`. A bundle with another one, or none, isn't the
+    /// app the manifest means, and RABBIT leaves it for the user to remove
+    /// in Finder. Only for a `backup: to_trash` plan, where it is checked;
+    /// required for `elevation: if_needed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -479,6 +491,10 @@ pub enum UninstallPostStep {
     /// Set REAPER's `langpack=` back to `<>` when it names a pack file this
     /// run actually removed.
     ResetReaperLangpackIfSelected {},
+    /// macOS only: have macOS list its Audio Units again, so hosts stop
+    /// offering the plug-ins that are gone. Runs as the user, and a failure
+    /// never undoes the removal.
+    RefreshAudioUnits {},
 }
 
 /// A path in an uninstall plan, kept exactly as the manifest writes it: a
@@ -878,6 +894,26 @@ fn validate_plan(spec: &EmbeddedPackageSpec, plan: &UninstallPlanSpec) -> Result
                 tree.path.as_str()
             ));
         }
+        if let Some(bundle_id) = &tree.bundle_id
+            && !is_package_id(bundle_id)
+        {
+            return Err(format!(
+                "remove.trees entry {:?} has the bundle_id {bundle_id:?}, which must be a full \
+                 identifier such as com.example.app",
+                tree.path.as_str()
+            ));
+        }
+        // Only the Trash route reads the identifier, through `tree_route`.
+        // The administrator command's deletes never do, so one there would
+        // look like a guard and guard nothing.
+        if tree.bundle_id.is_some() && plan.backup != UninstallBackup::ToTrash {
+            return Err(format!(
+                "remove.trees entry {:?} has a bundle_id, but RABBIT checks one only for an app a \
+                 backup to_trash plan moves to the Trash; the administrator command never reads \
+                 it, so it would guard nothing",
+                tree.path.as_str()
+            ));
+        }
     }
     for cleanup in &plan.registry_cleanup {
         if plan.platform != Some(SupportedPlatform::Windows) {
@@ -896,24 +932,58 @@ fn validate_plan(spec: &EmbeddedPackageSpec, plan: &UninstallPlanSpec) -> Result
     }
     for id in &plan.macos_pkg_forget {
         // These end up as words in a root shell command. Quoting makes any
-        // text safe there, but a real package id never needs more than this.
-        if id.is_empty()
-            || !id
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
-        {
+        // text safe there, but a real package id never needs more than this,
+        // and one that starts with a letter or digit can't pass for an
+        // option of pkgutil's.
+        if !is_package_id(id) {
             return Err(format!(
                 "macos_pkg_forget id {id:?} must be a full package id such as \
                  org.example.app.pkg"
             ));
         }
     }
+    // Only the run's administrator command forgets receipts, and only a plan
+    // that removes its files for good has one.
+    if !plan.macos_pkg_forget.is_empty() && plan.elevation != UninstallElevation::Required {
+        return Err(
+            "macos_pkg_forget needs elevation required: only the administrator command \
+             forgets installer receipts"
+                .to_string(),
+        );
+    }
+    // On macOS the names become one pattern for pgrep, run as root right
+    // before the removal, so they may hold nothing a pattern could read as
+    // more than a letter. A plan without a platform applies there too, for
+    // a package offered on macOS.
+    let applies_on_macos = plan.platform != Some(SupportedPlatform::Windows)
+        && spec.supported_platforms.contains(&SupportedPlatform::Macos);
     for program in &plan.blocking_programs {
         if program.trim().is_empty() || program.contains(['/', '\\']) {
             return Err(format!(
                 "blocking_programs entry {program:?} must be a program name, not a path"
             ));
         }
+        if applies_on_macos
+            && !program
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_'))
+        {
+            return Err(format!(
+                "blocking_programs entry {program:?} may only use letters, digits, spaces, - and \
+                 _ in a plan for macOS, where it becomes a pattern for pgrep"
+            ));
+        }
+    }
+    if plan.platform != Some(SupportedPlatform::Macos)
+        && plan
+            .post
+            .iter()
+            .any(|step| matches!(step, UninstallPostStep::RefreshAudioUnits {}))
+    {
+        return Err(
+            "refresh_audio_units needs \"platform\": \"macos\": only macOS has Audio Units"
+                .to_string(),
+        );
     }
 
     for path in &plan.remove.paths {
@@ -934,25 +1004,65 @@ fn validate_plan(spec: &EmbeddedPackageSpec, plan: &UninstallPlanSpec) -> Result
     for cleanup in &plan.registry_cleanup {
         check_path(plan, &cleanup.only_if_value_in.dir, ONLY_IF_VALUE_IN)?;
     }
+    if plan.strategy == UninstallStrategy::RemoveFiles {
+        for tree in &plan.remove.trees {
+            check_elevated_tree(plan, tree)?;
+        }
+    }
     Ok(())
+}
+
+/// A macOS package id or bundle identifier: ASCII letters, digits, `.`, `-`
+/// and `_`, starting with a letter or a digit. Both end up as words in a
+/// root shell command or in a check of what root may touch.
+fn is_package_id(id: &str) -> bool {
+    id.chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphanumeric())
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
 }
 
 /// Removals that need administrator rights never move root-owned files into
 /// the user's backups, and whole folders never go into a backup set at all.
 fn validate_elevation_and_backup(plan: &UninstallPlanSpec) -> Result<(), String> {
     let has_trees = !plan.remove.trees.is_empty();
-    match plan.elevation {
-        UninstallElevation::Required if plan.backup == UninstallBackup::Move => {
-            return Err(
-                "elevation required needs backup none or to_trash: RABBIT never moves \
-                 files it needs administrator rights for into the user's backups"
-                    .to_string(),
-            );
-        }
-        UninstallElevation::IfNeeded if !has_trees || plan.backup != UninstallBackup::ToTrash => {
-            return Err("elevation if_needed is only for trees with backup to_trash".to_string());
-        }
-        _ => {}
+    if plan.strategy == UninstallStrategy::RemoveFiles {
+        validate_files_elevation(plan)?;
+    } else if plan.elevation == UninstallElevation::Required && plan.backup == UninstallBackup::Move
+    {
+        return Err(
+            "elevation required needs backup none or to_trash: RABBIT never moves \
+             files it needs administrator rights for into the user's backups"
+                .to_string(),
+        );
+    }
+    if plan.elevation == UninstallElevation::IfNeeded
+        && (!has_trees || plan.backup != UninstallBackup::ToTrash)
+    {
+        return Err("elevation if_needed is only for trees with backup to_trash".to_string());
+    }
+    // RABBIT moves things to the Trash only on macOS, and only whole
+    // objects such as an app bundle.
+    if plan.backup == UninstallBackup::ToTrash
+        && (!has_trees || plan.platform != Some(SupportedPlatform::Macos))
+    {
+        return Err(
+            "backup to_trash needs remove.trees and \"platform\": \"macos\": only macOS has a \
+             Trash RABBIT moves things to"
+                .to_string(),
+        );
+    }
+    // RABBIT moves one app to the Trash per package. A second that failed
+    // after the first went could not be reported as one outcome, and the
+    // administrator command takes only one.
+    if plan.backup == UninstallBackup::ToTrash && plan.remove.trees.len() != 1 {
+        return Err(
+            "backup to_trash moves exactly one app to the Trash, so it needs exactly one \
+             remove.trees entry"
+                .to_string(),
+        );
     }
     if has_trees && plan.backup == UninstallBackup::Move {
         return Err(
@@ -961,6 +1071,123 @@ fn validate_elevation_and_backup(plan: &UninstallPlanSpec) -> Result<(), String>
         );
     }
     Ok(())
+}
+
+/// What a `remove_files` plan may ask of administrator rights. Only macOS
+/// removes files with them, in the run's one administrator command, and
+/// that command takes only whole folders: it never handles files one by
+/// one, and nothing a receipt or a settings list names ever reaches it. It
+/// deletes for good, so `elevation: required` goes with `backup: none`, and
+/// nothing else deletes for good, so `backup: none` goes with it too. The
+/// one thing root moves rather than deletes is an app RABBIT can't move to
+/// the Trash itself, which is what `if_needed` is for.
+fn validate_files_elevation(plan: &UninstallPlanSpec) -> Result<(), String> {
+    let elevated = plan.elevation != UninstallElevation::Never;
+    if elevated && plan.platform != Some(SupportedPlatform::Macos) {
+        return Err(format!(
+            "a remove_files plan with elevation {} needs \"platform\": \"macos\": only macOS \
+             removes files with administrator rights",
+            elevation_name(plan.elevation)
+        ));
+    }
+    if elevated {
+        let remove = &plan.remove;
+        let one_by_one = [
+            ("receipt_files", remove.receipt_files),
+            ("matching_user_plugins", remove.matching_user_plugins),
+            ("paths", !remove.paths.is_empty()),
+            ("dirs_if_empty", !remove.dirs_if_empty.is_empty()),
+            ("registry_cleanup", !plan.registry_cleanup.is_empty()),
+        ];
+        if let Some((field, _)) = one_by_one.iter().find(|(_, used)| *used) {
+            return Err(format!(
+                "a remove_files plan with elevation {} removes only remove.trees, so it may not \
+                 use {field}: root never handles files one by one, nor anything a receipt names",
+                elevation_name(plan.elevation)
+            ));
+        }
+    }
+    match (plan.elevation, plan.backup) {
+        (UninstallElevation::Required, UninstallBackup::Move | UninstallBackup::ToTrash) => Err(
+            "elevation required needs backup none: the administrator command deletes what it \
+             removes for good, and RABBIT never moves files it needs administrator rights for \
+             into the user's backups; only an if_needed app goes to the Trash"
+                .to_string(),
+        ),
+        (UninstallElevation::Never, UninstallBackup::None) => Err(
+            "backup none needs elevation required: only the administrator command deletes for \
+             good; anything else goes into a backup set or the Trash"
+                .to_string(),
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// The trees root may touch, once their paths have passed [`check_path`]:
+/// - `elevation: required` deletes each one for good, so each must be an
+///   absolute macOS path naming something directly in one of the fixed
+///   system folders, never a token such as `{home}` or `{resource}`; one
+///   directly in `/Applications` must be an `.app`;
+/// - `elevation: if_needed` may move REAPER's app into the user's Trash, so
+///   each tree must be `{app_path}`, an `.app` with the bundle identifier
+///   the app must have.
+fn check_elevated_tree(plan: &UninstallPlanSpec, tree: &UninstallTree) -> Result<(), String> {
+    let shown = tree.path.as_str();
+    let parsed = tree.path.parse()?;
+    let is_app = tree
+        .must_end_with
+        .as_deref()
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".app"));
+    match plan.elevation {
+        UninstallElevation::Never => Ok(()),
+        UninstallElevation::Required => {
+            if parsed.root != UninstallPathRoot::MacosAbsolute {
+                return Err(format!(
+                    "with elevation required, remove.trees entry {shown:?} must be an absolute \
+                     macOS path: root never resolves a token"
+                ));
+            }
+            let prefix = MACOS_ABSOLUTE_PREFIXES.iter().find(|prefix| {
+                parsed.components.len() > prefix.len() && parsed.components.starts_with(prefix)
+            });
+            if prefix.is_none_or(|prefix| parsed.components.len() != prefix.len() + 1) {
+                return Err(format!(
+                    "with elevation required, remove.trees entry {shown:?} must name something \
+                     directly in /Applications, /Library/Application Support or a \
+                     /Library/Audio/Plug-Ins format folder, not deeper"
+                ));
+            }
+            let in_applications =
+                prefix.is_some_and(|prefix| prefix.len() == 1 && prefix[0] == "Applications");
+            if in_applications && !is_app {
+                return Err(format!(
+                    "with elevation required, remove.trees entry {shown:?} sits directly in \
+                     /Applications, so it needs must_end_with \".app\""
+                ));
+            }
+            Ok(())
+        }
+        UninstallElevation::IfNeeded => {
+            let app_path = parsed.root == UninstallPathRoot::Token(UninstallPathToken::AppPath)
+                && parsed.components.is_empty();
+            if !app_path || !is_app || tree.bundle_id.is_none() {
+                return Err(format!(
+                    "with elevation if_needed, remove.trees entry {shown:?} must be {{app_path}} \
+                     with must_end_with \".app\" and a bundle_id: only an app RABBIT has \
+                     checked goes to the Trash with administrator rights"
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn elevation_name(elevation: UninstallElevation) -> &'static str {
+    match elevation {
+        UninstallElevation::Never => "never",
+        UninstallElevation::Required => "required",
+        UninstallElevation::IfNeeded => "if_needed",
+    }
 }
 
 fn validate_vendor_uninstaller(
@@ -1363,8 +1590,8 @@ fn strategy_name(strategy: UninstallStrategy) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        LeftoverRemoval, UninstallBackup, UninstallPath, UninstallStrategy, UninstallTarget,
-        wildcard_matches_ignoring_case,
+        LeftoverRemoval, UninstallBackup, UninstallPath, UninstallPostStep, UninstallStrategy,
+        UninstallTarget, wildcard_matches_ignoring_case,
     };
     use crate::model::{InstallationKind, Platform};
     use crate::package::{
@@ -1579,7 +1806,7 @@ mod tests {
                     },
                     "remove": {
                         "trees": [
-                            { "path": "{app_path}", "must_end_with": ".app", "name_contains": "REAPER" }
+                            { "path": "{app_path}", "must_end_with": ".app", "name_contains": "REAPER", "bundle_id": "com.cockos.reaper" }
                         ]
                     },
                     "kept_user_data": [
@@ -1626,22 +1853,52 @@ mod tests {
                     "elevation": "required",
                     "backup": "none",
                     "summary": {
-                        "removes_key": "uninstall-summary-surge-removes",
+                        "removes_key": "uninstall-summary-surge-macos-removes",
                         "keeps_key": "uninstall-summary-surge-keeps"
                     },
-                    "blocking_programs": ["Surge XT", "Surge XT Effects"],
+                    "blocking_programs": ["Surge XT", "Surge XT Effects", "surge-xt-cli"],
                     "remove": {
                         "trees": [
                             { "path": "/Applications/Surge XT.app", "must_end_with": ".app", "name_contains": "Surge XT" },
                             { "path": "/Applications/Surge XT Effects.app", "must_end_with": ".app", "name_contains": "Surge XT" },
-                            { "path": "/Library/Audio/Plug-Ins/VST3/Surge XT.vst3", "must_end_with": ".vst3", "name_contains": "Surge XT" },
-                            { "path": "/Library/Application Support/Surge XT", "name_contains": "Surge XT" }
+                            { "path": "/Library/Audio/Plug-Ins/Components/Surge XT.component", "must_end_with": ".component", "name_contains": "Surge XT" },
+                            { "path": "/Library/Audio/Plug-Ins/Components/Surge XT Effects.component", "must_end_with": ".component", "name_contains": "Surge XT" },
+                            { "path": "/Library/Audio/Plug-Ins/CLAP/Surge XT.clap", "must_end_with": ".clap", "name_contains": "Surge XT" },
+                            { "path": "/Library/Audio/Plug-Ins/CLAP/Surge XT Effects.clap", "must_end_with": ".clap", "name_contains": "Surge XT" },
+                            { "path": "/Library/Audio/Plug-Ins/LV2/Surge XT.lv2", "must_end_with": ".lv2", "name_contains": "Surge XT" },
+                            { "path": "/Library/Audio/Plug-Ins/LV2/Surge XT Effects.lv2", "must_end_with": ".lv2", "name_contains": "Surge XT" },
+                            { "path": "/Library/Application Support/Surge XT", "name_contains": "Surge XT" },
+                            { "path": "/Library/Audio/Plug-Ins/VST3/Surge XT Effects.vst3", "must_end_with": ".vst3", "name_contains": "Surge XT" },
+                            { "path": "/Library/Audio/Plug-Ins/VST3/Surge XT.vst3", "must_end_with": ".vst3", "name_contains": "Surge XT" }
                         ]
                     },
                     "macos_pkg_forget": [
                         "org.surge-synth-team.surge-xt.vst3.pkg",
-                        "org.surge-synth-team.surge-xt.app.pkg"
-                    ]
+                        "org.surge-synth-team.surge-xt.component.pkg",
+                        "org.surge-synth-team.surge-xt.clap.pkg",
+                        "org.surge-synth-team.surge-xt.lv2.pkg",
+                        "org.surge-synth-team.surge-xt.app.pkg",
+                        "org.surge-synth-team.surge-xt.resources.pkg",
+                        "org.surge-synth-team.surge-xt-fx.vst3.pkg",
+                        "org.surge-synth-team.surge-xt-fx.component.pkg",
+                        "org.surge-synth-team.surge-xt-fx.clap.pkg",
+                        "org.surge-synth-team.surge-xt-fx.lv2.pkg",
+                        "org.surge-synth-team.surge-xt-fx.app.pkg",
+                        "com.surge-synth-team.surge-xt.vst3.pkg",
+                        "com.surge-synth-team.surge-xt.component.pkg",
+                        "com.surge-synth-team.surge-xt.app.pkg",
+                        "com.surge-synth-team.surge-xt.resources.pkg",
+                        "com.surge-synth-team.surge-xt-fx.vst3.pkg",
+                        "com.surge-synth-team.surge-xt-fx.component.pkg",
+                        "com.surge-synth-team.surge-xt-fx.app.pkg"
+                    ],
+                    "kept_user_data": [
+                        { "path": "{documents}/Surge XT", "note_key": "uninstall-kept-surge-user-data" },
+                        { "path": "{documents}/Surge Synth Team/Surge XT", "note_key": "uninstall-kept-surge-user-data" },
+                        { "path": "{home}/Library/Application Support/Surge Synth Team/Surge XT", "note_key": "uninstall-kept-surge-settings-macos" },
+                        { "path": "{home}/Library/Application Support/Surge XT", "note_key": "uninstall-kept-surge-factory-copy-macos" }
+                    ],
+                    "post": [ { "refresh_audio_units": {} } ]
                 }
             ]
         }"#;
@@ -1672,8 +1929,44 @@ mod tests {
             .expect("REAPER on macOS has a plan");
         assert_eq!(mac.backup, UninstallBackup::ToTrash);
         assert_eq!(mac.remove.trees[0].path.as_str(), "{app_path}");
+        assert_eq!(
+            mac.remove.trees[0].bundle_id.as_deref(),
+            Some("com.cockos.reaper")
+        );
+        // It is the plan REAPER ships with on macOS, word for word.
+        let shipped = embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == "reaper")
+            .expect("REAPER is shipped")
+            .uninstall;
+        for target in [InstallationKind::Standard, InstallationKind::Portable] {
+            assert_eq!(
+                reaper.plan_for(Platform::MacOs, target),
+                shipped.plan_for(Platform::MacOs, target),
+                "{target:?}"
+            );
+        }
 
         let surge = demo_spec(r#""requires_standard_install": true,"#, surge).uninstall;
+        let mac = surge
+            .plan_for(Platform::MacOs, InstallationKind::Standard)
+            .expect("Surge XT on macOS has a plan");
+        assert_eq!(mac.post, [UninstallPostStep::RefreshAudioUnits {}]);
+        // It is the plan Surge XT ships with on macOS, word for word.
+        let shipped = embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == "surge-xt")
+            .expect("Surge XT is shipped")
+            .uninstall;
+        for target in [InstallationKind::Standard, InstallationKind::Portable] {
+            assert_eq!(
+                surge.plan_for(Platform::MacOs, target),
+                shipped.plan_for(Platform::MacOs, target),
+                "{target:?}"
+            );
+        }
         let vendor = surge
             .plan_for(Platform::Windows, InstallationKind::Standard)
             .and_then(|plan| plan.vendor_uninstaller.as_ref())
@@ -2003,42 +2296,414 @@ mod tests {
         );
     }
 
+    /// A macOS `remove_files` plan with `fields`, next to a Windows plan so
+    /// the package is covered everywhere.
+    fn macos_remove_plans(fields: &str) -> String {
+        plans(&[
+            r#"{ "platform": "windows", "strategy": "not_supported", "note_key": "a" }"#,
+            &format!(
+                r#"{{ "platform": "macos", "strategy": "remove_files", {SUMMARY}, {fields} }}"#
+            ),
+        ])
+    }
+
+    /// The tree Surge XT's macOS plan removes first, as an elevated tree.
+    const ELEVATED_APP_TREE: &str = r#""elevation": "required", "backup": "none",
+        "remove": { "trees": [{ "path": "/Applications/Demo.app", "must_end_with": ".app", "name_contains": "Demo" }] }"#;
+
+    /// REAPER's app as an `if_needed` tree, with `tree` as its fields.
+    fn if_needed_app(tree: &str) -> String {
+        macos_remove_plans(&format!(
+            r#""elevation": "if_needed", "backup": "to_trash",
+               "remove": {{ "trees": [{{ {tree} }}] }}"#
+        ))
+    }
+
+    const REAPER_APP_TREE: &str = r#""path": "{app_path}", "must_end_with": ".app", "name_contains": "REAPER", "bundle_id": "com.cockos.reaper""#;
+
     #[test]
     fn elevation_never_moves_files_into_the_users_backups() {
         rejects(
             "",
-            &plans(&[&remove_plan(
-                r#""elevation": "required", "remove": { "receipt_files": true }"#,
-            )]),
+            &macos_remove_plans(
+                r#""elevation": "required",
+                   "remove": { "trees": [{ "path": "/Applications/Demo.app", "must_end_with": ".app" }] }"#,
+            ),
+            "elevation required needs backup none",
+        );
+        rejects(
+            "",
+            &macos_remove_plans(
+                r#""elevation": "if_needed", "backup": "none",
+                   "remove": { "trees": [{ "path": "{app_path}", "must_end_with": ".app", "bundle_id": "com.example.demo" }] }"#,
+            ),
+            "if_needed is only for trees with backup to_trash",
+        );
+        rejects(
+            "",
+            &macos_remove_plans(
+                r#""remove": { "trees": [{ "path": "{resource}/Demo.app", "must_end_with": ".app" }] }"#,
+            ),
+            "can't be moved into a backup set",
+        );
+        // A vendor's uninstaller keeps its own rule: no backup set either.
+        rejects(
+            "",
+            &vendor_plans(&format!(r#""elevation": "required", {INNO_IN_PLACE}"#)),
             "elevation required needs backup none or to_trash",
         );
-        accepts(
+    }
+
+    /// Rule 1: only macOS removes files with administrator rights; on
+    /// Windows a vendor's uninstaller does that.
+    #[test]
+    fn an_elevated_remove_files_plan_is_for_macos_only() {
+        accepts("", &macos_remove_plans(ELEVATED_APP_TREE));
+        accepts("", &if_needed_app(REAPER_APP_TREE));
+        rejects(
             "",
             &plans(&[&remove_plan(
                 r#""elevation": "required", "backup": "none", "remove": { "receipt_files": true }"#,
             )]),
+            "elevation required needs \"platform\": \"macos\"",
+        );
+        rejects(
+            "",
+            &windows_remove_plans(r#""elevation": "required", "backup": "none""#),
+            "elevation required needs \"platform\": \"macos\"",
+        );
+        rejects(
+            "",
+            &plans(&[&remove_plan(&format!(
+                r#""elevation": "if_needed", "backup": "to_trash",
+                   "remove": {{ "trees": [{{ {REAPER_APP_TREE} }}] }}"#
+            ))]),
+            "elevation if_needed needs \"platform\": \"macos\"",
+        );
+    }
+
+    /// Rule 2: root never handles files one by one, and never anything a
+    /// receipt or a list of files names.
+    #[test]
+    fn an_elevated_remove_files_plan_removes_only_trees() {
+        accepts("", &macos_remove_plans(ELEVATED_APP_TREE));
+        for (other, field) in [
+            (r#""receipt_files": true"#, "receipt_files"),
+            (r#""matching_user_plugins": true"#, "matching_user_plugins"),
+            (
+                r#""paths": ["/Library/Application Support/Demo/demo.txt"]"#,
+                "paths",
+            ),
+            (
+                r#""dirs_if_empty": ["/Library/Application Support/Demo"]"#,
+                "dirs_if_empty",
+            ),
+        ] {
+            rejects(
+                "",
+                &macos_remove_plans(&format!(
+                    r#""elevation": "required", "backup": "none",
+                       "remove": {{ {other},
+                           "trees": [{{ "path": "/Applications/Demo.app", "must_end_with": ".app" }}] }}"#
+                )),
+                &format!("removes only remove.trees, so it may not use {field}"),
+            );
+        }
+        rejects(
+            "",
+            &macos_remove_plans(&format!(
+                r#""elevation": "if_needed", "backup": "to_trash",
+                   "remove": {{ "receipt_files": true, "trees": [{{ {REAPER_APP_TREE} }}] }}"#
+            )),
+            "elevation if_needed removes only remove.trees, so it may not use receipt_files",
+        );
+    }
+
+    /// Rule 3: what root deletes is named outright, directly in one of the
+    /// fixed system folders, and an app there must be an `.app`.
+    #[test]
+    fn an_elevated_tree_sits_directly_in_a_system_folder() {
+        for path in [
+            "/Library/Audio/Plug-Ins/VST3/Demo.vst3",
+            "/Library/Audio/Plug-Ins/Components/Demo.component",
+            "/Library/Audio/Plug-Ins/CLAP/Demo.clap",
+            "/Library/Audio/Plug-Ins/LV2/Demo.lv2",
+            "/Library/Application Support/Demo",
+        ] {
+            accepts(
+                "",
+                &macos_remove_plans(&format!(
+                    r#""elevation": "required", "backup": "none",
+                       "remove": {{ "trees": [{{ "path": "{path}", "name_contains": "Demo" }}] }}"#
+                )),
+            );
+        }
+        for (path, expected) in [
+            ("{home}/Library/Demo", "must be an absolute macOS path"),
+            ("{resource}/Demo", "must be an absolute macOS path"),
+            ("{documents}/Demo", "must be an absolute macOS path"),
+            ("/Library/Audio/Plug-Ins/VST3/Demo/Demo.vst3", "not deeper"),
+            ("/Library/Application Support/Demo/Data", "not deeper"),
+            ("/Applications/Demo/Demo.app", "not deeper"),
+        ] {
+            rejects(
+                "",
+                &macos_remove_plans(&format!(
+                    r#""elevation": "required", "backup": "none",
+                       "remove": {{ "trees": [{{ "path": "{path}", "name_contains": "Demo" }}] }}"#
+                )),
+                expected,
+            );
+        }
+        rejects(
+            "",
+            &macos_remove_plans(
+                r#""elevation": "required", "backup": "none",
+                   "remove": { "trees": [{ "path": "{app_path}", "must_end_with": ".app" }] }"#,
+            ),
+            "must be an absolute macOS path",
+        );
+        rejects(
+            "",
+            &macos_remove_plans(
+                r#""elevation": "required", "backup": "none",
+                   "remove": { "trees": [{ "path": "/Applications/Demo.app", "name_contains": "Demo" }] }"#,
+            ),
+            "needs must_end_with \".app\"",
+        );
+        // Only for what root deletes: a tree that goes to the Trash as the
+        // user may sit deeper.
+        accepts(
+            "",
+            &macos_remove_plans(
+                r#""backup": "to_trash",
+                   "remove": { "trees": [{ "path": "/Library/Application Support/Demo/Data", "name_contains": "Data" }] }"#,
+            ),
+        );
+    }
+
+    /// Rule 4, as decision 32 has it: root moves only REAPER's app into the
+    /// Trash, and only one RABBIT can tell is that app.
+    #[test]
+    fn an_if_needed_tree_is_the_app_with_its_bundle_id() {
+        accepts("", &if_needed_app(REAPER_APP_TREE));
+        for tree in [
+            r#""path": "{app_path}", "must_end_with": ".app", "name_contains": "REAPER""#,
+            r#""path": "{app_path}", "name_contains": "REAPER", "bundle_id": "com.cockos.reaper""#,
+            r#""path": "{app_path}", "must_end_with": ".bundle", "bundle_id": "com.cockos.reaper""#,
+            r#""path": "/Applications/REAPER.app", "must_end_with": ".app", "bundle_id": "com.cockos.reaper""#,
+            r#""path": "{resource}/REAPER.app", "must_end_with": ".app", "bundle_id": "com.cockos.reaper""#,
+        ] {
+            rejects(
+                "",
+                &if_needed_app(tree),
+                "must be {app_path} with must_end_with \".app\" and a bundle_id",
+            );
+        }
+    }
+
+    /// Rule 5: only macOS has a Trash RABBIT moves things to, and only whole
+    /// objects go there.
+    #[test]
+    fn backup_to_trash_needs_trees_on_macos() {
+        accepts(
+            "",
+            &macos_remove_plans(
+                r#""backup": "to_trash",
+                   "remove": { "trees": [{ "path": "{app_path}", "must_end_with": ".app" }] }"#,
+            ),
+        );
+        rejects(
+            "",
+            &macos_remove_plans(r#""backup": "to_trash", "remove": { "receipt_files": true }"#),
+            "backup to_trash needs remove.trees and \"platform\": \"macos\"",
         );
         rejects(
             "",
             &plans(&[&remove_plan(
-                r#""elevation": "if_needed", "backup": "to_trash", "remove": { "receipt_files": true }"#,
+                r#""backup": "to_trash",
+                   "remove": { "trees": [{ "path": "{app_path}", "must_end_with": ".app" }] }"#,
             )]),
-            "if_needed is only for trees with backup to_trash",
+            "backup to_trash needs remove.trees and \"platform\": \"macos\"",
+        );
+        rejects(
+            "",
+            &vendor_plans(&format!(r#""backup": "to_trash", {INNO_IN_PLACE}"#)),
+            "backup to_trash needs remove.trees and \"platform\": \"macos\"",
+        );
+    }
+
+    /// One app per package goes to the Trash: a second that failed after
+    /// the first went couldn't be reported as one outcome, and root's
+    /// command moves only one.
+    #[test]
+    fn a_trash_plan_moves_exactly_one_app() {
+        accepts("", &if_needed_app(REAPER_APP_TREE));
+        for elevation in ["never", "if_needed"] {
+            rejects(
+                "",
+                &macos_remove_plans(&format!(
+                    r#""elevation": "{elevation}", "backup": "to_trash",
+                       "remove": {{ "trees": [
+                           {{ {REAPER_APP_TREE} }},
+                           {{ "path": "/Applications/Other.app", "must_end_with": ".app", "name_contains": "Other" }}
+                       ] }}"#
+                )),
+                "backup to_trash moves exactly one app to the Trash",
+            );
+        }
+    }
+
+    /// Rule 6: only root deletes for good, so a plan without administrator
+    /// rights can't delete anything for good either.
+    #[test]
+    fn backup_none_needs_elevation_required() {
+        accepts("", &macos_remove_plans(ELEVATED_APP_TREE));
+        rejects(
+            "",
+            &macos_remove_plans(
+                r#""backup": "none",
+                   "remove": { "trees": [{ "path": "/Applications/Demo.app", "must_end_with": ".app" }] }"#,
+            ),
+            "backup none needs elevation required",
         );
         rejects(
             "",
             &plans(&[&remove_plan(
-                r#""elevation": "if_needed", "backup": "none",
-                   "remove": { "trees": [{ "path": "{resource}/Demo.app", "must_end_with": ".app" }] }"#,
+                r#""backup": "none", "remove": { "receipt_files": true }"#,
             )]),
-            "if_needed is only for trees with backup to_trash",
+            "backup none needs elevation required",
+        );
+    }
+
+    /// Rule 7: receipts are forgotten only by the administrator command,
+    /// and an id can't pass for one of pkgutil's options.
+    #[test]
+    fn pkg_forget_needs_elevation_and_ids_that_start_with_a_letter_or_digit() {
+        let forgetting = |ids: &str| {
+            macos_remove_plans(&format!(
+                r#"{ELEVATED_APP_TREE}, "macos_pkg_forget": [{ids}]"#
+            ))
+        };
+        accepts("", &forgetting(r#""org.example.demo.pkg", "9demo.pkg""#));
+        for id in ["-demo.pkg", ".demo.pkg", "_demo.pkg", ""] {
+            rejects(
+                "",
+                &forgetting(&format!("\"{id}\"")),
+                "must be a full package id",
+            );
+        }
+        rejects(
+            "",
+            &macos_remove_plans(
+                r#""backup": "to_trash",
+                   "remove": { "trees": [{ "path": "{app_path}", "must_end_with": ".app" }] },
+                   "macos_pkg_forget": ["org.example.demo.pkg"]"#,
+            ),
+            "macos_pkg_forget needs elevation required",
+        );
+    }
+
+    /// Rule 8: on macOS the program names become one pattern for pgrep.
+    #[test]
+    fn program_names_for_macos_are_plain_words() {
+        let blocking = |names: &str| {
+            macos_remove_plans(&format!(
+                r#"{ELEVATED_APP_TREE}, "blocking_programs": [{names}]"#
+            ))
+        };
+        accepts(
+            "",
+            &blocking(r#""Surge XT", "Surge XT Effects", "demo_2-x""#),
+        );
+        for name in ["Surge XT.app", "Surge*", "Surge|XT", "(Surge)", "Surgé XT"] {
+            rejects("", &blocking(&format!("\"{name}\"")), "a pattern for pgrep");
+        }
+        // A plan for every platform runs on macOS too.
+        rejects(
+            "",
+            &plans(&[&remove_plan(
+                r#""remove": { "receipt_files": true }, "blocking_programs": ["demo.exe"]"#,
+            )]),
+            "a pattern for pgrep",
+        );
+        // Windows keeps its file names, in its own plans and in the plans of
+        // a package offered only there.
+        accepts(
+            "",
+            &windows_remove_plans(r#""blocking_programs": ["Surge XT.exe"]"#),
+        );
+        accepts(
+            r#""supported_platforms": ["windows"],"#,
+            &plans(&[&remove_plan(
+                r#""remove": { "receipt_files": true }, "blocking_programs": ["demo.exe"]"#,
+            )]),
+        );
+    }
+
+    /// Rule 9: only macOS has Audio Units to refresh.
+    #[test]
+    fn refresh_audio_units_is_for_macos_plans() {
+        accepts(
+            "",
+            &macos_remove_plans(&format!(
+                r#"{ELEVATED_APP_TREE}, "post": [{{ "refresh_audio_units": {{}} }}]"#
+            )),
+        );
+        rejects(
+            "",
+            &windows_remove_plans(r#""post": [{ "refresh_audio_units": {} }]"#),
+            "refresh_audio_units needs \"platform\": \"macos\"",
         );
         rejects(
             "",
             &plans(&[&remove_plan(
-                r#""remove": { "trees": [{ "path": "{resource}/Demo.app", "must_end_with": ".app" }] }"#,
+                r#""remove": { "receipt_files": true }, "post": [{ "refresh_audio_units": {} }]"#,
             )]),
-            "can't be moved into a backup set",
+            "refresh_audio_units needs \"platform\": \"macos\"",
+        );
+    }
+
+    #[test]
+    fn a_bundle_id_is_a_full_identifier() {
+        accepts(
+            "",
+            &if_needed_app(
+                r#""path": "{app_path}", "must_end_with": ".app", "bundle_id": "com.cockos.reaper-arm_64""#,
+            ),
+        );
+        for bundle_id in ["", "-com.cockos.reaper", "com.cockos.reaper;", "com cockos"] {
+            rejects(
+                "",
+                &if_needed_app(&format!(
+                    r#""path": "{{app_path}}", "must_end_with": ".app", "bundle_id": "{bundle_id}""#
+                )),
+                "which must be a full identifier",
+            );
+        }
+    }
+
+    /// Only the Trash route compares a bundle's identifier. Root's delete
+    /// never reads one, so a manifest may not give one there and seem to
+    /// guard root with it.
+    #[test]
+    fn a_bundle_id_goes_only_where_rabbit_checks_it() {
+        accepts("", &if_needed_app(REAPER_APP_TREE));
+        accepts(
+            "",
+            &macos_remove_plans(&format!(
+                r#""elevation": "never", "backup": "to_trash",
+                   "remove": {{ "trees": [{{ {REAPER_APP_TREE} }}] }}"#
+            )),
+        );
+        rejects(
+            "",
+            &macos_remove_plans(
+                r#""elevation": "required", "backup": "none",
+                   "remove": { "trees": [{ "path": "/Applications/Surge XT.app", "must_end_with": ".app",
+                       "name_contains": "Surge XT", "bundle_id": "org.example.surge" }] }"#,
+            ),
+            "checks one only for an app a backup to_trash plan",
         );
     }
 
@@ -2250,9 +2915,9 @@ mod tests {
         );
         rejects(
             "",
-            &plans(&[&remove_plan(
-                r#""backup": "none", "remove": { "trees": [{ "path": "{resource}/Demo*.app", "must_end_with": ".app" }] }"#,
-            )]),
+            &macos_remove_plans(
+                r#""backup": "to_trash", "remove": { "trees": [{ "path": "{resource}/Demo*.app", "must_end_with": ".app" }] }"#,
+            ),
             "may not use *",
         );
     }
@@ -2276,9 +2941,9 @@ mod tests {
         );
         rejects(
             "",
-            &plans(&[&remove_plan(
-                r#""backup": "none", "remove": { "trees": [{ "path": "{app_path}/Contents", "must_end_with": ".app" }] }"#,
-            )]),
+            &macos_remove_plans(
+                r#""backup": "to_trash", "remove": { "trees": [{ "path": "{app_path}/Contents", "must_end_with": ".app" }] }"#,
+            ),
             "can't add components after it",
         );
         // Windows folders exist only on Windows, and $HOME only on macOS.
@@ -2298,16 +2963,18 @@ mod tests {
         );
     }
 
-    /// A macOS plan removing the tree at `path`, next to a Windows plan.
+    /// A macOS plan deleting the tree at `path` with administrator rights,
+    /// next to a Windows plan. The tree must end with the path's own
+    /// extension, if it has one, as an app in /Applications must.
     fn macos_tree_plans(path: &str) -> String {
-        plans(&[
-            r#"{ "platform": "windows", "strategy": "not_supported", "note_key": "a" }"#,
-            &format!(
-                r#"{{ "platform": "macos", "strategy": "remove_files", "elevation": "required",
-                     "backup": "none", {SUMMARY},
-                     "remove": {{ "trees": [{{ "path": "{path}", "name_contains": "Demo" }}] }} }}"#
-            ),
-        ])
+        let must_end_with = std::path::Path::new(path)
+            .extension()
+            .map(|extension| format!(r#", "must_end_with": ".{}""#, extension.to_string_lossy()))
+            .unwrap_or_default();
+        macos_remove_plans(&format!(
+            r#""elevation": "required", "backup": "none",
+               "remove": {{ "trees": [{{ "path": "{path}", "name_contains": "Demo"{must_end_with} }}] }}"#
+        ))
     }
 
     #[test]
@@ -2329,9 +2996,7 @@ mod tests {
         rejects("", &macos_tree_plans("/"), "empty component");
         rejects(
             "",
-            &plans(&[&remove_plan(
-                r#""backup": "none", "remove": { "trees": [{ "path": "/Applications/Demo.app", "must_end_with": ".app" }] }"#,
-            )]),
+            &path_plan("/Library/Application Support/Demo/demo.txt"),
             "allowed only in plans with \"platform\": \"macos\"",
         );
     }
@@ -2397,9 +3062,9 @@ mod tests {
         ] {
             rejects(
                 "",
-                &plans(&[&remove_plan(&format!(
+                &macos_remove_plans(&format!(
                     r#""backup": "to_trash", "remove": {{ "trees": [{tree}] }}"#
-                ))]),
+                )),
                 "needs must_end_with or name_contains",
             );
         }
@@ -2479,14 +3144,9 @@ mod tests {
         );
         rejects(
             "",
-            &plans(&[
-                r#"{ "platform": "windows", "strategy": "not_supported", "note_key": "a" }"#,
-                &format!(
-                    r#"{{ "platform": "macos", "strategy": "remove_files", {SUMMARY},
-                         "remove": {{ "receipt_files": true }},
-                         "macos_pkg_forget": ["org.example.demo.pkg; rm -rf /"] }}"#
-                ),
-            ]),
+            &macos_remove_plans(&format!(
+                r#"{ELEVATED_APP_TREE}, "macos_pkg_forget": ["org.example.demo.pkg; rm -rf /"]"#
+            )),
             "must be a full package id",
         );
         rejects(

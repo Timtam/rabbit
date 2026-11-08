@@ -32,11 +32,27 @@
 //! first change, and the helper runs both uninstallers when the run reaches
 //! them; see [`helper`] and [`vendor`]. Nothing a vendor's uninstaller
 //! removes goes into a backup.
+//!
+//! On macOS a plan's `trees`, whole folders such as app bundles, never go
+//! into a backup either. Each package's [`RemovalRoute`] says how it leaves:
+//! into the backup set, through a vendor's uninstaller, to the Trash, or
+//! through the run's one administrator command. Which way REAPER.app goes is
+//! decided while planning, from what this account may do with it; see
+//! [`macos_objects`]. The administrator command is the run's first change,
+//! behind its one password window; see [`admin_batch`].
 
+pub mod admin_batch;
+#[cfg(test)]
+mod admin_batch_tests;
+#[cfg(test)]
+mod admin_run_tests;
 pub mod execute;
 #[cfg(test)]
 mod execute_tests;
 pub mod helper;
+pub mod macos_objects;
+#[cfg(test)]
+mod macos_plan_tests;
 #[cfg(test)]
 mod manifest_tests;
 pub mod paths;
@@ -64,13 +80,25 @@ use crate::preflight::{PreflightCheck, PreflightReport};
 use crate::report::{SavedReportPaths, default_report_path, save_json_and_text_reports};
 use crate::version::Version;
 
-pub use execute::{execute_uninstall, plan_uninstall_at};
+pub use admin_batch::{
+    AdminShellEvent, AdminShellRun, AdministratorShell, AdministratorStepKind,
+    AdministratorStepRecord, AdministratorStepVerdict, NoAdministratorShell,
+    RecordingAdministratorShell, SystemAdministratorShell,
+};
+pub use execute::{APP_MANAGEMENT_HINT, execute_uninstall, plan_uninstall_at};
 pub use helper::{
     ElevatedHelper, ElevatedRunRequest, ElevatedSession, ElevationStartError, HELPER_SUBCOMMAND,
     HelperArgs, InProcessElevatedHelper, MachineFolders, NoElevatedHelper, SystemElevatedHelper,
     run_elevated_helper,
 };
-pub use paths::{PathRefusal, RemovalGuard, UninstallRoots, check_link_removal, check_removal};
+pub use macos_objects::{
+    FakeMacosObjects, FakeReceipts, MacosObjects, NoMacosObjects, ObjectFacts, ObjectProbe,
+    SystemMacosObjects, TrashError, TrashErrorKind, TrashFolderFacts, TreeRoute, tree_route,
+};
+pub use paths::{
+    PathRefusal, RemovalGuard, SYSTEM_ROOT, UninstallRoots, check_administrator_removal,
+    check_administrator_trash_move, check_link_removal, check_removal,
+};
 pub use plan::{UninstallPlanInput, build_uninstall_plan};
 pub use preflight::{
     ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, BACKUP_SPACE_MARGIN, PROGRAMS_RUNNING_CHECK,
@@ -89,13 +117,15 @@ pub const UNINSTALL_NOT_YET_KEY: &str = "uninstall-not-yet";
 
 /// What an uninstall run reads or starts beyond the files of the target:
 /// where each vendor's uninstaller is, what starts the run's elevated
-/// helper (and with it the run's one Windows permission prompt), and
-/// Windows' per-user list of installed programs.
+/// helper (and with it the run's one Windows permission prompt), Windows'
+/// per-user list of installed programs, what macOS says this account may do
+/// with an app and what the run does there as the user, and what runs the
+/// macOS administrator command (and with it the run's one password window).
 ///
 /// Only RABBIT's own entry points use [`UninstallServices::system`]. Tests
-/// hand in stand-ins, so none of them can reach Windows' real lists or the
-/// real helper; the real helper refuses to start from anything not named
-/// like RABBIT anyway.
+/// hand in stand-ins, so none of them can reach Windows' real lists, the
+/// real helper, the real Trash or a real password window; the real ones
+/// refuse to start from anything not named like RABBIT anyway.
 #[derive(Clone, Copy)]
 pub struct UninstallServices<'a> {
     /// Finds and checks each vendor's uninstaller before the run, read only.
@@ -106,6 +136,14 @@ pub struct UninstallServices<'a> {
     /// `registry_cleanup` names entries. `None` leaves every entry alone,
     /// unread.
     pub installed_programs: Option<&'a HkcuUninstallRoot>,
+    /// What this account may do with a macOS app, which decides how a
+    /// `to_trash` plan's app leaves, and what the run does there as the
+    /// user: the Trash, the installer's receipts, the Audio Unit list, and
+    /// whether RABBIT runs as root.
+    pub macos_objects: &'a dyn MacosObjects,
+    /// Runs the macOS administrator command once per run, when a package
+    /// needs it.
+    pub administrator_shell: &'a dyn AdministratorShell,
 }
 
 /// Windows' real per-user list of installed programs.
@@ -115,24 +153,29 @@ static INSTALLED_PROGRAMS: LazyLock<HkcuUninstallRoot> =
 impl UninstallServices<'static> {
     /// The real ones, for RABBIT's own entry points on `platform`: HKLM's
     /// list of programs installed for every user, read only, RABBIT's own
-    /// elevated helper, and on Windows the per-user list of installed
-    /// programs.
+    /// elevated helper, on Windows the per-user list of installed programs,
+    /// and macOS itself with its administrator password window.
     pub fn system(platform: Platform) -> Self {
         Self {
             vendor_lookup: &SystemVendorLookup,
             elevated_helper: &SystemElevatedHelper,
             installed_programs: (platform == Platform::Windows).then(|| &*INSTALLED_PROGRAMS),
+            macos_objects: &SystemMacosObjects,
+            administrator_shell: &SystemAdministratorShell,
         }
     }
 
-    /// None at all: no vendor uninstaller is found, no helper starts and no
-    /// list of installed programs is read. For listings, and for tests that
-    /// remove files only.
+    /// None at all: no vendor uninstaller is found, no helper starts, no
+    /// list of installed programs is read, nothing is asked about a macOS
+    /// app or moved to the Trash, and no administrator command runs. For
+    /// tests that remove files only.
     pub fn without_elevation() -> Self {
         Self {
             vendor_lookup: &NothingListed,
             elevated_helper: &NoElevatedHelper,
             installed_programs: None,
+            macos_objects: &NoMacosObjects,
+            administrator_shell: &NoAdministratorShell,
         }
     }
 }
@@ -166,6 +209,21 @@ impl UninstallPlan {
                 .filter(|item| package_ids.contains(&item.package_id))
                 .collect(),
         )
+    }
+
+    /// The items for `package_ids` in the order a run takes them, which is
+    /// the order its report lists them in. On macOS the run's one
+    /// administrator command is its first change, so the packages it removes
+    /// come first, in their removal order, REAPER among them when only root
+    /// can move its app. The rest follow in removal order, REAPER last. A
+    /// run without such packages, as on Windows, takes
+    /// [`in_removal_order`](Self::in_removal_order) as it is.
+    pub fn in_run_order(&self, package_ids: &[String]) -> Vec<&UninstallPlanItem> {
+        let (administrator, rest): (Vec<&UninstallPlanItem>, Vec<&UninstallPlanItem>) = self
+            .in_removal_order(package_ids)
+            .into_iter()
+            .partition(|item| item.needs_administrator());
+        administrator.into_iter().chain(rest).collect()
     }
 }
 
@@ -202,6 +260,10 @@ pub struct UninstallPlanItem {
     pub vendor_run: Option<PlannedVendorRun>,
     /// Programs that must not be running, from the manifest.
     pub blocking_programs: Vec<String>,
+    /// macOS installer receipts the run's administrator command forgets
+    /// once the package's files are gone, from the manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub macos_pkg_forget: Vec<String>,
     /// No REAPER at all may run, not only the target's: a vendor
     /// uninstaller reacts to any REAPER window, and a machine-wide package
     /// may be loaded by any REAPER.
@@ -264,6 +326,83 @@ pub enum Removability {
         path: PathBuf,
         refusal: PathRefusal,
     },
+    /// macOS: RABBIT can't move this app to the Trash, by itself or through
+    /// the run's administrator command, so the user moves it in Finder.
+    ByHand {
+        path: PathBuf,
+        reason: ByHandReason,
+    },
+}
+
+/// Why the user moves a macOS app to the Trash in Finder rather than RABBIT.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ByHandReason {
+    /// This account may not move it: it belongs to another account or to
+    /// the system, or its folder can't be changed by the user. Root may
+    /// move it only from `/Applications`, and only for a plan that allows
+    /// that.
+    NotMovableByYou,
+    /// It is Locked in Finder (or carries another flag that stops any
+    /// move), which not even root can move past.
+    Locked,
+    /// Its bundle identifier isn't the one the manifest names, or it isn't
+    /// an app bundle at all.
+    NotTheExpectedApp,
+    /// What this account may do with it couldn't be read.
+    CouldNotCheck { error: String },
+    /// Only root could move it, but the user's Trash isn't a real folder of
+    /// the user's, or isn't there.
+    NoTrashFolder,
+    /// Only root could move it, but it is on another volume than the user's
+    /// Trash, where root's move wouldn't be a plain rename.
+    NotOnTrashVolume,
+}
+
+impl ByHandReason {
+    /// Why, in English, as the end of a sentence that begins "because".
+    pub fn message(&self) -> String {
+        match self {
+            Self::NotMovableByYou => "your account may not move it: it belongs to another \
+                                      account or to macOS, or sits in a folder you can't change"
+                .to_string(),
+            Self::Locked => "it is locked".to_string(),
+            Self::NotTheExpectedApp => "it isn't the app RABBIT expects there".to_string(),
+            Self::CouldNotCheck { error } => {
+                format!("RABBIT couldn't check who may move it ({error})")
+            }
+            Self::NoTrashFolder => {
+                "your Trash isn't a folder of your own that RABBIT can check".to_string()
+            }
+            Self::NotOnTrashVolume => "it is on another disk than your Trash".to_string(),
+        }
+    }
+}
+
+/// How a package leaves, derived from its plan item. Each route is a
+/// different way of removing, with its own steps and its own way back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovalRoute {
+    /// Its files move into the run's backup set, so a restore can bring
+    /// them back.
+    BackupSet,
+    /// Its vendor's own uninstaller removes it, on Windows, through the
+    /// run's elevated helper.
+    Vendor,
+    /// Its trees go to the Trash on macOS, moved as the user.
+    Trash,
+    /// The run's one administrator command on macOS removes it: it deletes
+    /// the package's trees for good, or moves an app RABBIT can't move
+    /// itself into the user's Trash.
+    Administrator,
+}
+
+impl RemovalRoute {
+    /// Whether the route takes each tree as one whole object, such as an
+    /// app bundle: never listed, hashed or moved file by file.
+    pub fn takes_whole_objects(self) -> bool {
+        matches!(self, Self::Trash | Self::Administrator)
+    }
 }
 
 impl UninstallPlanItem {
@@ -276,12 +415,43 @@ impl UninstallPlanItem {
             && self.requires_elevation
     }
 
-    /// RABBIT can remove the package, and this version takes every step it
-    /// needs: files into a backup set, or the vendor's uninstaller through
-    /// the elevated helper. Other steps a backup can't undo, such as a whole
-    /// folder going to the Trash on macOS, come in a later version.
+    /// How the package leaves. Derived from the plan item, so it can't
+    /// disagree with it:
+    /// - a `vendor_uninstaller` plan: its vendor's uninstaller;
+    /// - a `remove_files` plan that needs administrator rights: the run's
+    ///   administrator command, REAPER.app included when only root can move
+    ///   it;
+    /// - a `remove_files` plan whose trees go to the Trash: the Trash;
+    /// - anything else: the backup set.
+    pub fn route(&self) -> RemovalRoute {
+        match self.strategy {
+            Some(UninstallStrategy::VendorUninstaller) => RemovalRoute::Vendor,
+            Some(UninstallStrategy::RemoveFiles) if self.requires_elevation => {
+                RemovalRoute::Administrator
+            }
+            Some(UninstallStrategy::RemoveFiles) if self.backup == UninstallBackup::ToTrash => {
+                RemovalRoute::Trash
+            }
+            _ => RemovalRoute::BackupSet,
+        }
+    }
+
+    /// The run's one administrator command on macOS removes the package.
+    pub fn needs_administrator(&self) -> bool {
+        self.route() == RemovalRoute::Administrator
+    }
+
+    /// RABBIT can remove the package, and its route has every step it
+    /// needs: on the backup set's route, nothing a backup can't undo; a
+    /// vendor's uninstaller only through the elevated helper; the Trash and
+    /// the administrator command whenever the package is removable.
     pub fn can_remove(&self) -> bool {
-        self.removability.is_removable() && (!self.unbacked || self.needs_elevated_helper())
+        self.removability.is_removable()
+            && match self.route() {
+                RemovalRoute::BackupSet => !self.unbacked,
+                RemovalRoute::Vendor => self.needs_elevated_helper(),
+                RemovalRoute::Trash | RemovalRoute::Administrator => true,
+            }
     }
 }
 
@@ -335,6 +505,34 @@ impl Removability {
                  remove only part of it.",
                 path.display()
             ),
+            Self::ByHand { path, reason } => {
+                let steps = match reason {
+                    // It may not be the package at all, so the steps are
+                    // only for the user who knows it is, as the GUI says.
+                    ByHandReason::NotTheExpectedApp => format!(
+                        "If it is the {name} you want to remove, select it in Finder and press \
+                         Command-Delete."
+                    ),
+                    // Get Info's Locked clears only the lock a user sets;
+                    // the other locks RABBIT counts as Locked stay, so the
+                    // steps can't promise to work every time.
+                    ByHandReason::Locked => format!(
+                        "To remove {name}, untick Locked in its Get Info window, then select it \
+                         in Finder and press Command-Delete; Finder asks for an administrator's \
+                         password if it needs one. If Locked isn't ticked, or Finder still can't \
+                         move it, it has a lock that Finder can't remove."
+                    ),
+                    _ => format!(
+                        "To remove {name}, select it in Finder and press Command-Delete; Finder \
+                         asks for an administrator's password if it needs one."
+                    ),
+                };
+                format!(
+                    "RABBIT can't move {} to the Trash, because {}. {steps}",
+                    path.display(),
+                    reason.message()
+                )
+            }
             Self::NotInstalled => format!("{name} isn't installed."),
             Self::Removable | Self::RemovableOrphanedFromReaPack => {
                 format!("RABBIT can remove {name}.")
@@ -355,6 +553,10 @@ pub struct PlannedRemoval {
     /// before the move: a file only the receipt names that changed since is
     /// kept; one the manifest names goes anyway, after its backup.
     pub receipt_sha256: Option<String>,
+    /// For a macOS app from `trees`: the bundle identifier it must have,
+    /// from the manifest, checked again right before it moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
     /// What the guard checks again right before the move.
     #[serde(skip)]
     pub guard: RemovalGuard,
@@ -536,7 +738,8 @@ pub enum UninstallStatus {
     /// RABBIT won't remove it, or a check stopped it before anything of it
     /// changed.
     Blocked,
-    /// Removing it went wrong. Whatever had moved was put back.
+    /// Removing it went wrong. Whatever had moved into the backup set was
+    /// put back; the message says what else, if anything, is gone.
     Failed,
     /// The user stopped the run before this package.
     Cancelled,
@@ -568,6 +771,11 @@ pub struct UninstallReport {
     pub backup_set_path: Option<PathBuf>,
     /// One item per requested package, in the order they were removed.
     pub items: Vec<UninstallReportItem>,
+    /// Every step the macOS administrator command was given, or in a dry
+    /// run would be given, in order, and how each went: what root was asked
+    /// to do, for the record. Empty when no package needed it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub administrator_steps: Vec<AdministratorStepRecord>,
     /// The plan the run carried out, built from fresh detection once the
     /// run held the lock.
     pub plan: UninstallPlan,
@@ -619,15 +827,16 @@ impl UninstallReport {
     }
 
     /// The user stopped the run before every package was reached, declined
-    /// the Windows permission prompt, or cancelled a vendor's uninstaller.
+    /// the administrator permission prompt, or cancelled a vendor's
+    /// uninstaller.
     pub fn was_cancelled(&self) -> bool {
         self.items
             .iter()
             .any(|item| item.status == UninstallStatus::Cancelled)
     }
 
-    /// The Windows permission prompt was declined, so the whole run was
-    /// cancelled before anything changed.
+    /// The administrator permission prompt was declined, Windows' or
+    /// macOS's, so the whole run was cancelled before anything changed.
     pub fn elevation_declined(&self) -> bool {
         self.items
             .iter()
@@ -698,7 +907,8 @@ pub struct UninstallReportItem {
     pub message_code: UninstallMessage,
 }
 
-/// A file the run removed into the backup set.
+/// A file or folder the run removed: into the backup set, or on macOS to
+/// the Trash or through the administrator command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemovedFile {
     pub path: PathBuf,
@@ -707,8 +917,12 @@ pub struct RemovedFile {
     /// The receipt recorded another hash. Only files the manifest names go
     /// even then, such as a newer plug-in copied in by hand.
     pub changed_since_install: bool,
-    /// Where it is in the backup set. `None` in a dry run.
+    /// Where it is in the backup set. `None` in a dry run, and for what
+    /// went to the Trash or through the administrator command.
     pub backup_path: Option<PathBuf>,
+    /// Where it is in the Trash, when it went there and RABBIT knows where.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trashed_to: Option<PathBuf>,
 }
 
 /// A file the plan listed that the run kept.
@@ -790,6 +1004,18 @@ pub enum UninstallProblem {
     /// vendor's uninstaller, so RABBIT couldn't check whether it still
     /// lists the package.
     InstalledListUnreadable { error: String },
+    /// macOS's installer still lists these receipts of the package after
+    /// the administrator command told it to forget them. They do no harm:
+    /// the package's files are gone.
+    InstallerRecordsRemain { ids: Vec<String> },
+    /// macOS's installer receipts couldn't be listed after the
+    /// administrator command, so RABBIT couldn't check that it forgot the
+    /// package's.
+    InstallerRecordsUnchecked { error: String },
+    /// The administrator command ended without saying where it stopped:
+    /// `status` is its exit status, `None` when it had none RABBIT could
+    /// read. Everything of the package is gone all the same.
+    AdministratorEndedUnclearly { status: Option<i32> },
 }
 
 impl UninstallProblem {
@@ -843,6 +1069,24 @@ impl UninstallProblem {
                 "RABBIT couldn't read Windows' list of installed programs afterwards ({error}), \
                  so it couldn't check whether Windows still lists the package."
             ),
+            Self::InstallerRecordsRemain { ids } => format!(
+                "macOS's installer still lists {}, though the package's files are gone. That \
+                 does no harm.",
+                ids.join(", ")
+            ),
+            Self::InstallerRecordsUnchecked { error } => format!(
+                "RABBIT couldn't read macOS's list of installer receipts afterwards ({error}), \
+                 so it couldn't check that macOS forgot the package's."
+            ),
+            Self::AdministratorEndedUnclearly { status } => match status {
+                Some(status) => format!(
+                    "The administrator command ended with status {status} without saying \
+                     where it stopped, but everything of the package is gone."
+                ),
+                None => "The administrator command ended without a status, but everything of \
+                         the package is gone."
+                    .to_string(),
+            },
         }
     }
 }
@@ -864,9 +1108,8 @@ pub enum UninstallMessage {
     NotRemovable {
         removability: Removability,
     },
-    /// The removal needs a step this version can't carry out yet: a vendor
-    /// uninstaller, administrator rights, or a whole folder going to the
-    /// Trash. None of these can be undone from a backup.
+    /// The removal needs a step a backup can't undo, and this version has
+    /// no way to carry it out for this plan.
     NotYetSupported,
     /// Checks failed for this package: REAPER or a program it names is
     /// running, the resource folder isn't writable, or the backup lacks
@@ -954,12 +1197,56 @@ pub enum UninstallMessage {
     VendorLost {
         error: String,
     },
-    /// The Windows permission prompt was declined, so nothing was
-    /// uninstalled at all.
+    /// The administrator permission prompt was declined, so nothing was
+    /// uninstalled at all: Windows' prompt for the elevated helper, or the
+    /// macOS administrator password window, which was cancelled.
     ElevationDeclined,
-    /// The elevated helper couldn't start, so nothing was uninstalled.
+    /// The elevated helper couldn't start, or the macOS administrator
+    /// command didn't run, so nothing was uninstalled.
     ElevationFailed {
         error: String,
+    },
+    /// Moved to the Trash on macOS, by RABBIT as the user or by the
+    /// administrator command. `trashed_to` is where it is now, when RABBIT
+    /// knows: macOS named it, or RABBIT could see it there.
+    MovedToTrash {
+        trashed_to: Option<PathBuf>,
+    },
+    /// macOS didn't move it to the Trash, so nothing of the package
+    /// changed. `refused_by_macos` when macOS refused for lack of
+    /// permission, which App Management can be behind.
+    TrashFailed {
+        error: String,
+        refused_by_macos: bool,
+    },
+    /// macOS said the app moved to the Trash, but `path` is still there,
+    /// or RABBIT can't find it where macOS said it went. What became of it
+    /// is for the user to check in Finder; the run stopped there.
+    TrashUnclear {
+        path: PathBuf,
+    },
+    /// The run's administrator command removed the package for good on
+    /// macOS. A backup can't bring it back.
+    RemovedAsAdministrator,
+    /// The administrator command stopped before the package was fully
+    /// removed, or ran and left some of it, and the run stopped there.
+    /// `path` is what the failing step worked on, only when that step was
+    /// one of this package's. `ended_unclearly` when the command ended
+    /// without saying which step stopped it; with neither, the command
+    /// stopped at another package's step or ran to its end, and the package
+    /// is still there all the same. `gone` and `left` say, from the
+    /// filesystem afterwards, which of the package's paths are gone and
+    /// which are still there. `refused_by_macos` when macOS said "Operation
+    /// not permitted", which App Management can be behind; `detail` is the
+    /// step's own message.
+    AdministratorStepFailed {
+        path: Option<PathBuf>,
+        #[serde(default)]
+        ended_unclearly: bool,
+        gone: Vec<PathBuf>,
+        left: Vec<PathBuf>,
+        refused_by_macos: bool,
+        detail: Option<String>,
     },
     /// After the vendor's uninstaller ran, these files were gone from the
     /// resource folder: REAPER's own settings or RABBIT's receipt. RABBIT

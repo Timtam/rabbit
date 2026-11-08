@@ -81,6 +81,9 @@ pub struct WizardText {
     /// The Packages page's two tabs.
     pub packages_tab_install: String,
     pub packages_tab_uninstall: String,
+    /// macOS only: what VoiceOver says the first time the Packages page
+    /// opens, that Control-Tab switches between the tabs.
+    pub packages_tabs_switch_hint_macos: String,
     pub packages_list_label: String,
     /// The label right before the Uninstall tab's list, naming the tab.
     pub uninstall_list_label: String,
@@ -159,7 +162,8 @@ pub struct WizardText {
     pub progress_details_cache_prefix: String,
     /// The progress page's heading and first status line while an
     /// uninstall runs, and what the status line says once the user asked
-    /// to stop one: a removal stops after the package, not the step.
+    /// to stop one: a removal stops once the step it is on has finished,
+    /// one package, or on macOS the administrator command for several.
     pub progress_uninstall_heading: String,
     pub progress_status_uninstall_running: String,
     pub progress_status_uninstall_cancelling: String,
@@ -174,6 +178,9 @@ pub struct WizardText {
     /// Why a run failed when another RABBIT holds the target's install
     /// lock, installing or uninstalling there.
     pub error_lock_held: String,
+    /// Why an uninstall didn't start on macOS: RABBIT itself runs as root,
+    /// as under sudo.
+    pub error_uninstall_as_root: String,
     pub done_status_cancelled: String,
     pub done_status_no_packages: String,
     pub done_show_details_label: String,

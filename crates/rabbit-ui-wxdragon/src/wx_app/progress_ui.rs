@@ -5,9 +5,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use rabbit_core::localization::Localizer;
-use rabbit_core::progress::{ProgressEvent, RemovalMethod};
+use rabbit_core::progress::ProgressEvent;
 
-use crate::{ProgressUiState, is_spoken};
+use crate::{
+    ProgressUiState, administrator_prompt_line, administrator_still_waiting_line, is_spoken,
+    removal_started_lines,
+};
 
 use crate::wx_app::globals::{AnnouncePriority, announce, with_ui_localizer};
 use crate::wx_app::widgets::WizardWidgets;
@@ -198,33 +201,13 @@ pub(crate) fn apply_progress_event_to_ui(
                     .value,
             );
         }
-        // Each removal holds the status line the way an install does.
-        ProgressEvent::RemoveStarted {
-            package_id,
-            method: RemovalMethod::Files,
-        } => {
-            status_line = Some(package_line(
-                localizer,
-                "wizard-progress-status-removing",
-                package_id,
-            ));
-            log_line = Some(package_line(
-                localizer,
-                "wizard-progress-log-remove-started",
-                package_id,
-            ));
-        }
-        ProgressEvent::RemoveStarted {
-            package_id,
-            method: RemovalMethod::VendorUninstaller,
-        } => {
-            let line = package_line(
-                localizer,
-                "wizard-progress-status-vendor-running",
-                package_id,
-            );
-            status_line = Some(line.clone());
-            log_line = Some(line);
+        // Each removal holds the status line the way an install does, in
+        // words that say how it goes; see `removal_started_lines`.
+        ProgressEvent::RemoveStarted { package_id, method } => {
+            let package = package_display_name(package_display_names, package_id);
+            let (status, log) = removal_started_lines(localizer, *method, &package);
+            status_line = status;
+            log_line = Some(log);
         }
         // The uninstaller may be waiting for an answer in a window of its
         // own, which the user has to go and find.
@@ -247,6 +230,33 @@ pub(crate) fn apply_progress_event_to_ui(
             );
             status_line = Some(line.clone());
             log_line = Some(line);
+        }
+        // Said right before the password window takes focus, on the status
+        // label and in the log as well, in case VoiceOver cuts it off.
+        ProgressEvent::AdministratorPrompt { package_ids } => {
+            let packages = package_ids
+                .iter()
+                .map(|id| package_display_name(package_display_names, id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if let Some(line) = administrator_prompt_line(
+                localizer,
+                rabbit_core::model::Platform::current(),
+                &packages,
+            ) {
+                status_line = Some(line.clone());
+                log_line = Some(line);
+            }
+        }
+        // The password window may be behind RABBIT, where the user can't
+        // hear it.
+        ProgressEvent::AdministratorStillWaiting { .. } => {
+            if let Some(line) =
+                administrator_still_waiting_line(localizer, rabbit_core::model::Platform::current())
+            {
+                status_line = Some(line.clone());
+                log_line = Some(line);
+            }
         }
         // The end of a removal stays on the status line until the next one
         // starts, and is spoken: whether the package really went is what

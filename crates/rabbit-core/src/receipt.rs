@@ -30,8 +30,16 @@ pub struct InstallState {
     /// a package is as clear a "no" as leaving it unticked, and one set for
     /// both means a recommended package doesn't come back ticked on the very
     /// next run after you removed it. The readers honour the set for every
-    /// package: the wizard doesn't tick a package listed here, and the CLI
-    /// leaves it out of its default package list.
+    /// package that isn't installed: the wizard doesn't tick its Install
+    /// row, and the CLI leaves it out of its default package list.
+    ///
+    /// A package listed here that is installed again, say dragged back from
+    /// the Trash or installed by hand, gets its updates as usual: the wizard
+    /// ticks its Update row, and the CLI keeps it in its default list. Only a
+    /// `remember_opt_out` package (the language packs) keeps its refusal
+    /// while installed, because for those a "no" can mean "stop updating
+    /// it". The entry stays here either way, until the user's own verdict
+    /// takes it out (see below).
     ///
     /// Leaving an optional package unticked once only counts as a "no" for
     /// `remember_opt_out` packages, though. Otherwise someone who skipped
@@ -398,9 +406,9 @@ pub fn upsert_package_receipt(
 
 /// Forget that `package_id` is installed and remember that the user removed
 /// it, by adding it to `declined_packages`, so the next install run doesn't
-/// tick it again by itself. Returns the entry that was removed, if there was
-/// one. The package is declined either way: a copy RABBIT has no receipt
-/// for can be uninstalled too.
+/// tick it again by itself while it is gone. Returns the entry that was
+/// removed, if there was one. The package is declined either way: a copy
+/// RABBIT has no receipt for can be uninstalled too.
 pub fn remove_package_receipt(
     state: &mut InstallState,
     package_id: &str,

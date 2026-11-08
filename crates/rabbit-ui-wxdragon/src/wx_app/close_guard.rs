@@ -151,7 +151,8 @@ pub(crate) enum CloseVerdict {
 
 /// Say that RABBIT is stopping, in both places the progress page speaks
 /// from: the status heading and the running log. An uninstall says it
-/// finishes the package it is on, since that is where it stops.
+/// finishes the step it started, since that is where it stops: one
+/// package, or on macOS the administrator command, which covers several.
 ///
 /// The log is a `TextCtrl` and takes focus; the status heading is a
 /// `StaticText` and cannot, and a label change on its own is not something

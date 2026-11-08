@@ -65,6 +65,46 @@ fn custom_portable_target_uses_reaper_exe_when_present() {
     assert_eq!(row.planned_app_path, resource_path.join("reaper.exe"));
 }
 
+/// The row's app is what Review and the run remove, so with several apps in
+/// one folder it must be the one detection and `rabbit uninstall` choose,
+/// whatever order the folder lists them in.
+#[test]
+fn custom_portable_macos_target_picks_the_app_detection_picks() {
+    let dir = tempdir().unwrap();
+    let folder = dir.path().join("PortableREAPER");
+    for name in [
+        "REAPER64.app",
+        "REAPER-ARM.app",
+        "My REAPER.app",
+        "REAPER.app",
+        "Notes.app",
+    ] {
+        std::fs::create_dir_all(folder.join(name)).unwrap();
+    }
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let model = model_from_plan(
+        &localizer,
+        Platform::MacOs,
+        Architecture::Arm64,
+        Vec::new(),
+        None,
+        InstallPlan {
+            target: None,
+            actions: Vec::new(),
+            notes: Vec::new(),
+        },
+    );
+
+    let row = custom_portable_target_row(&model, folder.clone(), true);
+
+    assert_eq!(row.app_path, Some(folder.join("REAPER.app")));
+    assert_eq!(
+        row.app_path,
+        rabbit_core::detection::portable_macos_app_bundle(&folder)
+    );
+    assert_eq!(row.planned_app_path, folder.join("REAPER.app"));
+}
+
 #[test]
 fn refreshed_standard_target_row_detects_app_that_appeared_after_startup() {
     let dir = tempdir().unwrap();

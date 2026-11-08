@@ -8,14 +8,14 @@ use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
 
 use super::{
-    ANY_REAPER_PROCESS_CHECK, KeptReason, NothingListed, PROGRAMS_RUNNING_CHECK, PathRefusal,
-    Removability, RemovalReason, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan,
-    UninstallPlanInput, UninstallPlanItem, UninstallPreflightOptions, UninstallRoots,
-    UninstallWarning, VendorJob, VendorLookup, VendorRefusal, build_uninstall_plan,
+    ANY_REAPER_PROCESS_CHECK, ByHandReason, KeptReason, NoMacosObjects, NothingListed,
+    PROGRAMS_RUNNING_CHECK, PathRefusal, Removability, RemovalReason, UNINSTALL_NOT_YET_KEY,
+    UninstallNote, UninstallPlan, UninstallPlanInput, UninstallPlanItem, UninstallPreflightOptions,
+    UninstallRoots, UninstallWarning, VendorJob, VendorLookup, VendorRefusal, build_uninstall_plan,
     run_uninstall_preflight_with_processes,
 };
 use crate::model::{ComponentDetection, Confidence, InstallationKind, Platform};
-use crate::package::uninstall::UninstallStrategy;
+use crate::package::uninstall::{UninstallBackup, UninstallStrategy};
 use crate::package::{
     PACKAGE_REAPACK, PACKAGE_REAPER, PackageSpec, builtin_package_specs,
     parse_embedded_package_spec, validate_package_spec,
@@ -114,6 +114,7 @@ impl Fixture {
             state,
             remove_settings,
             vendor_lookup,
+            objects: &NoMacosObjects,
         })
     }
 }
@@ -1222,6 +1223,7 @@ fn a_resource_folder_reached_through_a_link_still_plans() {
         state: None,
         remove_settings: false,
         vendor_lookup: &NothingListed,
+        objects: &NoMacosObjects,
     });
     let demo = item(&plan, "demo");
     assert_eq!(demo.removability, Removability::Removable);
@@ -1292,8 +1294,10 @@ fn packages_without_a_dependency_between_them_keep_manifest_order() {
 
 /// Every shipped manifest plans on both platforms and both targets without
 /// tripping over anything. With nothing on disk, a package whose plan
-/// removes files is removable unless it needs a receipt; every other
-/// installed package says why RABBIT won't remove it.
+/// removes files is removable unless it needs a receipt, or moves its app
+/// to the Trash: that app isn't where the target says, so moving nothing
+/// would only claim it removed, and the user is pointed at the path. Every
+/// other installed package says why RABBIT won't remove it.
 #[test]
 fn every_shipped_manifest_plans() {
     let fixture = Fixture::new();
@@ -1301,9 +1305,18 @@ fn every_shipped_manifest_plans() {
         let specs = builtin_package_specs(platform);
         let all_installed: Vec<ComponentDetection> =
             specs.iter().map(|spec| detection(&spec.id, true)).collect();
+        // A Mac target from the GUI knows where its REAPER app is, because
+        // detection finds REAPER only by its app; the CLI takes whatever
+        // --target-app-path says. Here it would sit in the resource folder,
+        // as a portable REAPER's does, and isn't there.
+        let mut roots = fixture.roots.clone();
+        if platform == Platform::MacOs {
+            roots.app_path = Some(fixture.resource.join("REAPER.app"));
+            roots.app_dir = Some(fixture.resource.clone());
+        }
         for target in [InstallationKind::Standard, InstallationKind::Portable] {
             let nothing = build_uninstall_plan(&UninstallPlanInput {
-                roots: &fixture.roots,
+                roots: &roots,
                 platform,
                 target,
                 specs: &specs,
@@ -1311,6 +1324,7 @@ fn every_shipped_manifest_plans() {
                 state: None,
                 remove_settings: false,
                 vendor_lookup: &NothingListed,
+                objects: &NoMacosObjects,
             });
             assert_eq!(nothing.items.len(), specs.len());
             assert!(
@@ -1321,7 +1335,7 @@ fn every_shipped_manifest_plans() {
             );
 
             let everything = build_uninstall_plan(&UninstallPlanInput {
-                roots: &fixture.roots,
+                roots: &roots,
                 platform,
                 target,
                 specs: &specs,
@@ -1329,12 +1343,13 @@ fn every_shipped_manifest_plans() {
                 state: None,
                 remove_settings: true,
                 vendor_lookup: &NothingListed,
+                objects: &NoMacosObjects,
             });
             for (item, spec) in everything.items.iter().zip(&specs) {
-                let removes_files = spec
-                    .uninstall
-                    .plan_for(platform, target)
-                    .is_some_and(|plan| plan.strategy == UninstallStrategy::RemoveFiles);
+                let plan = spec.uninstall.plan_for(platform, target);
+                let removes_files =
+                    plan.is_some_and(|plan| plan.strategy == UninstallStrategy::RemoveFiles);
+                let moves_an_app = plan.is_some_and(|plan| plan.backup == UninstallBackup::ToTrash);
                 let standard_removes = spec
                     .uninstall
                     .plan_for(platform, InstallationKind::Standard)
@@ -1349,6 +1364,19 @@ fn every_shipped_manifest_plans() {
                     && standard_removes
                 {
                     assert_eq!(item.removability, Removability::NeedsStandardTarget);
+                } else if moves_an_app {
+                    assert!(
+                        matches!(
+                            &item.removability,
+                            Removability::ByHand {
+                                path,
+                                reason: ByHandReason::CouldNotCheck { .. },
+                            } if roots.app_path.as_ref() == Some(path)
+                        ),
+                        "{}: {:?}",
+                        item.package_id,
+                        item.removability
+                    );
                 } else if removes_files && !spec.uninstall.requires_receipt {
                     assert!(
                         item.removability.is_removable(),

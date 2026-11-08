@@ -23,9 +23,9 @@ use wxdragon::widgets::SimpleBook;
 
 use crate::{
     ProgressUiState, UninstallBlocker, WizardMode, WizardModel, WizardUninstallList,
-    save_wizard_uninstall_outcome, uninstall_blocker, uninstall_confirmation_body,
-    uninstall_progress_details_for_start, uninstall_request_for_target, wizard_uninstall_outcome,
-    wizard_uninstall_outcome_from_error,
+    save_wizard_uninstall_outcome, saves_report_after_error, uninstall_blocker,
+    uninstall_confirmation_body, uninstall_progress_details_for_start,
+    uninstall_request_for_target, wizard_uninstall_outcome, wizard_uninstall_outcome_from_error,
 };
 
 use crate::wx_app::close_guard::InstallRunState;
@@ -89,7 +89,7 @@ pub(crate) struct UninstallRunUi {
     pub(crate) navigation: UninstallNavigation,
     pub(crate) uninstall_list: Rc<RefCell<WizardUninstallList>>,
     /// The close handshake, shared with the install: closing the window
-    /// during the run asks, then stops after the package it is on.
+    /// during the run asks, then stops once the step it is on has finished.
     pub(crate) install_run: Arc<InstallRunState>,
     /// Rebuilds both Packages tabs from fresh detection, as after an
     /// install. Fired once the run returns a report.
@@ -366,8 +366,14 @@ fn show_uninstall_outcome(
                 error,
             ),
         };
+        // Never after the refusal to run as root: what Done saved would be
+        // root's, in the user's resource folder.
+        let saves_report = match result {
+            Ok(_) => true,
+            Err(error) => saves_report_after_error(error),
+        };
         // Best effort, as for an install: the run is over either way.
-        if let Err(error) = save_wizard_uninstall_outcome(localizer, &mut built) {
+        if saves_report && let Err(error) = save_wizard_uninstall_outcome(localizer, &mut built) {
             eprintln!("could not save the uninstall outcome report: {error}");
         }
         outcome = Some(built);

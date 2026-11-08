@@ -10,15 +10,18 @@
 //! file's contents, so the UI thread can afford it: the version check's
 //! handler builds the rows from the detection it has just run.
 
+use std::path::Path;
+
 use rabbit_core::Result;
 use rabbit_core::localization::Localizer;
 use rabbit_core::model::{ComponentDetection, InstallationKind};
+use rabbit_core::package::uninstall::UninstallBackup;
 use rabbit_core::package::{PackageCategory, PackageSpec, builtin_package_specs};
 use rabbit_core::receipt::load_install_state;
 use rabbit_core::uninstall::{
-    Removability, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanInput,
-    UninstallPlanItem, UninstallRoots, UninstallWarning, VendorLookup, VendorRefusal,
-    build_uninstall_plan,
+    ByHandReason, ObjectProbe, Removability, RemovalRoute, UNINSTALL_NOT_YET_KEY, UninstallNote,
+    UninstallPlan, UninstallPlanInput, UninstallPlanItem, UninstallRoots, UninstallWarning,
+    VendorLookup, VendorRefusal, build_uninstall_plan,
 };
 
 use super::bootstrap::localizer_from_options;
@@ -192,14 +195,16 @@ impl WizardUninstallList {
 /// receipt the way `rabbit uninstall` builds it. The target's kind and its
 /// REAPER come from the target row rather than from guessing by the folder,
 /// so the rows and a later run from the wizard agree about them. Reads which
-/// files exist and how big they are, and looks vendors' uninstallers up
-/// through `vendor_lookup` (HKLM in RABBIT, a stand-in in tests); hashes
-/// nothing and changes nothing.
+/// files exist and how big they are, looks vendors' uninstallers up through
+/// `vendor_lookup` (HKLM in RABBIT, a stand-in in tests), and asks `objects`
+/// who may move a macOS app (macOS itself in RABBIT, a stand-in in tests);
+/// hashes nothing and changes nothing.
 pub fn uninstall_plan_for_target(
     model: &WizardModel,
     target: &TargetRow,
     detections: &[ComponentDetection],
     vendor_lookup: &dyn VendorLookup,
+    objects: &dyn ObjectProbe,
 ) -> Result<UninstallPlan> {
     let roots =
         UninstallRoots::for_target(model.platform, &target.path, target.app_path.as_deref());
@@ -217,6 +222,7 @@ pub fn uninstall_plan_for_target(
         state: state.as_ref(),
         remove_settings: false,
         vendor_lookup,
+        objects,
     }))
 }
 
@@ -228,11 +234,12 @@ pub fn uninstall_list_for_target(
     target: &TargetRow,
     detections: &[ComponentDetection],
     vendor_lookup: &dyn VendorLookup,
+    objects: &dyn ObjectProbe,
 ) -> WizardUninstallList {
     let Ok(localizer) = localizer_from_options(&model.bootstrap_options) else {
         return WizardUninstallList::default();
     };
-    match uninstall_plan_for_target(model, target, detections, vendor_lookup) {
+    match uninstall_plan_for_target(model, target, detections, vendor_lookup, objects) {
         Ok(plan) => {
             uninstall_list_from_plan(&localizer, &builtin_package_specs(model.platform), &plan)
         }
@@ -297,9 +304,10 @@ fn uninstall_row(
         .map(|text| text.value)
         .unwrap_or_else(|| item.display_name.clone());
     let installed = version_text(localizer, item.installed_version.as_ref());
-    // The engine refuses a removal a backup can't undo unless this version
-    // carries it out (a vendor's uninstaller, through the elevated helper),
-    // so a row for one would only lead to a refusal later on.
+    // The engine refuses a removal a backup can't undo unless its route
+    // carries it out (a vendor's uninstaller through the elevated helper,
+    // the Trash, or the macOS administrator command), so a row for one
+    // would only lead to a refusal later on.
     let can_tick = item.can_remove();
     let unavailability_reason = (!can_tick).then(|| unavailability_reason(localizer, item));
     let label = |action_key: &str| {
@@ -366,6 +374,9 @@ fn details_text(summary: &str, explanation: &str) -> String {
 fn unavailability_reason(localizer: &Localizer, item: &UninstallPlanItem) -> String {
     let key = match &item.removability {
         Removability::Manual { .. } => "wizard-uninstall-row-unavailable-manual",
+        // A macOS app RABBIT can't move to the Trash is the user's to move
+        // there in Finder, which the row says as plainly.
+        Removability::ByHand { .. } => "wizard-uninstall-row-unavailable-by-hand-macos",
         Removability::NotSupported { note_key } if note_key != UNINSTALL_NOT_YET_KEY => {
             "wizard-uninstall-row-unavailable-not-supported"
         }
@@ -447,10 +458,68 @@ fn refusal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
                 ("path", path.display().to_string().as_str()),
             ],
         ),
+        Removability::ByHand { path, reason } => {
+            by_hand_lines(localizer, path, reason, name).join("\n")
+        }
         Removability::Removable
         | Removability::RemovableOrphanedFromReaPack
         | Removability::NotInstalled => localizer.text(UNINSTALL_NOT_YET_KEY).value,
     }
+}
+
+/// Why RABBIT can't move the macOS app at `path` to the Trash, by itself or
+/// with an administrator's password, then how the user moves it there in
+/// Finder: one sentence for the reason, and the steps it calls for. A
+/// Locked app has to be unlocked first; an app that isn't the one RABBIT
+/// expects is only the user's to remove if it is the package after all.
+/// The row's details and the Done page both say it.
+pub fn by_hand_lines(
+    localizer: &Localizer,
+    path: &Path,
+    reason: &ByHandReason,
+    name: &str,
+) -> Vec<String> {
+    let path = path.display().to_string();
+    let arguments = [("package", name), ("path", path.as_str())];
+    let format = |key: &str, args: &[(&str, &str)]| localizer.format(key, args).value;
+    let why = match reason {
+        ByHandReason::NotMovableByYou => format(
+            "wizard-uninstall-details-by-hand-not-movable-macos",
+            &arguments,
+        ),
+        ByHandReason::Locked => format("wizard-uninstall-details-by-hand-locked-macos", &arguments),
+        ByHandReason::NotTheExpectedApp => format(
+            "wizard-uninstall-details-by-hand-not-the-app-macos",
+            &arguments,
+        ),
+        ByHandReason::CouldNotCheck { error } => format(
+            "wizard-uninstall-details-by-hand-unchecked-macos",
+            &[
+                ("package", name),
+                ("path", path.as_str()),
+                ("error", error.as_str()),
+            ],
+        ),
+        ByHandReason::NoTrashFolder => format(
+            "wizard-uninstall-details-by-hand-no-trash-folder-macos",
+            &arguments,
+        ),
+        ByHandReason::NotOnTrashVolume => format(
+            "wizard-uninstall-details-by-hand-other-disk-macos",
+            &arguments,
+        ),
+    };
+    let steps = match reason {
+        ByHandReason::Locked => "wizard-uninstall-details-by-hand-unlock-macos",
+        ByHandReason::NotTheExpectedApp => {
+            "wizard-uninstall-details-by-hand-not-the-app-finder-macos"
+        }
+        ByHandReason::NotMovableByYou
+        | ByHandReason::CouldNotCheck { .. }
+        | ByHandReason::NoTrashFolder
+        | ByHandReason::NotOnTrashVolume => "wizard-uninstall-details-by-hand-finder-macos",
+    };
+    vec![why, format(steps, &[("package", name)])]
 }
 
 /// Why RABBIT doesn't trust a vendor's uninstaller, in the user's language.
@@ -473,19 +542,33 @@ fn removal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
     if let Some(summary) = &item.summary {
         lines.push(text(&summary.removes_key));
     }
-    // Files go into a backup; a vendor's uninstaller works with
-    // administrator rights, after Windows asked.
-    lines.push(text(if item.needs_elevated_helper() {
-        "wizard-uninstall-details-vendor"
-    } else {
-        "wizard-uninstall-details-files"
-    }));
+    lines.push(text(route_details_key(item)));
     if let Some(summary) = &item.summary {
         lines.push(text(&summary.keeps_key));
     }
-    lines.extend(other_warning_lines(localizer, item, name));
+    lines.extend(other_warning_lines(localizer, item, name, &[]));
     lines.extend(note_lines(localizer, item, name));
     lines.join("\n")
+}
+
+/// The sentence on how the package leaves, by its route: files go into a
+/// backup; a vendor's uninstaller works with administrator rights, after
+/// Windows asked; on macOS the administrator command deletes it for good
+/// after one password window, or moves an app the user can't move into the
+/// user's Trash; an app the user can move goes to the Trash with no
+/// password at all, which the summary before it already says, so its line
+/// only says how to get it back. A row that can be ticked always has one
+/// of these.
+fn route_details_key(item: &UninstallPlanItem) -> &'static str {
+    match item.route() {
+        RemovalRoute::BackupSet => "wizard-uninstall-details-files",
+        RemovalRoute::Vendor => "wizard-uninstall-details-vendor",
+        RemovalRoute::Administrator if item.backup == UninstallBackup::ToTrash => {
+            "wizard-uninstall-details-trash-elevated-macos"
+        }
+        RemovalRoute::Administrator => "wizard-uninstall-details-elevated-macos",
+        RemovalRoute::Trash => "wizard-uninstall-details-trash",
+    }
 }
 
 /// The warnings the manifest says always to show, whatever else is
@@ -500,8 +583,16 @@ fn always_warning_lines(localizer: &Localizer, item: &UninstallPlanItem) -> Vec<
         .collect()
 }
 
-/// Every other warning, one sentence each.
-fn other_warning_lines(localizer: &Localizer, item: &UninstallPlanItem, name: &str) -> Vec<String> {
+/// Every other warning, one sentence each. `also_removed` are the packages
+/// the same run removes: Review leaves them out of the extensions that
+/// stay, and drops that line once none is left. A row's own details are
+/// about the package alone and pass none.
+fn other_warning_lines(
+    localizer: &Localizer,
+    item: &UninstallPlanItem,
+    name: &str,
+    also_removed: &[String],
+) -> Vec<String> {
     let format = |key: &str, args: &[(&str, &str)]| localizer.format(key, args).value;
     item.warnings
         .iter()
@@ -511,8 +602,15 @@ fn other_warning_lines(localizer: &Localizer, item: &UninstallPlanItem, name: &s
                 Some(localizer.text(message_key).value)
             }
             UninstallWarning::DependentsStay { package_ids } => {
-                let packages = package_ids
+                let staying: Vec<&String> = package_ids
                     .iter()
+                    .filter(|id| !also_removed.contains(id))
+                    .collect();
+                if staying.is_empty() {
+                    return None;
+                }
+                let packages = staying
+                    .into_iter()
                     .map(|id| localized_package_display_name(localizer, id))
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -654,14 +752,20 @@ pub struct WizardUninstallReviewPreview {
 /// 2. one line per package, with what goes and what stays, or, with "Also
 ///    remove settings" ticked, which of its settings go too;
 /// 3. the warnings, those the manifests always show first, and the notes;
+///    the extensions that stay leave out those ticked along with them;
 /// 4. "close other music programs" for a package that serves all of them,
-///    or whose own uninstaller removes machine-wide parts;
+///    or whose own uninstaller or the macOS administrator command removes
+///    machine-wide parts;
 /// 5. the permission note: Windows asks once, before anything is removed,
-///    and a window from a vendor's uninstaller is to be answered;
-/// 6. the ticks on the Install tab, which this run leaves out
+///    and a window from a vendor's uninstaller is to be answered; or macOS
+///    asks once for an administrator's name and password, in a window that
+///    may name osascript, and cancelling it uninstalls nothing;
+/// 6. for a package going to the Trash, that it can come back from there
+///    until the Trash is emptied;
+/// 7. the ticks on the Install tab, which this run leaves out
 ///    (`install_tab_ticked`, their package names);
-/// 7. that the packages can be installed again;
-/// 8. why the Uninstall button stays disabled, if it does.
+/// 8. that the packages can be installed again;
+/// 9. why the Uninstall button stays disabled, if it does.
 pub fn build_uninstall_review_preview(
     localizer: &Localizer,
     target: Option<&TargetRow>,
@@ -739,16 +843,24 @@ pub fn build_uninstall_review_preview(
             .into_iter()
             .for_each(&mut add_note);
     }
+    // An extension ticked along with REAPER doesn't stay, so Review only
+    // names the ones that do.
+    let ticked_ids = list.ticked_package_ids();
     for (row, item) in &planned {
-        other_warning_lines(localizer, item, &row.display_name)
+        other_warning_lines(localizer, item, &row.display_name, &ticked_ids)
             .into_iter()
             .chain(note_lines(localizer, item, &row.display_name))
             .for_each(&mut add_note);
     }
     // REAPER's own uninstaller removes ReaRoute and the file associations
-    // every REAPER and other programs use, so it asks this too.
+    // every REAPER and other programs use, so it asks this too, as does
+    // whatever the macOS administrator command deletes for good: plug-ins
+    // other programs may have loaded. An app it moves to the Trash serves
+    // nothing else, and the check before the run names the REAPERs to close.
     let machine_wide = planned.iter().any(|(_, item)| {
-        item.warnings.contains(&UninstallWarning::MachineWide) || item.needs_elevated_helper()
+        item.warnings.contains(&UninstallWarning::MachineWide)
+            || item.needs_elevated_helper()
+            || (item.needs_administrator() && item.backup != UninstallBackup::ToTrash)
     });
     if machine_wide {
         add_note(text("wizard-review-uninstall-close-programs-note"));
@@ -766,6 +878,36 @@ pub fn build_uninstall_review_preview(
                 &[("package", row.display_name.as_str())],
             ));
         }
+    }
+    // macOS's one password window covers every package the administrator
+    // command removes, so it is named once, with all of them. Its title
+    // names osascript rather than RABBIT, so the note says why.
+    let administrator: Vec<&str> = planned
+        .iter()
+        .filter(|(_, item)| item.needs_administrator())
+        .map(|(row, _)| row.display_name.as_str())
+        .collect();
+    if !administrator.is_empty() {
+        add_note(format(
+            "wizard-review-uninstall-elevation-note-macos",
+            &[("packages", administrator.join(", ").as_str())],
+        ));
+    }
+    // What goes to the Trash can come back from there, and Review says so:
+    // the summary's "Moves the app to the Trash" doesn't say how. An app the
+    // administrator command moves there keeps its owner, which changes what
+    // Finder offers for it.
+    for (row, item) in &planned {
+        let key = match item.route() {
+            RemovalRoute::Trash => "wizard-review-uninstall-trash-note",
+            RemovalRoute::Administrator if item.backup == UninstallBackup::ToTrash => {
+                "wizard-review-uninstall-trash-elevated-note-macos"
+            }
+            RemovalRoute::Administrator | RemovalRoute::BackupSet | RemovalRoute::Vendor => {
+                continue;
+            }
+        };
+        add_note(format(key, &[("package", row.display_name.as_str())]));
     }
     if let Some(note) = inactive_tab_note(localizer, WizardMode::Uninstall, install_tab_ticked) {
         add_note(note);
@@ -876,9 +1018,18 @@ pub fn remember_default_ticks(
 /// Why RABBIT asks once more before an uninstall starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UninstallConfirmReason {
-    /// A backup can't undo the package's removal: a vendor uninstaller, a
-    /// removal that needs administrator rights, or a whole folder going.
+    /// A backup can't undo the package's removal: a vendor uninstaller, or
+    /// the macOS administrator command deleting it for good.
     Unbacked { package_id: String },
+    /// The package's app goes to the Trash on macOS, not into a backup:
+    /// it can come back from there until the Trash is emptied.
+    /// `by_administrator` when the administrator command moves it there,
+    /// because the user's account may not; it then keeps its owner, and
+    /// taking it back out may need an administrator's password.
+    ToTrash {
+        package_id: String,
+        by_administrator: bool,
+    },
     /// The manifest's `always_warn` entry asks for the question.
     Warning {
         package_id: String,
@@ -888,10 +1039,10 @@ pub enum UninstallConfirmReason {
 
 /// The reasons to ask before uninstalling `package_ids`, in manifest order.
 /// Empty for a run of file removals that all go into a backup and that no
-/// manifest asks about, which is every package RABBIT can remove so far,
-/// OSARA included: the people who use RABBIT know that REAPER stops
-/// speaking without it, so asking would only be in their way. The question
-/// is for the packages later versions add, and they only add data for it.
+/// manifest asks about, OSARA included: the people who use RABBIT know that
+/// REAPER stops speaking without it, so asking would only be in their way.
+/// A removal no backup can undo always asks: a vendor's uninstaller, the
+/// macOS administrator command, or an app going to the Trash.
 pub fn uninstall_confirm_reasons(
     plan: &UninstallPlan,
     package_ids: &[String],
@@ -915,8 +1066,17 @@ pub fn uninstall_confirm_reasons(
             }
         }
         if item.unbacked {
-            reasons.push(UninstallConfirmReason::Unbacked {
-                package_id: item.package_id.clone(),
+            // "A backup can't bring it back" would be wrong for an app in
+            // the Trash, where it can be found again.
+            reasons.push(if item.backup == UninstallBackup::ToTrash {
+                UninstallConfirmReason::ToTrash {
+                    package_id: item.package_id.clone(),
+                    by_administrator: item.needs_administrator(),
+                }
+            } else {
+                UninstallConfirmReason::Unbacked {
+                    package_id: item.package_id.clone(),
+                }
             });
         }
     }
@@ -951,6 +1111,18 @@ pub fn uninstall_confirmation_body(
                         &[("package", name.as_str())],
                     )
                     .value
+            }
+            UninstallConfirmReason::ToTrash {
+                package_id,
+                by_administrator,
+            } => {
+                let name = localized_package_display_name(localizer, package_id);
+                let key = if *by_administrator {
+                    "wizard-confirm-uninstall-trash-elevated-macos"
+                } else {
+                    "wizard-confirm-uninstall-trash"
+                };
+                localizer.format(key, &[("package", name.as_str())]).value
             }
             UninstallConfirmReason::Warning { message_key, .. } => {
                 localizer.text(message_key).value

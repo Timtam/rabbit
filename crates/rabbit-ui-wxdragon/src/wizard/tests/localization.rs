@@ -213,6 +213,28 @@ fn the_uninstall_mnemonic_clashes_with_no_other_button_in_any_locale() {
     }
 }
 
+/// VoiceOver says the macOS hint once, with nothing on screen to read it
+/// again, so it must name the keys in every language: Control written out,
+/// as each locale spells it, and the Tab key.
+#[test]
+fn the_tab_switch_hint_names_control_and_tab_in_every_locale() {
+    for &locale in rabbit_core::localization::embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let text = localizer.text("wizard-packages-tabs-switch-hint-macos");
+        assert!(!text.missing, "{locale}");
+        assert_eq!(
+            wizard_text(&localizer).packages_tabs_switch_hint_macos,
+            text.value
+        );
+        assert!(
+            (text.value.contains("Control") || text.value.contains("Contrôle"))
+                && text.value.contains("Tab"),
+            "{locale}: {}",
+            text.value
+        );
+    }
+}
+
 #[test]
 fn wx_mnemonic_labels_support_translated_access_keys() {
     assert_eq!(wx_mnemonic_label("Weiter", "W"), "&Weiter");

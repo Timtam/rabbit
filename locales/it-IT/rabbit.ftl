@@ -67,6 +67,11 @@ uninstall-summary-surge-removes = Il programma di disinstallazione di Surge XT l
 uninstall-summary-surge-keeps = Le tue patch, nella cartella Surge XT dei tuoi Documenti, restano.
 uninstall-summary-reaper-windows-removes = Il programma di disinstallazione di REAPER rimuove il programma. Rimuove anche le associazioni dei file di REAPER e ReaRoute per tutti i REAPER di questo computer.
 uninstall-summary-reaper-keeps = Le tue impostazioni, estensioni e progetti restano.
+# The same two sentences on macOS, where Surge XT has no uninstaller of its
+# own and REAPER is an app. Name the Trash and the Library folder as Finder
+# does in your language.
+uninstall-summary-surge-macos-removes = Rimuove le app e i plug-in di Surge XT, e i suoi dati di fabbrica nella cartella Libreria. Un backup non può recuperarli.
+uninstall-summary-reaper-macos-removes = Sposta l'app REAPER nel Cestino.
 
 # A short description of a file or folder that stays, shown next to its path,
 # for example "Data\Grooves (your grooves)". Start in lower case where the
@@ -84,6 +89,13 @@ uninstall-kept-osara-merged-key-map = la tua mappa dei tasti di prima che OSARA 
 uninstall-kept-osara-settings = le impostazioni di OSARA, in un file condiviso da tutte le estensioni
 uninstall-kept-surge-user-data = le tue patch e tutto il resto che hai salvato con Surge XT
 uninstall-kept-reaper-resource = la cartella delle risorse di REAPER, con le tue impostazioni, estensioni e mappe dei tasti
+# On macOS, in the Library folder of your home folder.
+uninstall-kept-surge-settings-macos = le tue impostazioni di Surge XT
+# On macOS, in the Library folder of your home folder: a copy of Surge XT's
+# factory data put there by hand, which Surge XT reads instead of the one it
+# installs for everyone. Say "factory data" as in
+# uninstall-summary-surge-macos-removes.
+uninstall-kept-surge-factory-copy-macos = la tua copia dei dati di fabbrica di Surge XT
 
 # Shown before SWS is uninstalled while OSARA, or ReaPack, is installed.
 uninstall-warning-sws-osara-keymap = Se usi la mappa dei tasti di OSARA, alcuni dei suoi tasti eseguono azioni di SWS. Quei tasti smettono di funzionare finché non reinstalli SWS.
@@ -223,6 +235,10 @@ wizard-configuration-tree-group-label = Configurazione
 # name when the page opens, so keep both short.
 wizard-packages-tab-install = Installa o aggiorna
 wizard-packages-tab-uninstall = Disinstalla
+# macOS only: VoiceOver says this once, the first time the Packages page opens.
+# Name the Tab and Shift keys as Apple's page of Mac keyboard shortcuts does,
+# and write Control out in full.
+wizard-packages-tabs-switch-hint-macos = Premi Control-Tabulatore o Control-Maiuscole-Tabulatore per passare da una scheda all'altra.
 # The label right before the Uninstall tab's list. Screen readers read it when
 # focus enters the list, so it names the tab first.
 wizard-uninstall-list-label = Disinstalla: software che RABBIT può rimuovere
@@ -240,6 +256,9 @@ wizard-uninstall-row-unavailable-reapack-check-failed = non è stato possibile c
 wizard-uninstall-row-unavailable-no-receipt = RABBIT non ha installato questa copia
 wizard-uninstall-row-unavailable-no-trusted-uninstaller = nessun programma di disinstallazione di cui RABBIT si fidi
 wizard-uninstall-row-unavailable-unsafe-path = un file che RABBIT non rimuove mai
+# macOS: the app has to be moved to the Trash in Finder. Name the Trash and
+# Finder as macOS does in your language.
+wizard-uninstall-row-unavailable-by-hand-macos = da spostare nel Cestino dal Finder
 # The details text of an Uninstall row that can't be ticked. $package is the
 # localized package name, $path a file path, $reapack_package the name ReaPack
 # knows the package by, and $reason an error message. Keep file paths as they are.
@@ -249,6 +268,22 @@ wizard-uninstall-details-portable = { $package } serve a tutti i REAPER di quest
 wizard-uninstall-details-no-receipt = RABBIT non ha installato questa copia di { $package }, quindi molto probabilmente è tua, e RABBIT non la tocca.
 wizard-uninstall-details-no-trusted-uninstaller = RABBIT non ha trovato nessun programma di disinstallazione di { $package } di cui fidarsi.
 wizard-uninstall-details-unsafe-path = RABBIT non rimuoverà { $path }. Preferisce non toccare { $package } piuttosto che rimuoverlo solo in parte.
+# The details text of a macOS app RABBIT can't move to the Trash, by itself or
+# with an administrator's password: first why, then how to move it there in
+# Finder. $package is the localized package name, $path the app's full macOS
+# path, keep it as it is, and $error macOS's own error message. Name Finder,
+# the Trash, File > Get Info and Locked as Finder does in your language, and
+# Command-Delete as Apple's page of Mac keyboard shortcuts does: Finder's
+# menus show it only as symbols.
+wizard-uninstall-details-by-hand-not-movable-macos = Il tuo account non può spostare { $path }: appartiene a un altro account o a macOS, oppure si trova in una cartella che non puoi modificare.
+wizard-uninstall-details-by-hand-locked-macos = { $path } è bloccato.
+wizard-uninstall-details-by-hand-not-the-app-macos = { $path } non è l'app { $package } che RABBIT si aspetta lì, quindi RABBIT la lascia com'è.
+wizard-uninstall-details-by-hand-unchecked-macos = RABBIT non è riuscito a controllare chi può spostare { $path } ({ $error }).
+wizard-uninstall-details-by-hand-no-trash-folder-macos = Solo un amministratore può spostare { $path }, e il tuo Cestino non è una cartella tua che RABBIT possa controllare.
+wizard-uninstall-details-by-hand-other-disk-macos = Solo un amministratore può spostare { $path }, e si trova su un disco diverso da quello del tuo Cestino.
+wizard-uninstall-details-by-hand-finder-macos = Per rimuovere { $package }, selezionalo nel Finder e premi Comando-Elimina. Il Finder chiede nome e password di un amministratore se ne ha bisogno.
+wizard-uninstall-details-by-hand-unlock-macos = Per rimuovere { $package }, selezionalo nel Finder e scegli File > Ottieni informazioni. Deseleziona Bloccato e chiudi quella finestra, poi premi Comando-Elimina. Il Finder chiede nome e password di un amministratore se ne ha bisogno. Se Bloccato non è selezionato, o il Finder non riesce ancora a spostarlo, ha un blocco che il Finder non può togliere.
+wizard-uninstall-details-by-hand-not-the-app-finder-macos = Se è il { $package } che vuoi rimuovere, selezionalo nel Finder e premi Comando-Elimina.
 # The details text of an Uninstall row that can be ticked, one sentence per
 # line. $package is the localized package name, $packages a comma-separated
 # list of package names, and $reason an error message.
@@ -261,6 +296,18 @@ wizard-uninstall-details-no-receipt-note = RABBIT non ha installato questa copia
 wizard-uninstall-details-reapack-orphan = { $package } è stato installato a suo tempo da ReaPack. ReaPack non c'è più, quindi RABBIT può rimuoverlo; i registri di ReaPack che lo riguardano restano.
 wizard-uninstall-details-vendor = Windows ti chiede il permesso prima di rimuovere qualcosa.
 wizard-uninstall-details-vendor-by-hand = Puoi disinstallare { $package } da solo nelle Impostazioni di Windows, in App, App installate.
+# The details text of an Uninstall row on macOS, by how the package goes:
+# deleted for good with an administrator's password; to the Trash, moved as
+# you; or into your Trash with an administrator's password, because your
+# account may not move it. Name the Trash and Put Back as Finder does in your
+# language. The password window may offer Touch ID, so don't say a password
+# is the only way. The Trash line follows the package's own sentence, which
+# already says that it goes to the Trash, so it only says how to get it back.
+# The administrator line follows the package's own sentence, which already
+# says a backup can't bring it back, so it doesn't say that again.
+wizard-uninstall-details-elevated-macos = macOS chiede una sola volta nome e password di un amministratore, prima di rimuovere qualcosa. Per riaverlo, dovrai reinstallarlo.
+wizard-uninstall-details-trash = Finché non svuoti il Cestino, puoi trascinarlo fuori da lì.
+wizard-uninstall-details-trash-elevated-macos = Il tuo account non può spostarlo, quindi macOS chiede una sola volta nome e password di un amministratore, prima di rimuovere qualcosa, e RABBIT poi lo sposta nel tuo Cestino. Mantiene il proprietario che aveva, quindi il Finder non offre «Ripristina» per esso, e svuotare il Cestino potrebbe richiedere la password di un amministratore.
 # The one row, without a checkbox, of an Uninstall list with nothing in it,
 # and its details text.
 wizard-uninstall-empty = RABBIT non ha trovato niente che possa disinstallare in questo REAPER.
@@ -389,6 +436,19 @@ wizard-review-uninstall-settings-removed = Anche le sue impostazioni vengono rim
 wizard-review-uninstall-close-programs-note = Prima chiudi gli altri programmi musicali.
 wizard-review-uninstall-elevation-note-windows = Windows ti chiede il permesso una sola volta, prima di rimuovere qualcosa. Se non lo concedi, non viene disinstallato niente.
 wizard-review-uninstall-vendor-window-note = Se compare una finestra del programma di disinstallazione di { $package }, rispondi.
+# Review's permission note on macOS, when a ticked package needs an
+# administrator. $packages is a list of package names. osascript is a program
+# name, never translated: macOS names it in the password window. The window
+# may offer Touch ID, so don't say a password is the only way. Use the same
+# words for 'administrator command' as in the Done and progress lines that
+# name it.
+wizard-review-uninstall-elevation-note-macos = Prima di rimuovere qualcosa, macOS chiede una sola volta nome e password di un amministratore. Potrebbe proporre Touch ID al loro posto. La finestra potrebbe nominare osascript, lo strumento con cui RABBIT fa la richiesta. Con quella password, RABBIT esegue un comando di amministratore che disinstalla { $packages }. Se annulli la finestra, non viene disinstallato niente.
+# One line per ticked package that goes to the Trash; the second when your
+# account may not move it, so an administrator's password moves it there.
+# $package is the localized package name. Name the Trash and Put Back as
+# Finder does in your language.
+wizard-review-uninstall-trash-note = { $package } va nel Cestino. Finché non svuoti il Cestino, puoi trascinarlo fuori da lì.
+wizard-review-uninstall-trash-elevated-note-macos = { $package } va nel tuo Cestino con la password dell'amministratore. Mantiene il proprietario che aveva, quindi il Finder non offre «Ripristina» per esso, e svuotare il Cestino potrebbe richiedere la password di un amministratore.
 # What is ticked on the tab that isn't running stays ticked, but isn't part of
 # this run. RABBIT leaves out what it ticked by itself, such as updates, but the
 # list can still hold a setting RABBIT ticked along with one of the user's
@@ -415,11 +475,12 @@ wizard-progress-details-starting = Avvio dell'operazione di configurazione.
 wizard-progress-details-cache-prefix = Cache
 # The progress page while an uninstall runs: its heading, the first status
 # line, the first line of the log, and the status line once the user asked to
-# stop. An uninstall stops after the package it is on, not after a step.
+# stop. An uninstall stops once the step it is on has finished: one package,
+# or on macOS the administrator command, which removes several at once.
 wizard-progress-uninstall-heading = Disinstallazione
 wizard-progress-status-uninstall-running = Disinstallazione dei pacchetti selezionati.
 wizard-progress-details-uninstall-starting = Avvio della disinstallazione.
-wizard-progress-status-uninstall-cancelling = Arresto in corso. RABBIT completa il pacchetto iniziato, poi si chiude.
+wizard-progress-status-uninstall-cancelling = Arresto in corso. RABBIT termina il passaggio iniziato, poi si chiude.
 
 # Live per-package status line on the progress page.
 # $package is the localized package display name (e.g. "REAPER", "OSARA").
@@ -445,6 +506,18 @@ wizard-progress-log-remove-failed = Impossibile disinstallare { $package }.
 wizard-progress-status-vendor-running = Esecuzione del programma di disinstallazione di { $package }…
 wizard-progress-status-vendor-still-waiting = Ancora in attesa del programma di disinstallazione di { $package }. Potrebbe mostrare una domanda in un'altra finestra; premi Alt+Tab per trovarla.
 wizard-progress-status-vendor-waiting-for-files = Il programma di disinstallazione di { $package } è terminato e RABBIT aspetta che i suoi file spariscano. Se un altro programma musicale ha { $package } aperto, chiudilo.
+# On macOS, said right before the administrator password window appears, and
+# again if it has been open a while without an answer. RABBIT puts each on the
+# status line and in the log too, in case VoiceOver cuts it off. $packages is
+# a list of package names. Use the same words for 'administrator command' as
+# in the Done and progress lines that name it.
+wizard-progress-status-admin-prompt-macos = macOS chiede adesso, una sola volta, nome e password di un amministratore. Con questi, RABBIT esegue un comando di amministratore che disinstalla { $packages }. Se annulli, non viene disinstallato niente.
+wizard-progress-status-admin-still-waiting-macos = Ancora in attesa della finestra della password di amministratore. Se non la senti, controlla se è dietro RABBIT.
+# While a package goes to the Trash, and in the log once the administrator
+# command has worked on a package. $package is the localized package name.
+# Name the Trash as Finder does.
+wizard-progress-status-trashing = Spostamento di { $package } nel Cestino…
+wizard-progress-log-admin-done = Il comando di amministratore ha finito con { $package }.
 wizard-progress-log-configuration-started = Applicazione di { $step }…
 wizard-progress-log-configuration-completed = { $step } applicato.
 
@@ -465,6 +538,9 @@ wizard-reaper-running-uninstall-body = Chiudi REAPER, poi premi di nuovo Disinst
 # app2clap. $packages is a comma-separated list of localized package names.
 wizard-reaper-running-uninstall-every-body = Chiudi tutte le copie di REAPER su questo computer, comprese quelle portatili, poi premi di nuovo Disinstalla. Qualsiasi REAPER su questo computer può usare { $packages }.
 wizard-reaper-running-uninstall-reaper-body = Chiudi tutte le copie di REAPER su questo computer, comprese quelle portatili, poi premi di nuovo Disinstalla. Il programma di disinstallazione di REAPER non parte finché è aperto un REAPER.
+# The same on macOS, when RABBIT's administrator command is to move REAPER's
+# app: it can't tell one REAPER from another.
+wizard-reaper-running-uninstall-reaper-body-macos = Chiudi tutte le copie di REAPER su questo computer, comprese quelle portatili, poi premi di nuovo Disinstalla. Il comando di amministratore che sposta REAPER non distingue un REAPER dall'altro, quindi devono essere tutti chiusi.
 # Shown instead of starting an uninstall while a program that has to be
 # closed first is running. $programs is a comma-separated list of program
 # names, such as "Surge XT.exe"; they are never translated.
@@ -476,6 +552,9 @@ wizard-error-uninstall-not-enough-space = RABBIT si è fermato perché non c'è 
 # $package is the localized package name, and $path the full path of the
 # file another program has open.
 wizard-error-uninstall-file-in-use = { $package } non è stato disinstallato perché un altro programma sta usando { $path }. Chiudi quel programma, poi avvia di nuovo RABBIT.
+# Why an uninstall didn't start on macOS: RABBIT itself runs as root, as under
+# sudo. sudo and root are never translated.
+wizard-error-uninstall-as-root = RABBIT è in esecuzione come root, come succede con sudo, quindi non disinstalla niente. Esci da RABBIT e avvialo con il tuo account. Chiede da solo la password di un amministratore quando gli serve.
 wizard-done-status-completed-with-errors = Installazione completata con errori. Consulta i dettagli qui sotto.
 wizard-done-status-cancelled = Hai interrotto l'installazione. L'elenco qui sotto mostra ciò che RABBIT ha completato prima di fermarsi.
 wizard-done-status-no-packages = Nessun pacchetto è stato selezionato per l'installazione o l'aggiornamento.
@@ -489,6 +568,12 @@ wizard-done-uninstall-status-cancelled = Hai interrotto la disinstallazione. I p
 wizard-done-uninstall-status-no-packages = Non è stato disinstallato niente.
 wizard-done-uninstall-status-pending-restart = RABBIT ha disinstallato { $packages }. Riavvia il computer per completare.
 wizard-done-uninstall-status-declined = Non è stato disinstallato niente, perché la richiesta di autorizzazione di Windows è stata rifiutata.
+# The same on macOS, where the administrator password window was cancelled.
+wizard-done-uninstall-status-declined-macos = Non è stato disinstallato niente, perché la finestra della password di amministratore è stata annullata.
+# The Done page's first line when the administrator command removed only part
+# of a package and nothing else was uninstalled. $packages is a list of
+# package names.
+wizard-done-uninstall-status-partly-removed = RABBIT ha rimosso solo una parte di { $packages }.
 wizard-done-uninstall-removed-before-stop = Prima che lo interrompessi, RABBIT ha disinstallato { $packages }.
 # There is no way back to the package list from the Done page. Name the tab
 # as wizard-packages-tab-install does.
@@ -519,6 +604,29 @@ wizard-done-uninstall-vendor-not-listed = Windows non elenca più { $package } t
 wizard-done-uninstall-working-folder-left = RABBIT non è riuscito a rimuovere { $path }, la cartella da cui ha avviato il programma di disinstallazione di { $package }. Solo un amministratore può eliminarla.
 wizard-done-uninstall-restart-list-unreadable = RABBIT non è riuscito a leggere quali file Windows rimuove al prossimo riavvio, quindi non sa se i file rimasti di { $package } spariranno allora.
 wizard-done-uninstall-installed-list-unreadable = RABBIT non è riuscito a leggere l'elenco dei programmi installati di Windows dopo il programma di disinstallazione di { $package }, quindi non ha potuto controllare se Windows elenca ancora { $package }.
+# After a macOS removal: to the Trash, or by the administrator command.
+# $package is the localized package name, $path a full macOS path, keep it as
+# it is, $error macOS's own error message, and $programs a list of program
+# names, never translated. Name the Trash, Put Back and Finder as Finder does,
+# "Show details" as wizard-done-show-details does, and System Settings >
+# Privacy & Security > App Management as macOS names it in your language.
+wizard-done-uninstall-moved-to-trash = RABBIT ha spostato { $package } nel Cestino. Lì si trova in { $path }. Finché non svuoti il Cestino, puoi trascinarlo fuori da lì.
+wizard-done-uninstall-moved-to-trash-unknown = RABBIT ha spostato { $package } nel Cestino. Finché non svuoti il Cestino, puoi trascinarlo fuori da lì.
+wizard-done-uninstall-trash-owner = Mantiene il proprietario che aveva, quindi il Finder non offre «Ripristina» per esso. Svuotare il Cestino potrebbe richiedere la password di un amministratore, e così anche trascinarlo fuori.
+wizard-done-uninstall-trash-failed = RABBIT non è riuscito a spostare { $package } nel Cestino, quindi di { $package } non è cambiato niente ({ $error }).
+wizard-done-uninstall-trash-unclear = RABBIT ha chiesto a macOS di spostare { $path } nel Cestino, ma non può confermare che ora sia lì. Cerca { $package } nel Cestino e nella sua cartella nel Finder. RABBIT si è fermato lì.
+wizard-done-uninstall-admin-step-failed = Il comando di amministratore si è fermato a { $path }, quindi non è stato rimosso niente di { $package }. RABBIT si è fermato lì.
+wizard-done-uninstall-admin-delete-failed = Il comando di amministratore si è fermato a { $path }, che ora potrebbe essere presente solo in parte. Non è stato rimosso nient'altro di { $package }. RABBIT si è fermato lì.
+wizard-done-uninstall-admin-stopped = Il comando di amministratore è terminato senza dire dove si è fermato, e non è stato rimosso niente di { $package }. RABBIT si è fermato lì.
+wizard-done-uninstall-partly-removed = Il comando di amministratore si è fermato a { $path }, quindi { $package } è stato rimosso solo in parte. «Mostra dettagli» indica cosa è stato rimosso e cosa è ancora presente. RABBIT si è fermato lì.
+wizard-done-uninstall-partly-removed-unclear = Il comando di amministratore è terminato senza dire dove si è fermato, e { $package } è stato rimosso solo in parte. «Mostra dettagli» indica cosa è stato rimosso e cosa è ancora presente. RABBIT si è fermato lì.
+wizard-done-uninstall-admin-left = Il comando di amministratore è stato eseguito, ma { $path } è ancora presente, o RABBIT non riesce a vedere che è stato rimosso, quindi { $package } non è stato rimosso del tutto. «Mostra dettagli» indica cosa è stato rimosso e cosa è ancora presente. RABBIT si è fermato lì.
+wizard-done-uninstall-app-management = Se macOS l'ha impedito: in Impostazioni di Sistema > Privacy e Sicurezza > Gestione app, attiva RABBIT. Poi esci da RABBIT, avvialo di nuovo e disinstalla di nuovo.
+wizard-done-uninstall-admin-unclear = Il comando di amministratore è terminato senza dire come, ma di { $package } non resta più niente.
+wizard-done-uninstall-installer-records-remain = Il programma di installazione di macOS elenca ancora delle ricevute di { $package }, anche se i suoi file non ci sono più. Non fa nessun danno; «Mostra dettagli» le indica.
+wizard-done-uninstall-installer-records-unchecked = RABBIT non è riuscito a controllare che il programma di installazione di macOS abbia dimenticato { $package } ({ $error }). Non fa nessun danno: i suoi file non ci sono più.
+wizard-done-uninstall-program-started = Il comando di amministratore ha trovato aperto uno di questi programmi, o non è riuscito a controllarlo, quindi non ha cambiato niente: { $programs }. Chiudi quelli aperti, poi avvia di nuovo RABBIT.
+wizard-done-uninstall-admin-steps-refused = RABBIT non è riuscito a preparare il comando di amministratore per { $package } ({ $error }), quindi non ha chiesto nessuna password e non ha disinstallato niente.
 wizard-done-show-details = Mostra dettagli
 # Mnemonic messages are single-character native access keys. Choose a character
 # from the translated label when possible.
@@ -542,7 +650,7 @@ wizard-close-during-install-body = RABBIT sta installando. Se interrompi adesso,
 # The same question while an uninstall runs. No is the focused button here
 # too.
 wizard-close-during-uninstall-title = Interrompere la disinstallazione?
-wizard-close-during-uninstall-body = RABBIT sta disinstallando. Se interrompi adesso, RABBIT completa il pacchetto iniziato, poi si ferma e si chiude. I pacchetti che non ha ancora raggiunto restano installati. Vuoi interrompere la disinstallazione?
+wizard-close-during-uninstall-body = RABBIT sta disinstallando. Se interrompi adesso, RABBIT completa il passaggio iniziato, poi si ferma e si chiude. I pacchetti che non ha ancora raggiunto restano installati. Vuoi interrompere la disinstallazione?
 
 # Asked before an uninstall that a backup can't undo, or that a package's
 # manifest asks to confirm. The No button is the focused one, so Enter never
@@ -550,6 +658,12 @@ wizard-close-during-uninstall-body = RABBIT sta disinstallando. Se interrompi ad
 wizard-confirm-uninstall-title = Disinstallare i pacchetti selezionati?
 # $package is the localized package name.
 wizard-confirm-uninstall-unbacked = Un backup non può recuperare { $package }. Per riaverlo, dovrai reinstallarlo.
+# Instead of the sentence above, for a package that goes to the Trash; the
+# second when your account may not move it, so an administrator's password
+# moves it there. $package is the localized package name. Name the Trash as
+# Finder does.
+wizard-confirm-uninstall-trash = { $package } va nel Cestino. Puoi trascinarlo fuori da lì finché non svuoti il Cestino.
+wizard-confirm-uninstall-trash-elevated-macos = { $package } va nel Cestino. Puoi trascinarlo fuori da lì finché non svuoti il Cestino, ma macOS potrebbe chiedere la password di un amministratore per farlo.
 wizard-confirm-uninstall-question = Disinstallare adesso?
 
 # Shown instead when the user closes the window while RABBIT is replacing its
@@ -633,6 +747,17 @@ wizard-summary-left-over = Ancora presente: { $path }
 wizard-summary-left-in-backup = Non rimesso al suo posto, ancora nel backup: { $path }
 wizard-summary-pending-restart = Rimosso al riavvio del computer: { $path }
 wizard-summary-vendor-uninstaller = Il suo programma di disinstallazione: { $path }
+# Below a package removed on macOS, one line per path: what went to the Trash
+# and where it is there now, and what the administrator command removed; then
+# the installer receipts macOS still lists, and macOS's own words when a step
+# failed. $path is a full macOS path, keep it as it is; $ids a comma-separated
+# list of receipt names, never translated; $error macOS's own message. Name
+# the Trash as Finder does.
+wizard-summary-moved-to-trash = Spostato nel Cestino: { $path }
+wizard-summary-in-trash-as = Ora nel Cestino: { $path }
+wizard-summary-removed-as-admin = Rimosso con i diritti di amministratore: { $path }
+wizard-summary-installer-records-remain = Ancora elencato dal programma di installazione di macOS: { $ids }
+wizard-summary-macos-said = macOS ha detto: { $error }
 # What became of a package's entry in Windows' list of installed programs,
 # below the package's line. $key is the entry's registry key, such as
 # HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\OSARA, and is

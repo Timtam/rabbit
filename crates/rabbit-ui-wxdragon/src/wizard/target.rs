@@ -211,19 +211,9 @@ fn portable_reaper_app_path(platform: Platform, resource_path: &Path) -> Option<
             let app_path = resource_path.join("reaper.exe");
             app_path.is_file().then_some(app_path)
         }
-        Platform::MacOs => fs::read_dir(resource_path)
-            .ok()?
-            .filter_map(std::result::Result::ok)
-            .map(|entry| entry.path())
-            .find(|path| {
-                path.extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
-                    && path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.to_ascii_lowercase().contains("reaper"))
-            }),
+        // The same app detection, the checks and `rabbit uninstall` choose,
+        // so the GUI and the CLI remove the same bundle from this folder.
+        Platform::MacOs => rabbit_core::detection::portable_macos_app_bundle(resource_path),
     }
 }
 

@@ -21,6 +21,7 @@ use std::path::{Component, Path, PathBuf, Prefix};
 
 use serde::{Deserialize, Serialize};
 
+use super::PlannedRemoval;
 use crate::model::Platform;
 use crate::package::uninstall::{
     MACOS_ABSOLUTE_PREFIXES, RABBIT_FOLDER, UninstallPath, UninstallPathRoot, UninstallPathToken,
@@ -46,14 +47,25 @@ pub struct UninstallRoots {
     pub program_data: Option<PathBuf>,
     pub home: Option<PathBuf>,
     pub documents: Option<PathBuf>,
+    /// Where absolute macOS paths such as `/Applications/Surge XT.app`
+    /// start: `/` on a real computer. Tests point it at a temporary folder
+    /// holding their own `Applications` and `Library`, so the macOS rules
+    /// for those folders run on every platform without touching the real
+    /// ones.
+    pub system_root: PathBuf,
 }
 
+/// The folder absolute macOS paths start from on a real computer.
+pub const SYSTEM_ROOT: &str = "/";
+
 impl UninstallRoots {
-    /// Roots with only the resource folder known. Every other token stays
-    /// unresolved until the caller fills it in.
+    /// Roots with only the resource folder known, and absolute macOS paths
+    /// starting at [`SYSTEM_ROOT`]. Every other token stays unresolved until
+    /// the caller fills it in.
     pub fn new(resource: &Path) -> Self {
         Self {
             resource: absolute(resource),
+            system_root: PathBuf::from(SYSTEM_ROOT),
             ..Self::default()
         }
     }
@@ -66,7 +78,17 @@ impl UninstallRoots {
     /// known folder an environment variable can't name.
     pub fn for_target(platform: Platform, resource: &Path, app_path: Option<&Path>) -> Self {
         let windows = platform == Platform::Windows;
-        let app_path = app_path.map(absolute);
+        // A trailing slash, which shell completion adds to a folder such as
+        // `/Applications/REAPER.app/`, makes `lstat` and `rename` follow a
+        // link in the last place, so it never gets into a plan: rebuilding
+        // the path from its components drops it.
+        let app_path = app_path.map(absolute).map(|path| {
+            if windows {
+                path
+            } else {
+                path.components().collect::<PathBuf>()
+            }
+        });
         Self {
             resource: absolute(resource),
             app_dir: app_path
@@ -92,7 +114,33 @@ impl UninstallRoots {
                 .flatten(),
             home: (!windows).then(rabbit_platform::user_home_dir).flatten(),
             documents: rabbit_platform::user_documents_dir(),
+            system_root: PathBuf::from(SYSTEM_ROOT),
         }
+    }
+
+    /// The path an absolute macOS path's `components` stand for, below
+    /// [`system_root`](Self::system_root).
+    fn system_path<'c>(&self, components: impl IntoIterator<Item = &'c str>) -> PathBuf {
+        components
+            .into_iter()
+            .fold(self.system_root.clone(), |path, component| {
+                path.join(component)
+            })
+    }
+
+    /// The fixed system folders an absolute macOS path may sit below, as
+    /// they resolve here: `/Applications`, `/Library/Application Support`
+    /// and the `/Library/Audio/Plug-Ins` format folders.
+    fn system_folders(&self) -> impl Iterator<Item = PathBuf> + '_ {
+        MACOS_ABSOLUTE_PREFIXES
+            .iter()
+            .map(|prefix| self.system_path(prefix.iter().copied()))
+    }
+
+    /// `/Applications` as it resolves here: the one folder root may move
+    /// REAPER's app out of, into the user's Trash.
+    pub fn system_applications(&self) -> PathBuf {
+        self.system_path(["Applications"])
     }
 
     /// Every path `token` stands for. Only `{program_files}` can stand for
@@ -142,7 +190,7 @@ impl UninstallRoots {
     fn allowed_object_parents(&self, token: UninstallPathToken) -> Vec<PathBuf> {
         match token {
             UninstallPathToken::AppPath => {
-                let mut parents = vec![PathBuf::from("/Applications")];
+                let mut parents = vec![self.system_applications()];
                 parents.extend(self.home.as_ref().map(|home| home.join("Applications")));
                 parents.push(self.resource.clone());
                 parents
@@ -223,12 +271,9 @@ pub fn resolve_path(
                     parsed.components.len() > prefix.len() && parsed.components.starts_with(prefix)
                 })
                 .ok_or(PathRefusal::OutsideRoot)?;
-            let root = prefix
-                .iter()
-                .fold(PathBuf::from("/"), |path, component| path.join(component));
             Ok(vec![ResolvedPath {
-                path: PathBuf::from(path.as_str()),
-                guard: RemovalGuard::under(root),
+                path: roots.system_path(parsed.components.iter().copied()),
+                guard: RemovalGuard::under(roots.system_path(prefix.iter().copied())),
                 is_root: false,
                 wildcard,
             }])
@@ -315,6 +360,27 @@ pub enum PathRefusal {
     ParentNotAllowed,
     #[error("RABBIT couldn't check it: {message}")]
     Unreadable { message: String },
+    /// For a removal with administrator rights: a folder on the way to it
+    /// is a link, which could send root somewhere else.
+    #[error("a folder on the way to it is a symbolic link, which RABBIT never lets root follow")]
+    LinkedAncestor,
+    /// For a removal with administrator rights: it isn't directly in one of
+    /// the fixed system folders only an administrator can change.
+    #[error("it isn't directly in a system folder that only an administrator can change")]
+    NotRootControlled,
+    /// For a removal with administrator rights: it, or a folder on the way
+    /// to it, isn't a folder.
+    #[error("it isn't a folder")]
+    NotADirectory,
+    /// For a removal with administrator rights: its path can't be written
+    /// as text, which the administrator command needs.
+    #[error("its name isn't valid text, so RABBIT can't name it to the administrator command")]
+    NotUtf8,
+    /// For a removal with administrator rights: another volume is mounted
+    /// exactly there. `rm -R -x` only stays out of a volume mounted below
+    /// the folder it is given, so it would empty this one.
+    #[error("another disk or volume is mounted there, and RABBIT never lets root reach into it")]
+    MountPoint,
 }
 
 impl PathRefusal {
@@ -453,6 +519,137 @@ fn check_removal_of(
         return Err(PathRefusal::UnexpectedName);
     }
     Ok(())
+}
+
+/// Whether the run's administrator command may delete `planned`, an
+/// absolute macOS path from a manifest such as `/Applications/Surge XT.app`,
+/// and the exact text to name it with there.
+///
+/// Root deletes for good, so this asks more than [`check_removal`], which
+/// it runs first. The path must also:
+/// - have come from one of the fixed system folders, and sit directly in
+///   it: never a token such as `{home}` or `{resource}`, never deeper;
+/// - be a real folder, not a link and not a file;
+/// - be reached through real folders only, from the system root down:
+///   `lstat` of every folder on the way, so no link anywhere can send root
+///   somewhere else;
+/// - be on the same volume as the folder holding it, so no volume is
+///   mounted exactly there;
+/// - be valid UTF-8, the only text the administrator command takes.
+pub fn check_administrator_removal(
+    roots: &UninstallRoots,
+    planned: &PlannedRemoval,
+) -> Result<String, PathRefusal> {
+    check_removal(roots, &planned.path, &planned.guard)?;
+    let folder = planned
+        .guard
+        .root
+        .as_deref()
+        .filter(|root| roots.system_folders().any(|folder| folder == *root))
+        .ok_or(PathRefusal::NotRootControlled)?;
+    check_root_reaches(roots, &planned.path, folder, &rabbit_platform::volume_id)
+}
+
+/// Whether the run's administrator command may move `planned`, REAPER's
+/// app, out of `/Applications` into the user's Trash, and the exact text
+/// to name it with there.
+///
+/// Root moves the app only when RABBIT can't, so this asks more than
+/// [`check_removal`], which it runs first: the app must sit directly in
+/// `/Applications`, a folder only an administrator can change, never in a
+/// folder of the user's or on another volume; it must be a real folder, not
+/// a link, with no volume mounted on it; and every folder on the way to it
+/// from the system root must be a real folder too, read with `lstat`.
+/// Whether it is the app the manifest means, and whether the user's Trash
+/// may take it, is [`tree_route`](super::macos_objects::tree_route)'s to
+/// say.
+pub fn check_administrator_trash_move(
+    roots: &UninstallRoots,
+    planned: &PlannedRemoval,
+) -> Result<String, PathRefusal> {
+    check_removal(roots, &planned.path, &planned.guard)?;
+    check_root_reaches(
+        roots,
+        &planned.path,
+        &roots.system_applications(),
+        &rabbit_platform::volume_id,
+    )
+}
+
+/// The checks both administrator steps share: `path` sits directly in
+/// `folder`, is a real folder, every folder from the system root down to
+/// `folder` is a real folder, not a link, and `path` is on `folder`'s
+/// volume, as `volume` reads them. Returns `path` as text, spelt exactly
+/// as `folder` and its name, which it must already be.
+fn check_root_reaches(
+    roots: &UninstallRoots,
+    path: &Path,
+    folder: &Path,
+    volume: &dyn Fn(&Path) -> io::Result<u64>,
+) -> Result<String, PathRefusal> {
+    if path.parent() != Some(folder) {
+        return Err(PathRefusal::NotRootControlled);
+    }
+    let name = path.file_name().ok_or(PathRefusal::NotPlain)?;
+    let exact = folder.join(name);
+    // A trailing slash makes `lstat` and `rename` follow a link in the last
+    // place, though `Path` compares as if it weren't there. Root gets only
+    // folder/name, spelt exactly so, and so is everything checked here.
+    if path.as_os_str() != exact.as_os_str() {
+        return Err(PathRefusal::NotPlain);
+    }
+    let path = exact.as_path();
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| PathRefusal::unreadable(path, &error))?;
+    if metadata.file_type().is_symlink() {
+        return Err(PathRefusal::Link);
+    }
+    if !metadata.is_dir() {
+        return Err(PathRefusal::NotADirectory);
+    }
+    let below_root = folder
+        .strip_prefix(&roots.system_root)
+        .map_err(|_| PathRefusal::NotRootControlled)?;
+    let mut on_the_way = roots.system_root.clone();
+    real_folder(&on_the_way)?;
+    for component in below_root.components() {
+        let Component::Normal(name) = component else {
+            return Err(PathRefusal::NotPlain);
+        };
+        on_the_way.push(name);
+        real_folder(&on_the_way)?;
+    }
+    // `rm -R -x` stays on the volume of the folder it is given: it keeps
+    // out of a volume mounted below that folder, but empties one mounted
+    // on the folder itself. A mount there shows as a volume other than the
+    // holding folder's. Where volumes can't be read this way, as on
+    // Windows, which has no administrator command, nothing is compared.
+    match (volume(path), volume(folder)) {
+        (Ok(tree), Ok(holder)) if tree != holder => return Err(PathRefusal::MountPoint),
+        (Err(error), _) if error.kind() != io::ErrorKind::Unsupported => {
+            return Err(PathRefusal::unreadable(path, &error));
+        }
+        (_, Err(error)) if error.kind() != io::ErrorKind::Unsupported => {
+            return Err(PathRefusal::unreadable(folder, &error));
+        }
+        _ => {}
+    }
+    path.to_str()
+        .map(str::to_string)
+        .ok_or(PathRefusal::NotUtf8)
+}
+
+/// `folder`, read with `lstat`, is a folder and not a link.
+fn real_folder(folder: &Path) -> Result<(), PathRefusal> {
+    let metadata =
+        fs::symlink_metadata(folder).map_err(|error| PathRefusal::unreadable(folder, &error))?;
+    if metadata.file_type().is_symlink() {
+        Err(PathRefusal::LinkedAncestor)
+    } else if metadata.is_dir() {
+        Ok(())
+    } else {
+        Err(PathRefusal::NotADirectory)
+    }
 }
 
 /// Whether `path` is at or below `{resource}/RABBIT`, compared by its text.
@@ -615,10 +812,13 @@ mod tests {
     use tempfile::{TempDir, tempdir};
 
     use super::{
-        PathRefusal, RemovalGuard, ResolvedPath, UninstallRoots, check_removal, expand_wildcard,
+        PathRefusal, RemovalGuard, ResolvedPath, UninstallRoots, check_administrator_removal,
+        check_administrator_trash_move, check_removal, check_root_reaches, expand_wildcard,
         resolve_path,
     };
+    use crate::model::Platform;
     use crate::package::uninstall::UninstallPath;
+    use crate::uninstall::{PlannedRemoval, RemovalReason};
 
     /// A temporary folder holding a resource folder `REAPER`, and roots that
     /// know it and a CLAP folder beside it.
@@ -739,6 +939,358 @@ mod tests {
             Err(PathRefusal::UnknownRoot {
                 token: "{documents}".to_string()
             })
+        );
+    }
+
+    /// A temporary folder standing in for `/`, holding the system folders
+    /// absolute macOS paths may name, and roots that start such paths there.
+    fn system_fixture() -> (TempDir, UninstallRoots) {
+        let (dir, mut roots) = fixture();
+        let system = dir.path().join("system");
+        for folder in [
+            "Applications",
+            "Library/Application Support",
+            "Library/Audio/Plug-Ins/VST3",
+            "Library/Audio/Plug-Ins/Components",
+        ] {
+            fs::create_dir_all(
+                folder
+                    .split('/')
+                    .fold(system.clone(), |path, part| path.join(part)),
+            )
+            .unwrap();
+        }
+        roots.system_root = system;
+        (dir, roots)
+    }
+
+    /// A tree from a manifest, resolved and planned as the planner would.
+    fn planned_tree(manifest_path: &str, roots: &UninstallRoots) -> PlannedRemoval {
+        let resolved = resolve_one(manifest_path, roots);
+        PlannedRemoval {
+            is_dir: resolved.path.is_dir(),
+            path: resolved.path,
+            reason: RemovalReason::Tree,
+            size: None,
+            receipt_sha256: None,
+            bundle_id: None,
+            guard: resolved.guard,
+        }
+    }
+
+    /// Make `link` point to the folder `target`: a junction on Windows, a
+    /// symbolic link elsewhere. The guard sees both as links.
+    fn link_folder(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        super::make_junction(link, target);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[test]
+    fn absolute_macos_paths_start_at_the_system_root() {
+        let (_dir, mut roots) = system_fixture();
+        let system = roots.system_root.clone();
+        let vst3 = system
+            .join("Library")
+            .join("Audio")
+            .join("Plug-Ins")
+            .join("VST3");
+
+        let tree = resolve_one("/Library/Audio/Plug-Ins/VST3/Demo.vst3", &roots);
+        assert_eq!(tree.path, vst3.join("Demo.vst3"));
+        assert_eq!(tree.guard, RemovalGuard::under(vst3));
+
+        roots.app_path = Some(system.join("Applications").join("REAPER.app"));
+        let app = resolve_one("{app_path}", &roots);
+        assert!(
+            app.guard
+                .allowed_parents
+                .contains(&system.join("Applications")),
+            "{:?}",
+            app.guard.allowed_parents
+        );
+        assert!(
+            !app.guard
+                .allowed_parents
+                .contains(&PathBuf::from("/Applications"))
+        );
+
+        // A real computer's start at /.
+        let real = UninstallRoots::new(Path::new("/REAPER"));
+        assert_eq!(real.system_root, PathBuf::from("/"));
+        assert_eq!(
+            resolve_one("/Applications/Demo.app", &real).path,
+            Path::new("/Applications/Demo.app")
+        );
+    }
+
+    #[test]
+    fn the_administrator_command_may_delete_a_real_folder_directly_in_a_system_folder() {
+        let (_dir, roots) = system_fixture();
+        for manifest_path in [
+            "/Applications/Demo.app",
+            "/Library/Audio/Plug-Ins/VST3/Demo.vst3",
+            "/Library/Application Support/Demo",
+        ] {
+            let tree = planned_tree(manifest_path, &roots);
+            fs::create_dir_all(tree.path.join("Contents")).unwrap();
+            assert_eq!(
+                check_administrator_removal(&roots, &tree),
+                Ok(tree.path.to_str().unwrap().to_string()),
+                "{manifest_path}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_administrator_command_never_deletes_through_a_link_on_the_way() {
+        let (dir, roots) = system_fixture();
+        let elsewhere = dir.path().join("elsewhere");
+        fs::create_dir_all(elsewhere.join("Demo.clap")).unwrap();
+        let plug_ins = roots
+            .system_root
+            .join("Library")
+            .join("Audio")
+            .join("Plug-Ins");
+        link_folder(&plug_ins.join("CLAP"), &elsewhere);
+
+        let tree = planned_tree("/Library/Audio/Plug-Ins/CLAP/Demo.clap", &roots);
+        assert_eq!(
+            check_administrator_removal(&roots, &tree),
+            Err(PathRefusal::LinkedAncestor)
+        );
+        assert!(
+            elsewhere.join("Demo.clap").is_dir(),
+            "checking removes nothing"
+        );
+    }
+
+    #[test]
+    fn the_administrator_command_never_deletes_a_link_a_file_or_anything_deeper() {
+        let (dir, mut roots) = system_fixture();
+        let support = roots
+            .system_root
+            .join("Library")
+            .join("Application Support");
+
+        // The object itself a link.
+        let target = dir.path().join("target");
+        fs::create_dir_all(&target).unwrap();
+        link_folder(&support.join("Linked"), &target);
+        assert_eq!(
+            check_administrator_removal(
+                &roots,
+                &planned_tree("/Library/Application Support/Linked", &roots)
+            ),
+            Err(PathRefusal::Link)
+        );
+
+        // A file where a folder should be.
+        write(&support.join("Demo"));
+        assert_eq!(
+            check_administrator_removal(
+                &roots,
+                &planned_tree("/Library/Application Support/Demo", &roots)
+            ),
+            Err(PathRefusal::NotADirectory)
+        );
+
+        // Two levels down, which no manifest may name.
+        fs::create_dir_all(support.join("Deep").join("Data")).unwrap();
+        assert_eq!(
+            check_administrator_removal(
+                &roots,
+                &planned_tree("/Library/Application Support/Deep/Data", &roots)
+            ),
+            Err(PathRefusal::NotRootControlled)
+        );
+
+        // Anything a token names, even a folder below the system root, as
+        // every token folder is on a real Mac: only the system-folder check
+        // refuses `{home}/Demo` here.
+        let home = roots.system_root.join("Users").join("me");
+        roots.home = Some(home.clone());
+        let mine = roots.resource.join("Demo");
+        let at_home = home.join("Demo");
+        for (manifest_path, folder) in [("{resource}/Demo", &mine), ("{home}/Demo", &at_home)] {
+            fs::create_dir_all(folder).unwrap();
+            assert_eq!(
+                check_administrator_removal(&roots, &planned_tree(manifest_path, &roots)),
+                Err(PathRefusal::NotRootControlled),
+                "{manifest_path}"
+            );
+        }
+        assert!(
+            target.is_dir() && mine.is_dir() && at_home.is_dir(),
+            "checking removes nothing"
+        );
+    }
+
+    /// `rm -R -x` stays out of a volume mounted below the folder it is
+    /// given, but not out of one mounted on that folder itself. A tree on
+    /// another volume than the folder holding it is such a mount, and root
+    /// never gets it, nor an app to move. One on the same volume passes,
+    /// and so does every tree where volumes can't be read, as on Windows.
+    #[test]
+    fn a_volume_mounted_exactly_at_a_tree_is_never_given_to_root() {
+        let (_dir, roots) = system_fixture();
+        let support = roots
+            .system_root
+            .join("Library")
+            .join("Application Support");
+        let tree = support.join("Demo");
+        fs::create_dir_all(tree.join("Contents")).unwrap();
+        let app = roots.system_root.join("Applications").join("REAPER.app");
+        fs::create_dir_all(app.join("Contents")).unwrap();
+        let applications = roots.system_root.join("Applications");
+        let text = |path: &Path| path.to_str().unwrap().to_string();
+
+        // The tree, or the app, is the root of another volume.
+        let mounted_on = |mounted: &Path| {
+            let mounted = mounted.to_path_buf();
+            move |path: &Path| -> std::io::Result<u64> { Ok(if path == mounted { 2 } else { 1 }) }
+        };
+        assert_eq!(
+            check_root_reaches(&roots, &tree, &support, &mounted_on(&tree)),
+            Err(PathRefusal::MountPoint)
+        );
+        assert_eq!(
+            check_root_reaches(&roots, &app, &applications, &mounted_on(&app)),
+            Err(PathRefusal::MountPoint)
+        );
+
+        // One volume for all: it passes.
+        let one_volume = |_: &Path| -> std::io::Result<u64> { Ok(1) };
+        assert_eq!(
+            check_root_reaches(&roots, &tree, &support, &one_volume),
+            Ok(text(&tree))
+        );
+        // Volumes RABBIT can't read this way are never compared.
+        let unsupported = |_: &Path| -> std::io::Result<u64> {
+            Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no"))
+        };
+        assert_eq!(
+            check_root_reaches(&roots, &tree, &support, &unsupported),
+            Ok(text(&tree))
+        );
+        // Any other failure to read one refuses.
+        let denied = |_: &Path| -> std::io::Result<u64> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            ))
+        };
+        assert!(matches!(
+            check_root_reaches(&roots, &tree, &support, &denied),
+            Err(PathRefusal::Unreadable { .. })
+        ));
+        // And the real reader passes a temporary folder, on one volume.
+        assert_eq!(
+            check_root_reaches(&roots, &tree, &support, &rabbit_platform::volume_id),
+            Ok(text(&tree))
+        );
+        assert!(tree.is_dir() && app.is_dir(), "checking removes nothing");
+    }
+
+    #[test]
+    fn root_moves_reaper_only_out_of_applications_through_real_folders() {
+        let (dir, mut roots) = system_fixture();
+        let applications = roots.system_root.join("Applications");
+        let app = applications.join("REAPER.app");
+        fs::create_dir_all(app.join("Contents")).unwrap();
+        roots.app_path = Some(app.clone());
+        let tree = |roots: &UninstallRoots| PlannedRemoval {
+            guard: RemovalGuard {
+                must_end_with: Some(".app".to_string()),
+                name_contains: Some("REAPER".to_string()),
+                ..resolve_one("{app_path}", roots).guard
+            },
+            ..planned_tree("{app_path}", roots)
+        };
+        assert_eq!(
+            check_administrator_trash_move(&roots, &tree(&roots)),
+            Ok(app.to_str().unwrap().to_string())
+        );
+
+        // A portable REAPER's app sits in the resource folder: the guard
+        // allows it there, but root never moves it.
+        let portable = roots.resource.join("REAPER.app");
+        fs::create_dir_all(&portable).unwrap();
+        roots.app_path = Some(portable);
+        assert_eq!(
+            check_administrator_trash_move(&roots, &tree(&roots)),
+            Err(PathRefusal::NotRootControlled)
+        );
+
+        // /Applications itself a link.
+        let real = dir.path().join("real Applications");
+        fs::create_dir_all(real.join("REAPER.app")).unwrap();
+        fs::remove_dir_all(&applications).unwrap();
+        link_folder(&applications, &real);
+        roots.app_path = Some(app);
+        assert_eq!(
+            check_administrator_trash_move(&roots, &tree(&roots)),
+            Err(PathRefusal::LinkedAncestor)
+        );
+        assert!(real.join("REAPER.app").is_dir(), "checking removes nothing");
+    }
+
+    /// `path` with a separator added at its end, as shell completion types
+    /// a folder.
+    fn with_trailing_separator(path: &Path) -> PathBuf {
+        let mut text = path.as_os_str().to_os_string();
+        text.push(std::path::MAIN_SEPARATOR_STR);
+        PathBuf::from(text)
+    }
+
+    /// A trailing slash makes `lstat` and `rename` follow a link in the last
+    /// place on macOS, so a macOS target's app path loses it, and root is
+    /// never handed a path spelt with one.
+    #[test]
+    fn a_trailing_slash_never_reaches_root() {
+        let (dir, mut roots) = system_fixture();
+        let applications = roots.system_root.join("Applications");
+        let app = applications.join("REAPER.app");
+        fs::create_dir_all(app.join("Contents")).unwrap();
+
+        let target = UninstallRoots::for_target(
+            Platform::MacOs,
+            &roots.resource,
+            Some(&with_trailing_separator(&app)),
+        );
+        let normalized = target.app_path.unwrap();
+        assert_eq!(normalized.as_os_str(), app.as_os_str());
+
+        let tree = |roots: &UninstallRoots| PlannedRemoval {
+            guard: RemovalGuard {
+                must_end_with: Some(".app".to_string()),
+                name_contains: Some("REAPER".to_string()),
+                ..resolve_one("{app_path}", roots).guard
+            },
+            ..planned_tree("{app_path}", roots)
+        };
+        // Spelt with the slash, even a real folder is refused.
+        roots.app_path = Some(with_trailing_separator(&app));
+        assert_eq!(
+            check_administrator_trash_move(&roots, &tree(&roots)),
+            Err(PathRefusal::NotPlain)
+        );
+
+        // REAPER.app a link to an app elsewhere: refused as a link where
+        // `lstat` sees one, and for its spelling where the slash hides it.
+        let elsewhere = dir.path().join("elsewhere").join("REAPER.app");
+        fs::create_dir_all(elsewhere.join("Contents")).unwrap();
+        fs::remove_dir_all(&app).unwrap();
+        link_folder(&app, &elsewhere);
+        let refusal = check_administrator_trash_move(&roots, &tree(&roots));
+        assert!(
+            matches!(refusal, Err(PathRefusal::Link | PathRefusal::NotPlain)),
+            "{refusal:?}"
+        );
+        assert!(
+            elsewhere.join("Contents").is_dir(),
+            "checking moves nothing"
         );
     }
 

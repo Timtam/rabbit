@@ -8,6 +8,12 @@
 //! point, and prints a notice saying so. A second Ctrl+C ends the process as
 //! usual, for a user who really wants out.
 //!
+//! On Unix, a child RABBIT started in a process group of its own, such as
+//! macOS's osascript and its password window, doesn't get Terminal's
+//! Ctrl+C. While a [`ForwardSecondCtrlC`] names that group, the second
+//! Ctrl+C is passed on to it before RABBIT ends, so nothing RABBIT started
+//! is left waiting for an answer nobody will read.
+//!
 //! Windows calls a console handler on a thread of its own. Unix runs a
 //! signal handler on whichever thread the signal lands on, where only
 //! async-signal-safe calls are allowed. So both handlers do no more than set
@@ -17,6 +23,8 @@
 //! command keeps Ctrl+C's usual meaning.
 
 use std::io;
+#[cfg(unix)]
+use std::sync::atomic::AtomicI32;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
@@ -28,6 +36,10 @@ static PRESSED: AtomicBool = AtomicBool::new(false);
 /// installed, and left alone while it is.
 static NOTICE_PTR: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 static NOTICE_LEN: AtomicUsize = AtomicUsize::new(0);
+
+/// The process group the second Ctrl+C is passed on to, or 0 for none.
+#[cfg(unix)]
+static FORWARD_GROUP: AtomicI32 = AtomicI32::new(0);
 
 /// How many guards live, and what to put back when the last one goes.
 static STATE: Mutex<State> = Mutex::new(State {
@@ -84,6 +96,47 @@ pub fn catch_ctrl_c(notice: &'static str) -> io::Result<CtrlCGuard> {
     }
     state.guards += 1;
     Ok(CtrlCGuard { _private: () })
+}
+
+/// While this lives, a second Ctrl+C sends SIGINT to the process group it
+/// names before RABBIT ends. Only one group is named at a time; the latest
+/// wins, and dropping a guard clears it.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct ForwardSecondCtrlC {
+    _private: (),
+}
+
+#[cfg(unix)]
+impl Drop for ForwardSecondCtrlC {
+    fn drop(&mut self) {
+        FORWARD_GROUP.store(0, Ordering::SeqCst);
+    }
+}
+
+/// Pass a second Ctrl+C on to `group`, the id of a process group RABBIT
+/// started, for as long as the returned guard lives. A group id of 0 or
+/// less names nothing: `kill` would read it as RABBIT's own group, or as
+/// every process RABBIT may signal.
+#[cfg(unix)]
+pub fn forward_second_ctrl_c_to(group: libc::pid_t) -> ForwardSecondCtrlC {
+    FORWARD_GROUP.store(group.max(0), Ordering::SeqCst);
+    ForwardSecondCtrlC { _private: () }
+}
+
+/// Send SIGINT to the group [`forward_second_ctrl_c_to`] named, if any.
+/// Async-signal-safe: one atomic load and one `kill`. The group's leader,
+/// RABBIT's own child, is always reached; a member running as another user,
+/// such as root's shell, only when the system lets RABBIT signal it. Either
+/// way this is the "stop at once" the second press asks for.
+#[cfg(unix)]
+fn forward_to_group() {
+    let group = FORWARD_GROUP.load(Ordering::SeqCst);
+    if group > 0 {
+        // SAFETY: kill is async-signal-safe, and a negative pid names the
+        // process group `group`, never RABBIT's own or every process.
+        unsafe { libc::kill(-group, libc::SIGINT) };
+    }
 }
 
 /// What both handlers do on a press. Returns `false` for a second press,
@@ -163,11 +216,25 @@ mod platform {
 
     use super::State;
 
-    /// SIGINT, the signal Ctrl+C sends.
+    /// SIGINT, the signal Ctrl+C sends. The first press only sets the flag.
+    /// The second is passed on to a group RABBIT named, and then ends the
+    /// process the way SIGINT always does, so the shell sees the usual
+    /// status. Only async-signal-safe calls: kill, sigaction and raise.
     pub(super) extern "C" fn on_sigint(_signal: libc::c_int) {
-        // SA_RESETHAND has already put the default handling back, so the
-        // next Ctrl+C ends the process whatever this returns.
-        super::on_press();
+        if super::on_press() {
+            return;
+        }
+        super::forward_to_group();
+        // SAFETY: sigaction with a zeroed action and SIG_DFL is valid, and
+        // raise is async-signal-safe. SIGINT stays blocked until this handler
+        // returns; then the default handling ends the process.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = libc::SIG_DFL;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+            libc::raise(libc::SIGINT);
+        }
     }
 
     pub(super) fn install(state: &mut State) -> io::Result<()> {
@@ -188,9 +255,10 @@ mod platform {
             let handler: extern "C" fn(libc::c_int) = on_sigint;
             action.sa_sigaction = handler as libc::sighandler_t;
             // SA_RESTART: a read or write the signal interrupts carries on,
-            // rather than failing a file move with EINTR. SA_RESETHAND: the
-            // second Ctrl+C gets the default handling and ends the process.
-            action.sa_flags = libc::SA_RESTART | libc::SA_RESETHAND;
+            // rather than failing a file move with EINTR. No SA_RESETHAND:
+            // the handler itself ends the process on the second Ctrl+C, after
+            // passing it on.
+            action.sa_flags = libc::SA_RESTART;
             libc::sigemptyset(&mut action.sa_mask);
             let mut previous: libc::sigaction = std::mem::zeroed();
             if libc::sigaction(libc::SIGINT, &action, &mut previous) != 0 {
@@ -259,5 +327,48 @@ mod tests {
         // A new guard starts over, so a press from before doesn't count.
         let again = catch_ctrl_c("").unwrap();
         assert!(!again.flag().load(Ordering::SeqCst));
+    }
+
+    /// What the second press passes on reaches a child in a group of its
+    /// own, and nothing once the guard is gone. Calls the forwarding
+    /// directly: a real second SIGINT would end the test process.
+    #[cfg(unix)]
+    #[test]
+    fn the_second_press_reaches_a_named_group_and_nothing_after_the_guard() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        use std::process::Command;
+
+        use super::{forward_second_ctrl_c_to, forward_to_group};
+
+        let mut named = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let guard = forward_second_ctrl_c_to(i32::try_from(named.id()).unwrap());
+        forward_to_group();
+        let status = named.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGINT));
+        drop(guard);
+
+        let mut left_alone = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        forward_to_group();
+        // Still running: kill(pid, 0) only checks the process is there.
+        // SAFETY: signal 0 sends nothing.
+        assert_eq!(
+            unsafe { libc::kill(i32::try_from(left_alone.id()).unwrap(), 0) },
+            0
+        );
+        left_alone.kill().unwrap();
+        left_alone.wait().unwrap();
+
+        // 0 and negative ids name nothing.
+        let none = forward_second_ctrl_c_to(-5);
+        forward_to_group();
+        drop(none);
     }
 }

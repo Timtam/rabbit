@@ -36,9 +36,13 @@ from this file and posts it as the GitHub release body.
 - The wizard can now uninstall: the **Packages** page has an **Uninstall**
   tab beside **Install or update**. The page opens on **Install or update**
   with focus on the tabs, so screen readers read "Install or update, tab, 1
-  of 2" first; press Tab to reach the package list, which works as before.
-  Switch tabs with Ctrl+Tab or Ctrl+Page Down on Windows, and with Ctrl+Tab
-  or VoiceOver's tab navigation on macOS. The **Uninstall** tab lists what
+  of 2" first; press Tab to reach the package list, which works as before,
+  and Shift+Tab from the list to get back to the tabs. On a Mac the tabs
+  take focus only with keyboard navigation on; without it, the page opens
+  in the package list. Switch tabs with Ctrl+Tab or Ctrl+Page Down on
+  Windows, and on macOS with Ctrl+Tab, the arrow keys on the tabs, or
+  VoiceOver's tab navigation. VoiceOver mentions Ctrl+Tab the first time
+  the page opens. The **Uninstall** tab lists what
   is installed in the chosen REAPER, with nothing ticked. RABBIT can remove
   SWS, ReaPack, ReaKontrol, FFmpeg, app2clap and the language packs, and a
   row it can't tick says why. Your settings stay unless you tick **Also
@@ -48,7 +52,8 @@ from this file and posts it as the GitHub release body.
   first; for app2clap, every REAPER on the computer. Removed files move
   into a backup rather than being deleted. The progress page names each
   package as it goes and says whether it went, and closing RABBIT during an
-  uninstall asks first, then stops after the package it is on. The Done
+  uninstall asks first, then stops after the step it is on: one package, or
+  on macOS the administrator command, which can remove several. The Done
   page says what went, why anything stayed, and how to get a package back:
   run RABBIT again and tick it on **Install or update**, where it is no
   longer ticked by itself. **Show details** lists the files, the backup
@@ -62,12 +67,13 @@ from this file and posts it as the GitHub release body.
   backup set rather than being deleted, your settings stay unless you add
   `--remove-settings`, and if REAPER used the language pack you removed, it
   goes back to English. REAPER must be closed; there is deliberately no
-  `--allow-reaper-running`. Ctrl+C stops the run before the next package.
-  For the JAWS scripts and a portable REAPER, which RABBIT can't remove, it
-  prints how to remove them by hand. The exit code is 0 when everything you
-  named is gone or wasn't installed, 2 when something can't be uninstalled,
-  and 1 when a removal failed. The wizard's **Uninstall** tab removes the same
-  packages.
+  `--allow-reaper-running`. Ctrl+C stops the run once the step it is on is
+  done: a package, or on macOS the administrator command, which can remove
+  several. For the JAWS scripts and a portable REAPER on Windows, which
+  RABBIT can't remove, it prints how to remove them by hand. The exit code
+  is 0 when everything you named is gone or wasn't installed, 2 when
+  something can't be uninstalled, and 1 when a removal failed. The wizard's
+  **Uninstall** tab removes the same packages.
 - `rabbit restore-backup --package <id>` brings one uninstalled package back
   from its backup set: its files, its entry in RABBIT's receipt, and REAPER's
   language if the uninstall reset it and no other language was picked since.
@@ -110,6 +116,50 @@ from this file and posts it as the GitHub release body.
   you to close that program; screen readers hear this once too. A removal
   that finishes only after a restart says so, and `rabbit uninstall` then
   exits with 0. A portable REAPER stays yours to remove by hand.
+- On macOS, Surge XT and REAPER can be uninstalled too, from the wizard's
+  **Uninstall** tab and with `rabbit uninstall --package surge-xt` or
+  `--package reaper`. REAPER's app goes to the Trash, from a standard or a
+  portable REAPER, and your settings, extensions and projects stay. If your
+  account may move the app, it goes to the Trash with no password. If only an
+  administrator may move it, it sits directly in Applications, and your Trash
+  is a folder of your own on the same disk, an administrator's password moves
+  it into your Trash; it keeps its owner, so Finder offers no Put Back for
+  it. An app RABBIT can't move, such as a Locked one, can't be ticked, and
+  RABBIT says how to move it to the Trash in Finder. A REAPER that was never opened can be uninstalled too: RABBIT then
+  makes REAPER's resource folder, to save the run's report and RABBIT's
+  receipt there. Surge XT has no uninstaller of its own on a Mac, so RABBIT
+  deletes its apps, plug-ins and factory data for good, with an
+  administrator's password. Surge XT goes for every music program on the
+  Mac. macOS's installer then forgets Surge XT's receipts, and RABBIT has
+  macOS refresh the list of Audio Units that music programs read. Your
+  patches and your Surge XT settings stay. Close Surge XT, Surge XT Effects,
+  `surge-xt-cli` and every REAPER first; a portable REAPER can't remove
+  Surge XT. If the
+  removal stops partway, the Done page says so, and where it stopped when the
+  administrator command said. **Show details** lists what is gone and what is
+  still there, and Surge XT is still offered, so you can uninstall it again.
+- An uninstall on macOS asks for an administrator's name and password at
+  most once per run, before anything is removed, however many packages need
+  it, and RABBIT then runs one administrator command for all of them. The
+  window may name osascript, the tool RABBIT asks through, and may offer
+  Touch ID. RABBIT says when the window is coming, and again if it is still
+  waiting after 30 seconds; VoiceOver reads both, and `rabbit uninstall`
+  prints both. If you cancel the window, nothing is uninstalled. Review says
+  beforehand that macOS asks once, that the window may name osascript or
+  offer Touch ID, and that cancelling it uninstalls nothing; RABBIT then asks
+  once more with **No** selected. If macOS refuses to change an app, RABBIT
+  says to turn on RABBIT under System Settings > Privacy & Security > App
+  Management; `rabbit uninstall` names the app you run it in instead, such
+  as Terminal. Started as root, as with `sudo`, RABBIT uninstalls nothing; a
+  dry run still works. In `rabbit uninstall`, a first Ctrl+C never
+  interrupts the password window or the administrator command: RABBIT stops
+  once the command is done. A second Ctrl+C closes the window if it is still
+  open, then ends RABBIT; if the administrator command is already running,
+  it may go on after RABBIT has ended. Closing the wizard while the password
+  window is open or the administrator command runs asks first, then lets
+  that command finish, even when it removes more than one package: the
+  password window stays until you answer it, and RABBIT stops once the
+  command is done.
 
 ### Changed
 
@@ -117,13 +167,16 @@ from this file and posts it as the GitHub release body.
   the Done page now says so in plain words, in your language, instead of
   naming a lock file and a process number.
 - A package you uninstalled, or turned down in the wizard, is no longer
-  offered again by itself: the wizard doesn't tick it, and `rabbit
-  apply-packages` and `rabbit setup` without `--package` skip it and say so.
-  Before, only the language packs were remembered this way. Ticking any
-  package in the wizard, or naming it with `--package` in a run that
-  installs, takes it off that list again; before, `--package` installed it
-  just for that run. Leaving an optional package unticked once still doesn't
-  hide its updates.
+  offered again by itself while it is gone: the wizard doesn't tick it, and
+  `rabbit apply-packages` and `rabbit setup` without `--package` skip it and
+  say so. Before, only the language packs were remembered this way. If you
+  put an uninstalled package back yourself, from the Trash or with its own
+  installer, its updates are offered as usual: the wizard ticks them, and
+  those commands update it. Language packs are the exception, as before:
+  one you removed or turned down stays unticked. Ticking any package in the
+  wizard, or naming it with `--package` in a run that installs, takes it off
+  that list again; before, `--package` installed it just for that run.
+  Leaving an optional package unticked once still doesn't hide its updates.
 
 - RABBIT now uses wxDragon 0.9.23, which brings wxWidgets 3.3.4. On macOS,
   text fields, dropdowns and the packages list now take their VoiceOver
@@ -137,6 +190,13 @@ from this file and posts it as the GitHub release body.
   certificate is refused. On a network that blocks certificate revocation
   checks, the first connection to a server can take up to about 10 seconds
   longer.
+- On macOS, RABBIT now asks for an administrator's password, such as for a
+  Surge XT install, only when its program file is named like RABBIT:
+  `rabbit`, or a name that starts with `rabbit` and then a dash, a space or
+  an opening parenthesis, such as `rabbit-macos-universal`, ignoring case
+  and anything from the last dot on. Every name RABBIT ships under works. A
+  copy renamed to anything else can no longer install Surge XT, and can't
+  uninstall Surge XT or REAPER.
 
 ### Fixed
 
@@ -162,6 +222,10 @@ from this file and posts it as the GitHub release body.
   **Additional software**, **Language packs**, **Configuration**) now show
   their names, and VoiceOver reads them. Before, a group row had only its
   checkbox, so VoiceOver read it as a checkbox without a name.
+- On macOS, Tab and Shift+Tab no longer stop on a wizard page's scroll bar.
+  When a page was too tall for the window, its scroll bar sat in the Tab
+  order: on the **Packages** page, Shift+Tab from the package list went to
+  the scroll bar. VoiceOver still reaches the scroll bar with its own keys.
 - Installing OSARA into a portable REAPER no longer leaves Windows' list of
   installed programs pointing at an uninstaller that isn't there. OSARA's
   installer replaced the list's OSARA entry with one for the portable copy,
@@ -171,6 +235,11 @@ from this file and posts it as the GitHub release body.
   left pointing at the portable copy is removed the next time you install
   or update OSARA there. If another copy of RABBIT changes the entry while
   OSARA installs, RABBIT leaves it as that copy wrote it.
+- On macOS, when the administrator password window of a Surge XT install
+  fails rather than being cancelled, for example after three wrong passwords
+  or with an account that isn't an administrator, RABBIT now says so, and
+  that nothing was installed. Before, it reported that Surge XT's installer
+  had failed. Cancelling that window no longer speaks of a Windows prompt.
 
 ## [0.4.4] - 2026-10-13
 

@@ -7,6 +7,13 @@
 //! must stay is taken out, every remaining path passes the guard, and
 //! ReaPack's records get their say. A path the guard refuses blocks the whole
 //! package rather than leaving it half removed.
+//!
+//! On macOS a plan's `trees` leave whole. What root deletes passes the
+//! stricter guard of the administrator command here already, so Review never
+//! offers what the run would refuse. A `to_trash` plan's app is asked about
+//! (who may move it, its bundle identifier, the user's Trash) and its route
+//! decided from that: to the Trash as the user, through the administrator
+//! command, or by hand in Finder.
 
 use std::fs;
 use std::io;
@@ -22,15 +29,17 @@ use crate::package::{InstallDestination, PACKAGE_REAPACK, PACKAGE_REAPER, Packag
 use crate::reapack::{ReapackOwnership, reapack_ownership, reapack_packages_with_files_under};
 use crate::receipt::{InstallState, PackageReceipt};
 
+use super::macos_objects::{ObjectProbe, TreeRoute, tree_route};
 use super::paths::{
-    RemovalGuard, ResolvedPath, UninstallRoots, check_removal, expand_wildcard, inside_or_same,
+    RemovalGuard, ResolvedPath, UninstallRoots, check_administrator_removal,
+    check_administrator_trash_move, check_removal, expand_wildcard, inside_or_same,
     is_in_rabbit_folder, resolve_path, same_ignoring_case,
 };
 use super::vendor::{VendorJob, VendorLookup, VendorRefusal, plan_vendor_run};
 use super::{
-    KeptPath, KeptReason, PathRefusal, PlannedRegistryCleanup, PlannedRemoval, Removability,
-    RemovalReason, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanItem,
-    UninstallWarning, resource_relative,
+    ByHandReason, KeptPath, KeptReason, PathRefusal, PlannedRegistryCleanup, PlannedRemoval,
+    Removability, RemovalReason, RemovalRoute, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan,
+    UninstallPlanItem, UninstallWarning, resource_relative,
 };
 
 /// Everything [`build_uninstall_plan`] needs.
@@ -49,6 +58,10 @@ pub struct UninstallPlanInput<'a> {
     /// Finds and checks each vendor's uninstaller, read only: HKLM's list
     /// of installed programs in RABBIT itself, a stand-in in tests.
     pub vendor_lookup: &'a dyn VendorLookup,
+    /// What this account may do with a macOS app, read only: macOS itself
+    /// in RABBIT, a stand-in in tests. Asked only for a `to_trash` plan's
+    /// trees.
+    pub objects: &'a dyn ObjectProbe,
 }
 
 /// Build the plan for every package offered on `input.platform`. Reads
@@ -110,8 +123,7 @@ fn plan_item(
     // REAPER's plan says what removing the package means. Only a plan that
     // removes something is out of reach here. One that removes nothing,
     // manual or not_supported, holds whatever the target: the JAWS DLLs'
-    // manual steps are the same from a portable REAPER, and Surge XT can't
-    // be uninstalled from the standard REAPER either.
+    // manual steps are the same from a portable REAPER.
     let (plan, needs_standard_target) =
         if spec.requires_standard_install && input.target == InstallationKind::Portable {
             match spec
@@ -136,16 +148,11 @@ fn plan_item(
         strategy,
         Some(UninstallStrategy::RemoveFiles | UninstallStrategy::VendorUninstaller)
     );
+    // An `if_needed` app needs the administrator command only when RABBIT
+    // can't move it itself, which is decided below, from what this account
+    // may do with it, once the package is known to be removable.
     let requires_elevation = changes_something
-        && plan.is_some_and(|plan| match plan.elevation {
-            UninstallElevation::Never => false,
-            UninstallElevation::Required => true,
-            // The ownership check that decides this for REAPER.app on macOS
-            // comes with that removal. Until then the plan asks for the
-            // prompt it may need: an unneeded permission note is harmless,
-            // a missing one isn't.
-            UninstallElevation::IfNeeded => true,
-        });
+        && plan.is_some_and(|plan| plan.elevation == UninstallElevation::Required);
     let unbacked = changes_something
         && plan.is_some_and(|plan| {
             plan.strategy == UninstallStrategy::VendorUninstaller
@@ -172,6 +179,9 @@ fn plan_item(
         vendor_run: None,
         blocking_programs: plan
             .map(|plan| plan.blocking_programs.clone())
+            .unwrap_or_default(),
+        macos_pkg_forget: plan
+            .map(|plan| plan.macos_pkg_forget.clone())
             .unwrap_or_default(),
         // The engine adds this itself, so a manifest can't forget it: a
         // vendor uninstaller reacts to any REAPER window, and a machine-wide
@@ -240,11 +250,7 @@ fn plan_item(
         // The vendor's uninstaller removes what its installer put there, and
         // none of it goes into a backup set, so "Also remove settings" never
         // takes this package's data: it is only listed as kept.
-        let (_, mut kept) = planner.user_data(false);
-        for kept in &mut kept {
-            kept.removable_with_settings = false;
-        }
-        item.kept = kept;
+        item.kept = planner.user_data_listed_only();
         // Found and checked here, read only, the way the elevated helper
         // checks it again right before it starts it: a package RABBIT can't
         // trust is refused before anything happens, and before any
@@ -275,11 +281,22 @@ fn plan_item(
         return item;
     }
 
+    // The administrator command never takes the user's data, so on that
+    // route it is only listed, blocked or not, as with a vendor's
+    // uninstaller. An `elevation: required` plan is on it from the start.
+    let listed_only = item.route() == RemovalRoute::Administrator;
+    let blocked_kept = || {
+        if listed_only {
+            planner.user_data_listed_only()
+        } else {
+            planner.user_data(false).1
+        }
+    };
     let collected = match planner.collect() {
         Ok(collected) => collected,
         Err(blocked) => {
             item.removability = blocked;
-            item.kept = planner.user_data(false).1;
+            item.kept = blocked_kept();
             return item;
         }
     };
@@ -287,15 +304,38 @@ fn plan_item(
         Ok(orphaned_from) => orphaned_from,
         Err(blocked) => {
             item.removability = blocked;
-            item.kept = planner.user_data(false).1;
+            item.kept = blocked_kept();
             item.kept.extend(collected.kept);
             return item;
         }
     };
+    match whole_object_routes(input, plan, &collected.files) {
+        Ok(as_administrator) => item.requires_elevation |= as_administrator,
+        Err(blocked) => {
+            item.removability = blocked;
+            item.kept = blocked_kept();
+            item.kept.extend(collected.kept);
+            return item;
+        }
+    }
+    // Root's first step looks for every REAPER by name: pgrep can't tell
+    // the target from a portable one. So the checks RABBIT makes as the
+    // user first must ask the same, or the password window would open for
+    // a command that can only stop.
+    if spec.id == PACKAGE_REAPER && item.needs_administrator() {
+        item.every_reaper_closed = true;
+    }
     // Only now is the package known to be removable, so only now may "Also
     // remove settings" take its data. A settings file ReaPack installed
-    // stays, like everything ReaPack installed; see `user_data`.
-    let (settings, user_data) = planner.user_data(input.remove_settings);
+    // stays, like everything ReaPack installed; see `user_data`. What the
+    // administrator command removes is never mixed with the user's own
+    // data, which would go into a backup set: as with a vendor's
+    // uninstaller, the data is only listed as kept.
+    let (settings, user_data) = if item.route() == RemovalRoute::Administrator {
+        (Vec::new(), planner.user_data_listed_only())
+    } else {
+        planner.user_data(input.remove_settings)
+    };
     item.kept = user_data;
     item.kept.extend(collected.kept);
     if spec.id == PACKAGE_REAPACK {
@@ -306,7 +346,18 @@ fn plan_item(
         Some(_) => Removability::RemovableOrphanedFromReaPack,
         None => Removability::Removable,
     };
-    if receipt.is_none() {
+    // Without a receipt RABBIT removes what the manifest says the package
+    // installs, and says so. What goes whole, to the Trash or through the
+    // administrator command, the manifest alone finds, by its place and
+    // name (an app also by its bundle ID), whoever installed it. As with a
+    // vendor's uninstaller there is nothing to say, and "removes the files"
+    // would only contradict "moves it to the Trash".
+    let found_by_the_manifest_alone = item.route().takes_whole_objects()
+        && collected
+            .files
+            .iter()
+            .all(|file| file.reason == RemovalReason::Tree);
+    if receipt.is_none() && !found_by_the_manifest_alone {
         item.notes.push(UninstallNote::NoReceipt);
     }
     if let Some(reapack_packages) = orphaned_from {
@@ -323,6 +374,82 @@ fn plan_item(
     item.dirs_if_empty = collected.dirs_if_empty;
     item.registry_cleanup = planner.registry_cleanup();
     item
+}
+
+/// Check the whole objects a macOS plan removes, and decide how they leave.
+///
+/// What the administrator command deletes (`elevation: required`) must
+/// pass [`check_administrator_removal`] already, so Review never offers a
+/// removal the run would refuse. Each tree of a `to_trash` plan is asked
+/// about and given its [`TreeRoute`]: one this account may move goes to the
+/// Trash as the user; one only root may move goes through the
+/// administrator command when the plan says `if_needed`, after
+/// [`check_administrator_trash_move`]; anything else is the user's to move
+/// in Finder, and so is the package. Returns whether such an app needs the
+/// administrator command after all, which is what `requires_elevation`
+/// then says.
+///
+/// Everything is only read: the user's Trash folder once, with `lstat`, and
+/// never what is inside it.
+fn whole_object_routes(
+    input: &UninstallPlanInput<'_>,
+    plan: &UninstallPlanSpec,
+    files: &[PlannedRemoval],
+) -> Result<bool, Removability> {
+    let trees = files
+        .iter()
+        .filter(|file| file.reason == RemovalReason::Tree);
+    let unsafe_path = |file: &PlannedRemoval, refusal: PathRefusal| Removability::UnsafePath {
+        path: file.path.clone(),
+        refusal,
+    };
+    if plan.strategy != UninstallStrategy::RemoveFiles {
+        return Ok(false);
+    }
+    if plan.elevation == UninstallElevation::Required {
+        for file in trees {
+            check_administrator_removal(input.roots, file)
+                .map_err(|refusal| unsafe_path(file, refusal))?;
+        }
+        return Ok(false);
+    }
+    if plan.backup != UninstallBackup::ToTrash {
+        return Ok(false);
+    }
+    let mut trash = None;
+    let mut as_administrator = false;
+    for file in trees {
+        let facts = input.objects.facts(&file.path);
+        let trash = trash.get_or_insert_with(|| input.objects.user_trash_folder_facts());
+        match tree_route(
+            &file.path,
+            &facts,
+            trash,
+            file.bundle_id.as_deref(),
+            &input.roots.system_root,
+        ) {
+            TreeRoute::Trash => {}
+            TreeRoute::TrashAsAdministrator if plan.elevation == UninstallElevation::IfNeeded => {
+                check_administrator_trash_move(input.roots, file)
+                    .map_err(|refusal| unsafe_path(file, refusal))?;
+                as_administrator = true;
+            }
+            // Only root could move it, and the plan doesn't let root.
+            TreeRoute::TrashAsAdministrator => {
+                return Err(Removability::ByHand {
+                    path: file.path.clone(),
+                    reason: ByHandReason::NotMovableByYou,
+                });
+            }
+            TreeRoute::ByHand(reason) => {
+                return Err(Removability::ByHand {
+                    path: file.path.clone(),
+                    reason,
+                });
+            }
+        }
+    }
+    Ok(as_administrator)
 }
 
 /// The warnings that don't depend on which files would go. Each thing is
@@ -565,6 +692,7 @@ impl PackagePlanner<'_> {
                             .map(fs::Metadata::len),
                         is_dir,
                         receipt_sha256: None,
+                        bundle_id: None,
                         guard: resolved.guard,
                     });
                 } else {
@@ -579,6 +707,18 @@ impl PackagePlanner<'_> {
             }
         }
         (settings, kept)
+    }
+
+    /// The package's `kept_user_data`, listed as kept and never taken, not
+    /// even by "Also remove settings": for a package whose removal never
+    /// goes into a backup set, a vendor's uninstaller or the administrator
+    /// command, whose data would otherwise be the only part of it there.
+    fn user_data_listed_only(&self) -> Vec<KeptPath> {
+        let (_, mut kept) = self.user_data(false);
+        for kept in &mut kept {
+            kept.removable_with_settings = false;
+        }
+        kept
     }
 
     /// Resolve manifest paths, refusing the package when one can't be: a
@@ -671,11 +811,27 @@ impl PackagePlanner<'_> {
         Ok(())
     }
 
+    /// The trees that exist, as whole objects. Most plans name every place a
+    /// tree may be, so one that isn't there is skipped. A `to_trash` plan
+    /// names the one app it moves, and the package is detected installed by
+    /// now, so a missing app means the target points somewhere else, such
+    /// as a mistyped `--target-app-path`: moving nothing would report the
+    /// package removed while it is still there. The user is told the path
+    /// and removes the app in Finder instead.
     fn add_trees(&self, candidates: &mut Vec<PlannedRemoval>) -> Result<(), Removability> {
         for tree in &self.plan.remove.trees {
             for resolved in self.resolve(&tree.path)? {
-                let Ok(metadata) = fs::symlink_metadata(&resolved.path) else {
-                    continue;
+                let metadata = match fs::symlink_metadata(&resolved.path) {
+                    Ok(metadata) => metadata,
+                    Err(error) if self.plan.backup == UninstallBackup::ToTrash => {
+                        return Err(Removability::ByHand {
+                            path: resolved.path,
+                            reason: ByHandReason::CouldNotCheck {
+                                error: error.to_string(),
+                            },
+                        });
+                    }
+                    Err(_) => continue,
                 };
                 let guard = RemovalGuard {
                     must_end_with: tree.must_end_with.clone(),
@@ -688,6 +844,7 @@ impl PackagePlanner<'_> {
                     size: None,
                     is_dir: metadata.is_dir(),
                     receipt_sha256: None,
+                    bundle_id: tree.bundle_id.clone(),
                     guard,
                 });
             }
@@ -864,6 +1021,7 @@ fn add_file(
         size: metadata.is_file().then_some(metadata.len()),
         is_dir: false,
         receipt_sha256: None,
+        bundle_id: None,
         guard: guard.clone(),
     });
 }

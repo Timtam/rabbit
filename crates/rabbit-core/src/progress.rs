@@ -107,6 +107,16 @@ pub enum ProgressEvent {
     /// `removed` says whether the package's files are gone; the report says
     /// the rest.
     RemoveCompleted { package_id: String, removed: bool },
+    /// The uninstall is about to ask for administrator rights, for
+    /// `package_ids`: Windows' permission prompt for RABBIT's elevated
+    /// helper, or macOS's administrator password window for the run's one
+    /// administrator command. Sent once, right before the window appears,
+    /// so the progress page can say what it is for before it takes focus.
+    AdministratorPrompt { package_ids: Vec<String> },
+    /// macOS's administrator password window has been open for `seconds`
+    /// without an answer. It may be behind another window. Sent at most
+    /// once per run.
+    AdministratorStillWaiting { seconds: u64 },
 }
 
 /// How an uninstall removes a package.
@@ -117,6 +127,14 @@ pub enum RemovalMethod {
     /// The package's own uninstaller removes it, started by RABBIT's
     /// elevated helper.
     VendorUninstaller,
+    /// RABBIT moves the package's app to the Trash, as the user, on macOS.
+    Trash,
+    /// The run's one administrator command on macOS removed it. That
+    /// command runs before every other removal of the run, so its packages'
+    /// start and end are sent together, once it has ended. Sent only for a
+    /// package root had steps for; one whose files were all gone before
+    /// root's turn is sent as `Files`.
+    Administrator,
 }
 
 /// A `Send + Sync` handle to the user-supplied progress callback. Cheap

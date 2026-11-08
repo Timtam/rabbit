@@ -222,19 +222,8 @@ pub(crate) fn portable_target_app_path(
             let app_path = resource_path.join("reaper.exe");
             app_path.is_file().then_some(app_path)
         }
-        Some(Platform::MacOs) => fs::read_dir(resource_path)
-            .ok()?
-            .filter_map(std::result::Result::ok)
-            .map(|entry| entry.path())
-            .find(|path| {
-                path.extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
-                    && path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.to_ascii_lowercase().contains("reaper"))
-            }),
+        // The same app detection finds, so the checks and the run agree.
+        Some(Platform::MacOs) => crate::detection::portable_macos_app_bundle(resource_path),
         None => None,
     }
 }
@@ -562,6 +551,11 @@ fn userplugins_write_failure(name: String, path: &Path, error: &std::io::Error) 
     }
 }
 
+/// The process names a REAPER has on macOS, compared ignoring case. The
+/// uninstall's administrator command looks for the same names as root, so
+/// both stay in step through this one list.
+pub const MACOS_REAPER_PROCESS_NAMES: [&str; 2] = ["REAPER", "reaper64"];
+
 fn is_reaper_process_name(platform: Option<Platform>, name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     match platform {
@@ -571,7 +565,9 @@ fn is_reaper_process_name(platform: Option<Platform>, name: &str) -> bool {
                 "reaper.exe" | "reaper64.exe" | "reaper_host32.exe" | "reaper_host64.exe"
             )
         }
-        Some(Platform::MacOs) => lower == "reaper" || lower == "reaper64",
+        Some(Platform::MacOs) => MACOS_REAPER_PROCESS_NAMES
+            .iter()
+            .any(|reaper| reaper.eq_ignore_ascii_case(&lower)),
         None => lower.starts_with("reaper"),
     }
 }

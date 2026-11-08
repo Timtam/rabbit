@@ -20,8 +20,8 @@ use super::preflight::VolumeProbe;
 use super::tests::{FoundAt, installed, write};
 use super::vendor::{VendorEvent, VendorLookup, VendorOutcome, VendorRefusal, VendorStatus};
 use super::{
-    ANY_REAPER_PROCESS_CHECK, NothingListed, Removability, UninstallMessage, UninstallReport,
-    UninstallRequest, UninstallRoots, UninstallStatus,
+    ANY_REAPER_PROCESS_CHECK, NoAdministratorShell, NoMacosObjects, NothingListed, Removability,
+    UninstallMessage, UninstallReport, UninstallRequest, UninstallRoots, UninstallStatus,
 };
 use crate::cancel::CancelToken;
 use crate::model::{ComponentDetection, InstallationKind, Platform};
@@ -367,6 +367,8 @@ impl<'c> Run<'c> {
                 installed_programs: None,
                 vendor_lookup: self.lookup.as_ref(),
                 elevated_helper: self.helper,
+                macos_objects: &NoMacosObjects,
+                administrator_shell: &NoAdministratorShell,
             },
             &self.progress,
             &self.cancel,
@@ -1286,6 +1288,10 @@ fn a_long_uninstaller_sends_still_waiting_once() {
     assert_eq!(
         *events.lock().unwrap(),
         [
+            // Said right before Windows' permission prompt appears.
+            ProgressEvent::AdministratorPrompt {
+                package_ids: vec![PACKAGE_SURGE_XT.to_string()],
+            },
             ProgressEvent::RemoveStarted {
                 package_id: PACKAGE_SURGE_XT.to_string(),
                 method: RemovalMethod::VendorUninstaller,
@@ -1545,6 +1551,8 @@ fn surge_end_to_end(
             installed_programs: None,
             vendor_lookup: &FoundAt(surge.uninstaller.clone()),
             elevated_helper: &helper,
+            macos_objects: &NoMacosObjects,
+            administrator_shell: &NoAdministratorShell,
         },
         &ProgressReporter::noop(),
         &CancelToken::new(),

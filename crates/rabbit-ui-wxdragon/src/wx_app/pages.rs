@@ -44,15 +44,46 @@ pub(crate) type WizardPage = ScrolledWindow;
 /// width instead of extending past it.
 pub(crate) const WIZARD_PAGE_SCROLL_STEP: i32 = 10;
 
+/// The name wxWidgets gives a scroll bar it creates itself
+/// (`wxScrollBarNameStr`).
+const WX_SCROLL_BAR_NAME: &str = "scrollBar";
+
 /// Build one empty wizard page inside the book.
 pub(crate) fn new_wizard_page(book: &SimpleBook) -> WizardPage {
     let page = ScrolledWindow::builder(book).build();
+    if cfg!(target_os = "macos") {
+        keep_scroll_bars_out_of_tab_order(&page);
+    }
     page.set_scroll_rate(0, WIZARD_PAGE_SCROLL_STEP);
     // wxScrolledWindow is created without wxTAB_TRAVERSAL, which wxPanel
     // gets by default — without it Tab stops moving between the controls of
     // a page. Put the flag back before any child is created.
     page.set_style_raw(page.get_style_raw() | PanelStyle::TabTraversal.bits());
     page
+}
+
+/// Take a new page's own scroll bars out of the Tab order.
+///
+/// wxOSX gives a scrolled window real scroll bar controls: a vertical and a
+/// horizontal one, then a corner box, as its first children. wxWidgets'
+/// Tab order visits every child, so Tab and Shift+Tab stopped on the
+/// vertical scroll bar whenever a page was too tall for the window. On the
+/// Packages page, Shift+Tab from the list went to it. VoiceOver still
+/// reaches the scroll bars with its own keys.
+///
+/// Call it before anything else is added to the page. The search by name
+/// also looks inside the page's other children, so then it can only find
+/// the first scroll bar, and the walk stops at the corner box after them.
+/// `set_can_focus(false)` would not do: it does nothing outside GTK.
+fn keep_scroll_bars_out_of_tab_order(page: &WizardPage) {
+    let mut child = page.find_window_by_name(WX_SCROLL_BAR_NAME);
+    while let Some(window) = child {
+        if window.get_class_name().as_deref() != Some("wxScrollBar") {
+            break;
+        }
+        window.disable_focus_from_keyboard();
+        child = window.get_next_sibling();
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // UI plumbing: one parameter per widget handle.
@@ -151,6 +182,19 @@ pub(crate) fn add_pages(
     let (done_status, done_details, done_launch_reaper, done_open_resource) =
         build_done_page(&done_page, model);
     book.add_page(&done_page, &model.steps[DONE_STEP].label, false, None);
+
+    // Give the start focus back to the REAPER installation choice on macOS.
+    // Adding the Packages page's first tab selects it, and wxOSX then
+    // focuses that tab's list, even on a hidden page. Until the window
+    // first shows, every focus call there only picks where focus starts,
+    // and the last one wins. That put the start focus in the hidden list:
+    // VoiceOver began at the top of the window and Tab did nothing. Nothing
+    // after this point moves focus before the window shows, as before the
+    // tabs came. Windows moves focus on a tab change only when the tabs are
+    // visible.
+    if cfg!(target_os = "macos") {
+        target_choice.set_focus();
+    }
 
     WizardWidgets {
         target_choice,
@@ -411,6 +455,8 @@ pub(crate) fn build_target_page(
     page.set_sizer(sizer, true);
     set_optional_choice_shown(&reaper_build_choice, REAPER_BUILDS_LABEL_NAME, false);
     set_optional_choice_shown(&osara_build_choice, OSARA_BUILDS_LABEL_NAME, false);
+    // Where focus starts. On macOS, `add_pages` sets it again once the
+    // Packages page is built.
     choice.set_focus();
     (
         choice,

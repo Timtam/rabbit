@@ -551,8 +551,10 @@ pub(crate) fn package_rows(
             let installed_version = version_text(localizer, action.installed_version.as_ref());
             let available_version = version_text(localizer, action.available_version.as_ref());
             // Auto-tick rule:
-            //  - Update → always ticked (the package is already on disk; the
-            //    user opted into having it, so keep it current by default).
+            //  - Update → ticked (the package is already on disk; the user
+            //    opted into having it, so keep it current by default), unless
+            //    it is a language pack the user turned down or removed (see
+            //    below).
             //  - Install → only ticked when the spec is *effectively*
             //    recommended. That's the manifest baseline OR a host-conditional
             //    escalation (e.g. ReaKontrol's `recommended_when:
@@ -565,11 +567,18 @@ pub(crate) fn package_rows(
             // but unticked; nothing is offered for English, since REAPER is
             // already English.
             // Has the user turned this package down on this install, or
-            // uninstalled it? Either counts, for every package: a package
-            // removed through RABBIT must not come back ticked on the next
-            // run. It stays listed and tickable either way — a refusal
-            // suppresses the automatic tick, never the package itself.
+            // uninstalled it? Either keeps an Install row unticked, for
+            // every package: a package removed through RABBIT and still gone
+            // must not come back ticked on the next run. An Update row
+            // honours it only for a package that remembers an opt-out (the
+            // language packs). Any other package gets into the set only by
+            // an uninstall, and an Update row means it is back: dragged back
+            // from the Trash, say, or installed by hand. So it gets its
+            // updates like any package you have. The row stays listed and
+            // tickable either way: a refusal suppresses the automatic tick,
+            // never the package itself.
             let refused = declined.contains(&action.package_id);
+            let refuses_updates = refused && spec.is_some_and(|spec| spec.remember_opt_out);
             let recommended = spec
                 .map(|spec| {
                     rabbit_core::package::effective_recommended(spec, host)
@@ -581,11 +590,11 @@ pub(crate) fn package_rows(
                 .unwrap_or(false);
             let initially_selected = match action.action {
                 // Updates are ticked by default because a package you have
-                // should stay current — but not once you have said no to it.
-                // Someone who stopped using a language pack and turned its
-                // update down would otherwise be re-offered it, ticked,
-                // every time the translators publish a fix.
-                PlanActionKind::Update => !refused,
+                // should stay current. A language pack you turned down or
+                // removed is the exception. Someone who stopped using one
+                // and turned its update down would otherwise be offered it
+                // again, ticked, every time the translators publish a fix.
+                PlanActionKind::Update => !refuses_updates,
                 PlanActionKind::Install => recommended && !refused,
                 PlanActionKind::Keep => false,
             };

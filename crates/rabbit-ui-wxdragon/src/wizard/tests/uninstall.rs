@@ -2,13 +2,14 @@ use std::path::PathBuf;
 
 use rabbit_core::localization::{DEFAULT_LOCALE, Localizer, embedded_locales};
 use rabbit_core::model::{Architecture, ComponentDetection, InstallationKind, Platform};
-use rabbit_core::package::uninstall::{UninstallStrategy, UninstallSummary};
+use rabbit_core::package::uninstall::{UninstallBackup, UninstallStrategy, UninstallSummary};
 use rabbit_core::package::{PACKAGE_REAPACK, PackageCategory, builtin_package_specs};
 use rabbit_core::plan::{InstallPlan, PlanAction, PlanActionKind};
 use rabbit_core::receipt::{InstallState, PackageReceipt};
 use rabbit_core::uninstall::{
-    KeptPath, KeptReason, NothingListed, PlannedRemoval, PlannedVendorRun, Removability,
-    RemovalReason, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanInput,
+    ByHandReason, FakeMacosObjects, KeptPath, KeptReason, NoMacosObjects, NothingListed,
+    ObjectFacts, PathRefusal, PlannedRemoval, PlannedVendorRun, Removability, RemovalReason,
+    TrashFolderFacts, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanInput,
     UninstallPlanItem, UninstallRoots, UninstallWarning, VendorJob, VendorLookup, VendorRefusal,
     build_uninstall_plan,
 };
@@ -39,6 +40,7 @@ pub(super) fn item(package_id: &str, removability: Removability) -> UninstallPla
         registry_cleanup: Vec::new(),
         vendor_run: None,
         blocking_programs: Vec::new(),
+        macos_pkg_forget: Vec::new(),
         every_reaper_closed: false,
         requires_elevation: false,
         unbacked: false,
@@ -417,7 +419,13 @@ fn a_target_with_nothing_installed_lists_nothing() {
         .map(|spec| ComponentDetection::not_installed(&spec.id, &spec.display_name))
         .collect();
 
-    let list = uninstall_list_for_target(&model, &target, &detections, &NothingListed);
+    let list = uninstall_list_for_target(
+        &model,
+        &target,
+        &detections,
+        &NothingListed,
+        &NoMacosObjects,
+    );
 
     assert!(list.rows.is_empty());
     assert_eq!(list.unreadable, None);
@@ -439,7 +447,7 @@ fn a_receipt_that_cant_be_read_says_so_instead_of_listing_nothing() {
         ..model.target_rows[0].clone()
     };
 
-    let list = uninstall_list_for_target(&model, &target, &[], &NothingListed);
+    let list = uninstall_list_for_target(&model, &target, &[], &NothingListed, &NoMacosObjects);
 
     assert!(list.rows.is_empty());
     let (label, _) = list.placeholder(&model.text).unwrap();
@@ -459,7 +467,8 @@ fn the_target_row_decides_whether_the_plan_is_for_a_portable_reaper() {
             portable,
             ..model.target_rows[0].clone()
         };
-        let plan = uninstall_plan_for_target(&model, &target, &[], &NothingListed).unwrap();
+        let plan = uninstall_plan_for_target(&model, &target, &[], &NothingListed, &NoMacosObjects)
+            .unwrap();
         let expected = if portable {
             InstallationKind::Portable
         } else {
@@ -519,6 +528,7 @@ fn rows_build_in_every_locale_without_missing_text() {
         for label in [
             &text.packages_tab_install,
             &text.packages_tab_uninstall,
+            &text.packages_tabs_switch_hint_macos,
             &text.uninstall_list_label,
             &text.uninstall_empty,
             &text.uninstall_empty_details,
@@ -730,6 +740,7 @@ fn review_says_what_goes_and_what_stays_without_listing_files() {
                 size: Some(4_000_000),
                 is_dir: false,
                 receipt_sha256: None,
+                bundle_id: None,
                 guard: Default::default(),
             }],
             ..removable_sws()
@@ -1253,6 +1264,7 @@ fn the_real_sws_plan_offers_its_existing_settings() {
         state: None,
         remove_settings: false,
         vendor_lookup: &NothingListed,
+        objects: &NoMacosObjects,
     });
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
     let list = uninstall_list_from_plan(&localizer, &specs, &plan);
@@ -1389,13 +1401,22 @@ fn the_question_reads_in_every_locale() {
     }
 }
 
-/// Every package RABBIT can remove so far is a file removal that goes into
-/// a backup with no warning that asks, so none of them asks a question.
-/// That includes OSARA: the people who use RABBIT know that REAPER stops
-/// speaking without it. The question is for the packages later phases add.
+/// Every package RABBIT can remove whose files go into a backup, with no
+/// warning that asks, asks no question before it goes. That includes
+/// OSARA: the people who use RABBIT know that REAPER stops speaking
+/// without it. The question is for what a backup can't bring back. On
+/// Windows, REAPER and Surge XT can't be ticked here, as no uninstaller is
+/// found for them. On macOS these roots don't know where REAPER's app is,
+/// so `{app_path}` is refused; Surge XT, which the administrator command
+/// deletes for good, can be ticked, and is the one package that asks.
+/// REAPER's question is tested with its own plans.
 #[test]
-fn no_package_the_wizard_can_remove_yet_asks_a_question() {
+fn only_a_package_a_backup_cant_bring_back_asks_a_question() {
     let dir = tempdir().unwrap();
+    // Surge XT's trees are absolute macOS paths. They are planned below an
+    // empty temporary system root, never the host's real /, so what this
+    // computer has installed can't change the answer.
+    let system = tempdir().unwrap();
     for platform in [Platform::Windows, Platform::MacOs] {
         let specs = builtin_package_specs(platform);
         let detections: Vec<ComponentDetection> = specs
@@ -1416,7 +1437,8 @@ fn no_package_the_wizard_can_remove_yet_asks_a_question() {
                 .collect(),
             ..InstallState::default()
         };
-        let roots = UninstallRoots::for_target(platform, dir.path(), None);
+        let mut roots = UninstallRoots::for_target(platform, dir.path(), None);
+        roots.system_root = system.path().to_path_buf();
         let plan = build_uninstall_plan(&UninstallPlanInput {
             roots: &roots,
             platform,
@@ -1426,7 +1448,21 @@ fn no_package_the_wizard_can_remove_yet_asks_a_question() {
             state: Some(&state),
             remove_settings: false,
             vendor_lookup: &NothingListed,
+            objects: &NoMacosObjects,
         });
+        if platform == Platform::MacOs {
+            assert!(
+                matches!(
+                    plan.item("reaper").map(|item| &item.removability),
+                    Some(Removability::UnsafePath {
+                        refusal: PathRefusal::UnknownRoot { .. },
+                        ..
+                    })
+                ),
+                "{:?}",
+                plan.item("reaper")
+            );
+        }
         let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
         let tickable: Vec<String> = uninstall_list_from_plan(&localizer, &specs, &plan)
             .rows
@@ -1460,11 +1496,23 @@ fn no_package_the_wizard_can_remove_yet_asks_a_question() {
                 "{platform:?}: {id} isn't in {tickable:?}"
             );
         }
+        let (asks, backed_up): (Vec<String>, Vec<String>) =
+            tickable.into_iter().partition(|id| id == "surge-xt");
         assert_eq!(
-            uninstall_confirmation_body(&localizer, &plan, &tickable),
-            None,
-            "{platform:?}: {tickable:?}"
+            asks.len(),
+            usize::from(platform == Platform::MacOs),
+            "{platform:?}: {asks:?}"
         );
+        assert_eq!(
+            uninstall_confirmation_body(&localizer, &plan, &backed_up),
+            None,
+            "{platform:?}: {backed_up:?}"
+        );
+        if !asks.is_empty() {
+            let body = uninstall_confirmation_body(&localizer, &plan, &asks)
+                .expect("Surge XT asks before it goes");
+            assert!(body.contains("Surge XT"), "{body}");
+        }
     }
 }
 
@@ -1494,6 +1542,7 @@ fn osara_says_what_goes_and_what_stays() {
             state: None,
             remove_settings: false,
             vendor_lookup: &NothingListed,
+            objects: &NoMacosObjects,
         });
         let mut list = uninstall_list_from_plan(&localizer, &specs, &plan);
         let row = list
@@ -1897,6 +1946,7 @@ fn the_shipped_vendor_plans_read_in_every_locale() {
         state: None,
         remove_settings: false,
         vendor_lookup: &FoundIt(dir.path().join("uninstall.exe")),
+        objects: &NoMacosObjects,
     });
     for &locale in embedded_locales() {
         let localizer = Localizer::embedded(locale).unwrap();
@@ -1919,6 +1969,724 @@ fn the_shipped_vendor_plans_read_in_every_locale() {
         texts.push(
             uninstall_confirmation_body(&localizer, &plan, &ids(&["reaper", "surge-xt"])).unwrap(),
         );
+        for text in texts {
+            assert!(
+                !text.contains("wizard-") && !text.contains("uninstall-") && !text.contains('{'),
+                "{locale}: {text}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// macOS: the Trash, the administrator command, and apps moved by hand.
+// ---------------------------------------------------------------------------
+
+pub(super) const MAC_RESOURCE: &str = "/Users/me/Library/Application Support/REAPER";
+pub(super) const MAC_REAPER_APP: &str = "/Applications/REAPER.app";
+
+pub(super) fn mac_plan(items: Vec<UninstallPlanItem>) -> UninstallPlan {
+    UninstallPlan {
+        resource_path: PathBuf::from(MAC_RESOURCE),
+        platform: Platform::MacOs,
+        target: InstallationKind::Standard,
+        remove_settings: false,
+        items,
+    }
+}
+
+pub(super) fn mac_list_in(
+    localizer: &Localizer,
+    items: Vec<UninstallPlanItem>,
+) -> WizardUninstallList {
+    uninstall_list_from_plan(
+        localizer,
+        &builtin_package_specs(Platform::MacOs),
+        &mac_plan(items),
+    )
+}
+
+fn mac_list(items: Vec<UninstallPlanItem>) -> WizardUninstallList {
+    mac_list_in(&Localizer::embedded(DEFAULT_LOCALE).unwrap(), items)
+}
+
+/// Surge XT as the macOS plan describes it: deleted for good by the run's
+/// one administrator command, with its settings only listed as kept, a
+/// question first, and the machine-wide warning the plan adds.
+pub(super) fn admin_surge() -> UninstallPlanItem {
+    UninstallPlanItem {
+        summary: Some(UninstallSummary {
+            removes_key: "uninstall-summary-surge-macos-removes".to_string(),
+            keeps_key: "uninstall-summary-surge-keeps".to_string(),
+        }),
+        backup: UninstallBackup::None,
+        files: vec![tree("/Applications/Surge XT.app")],
+        kept: vec![kept(
+            "/Users/me/Library/Application Support/Surge Synth Team/Surge XT",
+            "uninstall-kept-surge-settings-macos",
+            false,
+        )],
+        blocking_programs: vec!["Surge XT".to_string(), "Surge XT Effects".to_string()],
+        macos_pkg_forget: vec!["org.surge-synth-team.surge-xt.app.pkg".to_string()],
+        every_reaper_closed: true,
+        requires_elevation: true,
+        unbacked: true,
+        confirm: true,
+        warnings: vec![UninstallWarning::MachineWide],
+        ..item("surge-xt", Removability::Removable)
+    }
+}
+
+/// REAPER.app as the macOS plan describes one the user may move: to the
+/// Trash, as the user, with no password.
+pub(super) fn trash_reaper() -> UninstallPlanItem {
+    UninstallPlanItem {
+        summary: Some(UninstallSummary {
+            removes_key: "uninstall-summary-reaper-macos-removes".to_string(),
+            keeps_key: "uninstall-summary-reaper-keeps".to_string(),
+        }),
+        backup: UninstallBackup::ToTrash,
+        files: vec![tree(MAC_REAPER_APP)],
+        unbacked: true,
+        confirm: true,
+        ..item("reaper", Removability::Removable)
+    }
+}
+
+/// REAPER.app the user's account may not move: the administrator command
+/// moves it into the user's Trash, with every REAPER closed.
+pub(super) fn root_moved_reaper() -> UninstallPlanItem {
+    UninstallPlanItem {
+        requires_elevation: true,
+        every_reaper_closed: true,
+        ..trash_reaper()
+    }
+}
+
+/// REAPER.app RABBIT can't move at all, for `reason`.
+fn by_hand_reaper(reason: ByHandReason) -> UninstallPlanItem {
+    UninstallPlanItem {
+        removability: Removability::ByHand {
+            path: PathBuf::from(MAC_REAPER_APP),
+            reason,
+        },
+        ..trash_reaper()
+    }
+}
+
+fn tree(path: &str) -> PlannedRemoval {
+    PlannedRemoval {
+        path: PathBuf::from(path),
+        reason: RemovalReason::Tree,
+        size: None,
+        is_dir: true,
+        receipt_sha256: None,
+        bundle_id: None,
+        guard: Default::default(),
+    }
+}
+
+/// Each macOS route says how the package leaves, never that it goes into
+/// a backup: the administrator command deletes it after one password
+/// window; the Trash keeps it until it is emptied; an app only root can
+/// move keeps its owner there. The Windows sentences stay out.
+#[test]
+fn macos_rows_say_how_each_package_leaves() {
+    let list = mac_list(vec![admin_surge()]);
+    let surge = &list.rows[0];
+    assert!(surge.can_tick, "{}", surge.details);
+    for sentence in [
+        "Removes Surge XT's apps and plug-ins, and its factory data in the Library folder. A \
+         backup can't bring them back.",
+        "macOS asks once for an administrator's name and password, before anything is removed. \
+         To have it again, you install it again.",
+        "Your own patches, in the Surge XT folder in your Documents, stay.",
+        "Surge XT serves every REAPER and every other program on this computer",
+    ] {
+        assert!(
+            surge.details.contains(sentence),
+            "{sentence}: {}",
+            surge.details
+        );
+    }
+    // The summary says a backup can't bring it back; the route's line
+    // doesn't say it again.
+    assert_eq!(
+        surge.details.matches("backup").count(),
+        1,
+        "{}",
+        surge.details
+    );
+    // Root's removals never take the user's settings.
+    assert!(surge.settings.is_empty(), "{:?}", surge.settings);
+
+    let reaper_list = mac_list(vec![trash_reaper()]);
+    let reaper = &reaper_list.rows[0];
+    assert!(reaper.can_tick, "{}", reaper.details);
+    for sentence in [
+        "Moves the REAPER app to the Trash.",
+        "Until you empty the Trash, you can drag it back from there.",
+        "Your settings, extensions and projects stay.",
+    ] {
+        assert!(
+            reaper.details.contains(sentence),
+            "{sentence}: {}",
+            reaper.details
+        );
+    }
+    // The summary says where it goes; the route's line doesn't say it again.
+    assert_eq!(
+        reaper.details.matches("to the Trash").count(),
+        1,
+        "{}",
+        reaper.details
+    );
+    assert!(!reaper.details.contains("password"), "{}", reaper.details);
+
+    let root_list = mac_list(vec![root_moved_reaper()]);
+    let root = &root_list.rows[0];
+    assert!(root.can_tick, "{}", root.details);
+    assert!(
+        root.details.contains(
+            "Your account may not move it, so macOS asks once for an administrator's name and \
+             password, before anything is removed, and RABBIT then moves it into your Trash. It \
+             keeps the owner it had, so Finder offers no Put Back for it, and emptying the Trash \
+             may ask for an administrator's password."
+        ),
+        "{}",
+        root.details
+    );
+
+    for row in [surge, reaper, root] {
+        for windows in ["into a backup rather than", "Windows"] {
+            assert!(!row.details.contains(windows), "{windows}: {}", row.details);
+        }
+    }
+}
+
+/// Review names only the extensions that really stay on top of REAPER: one
+/// ticked along with it goes in the same run, and with every one ticked the
+/// line goes. REAPER's own details, about REAPER alone, still name them all.
+#[test]
+fn review_says_only_the_extensions_left_behind_stay_on_top_of_reaper() {
+    let reaper = UninstallPlanItem {
+        warnings: vec![UninstallWarning::DependentsStay {
+            package_ids: vec!["osara".to_string(), "sws".to_string()],
+        }],
+        ..trash_reaper()
+    };
+    let mut list = mac_list(vec![
+        reaper,
+        item("osara", Removability::Removable),
+        removable_sws(),
+    ]);
+    let row = list
+        .rows
+        .iter()
+        .find(|row| row.package_id == "reaper")
+        .unwrap();
+    assert!(
+        row.details
+            .contains("These packages install on top of REAPER and stay: OSARA, SWS Extension."),
+        "{}",
+        row.details
+    );
+
+    tick(&mut list, "reaper");
+    tick(&mut list, "osara");
+    let text = review(&list, Some(&target(true)), false, &[])
+        .lines
+        .join("\n");
+    assert!(
+        text.contains(
+            "These packages install on top of REAPER and stay: SWS Extension. They work again \
+             once you install REAPER again."
+        ),
+        "{text}"
+    );
+
+    tick(&mut list, "sws");
+    let text = review(&list, Some(&target(true)), false, &[])
+        .lines
+        .join("\n");
+    assert!(!text.contains("install on top of REAPER"), "{text}");
+}
+
+/// An app RABBIT can't move to the Trash, by itself or with a password,
+/// can't be ticked. Its row says to move it in Finder, and its details say
+/// why, then the Finder steps for that reason: a Locked app is unlocked
+/// first, and one that isn't REAPER is only the user's to remove if it is.
+#[test]
+fn an_app_only_finder_can_move_says_why_and_how() {
+    let finder = "To remove REAPER, select it in Finder and press Command-Delete. Finder asks for \
+                  an administrator's name and password if it needs one.";
+    for (reason, why, steps) in [
+        (
+            ByHandReason::NotMovableByYou,
+            "Your account may not move /Applications/REAPER.app: it belongs to another account \
+             or to macOS, or its folder is one you can't change.",
+            finder,
+        ),
+        (
+            ByHandReason::Locked,
+            "/Applications/REAPER.app is locked.",
+            "To remove REAPER, select it in Finder and choose File > Get Info. Untick Locked and \
+             close that window, then press Command-Delete.",
+        ),
+        (
+            ByHandReason::NotTheExpectedApp,
+            "/Applications/REAPER.app isn't the REAPER app RABBIT expects there, so RABBIT \
+             leaves it alone.",
+            "If it is the REAPER you want to remove, select it in Finder and press \
+             Command-Delete.",
+        ),
+        (
+            ByHandReason::CouldNotCheck {
+                error: "Permission denied".to_string(),
+            },
+            "RABBIT couldn't check who may move /Applications/REAPER.app (Permission denied).",
+            finder,
+        ),
+        (
+            ByHandReason::NoTrashFolder,
+            "Only an administrator can move /Applications/REAPER.app, and your Trash isn't a \
+             folder of your own that RABBIT can check.",
+            finder,
+        ),
+        (
+            ByHandReason::NotOnTrashVolume,
+            "Only an administrator can move /Applications/REAPER.app, and it is on another disk \
+             than your Trash.",
+            finder,
+        ),
+    ] {
+        let list = mac_list(vec![by_hand_reaper(reason.clone())]);
+        let row = &list.rows[0];
+        assert!(!row.can_tick, "{reason:?}");
+        assert_eq!(
+            row.unavailability_reason.as_deref(),
+            Some("move it to the Trash in Finder"),
+            "{reason:?}"
+        );
+        assert!(
+            row.summary
+                .ends_with("(not available: move it to the Trash in Finder)"),
+            "{}",
+            row.summary
+        );
+        let (Some(at_why), Some(at_steps)) = (row.details.find(why), row.details.find(steps))
+        else {
+            panic!("{reason:?}: {}", row.details);
+        };
+        assert!(at_why < at_steps, "the reason comes first: {}", row.details);
+    }
+    // Get Info's Locked clears only the lock a user sets, so the steps
+    // don't promise to work every time.
+    let list = mac_list(vec![by_hand_reaper(ByHandReason::Locked)]);
+    assert!(
+        list.rows[0].details.contains(
+            "If Locked isn't ticked, or Finder still can't move it, it has a lock that Finder \
+             can't remove."
+        ),
+        "{}",
+        list.rows[0].details
+    );
+}
+
+/// Review names macOS's one password window once, for every package the
+/// administrator command removes: that it may name osascript, that Touch
+/// ID may stand in for the password, and that cancelling it uninstalls
+/// nothing. What goes to the Trash says it can come back from there. A
+/// REAPER the user may move asks for no password at all.
+#[test]
+fn macos_review_names_the_one_password_window_and_the_trash() {
+    let mut list = mac_list(vec![trash_reaper(), admin_surge()]);
+    tick(&mut list, "reaper");
+    tick(&mut list, "surge-xt");
+    let preview = review(&list, Some(&target(true)), false, &[]);
+    let text = preview.lines.join("\n");
+    assert!(preview.can_uninstall);
+    let note = "Before anything is removed, macOS asks once for an administrator's name and \
+                password. It may offer Touch ID instead. The window may name osascript, the tool \
+                RABBIT asks through. With that password, RABBIT runs one administrator command \
+                that uninstalls Surge XT. If you cancel the window, nothing is uninstalled.";
+    assert_eq!(text.matches(note).count(), 1, "{text}");
+    assert_eq!(
+        text.matches("Close other music programs first.").count(),
+        1,
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "REAPER goes to the Trash. Until you empty the Trash, you can drag it back from \
+             there."
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("Windows"), "{text}");
+
+    // The administrator command moves REAPER too: one window for both.
+    let mut list = mac_list(vec![root_moved_reaper(), admin_surge()]);
+    tick(&mut list, "reaper");
+    tick(&mut list, "surge-xt");
+    let text = review(&list, Some(&target(true)), false, &[])
+        .lines
+        .join("\n");
+    assert_eq!(
+        text.matches("macOS asks once for an administrator's name and password")
+            .count(),
+        1,
+        "{text}"
+    );
+    assert!(
+        text.contains("one administrator command that uninstalls REAPER, Surge XT."),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "REAPER goes into your Trash with the administrator's password. It keeps the owner \
+             it had, so Finder offers no Put Back for it"
+        ),
+        "{text}"
+    );
+
+    // REAPER alone, moved as the user: no password, nothing else to close.
+    let mut list = mac_list(vec![trash_reaper()]);
+    tick(&mut list, "reaper");
+    let text = review(&list, Some(&target(true)), false, &[])
+        .lines
+        .join("\n");
+    assert!(!text.contains("password"), "{text}");
+    assert!(!text.contains("Close other music programs"), "{text}");
+}
+
+/// Going to the Trash asks first, in words that fit: the app can come back
+/// from the Trash, unlike what the administrator command deletes, which no
+/// backup brings back. An app only root can move may need an
+/// administrator's password to come back out.
+#[test]
+fn an_app_going_to_the_trash_asks_with_its_own_sentence() {
+    let plan = mac_plan(vec![trash_reaper(), admin_surge()]);
+    assert_eq!(
+        uninstall_confirm_reasons(&plan, &ids(&["reaper", "surge-xt"])),
+        [
+            UninstallConfirmReason::ToTrash {
+                package_id: "reaper".to_string(),
+                by_administrator: false,
+            },
+            UninstallConfirmReason::Unbacked {
+                package_id: "surge-xt".to_string(),
+            },
+        ]
+    );
+    assert_eq!(
+        question(&plan, &["reaper", "surge-xt"]).as_deref(),
+        Some(
+            "REAPER goes to the Trash. You can drag it back from there until you empty the \
+             Trash.\n\nA backup can't bring Surge XT back. To have it again, you install it \
+             again.\n\nUninstall now?"
+        )
+    );
+
+    let plan = mac_plan(vec![root_moved_reaper()]);
+    assert_eq!(
+        uninstall_confirm_reasons(&plan, &ids(&["reaper"])),
+        [UninstallConfirmReason::ToTrash {
+            package_id: "reaper".to_string(),
+            by_administrator: true,
+        }]
+    );
+    let body = question(&plan, &["reaper"]).unwrap();
+    assert!(
+        body.contains("but macOS may ask for an administrator's password for that.")
+            && !body.contains("A backup can't bring REAPER back"),
+        "{body}"
+    );
+}
+
+/// The shipped macOS REAPER plan on a stand-in Mac in a temporary folder,
+/// with REAPER.app in its `/Applications` described by `app` and the
+/// user's Trash a folder of theirs on the same disk. Nothing here reads or
+/// moves a real app.
+fn shipped_mac_reaper_plan(app: ObjectFacts) -> (tempfile::TempDir, UninstallPlan) {
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    let system = dir.path().join("system");
+    let applications = system.join("Applications");
+    let reaper_app = applications.join("REAPER.app");
+    std::fs::create_dir_all(reaper_app.join("Contents")).unwrap();
+    std::fs::create_dir_all(&resource).unwrap();
+    let mut roots = UninstallRoots::new(&resource);
+    roots.system_root = system;
+    roots.app_path = Some(reaper_app.clone());
+    roots.app_dir = Some(applications);
+    let objects = FakeMacosObjects::new()
+        .with_object(&reaper_app, app)
+        .with_trash(TrashFolderFacts {
+            path: PathBuf::from("/Users/me/.Trash"),
+            is_dir: true,
+            is_symlink: false,
+            owner_uid: 501,
+            owned_by_me: true,
+            dev: 1,
+        });
+    let specs = builtin_package_specs(Platform::MacOs);
+    let detections = vec![ComponentDetection {
+        installed: true,
+        version: Some(Version::parse("7.82").unwrap()),
+        ..ComponentDetection::not_installed("reaper", "REAPER")
+    }];
+    let plan = build_uninstall_plan(&UninstallPlanInput {
+        roots: &roots,
+        platform: Platform::MacOs,
+        target: InstallationKind::Standard,
+        specs: &specs,
+        detections: &detections,
+        state: None,
+        remove_settings: false,
+        vendor_lookup: &NothingListed,
+        objects: &objects,
+    });
+    (dir, plan)
+}
+
+/// REAPER.app as macOS describes it to the user who may move it, or, with
+/// `mine` false, to a user only root lets move it.
+fn mac_reaper_app(mine: bool) -> ObjectFacts {
+    ObjectFacts {
+        is_dir: true,
+        is_symlink: false,
+        owner_uid: if mine { 501 } else { 0 },
+        owned_by_me: mine,
+        writable: mine,
+        parent_writable_searchable: true,
+        removable_by_me: mine,
+        parent_sticky: false,
+        parent_owned_by_me: false,
+        locked: false,
+        parent_locked: false,
+        dev: 1,
+        bundle_identifier: Some("com.cockos.reaper".to_string()),
+    }
+}
+
+/// REAPER from the shipped macOS plan, as the wizard shows it: its row can
+/// be ticked on the Trash route and on root's, its details say where it
+/// goes and what stays, and its row, Review and question read in every
+/// language.
+#[test]
+fn the_shipped_macos_reaper_can_be_ticked_and_reads_in_every_locale() {
+    for mine in [true, false] {
+        let (_dir, plan) = shipped_mac_reaper_plan(mac_reaper_app(mine));
+        for &locale in embedded_locales() {
+            let localizer = Localizer::embedded(locale).unwrap();
+            let mut list = uninstall_list_from_plan(
+                &localizer,
+                &builtin_package_specs(Platform::MacOs),
+                &plan,
+            );
+            let row = list
+                .rows
+                .iter()
+                .find(|row| row.package_id == "reaper")
+                .unwrap();
+            assert!(row.can_tick, "{locale}, mine {mine}: {}", row.details);
+            assert!(
+                row.details.contains(
+                    &localizer
+                        .text("uninstall-summary-reaper-macos-removes")
+                        .value
+                ),
+                "{locale}: {}",
+                row.details
+            );
+            assert!(
+                row.details
+                    .contains(&localizer.text("uninstall-summary-reaper-keeps").value),
+                "{locale}: {}",
+                row.details
+            );
+            let mut texts = vec![row.summary.clone(), row.details.clone()];
+            tick(&mut list, "reaper");
+            let preview =
+                build_uninstall_review_preview(&localizer, Some(&target(true)), &list, false, &[]);
+            assert!(preview.can_uninstall, "{locale}: {:?}", preview.lines);
+            texts.push(preview.lines.join("\n"));
+            texts.push(uninstall_confirmation_body(&localizer, &plan, &ids(&["reaper"])).unwrap());
+            for text in texts {
+                assert!(
+                    !text.contains("wizard-")
+                        && !text.contains("uninstall-")
+                        && !text.contains('{'),
+                    "{locale}: {text}"
+                );
+            }
+            if locale == DEFAULT_LOCALE {
+                // Only root's route asks for a password.
+                let details = &list.rows[0].details;
+                assert_eq!(details.contains("password"), !mine, "{details}");
+                // There is no receipt, but the app is found by its name
+                // and bundle ID alone: nothing says it "removes the files".
+                assert!(!details.contains("didn't install"), "{details}");
+            }
+        }
+    }
+}
+
+/// Surge XT from the shipped macOS plan, on a stand-in Mac in a temporary
+/// folder holding its app and its VST3: its row can be ticked, its details
+/// say what goes and what stays, that it goes for every program and that
+/// macOS asks for an administrator's password, and its row, Review and
+/// question read in every language. Nothing here deletes anything.
+#[test]
+fn the_shipped_macos_surge_xt_can_be_ticked_and_reads_in_every_locale() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    let system = dir.path().join("system");
+    for tree in [
+        system.join("Applications").join("Surge XT.app"),
+        system
+            .join("Library")
+            .join("Audio")
+            .join("Plug-Ins")
+            .join("VST3")
+            .join("Surge XT.vst3"),
+    ] {
+        std::fs::create_dir_all(tree.join("Contents")).unwrap();
+    }
+    std::fs::create_dir_all(&resource).unwrap();
+    let mut roots = UninstallRoots::new(&resource);
+    roots.system_root = system;
+    let specs = builtin_package_specs(Platform::MacOs);
+    let detections = vec![ComponentDetection {
+        installed: true,
+        version: Some(Version::parse("1.4.0").unwrap()),
+        ..ComponentDetection::not_installed("surge-xt", "Surge XT")
+    }];
+    let plan = build_uninstall_plan(&UninstallPlanInput {
+        roots: &roots,
+        platform: Platform::MacOs,
+        target: InstallationKind::Standard,
+        specs: &specs,
+        detections: &detections,
+        state: None,
+        remove_settings: false,
+        vendor_lookup: &NothingListed,
+        objects: &NoMacosObjects,
+    });
+    assert_eq!(
+        plan.item("surge-xt").map(|item| item.files.len()),
+        Some(2),
+        "{:?}",
+        plan.item("surge-xt")
+    );
+
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let mut list = uninstall_list_from_plan(&localizer, &specs, &plan);
+        let row = list
+            .rows
+            .iter()
+            .find(|row| row.package_id == "surge-xt")
+            .unwrap();
+        assert!(row.can_tick, "{locale}: {}", row.details);
+        for key in [
+            "uninstall-summary-surge-macos-removes",
+            "uninstall-summary-surge-keeps",
+            "wizard-uninstall-details-elevated-macos",
+        ] {
+            assert!(
+                row.details.contains(&localizer.text(key).value),
+                "{locale}: {key}: {}",
+                row.details
+            );
+        }
+        // Its root's data is never "Also remove settings" material.
+        assert!(row.settings.is_empty(), "{locale}: {:?}", row.settings);
+        let mut texts = vec![row.summary.clone(), row.details.clone()];
+        tick(&mut list, "surge-xt");
+        let preview =
+            build_uninstall_review_preview(&localizer, Some(&target(true)), &list, false, &[]);
+        assert!(preview.can_uninstall, "{locale}: {:?}", preview.lines);
+        texts.push(preview.lines.join("\n"));
+        let question = uninstall_confirmation_body(&localizer, &plan, &ids(&["surge-xt"]))
+            .expect("Surge XT asks before it goes");
+        texts.push(question);
+        for text in texts {
+            assert!(
+                !text.contains("wizard-") && !text.contains("uninstall-") && !text.contains('{'),
+                "{locale}: {text}"
+            );
+        }
+        if locale == DEFAULT_LOCALE {
+            let details = &list.rows[0].details;
+            assert!(
+                details.contains(
+                    "Surge XT serves every REAPER and every other program on this computer"
+                ),
+                "{details}"
+            );
+            let review = preview.lines.join("\n");
+            assert!(
+                review.contains("administrator's name and password"),
+                "{review}"
+            );
+            // Found by its places and names alone: nothing says RABBIT
+            // didn't install it.
+            assert!(!details.contains("didn't install"), "{details}");
+        }
+    }
+}
+
+/// Every macOS row, Review and question reads in every language, with no
+/// key or placeholder left over, the manifest keys only the shipped macOS
+/// plans name included.
+#[test]
+fn macos_rows_review_and_question_read_in_every_locale() {
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let mut texts = Vec::new();
+        for reaper in [trash_reaper(), root_moved_reaper()] {
+            let mut list = mac_list_in(&localizer, vec![reaper, admin_surge()]);
+            texts.extend(list.rows.iter().map(|row| row.details.clone()));
+            tick(&mut list, "reaper");
+            tick(&mut list, "surge-xt");
+            texts.push(
+                build_uninstall_review_preview(&localizer, Some(&target(true)), &list, false, &[])
+                    .lines
+                    .join("\n"),
+            );
+            texts.push(
+                uninstall_confirmation_body(
+                    &localizer,
+                    list.plan.as_ref().unwrap(),
+                    &ids(&["reaper", "surge-xt"]),
+                )
+                .unwrap(),
+            );
+        }
+        for reason in [
+            ByHandReason::NotMovableByYou,
+            ByHandReason::Locked,
+            ByHandReason::NotTheExpectedApp,
+            ByHandReason::CouldNotCheck {
+                error: "denied".to_string(),
+            },
+            ByHandReason::NoTrashFolder,
+            ByHandReason::NotOnTrashVolume,
+        ] {
+            let list = mac_list_in(&localizer, vec![by_hand_reaper(reason)]);
+            texts.push(list.rows[0].summary.clone());
+            texts.push(list.rows[0].details.clone());
+        }
+        for key in [
+            "uninstall-kept-surge-settings-macos",
+            "uninstall-kept-surge-factory-copy-macos",
+        ] {
+            let kept = localizer.text(key);
+            assert!(!kept.missing && !kept.fallback_used, "{locale}: {key}");
+            texts.push(kept.value);
+        }
         for text in texts {
             assert!(
                 !text.contains("wizard-") && !text.contains("uninstall-") && !text.contains('{'),

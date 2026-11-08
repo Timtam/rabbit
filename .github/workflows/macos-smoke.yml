@@ -33,3 +33,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo test -p rabbit-core --test macos_upstream_smoke -- --ignored --test-threads=1
+
+      # The one test that really moves something to the Trash: a throwaway
+      # bundle from a temp folder goes to this runner's Trash through
+      # NSFileManager, the way an uninstall moves REAPER.app. The test is
+      # #[ignore]d and moves nothing without RABBIT_TRASH_SMOKE=1, so no
+      # other test run touches the Trash, and this step only runs when the
+      # workflow is started by hand.
+      - name: Run the Trash smoke test
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RABBIT_TRASH_SMOKE: "1"
+        run: cargo test -p rabbit-platform --lib -- --ignored --exact trash::tests::a_throwaway_bundle_goes_to_the_trash_and_says_where

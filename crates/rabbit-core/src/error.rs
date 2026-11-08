@@ -145,10 +145,30 @@ pub enum RabbitError {
         exit_code: Option<i32>,
     },
 
+    /// The administrator permission prompt was cancelled or declined:
+    /// Windows' UAC prompt, or macOS's administrator password window, as
+    /// when installing Surge XT there. The program never ran.
     #[error(
-        "the Windows administrator approval prompt for {program} was cancelled or declined; re-run and approve the prompt to continue, or pick a portable REAPER target that doesn't need elevation"
+        "the administrator permission prompt for {program} was cancelled or declined; re-run and approve the prompt to continue, or pick a portable REAPER target that doesn't need elevation"
     )]
     UserCancelledElevation { program: String },
+
+    /// macOS's administrator password window ended with an error rather
+    /// than a cancel, so the program never ran. `number` is the AppleScript
+    /// or Authorization error number.
+    #[error(
+        "the administrator password prompt for {program} failed (error {number}), so it never ran and nothing was installed. That happens after a wrong password three times, with an account that isn't an administrator, or where macOS can't show the window, such as over SSH; run RABBIT again and enter the name and password of an administrator"
+    )]
+    AdministratorPromptFailed { program: String, number: i32 },
+
+    /// A macOS uninstall was started with RABBIT itself running as root,
+    /// as under `sudo`. Refused before anything happens: the checks of what
+    /// the user may do, the user's Trash and the backup set would all be
+    /// root's.
+    #[error(
+        "RABBIT is running as root, as it does under sudo, and doesn't uninstall like that: your Trash, the checks of what your account may do and the backup set would all be root's. Run RABBIT as yourself, not with sudo; it asks for an administrator's password itself when it needs one"
+    )]
+    UninstallAsRoot,
 
     #[error(
         "macOS blocked updating {path} ({source}). This is a permission block, not REAPER being open: grant RABBIT Full Disk Access (or App Management) under System Settings > Privacy & Security, then quit and relaunch RABBIT and try again. If that doesn't help, the file may be locked or owned by another account and need to be removed manually."

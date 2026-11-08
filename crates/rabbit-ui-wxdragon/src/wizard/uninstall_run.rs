@@ -8,21 +8,24 @@
 //! The Done page points to that file rather than writing a second one, which
 //! within the same second would even overwrite it. Only a run that failed
 //! before that point leaves nothing behind, so the wizard saves a report of
-//! its own for it.
+//! its own for it, except after the refusal to run as root, which must
+//! leave nothing of root's in the user's resource folder.
 
 use std::path::{Path, PathBuf};
 
 use rabbit_core::localization::Localizer;
-use rabbit_core::model::InstallationKind;
+use rabbit_core::model::{InstallationKind, Platform};
 use rabbit_core::package::PACKAGE_REAPER;
+use rabbit_core::package::uninstall::UninstallBackup;
 use rabbit_core::preflight::{
     PreflightCheck, PreflightReport, PreflightStatus, REAPER_PROCESS_CHECK,
 };
 use rabbit_core::report::{default_report_path, save_json_and_text_reports};
 use rabbit_core::uninstall::{
-    ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, KeptFileReason, LeftoverResult,
-    PROGRAMS_RUNNING_CHECK, RegistryEntryAction, UninstallMessage, UninstallPlan, UninstallProblem,
-    UninstallReport, UninstallReportItem, UninstallRequest, UninstallStatus,
+    ANY_REAPER_PROCESS_CHECK, AdministratorStepKind, AdministratorStepVerdict, BACKUP_SPACE_CHECK,
+    KeptFileReason, LeftoverResult, PROGRAMS_RUNNING_CHECK, RegistryEntryAction, Removability,
+    RemovedFile, UninstallMessage, UninstallPlan, UninstallProblem, UninstallReport,
+    UninstallReportItem, UninstallRequest, UninstallStatus,
 };
 use rabbit_core::{RabbitError, Result};
 use serde::Serialize;
@@ -30,7 +33,7 @@ use serde::Serialize;
 use super::model::{TargetRow, WizardModel};
 use super::outcome::wizard_error_reason;
 use super::packages::localized_package_display_name;
-use super::uninstall::{WizardUninstallList, refusal_text};
+use super::uninstall::{WizardUninstallList, by_hand_lines, refusal_text};
 
 /// What the engine is asked to do when the Uninstall button is pressed: the
 /// ticked packages, from the target Review named, with "Also remove
@@ -116,9 +119,11 @@ pub fn uninstall_blocker(
     // A package every REAPER on the computer may load needs all of them
     // closed, which covers the target's REAPER too: one sentence, not two.
     let reaper = if failed(ANY_REAPER_PROCESS_CHECK) {
-        // REAPER is never among the packages every REAPER can use: its own
-        // uninstaller needs them all closed because it doesn't run while
-        // any REAPER is open, and alone it says so.
+        // REAPER is never among the packages every REAPER can use. On
+        // Windows its own uninstaller needs them all closed because it
+        // doesn't run while any REAPER is open; on macOS the administrator
+        // command that moves its app can't tell one REAPER from another.
+        // Alone, each says so.
         let packages = ticked()
             .filter(|item| item.every_reaper_closed && item.package_id != PACKAGE_REAPER)
             .map(|item| localized_package_display_name(localizer, &item.package_id))
@@ -126,7 +131,11 @@ pub fn uninstall_blocker(
             .join(", ");
         lines.push(if packages.is_empty() {
             localizer
-                .text("wizard-reaper-running-uninstall-reaper-body")
+                .text(if plan.platform == Platform::MacOs {
+                    "wizard-reaper-running-uninstall-reaper-body-macos"
+                } else {
+                    "wizard-reaper-running-uninstall-reaper-body"
+                })
                 .value
         } else {
             localizer
@@ -252,16 +261,30 @@ pub enum UninstallOutcomeStatus {
     /// Everything ticked is gone, but some of it only once the computer
     /// restarts.
     PendingRestart,
-    /// The Windows permission prompt was declined, so nothing was
-    /// uninstalled at all.
+    /// The administrator permission prompt was declined, Windows' or
+    /// macOS's password window, so nothing was uninstalled at all.
     PermissionDeclined,
+    /// No package was uninstalled, but the macOS administrator command
+    /// removed part of one before it stopped. What it removed can't be put
+    /// back, so "nothing was uninstalled" would hide it.
+    PartlyRemoved,
+}
+
+/// Part of the package is gone and part is still there: the macOS
+/// administrator command stopped in the middle of it. Its status is Failed,
+/// but unlike any other failure, nothing was put back.
+pub fn partly_removed(item: &UninstallReportItem) -> bool {
+    matches!(
+        &item.message_code,
+        UninstallMessage::AdministratorStepFailed { gone, .. } if !gone.is_empty()
+    )
 }
 
 /// The status of a run that returned a report. A declined permission prompt
 /// comes first: it is why nothing happened at all. Then a stop outranks a
 /// problem, as for an install: "you stopped it" explains a half-finished
 /// run, where "finished with problems" would send the user looking for a
-/// fault.
+/// fault. A package removed only in part is never "nothing uninstalled".
 pub fn uninstall_outcome_status(report: &UninstallReport) -> UninstallOutcomeStatus {
     if report.elevation_declined() {
         UninstallOutcomeStatus::PermissionDeclined
@@ -275,6 +298,8 @@ pub fn uninstall_outcome_status(report: &UninstallReport) -> UninstallOutcomeSta
         } else {
             UninstallOutcomeStatus::Success
         }
+    } else if report.items.iter().any(partly_removed) {
+        UninstallOutcomeStatus::PartlyRemoved
     } else if report
         .items
         .iter()
@@ -339,8 +364,28 @@ pub fn wizard_uninstall_outcome(
         UninstallOutcomeStatus::PendingRestart => {
             format("wizard-done-uninstall-status-pending-restart")
         }
+        // macOS's window asks for a password, and is cancelled rather than
+        // declined; Windows' asks for permission.
+        UninstallOutcomeStatus::PermissionDeclined if report.platform == Platform::MacOs => {
+            format("wizard-done-uninstall-status-declined-macos")
+        }
         UninstallOutcomeStatus::PermissionDeclined => {
             format("wizard-done-uninstall-status-declined")
+        }
+        UninstallOutcomeStatus::PartlyRemoved => {
+            let partly = report
+                .items
+                .iter()
+                .filter(|item| partly_removed(item))
+                .map(|item| package_name(localizer, item))
+                .collect::<Vec<_>>()
+                .join(", ");
+            localizer
+                .format(
+                    "wizard-done-uninstall-status-partly-removed",
+                    &[("packages", partly.as_str())],
+                )
+                .value
         }
     };
     let mut blocks = vec![heading.clone()];
@@ -366,12 +411,12 @@ pub fn wizard_uninstall_outcome(
     if !reasons.is_empty() {
         blocks.push(reasons.join("\n"));
     }
-    if report.changed_anything() {
+    if report.changed_anything() || status == UninstallOutcomeStatus::PartlyRemoved {
         if status == UninstallOutcomeStatus::Cancelled {
             blocks.push(format("wizard-done-uninstall-removed-before-stop"));
         }
         // There is no way back to the package list from Done, so the way to
-        // undo a removal is a new run.
+        // undo a removal, whole or in part, is a new run.
         blocks.push(localizer.text("wizard-done-uninstall-reinstall-hint").value);
     }
     WizardUninstallOutcome {
@@ -463,6 +508,14 @@ pub fn save_wizard_uninstall_outcome(
     Ok(())
 }
 
+/// Whether Done may save a report of its own for a run that ended in
+/// `error`. Not after the refusal to run as root, as under sudo: the files,
+/// and any RABBIT or logs folder made for them, would be root's, in the
+/// user's resource folder. The engine refuses first so that it leaves none.
+pub fn saves_report_after_error(error: &RabbitError) -> bool {
+    !matches!(error, RabbitError::UninstallAsRoot)
+}
+
 /// Why packages stayed, or what to look at after a removal, one sentence
 /// each and each said once, in the user's language where RABBIT knows the
 /// reason. Packages that only stayed because an earlier one stopped the run
@@ -470,7 +523,7 @@ pub fn save_wizard_uninstall_outcome(
 pub fn uninstall_reasons(localizer: &Localizer, report: &UninstallReport) -> Vec<String> {
     let mut reasons: Vec<String> = Vec::new();
     for item in &report.items {
-        for reason in item_reasons(localizer, item) {
+        for reason in item_reasons(localizer, report, item) {
             if !reasons.contains(&reason) {
                 reasons.push(reason);
             }
@@ -479,7 +532,35 @@ pub fn uninstall_reasons(localizer: &Localizer, report: &UninstallReport) -> Vec
     reasons
 }
 
-fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String> {
+/// The programs the macOS administrator command looked for first, when that
+/// first step didn't come back with "nothing found": one of them was
+/// running, or pgrep couldn't check. Either way the command changed
+/// nothing. `None` for any other run.
+fn programs_check_failed(report: &UninstallReport) -> Option<&str> {
+    report
+        .administrator_steps
+        .iter()
+        .find(|step| {
+            step.kind == AdministratorStepKind::ProgramsClosed
+                && step.verdict == AdministratorStepVerdict::Failed
+        })
+        .map(|step| step.target.as_str())
+}
+
+/// The administrator command moved the package's app into the Trash, rather
+/// than RABBIT as the user: the app keeps the owner it had there.
+fn moved_by_administrator(report: &UninstallReport, item: &UninstallReportItem) -> bool {
+    report.administrator_steps.iter().any(|step| {
+        step.kind == AdministratorStepKind::MoveToTrash
+            && step.package_id.as_deref() == Some(item.package_id.as_str())
+    })
+}
+
+fn item_reasons(
+    localizer: &Localizer,
+    report: &UninstallReport,
+    item: &UninstallReportItem,
+) -> Vec<String> {
     let package = package_name(localizer, item);
     let with_package = |key: &str| {
         localizer
@@ -491,11 +572,28 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
             .format(key, &[("package", package.as_str()), (name, value)])
             .value
     };
+    let app_management = || localizer.text("wizard-done-uninstall-app-management").value;
     let mut reasons = Vec::new();
     match &item.message_code {
         UninstallMessage::Removed { .. }
         | UninstallMessage::WouldRemove
-        | UninstallMessage::UninstalledByVendor => {}
+        | UninstallMessage::UninstalledByVendor
+        | UninstallMessage::RemovedAsAdministrator => {}
+        // Where it is in the Trash, when RABBIT saw it there, and that it
+        // can come back from there. Never a place RABBIT didn't see.
+        UninstallMessage::MovedToTrash { trashed_to } => {
+            reasons.push(match trashed_to {
+                Some(path) => with(
+                    "wizard-done-uninstall-moved-to-trash",
+                    "path",
+                    &path.display().to_string(),
+                ),
+                None => with_package("wizard-done-uninstall-moved-to-trash-unknown"),
+            });
+            if moved_by_administrator(report, item) {
+                reasons.push(localizer.text("wizard-done-uninstall-trash-owner").value);
+            }
+        }
         // Done's first line says the prompt was declined, for every package.
         UninstallMessage::ElevationDeclined => {}
         UninstallMessage::VendorRefused { refusal } => {
@@ -555,6 +653,17 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
                 );
             }
         }
+        // Refused before any password window: the administrator command
+        // couldn't be put together, so macOS was never asked.
+        UninstallMessage::ElevationFailed { error }
+            if report.platform == Platform::MacOs && item.status == UninstallStatus::Blocked =>
+        {
+            reasons.push(with(
+                "wizard-done-uninstall-admin-steps-refused",
+                "error",
+                error,
+            ));
+        }
         UninstallMessage::ElevationFailed { error } => reasons.push(with(
             "wizard-done-uninstall-elevation-failed",
             "error",
@@ -581,11 +690,28 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
         | UninstallMessage::RunStopped { .. }
         | UninstallMessage::OtherPackageBlocked { .. } => {}
         UninstallMessage::ChecksFailed { checks } => {
-            for check in checks
-                .iter()
-                .filter(|check| check.status == PreflightStatus::Fail)
-            {
-                reasons.push(check_reason(localizer, check));
+            match programs_check_failed(report) {
+                // The administrator command's first step didn't come back
+                // with "nothing found": one of the programs it looks for
+                // was running, or pgrep couldn't check. Said once, with
+                // every name root looked for, rather than as a check that
+                // ran before anything started.
+                Some(programs) => reasons.push(
+                    localizer
+                        .format(
+                            "wizard-done-uninstall-program-started",
+                            &[("programs", programs)],
+                        )
+                        .value,
+                ),
+                None => {
+                    for check in checks
+                        .iter()
+                        .filter(|check| check.status == PreflightStatus::Fail)
+                    {
+                        reasons.push(check_reason(localizer, check));
+                    }
+                }
             }
         }
         UninstallMessage::FileInUse { path, .. } => reasons.push(
@@ -599,6 +725,12 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
                 )
                 .value,
         ),
+        // A macOS app that changed between Review and the run, so that
+        // only the user can move it now: why, and the Finder steps, as the
+        // row says them.
+        UninstallMessage::NotRemovable {
+            removability: Removability::ByHand { path, reason },
+        } => reasons.extend(by_hand_lines(localizer, path, reason, &package)),
         // Rare enough that the engine's English sentence, which names the
         // file and the error, says it best.
         UninstallMessage::UnknownPackage
@@ -609,6 +741,59 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
         | UninstallMessage::MoveFailed { .. }
         | UninstallMessage::BackupFailed { .. }
         | UninstallMessage::ReceiptSaveFailed { .. } => reasons.push(item.message.clone()),
+        // App Management lets macOS refuse a move, and later a deletion,
+        // even to root; turning RABBIT on there is the way past it.
+        UninstallMessage::TrashFailed {
+            error,
+            refused_by_macos,
+        } => {
+            reasons.push(with("wizard-done-uninstall-trash-failed", "error", error));
+            if *refused_by_macos {
+                reasons.push(app_management());
+            }
+        }
+        UninstallMessage::TrashUnclear { path } => reasons.push(with(
+            "wizard-done-uninstall-trash-unclear",
+            "path",
+            &path.display().to_string(),
+        )),
+        // Never "put back": what root removed stays removed. Show details
+        // lists what is gone and what is left. Where the command stopped
+        // only when its step was this package's, and "without saying" only
+        // when the command didn't say: otherwise it stopped at another
+        // package's step, or ran to its end, and this is still there.
+        UninstallMessage::AdministratorStepFailed {
+            path,
+            ended_unclearly,
+            gone,
+            left,
+            refused_by_macos,
+            ..
+        } => {
+            // `rm -R -f` deletes all it can inside a tree before it fails,
+            // so a tree deleted for good that it stopped at may be half
+            // gone. REAPER's move is one rename: its app went or it didn't.
+            let deleted_for_good = report.plan.item(&item.package_id).is_some_and(|planned| {
+                planned.needs_administrator() && planned.backup != UninstallBackup::ToTrash
+            });
+            let (key, shown) = match (path, *ended_unclearly, gone.is_empty()) {
+                (Some(path), _, true) if deleted_for_good => {
+                    ("wizard-done-uninstall-admin-delete-failed", Some(path))
+                }
+                (Some(path), _, true) => ("wizard-done-uninstall-admin-step-failed", Some(path)),
+                (Some(path), _, false) => ("wizard-done-uninstall-partly-removed", Some(path)),
+                (None, true, true) => ("wizard-done-uninstall-admin-stopped", None),
+                (None, true, false) => ("wizard-done-uninstall-partly-removed-unclear", None),
+                (None, false, _) => ("wizard-done-uninstall-admin-left", left.first()),
+            };
+            let path = shown
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            reasons.push(with(key, "path", &path));
+            if *refused_by_macos {
+                reasons.push(app_management());
+            }
+        }
     }
     if item.status == UninstallStatus::RemovedPendingRestart {
         reasons.push(with_package("wizard-done-uninstall-pending-restart"));
@@ -646,6 +831,20 @@ fn item_reasons(localizer: &Localizer, item: &UninstallReportItem) -> Vec<String
                     "wizard-done-uninstall-installed-list-unreadable",
                 ));
             }
+            // Show details names the receipts, as it names a registry entry.
+            UninstallProblem::InstallerRecordsRemain { .. } => {
+                reasons.push(with_package(
+                    "wizard-done-uninstall-installer-records-remain",
+                ));
+            }
+            UninstallProblem::InstallerRecordsUnchecked { error } => reasons.push(with(
+                "wizard-done-uninstall-installer-records-unchecked",
+                "error",
+                error,
+            )),
+            UninstallProblem::AdministratorEndedUnclearly { .. } => {
+                reasons.push(with_package("wizard-done-uninstall-admin-unclear"));
+            }
         }
     }
     reasons
@@ -679,10 +878,11 @@ fn vendor_still_present(item: &UninstallReportItem) -> &[PathBuf] {
 }
 
 /// "Show details" after an uninstall: the target, then for each package
-/// what became of it, the files it removed, kept and left behind, its
-/// entries in Windows' list of installed programs, and why it stayed; then
-/// the backup set with a command per package to bring it back, and where
-/// the report is.
+/// what became of it, the files it removed (into the backup set, to the
+/// Trash and where it is there, or with administrator rights), kept and
+/// left behind, its entries in Windows' list of installed programs, the
+/// installer receipts macOS still lists, and why it stayed; then the backup
+/// set with a command for each package it holds, and where the report is.
 pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallReport) -> Vec<String> {
     let path_line = |key: &str, path: &Path| {
         localizer
@@ -717,16 +917,41 @@ pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallRepor
                 )
                 .value,
         );
-        lines.extend(
-            item.removed
-                .iter()
-                .map(|file| file_line("wizard-summary-removed-file", &file.path)),
-        );
+        for file in &item.removed {
+            lines.push(file_line(removed_file_key(item, file), &file.path));
+            // Only a place RABBIT saw: macOS named it, or RABBIT found it.
+            if let Some(trashed_to) = &file.trashed_to {
+                lines.push(file_line("wizard-summary-in-trash-as", trashed_to));
+            }
+        }
         lines.extend(
             item.removed_dirs
                 .iter()
                 .map(|dir| file_line("wizard-summary-removed-file", dir)),
         );
+        // The administrator command stopped part of the way through: what
+        // it removed, what is still there, and macOS's own words on why.
+        if let UninstallMessage::AdministratorStepFailed {
+            gone, left, detail, ..
+        } = &item.message_code
+        {
+            lines.extend(
+                gone.iter()
+                    .map(|path| file_line("wizard-summary-removed-as-admin", path)),
+            );
+            lines.extend(
+                left.iter()
+                    .map(|path| file_line("wizard-summary-left-over", path)),
+            );
+            if let Some(detail) = detail {
+                lines.push(format!(
+                    "  {}",
+                    localizer
+                        .format("wizard-summary-macos-said", &[("error", detail.as_str())])
+                        .value
+                ));
+            }
+        }
         // A vendor's uninstaller: which one ran, the links and empty folders
         // RABBIT removed after it, and what goes at the next restart.
         if let Some(vendor) = &item.vendor {
@@ -776,8 +1001,20 @@ pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallRepor
                 .map(|path| file_line("wizard-summary-left-in-backup", path)),
         );
         lines.extend(registry_lines(localizer, item));
+        lines.extend(item.problems.iter().filter_map(|problem| match problem {
+            UninstallProblem::InstallerRecordsRemain { ids } => Some(format!(
+                "  {}",
+                localizer
+                    .format(
+                        "wizard-summary-installer-records-remain",
+                        &[("ids", ids.join(", ").as_str())],
+                    )
+                    .value
+            )),
+            _ => None,
+        }));
         lines.extend(
-            item_reasons(localizer, item)
+            item_reasons(localizer, report, item)
                 .into_iter()
                 .map(|reason| format!("  {reason}")),
         );
@@ -791,7 +1028,13 @@ pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallRepor
                 )
                 .value,
         );
-        for item in report.items.iter().filter(|item| item.status.is_removed()) {
+        // Only a package whose files went into the backup set can come back
+        // from it. What a vendor's uninstaller or the macOS administrator
+        // command removed, or what went to the Trash, isn't in the set,
+        // even when another package of the same run is.
+        for item in report.items.iter().filter(|item| {
+            item.status.is_removed() && item.removed.iter().any(|file| file.backup_path.is_some())
+        }) {
             let command = format!(
                 "rabbit restore-backup --resource-path \"{}\" --backup-id {set_id} --package {} \
                  --apply",
@@ -818,6 +1061,21 @@ pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallRepor
         ));
     }
     lines
+}
+
+/// How Show details names one path the run removed: moved into the backup
+/// set, to the Trash, or deleted by the macOS administrator command. A
+/// setting that went into the backup set beside an app in the Trash is
+/// still a plain removal.
+fn removed_file_key(item: &UninstallReportItem, file: &RemovedFile) -> &'static str {
+    if file.backup_path.is_some() {
+        return "wizard-summary-removed-file";
+    }
+    match item.message_code {
+        UninstallMessage::MovedToTrash { .. } => "wizard-summary-moved-to-trash",
+        UninstallMessage::RemovedAsAdministrator => "wizard-summary-removed-as-admin",
+        _ => "wizard-summary-removed-file",
+    }
 }
 
 /// What became of a package's entries in Windows' list of installed
@@ -850,7 +1108,10 @@ fn registry_lines(localizer: &Localizer, item: &UninstallReportItem) -> Vec<Stri
         | UninstallProblem::ReceiptNotSaved { .. }
         | UninstallProblem::VendorWorkingFolderLeft { .. }
         | UninstallProblem::RestartListUnreadable { .. }
-        | UninstallProblem::InstalledListUnreadable { .. } => None,
+        | UninstallProblem::InstalledListUnreadable { .. }
+        | UninstallProblem::InstallerRecordsRemain { .. }
+        | UninstallProblem::InstallerRecordsUnchecked { .. }
+        | UninstallProblem::AdministratorEndedUnclearly { .. } => None,
     }));
     lines
 }

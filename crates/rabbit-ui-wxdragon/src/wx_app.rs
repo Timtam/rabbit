@@ -279,6 +279,7 @@ pub fn run() {
         bind_expert_mode_chord(&frame, &model, wizard_widgets, &current_step);
         bind_packages_tab_switching(
             &frame,
+            &close,
             &model,
             wizard_widgets,
             &uninstall_list,
@@ -355,9 +356,12 @@ pub fn run() {
                     reapack_ack_confirmed(&widgets),
                 );
                 if current == REVIEW_STEP && wizard_mode.get() == WizardMode::Uninstall {
-                    // Back sits outside the wizard page, so focus would stay
-                    // on it. The Uninstall tab is still the one showing; put
-                    // the user back in its list, on the row they left.
+                    // Showing the page puts focus back on the tab strip, its
+                    // last focused control, or leaves it on Back where the
+                    // strip can't take focus (macOS without keyboard
+                    // navigation). The Uninstall tab is still the one
+                    // showing; put the user back in its list, on the row
+                    // they left.
                     focus_uninstall_list(&widgets);
                 }
             });
@@ -634,6 +638,7 @@ pub fn run() {
                         &refreshed_target,
                         &plan.detections,
                         &rabbit_core::uninstall::SystemVendorLookup,
+                        &rabbit_core::uninstall::SystemMacosObjects,
                     );
                     rebuild_uninstall_list_widgets(
                         &widgets,
