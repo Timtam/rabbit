@@ -514,9 +514,13 @@ fn rows_build_in_every_locale_without_missing_text() {
                     },
                 },
             ),
-            // The JAWS scripts: removable with the notes on script files
-            // that stay, refused for their uninstaller folder or registry
-            // entry, left to another account, and from a portable REAPER.
+            // The JAWS scripts: removable with their uninstaller folder and
+            // registry entry, with or without files left to move, and with
+            // the notes on script files that stay; refused for their
+            // uninstaller folder or registry entry, left to another
+            // account, and from a portable REAPER.
+            jaws_with_cleanup(),
+            jaws_cleanup_only(),
             UninstallPlanItem {
                 notes: vec![
                     UninstallNote::NoVendorRecord,
@@ -530,7 +534,7 @@ fn rows_build_in_every_locale_without_missing_text() {
                 "jaws-scripts",
                 Removability::CleanupNotTrusted {
                     refusal: VendorRefusal::UntrustedFolder {
-                        path: PathBuf::from("C:/Program Files (x86)/Reaper_JawsScripts"),
+                        path: PathBuf::from(JAWS_FOLDER),
                     },
                     by_hand_key: BY_HAND_KEY.to_string(),
                 },
@@ -1350,9 +1354,11 @@ fn removals_that_go_into_a_backup_need_no_question() {
     assert_eq!(question(&plan, &["sws", "reapack", "reakontrol"]), None);
 }
 
-/// A plan as later phases bring them: Surge XT's vendor uninstaller, which
-/// a backup can't undo, and the JAWS scripts, whose manifest is to ask
-/// before they go. The warning's text is borrowed: any manifest's will do.
+/// A plan with both kinds of question: Surge XT's vendor uninstaller, which
+/// a backup can't undo, and a manifest's warning that asks before its
+/// package goes. No shipped manifest asks that way; the JAWS scripts stand
+/// in for one, with a borrowed warning. Their own question, about their
+/// uninstaller folder and registry entry, has tests of its own.
 fn plan_with_questions() -> UninstallPlan {
     plan(vec![
         UninstallPlanItem {
@@ -1883,9 +1889,9 @@ fn an_uninstaller_rabbit_cant_trust_says_why_and_how_to_remove_it_by_hand() {
 }
 
 // ---------------------------------------------------------------------------
-// The JAWS scripts: rows RABBIT leaves alone because of the uninstaller
-// folder and registry entry their installer left, and the notes on the
-// script files that stay.
+// The JAWS scripts: rows whose uninstaller folder and registry entry the
+// elevated helper removes, rows RABBIT leaves alone because of them, the
+// notes on the script files that stay, Review and the question.
 // ---------------------------------------------------------------------------
 
 /// Steps over several lines, standing in for a package's steps to remove it
@@ -1894,7 +1900,142 @@ pub(super) const BY_HAND_KEY: &str = "uninstall-manual-reaper-portable";
 
 /// One sentence, standing in for the note on removing by hand the script
 /// files that stay.
-const SCRIPTS_NOTE_KEY: &str = "uninstall-note-reapack-packages-stay";
+pub(super) const SCRIPTS_NOTE_KEY: &str = "uninstall-note-reapack-packages-stay";
+
+pub(super) const JAWS: &str = "Snowman's JAWS Scripts for REAPER";
+pub(super) const JAWS_DLL: &str = "C:/REAPER/UserPlugins/Reaper_ComAccess64.dll";
+pub(super) const JAWS_SCRIPT: &str =
+    "C:/Users/me/AppData/Roaming/Freedom Scientific/JAWS/2025/Settings/enu/reaper.jss";
+pub(super) const JAWS_FOLDER: &str = "C:/Program Files (x86)/Reaper_JawsScripts";
+pub(super) const JAWS_KEY: &str =
+    r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Reaper_JawsScripts";
+
+/// `name` in the JAWS scripts' uninstaller folder, spelled the same way in
+/// plan items and reports.
+pub(super) fn jaws_folder_file(name: &str) -> String {
+    format!("{JAWS_FOLDER}/{name}")
+}
+
+/// What the question and Review say a backup can't bring back of the JAWS
+/// scripts while their files go into the backup.
+const JAWS_PARTLY_UNBACKED: &str = "A backup can bring back Snowman's JAWS Scripts for REAPER's \
+                                    files, but not its uninstaller folder in Program Files and \
+                                    its registry entry, which RABBIT removes with administrator \
+                                    rights.";
+
+/// The same once none of their files are left to move.
+const JAWS_UNBACKED: &str = "A backup can't bring Snowman's JAWS Scripts for REAPER back. To have \
+                             it again, you install it again.";
+
+const PERMISSION_NOTE: &str = "Windows asks for your permission once, before anything is \
+                               removed. If you don't allow it, nothing is uninstalled.";
+
+/// The JAWS scripts as planned while their installer's uninstaller folder
+/// and registry entry are there: a plug-in from the receipt and a script
+/// file their installer added go into the backup, then the elevated helper
+/// removes both files of the folder, the folder and the entry. Its two
+/// sentences are SWS's, standing in for the scripts' own.
+pub(super) fn jaws_with_cleanup() -> UninstallPlanItem {
+    let file = |path: &str, reason| PlannedRemoval {
+        path: PathBuf::from(path),
+        reason,
+        size: Some(3),
+        is_dir: false,
+        receipt_sha256: None,
+        bundle_id: None,
+        guard: Default::default(),
+    };
+    UninstallPlanItem {
+        summary: Some(UninstallSummary {
+            removes_key: "uninstall-summary-sws-removes".to_string(),
+            keeps_key: "uninstall-summary-sws-keeps".to_string(),
+        }),
+        files: vec![
+            file(JAWS_DLL, RemovalReason::Receipt),
+            file(JAWS_SCRIPT, RemovalReason::VendorAdded),
+        ],
+        machine_cleanup: Some(PlannedMachineCleanup {
+            files: vec![
+                PathBuf::from(jaws_folder_file("Uninstall.dat")),
+                PathBuf::from(jaws_folder_file("Uninstall.exe")),
+            ],
+            folder: Some(PathBuf::from(JAWS_FOLDER)),
+            registry_key: Some(JAWS_KEY.to_string()),
+            by_hand_key: BY_HAND_KEY.to_string(),
+        }),
+        every_reaper_closed: true,
+        confirm: true,
+        notes: vec![UninstallNote::VendorFilesByHand {
+            note_key: SCRIPTS_NOTE_KEY.to_string(),
+        }],
+        ..item("jaws-scripts", Removability::Removable)
+    }
+}
+
+/// The JAWS scripts with only their uninstaller folder and registry entry
+/// left to remove: none of their files are in this account any more, but
+/// the receipt says this account installed them.
+fn jaws_cleanup_only() -> UninstallPlanItem {
+    UninstallPlanItem {
+        files: Vec::new(),
+        ..jaws_with_cleanup()
+    }
+}
+
+/// The JAWS scripts once their uninstaller folder and registry entry are
+/// gone, as after a restore: everything left goes into the backup.
+fn jaws_without_cleanup() -> UninstallPlanItem {
+    UninstallPlanItem {
+        machine_cleanup: None,
+        confirm: false,
+        ..jaws_with_cleanup()
+    }
+}
+
+/// A JAWS row whose uninstaller folder and registry entry the elevated
+/// helper removes can be ticked. After what goes and that the files go into
+/// a backup, it says only an administrator may remove the folder and entry,
+/// so Windows asks, and that a backup can't bring those back; then what
+/// stays and how to remove the script files that stay. With none of the
+/// files left to move, the backup's line goes, and the cleanup's line says
+/// how the package goes on its own.
+#[test]
+fn a_jaws_row_with_a_cleanup_says_windows_asks_and_a_backup_cant_bring_those_back() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let text = |key: &str| localizer.text(key).value;
+    let removes = text("uninstall-summary-sws-removes");
+    let keeps = text("uninstall-summary-sws-keeps");
+    let note = text(SCRIPTS_NOTE_KEY);
+    let backup = "RABBIT moves the files into a backup rather than deleting them.".to_string();
+    let cleanup = format!(
+        "Only an administrator may remove {JAWS}'s uninstaller folder in Program Files and its \
+         registry entry, so Windows asks for your permission before anything is removed. A \
+         backup can't bring those back."
+    );
+    for (jaws, lines) in [
+        (
+            jaws_with_cleanup(),
+            vec![
+                removes.clone(),
+                backup.clone(),
+                cleanup.clone(),
+                keeps.clone(),
+                note.clone(),
+            ],
+        ),
+        (jaws_cleanup_only(), vec![removes, cleanup, keeps, note]),
+    ] {
+        let mut row = rows_for(vec![jaws]).remove(0);
+        assert!(row.can_tick, "{}", row.details);
+        assert_eq!(row.unavailability_reason, None);
+        assert_eq!(
+            row.details,
+            format!("{}\n\n{}", row.summary, lines.join("\n"))
+        );
+        assert!(apply_uninstall_checkbox(&mut row, true));
+        assert!(row.details.ends_with(&lines.join("\n")), "{}", row.details);
+    }
+}
 
 /// Each line of the stand-in steps to remove a package by hand, in English.
 pub(super) fn by_hand_lines_en() -> Vec<String> {
@@ -2038,13 +2179,19 @@ fn review_names_the_one_permission_prompt_and_the_question_covers_each_package()
     let preview = review(&list, Some(&target(true)), false, &[]);
     let text = preview.lines.join("\n");
     assert!(preview.can_uninstall);
-    let note = "Windows asks for your permission once, before anything is removed. If you don't \
-                allow it, nothing is uninstalled.";
-    assert_eq!(text.matches(note).count(), 1, "{text}");
+    assert_eq!(text.matches(PERMISSION_NOTE).count(), 1, "{text}");
     for package in ["REAPER", "Surge XT"] {
         assert!(
             text.contains(&format!(
                 "If a window from {package}'s own uninstaller appears, answer it."
+            )),
+            "{text}"
+        );
+        // The question's sentence is added only for a package whose own
+        // line leaves out what a backup can't bring back.
+        assert!(
+            !text.contains(&format!(
+                "A backup can't bring {package} back. To have it again"
             )),
             "{text}"
         );
@@ -2063,7 +2210,7 @@ fn review_names_the_one_permission_prompt_and_the_question_covers_each_package()
         .lines
         .join("\n");
     assert!(text.contains("Close other music programs first."), "{text}");
-    assert!(text.contains(note), "{text}");
+    assert!(text.contains(PERMISSION_NOTE), "{text}");
 
     // SWS alone goes into a backup, with no prompt and no question.
     let mut sws_only = list_for(vec![removable_sws()]);
@@ -2085,39 +2232,159 @@ fn review_names_the_one_permission_prompt_and_the_question_covers_each_package()
 }
 
 /// A package whose uninstaller folder and registry entry the elevated
-/// helper removes raises the run's one permission prompt too. But no window
-/// of a vendor's own uninstaller appears, and nothing it removes serves
-/// other music programs, so Review asks for neither.
+/// helper removes raises the run's one permission prompt too. Its own line
+/// leaves the folder and entry out, so Review then says what of it a backup
+/// can't bring back, as the question will: the folder and entry while its
+/// files go into the backup, the whole package once none are left to move.
+/// No window of a vendor's own uninstaller appears, and nothing it removes
+/// serves other music programs, so Review asks for neither. It reads so in
+/// every language.
 #[test]
-fn review_names_the_permission_prompt_for_a_cleanup_but_no_vendor_window_or_music_programs() {
-    let jaws = UninstallPlanItem {
-        machine_cleanup: Some(PlannedMachineCleanup {
-            folder: Some(PathBuf::from("C:/Program Files (x86)/Reaper_JawsScripts")),
-            files: Vec::new(),
-            registry_key: None,
-            by_hand_key: BY_HAND_KEY.to_string(),
-        }),
-        confirm: true,
-        ..item("jaws-scripts", Removability::Removable)
-    };
-    assert!(jaws.needs_elevated_helper() && !jaws.runs_vendor_uninstaller());
+fn review_names_the_permission_prompt_and_the_cleanup_but_no_vendor_window_or_music_programs() {
+    for (jaws, said, not_said) in [
+        (jaws_with_cleanup(), JAWS_PARTLY_UNBACKED, JAWS_UNBACKED),
+        (jaws_cleanup_only(), JAWS_UNBACKED, JAWS_PARTLY_UNBACKED),
+    ] {
+        assert!(jaws.needs_elevated_helper() && !jaws.runs_vendor_uninstaller());
+        let mut list = list_for(vec![jaws]);
+        tick(&mut list, "jaws-scripts");
+        let text = review(&list, Some(&target(true)), false, &[])
+            .lines
+            .join("\n");
+        assert_eq!(text.matches(PERMISSION_NOTE).count(), 1, "{text}");
+        assert_eq!(text.matches(said).count(), 1, "{text}");
+        assert!(
+            text.find(PERMISSION_NOTE) < text.find(said),
+            "the permission prompt comes first: {text}"
+        );
+        assert!(!text.contains(not_said), "{text}");
+        assert!(!text.contains("own uninstaller appears"), "{text}");
+        assert!(
+            !text.contains("Close other music programs first."),
+            "{text}"
+        );
+    }
+
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        for jaws in [jaws_with_cleanup(), jaws_cleanup_only()] {
+            let mut list = uninstall_list_from_plan(
+                &localizer,
+                &builtin_package_specs(Platform::Windows),
+                &plan(vec![jaws]),
+            );
+            tick(&mut list, "jaws-scripts");
+            let text =
+                build_uninstall_review_preview(&localizer, Some(&target(true)), &list, false, &[])
+                    .lines
+                    .join("\n");
+            assert!(
+                !text.contains("wizard-") && !text.contains("uninstall-") && !text.contains('{'),
+                "{locale}: {text}"
+            );
+        }
+    }
+}
+
+/// The question before uninstalling the JAWS scripts says only what a
+/// backup can't bring back: their uninstaller folder and registry entry,
+/// never that a backup can't bring the scripts back, since their files go
+/// into it. Ticked with REAPER, whose own uninstaller no backup undoes,
+/// each package gets its own sentence. With none of the scripts' files left
+/// to move, the whole package is beyond a backup. The two sentences never
+/// come together, even for a plan that also marked the package unbacked.
+#[test]
+fn the_jaws_question_says_only_what_a_backup_cant_bring_back() {
+    let jaws_id = || "jaws-scripts".to_string();
+    let both = plan(vec![jaws_with_cleanup(), vendor_reaper()]);
+    assert_eq!(
+        uninstall_confirm_reasons(&both, &ids(&["jaws-scripts", "reaper"])),
+        [
+            UninstallConfirmReason::PartlyUnbacked {
+                package_id: jaws_id()
+            },
+            UninstallConfirmReason::Unbacked {
+                package_id: "reaper".to_string()
+            },
+        ]
+    );
+    assert_eq!(
+        question(&both, &["jaws-scripts", "reaper"]),
+        Some(format!(
+            "{JAWS_PARTLY_UNBACKED}\n\nA backup can't bring REAPER back. To have it again, you \
+             install it again.\n\nUninstall now?"
+        ))
+    );
+    assert_eq!(
+        question(&both, &["jaws-scripts"]),
+        Some(format!("{JAWS_PARTLY_UNBACKED}\n\nUninstall now?"))
+    );
+
+    let cleanup_only = plan(vec![jaws_cleanup_only()]);
+    assert_eq!(
+        uninstall_confirm_reasons(&cleanup_only, &ids(&["jaws-scripts"])),
+        [UninstallConfirmReason::Unbacked {
+            package_id: jaws_id()
+        }]
+    );
+    assert_eq!(
+        question(&cleanup_only, &["jaws-scripts"]),
+        Some(format!("{JAWS_UNBACKED}\n\nUninstall now?"))
+    );
+
+    let marked = plan(vec![UninstallPlanItem {
+        unbacked: true,
+        ..jaws_with_cleanup()
+    }]);
+    assert_eq!(
+        uninstall_confirm_reasons(&marked, &ids(&["jaws-scripts"])),
+        [UninstallConfirmReason::PartlyUnbacked {
+            package_id: jaws_id()
+        }]
+    );
+
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        for plan in [&both, &cleanup_only] {
+            let body =
+                uninstall_confirmation_body(&localizer, plan, &ids(&["jaws-scripts", "reaper"]))
+                    .unwrap();
+            assert!(
+                !body.contains("wizard-") && !body.contains("uninstall-") && !body.contains('{'),
+                "{locale}: {body}"
+            );
+        }
+    }
+}
+
+/// Once the JAWS scripts' uninstaller folder and registry entry are gone,
+/// as after a restore, everything left of them goes into a backup: the row
+/// says nothing of administrator rights, and there is no permission prompt,
+/// no sentence on what a backup can't bring back, and no question.
+#[test]
+fn no_jaws_question_when_nothing_needs_administrator_rights() {
+    let jaws = jaws_without_cleanup();
+    assert!(!jaws.needs_elevated_helper());
+    let plan = plan(vec![jaws.clone()]);
+    assert!(uninstall_confirm_reasons(&plan, &ids(&["jaws-scripts"])).is_empty());
+    assert_eq!(question(&plan, &["jaws-scripts"]), None);
+
     let mut list = list_for(vec![jaws]);
+    let row = &list.rows[0];
+    assert!(row.can_tick, "{}", row.details);
+    assert!(
+        row.details
+            .contains("RABBIT moves the files into a backup rather than deleting them."),
+        "{}",
+        row.details
+    );
+    assert!(!row.details.contains("administrator"), "{}", row.details);
     tick(&mut list, "jaws-scripts");
     let text = review(&list, Some(&target(true)), false, &[])
         .lines
         .join("\n");
-    assert!(
-        text.contains(
-            "Windows asks for your permission once, before anything is removed. If you don't \
-             allow it, nothing is uninstalled."
-        ),
-        "{text}"
-    );
-    assert!(!text.contains("own uninstaller appears"), "{text}");
-    assert!(
-        !text.contains("Close other music programs first."),
-        "{text}"
-    );
+    assert!(!text.contains("permission"), "{text}");
+    assert!(!text.contains("A backup can"), "{text}");
 }
 
 /// Finds every vendor's uninstaller at one made-up path, as if HKLM listed
@@ -2562,6 +2829,15 @@ fn macos_review_names_the_one_password_window_and_the_trash() {
             "REAPER goes to the Trash. Until you empty the Trash, you can drag it back from \
              there."
         ),
+        "{text}"
+    );
+    // Review's own note on the Trash, not the question's sentences.
+    assert!(
+        !text.contains("You can drag it back from there until you empty the Trash."),
+        "{text}"
+    );
+    assert!(
+        !text.contains("A backup can't bring Surge XT back."),
         "{text}"
     );
     assert!(!text.contains("Windows"), "{text}");

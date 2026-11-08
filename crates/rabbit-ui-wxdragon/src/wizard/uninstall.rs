@@ -572,15 +572,33 @@ pub fn refusal_text(localizer: &Localizer, refusal: &VendorRefusal, name: &str) 
 
 /// What uninstalling the package does, one short sentence per line, in the
 /// order the plan gives: warnings that always apply first, then what goes,
-/// what stays, the other warnings and the notes. No file lists or counts;
-/// those belong to the report.
+/// how it goes, what stays, the other warnings and the notes. No file lists
+/// or counts; those belong to the report.
+///
+/// A planned machine cleanup adds its own line on how the package goes:
+/// only an administrator may remove the uninstaller folder and registry
+/// entry, so Windows asks, and no backup brings them back. It follows the
+/// backup line, or stands in for it when none of the package's files are
+/// left to move.
 fn removal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &str) -> String {
     let text = |key: &str| localizer.text(key).value;
     let mut lines = always_warning_lines(localizer, item);
     if let Some(summary) = &item.summary {
         lines.push(text(&summary.removes_key));
     }
-    lines.push(text(route_details_key(item)));
+    if item.machine_cleanup.is_none() || !item.files.is_empty() {
+        lines.push(text(route_details_key(item)));
+    }
+    if item.machine_cleanup.is_some() {
+        lines.push(
+            localizer
+                .format(
+                    "wizard-uninstall-details-machine-cleanup",
+                    &[("package", name)],
+                )
+                .value,
+        );
+    }
     if let Some(summary) = &item.summary {
         lines.push(text(&summary.keeps_key));
     }
@@ -596,7 +614,7 @@ fn removal_explanation(localizer: &Localizer, item: &UninstallPlanItem, name: &s
 /// user's Trash; an app the user can move goes to the Trash with no
 /// password at all, which the summary before it already says, so its line
 /// only says how to get it back. A row that can be ticked always has one
-/// of these.
+/// of these, or the machine cleanup's line instead.
 fn route_details_key(item: &UninstallPlanItem) -> &'static str {
     match item.route() {
         RemovalRoute::BackupSet => "wizard-uninstall-details-files",
@@ -800,9 +818,12 @@ pub struct WizardUninstallReviewPreview {
 ///    or whose own uninstaller or the macOS administrator command removes
 ///    machine-wide parts;
 /// 5. the permission note: Windows asks once, before anything is removed,
-///    and a window from a vendor's uninstaller is to be answered; or macOS
-///    asks once for an administrator's name and password, in a window that
-///    may name osascript, and cancelling it uninstalls nothing;
+///    a window from a vendor's uninstaller is to be answered, and a backup
+///    can't bring back the uninstaller folder and registry entry the
+///    elevated helper removes, or, with none of the package's files left to
+///    move, the package itself, as the question before starting says; or
+///    macOS asks once for an administrator's name and password, in a window
+///    that may name osascript, and cancelling it uninstalls nothing;
 /// 6. for a package going to the Trash, that it can come back from there
 ///    until the Trash is emptied;
 /// 7. the ticks on the Install tab, which this run leaves out
@@ -920,6 +941,14 @@ pub fn build_uninstall_review_preview(
                 "wizard-review-uninstall-vendor-window-note",
                 &[("package", row.display_name.as_str())],
             ));
+        }
+        // The package's own line leaves out the uninstaller folder and
+        // registry entry the helper removes, so Review says what the
+        // question will: what of the package a backup can't bring back.
+        if item.machine_cleanup.is_some()
+            && let Some(reason) = beyond_backup_reason(item)
+        {
+            add_note(confirm_reason_line(localizer, &reason));
         }
     }
     // macOS's one password window covers every package the administrator
@@ -1061,9 +1090,16 @@ pub fn remember_default_ticks(
 /// Why RABBIT asks once more before an uninstall starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UninstallConfirmReason {
-    /// A backup can't undo the package's removal: a vendor uninstaller, or
-    /// the macOS administrator command deleting it for good.
+    /// A backup can't undo the package's removal: a vendor uninstaller, the
+    /// macOS administrator command deleting it for good, or the elevated
+    /// helper removing the uninstaller folder and registry entry of a
+    /// package with none of its files left to move.
     Unbacked { package_id: String },
+    /// The package's files go into a backup, but the elevated helper then
+    /// removes its uninstaller folder and registry entry with administrator
+    /// rights, which no backup brings back: the JAWS scripts while their
+    /// installer's folder in Program Files or its entry is there.
+    PartlyUnbacked { package_id: String },
     /// The package's app goes to the Trash on macOS, not into a backup:
     /// it can come back from there until the Trash is emptied.
     /// `by_administrator` when the administrator command moves it there,
@@ -1085,7 +1121,11 @@ pub enum UninstallConfirmReason {
 /// manifest asks about, OSARA included: the people who use RABBIT know that
 /// REAPER stops speaking without it, so asking would only be in their way.
 /// A removal no backup can undo always asks: a vendor's uninstaller, the
-/// macOS administrator command, or an app going to the Trash.
+/// macOS administrator command, an app going to the Trash, or the elevated
+/// helper removing a package's uninstaller folder and registry entry, as it
+/// does for the JAWS scripts after their files went into the backup. Once
+/// that folder and entry are gone, the JAWS scripts' files all go into a
+/// backup and nothing asks.
 pub fn uninstall_confirm_reasons(
     plan: &UninstallPlan,
     package_ids: &[String],
@@ -1108,22 +1148,66 @@ pub fn uninstall_confirm_reasons(
                 });
             }
         }
-        if item.unbacked {
-            // "A backup can't bring it back" would be wrong for an app in
-            // the Trash, where it can be found again.
-            reasons.push(if item.backup == UninstallBackup::ToTrash {
-                UninstallConfirmReason::ToTrash {
-                    package_id: item.package_id.clone(),
-                    by_administrator: item.needs_administrator(),
-                }
-            } else {
-                UninstallConfirmReason::Unbacked {
-                    package_id: item.package_id.clone(),
-                }
-            });
-        }
+        reasons.extend(beyond_backup_reason(item));
     }
     reasons
+}
+
+/// What of `item`'s removal a backup can't undo, as the question says it;
+/// `None` when every part of it goes into a backup. A planned machine
+/// cleanup decides on its own: the package's files still go into the
+/// backup, so only the uninstaller folder and registry entry are beyond
+/// it, or the whole package when none of its files are left to move.
+fn beyond_backup_reason(item: &UninstallPlanItem) -> Option<UninstallConfirmReason> {
+    let package_id = item.package_id.clone();
+    if item.machine_cleanup.is_some() {
+        return Some(if item.files.is_empty() {
+            UninstallConfirmReason::Unbacked { package_id }
+        } else {
+            UninstallConfirmReason::PartlyUnbacked { package_id }
+        });
+    }
+    if !item.unbacked {
+        return None;
+    }
+    // "A backup can't bring it back" would be wrong for an app in the
+    // Trash, where it can be found again.
+    Some(if item.backup == UninstallBackup::ToTrash {
+        UninstallConfirmReason::ToTrash {
+            package_id,
+            by_administrator: item.needs_administrator(),
+        }
+    } else {
+        UninstallConfirmReason::Unbacked { package_id }
+    })
+}
+
+/// The question's sentence for `reason`.
+fn confirm_reason_line(localizer: &Localizer, reason: &UninstallConfirmReason) -> String {
+    let with_package = |key: &str, package_id: &str| {
+        let name = localized_package_display_name(localizer, package_id);
+        localizer.format(key, &[("package", name.as_str())]).value
+    };
+    match reason {
+        UninstallConfirmReason::Unbacked { package_id } => {
+            with_package("wizard-confirm-uninstall-unbacked", package_id)
+        }
+        UninstallConfirmReason::PartlyUnbacked { package_id } => {
+            with_package("wizard-confirm-uninstall-partly-unbacked", package_id)
+        }
+        UninstallConfirmReason::ToTrash {
+            package_id,
+            by_administrator,
+        } => with_package(
+            if *by_administrator {
+                "wizard-confirm-uninstall-trash-elevated-macos"
+            } else {
+                "wizard-confirm-uninstall-trash"
+            },
+            package_id,
+        ),
+        UninstallConfirmReason::Warning { message_key, .. } => localizer.text(message_key).value,
+    }
 }
 
 /// The text of the Yes/No question asked before uninstalling `package_ids`:
@@ -1145,32 +1229,7 @@ pub fn uninstall_confirmation_body(
     }
     let mut lines: Vec<String> = Vec::new();
     for reason in &reasons {
-        let line = match reason {
-            UninstallConfirmReason::Unbacked { package_id } => {
-                let name = localized_package_display_name(localizer, package_id);
-                localizer
-                    .format(
-                        "wizard-confirm-uninstall-unbacked",
-                        &[("package", name.as_str())],
-                    )
-                    .value
-            }
-            UninstallConfirmReason::ToTrash {
-                package_id,
-                by_administrator,
-            } => {
-                let name = localized_package_display_name(localizer, package_id);
-                let key = if *by_administrator {
-                    "wizard-confirm-uninstall-trash-elevated-macos"
-                } else {
-                    "wizard-confirm-uninstall-trash"
-                };
-                localizer.format(key, &[("package", name.as_str())]).value
-            }
-            UninstallConfirmReason::Warning { message_key, .. } => {
-                localizer.text(message_key).value
-            }
-        };
+        let line = confirm_reason_line(localizer, reason);
         if !lines.contains(&line) {
             lines.push(line);
         }

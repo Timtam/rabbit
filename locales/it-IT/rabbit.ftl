@@ -319,6 +319,14 @@ wizard-uninstall-details-reapack-orphan = { $package } è stato installato a suo
 wizard-uninstall-details-no-vendor-record = RABBIT non ha traccia di quali file abbia aggiunto il programma di installazione di { $package }, quindi restano tutti.
 wizard-uninstall-details-vendor = Windows ti chiede il permesso prima di rimuovere qualcosa.
 wizard-uninstall-details-vendor-by-hand = Puoi disinstallare { $package } da solo nelle Impostazioni di Windows, in App, App installate.
+# The details text of an Uninstall row whose package's installer left an
+# uninstaller folder in Program Files and a registry entry, which RABBIT
+# removes with administrator rights once the package's files are in the
+# backup. It follows wizard-uninstall-details-files, or takes its place
+# when none of the package's files are left to move. $package is the
+# localized package name. Name Program Files as
+# uninstall-vendor-refused-not-below-program-files does.
+wizard-uninstall-details-machine-cleanup = Solo un amministratore può rimuovere la cartella del programma di disinstallazione di { $package } dentro Programmi (Program Files) e la sua voce di registro, quindi Windows ti chiede il permesso prima di rimuovere qualcosa. Un backup non può recuperarle.
 # The details text of an Uninstall row on macOS, by how the package goes:
 # deleted for good with an administrator's password; to the Trash, moved as
 # you; or into your Trash with an administrator's password, because your
@@ -643,6 +651,10 @@ wizard-done-uninstall-installed-list-unreadable = RABBIT non è riuscito a legge
 wizard-done-uninstall-cleanup-refused = RABBIT ha controllato di nuovo la cartella del programma di disinstallazione di { $package } dentro Programmi (Program Files) e la sua voce di registro e non si è fidato di ciò che ha trovato, quindi ha rimesso al suo posto ciò che aveva spostato.
 wizard-done-uninstall-cleanup-failed = RABBIT non è riuscito a rimuovere del tutto la cartella del programma di disinstallazione e la voce di registro di { $package } ({ $error }), quindi ha rimesso al suo posto ciò che aveva spostato. «Mostra dettagli» indica cosa è già stato rimosso.
 wizard-done-uninstall-cleanup-lost = RABBIT ha perso il contatto con il suo programma di supporto mentre rimuoveva la cartella del programma di disinstallazione e la voce di registro di { $package } ({ $error }), quindi ha rimesso al suo posto ciò che aveva spostato. Parte di quella cartella o la sua voce di registro potrebbero essere già state rimosse.
+# Instead of wizard-done-uninstall-cleanup-failed, when RABBIT removed
+# nothing of the folder or the registry entry before it failed, so "Show
+# details" lists nothing as gone. $package and $error as above.
+wizard-done-uninstall-cleanup-failed-nothing-gone = RABBIT non è riuscito a rimuovere la cartella del programma di disinstallazione e la voce di registro di { $package } ({ $error }), quindi ha rimesso al suo posto ciò che aveva spostato. Non è stato rimosso nulla di quella cartella né della sua voce di registro.
 # After a macOS removal: to the Trash, or by the administrator command.
 # $package is the localized package name, $path a full macOS path, keep it as
 # it is, $error macOS's own error message, and $programs a list of program
@@ -697,10 +709,17 @@ wizard-close-during-uninstall-body = RABBIT sta disinstallando. Se interrompi ad
 wizard-confirm-uninstall-title = Disinstallare i pacchetti selezionati?
 # $package is the localized package name.
 wizard-confirm-uninstall-unbacked = Un backup non può recuperare { $package }. Per riaverlo, dovrai reinstallarlo.
-# Instead of the sentence above, for a package that goes to the Trash; the
-# second when your account may not move it, so an administrator's password
-# moves it there. $package is the localized package name. Name the Trash as
-# Finder does.
+# Instead of the sentence above, for a package whose files go into a backup
+# while RABBIT removes its uninstaller folder in Program Files and its
+# registry entry with administrator rights. Review shows this sentence too,
+# or the one above when none of the package's files are left to move.
+# $package is the localized package name. Name Program Files as
+# uninstall-vendor-refused-not-below-program-files does.
+wizard-confirm-uninstall-partly-unbacked = Un backup può recuperare i file di { $package }, ma non la cartella del suo programma di disinstallazione dentro Programmi (Program Files) né la sua voce di registro, che RABBIT rimuove con i diritti di amministratore.
+# Instead of wizard-confirm-uninstall-unbacked, for a package that goes to
+# the Trash; the second when your account may not move it, so an
+# administrator's password moves it there. $package is the localized
+# package name. Name the Trash as Finder does.
 wizard-confirm-uninstall-trash = { $package } va nel Cestino. Puoi trascinarlo fuori da lì finché non svuoti il Cestino.
 wizard-confirm-uninstall-trash-elevated-macos = { $package } va nel Cestino. Puoi trascinarlo fuori da lì finché non svuoti il Cestino, ma macOS potrebbe chiedere la password di un amministratore per farlo.
 wizard-confirm-uninstall-question = Disinstallare adesso?
@@ -778,11 +797,14 @@ wizard-summary-architecture = Architettura: { $architecture }
 # "Show details" after an uninstall. $value is common-yes or common-no.
 wizard-summary-uninstall-remove-settings = Rimuovi anche le impostazioni: { $value }
 # One line per file, below its package's line. $path is a full path.
+# wizard-summary-left-over can also name a folder, such as a package's
+# uninstaller folder in Program Files, or a registry key as regedit shows
+# it; keep either as it is, never translated.
 wizard-summary-removed-file = Rimosso: { $path }
 wizard-summary-kept-file = Conservato perché è cambiato da quando RABBIT lo ha installato: { $path }
 wizard-summary-kept-link = Conservato perché contiene un collegamento che RABBIT non segue mai: { $path }
 wizard-summary-kept-reapack = Conservato perché l'ha installato ReaPack, che ne tiene traccia: { $path }
-wizard-summary-left-over = Ancora presente: { $path }
+wizard-summary-left-over = Ancora lì: { $path }
 wizard-summary-left-in-backup = Non rimesso al suo posto, ancora nel backup: { $path }
 # A file a package's installer added outside REAPER's folder that stays:
 # it was there before RABBIT ran that installer, or RABBIT recorded it more
@@ -796,9 +818,11 @@ wizard-summary-vendor-uninstaller = Il suo programma di disinstallazione: { $pat
 # Below a package removed on macOS, one line per path: what went to the Trash
 # and where it is there now, and what the administrator command removed; then
 # the installer receipts macOS still lists, and macOS's own words when a step
-# failed. $path is a full macOS path, keep it as it is; $ids a comma-separated
-# list of receipt names, never translated; $error macOS's own message. Name
-# the Trash as Finder does.
+# failed. On Windows, the line for what was removed with administrator rights
+# also names a package's uninstaller folder in Program Files, and each file
+# in it, that RABBIT removed that way. $path is a full Windows or macOS path,
+# keep it as it is; $ids a comma-separated list of receipt names, never
+# translated; $error macOS's own message. Name the Trash as Finder does.
 wizard-summary-moved-to-trash = Spostato nel Cestino: { $path }
 wizard-summary-in-trash-as = Ora nel Cestino: { $path }
 wizard-summary-removed-as-admin = Rimosso con i diritti di amministratore: { $path }
@@ -811,6 +835,13 @@ wizard-summary-macos-said = macOS ha detto: { $error }
 wizard-summary-registry-removed = Tolta dall'elenco dei programmi installati di Windows: { $key }
 wizard-summary-registry-kept = Ancora nell'elenco dei programmi installati di Windows, perché non punta a questo REAPER: { $key }
 wizard-summary-registry-failed = Ancora nell'elenco dei programmi installati di Windows, perché RABBIT non è riuscito a leggerla né a toglierla ({ $error }): { $key }
+# Below a package whose uninstaller folder and registry entry RABBIT removed
+# with administrator rights: the registry entry. $key is the entry's
+# registry key as regedit shows it, such as
+# HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Reaper_JawsScripts,
+# and is never translated. The folder and its files are listed with
+# wizard-summary-removed-as-admin.
+wizard-summary-registry-key-removed = Rimossa dal registro con i diritti di amministratore: { $key }
 # $id is the backup set's name, such as uninstall-unix-1782841261.
 wizard-summary-uninstall-backup = Backup: { $id }
 # One line per uninstalled package. $package is the localized package name,

@@ -23,9 +23,10 @@ use rabbit_core::preflight::{
 use rabbit_core::report::{default_report_path, save_json_and_text_reports};
 use rabbit_core::uninstall::{
     ANY_REAPER_PROCESS_CHECK, AdministratorStepKind, AdministratorStepVerdict, BACKUP_SPACE_CHECK,
-    KeptFileReason, LeftoverResult, PROGRAMS_RUNNING_CHECK, RegistryEntryAction, Removability,
-    RemovedFile, UninstallMessage, UninstallPlan, UninstallProblem, UninstallReport,
-    UninstallReportItem, UninstallRequest, UninstallStatus,
+    CleanupOutcome, CleanupResult, CleanupTarget, KeptFileReason, KeptReason, LeftoverResult,
+    PROGRAMS_RUNNING_CHECK, RegistryEntryAction, Removability, RemovedFile, UninstallMessage,
+    UninstallNote, UninstallPlan, UninstallProblem, UninstallReport, UninstallReportItem,
+    UninstallRequest, UninstallStatus,
 };
 use rabbit_core::{RabbitError, Result};
 use serde::Serialize;
@@ -664,8 +665,18 @@ fn item_reasons(
         // What had moved is back, but part of the folder or entry may be
         // gone. Without a receipt, that can leave RABBIT nothing to find the
         // package by, so the steps to remove it by hand follow here too.
+        // Show details is only named when it lists something as gone.
         UninstallMessage::CleanupFailed { error } => {
-            reasons.push(with("wizard-done-uninstall-cleanup-failed", "error", error));
+            let key = if item
+                .cleanup
+                .as_ref()
+                .is_some_and(CleanupOutcome::removed_anything)
+            {
+                "wizard-done-uninstall-cleanup-failed"
+            } else {
+                "wizard-done-uninstall-cleanup-failed-nothing-gone"
+            };
+            reasons.push(with(key, "error", error));
             reasons.extend(cleanup_by_hand_lines(localizer, report, item));
         }
         UninstallMessage::CleanupLost { error } => {
@@ -921,6 +932,39 @@ fn cleanup_by_hand_lines(
         .unwrap_or_default()
 }
 
+/// What the elevated helper's machine cleanup removed with administrator
+/// rights, one indented line per file, the folder and the registry entry,
+/// then what of the folder and entry is still there. A cleanup that failed
+/// part way lists them too: Done says Show details names what is already
+/// gone, which stays gone though the package's files were put back.
+fn cleanup_lines(localizer: &Localizer, cleanup: &CleanupOutcome) -> Vec<String> {
+    let line = |key: &str, name: &str, value: &str| {
+        format!("  {}", localizer.format(key, &[(name, value)]).value)
+    };
+    let mut lines: Vec<String> = cleanup
+        .steps
+        .iter()
+        .filter(|step| step.result == CleanupResult::Removed)
+        .map(|step| match &step.target {
+            CleanupTarget::File { path } | CleanupTarget::Folder { path } => line(
+                "wizard-summary-removed-as-admin",
+                "path",
+                &path.display().to_string(),
+            ),
+            CleanupTarget::RegistryKey { key } => {
+                line("wizard-summary-registry-key-removed", "key", key)
+            }
+        })
+        .collect();
+    lines.extend(
+        cleanup
+            .still_present
+            .iter()
+            .map(|left| line("wizard-summary-left-over", "path", left)),
+    );
+    lines
+}
+
 /// What RABBIT still found of a package after its own uninstaller ran and
 /// didn't remove it. Only the engine's message and the vendor run know
 /// this: the package's leftovers list only what a removal left behind.
@@ -937,10 +981,13 @@ fn vendor_still_present(item: &UninstallReportItem) -> &[PathBuf] {
 
 /// "Show details" after an uninstall: the target, then for each package
 /// what became of it, the files it removed (into the backup set, to the
-/// Trash and where it is there, or with administrator rights), kept and
-/// left behind, its entries in Windows' list of installed programs, the
-/// installer receipts macOS still lists, and why it stayed; then the backup
-/// set with a command for each package it holds, and where the report is.
+/// Trash and where it is there, or with administrator rights), the
+/// uninstaller folder and registry entry the elevated helper removed, what
+/// was kept and why, how to remove by hand the installer's files that
+/// stayed, what was left behind, its entries in Windows' list of installed
+/// programs, the installer receipts macOS still lists, and why it stayed;
+/// then the backup set with a command for each package it holds, and where
+/// the report is.
 pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallReport) -> Vec<String> {
     let path_line = |key: &str, path: &Path| {
         localizer
@@ -1027,6 +1074,9 @@ pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallRepor
                     .map(|leftover| file_line("wizard-summary-removed-file", &leftover.path)),
             );
         }
+        if let Some(cleanup) = &item.cleanup {
+            lines.extend(cleanup_lines(localizer, cleanup));
+        }
         lines.extend(
             item.pending_restart
                 .iter()
@@ -1040,6 +1090,54 @@ pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallRepor
             };
             file_line(key, &kept.path)
         }));
+        // Once the package is gone, the files its installer added that
+        // stayed because they may be the user's, which the summary's keeps
+        // sentence only says stay, not which; then how to remove them by
+        // hand, as the row said it. While the package is still there, all
+        // of its files are, so a list of the ones kept would only mislead.
+        if item.status.is_removed() {
+            let planned = report.plan.item(&item.package_id);
+            lines.extend(
+                planned
+                    .into_iter()
+                    .flat_map(|planned| &planned.kept)
+                    .filter(|kept| kept.exists)
+                    .filter_map(|kept| {
+                        let key = match kept.reason {
+                            KeptReason::ThereBeforeInstall => "wizard-summary-kept-there-before",
+                            KeptReason::RecordUnclear => "wizard-summary-kept-record-unclear",
+                            // The package's settings and REAPER's or
+                            // RABBIT's own files, which the keeps sentence
+                            // covers, and paths RABBIT never removes.
+                            KeptReason::UserData
+                            | KeptReason::FolderRoot
+                            | KeptReason::ReaperConfiguration
+                            | KeptReason::KeyMap
+                            | KeptReason::KeepList
+                            | KeptReason::RabbitFolder
+                            | KeptReason::OutsideResourceFolder
+                            | KeptReason::InstalledByReaPack => return None,
+                        };
+                        Some(file_line(key, &kept.path))
+                    }),
+            );
+            lines.extend(
+                planned
+                    .into_iter()
+                    .flat_map(|planned| &planned.notes)
+                    .filter_map(|note| match note {
+                        UninstallNote::VendorFilesByHand { note_key } => {
+                            Some(localizer.text(note_key).value)
+                        }
+                        _ => None,
+                    })
+                    .flat_map(|text| {
+                        text.lines()
+                            .map(|line| format!("  {line}"))
+                            .collect::<Vec<_>>()
+                    }),
+            );
+        }
         // What a vendor's uninstaller didn't remove, which Done points to,
         // then what a removal left; a path in both is said once.
         let still_present = vendor_still_present(item);
