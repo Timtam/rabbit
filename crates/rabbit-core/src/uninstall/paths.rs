@@ -44,6 +44,9 @@ pub struct UninstallRoots {
     pub clap_dir: Option<PathBuf>,
     pub common_program_files: Option<PathBuf>,
     pub program_files: Vec<PathBuf>,
+    /// `C:\Program Files (x86)` alone, as Windows names it, never from the
+    /// environment.
+    pub program_files_x86: Option<PathBuf>,
     pub program_data: Option<PathBuf>,
     pub home: Option<PathBuf>,
     pub documents: Option<PathBuf>,
@@ -75,7 +78,8 @@ impl UninstallRoots {
     /// Windows and `{home}` only on macOS, as the manifest's validation
     /// expects: Git Bash sets `HOME` on Windows, but no plan means it there.
     /// `{documents}` is the user's Documents folder, which Windows keeps as a
-    /// known folder an environment variable can't name.
+    /// known folder an environment variable can't name. `{program_files_x86}`
+    /// is read as a known folder too, the way the elevated helper reads it.
     pub fn for_target(platform: Platform, resource: &Path, app_path: Option<&Path>) -> Self {
         let windows = platform == Platform::Windows;
         // A trailing slash, which shell completion adds to a folder such as
@@ -109,6 +113,9 @@ impl UninstallRoots {
             } else {
                 Vec::new()
             },
+            program_files_x86: windows
+                .then(|| rabbit_platform::machine_program_files_x86_dir().ok())
+                .flatten(),
             program_data: windows
                 .then(rabbit_platform::windows_program_data_dir)
                 .flatten(),
@@ -156,6 +163,7 @@ impl UninstallRoots {
             UninstallPathToken::ClapDir => one(&self.clap_dir),
             UninstallPathToken::CommonProgramFiles => one(&self.common_program_files),
             UninstallPathToken::ProgramFiles => self.program_files.clone(),
+            UninstallPathToken::ProgramFilesX86 => one(&self.program_files_x86),
             UninstallPathToken::ProgramData => one(&self.program_data),
             UninstallPathToken::Home => one(&self.home),
             UninstallPathToken::Documents => one(&self.documents),
@@ -174,6 +182,7 @@ impl UninstallRoots {
                     &self.localappdata,
                     &self.clap_dir,
                     &self.common_program_files,
+                    &self.program_files_x86,
                     &self.program_data,
                     &self.home,
                     &self.documents,
@@ -925,6 +934,17 @@ mod tests {
                 dir.path().join("PF86").join("Demo")
             ]
         );
+        // `{program_files_x86}` is the 32-bit folder alone.
+        assert_eq!(
+            resolve("{program_files_x86}/Demo", &roots),
+            Err(PathRefusal::UnknownRoot {
+                token: "{program_files_x86}".to_string()
+            })
+        );
+        roots.program_files_x86 = Some(dir.path().join("PF86"));
+        let x86 = resolve_one("{program_files_x86}/Demo", &roots);
+        assert_eq!(x86.path, dir.path().join("PF86").join("Demo"));
+        assert_eq!(x86.guard, RemovalGuard::under(dir.path().join("PF86")));
 
         // An object token names the thing itself: it has no root to stay
         // under, only folders it may sit in.
@@ -1342,6 +1362,14 @@ mod tests {
         fs::create_dir_all(&clap).unwrap();
         assert_eq!(
             check_removal(&roots, &clap, &through_appdata),
+            Err(PathRefusal::FolderRoot)
+        );
+        // The 32-bit Program Files folder is a root of its own.
+        let x86 = dir.path().join("Program Files (x86)");
+        fs::create_dir_all(&x86).unwrap();
+        roots.program_files_x86 = Some(x86.clone());
+        assert_eq!(
+            check_removal(&roots, &x86, &through_appdata),
             Err(PathRefusal::FolderRoot)
         );
     }

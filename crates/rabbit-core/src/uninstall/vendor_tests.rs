@@ -521,8 +521,10 @@ pub(crate) mod windows {
             let dir = tempfile::tempdir().unwrap();
             let root = plain(dir.path());
             let program_files = root.join("Program Files");
+            let program_files_x86 = root.join("Program Files (x86)");
             let folders = MachineFolders {
-                program_files: vec![program_files.clone(), root.join("Program Files (x86)")],
+                program_files: vec![program_files.clone(), program_files_x86.clone()],
+                program_files_x86,
                 common_program_files: program_files.join("Common Files"),
                 program_data: root.join("ProgramData"),
             };

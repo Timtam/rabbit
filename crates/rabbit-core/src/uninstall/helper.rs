@@ -516,6 +516,8 @@ pub(crate) fn run_package(
 pub struct MachineFolders {
     /// `C:\Program Files`, then `C:\Program Files (x86)`.
     pub program_files: Vec<PathBuf>,
+    /// `C:\Program Files (x86)` alone, where a 32-bit installer writes.
+    pub program_files_x86: PathBuf,
     pub common_program_files: PathBuf,
     pub program_data: PathBuf,
 }
@@ -529,6 +531,7 @@ impl MachineFolders {
     pub fn of_this_computer() -> io::Result<Self> {
         Ok(Self {
             program_files: rabbit_platform::machine_program_files_dirs()?,
+            program_files_x86: rabbit_platform::machine_program_files_x86_dir()?,
             common_program_files: rabbit_platform::machine_common_program_files_dir()?,
             program_data: rabbit_platform::program_data_dir()?,
         })
@@ -552,6 +555,7 @@ pub fn helper_roots(args: &HelperArgs, folders: &MachineFolders) -> UninstallRoo
         clap_dir: None,
         common_program_files: Some(folders.common_program_files.clone()),
         program_files: folders.program_files.clone(),
+        program_files_x86: Some(folders.program_files_x86.clone()),
         program_data: Some(folders.program_data.clone()),
         home: None,
         documents: None,

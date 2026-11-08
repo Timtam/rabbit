@@ -811,6 +811,35 @@ fn machine_wide_packages_need_a_standard_target() {
     );
 }
 
+/// A package that needs a standard REAPER but serves one program only,
+/// such as the JAWS scripts, turns the machine-wide sentence off. It still
+/// needs every REAPER closed.
+#[test]
+fn no_machine_wide_warning_when_the_manifest_turns_it_off() {
+    let fixture = Fixture::new();
+    write(
+        &fixture.dir.path().join("CLAP").join("reaper_single.clap"),
+        b"clap",
+    );
+    let specs = [spec(
+        "single",
+        r#""requires_standard_install": true, "install_destination": "windows_clap_dir","#,
+        &remove_files_with(
+            r#""machine_wide_warning": false,"#,
+            r#""remove": { "matching_user_plugins": true }"#,
+        ),
+    )];
+    let plan = fixture.plan(&specs, &installed(&["single"]), None);
+    let single = item(&plan, "single");
+    assert_eq!(single.removability, Removability::Removable);
+    assert!(single.every_reaper_closed);
+    assert!(
+        !single.warnings.contains(&UninstallWarning::MachineWide),
+        "{:?}",
+        single.warnings
+    );
+}
+
 /// "Removes it only from the standard REAPER" would promise a removal no
 /// target offers when the package's plan removes nothing. Such a plan holds
 /// on a portable target too, note and all.

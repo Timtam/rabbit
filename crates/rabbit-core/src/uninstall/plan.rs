@@ -496,8 +496,12 @@ fn package_warnings(
     }
     // A vendor's uninstaller plan says in its own summary whom it takes the
     // package from, as Surge XT's "for every music program on this
-    // computer" does.
-    if spec.requires_standard_install && strategy != Some(UninstallStrategy::VendorUninstaller) {
+    // computer" does. A manifest turns the sentence off for a package that
+    // serves one program only, such as the JAWS scripts.
+    if spec.requires_standard_install
+        && spec.uninstall.machine_wide_warning
+        && strategy != Some(UninstallStrategy::VendorUninstaller)
+    {
         warnings.push(UninstallWarning::MachineWide);
     }
     warnings

@@ -88,7 +88,8 @@ impl VendorEnvironment for NothingToRun {
 fn folders() -> MachineFolders {
     let root = std::env::temp_dir().join("RABBIT-test-machine");
     MachineFolders {
-        program_files: vec![root.join("Program Files")],
+        program_files: vec![root.join("Program Files"), root.join("Program Files (x86)")],
+        program_files_x86: root.join("Program Files (x86)"),
         common_program_files: root.join("Program Files").join("Common Files"),
         program_data: root.join("ProgramData"),
     }
@@ -557,6 +558,10 @@ fn the_helper_knows_no_per_user_folder() {
         Some(Path::new("C:\\Program Files\\REAPER (x64)"))
     );
     assert_eq!(roots.program_files, folders.program_files);
+    assert_eq!(
+        roots.program_files_x86,
+        Some(folders.program_files_x86.clone())
+    );
     assert_eq!(
         roots.common_program_files,
         Some(folders.common_program_files.clone())
