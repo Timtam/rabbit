@@ -193,16 +193,24 @@ questions they cannot reasonably answer.
   separate signed helper bundle RABBIT doesn't ship, and over plain
   `sudo` because `sudo` can't read a password from a GUI parent
   process. The osascript route is the same path Apple's own installer
-  uses for GUI-driven elevation and is screen-reader friendly. The only
-  consumer today is the Surge XT
-  `MountDiskImageAndRunPkgInstaller` runner. The root shell behind
+  uses for GUI-driven elevation and is screen-reader friendly. Its
+  consumers are the Surge XT `MountDiskImageAndRunPkgInstaller` runner and
+  an uninstall's one administrator command (see Safety Behavior). The root
+  shell behind
   `do shell script` would split and expand an unquoted path, so every
   word is POSIX single-quoted and the whole command is then put into one
   AppleScript string, after a `cd /`. Nothing is written to a script
   file, which another process of the same user could rewrite before root
   runs it. `run_administrator_shell` puts several commands behind one
   prompt the same way and reports which one failed. Neither raises a
-  prompt from a test build or from a program not named like RABBIT.
+  prompt from a test build or from a program not named like RABBIT:
+  `is_rabbit_file_stem` wants the file stem to be `rabbit`, ignoring case,
+  then nothing, `-`, a space or `(`, and never a cargo test binary's
+  `<crate>-<16 hex digits>`. The same check guards `move_to_trash` and
+  `refresh_audio_units`, so no test moves or ends anything of the user's.
+  Every name RABBIT ships under passes, the app's inner `rabbit` included;
+  a bare binary renamed to anything else can't install Surge XT, and can't
+  uninstall it or REAPER.
 
 ## Recommended Technical Direction
 
@@ -602,7 +610,13 @@ user can finish the install by pressing Next a few times.
      without a checkbox; macOS shows no row, because a row there has either
      a checkbox or a disclosure triangle, and says the sentence with the
      tab's name instead. Its rows come from the detection the version check
-     already ran, which asks only which files exist and how big they are.
+     already ran, which asks only which files exist and how big they are,
+     and on macOS who may move an app. There a row's details say how the
+     package goes: to the Trash as the user, into the user's Trash through
+     the administrator command, or deleted for good by it. An app RABBIT
+     can't move is shown but can't be ticked, and its details say why and
+     how to move it in Finder: Command-Delete, and for a locked app Get
+     Info's Locked first.
      Below its list, an unticked **Also remove settings** checkbox with a
      note on what it would remove works like the OSARA key map checkbox:
      disabled and out of the Tab order until a ticked package has settings
@@ -680,16 +694,31 @@ user can finish the install by pressing Next a few times.
      (on the Install or update tab, only ticks RABBIT didn't set itself,
      such as an update it ticked by default), and that the packages can be
      installed again. When a ticked package's own uninstaller removes it
-     (Surge XT, a standard REAPER on Windows), the summary also says that
+     (on Windows, Surge XT or a standard REAPER), the summary also says that
      Windows asks for permission once, before anything is removed, that
      nothing is uninstalled without it, and to answer a window from that
      uninstaller if one appears; and it asks to close other music
-     programs. The Uninstall button is enabled whenever something
-     removable is ticked, whatever the install plan says. Uninstalling is
+     programs. On macOS, when the administrator command has a package to
+     remove, the summary says once, naming every such package, that macOS
+     asks once for an administrator's name and password before anything is
+     removed, that it may offer Touch ID, that the window may name
+     osascript, the tool RABBIT asks through, and that cancelling the window
+     uninstalls nothing. A package that goes to the Trash gets a line saying
+     it can be dragged back from there until the Trash is emptied; one the
+     administrator command moves there, that it keeps its owner, so Finder
+     offers no Put Back and emptying the Trash may ask for a password. When
+     that command deletes a package for good, the summary also asks to close
+     other music programs. It doesn't ask this for an app the command moves
+     to the Trash, since no other program uses that app. The Uninstall
+     button is enabled whenever something removable is ticked, whatever the
+     install plan says. Uninstalling is
      never one key press away: focus goes to the summary, there is no
      default button, and Enter starts nothing. A run with a step a backup
-     can't undo, such as a vendor's uninstaller, or a package whose
-     manifest asks for it, gets a Yes/No question with No focused first.
+     can't undo, such as a vendor's uninstaller, the macOS administrator
+     command or a move to the Trash, or a package whose manifest asks for
+     it, gets a Yes/No question with No focused first. For a package that
+     goes to the Trash the question says it can be dragged back from there
+     instead of saying a backup can't bring it back.
      Back returns to the Uninstall tab's list, never to the ReaPack
      donation page.
 
@@ -699,9 +728,12 @@ user can finish the install by pressing Next a few times.
    - Before an uninstall starts, the Uninstall button refuses with a message
      while something the uninstall preflight needs closed is running: the
      target's REAPER, every REAPER for a package any REAPER can load (such
-     as app2clap), and the programs a package's plan names. It uses the
-     engine's own process checks, so the two agree, and there is no way to
-     go ahead anyway.
+     as app2clap), and the programs a package's plan names. On macOS a
+     REAPER.app the administrator command moves needs every REAPER closed
+     too, because root's `pgrep` can't tell one REAPER from another; when
+     no other ticked package (such as Surge XT) needs every REAPER closed,
+     the message says so. It uses the engine's own process checks, so the
+     two agree, and there is no way to go ahead anyway.
    - In uninstall mode the heading says "Uninstalling", focus moves to the
      gauge, and the gauge counts one step per package, so it never parks
      halfway. The status line names each package as its removal starts and
@@ -714,10 +746,23 @@ user can finish the install by pressing Next a few times.
      and to close the music program that has the package open. Each line is
      spoken on macOS; on Windows, which has no announcement, focus moves to
      the log the first time each happens in a run, so the screen reader
-     reads it once. Which progress events are spoken is
+     reads it once. On macOS, right before the password window takes
+     focus, the status line and the log say, and VoiceOver hears, that
+     macOS now asks once for an administrator's name and password, which
+     packages the administrator command uninstalls, and that cancelling
+     uninstalls nothing. The window itself keeps macOS's own text and names
+     osascript, not RABBIT: RABBIT adds no `with prompt` text, so this is
+     the only word from RABBIT the user gets. After 30 seconds without an
+     answer a second line says RABBIT is still waiting and the window may be
+     behind RABBIT. The command runs as one, so afterwards each of its
+     packages gets its lines together: the log says "The administrator
+     command has finished with Surge XT", and the status line says whether
+     it went. An app the user moves to the Trash gets "Moving REAPER to the
+     Trash…". Which progress events are spoken is
      decided by one exhaustive match, so a new event can't be added without
      that decision. Closing the window asks "Stop uninstalling?" with No
-     focused, and the run stops after the package it is on; a vendor's
+     focused, and the run stops after the step it is on: one package, or on
+     macOS the administrator command, which covers several. A vendor's
      uninstaller always runs to its end.
 
 7. Done
@@ -732,13 +777,30 @@ user can finish the install by pressing Next a few times.
      vendor's uninstaller can end; otherwise the engine's own sentence), and
      that a package comes back by ticking it on the Install or update tab in
      a new run. A removal that finishes after a restart says to restart the
-     computer, and a declined permission prompt says plainly that nothing
-     was uninstalled. Show details lists the files
+     computer, and a declined permission prompt, or on macOS a cancelled
+     password window, says plainly that nothing was uninstalled. After a
+     macOS removal Done also says what moved to the Trash and what it is
+     called there now; where the administrator command stopped or what it
+     left, and that a tree it stopped in while deleting may be only partly
+     there. When no package went but the command removed part of one, the
+     first line says RABBIT removed only part of it rather than that
+     nothing was uninstalled, since that part can't be put back. Done also
+     names installer receipts macOS still lists, which do no harm, and
+     every program the command looked for when it found one of them
+     running, or couldn't check, and so changed nothing; and when
+     macOS refused a step, it says to turn RABBIT on under System Settings >
+     Privacy & Security > App Management, quit it, start it again and
+     uninstall again. Show details
+     lists the files
      removed, kept and left over, the backup set, and one `rabbit
-     restore-backup` command per removed package. The saved report is the
+     restore-backup` command per removed package whose files went into
+     that set: never for one a vendor's uninstaller, the Trash or the
+     administrator command took. The saved report is the
      engine's `uninstall-<time>` report, which the details point to; the
      wizard writes one of its own only for a run the engine refused before
-     it began. Both tabs are then rebuilt from fresh detection.
+     it began, except a macOS run refused because RABBIT runs as root,
+     whose report would be root's file in the user's resource folder. Both
+     tabs are then rebuilt from fresh detection.
 
 Streamlining rules (apply when adding new wizard text):
 
@@ -796,6 +858,11 @@ macOS portable detection:
 
 - User-selected folder is authoritative.
 - Candidate folder should contain a REAPER app bundle and normally `reaper.ini`.
+  The app bundle is an `.app` directly in the folder, with "reaper" in its
+  own name, ignoring case. With more than one, detection, the preflight, the
+  wizard and an uninstall all pick the same: `REAPER.app`, then
+  `REAPER64.app`, then `REAPER-ARM.app`, then any other by name, so Review
+  and the run name the same app.
 - Resource path is the selected folder.
 
 REAPER runtime probe:
@@ -818,7 +885,7 @@ should rely on. Detection must be package-specific and confidence-scored.
 | ReaPack | RABBIT receipt; Windows PE `ProductVersion`; ReaPack self-entry in `ReaPack/registry.db` after first launch | presence of `reaper_reapack*` | The registry DB may not exist until ReaPack has run inside REAPER. |
 | ReaKontrol | RABBIT receipt after RABBIT-managed install | best-effort binary metadata if available; presence of `reaper_kontrol*` | No installer or registry-based detector is expected; validate binary metadata quality during implementation. |
 | FFmpeg | RABBIT receipt after RABBIT-managed install; `ffmpeg.exe -version` parsed from stdout's first line | StringFileInfo `ProductVersion` of an FFmpeg executable (only present when a vendor patches it in); libavformat-major filename heuristic (`avformat-62.dll` → FFmpeg 8.0.0, mapped via `lib_major - 54`) | Vanilla FFmpeg attaches only a manifest to its binaries; `VS_FIXEDFILEINFO` of `ffmpeg.exe` carries libavutil's version, not the FFmpeg release. Spawning `ffmpeg.exe -version` is the only reliable vendor-independent way to recover the patch level for an externally-installed copy; the libavformat-major fallback recovers only the major when no executable is present. |
-| Surge XT | RABBIT receipt after RABBIT-managed install (records the `NIGHTLY-YYYY-MM-DD-sha` token verbatim) | `read_file_version_parts` on the system VST3 bundle — Windows PE `VERSIONINFO` of `Contents\x86_64-win\Surge XT.vst3` inside `<CommonProgramFiles>\VST3\Surge Synth Team\Surge XT.vst3\`; macOS `CFBundleShortVersionString` of `/Library/Audio/Plug-Ins/VST3/Surge XT.vst3/Contents/Info.plist` | The vendor-installed binary still carries the most recent *stable* semver (e.g. `1.3.4`) — Surge XT doesn't stamp nightlies with their date+sha. Receipt-driven detection produces the exact nightly token; the file-metadata fallback reports the stable semver, which compares lower than any `NIGHTLY-…` under `Version::cmp_lenient` so the planner naturally schedules an Update. |
+| Surge XT | RABBIT receipt after RABBIT-managed install (records the `NIGHTLY-YYYY-MM-DD-sha` token verbatim) | `read_file_version_parts` on the system VST3 bundle — Windows PE `VERSIONINFO` of `Contents\x86_64-win\Surge XT.vst3` inside `<CommonProgramFiles>\VST3\Surge Synth Team\Surge XT.vst3\`; macOS `CFBundleShortVersionString` of `/Library/Audio/Plug-Ins/VST3/Surge XT.vst3/Contents/Info.plist` | The vendor-installed binary still carries the most recent *stable* semver (e.g. `1.3.4`) — Surge XT doesn't stamp nightlies with their date+sha. Receipt-driven detection produces the exact nightly token; the file-metadata fallback reports the stable semver, which compares lower than any `NIGHTLY-…` under `Version::cmp_lenient` so the planner naturally schedules an Update. On macOS a VST3 bundle whose version can't be read still counts as installed, with no version and low confidence: the uninstall deletes that bundle last with `rm -R`, which may take its `Info.plist` before it stops, so a removal stopped there leaves Surge XT detected and offered again. On Windows a bundle without a version is still not detected. |
 | ReaPack packages | `ReaPack/registry.db` table `entries.version` | none | This is the best source for packages ReaPack knows about. |
 
 RABBIT should keep its own receipt in each REAPER resource path:
@@ -911,7 +978,8 @@ PackageSpec {
 Every package also carries a required `uninstall` block saying what removing
 it means. It holds a list of plans, and the first plan matching the platform
 and the target (`standard` or `portable`) wins. Each plan picks one strategy:
-`remove_files` (RABBIT moves the package's own files into a backup set),
+`remove_files` (RABBIT moves the package's own files into a backup set, or
+on macOS whole bundles to the Trash or through the administrator command),
 `vendor_uninstaller` (RABBIT runs the vendor's uninstaller silently and checks
 the result), `manual` (RABBIT changes nothing and explains how to remove it by
 hand) or `not_supported` (RABBIT changes nothing and says why). Paths in a
@@ -963,8 +1031,50 @@ for the restart isn't empty and stays. Surge's
 installed packages that depend on REAPER says its extensions stay and work
 again once REAPER is back, so the manifest adds no warning of its own. A
 vendor plan's summary says whom the uninstaller takes the package from, so
-Surge XT gets no separate machine-wide warning. On macOS both still say
-`not_supported`. `rabbit packages`
+Surge XT gets no separate machine-wide warning.
+
+On macOS neither has an uninstaller RABBIT can use, so both have
+`remove_files` plans whose `remove.trees` name whole bundles. A tree leaves
+whole, to the Trash or through the run's administrator command, never into a
+backup set (see Safety Behavior). REAPER's plan holds for standard and
+portable targets alike, with `elevation: if_needed` and `backup: to_trash`.
+Its one tree is `{app_path}`, which must end in `.app`, contain "REAPER" and
+carry the bundle ID `com.cockos.reaper`, and its `kept_user_data` is
+`{resource}`, which always stays. Surge XT's has
+`elevation: required` and `backup: none`, and lists eleven trees: its two
+apps first, then its Audio Unit, CLAP and LV2 bundles,
+`/Library/Application Support/Surge XT`, and its two VST3 bundles last, the
+`Surge XT.vst3` that detection reads at the very end. Its
+`blocking_programs` are `Surge XT`, `Surge XT Effects` and `surge-xt-cli`,
+which ships inside the app. `macos_pkg_forget` spells out the installer
+receipt IDs of today's Surge XT (`org.surge-synth-team.…`) and those Surge
+XT 1.0.x left behind (`com.surge-synth-team.…`). A `refresh_audio_units`
+post step follows, and its `kept_user_data` lists the patches under
+`{documents}` and the settings and any copy of the factory data under
+`{home}/Library/Application Support`. All of them are shown as kept and
+never removed, not even with Also remove settings ticked or
+`--remove-settings`, since the administrator command never takes the user's
+data. `requires_standard_install` keeps a portable target away from it, as on
+Windows. The checks when the manifest loads keep root narrow. A
+`remove_files` plan with any elevation is macOS only and may name nothing
+to remove but `remove.trees`: never files one by one, never anything a
+receipt names. Its `kept_user_data` is kept from root by the planner, not
+by these checks: when the administrator command takes the package, that
+data is only listed as kept, while an `if_needed` app that goes to the
+Trash as the user lets Also remove settings move it into a backup set
+first. `elevation: required` deletes for good, so it needs
+`backup: none`, and each of its trees must be an absolute macOS path
+directly in `/Applications`, `/Library/Application Support` or one of the
+`/Library/Audio/Plug-Ins` format folders (VST3, Components, CLAP, LV2),
+never a token such as `{home}` or `{resource}`; one in `/Applications` must
+be an `.app`. `elevation: if_needed` is only for one `{app_path}` tree with
+`must_end_with: ".app"` and a `bundle_id`, on a `to_trash` plan; a
+`to_trash` plan moves exactly one tree, and a `bundle_id` is allowed only
+there, since the administrator command's deletes never read it. Program
+names in a plan for macOS hold only letters, digits, spaces, `_` and `-`,
+since they become a pattern for `pgrep`. Receipt IDs, allowed only on an
+`elevation: required` plan, start with a letter or digit and hold only
+letters, digits, `.`, `_` and `-`. `rabbit packages`
 prints each package's plan per platform and target, and `rabbit components`
 says for each package whether RABBIT can uninstall it, and if not, why.
 
@@ -1300,10 +1410,12 @@ Extension files:
   package's files couldn't all go back), or an earlier restore from the set
   put the entry back. Its files are restored and the entry stays as it is.
 - Uninstall removes only regular files a RABBIT receipt lists with a hash and
-  files the package manifest names. `reaper.ini`, every `reaper-*.ini` such
-  as `reaper-kb.ini` and `reaper-extstate.ini` (where every extension keeps
-  its settings), copies of them, and everything in `{resource}/RABBIT`
-  always stay, and every path passes a guard
+  files the package manifest names. A macOS plan's `remove.trees` are
+  different: those bundles leave whole, by the routes described below, and
+  are never hashed, put into a backup set or put back. `reaper.ini`, every
+  `reaper-*.ini` such as `reaper-kb.ini` and `reaper-extstate.ini` (where
+  every extension keeps its settings), copies of them, and everything in
+  `{resource}/RABBIT` always stay, and every path passes a guard
   against links, `..` and whole folders, once when the plan is built and again
   right before it moves. Before anything moves, every file of every package
   is read and hashed, as the dry run does, so a file that can't be read
@@ -1317,8 +1429,10 @@ Extension files:
   from another drive as a copy that is checked before the original is
   deleted, after a free-space check. The target's REAPER must be closed, and
   every REAPER for packages that serve the whole computer; those checks run
-  again before each package. A package that serves the whole computer can't
-  be removed from a portable target when its plan removes anything; a
+  again before each package, or on macOS for all the packages of the
+  administrator command together, right before its window. A package that
+  serves the whole computer can't be removed from a portable target when
+  its plan removes anything; a
   `manual` or `not_supported` plan says the same on every target. One
   requested package that can't be removed makes the whole run change
   nothing. When a package's removal fails, its files go back and its
@@ -1374,24 +1488,181 @@ Extension files:
   package is Failed, and the receipt is written again from the copy the run
   holds in memory. The helper is told to quit at the end of every run.
   Nothing these uninstallers remove can be restored from a backup.
+- On macOS a plan's trees leave whole. Surge XT's, its bundles and
+  `/Library/Application Support/Surge XT`, are deleted for good by the
+  run's administrator command. REAPER.app leaves by one of three routes,
+  decided while the plan is built from file facts read as the user
+  (`tree_route`): to the Trash as the user, into the user's Trash through
+  the run's administrator command, or by hand. The read before the run,
+  and a dry run, check each tree with the guard and see that it is there,
+  but never list, hash or walk it, and the space check and the write
+  rehearsal count only files that still go into a backup set. The routes
+  decide the run's order: the packages of the administrator command
+  first, in removal order, REAPER among them when only root can move its
+  app; then the rest in removal order, REAPER last. The report, and the
+  progress page as the run reaches each package, follow that order.
+  Review, and the list the progress page starts with, name the ticked
+  packages in the Uninstall tab's order.
+- A REAPER.app this account may move goes to the Trash as the user, with
+  no password, through `NSFileManager`'s `trashItemAtURL`. "May move" is
+  read the way macOS's Trash function needs it: the right to take the
+  name out of its folder (macOS's own `_DELETE_OK` check, which covers
+  ACLs, the sticky rule and the folder's flags), to add names to that
+  folder and search it, and to write the bundle, whose `..` changes. Right
+  before it moves, the guard and that question run again, and the answer
+  must still be the user. It counts as moved only once its old place is
+  empty and macOS named where it went; a refusal is TrashFailed, anything
+  less certain TrashUnclear and stops the run, and whatever of the package
+  went into the backup set goes back on either. An app only root may move
+  goes into the user's Trash through the administrator command, but only
+  when it sits directly in `/Applications`, has the bundle ID the manifest
+  names, neither it nor `/Applications` is Locked, and the user's Trash,
+  found from the passwd entry and never from `$HOME`, is a real folder the
+  user owns on the app's volume. Anything else is left to
+  the user, with the reason and Finder steps, and can't be ticked: a
+  Locked app, another bundle ID or none, an app only root may move
+  anywhere else, no Trash RABBIT can check, a Trash on another volume, or
+  a target app path that isn't there. The resource folder always stays.
+- On macOS the run's one administrator command is its first change.
+  `osascript` asks for the password and runs root's shell in one blocking
+  call, and a second call asks again, so every root step of the run goes
+  into one call, made after every check RABBIT makes as the user and
+  before anything else changes. Before it, as the user: the
+  cancel token; the process checks for these packages; the administrator
+  guard on every path root deletes or moves; for REAPER's app, the
+  question of who may move it, which must still say only root, and the
+  check of the user's Trash; `pkgutil --pkgs`, for the receipts still
+  listed; and the steps themselves, which must be ones the administrator
+  shell takes. Anything that stops the run there stops it with nothing
+  changed and no window. When everything root would delete or move is
+  gone already and none of these packages' receipts is still listed,
+  there is no window either; a receipt still listed, or a listing that
+  failed while a package has receipts to forget, still opens one for
+  `pkgutil --forget`. A cancelled window cancels every package of the
+  run, those that needed no administrator included, and changes nothing;
+  a window that fails, or a command that never ran, fails the packages
+  that needed it, leaves the rest unreached and changes nothing either.
+  Root gets only these steps, each program by its absolute path on the
+  sealed system volume:
+  1. `/usr/bin/pgrep -x -i -- <names>`, which must find nothing: the plans'
+     `blocking_programs`, plus `REAPER` and `reaper64` when a package needs
+     every REAPER closed (Surge XT, or a REAPER.app root moves), in case one
+     was started while the window was open.
+  2. For each package that deletes, `/bin/rm -R -f -x <path>` for each
+     tree in manifest order, exactly the path the guard checked moments
+     before, then `/usr/sbin/pkgutil --forget <id>` for each of its
+     receipts the listing still showed (all of them when listing failed).
+     A forget that fails doesn't stop the command.
+  3. For a REAPER.app only root can move, `/bin/test -d` and
+     `/bin/test ! -L` on the user's Trash, then `/bin/mv -h -n` of the app
+     into it under a fresh name: its own name with the local date and time
+     from just before the password window, such as
+     `REAPER 2026-11-07 15.30.12.app`, so it never takes the name of
+     something already there.
+  Every word is POSIX single-quoted inside one AppleScript string, with no
+  script file, no `with prompt` text and the output silenced. A step that
+  fails, other than a forget, stops the command with its own status, 101
+  for the first step, so RABBIT knows where it stopped; statuses end at
+  254, which caps one command at 154 steps. RABBIT waits for `osascript`
+  on a helper thread, so it can say after 30 seconds that it is still
+  waiting.
+- After the command, the filesystem decides every package's status, read
+  with `lstat` as the user; the exit status only says where it stopped. A
+  package whose paths are all gone is Removed, whatever the status,
+  unless it is an app root was to move whose move may not have run and
+  that RABBIT can't see at its destination: that is TrashUnclear, since
+  something else may have moved it. One partly gone is Failed, with what
+  is gone and what is left; one with nothing gone is Failed if its step
+  stopped the command, and the packages after it weren't reached.
+  `rm -R -f` deletes all it can inside a tree before it fails on a
+  folder, so a tree it stopped in may be partly gone though still there,
+  and the report says so. Root's move into the Trash is claimed only when
+  something is at the destination and nothing of the app's name is inside
+  it, because BSD `mv` moves into a folder already there. A package not
+  fully removed stops the run there; nothing else has changed, since the
+  command came first. What root removed never goes back. Receipt
+  entries follow fresh detection, the installer's receipts are listed again
+  and any still listed are reported as harmless, and once anything of a
+  package is gone its `refresh_audio_units` step ends the user's
+  `AudioComponentRegistrar` so hosts read the Audio Unit list again; a
+  refresh that fails is never a problem. "Operation not permitted" from a
+  step, which root gets only from macOS's own protections such as App
+  Management, or a refused move to the Trash, adds the advice to turn RABBIT
+  on under System Settings > Privacy & Security > App Management (from the
+  CLI, the app it runs in, such as Terminal).
+- Root never deletes or moves anything reached through a link, a folder
+  another volume is mounted on, or anything outside the fixed system
+  folders. The one other path it is given is the user's Trash, where
+  REAPER.app goes. RABBIT checks it as the user just before the window,
+  with one `lstat` of the Trash itself but not of the folders above it: a
+  real folder, not a link, owned by the user, on the app's volume. Root
+  checks it again with `test -d` and `test ! -L` before the move. Before
+  the window, every path root deletes or moves must sit directly in its
+  system folder (`/Applications` for REAPER.app), spelt exactly as that
+  folder and its name, so a trailing slash that would make `lstat` and
+  `rename` follow a link never gets in; be a real folder, not a link or a
+  file; be reached through real folders only, each read with `lstat` from
+  `/` down; be on the same volume as the folder holding it, or it is
+  refused as `MountPoint`, because `rm -x` stays out of a volume mounted
+  below the folder it is given but empties one mounted on that folder;
+  and be valid UTF-8. Surge XT's trees go in a fixed order, so that a
+  command that stops partway leaves something the next run can finish.
+  Its apps go first: App Management can refuse even root at another
+  developer's app, and the command then stops before any plug-in. Its
+  VST3 bundle goes last: detection finds Surge XT by it, so a command
+  that stops partway leaves Surge XT detected, with its receipt entry,
+  and offered again.
+- A real macOS uninstall refuses before anything, the install lock
+  included, when RABBIT itself runs as root, as under `sudo`: the checks
+  of what the user may do, the Trash and the backup set would all be
+  root's. A dry run still works. The wizard saves no report for that
+  refusal, and the CLI says so in words of its own and exits with 1.
+- A real run takes the install lock even where the resource folder doesn't
+  exist yet, as for a REAPER.app that was never opened, which creates the
+  folder: the app outside it can still go, and the receipt and the report
+  are saved there. Folders made only for the lock go again when the run
+  changed nothing, so a mistyped `--resource-path` leaves no trace.
 - `rabbit uninstall` only shows what it would do unless given `--apply`, and
   needs every package named with `--package`; there is no "remove
   everything". Its dry run names the packages that need administrator
-  rights and says Windows asks once. Its dry run runs the same checks, a running REAPER included,
-  so it says what `--apply` would say. It has no `--allow-reaper-running`,
-  unlike every command that installs: a running REAPER holds its extensions'
-  files open and writes `reaper.ini` again when it closes. Its exit code is 2
+  rights and says Windows asks once, or on macOS that macOS asks once, in a
+  window that may name osascript. Its dry run runs the same checks, a
+  running REAPER included, so it says what `--apply` would say. A macOS dry
+  run also lists, below each package, the steps root would get, from the
+  same checks, and names the programs root first checks are closed; it
+  records them in the report and never runs them. For REAPER's move it
+  shows only the Trash folder, since a real run names the app by its own
+  time, taken just before the password window. With `--apply` on macOS,
+  the CLI says on stderr when the password window is coming and when it is
+  still open after 30 seconds, because the window names osascript and the
+  CLI otherwise says nothing until the run is over. `rabbit uninstall` has
+  no `--allow-reaper-running`, unlike every command that installs: a
+  running REAPER holds its extensions' files open and writes `reaper.ini`
+  again when it closes. Its exit code is 2
   when a package asked for can't be uninstalled and nothing changed, 1 when a
-  removal failed or was stopped or the permission prompt was declined, and 0
+  removal failed or was stopped or the permission prompt was declined (on
+  macOS, the password window cancelled), and 0
   otherwise, packages that aren't installed and removals that finish after a
   restart included. Package settings stay unless `--remove-settings` is
-  given; then they move into the same backup set. With `--apply`, the first
-  Ctrl+C asks the run to stop before the next package, through the same
-  cancel token the wizard uses, and a second one ends RABBIT at once.
+  given; then they move into the same backup set. Those of a package that a
+  vendor's uninstaller or, on macOS, the administrator command removes stay
+  even then and are only listed as kept, since neither puts anything into a
+  backup set. With `--apply`, the first Ctrl+C asks the run to stop before
+  the next step, through the same cancel token the wizard uses: the next
+  package, or on macOS the administrator command, which covers several. A
+  second Ctrl+C ends RABBIT at once. On macOS `osascript` runs in a
+  process group of its own, so Terminal's first Ctrl+C reaches only
+  RABBIT's group and can't end the password window or root's steps
+  halfway; RABBIT reads the stop once `osascript` has returned. While
+  `osascript` runs, the second Ctrl+C is passed on to its group as SIGINT
+  before RABBIT ends, so no password window is left open with nobody
+  waiting for its answer. Root's shell in that group gets it only where
+  macOS lets RABBIT signal it.
 - Keep a machine-readable operation report and a plain text report.
 - Treat non-writable targets as a planning error before downloading anything.
 - Do not request elevation unless the selected REAPER app install target
-  requires it, or a selected vendor uninstaller or machine-wide removal does.
+  requires it, or a selected vendor uninstaller, machine-wide removal, or
+  REAPER.app that only an administrator can move to the Trash does.
 - Do not delete unknown files during update. Only remove files listed in a RABBIT
   receipt or explicitly owned by the package manifest.
 - Closing the window during an install or an uninstall stops the run; it
@@ -1402,7 +1673,8 @@ Extension files:
   packages landed and which were never reached. Whatever step is running
   when the user confirms runs to completion — an elevated vendor installer
   has no halfway point to return to, and an uninstall finishes the package
-  it started — so the wizard says it is finishing that step rather than
+  it started, or on macOS the administrator command — so the wizard says it
+  is finishing that step rather than
   pretending the stop is instant.
 - Refuse to close at all while RABBIT is replacing its own program files.
   That swap has no unwind path, so there is no answer that makes quitting
@@ -1568,3 +1840,11 @@ Install tests:
   video decoder. Candidate fallbacks include bridging to Homebrew
   (detect `brew` on `$PATH` and run `brew install ffmpeg` on opt-in) or
   hosting our own shared builds.
+- Confirm the macOS uninstall on real Macs, Apple Silicon and Intel, with
+  VoiceOver. In particular: that each system folder root deletes or moves
+  from reports the same volume as the bundles in it, `/Applications` above
+  all, since macOS firmlinks it to the data volume, or the `MountPoint`
+  check refuses every Surge XT removal and every root move of REAPER.app;
+  that root's `pgrep -x` finds `Surge XT Effects`, whose name is exactly
+  the 16 characters the kernel keeps of a program's name; and what root's
+  `rm` does when a second Ctrl+C ends RABBIT while it runs.

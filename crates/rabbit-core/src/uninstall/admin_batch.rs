@@ -489,10 +489,13 @@ fn is_receipt_id(id: &str) -> bool {
 }
 
 /// The name RABBIT gives an app root moves into the Trash: the app's own
-/// name with the local time it moved added, such as `REAPER 2026-11-07
+/// name with the local time `at` added, such as `REAPER 2026-11-07
 /// 15.30.12.app` for `REAPER.app`, so it never takes the name of something
-/// already there. `utc_offset_seconds` is how far local time is ahead of
-/// UTC at `at`. `None` for a path without a name that is valid text.
+/// already there. A real run takes `at` once, just before the password
+/// window (a dry run when it lists the steps), so the name says when the
+/// run started, not the moment of the move.
+/// `utc_offset_seconds` is how far local time is ahead of UTC at `at`.
+/// `None` for a path without a name that is valid text.
 pub fn trash_name(app: &Path, at: SystemTime, utc_offset_seconds: i32) -> Option<String> {
     let stem = app.file_stem()?.to_str()?;
     let extension = match app.extension() {

@@ -177,6 +177,14 @@ The bare `rabbit-<version>-macos-universal` download is a plain Mach-O CLI
 executable (no `.app` wrapper). After downloading, run `chmod +x` and invoke
 it from Terminal.
 
+If you rename it, keep `rabbit` at the start of the name, in capitals or not,
+with nothing, a dash, a space or an opening parenthesis after it, such as
+`rabbit`, `Rabbit-cli` or `rabbit(2)`. The last dot in the name and whatever
+follows it don't count, so `rabbit.old` works too. Only a copy named like that
+asks macOS for an administrator's password or moves anything to the Trash. A
+copy with any other name can't install or uninstall Surge XT, and can't
+uninstall REAPER.
+
 ## Use it
 
 Launch the downloaded executable. The wizard walks you through:
@@ -206,9 +214,10 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
   keys work while the tabs have focus. On macOS, Ctrl+Tab and Ctrl+Shift+Tab
   anywhere on the page, or VoiceOver's own navigation of the tab group.
 - **What RABBIT can remove:** OSARA, SWS, ReaPack, ReaKontrol, FFmpeg and
-  app2clap (both Windows only) and the language packs; on Windows also Surge
-  XT and a standard REAPER, through their own uninstallers (see below). Every
-  other installed package is listed too, with the reason it can't be ticked.
+  app2clap (both Windows only), the language packs, Surge XT and REAPER (see
+  below). On Windows that means a standard REAPER; on a Mac, the REAPER app
+  of a standard or a portable REAPER. Every other installed package is listed
+  too, with the reason it can't be ticked.
 - **What is kept:** your settings, such as SWS's grooves, ReaPack's
   repositories and ReaKontrol's FX maps, unless you tick **Also remove
   settings** below the list. `reaper.ini`, `reaper-kb.ini`, your key maps and
@@ -216,11 +225,13 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
   OSARA made and OSARA's settings, which live in `reaper-extstate.ini` beside
   every other extension's. Everything that goes, settings removed with that
   option included, moves into a backup set under `RABBIT\backups` rather than
-  being deleted.
+  being deleted. Surge XT and REAPER are the exception; see below.
 - **Starting it:** the review page says what each package loses and keeps.
   Enter doesn't start an uninstall there; press **Uninstall**. REAPER must be
   closed, and for app2clap, Surge XT and REAPER itself every REAPER on the
-  computer.
+  computer. On a Mac, uninstalling REAPER needs every REAPER closed only when
+  moving its app takes an administrator's password; otherwise closing that
+  REAPER is enough.
 - **Surge XT and REAPER (Windows):** their own uninstallers remove them, with
   administrator rights. Windows asks for your permission once, before
   anything is removed, however many of them you ticked; if you don't allow
@@ -230,19 +241,72 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
   program on the computer; your patches in `Documents\Surge XT` and the fonts
   it installed stay. REAPER's uninstaller removes the program, and REAPER's
   file associations and ReaRoute for every REAPER on the computer; your
-  settings, extensions and projects in `%APPDATA%\REAPER` stay, and the
-  extensions work again once you install REAPER again. REAPER always goes
-  last. If an uninstaller takes long, the progress page says RABBIT is still
-  waiting: it may be showing a question in a window of its own, which
-  Alt+Tab finds. If it has finished but its files are still there, the
-  progress page says RABBIT is waiting for them: close the music program
-  that has the package open. A removal that finishes only after a restart
-  says so on the last page. A portable REAPER stays yours to remove by hand.
+  settings and extensions in `%APPDATA%\REAPER` stay, and so do your
+  projects. The extensions work again once you install REAPER again. REAPER
+  always goes last. If an uninstaller takes long, the progress page says
+  RABBIT is still waiting: it may be showing a question in a window of its
+  own, which Alt+Tab finds. If it has finished but its files are still
+  there, the progress page says RABBIT is waiting for them: close the music
+  program that has the package open. A removal that finishes only after a
+  restart says so on the last page. A portable REAPER stays yours to remove
+  by hand.
+- **REAPER on a Mac:** RABBIT moves the REAPER app to the Trash, from
+  Applications or from a portable REAPER folder. Your settings and extensions
+  stay, in `~/Library/Application Support/REAPER` or in the portable folder,
+  and so do your projects. The extensions work again once you install REAPER
+  again. If your account may move the app, it goes to the Trash with no
+  password, after everything else in the run. If only an administrator may
+  move it, for example because another account owns it, it sits directly in
+  Applications, and your Trash is a folder of your own on the same disk,
+  macOS asks for an administrator's password and RABBIT moves it into your
+  Trash, with the date and time added to its name, such as
+  `REAPER 2026-11-07 15.30.12.app`. It keeps the owner it had, so Finder
+  offers no Put Back for it, and emptying the Trash, or dragging it back to
+  Applications, may ask for an administrator's password. An app RABBIT can't
+  move at all, such as a Locked one, or one only an administrator may move
+  that misses any of these conditions, can't be ticked; its details say how
+  to move it to the Trash in Finder. RABBIT asks you once more before it
+  starts, with **No** selected.
+- **Surge XT on a Mac:** Surge XT has no uninstaller of its own there, so
+  RABBIT deletes it for good with an administrator's password: its apps, its
+  plug-ins in every format and its factory data in
+  `/Library/Application Support/Surge XT`. Surge XT goes for every music
+  program on the Mac. macOS's installer then forgets Surge XT's receipts, and
+  RABBIT has macOS refresh the list of Audio Units that music programs read.
+  Your patches in your Documents folder and your Surge XT settings in the
+  Library folder of your home folder stay, even with **Also remove
+  settings**. A copy of Surge XT you put somewhere else, such as among the
+  plug-ins in the Library folder of your home folder, stays too. Close
+  Surge XT, Surge XT Effects, `surge-xt-cli` and every REAPER first. RABBIT
+  asks you once more before it starts, with **No** selected, because a
+  backup can't bring it back. A portable REAPER can't remove Surge XT. If
+  the removal stops partway, the last page says so, and where it stopped
+  when the administrator command said. **Show details** lists what is gone
+  and what is still there. The next time you start RABBIT, Surge XT is still
+  on the **Uninstall** tab, so you can uninstall it again.
+- **The password window (Mac):** macOS asks once for an administrator's name
+  and password, before anything is removed, however many packages need it. It
+  may offer Touch ID instead, and it may name osascript, the tool RABBIT asks
+  through. RABBIT says when the window is coming. If it is still waiting after
+  30 seconds, it says so again, because the window may be behind RABBIT.
+  VoiceOver reads both. If you cancel the window, nothing is uninstalled. If
+  the window fails instead, for example after three wrong passwords or with a
+  name that isn't an administrator's, nothing is uninstalled either, and the
+  last page says RABBIT couldn't get administrator rights.
+- **If macOS refuses, or RABBIT runs as root (Mac):** if macOS refuses to
+  move or delete something, with or without a password, turn on RABBIT under
+  System Settings > Privacy & Security > App Management, then quit RABBIT,
+  start it again and uninstall again. Start RABBIT as yourself, not with
+  sudo: running as root, it uninstalls nothing.
 - **Getting a package back:** start RABBIT again and tick it on the **Install
   or update** tab, which no longer ticks a package you removed by itself. To
   put back the very files that went instead, **Show details** on the last
-  page lists a `rabbit restore-backup` command for each package (see
-  [Uninstall](#uninstall) under command-line usage).
+  page lists a `rabbit restore-backup` command for each package whose files
+  went into a backup set (see [Uninstall](#uninstall) under command-line
+  usage). Surge XT and REAPER don't go into one: install them again. On a
+  Mac, you can also drag REAPER back from the Trash until you empty it; if an
+  administrator's password moved it there, dragging it back may ask for one
+  again.
 
 ### Switching the language
 
@@ -435,9 +499,11 @@ GITHUB_TOKEN="<your token>" /Applications/Rabbit.app/Contents/MacOS/rabbit   # m
 ### Uninstall
 
 `uninstall` removes packages RABBIT knows how to take off again: today OSARA,
-SWS, ReaPack, ReaKontrol, FFmpeg and app2clap (both Windows only) and the
-language packs, and on Windows Surge XT and a standard REAPER through their own
-uninstallers. `RABBIT components` says for each package whether RABBIT can
+SWS, ReaPack, ReaKontrol, FFmpeg and app2clap (both Windows only), the language
+packs, Surge XT and REAPER. On Windows, Surge XT and a standard REAPER come off
+through their own uninstallers. On a Mac, RABBIT deletes Surge XT for good and
+moves the REAPER app of a standard or a portable REAPER to the Trash.
+`RABBIT components` says for each package whether RABBIT can
 uninstall it, and if not, why. Name every package with `--package`; there is
 no "remove everything". Like the other commands, it only shows what it would
 do until you add `--apply`:
@@ -449,6 +515,10 @@ RABBIT uninstall --resource-path "%APPDATA%\REAPER" --package sws
 # Uninstall SWS and the German language pack:
 RABBIT uninstall --resource-path "%APPDATA%\REAPER" --package sws \
      --package langpack-de --apply
+
+# On a Mac, see what uninstalling Surge XT and REAPER would do:
+RABBIT uninstall --resource-path "$HOME/Library/Application Support/REAPER" \
+     --package surge-xt --package reaper
 ```
 
 - **What goes:** the files RABBIT installed and the files the package is known
@@ -466,20 +536,24 @@ RABBIT uninstall --resource-path "%APPDATA%\REAPER" --package sws \
   even files ReaPack installed among a package's settings. So do the key map
   backups OSARA made, and OSARA's settings, which live in
   `reaper-extstate.ini` beside every other extension's.
-- **Nothing is deleted for good.** Removed files move into a backup set under
-  `RABBIT\backups`, and so do settings removed with `--remove-settings`. The
-  run saves a report under `RABBIT\logs`. If REAPER used the language pack you
-  removed, RABBIT sets REAPER back to English.
+- **Nothing is deleted for good,** except Surge XT, and REAPER on Windows
+  (see below). A REAPER app on a Mac goes to the Trash. Other removed files
+  move into a backup set under `RABBIT\backups`, and so do settings removed
+  with `--remove-settings`. The run saves a report under `RABBIT\logs`. If
+  REAPER used the language pack you removed, RABBIT sets REAPER back to
+  English.
 - **REAPER must be closed.** For REAPER on Windows, Surge XT, app2clap and the
   JAWS scripts, every REAPER on the computer must be closed, portable ones
-  included. Unlike the commands that install, `uninstall` has no
-  `--allow-reaper-running`: a running REAPER holds its extensions' files open,
-  so they can't be moved, and it writes `reaper.ini` again when it closes,
-  which would undo the language reset. The dry run checks this too.
+  included. The same goes for REAPER on a Mac when the administrator command
+  (see below) moves its app. Unlike the commands that install, `uninstall` has
+  no `--allow-reaper-running`: a running REAPER holds its extensions' files
+  open, so they can't be moved, and it writes `reaper.ini` again when it
+  closes, which would undo the language reset. The dry run checks this too.
 - **All or nothing up front.** If any package you named can't be uninstalled,
   or one of its files can't be read, `--apply` changes nothing at all and
-  says why. For the JAWS scripts (whichever REAPER you name) and a portable
-  REAPER, which RABBIT can't remove, it prints how to remove them by hand.
+  says why. For the JAWS scripts (whichever REAPER you name), a portable
+  REAPER on Windows and a REAPER app on a Mac that RABBIT can't move, it
+  prints how to remove them by hand.
 - **Surge XT and REAPER on Windows** come off through their own uninstallers,
   which need administrator rights. The dry run names the packages that need
   them and the uninstaller it would run. With `--apply`, Windows asks for
@@ -498,9 +572,71 @@ RABBIT uninstall --resource-path "%APPDATA%\REAPER" --package sws \
   and says so. An uninstaller still open after ten minutes stops the run; it
   may be waiting for an answer in a window of its own. What these
   uninstallers remove can't be restored from a backup.
+- **REAPER on a Mac** goes to the Trash, from a standard or a portable
+  REAPER, and its resource folder stays. The dry run says whether it needs a
+  password. If your account may move the app, RABBIT moves it to the Trash
+  with no password, after every other package. If only an administrator may
+  move it and it sits directly in `/Applications`, the administrator command
+  (below) moves it into your Trash, under its name with the date and time
+  added, such as `REAPER 2026-11-07 15.30.12.app`; every REAPER must then be
+  closed. It keeps the owner it had, so emptying the Trash or dragging it back
+  to `/Applications` may ask for an administrator's password, and Finder
+  offers no Put Back for it. An app RABBIT can't move at all, such as a Locked
+  one, one that isn't the REAPER app RABBIT expects, or one only an
+  administrator may move that isn't directly in `/Applications`, is on
+  another disk than your Trash or would go to a Trash that isn't a folder of
+  your own, is blocked: RABBIT changes nothing, prints how to move it to the
+  Trash in Finder and exits with 2.
+- **Surge XT on a Mac** has no uninstaller of its own, so the administrator
+  command deletes it for good: its two apps, its plug-ins (VST3, AU, CLAP and
+  LV2) and its factory data in `/Library/Application Support/Surge XT`, the
+  VST3 plug-ins last. It then has macOS's installer forget Surge XT's receipts
+  that the installer still lists, and RABBIT has macOS refresh the list of
+  Audio Units that music programs read. Your patches in your Documents
+  folder, your settings in
+  `~/Library/Application Support/Surge Synth Team/Surge XT` and any copy of
+  its factory data you put in `~/Library/Application Support/Surge XT` stay,
+  even with `--remove-settings`. RABBIT removes Surge XT only from the places
+  its installer puts it: a copy you put somewhere else, such as in
+  `~/Library/Audio/Plug-Ins`, stays, and RABBIT doesn't list it. Surge XT,
+  Surge XT Effects, `surge-xt-cli` and every REAPER must be closed. A backup
+  can't bring Surge XT back; install it again instead. If the command stops
+  partway, the report says what is gone and what is still there, the exit
+  code is 1, and RABBIT still finds Surge XT, so you can run
+  `RABBIT uninstall` again.
+- **The administrator command (Mac).** Everything that needs an
+  administrator on a Mac goes into one command, and it is the run's first
+  change. The dry run lists what root would get: each path it deletes for
+  good, each installer receipt it forgets, the Trash it moves REAPER into, and
+  the programs it first checks are closed. With `--apply`, RABBIT says on
+  stderr when macOS's password window is coming, and again if it is still
+  open after 30 seconds: it may be behind the app you run RABBIT from, such as
+  Terminal. macOS asks once for an administrator's name and password, in a
+  window that may name osascript. If you cancel it, nothing is uninstalled and
+  the exit code is 1. The same goes for a window that fails, for example after
+  three wrong passwords or with a name that isn't an administrator's: RABBIT
+  says it couldn't get administrator rights. If one of the programs that must
+  be closed was started while the window was open, the command changes
+  nothing. If macOS refuses a step, turn on the app you run RABBIT from, such
+  as Terminal, under System Settings > Privacy & Security > App Management,
+  then quit that app, open it again and run `RABBIT uninstall` again. Run
+  RABBIT as yourself, not with sudo: `--apply` as root changes nothing and
+  exits with 1. Run the dry run as yourself too: under sudo it describes
+  root's run, not yours.
 - **Ctrl+C stops between packages.** The package being removed finishes, and
   the rest stay installed. Press Ctrl+C again to stop at once; the files
-  already moved stay in the backup set, where `restore-backup` finds them.
+  already moved stay in the backup set, where `restore-backup` finds them. On
+  a Mac the administrator command counts as one package here, even when it
+  removes more than one. RABBIT looks for Ctrl+C one last time a moment
+  before it says the password window is coming. Pressed before then, Ctrl+C
+  stops the run with nothing changed. Pressed later, even while RABBIT is
+  still saying it, the first Ctrl+C doesn't reach the window or root's steps:
+  the window opens anyway, and RABBIT stops once the command is done. Cancel
+  the window to change nothing. A second Ctrl+C closes the password window if
+  it is still open, then ends RABBIT. If root's steps are already running,
+  they may go on after RABBIT has ended, and RABBIT saves no report; what
+  they delete is gone for good. Run the dry run again to see what is left,
+  and run `RABBIT uninstall` again to remove the rest.
 - **Removed packages stay removed.** The wizard no longer ticks them, and
   `apply-packages` and `setup` skip them with a note. Name one with
   `--package` to install it again.
@@ -512,7 +648,7 @@ dry run and `--apply`:
 | Exit code | Meaning |
 |---|---|
 | 0 | Every package was removed (or, in a dry run, can be), or isn't installed, so a script can run twice. Anything of a package RABBIT still finds afterwards is listed, never deleted. A removal that finishes only after a restart also exits with 0, and says to restart. |
-| 1 | A removal failed or was stopped, or the Windows permission prompt was declined. Its files went back where they were; packages removed before it stay removed. Also when an error stopped RABBIT before anything changed, such as another RABBIT working on the same REAPER; the message says which. |
+| 1 | A removal failed or was stopped, the Windows permission prompt was declined, or macOS's password window was cancelled or failed. The failed package's files went back where they were, except: what its own uninstaller on Windows already removed; what the administrator command on a Mac already deleted, which the report lists; an app macOS may already have moved to the Trash; and any file that couldn't be moved back, which stays in the backup set and is named in the report. Packages removed before it stay removed. Also when an error stopped RABBIT before anything changed, such as another RABBIT working on the same REAPER, or `--apply` run as root on a Mac; the message says which. |
 | 2 | A package you named can't be uninstalled. Nothing changed. |
 
 To bring a package back, find the uninstall's backup set and restore just that
@@ -532,9 +668,12 @@ uninstall that stopped partway through a package restores the same way. Two
 limits: a package you installed again after uninstalling it can't be restored
 from the old set, because the newer copy is in the way (uninstall it first);
 and a removal that a backup can't hold, by Surge XT's or REAPER's own
-uninstaller, can't be restored: install the package again instead. A restored
-OSARA isn't back on Windows' list of installed programs; installing OSARA
-again puts it there.
+uninstaller on Windows or by the administrator command deleting Surge XT on a
+Mac, can't be restored: install the package again instead. A REAPER app RABBIT
+moved to the Trash isn't in a backup set either: until you empty the Trash, you
+can drag it back from there. If the administrator command moved it, macOS may
+ask for an administrator's password for that. A restored OSARA isn't back on
+Windows' list of installed programs; installing OSARA again puts it there.
 
 ### Maintain
 
@@ -613,7 +752,11 @@ CI lives under `.github/workflows/`:
 
 - `ci.yml` — formatting, tests, and release-mode artifacts on every push.
 - `macos-smoke.yml` — daily live-upstream smoke against real REAPER + OSARA
-  + SWS + ReaKontrol downloads.
+  + SWS + ReaKontrol downloads. Started by hand (workflow_dispatch), it also
+  runs the Trash smoke test: a throwaway bundle goes to the runner's Trash
+  the way an uninstall moves REAPER.app. That test is ignored and moves
+  nothing unless `RABBIT_TRASH_SMOKE=1` is set, so ordinary test runs never
+  touch the Trash.
 - `release.yml` — builds tagged `v*` releases (Windows `.exe`, macOS bare
   binary, macOS `.app.zip`), publishes the GitHub Release with checksums and
   the self-update manifest. macOS bundles are Developer ID signed and
