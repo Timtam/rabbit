@@ -14,6 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use super::cleanup::{CleanupJob, CleanupOutcome, PlannedMachineCleanup};
 use super::execute::{UninstallEnvironment, execute_uninstall_in};
 use super::helper::{ElevatedHelper, ElevatedRunRequest, ElevatedSession, ElevationStartError};
 use super::preflight::VolumeProbe;
@@ -88,10 +89,12 @@ fn outcome(package_id: &str, status: VendorStatus, exit_code: Option<i32>) -> Ve
 }
 
 /// A stand-in for the elevated helper: it starts, declines or fails as told,
-/// runs each package's script once, and writes down every call.
+/// runs each package's script once, answers each package's machine cleanup
+/// once with its scripted outcome, and writes down every call.
 struct ScriptedHelper {
     start: Result<(), ElevationStartError>,
     scripts: Mutex<HashMap<String, Script>>,
+    cleanups: Mutex<HashMap<String, CleanupOutcome>>,
     log: Arc<Mutex<Vec<String>>>,
 }
 
@@ -105,8 +108,20 @@ impl ScriptedHelper {
                     .map(|(id, script)| (id.to_string(), script))
                     .collect(),
             ),
+            cleanups: Mutex::new(HashMap::new()),
             log: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Answer `outcome` when the run asks for its package's machine
+    /// cleanup.
+    #[expect(dead_code, reason = "no engine test runs a machine cleanup yet")]
+    fn cleaning_up(self, outcome: CleanupOutcome) -> Self {
+        self.cleanups
+            .lock()
+            .unwrap()
+            .insert(outcome.package_id.clone(), outcome);
+        self
     }
 
     fn failing_to_start(start: ElevationStartError) -> Self {
@@ -133,6 +148,7 @@ impl ElevatedHelper for ScriptedHelper {
         self.start.clone()?;
         Ok(Box::new(ScriptedSession {
             scripts: std::mem::take(&mut *self.scripts.lock().unwrap()),
+            cleanups: std::mem::take(&mut *self.cleanups.lock().unwrap()),
             log: Arc::clone(&self.log),
         }))
     }
@@ -140,6 +156,7 @@ impl ElevatedHelper for ScriptedHelper {
 
 struct ScriptedSession {
     scripts: HashMap<String, Script>,
+    cleanups: HashMap<String, CleanupOutcome>,
     log: Arc<Mutex<Vec<String>>>,
 }
 
@@ -168,6 +185,16 @@ impl ElevatedSession for ScriptedSession {
             cancel.cancel();
         }
         script.outcome
+    }
+
+    fn run_cleanup(&mut self, package_id: &str) -> CleanupOutcome {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("cleanup {package_id}"));
+        self.cleanups
+            .remove(package_id)
+            .unwrap_or_else(|| panic!("no cleanup scripted for {package_id}"))
     }
 
     fn finish(self: Box<Self>) {
@@ -309,7 +336,7 @@ impl<'c> Run<'c> {
         Self {
             computer,
             helper,
-            lookup: Box::new(FoundAtEach(computer)),
+            lookup: Box::new(FoundAtEach::new(computer)),
             still_installed: Box::new(move || {
                 let mut ids = Vec::new();
                 if computer.sws.exists() {
@@ -377,12 +404,33 @@ impl<'c> Run<'c> {
     }
 }
 
-/// Finds each package's uninstaller at its own fixture path.
-struct FoundAtEach<'c>(&'c Computer);
+/// Finds each package's uninstaller at its own fixture path, and answers
+/// every machine cleanup with `cleanup`.
+struct FoundAtEach<'c> {
+    computer: &'c Computer,
+    cleanup: Result<Option<PlannedMachineCleanup>, VendorRefusal>,
+}
+
+impl<'c> FoundAtEach<'c> {
+    /// No machine cleanup's folder or registry entry there.
+    fn new(computer: &'c Computer) -> Self {
+        Self {
+            computer,
+            cleanup: Ok(None),
+        }
+    }
+}
 
 impl VendorLookup for FoundAtEach<'_> {
     fn locate(&self, job: &super::VendorJob<'_>) -> Result<PathBuf, VendorRefusal> {
-        Ok(self.0.uninstaller(job.package_id))
+        Ok(self.computer.uninstaller(job.package_id))
+    }
+
+    fn machine_cleanup(
+        &self,
+        _job: &CleanupJob<'_>,
+    ) -> Result<Option<PlannedMachineCleanup>, VendorRefusal> {
+        self.cleanup.clone()
     }
 }
 
@@ -1549,7 +1597,7 @@ fn surge_end_to_end(
             named_processes: &named,
             volumes: &OneVolume,
             installed_programs: None,
-            vendor_lookup: &FoundAt(surge.uninstaller.clone()),
+            vendor_lookup: &FoundAt::new(surge.uninstaller.clone()),
             elevated_helper: &helper,
             macos_objects: &NoMacosObjects,
             administrator_shell: &NoAdministratorShell,

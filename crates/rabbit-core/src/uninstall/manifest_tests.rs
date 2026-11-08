@@ -1291,7 +1291,7 @@ fn surge_xt_on_windows_runs_its_own_uninstaller() {
         None,
         InstallationKind::Standard,
         true,
-        &FoundAt(uninstaller.clone()),
+        &FoundAt::new(uninstaller.clone()),
     );
     let surge = item(&plan, PACKAGE_SURGE_XT);
     assert_eq!(surge.removability, Removability::Removable);
@@ -1362,7 +1362,7 @@ fn surge_xt_on_windows_runs_its_own_uninstaller() {
         None,
         InstallationKind::Portable,
         false,
-        &FoundAt(uninstaller),
+        &FoundAt::new(uninstaller),
     );
     let surge = item(&plan, PACKAGE_SURGE_XT);
     assert_eq!(surge.removability, Removability::NeedsStandardTarget);
@@ -1387,7 +1387,7 @@ fn reaper_on_windows_runs_its_own_uninstaller_and_keeps_the_resource_folder() {
         None,
         InstallationKind::Standard,
         true,
-        &FoundAt(uninstaller.clone()),
+        &FoundAt::new(uninstaller.clone()),
     );
     let reaper = item(&plan, PACKAGE_REAPER);
     assert_eq!(reaper.removability, Removability::Removable);
@@ -1448,7 +1448,7 @@ fn reaper_on_windows_runs_its_own_uninstaller_and_keeps_the_resource_folder() {
         None,
         InstallationKind::Portable,
         false,
-        &FoundAt(uninstaller),
+        &FoundAt::new(uninstaller),
     );
     assert_eq!(
         item(&plan, PACKAGE_REAPER).removability,

@@ -46,6 +46,7 @@ pub mod admin_batch;
 mod admin_batch_tests;
 #[cfg(test)]
 mod admin_run_tests;
+pub mod cleanup;
 pub mod execute;
 #[cfg(test)]
 mod execute_tests;
@@ -84,6 +85,10 @@ pub use admin_batch::{
     AdminShellEvent, AdminShellRun, AdministratorShell, AdministratorStepKind,
     AdministratorStepRecord, AdministratorStepVerdict, NoAdministratorShell,
     RecordingAdministratorShell, SystemAdministratorShell,
+};
+pub use cleanup::{
+    CleanupJob, CleanupOutcome, CleanupResult, CleanupStatus, CleanupStep, CleanupTarget,
+    PlannedMachineCleanup, check_machine_cleanup, run_machine_cleanup,
 };
 pub use execute::{APP_MANAGEMENT_HINT, execute_uninstall, plan_uninstall_at};
 pub use helper::{

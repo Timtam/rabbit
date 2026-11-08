@@ -3,10 +3,10 @@
 //! Nothing here reaches the real system's elevated paths: every run reads a
 //! throwaway key, `HKCU\Software\RABBIT-test-<unique>`, that stands in for
 //! HKLM's list of installed programs; every folder is a fixture in a
-//! temporary folder; and [`TestEnvironment`] refuses to start any program
-//! outside its fixture folder. The programs it starts are fakes or this
-//! test binary itself, told by environment variables to act as an
-//! uninstaller.
+//! temporary folder; and [`TestEnvironment`] refuses to start any program,
+//! or delete any file or folder, outside its fixture folder, and to delete
+//! anything from HKLM. The programs it starts are fakes or this test binary
+//! itself, told by environment variables to act as an uninstaller.
 
 // Most fixtures serve only the Windows tests below.
 #![cfg_attr(not(windows), allow(dead_code))]
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use rabbit_platform::{PendingFileRename, UninstallViews};
+use rabbit_platform::{PendingFileRename, RegistryView, UninstallViews};
 
 use super::{
     LeftoverResult, ProgramEnd, RunLimits, VendorCommand, VendorEnvironment, VendorExit,
@@ -35,6 +35,9 @@ pub(crate) enum Owners {
     /// These are owned by administrators, standing in for the files a
     /// vendor's installer made; everything else is asked of Windows.
     RealExcept(Vec<PathBuf>),
+    /// These are owned by a standard user; everything else by
+    /// administrators. The same whether the test runs elevated or not.
+    UntrustedOnly(Vec<PathBuf>),
 }
 
 /// What a fake uninstaller does: it gets the command, and says how it ended
@@ -91,7 +94,8 @@ pub(crate) struct TestEnvironment {
     pub(crate) owners: Owners,
     /// Where working folders go; never ProgramData.
     pub(crate) working_parent: PathBuf,
-    /// The only folder programs may be started from.
+    /// The only folder programs may be started from, and the only one
+    /// files and folders are deleted in.
     pub(crate) sandbox: PathBuf,
     pub(crate) runner: Runner,
     pub(crate) pending: Vec<PendingFileRename>,
@@ -122,6 +126,30 @@ impl TestEnvironment {
     pub(crate) fn started(&self) -> Vec<VendorCommand> {
         self.started.lock().unwrap().clone()
     }
+
+    /// Refuse, as `PermissionDenied`, a path that isn't strictly inside
+    /// [`Self::sandbox`], both by its real path and by its folder's real
+    /// path, so neither a link nor the folder it sits in leads outside. A
+    /// path that isn't there fails as not found, as a delete would.
+    fn check_in_sandbox(&self, path: &Path) -> io::Result<()> {
+        let sandbox = std::fs::canonicalize(&self.sandbox)?;
+        let real = std::fs::canonicalize(path)?;
+        let real_folder = match path.parent() {
+            Some(folder) => std::fs::canonicalize(folder)?,
+            None => PathBuf::new(),
+        };
+        let inside = |real: &Path| real != sandbox && real.starts_with(&sandbox);
+        if inside(&real) && (inside(&real_folder) || real_folder == sandbox) {
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "tests only delete in their fixture folder, not {}",
+                path.display()
+            ),
+        ))
+    }
 }
 
 impl VendorEnvironment for TestEnvironment {
@@ -138,6 +166,9 @@ impl VendorEnvironment for TestEnvironment {
                 } else {
                     rabbit_platform::file_owner_is_trusted(path)
                 }
+            }
+            Owners::UntrustedOnly(untrusted) => {
+                Ok(!untrusted.iter().any(|untrusted| untrusted == path))
             }
         }
     }
@@ -229,6 +260,28 @@ impl VendorEnvironment for TestEnvironment {
             }
             None => std::thread::sleep(duration),
         }
+    }
+
+    fn remove_file_no_follow(&self, path: &Path) -> io::Result<()> {
+        self.check_in_sandbox(path)?;
+        rabbit_platform::remove_regular_file(path)
+    }
+
+    fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
+        self.check_in_sandbox(path)?;
+        rabbit_platform::remove_empty_dir(path)
+    }
+
+    fn delete_uninstall_entry(&self, key: &str, view: RegistryView) -> io::Result<bool> {
+        // Never Windows' real list, whatever a test hands in. Under HKCU the
+        // platform itself deletes only below a test's own key.
+        if self.views.is_local_machine() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "tests never delete from Windows' real list of installed programs",
+            ));
+        }
+        self.views.delete_entry_in_view(key, view)
     }
 }
 
@@ -348,6 +401,14 @@ fn every_refusal() -> Vec<VendorRefusal> {
             what: path().display().to_string(),
             error: "denied".to_string(),
         },
+        VendorRefusal::UnexpectedRegistryValue {
+            value: "DisplayName".to_string(),
+        },
+        VendorRefusal::RegistryValueMismatch {
+            found: "C:\\Program Files\\Reaper_JawsScripts".to_string(),
+        },
+        VendorRefusal::RegistryKeyHasSubkeys,
+        VendorRefusal::UntrustedFolder { path: path() },
         VendorRefusal::NotAVendorPlan,
         VendorRefusal::Unsupported,
     ]
@@ -481,14 +542,22 @@ pub(crate) mod windows {
             UninstallViews::current_user_at(self.path())
         }
 
+        /// Make the entry `key` hold exactly these `REG_SZ` values.
         pub(crate) fn write(&self, key: &str, values: &[(&str, &str)]) {
-            let entry = UninstallEntry::new(
+            self.write_values(
+                key,
                 values
                     .iter()
                     .map(|(name, text)| RegistryValue::string(*name, text))
                     .collect(),
             );
-            self.root().write_entry(key, &entry).unwrap();
+        }
+
+        /// Make the entry `key` hold exactly `values`, each of its own type.
+        pub(crate) fn write_values(&self, key: &str, values: Vec<RegistryValue>) {
+            self.root()
+                .write_entry(key, &UninstallEntry::new(values))
+                .unwrap();
             self.entries.lock().unwrap().push(key.to_string());
         }
     }

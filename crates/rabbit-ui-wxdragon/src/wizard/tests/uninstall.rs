@@ -7,11 +7,11 @@ use rabbit_core::package::{PACKAGE_REAPACK, PackageCategory, builtin_package_spe
 use rabbit_core::plan::{InstallPlan, PlanAction, PlanActionKind};
 use rabbit_core::receipt::{InstallState, PackageReceipt};
 use rabbit_core::uninstall::{
-    ByHandReason, FakeMacosObjects, KeptPath, KeptReason, NoMacosObjects, NothingListed,
-    ObjectFacts, PathRefusal, PlannedRemoval, PlannedVendorRun, Removability, RemovalReason,
-    TrashFolderFacts, UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanInput,
-    UninstallPlanItem, UninstallRoots, UninstallWarning, VendorJob, VendorLookup, VendorRefusal,
-    build_uninstall_plan,
+    ByHandReason, CleanupJob, FakeMacosObjects, KeptPath, KeptReason, NoMacosObjects,
+    NothingListed, ObjectFacts, PathRefusal, PlannedMachineCleanup, PlannedRemoval,
+    PlannedVendorRun, Removability, RemovalReason, TrashFolderFacts, UNINSTALL_NOT_YET_KEY,
+    UninstallNote, UninstallPlan, UninstallPlanInput, UninstallPlanItem, UninstallRoots,
+    UninstallWarning, VendorJob, VendorLookup, VendorRefusal, build_uninstall_plan,
 };
 use rabbit_core::version::Version;
 use tempfile::tempdir;
@@ -1901,12 +1901,33 @@ fn review_names_the_one_permission_prompt_and_the_question_covers_each_package()
 }
 
 /// Finds every vendor's uninstaller at one made-up path, as if HKLM listed
-/// it and every check passed. Nothing reads the registry.
-struct FoundIt(PathBuf);
+/// it and every check passed, and answers every machine cleanup with
+/// `cleanup`. Nothing reads the registry.
+struct FoundIt {
+    uninstaller: PathBuf,
+    cleanup: Result<Option<PlannedMachineCleanup>, VendorRefusal>,
+}
+
+impl FoundIt {
+    /// No machine cleanup's folder or registry entry there.
+    fn new(uninstaller: PathBuf) -> Self {
+        Self {
+            uninstaller,
+            cleanup: Ok(None),
+        }
+    }
+}
 
 impl VendorLookup for FoundIt {
     fn locate(&self, _job: &VendorJob<'_>) -> Result<PathBuf, VendorRefusal> {
-        Ok(self.0.clone())
+        Ok(self.uninstaller.clone())
+    }
+
+    fn machine_cleanup(
+        &self,
+        _job: &CleanupJob<'_>,
+    ) -> Result<Option<PlannedMachineCleanup>, VendorRefusal> {
+        self.cleanup.clone()
     }
 }
 
@@ -1945,7 +1966,7 @@ fn the_shipped_vendor_plans_read_in_every_locale() {
         detections: &detections,
         state: None,
         remove_settings: false,
-        vendor_lookup: &FoundIt(dir.path().join("uninstall.exe")),
+        vendor_lookup: &FoundIt::new(dir.path().join("uninstall.exe")),
         objects: &NoMacosObjects,
     });
     for &locale in embedded_locales() {

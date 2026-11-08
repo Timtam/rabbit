@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
 
 use super::{
-    ANY_REAPER_PROCESS_CHECK, ByHandReason, KeptReason, NoMacosObjects, NothingListed,
-    PROGRAMS_RUNNING_CHECK, PathRefusal, Removability, RemovalReason, UNINSTALL_NOT_YET_KEY,
-    UninstallNote, UninstallPlan, UninstallPlanInput, UninstallPlanItem, UninstallPreflightOptions,
-    UninstallRoots, UninstallWarning, VendorJob, VendorLookup, VendorRefusal, build_uninstall_plan,
-    run_uninstall_preflight_with_processes,
+    ANY_REAPER_PROCESS_CHECK, ByHandReason, CleanupJob, KeptReason, NoMacosObjects, NothingListed,
+    PROGRAMS_RUNNING_CHECK, PathRefusal, PlannedMachineCleanup, Removability, RemovalReason,
+    UNINSTALL_NOT_YET_KEY, UninstallNote, UninstallPlan, UninstallPlanInput, UninstallPlanItem,
+    UninstallPreflightOptions, UninstallRoots, UninstallWarning, VendorJob, VendorLookup,
+    VendorRefusal, build_uninstall_plan, run_uninstall_preflight_with_processes,
 };
 use crate::model::{ComponentDetection, Confidence, InstallationKind, Platform};
 use crate::package::uninstall::{UninstallBackup, UninstallStrategy};
@@ -26,13 +26,35 @@ use crate::receipt::{InstallState, InstalledFileReceipt, PackageReceipt};
 
 const SUMMARY: &str = r#""summary": { "removes_key": "test-removes", "keeps_key": "test-keeps" }"#;
 
-/// A vendor lookup that finds every uninstaller at `0`, checked and
-/// trusted, as Windows' list would name it. Nothing reads the registry.
-pub(super) struct FoundAt(pub(super) PathBuf);
+/// A vendor lookup that finds every uninstaller at `uninstaller`, checked
+/// and trusted, as Windows' list would name it, and answers every machine
+/// cleanup with `cleanup`. Nothing reads the registry.
+pub(super) struct FoundAt {
+    pub(super) uninstaller: PathBuf,
+    pub(super) cleanup: Result<Option<PlannedMachineCleanup>, VendorRefusal>,
+}
+
+impl FoundAt {
+    /// Every uninstaller at `uninstaller`, and no machine cleanup's folder
+    /// or registry entry there.
+    pub(super) fn new(uninstaller: PathBuf) -> Self {
+        Self {
+            uninstaller,
+            cleanup: Ok(None),
+        }
+    }
+}
 
 impl VendorLookup for FoundAt {
     fn locate(&self, _job: &VendorJob<'_>) -> Result<PathBuf, VendorRefusal> {
-        Ok(self.0.clone())
+        Ok(self.uninstaller.clone())
+    }
+
+    fn machine_cleanup(
+        &self,
+        _job: &CleanupJob<'_>,
+    ) -> Result<Option<PlannedMachineCleanup>, VendorRefusal> {
+        self.cleanup.clone()
     }
 }
 
@@ -980,7 +1002,7 @@ fn vendor_plans_need_an_uninstaller_rabbit_can_trust() {
         None,
         InstallationKind::Standard,
         true,
-        &FoundAt(uninstaller.clone()),
+        &FoundAt::new(uninstaller.clone()),
     );
     let vendor = item(&plan, "vendor");
     assert_eq!(vendor.removability, Removability::Removable);

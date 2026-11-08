@@ -117,10 +117,13 @@ uninstall-manual-reaper-portable = RABBIT non rimuove un REAPER portable: i file
     3. Elimina la cartella del REAPER portable.
     Anche i backup che RABBIT ha creato per questo REAPER si trovano in quella cartella, in RABBIT\backups, e vengono eliminati con essa.
 
-# Why RABBIT didn't start a program's own uninstaller, which it runs with
+# Why RABBIT didn't start a program's own uninstaller, or didn't remove a
+# package's uninstaller folder and registry entry. RABBIT does both with
 # administrator rights. Nothing has changed at that point. RABBIT shows one
-# of these, then uninstall-vendor-refused-nothing-changed.
-# { $package } is the package's name, such as Surge XT or REAPER.
+# of these, then uninstall-vendor-refused-nothing-changed, or, for the folder
+# and registry entry, the steps to remove the package by hand.
+# { $package } is the package's name, such as Surge XT, REAPER or
+# JAWS-for-REAPER scripts.
 # { $path } is a file, a folder or a value as Windows holds it; keep it as it
 # is.
 uninstall-vendor-refused-not-listed = Windows non elenca { $package } tra i programmi installati per tutti gli utenti, quindi RABBIT non trova il suo programma di disinstallazione.
@@ -139,6 +142,14 @@ uninstall-vendor-refused-copy-differs = La copia che RABBIT ha fatto del program
 uninstall-vendor-refused-unreadable = RABBIT non è riuscito a leggere { $path } per controllare il programma di disinstallazione di { $package }.
 uninstall-vendor-refused-not-a-vendor-plan = RABBIT non ha un programma di disinstallazione di { $package } che possa eseguire.
 uninstall-vendor-refused-unsupported = RABBIT può eseguire il programma di disinstallazione di { $package } solo su Windows.
+# { $path } is the name of a value in the package's registry entry.
+uninstall-vendor-refused-unexpected-registry-value = La voce di registro di { $package } contiene un valore che RABBIT non si aspetta: { $path }
+# { $path } is the text of a value in the package's registry entry.
+uninstall-vendor-refused-registry-value-mismatch = La voce di registro di { $package } punta a una posizione che RABBIT non si aspetta: { $path }
+# The package's registry entry has subkeys, which its installer doesn't write.
+uninstall-vendor-refused-registry-key-has-subkeys = La voce di registro di { $package } contiene più di quanto RABBIT si aspetti.
+# { $path } is the package's uninstaller folder in Program Files.
+uninstall-vendor-refused-untrusted-folder = La cartella di { $package } non è stata creata da un amministratore: { $path }
 # Follows each of the messages above. { $package } as above.
 uninstall-vendor-refused-nothing-changed = Non è stato cambiato niente. Puoi disinstallare { $package } nelle Impostazioni di Windows, in App, App installate.
 

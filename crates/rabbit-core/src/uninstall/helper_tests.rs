@@ -14,17 +14,31 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rabbit_platform::{PendingFileRename, UninstallViews, uninstall_pipe_name};
+use rabbit_platform::{PendingFileRename, RegistryView, UninstallViews, uninstall_pipe_name};
 
 use super::*;
 use crate::model::{InstallationKind, Platform};
 use crate::package::{parse_embedded_package_spec, validate_package_spec};
+// The key and the folder the tests' machine cleanup names, shared with the
+// cleanup's own tests. No installer uses either, so even a test gone wrong
+// couldn't reach a real one.
+use crate::uninstall::cleanup::tests::{FOLDER as CLEANUP_FOLDER, KEY as CLEANUP_KEY};
+use crate::uninstall::cleanup::{CleanupResult, CleanupStatus, CleanupStep, CleanupTarget};
 use crate::uninstall::vendor::{
     ProgramEnd, RunLimits, VendorCommand, VendorEnvironment, VendorOutcome, VendorRefusal,
     VendorStatus,
 };
 
 const LONG: Duration = Duration::from_secs(20);
+
+/// An Inno uninstaller as a plan's `vendor_uninstaller` names it, with a
+/// time limit of 600 seconds.
+const INNO: &str = r#""vendor_uninstaller": {
+    "kind": "inno",
+    "locate": [{ "registry": { "hive": "hklm", "key": "Demo_is1", "value": "UninstallString" } }],
+    "must_be_in": { "dir": "{program_data}/Demo/uninstall", "only_files": "unins000.*" },
+    "timeout_seconds": 600
+}"#;
 
 /// An environment for helpers that are never asked to run an uninstaller:
 /// it can't start anything, and its list of installed programs is a key
@@ -82,6 +96,18 @@ impl VendorEnvironment for NothingToRun {
 
     fn sleep(&self, duration: Duration) {
         thread::sleep(duration);
+    }
+
+    fn remove_file_no_follow(&self, _path: &Path) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    fn remove_empty_dir(&self, _path: &Path) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    fn delete_uninstall_entry(&self, _key: &str, _view: RegistryView) -> io::Result<bool> {
+        Err(unsupported())
     }
 }
 
@@ -244,6 +270,20 @@ fn orders_and_events_are_one_json_object_per_line() {
     assert_eq!(
         serde_json::from_str::<HelperEvent>(&line).unwrap(),
         finished
+    );
+    let cleaned_up = HelperEvent::CleanupFinished {
+        package_id: "jaws-scripts".to_string(),
+        outcome: Box::new(removed_cleanup("jaws-scripts")),
+    };
+    let line = serde_json::to_string(&cleaned_up).unwrap();
+    assert!(
+        line.starts_with(r#"{"event":"cleanup-finished","package_id":"jaws-scripts","#),
+        "{line}"
+    );
+    assert!(!line.contains('\n'));
+    assert_eq!(
+        serde_json::from_str::<HelperEvent>(&line).unwrap(),
+        cleaned_up
     );
 }
 
@@ -497,14 +537,36 @@ pub(crate) fn elevated_surge(id: &str) -> PackageSpec {
     )
 }
 
+/// A package with the JAWS scripts' kind of plan: a Windows `remove_files`
+/// plan whose only removal is the cleanup's tests' machine cleanup of
+/// [`CLEANUP_FOLDER`] and [`CLEANUP_KEY`].
+pub(crate) fn cleanup_package(id: &str) -> PackageSpec {
+    let cleanup = serde_json::to_string(&crate::uninstall::cleanup::tests::spec()).unwrap();
+    package(
+        id,
+        &format!(r#""strategy": "remove_files", "machine_cleanup": {cleanup}"#),
+    )
+}
+
+/// A cleanup of `package_id` that removed everything there was.
+fn removed_cleanup(package_id: &str) -> CleanupOutcome {
+    CleanupOutcome {
+        package_id: package_id.to_string(),
+        status: CleanupStatus::Removed,
+        refusal: None,
+        steps: vec![CleanupStep {
+            target: CleanupTarget::RegistryKey {
+                key: CLEANUP_KEY.to_string(),
+            },
+            result: CleanupResult::Removed,
+        }],
+        still_present: Vec::new(),
+        error: None,
+    }
+}
+
 #[test]
 fn only_a_plan_that_runs_a_vendor_uninstaller_elevated_is_run() {
-    const INNO: &str = r#""vendor_uninstaller": {
-        "kind": "inno",
-        "locate": [{ "registry": { "hive": "hklm", "key": "Demo_is1", "value": "UninstallString" } }],
-        "must_be_in": { "dir": "{program_data}/Demo/uninstall", "only_files": "unins000.*" },
-        "timeout_seconds": 600
-    }"#;
     let specs = [
         package(
             "elevated",
@@ -540,6 +602,364 @@ fn only_a_plan_that_runs_a_vendor_uninstaller_elevated_is_run() {
         outcome,
         VendorOutcome::refused("files", VendorRefusal::NotAVendorPlan)
     );
+}
+
+#[test]
+fn only_a_machine_cleanup_for_a_standard_reaper_is_run() {
+    let mut not_standard = cleanup_package("not-standard");
+    not_standard.requires_standard_install = false;
+    let specs = [
+        cleanup_package("cleanup"),
+        not_standard,
+        package(
+            "elevated",
+            &format!(
+                r#""strategy": "vendor_uninstaller", "elevation": "required", "backup": "none", {INNO}"#
+            ),
+        ),
+        package(
+            "files",
+            r#""strategy": "remove_files", "remove": { "paths": ["{program_data}/Demo/a.dll"] }"#,
+        ),
+    ];
+    let cleanup = elevated_cleanup_plan(&specs, "cleanup", InstallationKind::Standard)
+        .expect("a cleanup for a standard REAPER");
+    assert_eq!(
+        cleanup.dir.as_str(),
+        format!("{{program_files_x86}}/{CLEANUP_FOLDER}")
+    );
+    // A cleanup runs no vendor's uninstaller, and a vendor's uninstaller
+    // is no cleanup.
+    assert!(elevated_vendor_plan(&specs, "cleanup", InstallationKind::Standard).is_none());
+    assert!(elevated_cleanup_plan(&specs, "elevated", InstallationKind::Standard).is_none());
+    // The folder and the key serve the whole computer.
+    assert!(elevated_cleanup_plan(&specs, "not-standard", InstallationKind::Standard).is_none());
+    assert!(elevated_cleanup_plan(&specs, "files", InstallationKind::Standard).is_none());
+    assert!(elevated_cleanup_plan(&specs, "missing", InstallationKind::Standard).is_none());
+}
+
+/// A portable REAPER's uninstall never removes what serves the whole
+/// computer: the helper runs nothing for the package, and says so the way
+/// it does for a package it has no plan for.
+#[test]
+fn the_helper_refuses_a_cleanup_for_a_portable_target() {
+    let specs = vec![cleanup_package("jaws-test")];
+    assert!(elevated_cleanup_plan(&specs, "jaws-test", InstallationKind::Standard).is_some());
+    assert!(elevated_cleanup_plan(&specs, "jaws-test", InstallationKind::Portable).is_none());
+
+    let (mut rabbit, mut helper) = MemoryChannel::pair();
+    let args = HelperArgs {
+        target_app_path: None,
+        target: InstallationKind::Portable,
+        ..args_for(&["jaws-test"])
+    };
+    let roots = helper_roots(&args, &folders());
+    let serving =
+        thread::spawn(move || serve(&mut helper, &args, &specs, &NothingToRun::new(), &roots));
+    assert_eq!(
+        next_event(&mut rabbit),
+        HelperEvent::Ready {
+            helper_pid: std::process::id()
+        }
+    );
+    expect_finished_without_a_plan(&mut rabbit, "jaws-test");
+    order(&mut rabbit, &HelperOrder::Quit {});
+    assert_eq!(serving.join().unwrap(), HELPER_EXIT_DONE);
+}
+
+/// The helper loop deletes the cleanup's files, its folder and its registry
+/// entry, and answers with `cleanup-finished`; RABBIT's session hands that
+/// outcome on as it came. The folders are fixtures and the list of
+/// installed programs is a throwaway HKCU key.
+#[cfg(windows)]
+#[test]
+fn the_helper_runs_a_cleanup_plan_and_answers_with_cleanup_finished() {
+    use crate::uninstall::cleanup::tests::windows::install;
+    use crate::uninstall::vendor::tests::windows::{Fixture, never_runs};
+
+    // The helper loop itself.
+    let fixture = Fixture::new();
+    let folder = install(&fixture).folder;
+    let (mut rabbit, mut helper) = MemoryChannel::pair();
+    let args = HelperArgs {
+        resource_path: fixture.resource.clone(),
+        target_app_path: None,
+        ..args_for(&["jaws-test"])
+    };
+    let roots = helper_roots(&args, &fixture.folders);
+    let specs = vec![cleanup_package("jaws-test")];
+    let env = fixture.env(never_runs());
+    let serving = thread::spawn(move || serve(&mut helper, &args, &specs, &env, &roots));
+    assert_eq!(
+        next_event(&mut rabbit),
+        HelperEvent::Ready {
+            helper_pid: std::process::id()
+        }
+    );
+    run_order(&mut rabbit, "jaws-test");
+    assert_eq!(
+        next_event(&mut rabbit),
+        HelperEvent::Started {
+            package_id: "jaws-test".to_string()
+        }
+    );
+    let HelperEvent::CleanupFinished {
+        package_id,
+        outcome,
+    } = next_event(&mut rabbit)
+    else {
+        panic!("the helper didn't answer with cleanup-finished");
+    };
+    assert_eq!(
+        (package_id.as_str(), outcome.package_id.as_str()),
+        ("jaws-test", "jaws-test")
+    );
+    assert_eq!(outcome.status, CleanupStatus::Removed, "{outcome:?}");
+    let shown_key = fixture
+        .list
+        .views()
+        .display_key(CLEANUP_KEY, RegistryView::Bit32);
+    assert_eq!(
+        outcome.steps,
+        vec![
+            CleanupStep {
+                target: CleanupTarget::File {
+                    path: folder.join("Uninstall.dat"),
+                },
+                result: CleanupResult::Removed,
+            },
+            CleanupStep {
+                target: CleanupTarget::File {
+                    path: folder.join("Uninstall.exe"),
+                },
+                result: CleanupResult::Removed,
+            },
+            CleanupStep {
+                target: CleanupTarget::Folder {
+                    path: folder.clone(),
+                },
+                result: CleanupResult::Removed,
+            },
+            CleanupStep {
+                target: CleanupTarget::RegistryKey { key: shown_key },
+                result: CleanupResult::Removed,
+            },
+        ]
+    );
+    assert!(std::fs::symlink_metadata(&folder).is_err());
+    assert!(!fixture.list.views().key_exists(CLEANUP_KEY).unwrap());
+    order(&mut rabbit, &HelperOrder::Quit {});
+    assert_eq!(serving.join().unwrap(), HELPER_EXIT_DONE);
+
+    // RABBIT's session, against the same loop on the in-process helper.
+    let fixture = Fixture::new();
+    let folder = install(&fixture).folder;
+    let helper = InProcessElevatedHelper::new(
+        Arc::new(fixture.env(never_runs())),
+        vec![cleanup_package("jaws-test")],
+        fixture.folders.clone(),
+    );
+    let mut session = helper
+        .start(&request(&["jaws-test"], &fixture.resource))
+        .unwrap();
+    let outcome = session.run_cleanup("jaws-test");
+    assert_eq!(outcome.status, CleanupStatus::Removed, "{outcome:?}");
+    assert_eq!(outcome.steps.len(), 4, "{outcome:?}");
+    assert!(std::fs::symlink_metadata(&folder).is_err());
+    assert!(!fixture.list.views().key_exists(CLEANUP_KEY).unwrap());
+
+    // No package is cleaned up twice: the helper refuses, which ends the
+    // session.
+    let again = session.run_cleanup("jaws-test");
+    assert_eq!(again.status, CleanupStatus::Lost, "{again:?}");
+    assert!(again.steps.is_empty());
+    assert!(
+        again.error.as_deref().unwrap().contains("refused"),
+        "{again:?}"
+    );
+    let later = session.run_cleanup("jaws-test");
+    assert_eq!(later.status, CleanupStatus::Lost);
+    assert!(
+        later.error.as_deref().unwrap().contains("already lost"),
+        "{later:?}"
+    );
+    session.finish();
+}
+
+/// Run a cleanup of `jaws-test` on a session whose helper answers the order
+/// with `lines`, then stays, or goes away if `goes_away`. Returns the
+/// outcome, the session and the helper's end, if it stayed.
+fn cleanup_answered_with(
+    lines: Vec<String>,
+    goes_away: bool,
+) -> (
+    CleanupOutcome,
+    ChannelSession<MemoryChannel>,
+    Option<MemoryChannel>,
+) {
+    let (rabbit, mut helper) = MemoryChannel::pair();
+    let waits = HashMap::from([("jaws-test".to_string(), LONG)]);
+    let mut session = ChannelSession::new(rabbit, HelperHandle::Detached, waits);
+    let talking = thread::spawn(move || {
+        let order = helper.read_line(LONG).unwrap().unwrap();
+        assert_eq!(order, r#"{"order":"run","package_id":"jaws-test"}"#);
+        for line in lines {
+            helper.send_line(&line, LONG).unwrap();
+        }
+        (!goes_away).then_some(helper)
+    });
+    let outcome = session.run_cleanup("jaws-test");
+    let helper = talking.join().unwrap();
+    (outcome, session, helper)
+}
+
+fn lines(events: &[HelperEvent]) -> Vec<String> {
+    events
+        .iter()
+        .map(|event| serde_json::to_string(event).unwrap())
+        .collect()
+}
+
+/// RABBIT takes only `started`, then `cleanup-finished`, both for the
+/// package it asked for, as the answer to a cleanup. Any other answer ends
+/// the session: the outcome is lost, and no later order goes out.
+#[test]
+fn a_session_expecting_a_cleanup_loses_contact_on_any_other_answer() {
+    let started = || HelperEvent::Started {
+        package_id: "jaws-test".to_string(),
+    };
+    let finished_for = |event_id: &str, outcome_id: &str| HelperEvent::CleanupFinished {
+        package_id: event_id.to_string(),
+        outcome: Box::new(removed_cleanup(outcome_id)),
+    };
+
+    // The one right answer comes back as it was sent.
+    let (outcome, session, _helper) = cleanup_answered_with(
+        lines(&[started(), finished_for("jaws-test", "jaws-test")]),
+        false,
+    );
+    assert_eq!(outcome, removed_cleanup("jaws-test"));
+    assert!(session.lost.is_none());
+    Box::new(session).finish();
+
+    let wrong_answers: Vec<(&str, Vec<String>, bool)> = vec![
+        (
+            "a vendor run's answer",
+            lines(&[
+                started(),
+                HelperEvent::Finished {
+                    package_id: "jaws-test".to_string(),
+                    outcome: Box::new(VendorOutcome::refused(
+                        "jaws-test",
+                        VendorRefusal::NotAVendorPlan,
+                    )),
+                },
+            ]),
+            false,
+        ),
+        (
+            "finished without starting",
+            lines(&[finished_for("jaws-test", "jaws-test")]),
+            false,
+        ),
+        ("started twice", lines(&[started(), started()]), false),
+        (
+            "another package started",
+            lines(&[HelperEvent::Started {
+                package_id: "reaper".to_string(),
+            }]),
+            false,
+        ),
+        (
+            "another package finished",
+            lines(&[started(), finished_for("reaper", "jaws-test")]),
+            false,
+        ),
+        (
+            "an outcome for another package",
+            lines(&[started(), finished_for("jaws-test", "reaper")]),
+            false,
+        ),
+        (
+            "a vendor uninstaller launched",
+            lines(&[
+                started(),
+                HelperEvent::VendorLaunched {
+                    package_id: "jaws-test".to_string(),
+                },
+            ]),
+            false,
+        ),
+        (
+            "ready again",
+            lines(&[HelperEvent::Ready { helper_pid: 1 }]),
+            false,
+        ),
+        (
+            "a line that isn't an event",
+            vec![r#"{"event":"cleanup-finished","package_id":"jaws-test"}"#.to_string()],
+            false,
+        ),
+        ("the helper went away", lines(&[started()]), true),
+        (
+            "the helper refused",
+            lines(&[HelperEvent::Refused {
+                reason: HelperRefusal::AlreadyRun {
+                    package_id: "jaws-test".to_string(),
+                },
+            }]),
+            false,
+        ),
+    ];
+    for (case, answer, goes_away) in wrong_answers {
+        let (outcome, mut session, helper) = cleanup_answered_with(answer, goes_away);
+        assert_eq!(outcome.status, CleanupStatus::Lost, "{case}: {outcome:?}");
+        assert_eq!(outcome.package_id, "jaws-test", "{case}");
+        assert!(outcome.steps.is_empty(), "{case}: {outcome:?}");
+        assert!(outcome.error.is_some(), "{case}");
+        assert!(session.lost.is_some(), "{case}");
+
+        let later = session.run_cleanup("jaws-test");
+        assert_eq!(later.status, CleanupStatus::Lost, "{case}");
+        assert!(
+            later.error.as_deref().unwrap().contains("already lost"),
+            "{case}: {later:?}"
+        );
+        if let Some(mut helper) = helper {
+            assert!(
+                helper.read_line(Duration::from_millis(100)).is_err(),
+                "{case}: no order went out"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_waits_cover_cleanup_packages() {
+    let specs = [
+        cleanup_package("jaws-test"),
+        package(
+            "vendor",
+            &format!(
+                r#""strategy": "vendor_uninstaller", "elevation": "required", "backup": "none", {INNO}"#
+            ),
+        ),
+    ];
+    let standard = request(&["jaws-test", "vendor", "unknown"], &std::env::temp_dir());
+    assert_eq!(
+        package_waits(&specs, &standard),
+        HashMap::from([
+            ("jaws-test".to_string(), CLEANUP_WAIT),
+            ("vendor".to_string(), Duration::from_secs(600 * 2 + 120)),
+        ])
+    );
+    assert_eq!(CLEANUP_WAIT, Duration::from_secs(60));
+    // Neither runs for a portable REAPER, so neither has a wait of its own.
+    let portable = ElevatedRunRequest {
+        target: InstallationKind::Portable,
+        ..standard
+    };
+    assert!(package_waits(&specs, &portable).is_empty());
 }
 
 /// The helper never reads a per-user folder: only the resource folder and
@@ -639,6 +1059,15 @@ fn an_in_process_helper_never_reads_windows_real_list() {
             Instant::now()
         }
         fn sleep(&self, _duration: Duration) {}
+        fn remove_file_no_follow(&self, _path: &Path) -> io::Result<()> {
+            Err(unsupported())
+        }
+        fn remove_empty_dir(&self, _path: &Path) -> io::Result<()> {
+            Err(unsupported())
+        }
+        fn delete_uninstall_entry(&self, _key: &str, _view: RegistryView) -> io::Result<bool> {
+            Err(unsupported())
+        }
     }
 
     let helper = InProcessElevatedHelper::new(
@@ -659,6 +1088,81 @@ fn a_declined_prompt_starts_nothing() {
     assert!(matches!(
         helper.start(&request(&["surge-xt"], &std::env::temp_dir())),
         Err(ElevationStartError::Declined)
+    ));
+}
+
+/// An in-process helper only works with machine-wide folders below the
+/// temporary folder, by their real paths, so a test's machine cleanup can't
+/// reach the real Program Files however it is put together. It refuses
+/// before it would ask for permission.
+#[test]
+fn an_in_process_helper_refuses_machine_folders_outside_the_temp_folder() {
+    let temp = std::env::temp_dir();
+    let refused = |change: &dyn Fn(&mut MachineFolders)| {
+        let mut folders = folders();
+        change(&mut folders);
+        let helper = InProcessElevatedHelper::new(
+            Arc::new(NothingToRun::new()),
+            vec![cleanup_package("jaws-test")],
+            folders.clone(),
+        )
+        .declining();
+        match helper.start(&request(&["jaws-test"], &temp)) {
+            Err(ElevationStartError::Failed(why)) => {
+                assert!(why.contains("temporary folder"), "{folders:?}: {why}");
+            }
+            Err(other) => panic!("{folders:?}: expected a refusal, got {other:?}"),
+            Ok(_) => panic!("{folders:?}: the helper started"),
+        }
+    };
+    let outside = [
+        // The temporary folder itself isn't below it...
+        temp.clone(),
+        // ...nor is anything beside it, there or not...
+        temp.parent().unwrap().to_path_buf(),
+        temp.parent().unwrap().join("RABBIT-test-machine"),
+        // ...nor a way out of it, or a path that isn't a full one.
+        temp.join("RABBIT-test-machine").join("..").join(".."),
+        PathBuf::from("Program Files (x86)"),
+    ];
+    for folder in &outside {
+        refused(&|folders| folders.program_files_x86 = folder.clone());
+        refused(&|folders| folders.program_files[0] = folder.clone());
+        refused(&|folders| folders.program_files[1] = folder.clone());
+        refused(&|folders| folders.common_program_files = folder.clone());
+        refused(&|folders| folders.program_data = folder.clone());
+    }
+
+    // Folders below it start a session, whether they are there yet or not.
+    let helper = InProcessElevatedHelper::new(
+        Arc::new(NothingToRun::new()),
+        vec![cleanup_package("jaws-test")],
+        folders(),
+    );
+    let session = helper.start(&request(&["jaws-test"], &temp)).unwrap();
+    session.finish();
+}
+
+/// A link below the temporary folder whose target is gone could lead
+/// anywhere once something is made there, so a folder behind it is refused.
+/// The link's target was a second temporary folder, so nothing outside the
+/// temporary folder is ever linked to.
+#[cfg(windows)]
+#[test]
+fn an_in_process_helper_refuses_a_machine_folder_behind_a_dangling_link() {
+    use crate::uninstall::paths::make_junction;
+
+    let dir = tempfile::tempdir().unwrap();
+    let gone = tempfile::tempdir().unwrap();
+    let link = dir.path().join("Program Files (x86)");
+    make_junction(&link, gone.path());
+    drop(gone);
+    let mut folders = folders();
+    folders.program_files_x86 = link.join("Inside");
+    let helper = InProcessElevatedHelper::new(Arc::new(NothingToRun::new()), Vec::new(), folders);
+    assert!(matches!(
+        helper.start(&request(&["jaws-test"], &std::env::temp_dir())),
+        Err(ElevationStartError::Failed(why)) if why.contains("temporary folder")
     ));
 }
 

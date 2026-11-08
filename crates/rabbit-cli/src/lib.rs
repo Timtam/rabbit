@@ -5094,10 +5094,28 @@ mod tests {
     }
 
     /// Finds every vendor's uninstaller at one fixture path, as if HKLM
-    /// listed it and every check passed. Nothing reads the registry. Only
-    /// Windows has packages a vendor's uninstaller removes.
+    /// listed it and every check passed, and answers every machine cleanup
+    /// with `cleanup`. Nothing reads the registry. Only Windows has packages
+    /// a vendor's uninstaller or a machine cleanup removes.
     #[cfg(windows)]
-    struct FoundIt(PathBuf);
+    struct FoundIt {
+        uninstaller: PathBuf,
+        cleanup: Result<
+            Option<rabbit_core::uninstall::PlannedMachineCleanup>,
+            rabbit_core::uninstall::VendorRefusal,
+        >,
+    }
+
+    #[cfg(windows)]
+    impl FoundIt {
+        /// No machine cleanup's folder or registry entry there.
+        fn new(uninstaller: PathBuf) -> Self {
+            Self {
+                uninstaller,
+                cleanup: Ok(None),
+            }
+        }
+    }
 
     #[cfg(windows)]
     impl rabbit_core::uninstall::VendorLookup for FoundIt {
@@ -5105,7 +5123,17 @@ mod tests {
             &self,
             _job: &rabbit_core::uninstall::VendorJob<'_>,
         ) -> Result<PathBuf, rabbit_core::uninstall::VendorRefusal> {
-            Ok(self.0.clone())
+            Ok(self.uninstaller.clone())
+        }
+
+        fn machine_cleanup(
+            &self,
+            _job: &rabbit_core::uninstall::CleanupJob<'_>,
+        ) -> Result<
+            Option<rabbit_core::uninstall::PlannedMachineCleanup>,
+            rabbit_core::uninstall::VendorRefusal,
+        > {
+            self.cleanup.clone()
         }
     }
 
@@ -5126,7 +5154,7 @@ mod tests {
 
         let reaper = FakeReaper::new();
         let app = reaper.resource.join("reaper.exe");
-        let lookup = FoundIt(reaper.resource.join("Uninstall.exe"));
+        let lookup = FoundIt::new(reaper.resource.join("Uninstall.exe"));
         let mut report = super::uninstall_report(
             &rabbit_core::uninstall::UninstallRequest {
                 target_app_path: Some(app),
