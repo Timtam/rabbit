@@ -34,11 +34,12 @@
 //! removed; each can be restored from the backup set on its own.
 //!
 //! A machine cleanup runs only once every file moved, since a backup can't
-//! bring back what it removes. Once it removed anything, the package counts
-//! as removed: a receipt that can't be saved then is a problem to report,
-//! and nothing goes back. A cleanup that fails part way puts the files back
-//! and the run goes on; one the helper refuses, or loses contact during,
-//! puts them back and stops the run.
+//! bring back what it removes. When it finishes and removed anything, the
+//! package counts as removed: a receipt that can't be saved then is a
+//! problem to report, and nothing goes back. A cleanup that fails part way
+//! puts the files back and keeps the receipt entry, even when something is
+//! already gone, and the run goes on; one the helper refuses, or loses
+//! contact during, puts them back and stops the run.
 //!
 //! A package whose vendor's uninstaller removes it (Surge XT, a standard
 //! REAPER) needs administrator rights, and so does a planned machine

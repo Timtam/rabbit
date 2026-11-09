@@ -27,8 +27,9 @@
 //! through [`VendorEnvironment`], and stops at the first failure. Right
 //! before each file and the folder it checks once more that the folder is
 //! reached through no link, and that an administrator still owns the file.
-//! So the key outlives everything else, and a package whose cleanup failed
-//! is still found through it.
+//! So the key outlives everything else, and Windows still lists a package
+//! whose cleanup failed. RABBIT finds it again through its receipt entry,
+//! which a failed cleanup keeps; `Uninstall.exe` may already be gone.
 
 use std::fs;
 use std::io;

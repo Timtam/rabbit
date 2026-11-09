@@ -643,7 +643,21 @@ user can finish the install by pressing Next a few times.
      the administrator command, or deleted for good by it. An app RABBIT
      can't move is shown but can't be ticked, and its details say why and
      how to move it in Finder: Command-Delete, and for a locked app Get
-     Info's Locked first.
+     Info's Locked first. On Windows the JAWS scripts' row adds, while the
+     uninstaller folder their installer left in Program Files (x86) or its
+     registry entry is there, that only an administrator may remove those, so
+     Windows asks, and that a backup can't bring them back; that line stands
+     in for the backup line when none of the scripts' files are left to move.
+     Its notes say when RABBIT has a receipt but no record of which files the
+     installer added, and in every removable state how to remove by hand the
+     script files that stay. When RABBIT doesn't trust that folder or entry,
+     or has no receipt and finds neither of the scripts' DLLs for this
+     account, the row can't be ticked and reads "remove it by hand"; its
+     details say why (what RABBIT didn't trust, or that the account that
+     installed the scripts should uninstall them), then give the manifest's
+     by-hand steps. On a portable target the row reads like that of any
+     package a portable REAPER can't have, and the same steps follow the
+     details' sentence that only the standard REAPER removes the scripts.
      Below its list, an unticked **Also remove settings** checkbox with a
      note on what it would remove works like the OSARA key map checkbox:
      disabled and out of the Tab order until a ticked package has settings
@@ -721,31 +735,40 @@ user can finish the install by pressing Next a few times.
      (on the Install or update tab, only ticks RABBIT didn't set itself,
      such as an update it ticked by default), and that the packages can be
      installed again. When a ticked package's own uninstaller removes it
-     (on Windows, Surge XT or a standard REAPER), the summary also says that
-     Windows asks for permission once, before anything is removed, that
-     nothing is uninstalled without it, and to answer a window from that
-     uninstaller if one appears; and it asks to close other music
-     programs. On macOS, when the administrator command has a package to
-     remove, the summary says once, naming every such package, that macOS
-     asks once for an administrator's name and password before anything is
-     removed, that it may offer Touch ID, that the window may name
-     osascript, the tool RABBIT asks through, and that cancelling the window
-     uninstalls nothing. A package that goes to the Trash gets a line saying
-     it can be dragged back from there until the Trash is emptied; one the
-     administrator command moves there, that it keeps its owner, so Finder
-     offers no Put Back and emptying the Trash may ask for a password. When
-     that command deletes a package for good, the summary also asks to close
-     other music programs. It doesn't ask this for an app the command moves
-     to the Trash, since no other program uses that app. The Uninstall
-     button is enabled whenever something removable is ticked, whatever the
-     install plan says. Uninstalling is
-     never one key press away: focus goes to the summary, there is no
-     default button, and Enter starts nothing. A run with a step a backup
-     can't undo, such as a vendor's uninstaller, the macOS administrator
-     command or a move to the Trash, or a package whose manifest asks for
-     it, gets a Yes/No question with No focused first. For a package that
-     goes to the Trash the question says it can be dragged back from there
-     instead of saying a backup can't bring it back.
+     (on Windows, Surge XT or a standard REAPER), or the elevated helper
+     removes the uninstaller folder and registry entry the JAWS scripts'
+     installer left, the summary also says that Windows asks for permission
+     once, before anything is removed, and that nothing is uninstalled
+     without it. For a vendor's uninstaller it also says to answer a window
+     from that uninstaller if one appears, and asks to close other music
+     programs. The JAWS scripts' own line leaves the folder and entry out,
+     so for them the summary adds the question's sentence: a backup can
+     bring back their files but not that folder and entry, or, with none of
+     their files left to move, can't bring the scripts back. On macOS,
+     when the administrator command has a package to remove, the summary
+     says once, naming every such package, that macOS asks once for an
+     administrator's name and password before anything is removed, that it
+     may offer Touch ID, that the window may name osascript, the tool RABBIT
+     asks through, and that cancelling the window uninstalls nothing. A
+     package that goes to the Trash gets a line saying it can be dragged
+     back from there until the Trash is emptied; one the administrator
+     command moves there, that it keeps its owner, so Finder offers no Put
+     Back and emptying the Trash may ask for a password. When that command
+     deletes a package for good, the summary also asks to close other music
+     programs. It doesn't ask this for an app the command moves to the
+     Trash, since no other program uses that app. The Uninstall button is
+     enabled whenever something removable is ticked, whatever the install
+     plan says. Uninstalling is never one key press away: focus goes to the
+     summary, there is no default button, and Enter starts nothing. A run
+     with a step a backup can't undo, such as a vendor's uninstaller, the
+     macOS administrator command, a move to the Trash or the elevated
+     helper's removal of the JAWS scripts' uninstaller folder and registry
+     entry, or a package whose manifest asks for it, gets a Yes/No question
+     with No focused first. For a package that goes to the Trash the
+     question says it can be dragged back from there instead of saying a
+     backup can't bring it back. For the JAWS scripts it names only the
+     folder and entry while any of their files go into the backup set, and
+     once both are gone it isn't asked at all.
      Back returns to the Uninstall tab's list, never to the ReaPack
      donation page.
 
@@ -754,13 +777,16 @@ user can finish the install by pressing Next a few times.
      reveals the underlying log for users who want it; collapsed by default.
    - Before an uninstall starts, the Uninstall button refuses with a message
      while something the uninstall preflight needs closed is running: the
-     target's REAPER, every REAPER for a package any REAPER can load (such
-     as app2clap), and the programs a package's plan names. On macOS a
-     REAPER.app the administrator command moves needs every REAPER closed
-     too, because root's `pgrep` can't tell one REAPER from another; when
-     no other ticked package (such as Surge XT) needs every REAPER closed,
-     the message says so. It uses the engine's own process checks, so the
-     two agree, and there is no way to go ahead anyway.
+     target's REAPER, every REAPER for a package that needs a standard
+     REAPER (such as app2clap, which any REAPER can load, or the JAWS
+     scripts), and the programs a package's plan names. JAWS itself is
+     never one of them: it is the user's screen reader, and the scripts'
+     plan names no program to close. On macOS a REAPER.app the
+     administrator command moves needs every REAPER closed too, because
+     root's `pgrep` can't tell one REAPER from another; when no other
+     ticked package (such as Surge XT) needs every REAPER closed, the
+     message says so. It uses the engine's own process checks, so the two
+     agree, and there is no way to go ahead anyway.
    - In uninstall mode the heading says "Uninstalling", focus moves to the
      gauge, and the gauge counts one step per package, so it never parks
      halfway. The status line names each package as its removal starts and
@@ -800,11 +826,17 @@ user can finish the install by pressing Next a few times.
      similar diagnostics stay in that saved report.
    - After an uninstall the status names the packages that went, says why
      any stayed (in the user's language for REAPER or another RABBIT being
-     open, a file in use, too little room for the backup and every way a
-     vendor's uninstaller can end; otherwise the engine's own sentence), and
-     that a package comes back by ticking it on the Install or update tab in
-     a new run. A removal that finishes after a restart says to restart the
-     computer, and a declined permission prompt, or on macOS a cancelled
+     open, a file in use, too little room for the backup, every way a
+     vendor's uninstaller can end and every way the JAWS scripts' cleanup
+     can end; otherwise the engine's own sentence), and that a package comes
+     back by ticking it on the Install or update tab in a new run. A JAWS
+     script file in use says JAWS or another program has it open, to wait
+     and run RABBIT again, and to restart JAWS first if that doesn't help,
+     rather than to close a program, which would be the user's screen
+     reader. After a cleanup that was refused, failed or lost, the reason is
+     followed by the manifest's steps to remove the scripts by hand. A
+     removal that finishes after a restart says to restart the computer,
+     and a declined permission prompt, or on macOS a cancelled
      password window, says plainly that nothing was uninstalled. After a
      macOS removal Done also says what moved to the Trash and what it is
      called there now; where the administrator command stopped or what it
@@ -822,12 +854,21 @@ user can finish the install by pressing Next a few times.
      removed, kept and left over, the backup set, and one `rabbit
      restore-backup` command per removed package whose files went into
      that set: never for one a vendor's uninstaller, the Trash or the
-     administrator command took. The saved report is the
-     engine's `uninstall-<time>` report, which the details point to; the
-     wizard writes one of its own only for a run the engine refused before
-     it began, except a macOS run refused because RABBIT runs as root,
-     whose report would be root's file in the user's resource folder. Both
-     tabs are then rebuilt from fresh detection.
+     administrator command took. For the JAWS scripts it also lists what
+     the elevated helper removed with administrator rights, each file, the
+     folder and the registry entry as regedit names it, and what of the
+     folder or entry is still there, also after a cleanup that failed part
+     way. For a removed package only, it lists the script files kept
+     because they were there before the installer ran or their records
+     disagree, then the note on removing by hand the script files that
+     stayed: while the package is still there, all of its files are. The
+     restore command for the JAWS scripts brings back their files, not the
+     folder and entry. The saved report is the engine's `uninstall-<time>`
+     report, which the details point to; the wizard writes one of its own
+     only for a run the engine refused before it began, except a macOS run
+     refused because RABBIT runs as root, whose report would be root's file
+     in the user's resource folder. Both tabs are then rebuilt from fresh
+     detection.
 
 Streamlining rules (apply when adding new wizard text):
 
@@ -978,7 +1019,29 @@ folder RABBIT couldn't list before the run is recorded, links are never
 followed, and nothing here can fail an install. Only the JAWS scripts declare
 folders so far: everything in each JAWS version's `Settings` folder under
 `%APPDATA%\Freedom Scientific\JAWS`, where the language folders are, and
-`%APPDATA%\REAPER\UserPlugins`. Nothing removes these files yet.
+`%APPDATA%\REAPER\UserPlugins`. The JAWS scripts' uninstall removes the files
+recorded as new directly in a folder below a `Settings` folder, such as a
+language folder, as long as they are unchanged (see Safety Behavior); files
+deeper down stay.
+
+The JAWS scripts' installer always runs elevated, and JAWS keeps running
+meanwhile and creates files of its own in the same folders, which are new
+too. So after an installer that runs elevated on Windows, a new file is
+recorded only when Administrators, SYSTEM or TrustedInstaller own it: the
+elevated installer's new files normally belong to Administrators, JAWS's to
+the user. Any other answer, a failure to read the owner included, leaves the
+file out. The owner is read at install time, while it still tells who
+created the file: a restore copies files back, and the copies belong to
+whoever restored them, so a check at uninstall time would keep every restored
+file. A changed file is recorded as above whoever owns it, since writing over
+a file keeps its owner. Owners don't always tell the two apart: with UAC
+turned off both run with full administrator rights, and a policy can make the
+account that created a file its owner even when it ran elevated. The rule
+then records every new file, as without it, or leaves the installer's files
+out too. Compared with no rule, it only ever leaves files out: it records
+fewer files, never more, so an uninstall removes fewer files, never more. A
+new file it leaves out that an earlier install recorded keeps that record, so
+it goes only if it still holds exactly what that install left.
 
 ## Package Model
 
@@ -1037,24 +1100,23 @@ plan is reachable, each strategy has the fields it needs, removals that need
 administrator rights never go into the user's backups, and no path may reach
 into `{resource}/RABBIT`. `rabbit uninstall` carries out `remove_files`
 and `vendor_uninstaller` plans (see Safety Behavior), and so does the wizard's
-Uninstall tab. OSARA, SWS, ReaPack, ReaKontrol, FFmpeg, app2clap and the
-language packs have `remove_files` plans. FFmpeg and the language packs set `requires_receipt`,
-because a copy RABBIT has no receipt for is most likely the user's own; the
-others name their files, so a copy without a receipt can go too, unless
-ReaPack still manages it. OSARA's Windows plan also has a `registry_cleanup`
-entry: once the files are gone, the engine removes
-`HKCU\...\Uninstall\OSARA`, but only while its `UninstallString` names a
-program directly in this resource folder's `osara` folder, compared ignoring
-case and by real path, so an entry that belongs to another REAPER stays. The
-entry is read only when the run gets there, never while the plan is built,
-and one that can't be read or removed is a problem in the report, not a
-reason to put the files back. The JAWS scripts, and a portable REAPER on
-Windows, have `manual` plans whose note holds the instructions; the JAWS
-scripts' block also lists `install_snapshot` folders, so what their
-installer adds or changes is recorded from now on (see the receipt above).
-On Windows, Surge XT (Inno Setup) and a standard REAPER (NSIS) have
-`vendor_uninstaller` plans with `elevation: required` and `backup: none`. Each
-names its uninstaller only through an HKLM `locate` value, where it must sit
+Uninstall tab. OSARA, SWS, ReaPack, ReaKontrol, FFmpeg, app2clap, the JAWS
+scripts and the language packs have `remove_files` plans. FFmpeg and the
+language packs set `requires_receipt`, because a copy RABBIT has no receipt
+for is most likely the user's own; the others name their files, so a copy
+without a receipt can go too, unless ReaPack still manages it. OSARA's
+Windows plan also has a `registry_cleanup` entry: once the files are gone,
+the engine removes `HKCU\...\Uninstall\OSARA`, but only while its
+`UninstallString` names a program directly in this resource folder's `osara`
+folder, compared ignoring case and by real path, so an entry that belongs to
+another REAPER stays. The entry is read only when the run gets there, never
+while the plan is built, and one that can't be read or removed is a problem
+in the report, not a reason to put the files back. A portable REAPER on
+Windows has a `manual` plan whose note holds the instructions. The JAWS
+scripts' plan is described below. On Windows, Surge XT (Inno Setup) and a
+standard REAPER (NSIS) have `vendor_uninstaller` plans with
+`elevation: required` and `backup: none`. Each names its uninstaller only
+through an HKLM `locate` value, where it must sit
 (`must_be_in`: Surge's exact `{program_data}/Surge XT/uninstall` folder holding
 only `unins000.*`, REAPER's install folder strictly below `{program_files}`,
 whose HKLM `InstallLocation` must equal `{app_dir}`), its silent arguments,
@@ -1103,11 +1165,15 @@ data. `requires_standard_install` keeps a portable target away from it, as on
 Windows. The checks when the manifest loads keep root narrow. A
 `remove_files` plan with any elevation is macOS only and may name nothing
 to remove but `remove.trees`: never files one by one, never anything a
-receipt names. Its `kept_user_data` is kept from root by the planner, not
-by these checks: when the administrator command takes the package, that
-data is only listed as kept, while an `if_needed` app that goes to the
-Trash as the user lets Also remove settings move it into a backup set
-first. `elevation: required` deletes for good, so it needs
+receipt names. Windows' one exception, a plan-level `machine_cleanup` (the
+JAWS scripts', below), isn't plan elevation: that plan stays
+`elevation: never` with `backup: move`, its files go into a backup set as
+the user, and only the cleanup runs in the elevated helper. An elevated
+plan's `kept_user_data` is kept from root by the planner, not by these
+checks: when the administrator command takes the package, that data is only
+listed as kept, while an `if_needed` app that goes to the Trash as the user
+lets Also remove settings move it into a backup set first.
+`elevation: required` deletes for good, so it needs
 `backup: none`, and each of its trees must be an absolute macOS path
 directly in `/Applications`, `/Library/Application Support` or one of the
 `/Library/Audio/Plug-Ins` format folders (VST3, Components, CLAP, LV2),
@@ -1122,6 +1188,53 @@ since they become a pattern for `pgrep`. Receipt IDs, allowed only on an
 letters, digits, `.`, `_` and `-`. `rabbit packages`
 prints each package's plan per platform and target, and `rabbit components`
 says for each package whether RABBIT can uninstall it, and if not, why.
+
+The JAWS scripts' Windows plan is a `remove_files` plan with
+`elevation: never` and `backup: move`, for a standard REAPER only
+(`requires_standard_install`). A standard REAPER's resource folder is
+`{appdata}/REAPER`, where the scripts' installer writes whatever the target.
+`remove.paths` names both DLLs in `{appdata}/REAPER/UserPlugins`; the receipt
+lends the 64-bit one its hash. `remove.vendor_added_files` names the pattern
+`{appdata}/Freedom Scientific/JAWS/*/Settings/*/*`, the files directly in
+any folder below a JAWS version's `Settings` folder, such as a language
+folder (files deeper down are never removed), and the key of a note on
+removing by hand the script files that stay. The plan-level
+`machine_cleanup` names what the installer leaves for its own uninstaller,
+which removes nothing and which RABBIT never runs: the folder
+`{program_files_x86}/Reaper_JawsScripts`; its files in the order they are
+deleted, `Uninstall.dat`, then `Uninstall.exe`, which detection looks for;
+the HKLM key `Reaper_JawsScripts` in the 32-bit view, with its two values,
+`UninstallDirectory` naming the folder and `Uninstall.dat` naming that file;
+and the key of the steps to remove the scripts by hand.
+`{program_files_x86}` is Windows' known folder for 32-bit programs
+(`FOLDERID_ProgramFilesX86`), never read from the environment. Unlike
+`{program_files}`, which stands for both Program Files folders, it is that
+one folder, so a folder of the same name in the native Program Files is
+never considered. `machine_wide_warning: false` turns off the engine's own
+sentence that a package needing a standard REAPER serves every REAPER and
+other programs, which is wrong for scripts only JAWS reads. On a portable
+target the plan is out of reach, since it removes something, and the
+planner shows the `machine_cleanup`'s by-hand steps instead.
+
+The checks when the manifest loads keep both new parts narrow.
+`vendor_added_files` is only for a Windows `remove_files` plan of a package
+that needs a standard REAPER, with at least one pattern and a by-hand note
+key. Each pattern starts with `{appdata}` or `{localappdata}` and spells out
+the folder after it, which may not be `REAPER`: that rule, not the snapshot
+roots, keeps the patterns out of the resource folder, since the JAWS scripts'
+roots include `{appdata}/REAPER/UserPlugins`. No name in a pattern is RABBIT
+or ends in a dot or a space, which Windows drops. Each pattern lies below an
+`install_snapshot` root, with at least one more name, written the same way up
+to there ignoring case, a `*` in the root matching only a `*`: RABBIT
+records added files only below those roots. A `*` may stand for a whole name
+at any level. `machine_cleanup` is only for a Windows `remove_files` plan
+with `elevation: never` and `backup: move` of a package that needs a standard
+REAPER. Its folder is one exact folder below `{program_files_x86}`; its
+files are plain names, each once ignoring case; its key is in HKLM, in the
+32-bit view; each of its values names the folder or one of its files, and
+exactly one names the folder, through which RABBIT checks the folder; and it
+has a by-hand key. `machine_wide_warning: false` is only for a package that
+needs a standard REAPER.
 
 Every package ships a `display_description_key` that resolves to a one- or
 two-sentence localized description of what the package is and why a user
@@ -1155,11 +1268,12 @@ Initial package kinds:
   backup.
 - `reapack_package`: install/update through ReaPack later, once ReaPack is
   present and REAPER has been launched.
-- `screen_reader_scripts`: copy a screen-reader-specific script bundle into
-  the user's screen-reader profile (e.g. JAWS scripts under `%APPDATA%\Freedom
-  Scientific\JAWS\<version>\Settings\enu`). Platform-gated: a package of this
-  kind only appears in the wizard when the relevant screen reader is
-  available on the host.
+- `screen_reader_scripts`: a screen reader's scripts, which their own
+  installer puts into the user's screen-reader settings (the JAWS scripts'
+  installer picks the JAWS version and language folder under
+  `%APPDATA%\Freedom Scientific\JAWS`, such as `2025\Settings\enu`).
+  Platform-gated: a package of this kind only appears in the wizard when the
+  relevant screen reader is available on the host.
 
 For the initial supported package set, RABBIT should implement these unattended
 strategies:
@@ -1221,17 +1335,30 @@ strategies:
 - JAWS scripts (Windows only):
   - latest-version + artifact provider: HFS REST API at
     `hoard.reaperaccessibility.com`. RABBIT calls
-    `POST /~/api/get_file_list` with the JAWS-Scripts directory as the path
-    and parses the returned JSON to pick the newest archive (date + filename
-    contain the version anchor). Source archive URLs come from the same API.
-  - install unattended by extracting the archive and placing the script set
-    into the user's JAWS settings folder (`%APPDATA%\Freedom Scientific\JAWS\
-    <version>\Settings\enu` for the highest installed JAWS version, falling
-    back to a clearly reported error if no JAWS install is detected).
+    `POST /~/api/get_file_list` with the JAWS scripts' folder and picks the
+    `.exe` installer with the highest version in its file name. Its download
+    URL comes from the same listing.
+  - install by running the scripts' own NSIS installer with administrator
+    rights, interactively rather than with `/S`: a plugin inside it opens a
+    dialog that silent mode hides without dismissing, so a silent run hangs.
+    The installer picks the JAWS version and language folder itself and
+    copies the script files into
+    `%APPDATA%\Freedom Scientific\JAWS\<version>\Settings\<language>`, such
+    as `2025\Settings\enu`. It always puts `Reaper_ComAccess32.dll` and
+    `Reaper_ComAccess64.dll` into `%APPDATA%\REAPER\UserPlugins`, whatever
+    the target, and leaves `Uninstall.dat` and `Uninstall.exe` in
+    `%ProgramFiles(x86)%\Reaper_JawsScripts`, with an entry
+    `Reaper_JawsScripts` in HKLM's 32-bit list of installed programs, through
+    which detection finds the scripts. RABBIT then checks that the 64-bit
+    DLL is there and, where that entry was there before, that the installer
+    wrote `Uninstall.exe` anew.
   - the package only appears in the wizard package list on Windows when JAWS
     is detected on the host. macOS users never see the JAWS scripts row.
-  - back up any existing same-named script files before overwriting; track
-    the install through the standard RABBIT receipt mechanism.
+  - RABBIT copies no script file itself, so it backs none up: the installer
+    writes over them in place. The receipt names the 64-bit DLL, and the
+    install snapshot records which files the installer added or changed in
+    the JAWS settings folders and in `UserPlugins` (see the receipt above),
+    for the uninstall.
 - FFmpeg (Windows only, opt-in):
   - latest-version provider: Gyan.dev's `*.ver` plain-text endpoint at
     `https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z.ver`,
@@ -1439,8 +1566,19 @@ Extension files:
   absolute, so a set written through a relative `--resource-path` restores
   from any folder; older sets that recorded relative paths are read by their
   `RABBIT/backups/<id>` part. Restore puts each file back at its recorded
-  path, refuses any path outside the resource folder and the outside folders
-  RABBIT installs into, and takes the install lock.
+  path and takes the install lock. Outside the resource folder it writes
+  only below a folder RABBIT installs into itself (the CLAP folder), for any
+  package, or where one of the entry's own package's `vendor_added_files`
+  patterns matches; another package's file never goes there. For a pattern,
+  the folder before its first `*` (`%APPDATA%\Freedom Scientific\JAWS` for
+  the JAWS scripts) must exist, nothing that exists below it on the way to
+  the file may be a link or junction, the file included, and the deepest of
+  those that exists must lie, by its real path, inside that folder's real
+  path. That folder itself, and what lies above it, may be reached through
+  a link. A path refused stops the restore before anything changes, with
+  the reason, such as that JAWS's folder is gone; in a whole set that
+  records several packages, the message adds that the set's other packages
+  can be restored one at a time with `--package`.
 - Restoring a set an uninstall wrote never copies a receipt file back: the
   receipt has moved on since. Each package's recorded entry is merged into
   the current receipt instead, the package comes off `declined_packages`,
@@ -1454,53 +1592,90 @@ Extension files:
   the receipt (RABBIT was ended halfway through the package, or a failed
   package's files couldn't all go back), or an earlier restore from the set
   put the entry back. Its files are restored and the entry stays as it is.
-- Uninstall removes only regular files a RABBIT receipt lists with a hash and
-  files the package manifest names. A macOS plan's `remove.trees` are
-  different: those bundles leave whole, by the routes described below, and
-  are never hashed, put into a backup set or put back. `reaper.ini`, every
-  `reaper-*.ini` such as `reaper-kb.ini` and `reaper-extstate.ini` (where
-  every extension keeps its settings), copies of them, and everything in
-  `{resource}/RABBIT` always stay, and every path passes a guard
-  against links, `..` and whole folders, once when the plan is built and again
-  right before it moves. Before anything moves, every file of every package
-  is read and hashed, as the dry run does, so a file that can't be read
-  stops the whole run with nothing changed. A file only the receipt names
-  that changed since RABBIT installed it stays and is reported. The move
-  reuses that hash only for a file last changed well before it was read and
-  whose size and modification time are still the same; any other file is
-  hashed again, so FFmpeg's 250 MB is read once. While ReaPack is installed,
-  a settings file its records claim stays, even with `--remove-settings`.
-  Files move into one backup set per run, by rename on the same drive, or
-  from another drive as a copy that is checked before the original is
-  deleted, after a free-space check. The target's REAPER must be closed, and
-  every REAPER for packages that serve the whole computer; those checks run
-  again before each package, or on macOS for all the packages of the
-  administrator command together, right before its window. A package that
-  serves the whole computer can't be removed from a portable target when
-  its plan removes anything; a
+- Uninstall removes only regular files a RABBIT receipt lists with a hash,
+  files the package manifest names, and files the receipt records the
+  package's installer adding where the plan's `vendor_added_files` patterns
+  match them (below). A macOS plan's `remove.trees` are different: those
+  bundles leave whole, by the routes described below, and are never hashed,
+  put into a backup set or put back. `reaper.ini`, every `reaper-*.ini` such
+  as `reaper-kb.ini` and `reaper-extstate.ini` (where every extension keeps
+  its settings), copies of them, and everything in `{resource}/RABBIT` always
+  stay, and every path passes a guard against links, `..` and whole folders,
+  once when the plan is built and again right before it moves. Before anything
+  moves, every file of every package is read and hashed, as the dry run does,
+  so a file that can't be read stops the whole run with nothing changed. A
+  file only the receipt names that changed since RABBIT installed it stays and
+  is reported. The move reuses that hash only for a file last changed well
+  before it was read and whose size and modification time are still the same;
+  any other file is hashed again, so FFmpeg's 250 MB is read once. While
+  ReaPack is installed, a settings file its records claim stays, even with
+  `--remove-settings`. Files move into one backup set per run, by rename on
+  the same drive, or from another drive as a copy that is checked before the
+  original is deleted, after a free-space check. A file another program holds
+  open is in use, for every package, with nothing moved: on the same drive
+  Windows refuses the rename with a sharing or lock violation, and from
+  another drive the copy goes again when the original can't be deleted. The
+  package's files then go back, and the message asks to close that program;
+  for a file the package's installer added, which only the JAWS scripts have
+  and JAWS itself may hold open, it says to wait and run RABBIT again, and to
+  restart JAWS first if that doesn't help, rather than to close the user's
+  screen reader. The target's REAPER must be closed, and every REAPER for
+  packages that serve the whole computer; those checks run again before each
+  package, or on macOS for all the packages of the administrator command
+  together, right before its window. A package that serves the whole computer
+  can't be removed from a portable target when its plan removes anything; a
   `manual` or `not_supported` plan says the same on every target. One
-  requested package that can't be removed makes the whole run change
-  nothing. When a package's removal fails, its files go back and its
-  receipt entry stays; when it works, the entry goes
-  and the package joins `declined_packages`. The set records each package's
-  receipt entry, and the `langpack=` value REAPER had when the removal set it
-  back to no language pack, never a copy of `reaper.ini`.
+  requested package that can't be removed makes the whole run change nothing.
+  When a package's removal fails, its files go back and its receipt entry
+  stays; when it works, the entry goes and the package joins
+  `declined_packages`. The set records each package's receipt entry, and the
+  `langpack=` value REAPER had when the removal set it back to no language
+  pack, never a copy of `reaper.ini`.
+- A plan's `vendor_added_files` patterns pick files from the receipt's
+  `vendor_added_files` records, never from a folder listing. A receipt is a
+  file anyone can edit, so only a plain absolute path counts, and only where
+  a pattern matches it: exactly as many names as the pattern, literal names
+  compared ignoring case, and no name holding a `:`, which would name an
+  alternate data stream. Records outside every pattern are passed by
+  without a word, such as the DLLs the same snapshot records in
+  `UserPlugins`. One file may be recorded under two spellings, so the
+  records are grouped by path, ignoring case. A file any record marks
+  `existed_before` stays and is listed as kept, because it was there before
+  the installer ran and may be the user's own; so does one whose records
+  disagree on its hash. Neither goes even with `--remove-settings`. Any other
+  file still there is a candidate with the hash its records agree on, and
+  the run checks that hash right before the move, so a file changed since,
+  such as `reaper.jkm` with the user's keys, stays and is reported, like a
+  file only the receipt names. Every candidate passes the guard below the
+  folder before the pattern's first `*` (`%APPDATA%\Freedom Scientific\JAWS`
+  for the JAWS scripts), so a junction there that leads elsewhere blocks the
+  whole package. No folder goes with the files, not even an empty one: JAWS
+  made most of the language folders, and nothing RABBIT still has can tell
+  which ones the installer made, since a restore changes owners. With a
+  receipt that records no file under the patterns as new from the
+  installer, as from an install made before RABBIT recorded them, a note
+  says all those files stay; in every state the package can be removed in,
+  another note says how to remove by hand the files that stay. The backup
+  set keeps these files under `external/<n>/`, like every file from outside
+  the resource folder, and a restore puts them back only under the package's
+  own patterns (see above).
 - A package whose vendor's uninstaller removes it (Surge XT and a standard
   REAPER, on Windows) is removable only once RABBIT found that uninstaller
   through HKLM and every trust check passed, read only, while the plan is
   built. Once every check of the run has passed and before the first
   change, the run starts one hidden elevated helper, RABBIT itself under a
-  hidden command, for every such package: the run's only Windows
-  permission prompt. Declined, every package is Cancelled and nothing
-  changes; if the helper can't start, the packages that need it fail and
-  nothing changes either. The helper takes orders only from the RABBIT
-  that started it, over a named pipe both ends check by process ID, runs
-  only the packages on its command line, each once and in order, from the
-  built-in manifests, and repeats every check itself from HKLM and the
-  real folders, never from HKCU or a per-user folder: over-the-shoulder
-  elevation runs it as another account. Its machine-wide folders don't
-  come from its environment either; ProgramData is read from HKLM with
-  Windows' own drive. rabbit.exe takes the DLLs it imports from System32
+  hidden command, for every such package and every planned machine cleanup
+  (below): the run's only Windows permission prompt. Declined, every
+  package is Cancelled and nothing changes; if the helper can't start, the
+  packages that need it fail and nothing changes either. The helper takes
+  orders only from the RABBIT that started it, over a named pipe both ends
+  check by process ID, runs only the packages on its command line, each
+  once and in order, from the built-in manifests, and repeats every check
+  itself from HKLM and the real folders, never from HKCU or a per-user
+  folder: over-the-shoulder elevation runs it as another account. Its
+  machine-wide folders don't come from its environment either; ProgramData
+  is read from HKLM with Windows' own drive, and Program Files (x86) is
+  Windows' known folder. rabbit.exe takes the DLLs it imports from System32
   only (`/DEPENDENTLOADFLAG:0x800`), and the helper loads later ones the
   same way, so a DLL put next to a portable RABBIT in Downloads can't run
   with administrator rights. Replacing rabbit.exe itself stays possible
@@ -1533,6 +1708,75 @@ Extension files:
   package is Failed, and the receipt is written again from the copy the run
   holds in memory. The helper is told to quit at the end of every run.
   Nothing these uninstallers remove can be restored from a backup.
+- The helper has a second kind of plan: a `machine_cleanup`, which deletes
+  what an installer left in machine-wide places to find its own uninstaller,
+  in place of running one. Only the JAWS scripts have one. While the plan is
+  built, `VendorLookup::machine_cleanup` checks the folder and the key read
+  only, the way the helper checks them again: the folder must be exactly the
+  one the manifest names below `{program_files_x86}`, which comes from
+  Windows' known folder, never from the environment or the registry; if it is
+  there, it is reached through no link, owned by Administrators, SYSTEM or
+  TrustedInstaller, and holds nothing but the manifest's `files`, each a
+  regular file with such an owner. The key is read in HKLM's 32-bit view only;
+  if it is there, it has no subkeys and only the manifest's values, each a
+  plain `REG_SZ` naming exactly its expected path ignoring case, and the value
+  naming the folder is among them. A value that holds no text counts as one
+  RABBIT doesn't expect, and a `REG_EXPAND_SZ` as one that points elsewhere.
+  There is no signature check: the scripts' `Uninstall.exe` isn't signed, and
+  nothing runs it; ownership stands in, as for vendor uninstallers. A check
+  that fails makes the package CleanupNotTrusted, with the reason and the
+  manifest's by-hand steps, and nothing of it is planned; so does a lookup
+  that can't look, such as `NothingListed`. With neither folder nor key there,
+  no cleanup is planned: no prompt, no question, and the files still go. With
+  no receipt and none of the files the plan names for this account (without a
+  receipt no script file is a candidate, so that means neither DLL), the
+  package is NoFilesForThisAccount and left alone, because the folder and key
+  then most likely belong to another account's install, whose files would be
+  left without them; with a receipt, the cleanup is planned even when no file
+  is left. A planned cleanup sets the plan item's `machine_cleanup` and
+  `confirm` and makes `needs_elevated_helper()` true, so it shares the run's
+  one permission prompt with vendor uninstallers. Its route stays the backup
+  set, `unbacked` stays false, and `requires_elevation`, which means macOS's
+  administrator command, stays false. RABBIT sends the helper only the package
+  ID; the helper takes the folder, files and key from its own built-in
+  manifest, only for a standard REAPER, and answers with `cleanup-finished`
+  instead of `finished`. The cleanup runs only after every file of the package
+  is in the backup set, so nothing a backup can't bring back happens unless
+  all of that worked. It checks everything again, then deletes the files in
+  the manifest's order, the folder once it is empty and the key last, and
+  stops at the first failure. So the key outlives the rest, and
+  `Uninstall.exe`, which detection looks for with the key, goes last of the
+  files; with a receipt, a package whose cleanup failed has its files back and
+  stays detected through the receipt, so the uninstall can be run again.
+  Something already gone counts as removed. Right before each file and the
+  folder it checks again that the folder is reached through no link and, for a
+  file, that an administrator still owns it; a refusal there while nothing is
+  gone yet is a refusal, later a failed step. Refused or lost puts every file
+  back, fails the package and stops the run: something changed after planning,
+  or what the helper did is unknown. Failed puts the files back and keeps the
+  receipt entry, even when something is already gone, and the run goes on;
+  what is already gone and what is still there are in the report. With nothing
+  there any more, the package is removed as if no cleanup were planned. When
+  the cleanup finishes and removed anything, the package counts as removed:
+  its receipt entry goes, and a receipt that can't be saved then is a problem
+  in the report, with nothing put back, and the receipt in memory stays
+  without the entry so a later package's save writes that too. The dry run
+  asks no helper and lists what the plan found. Every delete with
+  administrator rights goes through `VendorEnvironment`'s three delete
+  methods, `remove_file_no_follow`, `remove_empty_dir` and
+  `delete_uninstall_entry`: the lookup's read-only environment refuses all
+  three, the test environment deletes only inside its fixture folder and never
+  in HKLM, the cleanup refuses Windows' real list in rabbit-core's test
+  builds, the in-process test helper refuses machine-wide folders outside the
+  temporary folder, and `rabbit-platform`'s registry delete accepts only
+  HKLM's real list or an HKCU root `Software\RABBIT-test-*`, and refuses HKLM
+  in its own tests. A backup can't bring the folder and key back.
+  `restore-backup` brings back the files, and the receipt entry when there was
+  one. Detection then finds the scripts through that entry, as long as the
+  64-bit DLL has the size the entry records, and while the folder and key stay
+  gone a later uninstall needs no prompt. Without an entry nothing finds the
+  restored files: the scripts' only other detector needs the key and the
+  `Uninstall.exe` the cleanup removed.
 - On macOS a plan's trees leave whole. Surge XT's, its bundles and
   `/Library/Application Support/Surge XT`, are deleted for good by the
   run's administrator command. REAPER.app leaves by one of three routes,
@@ -1706,8 +1950,10 @@ Extension files:
 - Keep a machine-readable operation report and a plain text report.
 - Treat non-writable targets as a planning error before downloading anything.
 - Do not request elevation unless the selected REAPER app install target
-  requires it, or a selected vendor uninstaller, machine-wide removal, or
-  REAPER.app that only an administrator can move to the Trash does.
+  requires it, or a selected vendor uninstaller, machine cleanup of an
+  uninstaller folder or registry entry that is still there (the JAWS
+  scripts'), machine-wide removal, or REAPER.app that only an administrator
+  can move to the Trash does.
 - Do not delete unknown files during update. Only remove files listed in a RABBIT
   receipt or explicitly owned by the package manifest.
 - Closing the window during an install or an uninstall stops the run; it
