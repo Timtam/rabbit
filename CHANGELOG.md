@@ -160,6 +160,10 @@ from this file and posts it as the GitHub release body.
   that command finish, even when it removes more than one package: the
   password window stays until you answer it, and RABBIT stops once the
   command is done.
+- Brazilian Portuguese (pt-BR) UI translation. The language picker now lists
+  Português (Brasil), it ships in the macOS app bundle, and OS-language
+  auto-detection on first launch covers Portuguese locales (any `pt-*`, which
+  map to pt-BR).
 
 ### Changed
 
