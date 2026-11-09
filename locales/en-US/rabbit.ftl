@@ -927,6 +927,33 @@ package-status-skipped-content-unchanged = The installed copy is identical to th
 package-status-install-failed = Installation failed: { $error }
 package-status-skipped-dependency-failed = Skipped because { $dependency }, which it needs, did not install successfully.
 package-status-cancelled = Not installed: you stopped the setup before RABBIT reached this package.
+# Shown after the package's name when its vendor installer ended with an
+# exit code other than 0. $code is the number. One of the
+# package-status-vendor-exit-* sentences follows, then
+# package-status-vendor-installer-log when the installer left a log.
+package-status-vendor-installer-failed = The installer ended with exit code { $code }.
+# Inno Setup's exit code 2: cancelled before it began installing. RABBIT runs
+# it unattended, so in practice the user declined the Windows permission
+# prompt (User Account Control) the installer raised. "Yes" is the prompt's
+# button.
+package-status-vendor-exit-cancelled-before-installing = That usually means the Windows permission prompt was declined, so nothing changed. Run RABBIT again and choose Yes when Windows asks for permission.
+# Inno Setup's exit code 5: it stopped at a question, such as whether to close
+# programs that use its files, that nobody can answer while RABBIT runs it
+# unattended. $package is the package's name.
+package-status-vendor-exit-stopped-at-question = That means it stopped at a question it can't ask while RABBIT runs it unattended, usually because another program has one of its files open. Close other programs, especially other music programs and { $package }, then run RABBIT again.
+# Inno Setup's exit code 7: its preparation found it can't continue.
+package-status-vendor-exit-preparation-failed = That means it found, while getting ready, that it can't install right now. Restart the computer, then run RABBIT again.
+# Inno Setup's exit code 8: its preparation found Windows must restart first.
+package-status-vendor-exit-restart-needed = That means it found, while getting ready, that Windows has to restart first. Restart the computer, then run RABBIT again.
+# Any other exit code, or an installer whose codes RABBIT doesn't know.
+# $package is the package's name.
+package-status-vendor-exit-unknown = Close other programs and run RABBIT again. If it stops again, install { $package } from its publisher's website.
+# $path is the log file the installer wrote.
+package-status-vendor-installer-log = The installer's log is at { $path }.
+# Shown after the package's name when RABBIT didn't start its installer
+# because the package's own programs were open. $package is the package's
+# name; $programs lists the open programs' file names, such as "Surge XT.exe".
+package-status-blocking-programs-running = RABBIT didn't start the installer because { $package } is open ({ $programs }), and the installer can't replace a program that is running. Close it, then run RABBIT again.
 # $automation is one of the "package-automation-*" labels (vendor installer / archive extraction / ...).
 package-status-dry-run-would-run-unattended = Dry run: RABBIT would download and run this { $automation } unattended.
 # $automation is one of the "package-automation-*" labels.

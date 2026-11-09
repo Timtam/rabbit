@@ -903,6 +903,34 @@ package-status-skipped-content-unchanged = La copia instalada es idéntica a la 
 package-status-install-failed = La instalación falló: { $error }
 package-status-skipped-dependency-failed = Omitido porque { $dependency }, que necesita, no se instaló correctamente.
 package-status-cancelled = No instalado: detuviste la configuración antes de que RABBIT llegara a este paquete.
+# Aparece tras el nombre del paquete cuando el instalador del fabricante terminó
+# con un código distinto de 0. $code es el número. Le sigue una de las frases
+# package-status-vendor-exit-* y, si el instalador dejó un registro,
+# package-status-vendor-installer-log.
+package-status-vendor-installer-failed = El instalador terminó con el código de error { $code }.
+# Código 2 de Inno Setup: se canceló antes de empezar a instalar. Como RABBIT
+# lo ejecuta de forma desatendida, en la práctica se rechazó el aviso de
+# permisos de Windows (Control de cuentas de usuario) que mostró el
+# instalador. «Sí» es el botón del aviso.
+package-status-vendor-exit-cancelled-before-installing = Eso suele significar que se rechazó el aviso de permisos de Windows, así que no cambió nada. Vuelve a ejecutar RABBIT y elige Sí cuando Windows te pida permiso.
+# Código 5 de Inno Setup: se detuvo en una pregunta, como si debe cerrar los
+# programas que usan sus archivos, que nadie puede responder mientras RABBIT lo
+# ejecuta de forma desatendida. $package es el nombre del paquete.
+package-status-vendor-exit-stopped-at-question = Eso significa que se detuvo en una pregunta que no puede hacer mientras RABBIT lo ejecuta de forma desatendida, normalmente porque otro programa tiene abierto uno de sus archivos. Cierra los demás programas, sobre todo otros programas de música y { $package }, y vuelve a ejecutar RABBIT.
+# Código 7 de Inno Setup: al prepararse vio que no puede continuar.
+package-status-vendor-exit-preparation-failed = Eso significa que, al prepararse, vio que ahora no puede instalar. Reinicia el equipo y vuelve a ejecutar RABBIT.
+# Código 8 de Inno Setup: al prepararse vio que Windows debe reiniciarse antes.
+package-status-vendor-exit-restart-needed = Eso significa que, al prepararse, vio que Windows tiene que reiniciarse primero. Reinicia el equipo y vuelve a ejecutar RABBIT.
+# Cualquier otro código, o un instalador cuyos códigos RABBIT no conoce.
+# $package es el nombre del paquete.
+package-status-vendor-exit-unknown = Cierra los demás programas y vuelve a ejecutar RABBIT. Si se detiene de nuevo, instala { $package } desde el sitio web de su editor.
+# $path es el archivo de registro que escribió el instalador.
+package-status-vendor-installer-log = El registro del instalador está en { $path }.
+# Aparece tras el nombre del paquete cuando RABBIT no inició su instalador
+# porque los propios programas del paquete estaban abiertos. $package es el
+# nombre del paquete; $programs, los nombres de archivo de los programas
+# abiertos, como «Surge XT.exe».
+package-status-blocking-programs-running = RABBIT no inició el instalador porque { $package } está abierto ({ $programs }) y el instalador no puede reemplazar un programa que se está ejecutando. Ciérralo y vuelve a ejecutar RABBIT.
 # $automation is one of the "package-automation-*" labels (vendor installer / archive extraction / ...).
 package-status-dry-run-would-run-unattended = Dry run: RABBIT Va a descargar y ejecutar esta { $automation } desatendida.
 # $automation is one of the "package-automation-*" labels.

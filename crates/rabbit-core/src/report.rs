@@ -58,10 +58,18 @@ where
 }
 
 pub fn default_report_path(resource_path: &Path, operation_name: &str) -> PathBuf {
-    resource_path
-        .join("RABBIT")
-        .join("logs")
-        .join(format!("{operation_name}-{}.json", report_timestamp()))
+    logs_dir(resource_path).join(format!("{operation_name}-{}.json", report_timestamp()))
+}
+
+/// Where a vendor installer writes the log RABBIT asks it for: in the same
+/// folder as RABBIT's reports, stamped the same way, so the log and the
+/// run's report sit side by side.
+pub fn installer_log_path(resource_path: &Path, name: &str) -> PathBuf {
+    logs_dir(resource_path).join(format!("{name}-{}.log", report_timestamp()))
+}
+
+fn logs_dir(resource_path: &Path) -> PathBuf {
+    resource_path.join("RABBIT").join("logs")
 }
 
 pub fn text_report_path_for_json_path(json_path: &Path) -> PathBuf {

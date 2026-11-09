@@ -139,10 +139,18 @@ pub enum RabbitError {
     #[error("invalid planned execution: {message}")]
     InvalidPlannedExecution { message: String },
 
-    #[error("process failed for {program} with exit code {exit_code:?}")]
+    /// A program RABBIT ran, usually a vendor's installer, ended with an
+    /// exit code other than 0, or without one. `log_path` is the log the
+    /// installer was asked to write, when it is there afterwards.
+    #[error(
+        "process failed for {program} {}{}",
+        process_end_text(*.exit_code),
+        process_log_text(.log_path.as_deref())
+    )]
     ProcessFailed {
         program: String,
         exit_code: Option<i32>,
+        log_path: Option<PathBuf>,
     },
 
     /// The administrator permission prompt was cancelled or declined:
@@ -202,6 +210,22 @@ pub enum RabbitError {
 
     #[error("unsupported platform")]
     UnsupportedPlatform,
+}
+
+/// How [`RabbitError::ProcessFailed`] says the program ended: "with exit
+/// code 5", never Rust's `Some(5)`.
+fn process_end_text(exit_code: Option<i32>) -> String {
+    match exit_code {
+        Some(code) => format!("with exit code {code}"),
+        None => "without an exit code".to_string(),
+    }
+}
+
+/// Where [`RabbitError::ProcessFailed`] names the installer's log, if any.
+fn process_log_text(log_path: Option<&std::path::Path>) -> String {
+    log_path
+        .map(|path| format!("; its log is {}", path.display()))
+        .unwrap_or_default()
 }
 
 pub trait IoPathContext<T> {
@@ -283,6 +307,41 @@ mod tests {
                 matches!(error, RabbitError::Io { .. }),
                 "os error {code} should stay a generic Io error"
             );
+        }
+    }
+
+    /// A failed program's text gives the plain exit code, says so when there
+    /// was none, and names the installer's log when there is one. Surge XT's
+    /// install once reported "with exit code Some(5)".
+    #[test]
+    fn a_failed_process_reads_as_plain_text() {
+        let failed = |exit_code, log_path: Option<&str>| {
+            RabbitError::ProcessFailed {
+                program: r"C:\cache\surge-xt-setup.exe".to_string(),
+                exit_code,
+                log_path: log_path.map(PathBuf::from),
+            }
+            .to_string()
+        };
+
+        assert_eq!(
+            failed(Some(5), None),
+            r"process failed for C:\cache\surge-xt-setup.exe with exit code 5"
+        );
+        assert_eq!(
+            failed(None, None),
+            r"process failed for C:\cache\surge-xt-setup.exe without an exit code"
+        );
+        assert_eq!(
+            failed(
+                Some(5),
+                Some(r"C:\Users\Toni Barth\REAPER\RABBIT\logs\surge-xt-installer.log")
+            ),
+            r"process failed for C:\cache\surge-xt-setup.exe with exit code 5; its log is C:\Users\Toni Barth\REAPER\RABBIT\logs\surge-xt-installer.log"
+        );
+        for text in [failed(Some(-1), None), failed(None, Some("x.log"))] {
+            assert!(!text.contains("Some("), "{text}");
+            assert!(!text.contains("None"), "{text}");
         }
     }
 

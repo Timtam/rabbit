@@ -2783,6 +2783,7 @@ fn validate_reaper_language(
 }
 
 fn print_package_operation_report(report: &PackageOperationReport) {
+    let localizer = cli_localizer();
     println!("Resource path: {}", report.resource_path.display());
     println!("Dry run: {}", yes_no(report.dry_run));
     if let Some(install_report) = &report.install_report {
@@ -2802,7 +2803,10 @@ fn print_package_operation_report(report: &PackageOperationReport) {
         println!("  Kind: {:?}", item.artifact.kind);
         println!("  Version: {}", item.artifact.version);
         println!("  URL: {}", item.artifact.url);
-        println!("  Message: {}", item.message);
+        println!(
+            "  Message: {}",
+            package_operation_message(item, localizer.as_ref())
+        );
         for path in &item.backup_paths {
             println!("  Backup file: {}", path.display());
         }
@@ -2847,6 +2851,39 @@ fn print_package_operation_report(report: &PackageOperationReport) {
     }
 }
 
+/// What the CLI says about a package's result. A vendor installer's exit
+/// code, and the programs to close before an installer can run, are said in
+/// the user's language, as on the wizard's Done page: they tell the user
+/// what to do. Everything else is the report's English text.
+fn package_operation_message(item: &PackageOperationItem, localizer: Option<&Localizer>) -> String {
+    localizer
+        .and_then(|localizer| {
+            let package = localized_package_name(localizer, item);
+            rabbit_core::operation::localized_install_problem(
+                localizer,
+                &item.message_code,
+                &package,
+            )
+        })
+        .unwrap_or_else(|| item.message.clone())
+}
+
+/// The item's package by its name in the localizer's language, or by the
+/// manifest's name when the locale has none.
+fn localized_package_name(localizer: &Localizer, item: &PackageOperationItem) -> String {
+    rabbit_core::package::package_specs_by_id(item.artifact.platform)
+        .remove(&item.package_id)
+        .map(|spec| {
+            let name = localizer.text(&spec.display_name_key);
+            if name.missing {
+                spec.display_name
+            } else {
+                name.value
+            }
+        })
+        .unwrap_or_else(|| item.package_id.clone())
+}
+
 fn print_setup_report(report: &SetupReport) {
     println!("Setup resource path: {}", report.resource_path.display());
     println!("Dry run: {}", yes_no(report.dry_run));
@@ -2860,10 +2897,11 @@ fn print_setup_report(report: &SetupReport) {
 
 /// The embedded translations in the user's language (RABBIT_LOCALE, the
 /// system's, en-US as the fallback), for the text that comes from the
-/// package manifests: descriptions, uninstall notes and instructions. The
-/// CLI's own text stays English. Falling back to the default keeps the
-/// output usable even on hosts where a Fluent file is missing; with no
-/// locale at all, the keys are shown.
+/// package manifests: descriptions, uninstall notes and instructions; and
+/// for what to do about a vendor installer's exit code or programs that
+/// must be closed. The CLI's own text stays English. Falling back to the
+/// default keeps the output usable even on hosts where a Fluent file is
+/// missing; with no locale at all, the keys are shown.
 fn cli_localizer() -> Option<Localizer> {
     Localizer::embedded(&resolve_runtime_locale())
         .or_else(|_| Localizer::embedded(DEFAULT_LOCALE))
@@ -7119,6 +7157,135 @@ mod tests {
         assert_eq!(
             other.to_string(),
             rabbit_core::RabbitError::UnsupportedPlatform.to_string()
+        );
+    }
+
+    /// A failed Surge XT install with `message_code`, as the run reports
+    /// it, with an English text the localized one must replace.
+    fn failed_surge_item(
+        message_code: rabbit_core::operation::PackageOperationMessage,
+    ) -> rabbit_core::operation::PackageOperationItem {
+        failed_item(rabbit_core::package::PACKAGE_SURGE_XT, message_code)
+    }
+
+    /// A failed Windows install of `package_id` with `message_code`, as
+    /// the run reports it, with an English text the localized one must
+    /// replace.
+    fn failed_item(
+        package_id: &str,
+        message_code: rabbit_core::operation::PackageOperationMessage,
+    ) -> rabbit_core::operation::PackageOperationItem {
+        rabbit_core::operation::PackageOperationItem {
+            package_id: package_id.to_string(),
+            plan_action: rabbit_core::plan::PlanActionKind::Install,
+            status: rabbit_core::operation::PackageOperationStatus::Failed,
+            artifact: rabbit_core::artifact::ArtifactDescriptor {
+                package_id: package_id.to_string(),
+                version: rabbit_core::version::Version::parse("2026.11.9").unwrap(),
+                platform: rabbit_core::model::Platform::Windows,
+                architecture: rabbit_core::model::Architecture::X64,
+                kind: rabbit_core::artifact::ArtifactKind::Installer,
+                url: "https://example.test/surge-xt-setup.exe".to_string(),
+                file_name: "surge-xt-setup.exe".to_string(),
+                channel: None,
+            },
+            cached_artifact: None,
+            install_action: None,
+            backup_paths: Vec::new(),
+            backup_manifest_path: None,
+            planned_execution: None,
+            manual_instruction: None,
+            message: "The English text of the report".to_string(),
+            message_code,
+        }
+    }
+
+    /// `rabbit setup` and `rabbit apply-packages` say what a vendor
+    /// installer's exit code means, and which programs to close, in the
+    /// user's language, naming the code and the installer's log, as the
+    /// wizard does, and the package by its name in that language. Without a
+    /// localizer, and for any other message, the report's English text
+    /// stays.
+    #[test]
+    fn installer_problems_are_said_in_every_locale() {
+        use rabbit_core::localization::{DEFAULT_LOCALE, Localizer, embedded_locales};
+        use rabbit_core::operation::{
+            InstallerExitMeaning, PackageOperationMessage, localized_install_problem,
+        };
+
+        let log = PathBuf::from(
+            r"C:\Users\Toni Barth\AppData\Roaming\REAPER\RABBIT\logs\surge-xt-installer-unix-1.log",
+        );
+        let exit_code = failed_surge_item(PackageOperationMessage::VendorInstallerFailed {
+            program: r"C:\cache\surge-xt-setup.exe".to_string(),
+            exit_code: 5,
+            meaning: Some(InstallerExitMeaning::StoppedAtQuestion),
+            log_path: Some(log.clone()),
+        });
+        let open = failed_surge_item(PackageOperationMessage::BlockingProgramsRunning {
+            programs: vec!["Surge XT.exe".to_string()],
+        });
+        for &locale in embedded_locales() {
+            let localizer = Localizer::embedded(locale).unwrap();
+            let surge = localizer.text("package-surge-xt").value;
+            for item in [&exit_code, &open] {
+                let text = super::package_operation_message(item, Some(&localizer));
+                assert_eq!(
+                    Some(text.clone()),
+                    localized_install_problem(&localizer, &item.message_code, &surge),
+                    "{locale}"
+                );
+                assert!(!text.contains("English text"), "{locale}: {text}");
+            }
+            let text = super::package_operation_message(&exit_code, Some(&localizer));
+            assert!(
+                text.contains('5') && text.contains(&log.display().to_string()),
+                "{locale}: {text}"
+            );
+            assert!(
+                super::package_operation_message(&open, Some(&localizer)).contains("Surge XT.exe"),
+                "{locale}"
+            );
+        }
+        let english = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        assert!(
+            super::package_operation_message(&exit_code, Some(&english))
+                .starts_with("The installer ended with exit code 5. That means it stopped")
+        );
+        let german = Localizer::embedded("de-DE").unwrap();
+        assert!(
+            super::package_operation_message(&open, Some(&german)).starts_with(
+                "RABBIT hat das Installationsprogramm nicht gestartet, weil Surge XT geöffnet ist \
+                 (Surge XT.exe)"
+            )
+        );
+        // A package whose name is translated is named in German, not by the
+        // manifest's English name.
+        let jaws = failed_item(
+            rabbit_core::package::PACKAGE_JAWS_SCRIPTS,
+            PackageOperationMessage::VendorInstallerFailed {
+                program: r"C:\cache\jaws-scripts-setup.exe".to_string(),
+                exit_code: 1,
+                meaning: None,
+                log_path: None,
+            },
+        );
+        let text = super::package_operation_message(&jaws, Some(&german));
+        assert!(
+            text.contains("installieren Sie JAWS-Skripte für REAPER") && !text.contains("JAWS-for"),
+            "{text}"
+        );
+        assert_eq!(
+            super::package_operation_message(&exit_code, None),
+            "The English text of the report"
+        );
+        let other = failed_surge_item(PackageOperationMessage::InstallFailed {
+            error: "disk full".to_string(),
+            antivirus_block: false,
+        });
+        assert_eq!(
+            super::package_operation_message(&other, Some(&german)),
+            "The English text of the report"
         );
     }
 }

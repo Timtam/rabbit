@@ -159,7 +159,7 @@ fn execute_program_plan(plan: &PlannedExecutionPlan) -> Result<()> {
         // "No" on the UAC elevation prompt (or it timed out / was
         // dismissed). The installer never actually ran, so RABBIT surfaces
         // it as a distinct, recoverable error instead of the generic
-        // "process failed for X with exit code Some(1223)" — that lets
+        // "process failed for X with exit code 1223" — that lets
         // the wizard tell the user "approve the prompt and try again"
         // rather than implying the install itself broke.
         if cfg!(target_os = "windows") && status.code() == Some(1223) {
@@ -170,6 +170,7 @@ fn execute_program_plan(plan: &PlannedExecutionPlan) -> Result<()> {
         return Err(RabbitError::ProcessFailed {
             program: program.clone(),
             exit_code: status.code(),
+            log_path: installer_log_left(plan),
         });
     }
 
@@ -206,15 +207,18 @@ fn execute_program_plan_elevated(plan: &PlannedExecutionPlan, program: &str) -> 
 
     match exit_code {
         Some(0) => Ok(()),
-        Some(code) => Err(RabbitError::ProcessFailed {
+        exit_code => Err(RabbitError::ProcessFailed {
             program: program.to_string(),
-            exit_code: Some(code),
-        }),
-        None => Err(RabbitError::ProcessFailed {
-            program: program.to_string(),
-            exit_code: None,
+            exit_code,
+            log_path: installer_log_left(plan),
         }),
     }
+}
+
+/// The log `plan` asked its installer to write, when the installer left
+/// one, so a failure can name it.
+fn installer_log_left(plan: &PlannedExecutionPlan) -> Option<PathBuf> {
+    plan.installer_log.clone().filter(|path| path.is_file())
 }
 
 fn verify_paths(paths: &[PathBuf]) -> Result<()> {
@@ -235,6 +239,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{execute_planned_execution, verify_planned_execution_paths};
+    use crate::error::RabbitError;
     use crate::operation::{PlannedExecutionKind, PlannedExecutionPlan};
 
     #[test]
@@ -271,6 +276,82 @@ mod tests {
         assert!(error.to_string().contains("process failed"));
     }
 
+    /// A failed installer's error names the log the plan told it to write,
+    /// but only when the log is there afterwards, and gives the plain exit
+    /// code.
+    #[test]
+    fn a_failure_names_the_installer_log_it_left() {
+        let dir = tempdir().unwrap();
+        let marker_path = dir.path().join("marker.txt");
+        let log = dir.path().join("logs with spaces").join("installer.log");
+        let plan = PlannedExecutionPlan {
+            installer_log: Some(log.clone()),
+            ..failure_plan(&marker_path)
+        };
+        let failure = |error: RabbitError| match error {
+            RabbitError::ProcessFailed {
+                exit_code,
+                log_path,
+                ..
+            } => (exit_code, log_path),
+            other => panic!("unexpected error: {other:?}"),
+        };
+
+        let error = execute_planned_execution(&plan, false).unwrap_err();
+        assert!(error.to_string().ends_with("with exit code 7"), "{error}");
+        assert_eq!(failure(error), (Some(7), None));
+
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, "installer log").unwrap();
+        let error = execute_planned_execution(&plan, false).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .ends_with(&format!("with exit code 7; its log is {}", log.display())),
+            "{error}"
+        );
+        assert_eq!(failure(error), (Some(7), Some(log)));
+    }
+
+    /// A `/LOG=` argument whose path has spaces, as Surge XT's installer
+    /// gets, reaches the program as one quoted word with nothing added
+    /// inside the quotes. Inno Setup drops quotes wherever they are in a
+    /// parameter, so it gets the path whole. `cmd /c echo` writes the words
+    /// as it was given them; nothing is installed.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_log_argument_with_spaces_reaches_the_program_as_one_quoted_word() {
+        let dir = tempdir().unwrap();
+        let echoed = dir.path().join("echoed words.txt");
+        let log =
+            r"C:\Users\Toni Barth\AppData\Roaming\REAPER\RABBIT\logs\surge-xt-installer-unix-1.log";
+        let plan = PlannedExecutionPlan {
+            kind: PlannedExecutionKind::LaunchInstallerExecutable,
+            artifact_location: "cmd.exe".to_string(),
+            program: Some("cmd.exe".to_string()),
+            arguments: vec![
+                "/c".to_string(),
+                "echo".to_string(),
+                "/NOCLOSEAPPLICATIONS".to_string(),
+                format!("/LOG={log}"),
+                ">".to_string(),
+                echoed.display().to_string(),
+            ],
+            working_directory: None,
+            verification_paths: Vec::new(),
+            requires_elevation: false,
+            freshness_paths: Vec::new(),
+            installer_log: None,
+        };
+
+        execute_planned_execution(&plan, false).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&echoed).unwrap().trim_end(),
+            format!("/NOCLOSEAPPLICATIONS \"/LOG={log}\"")
+        );
+    }
+
     #[test]
     fn verification_fails_when_expected_output_is_missing() {
         let dir = tempdir().unwrap();
@@ -284,6 +365,7 @@ mod tests {
             verification_paths: vec![marker_path],
             requires_elevation: false,
             freshness_paths: Vec::new(),
+            installer_log: None,
         };
 
         let error = verify_planned_execution_paths(&plan).unwrap_err();
@@ -314,6 +396,7 @@ mod tests {
             verification_paths: vec![marker_path.to_path_buf()],
             requires_elevation: false,
             freshness_paths: Vec::new(),
+            installer_log: None,
         }
     }
 
@@ -331,6 +414,7 @@ mod tests {
             verification_paths: vec![marker_path.to_path_buf()],
             requires_elevation: false,
             freshness_paths: Vec::new(),
+            installer_log: None,
         }
     }
 
@@ -353,6 +437,7 @@ mod tests {
             verification_paths: vec![marker_path.to_path_buf()],
             requires_elevation: false,
             freshness_paths: Vec::new(),
+            installer_log: None,
         }
     }
 
@@ -370,6 +455,7 @@ mod tests {
             verification_paths: vec![marker_path.to_path_buf()],
             requires_elevation: false,
             freshness_paths: Vec::new(),
+            installer_log: None,
         }
     }
 

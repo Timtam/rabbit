@@ -180,6 +180,7 @@ fn rabbit_error_from_disk_image_error(error: DiskImageError) -> RabbitError {
         DiskImageError::InstallerFailed { image, code } => RabbitError::ProcessFailed {
             program: format!("/usr/sbin/installer (from {})", image.display()),
             exit_code: code,
+            log_path: None,
         },
         DiskImageError::UserCancelledElevation { image } => RabbitError::UserCancelledElevation {
             program: format!("/usr/sbin/installer (from {})", image.display()),

@@ -191,7 +191,10 @@ pub struct UninstallPlanSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kept_user_data: Vec<KeptUserData>,
     /// Program names that must not be running. The engine adds "no REAPER at
-    /// all" by itself where it is needed, so a manifest can't forget it.
+    /// all" by itself where it is needed, so a manifest can't forget it. On
+    /// Windows the same names also keep the package's vendor installer from
+    /// starting while one of them runs. A screen reader is never allowed
+    /// here: a blind user can't close it to get past the check.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocking_programs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1126,6 +1129,12 @@ fn validate_plan(spec: &EmbeddedPackageSpec, plan: &UninstallPlanSpec) -> Result
                 "blocking_programs entry {program:?} must be a program name, not a path"
             ));
         }
+        if is_screen_reader_program(program) {
+            return Err(format!(
+                "blocking_programs entry {program:?} is a screen reader, which a blind user \
+                 can't close to get past the check"
+            ));
+        }
         if applies_on_macos
             && !program
                 .chars()
@@ -1185,6 +1194,19 @@ fn is_package_id(id: &str) -> bool {
         && id
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+}
+
+/// Screen readers by their process names, without `.exe`: JAWS, NVDA,
+/// Windows Narrator and macOS VoiceOver.
+const SCREEN_READER_PROGRAMS: &[&str] = &["jfw", "nvda", "narrator", "voiceover"];
+
+/// Whether `program`, a `blocking_programs` entry, is a screen reader.
+/// RABBIT would refuse to uninstall the package, or to start its Windows
+/// installer, while one of these runs, and a blind user can't close it.
+fn is_screen_reader_program(program: &str) -> bool {
+    let name = program.trim().to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    SCREEN_READER_PROGRAMS.contains(&name)
 }
 
 /// Removals that need administrator rights never move root-owned files into
@@ -3238,6 +3260,31 @@ mod tests {
             &plans(&[&remove_plan(
                 r#""remove": { "receipt_files": true }, "blocking_programs": ["demo.exe"]"#,
             )]),
+        );
+    }
+
+    /// A plan never names a screen reader among the programs to close: the
+    /// package couldn't be uninstalled, nor its Windows installer started,
+    /// while it runs, and a blind user can't close it.
+    #[test]
+    fn program_names_never_name_a_screen_reader() {
+        for name in ["jfw.exe", "JFW.EXE", "nvda.exe", "Narrator.exe", "nvda"] {
+            rejects(
+                "",
+                &windows_remove_plans(&format!(r#""blocking_programs": ["Demo.exe", "{name}"]"#)),
+                "is a screen reader",
+            );
+        }
+        rejects(
+            "",
+            &macos_remove_plans(&format!(
+                r#"{ELEVATED_APP_TREE}, "blocking_programs": ["VoiceOver"]"#
+            )),
+            "is a screen reader",
+        );
+        accepts(
+            "",
+            &windows_remove_plans(r#""blocking_programs": ["Surge XT.exe", "nvda_demo.exe"]"#),
         );
     }
 

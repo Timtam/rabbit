@@ -266,6 +266,16 @@ from this file and posts it as the GitHub release body.
   or with an account that isn't an administrator, RABBIT now says so, and
   that nothing was installed. Before, it reported that Surge XT's installer
   had failed. Cancelling that window no longer speaks of a Windows prompt.
+- Installing Surge XT on Windows could stop with "exit code Some(5)" when
+  another program had one of Surge XT's fonts open. RABBIT no longer lets
+  Surge XT's installer close programs, which could also have closed your
+  screen reader. Instead, RABBIT doesn't start the installer while Surge XT
+  itself is open and asks you to close it first. When a vendor's installer
+  stops with an exit code, RABBIT now says in your language what to do, and
+  for Surge XT what the code means; Surge XT's installer also writes a log
+  to `RABBIT\logs`, which the message names. A Surge XT update whose
+  installer stopped is no longer reported as installed because the older
+  version's files were still there.
 
 ## [0.4.4] - 2026-10-13
 

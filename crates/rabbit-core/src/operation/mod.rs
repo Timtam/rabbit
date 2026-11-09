@@ -1,3 +1,4 @@
+mod install_problem;
 mod jaws_scripts;
 mod osara;
 mod reaper;
@@ -10,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+pub use self::install_problem::{InstallerExitMeaning, localized_install_problem};
 
 use crate::Result;
 use crate::artifact::{
@@ -24,13 +27,13 @@ use crate::error::{IoPathContext, RabbitError};
 use crate::install::{
     InstallFileReport, InstallOptions, InstallReport, install_cached_artifacts_with_progress,
 };
-use crate::model::{Architecture, ComponentDetection, Platform};
+use crate::model::{Architecture, ComponentDetection, InstallationKind, Platform};
 use crate::package::package_specs_by_id;
 use crate::package::uninstall::UninstallPath;
 use crate::plan::PlanActionKind;
 use crate::preflight::{
     RunningProcess, ensure_reaper_closed_with_processes, ensure_resource_path_ready,
-    running_reaper_processes,
+    running_processes_named, running_reaper_processes,
 };
 use crate::progress::{ProgressEvent, ProgressReporter};
 use crate::receipt::{
@@ -206,6 +209,28 @@ pub enum PackageOperationMessage {
         #[serde(default)]
         antivirus_block: bool,
     },
+    /// The vendor's installer `program` ran and ended with `exit_code`, and
+    /// RABBIT didn't find the package installed afterwards; an installer
+    /// whose codes RABBIT trusts fails on its code alone. Inno Setup has
+    /// rolled back by then, so nothing was installed; other installers may
+    /// have left files. `meaning` says what the code means, where RABBIT
+    /// knows the installer's codes (Inno Setup's, for Surge XT on Windows);
+    /// `log_path` is the installer's log, when it left one. The item's
+    /// `package_id` names the package. A permission prompt RABBIT raised
+    /// itself and the user declined (1223) is not one of these: it reads as
+    /// its own error. Inno Setup raises its own and ends with 2 instead.
+    VendorInstallerFailed {
+        program: String,
+        exit_code: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meaning: Option<InstallerExitMeaning>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        log_path: Option<PathBuf>,
+    },
+    /// RABBIT didn't start the package's installer, because programs the
+    /// installer can't replace while they run were open, Surge XT's own
+    /// apps for Surge XT. `programs` are their process names.
+    BlockingProgramsRunning { programs: Vec<String> },
     /// This package was skipped because `dependency` (a package it installs
     /// on top of, e.g. REAPER) failed or was skipped earlier in this run.
     SkippedDependencyFailed { dependency: String },
@@ -270,6 +295,11 @@ pub struct PlannedExecutionPlan {
     /// run when the file's mtime is older than `install_started_at`.
     #[serde(default)]
     pub freshness_paths: Vec<PathBuf>,
+    /// The log the installer is told to write, so a failure can name it.
+    /// Only Surge XT's Inno Setup installer on Windows takes one today; its
+    /// `/LOG=` argument in `arguments` names the same file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installer_log: Option<PathBuf>,
 }
 
 /// Per-package override used by `planned_execution_for_artifact` when a
@@ -551,13 +581,26 @@ pub fn execute_resolved_package_operation_with_detections_and_progress(
         options,
         progress,
         cancel,
-        &|| running_reaper_processes(Platform::current()),
+        &ProcessScans {
+            running_reaper: &|| running_reaper_processes(Platform::current()),
+            running_programs: &|names| running_processes_named(names),
+        },
     )
 }
 
-/// The operation itself, with the scan for running REAPER processes passed
-/// in so tests can stand in a REAPER that is "running".
-#[allow(clippy::too_many_arguments)] // The public entry point's, plus the scan.
+/// The scans for running programs an install makes, passed in so tests can
+/// stand in programs that are "running" without looking at the real ones.
+struct ProcessScans<'a> {
+    /// The running REAPER processes.
+    running_reaper: &'a dyn Fn() -> Vec<RunningProcess>,
+    /// The running processes with one of these names, ignoring case: the
+    /// programs a package's installer can't replace while they run.
+    running_programs: &'a dyn Fn(&[String]) -> Vec<RunningProcess>,
+}
+
+/// The operation itself, with the scans for running programs passed in so
+/// tests can stand in a REAPER, or a Surge XT, that is "running".
+#[allow(clippy::too_many_arguments)] // The public entry point's, plus the scans.
 fn execute_operation_with_process_scan(
     resource_path: &Path,
     artifacts: Vec<ArtifactDescriptor>,
@@ -566,7 +609,7 @@ fn execute_operation_with_process_scan(
     options: &PackageOperationOptions,
     progress: &ProgressReporter,
     cancel: &CancelToken,
-    running_reaper: &dyn Fn() -> Vec<RunningProcess>,
+    scans: &ProcessScans<'_>,
 ) -> Result<PackageOperationReport> {
     execute_operation_with(
         resource_path,
@@ -576,7 +619,7 @@ fn execute_operation_with_process_scan(
         options,
         progress,
         cancel,
-        running_reaper,
+        scans,
         &manifest_snapshot_source,
     )
 }
@@ -620,7 +663,7 @@ fn execute_operation_with(
     options: &PackageOperationOptions,
     progress: &ProgressReporter,
     cancel: &CancelToken,
-    running_reaper: &dyn Fn() -> Vec<RunningProcess>,
+    scans: &ProcessScans<'_>,
     snapshot_source: &SnapshotSource<'_>,
 ) -> Result<PackageOperationReport> {
     ensure_resource_path_ready(resource_path, options.dry_run)?;
@@ -726,7 +769,7 @@ fn execute_operation_with(
             resource_path,
             options.target_app_path.as_deref(),
             options.allow_reaper_running,
-            &running_reaper(),
+            &(scans.running_reaper)(),
         )?;
     }
 
@@ -869,6 +912,28 @@ fn execute_operation_with(
                     continue;
                 }
             };
+            // Windows can't replace the files of a running program, and
+            // RABBIT doesn't let an installer close programs itself (see
+            // `surge_xt`). So when a package's own programs are open, its
+            // installer isn't started at all, and the user is told what to
+            // close. Checked right before the installer would start.
+            let blocking = install_blocking_programs(
+                &planned.artifact,
+                resource_path,
+                options.target_app_path.as_deref(),
+            );
+            if !blocking.is_empty() {
+                let open = (scans.running_programs)(&blocking);
+                if !open.is_empty() {
+                    items.push(blocking_programs_item(
+                        planned.artifact.clone(),
+                        planned.plan_action,
+                        &open,
+                    ));
+                    failed.insert(package_id);
+                    continue;
+                }
+            }
             // Some installers write where no receipt path reaches: the JAWS
             // scripts' into JAWS's own settings folders. The folders their
             // manifest names are listed right before the installer runs, so
@@ -1301,6 +1366,7 @@ fn skipped_item(
         resource_path,
         target_app_path,
         replace_osara_keymap,
+        installer_log_for_artifact(&artifact, resource_path).as_deref(),
     ));
     let manual_instruction = Some(manual_instruction_for_artifact(
         &artifact,
@@ -1348,23 +1414,56 @@ fn skipped_item(
 /// Build the report item for a package whose download or install failed.
 /// The run continues after this; the error text is preserved verbatim so
 /// the saved report and the UI can show the real cause (an antivirus block,
-/// a network failure, a disk error, …).
+/// a network failure, a disk error, …). A vendor installer that ended with
+/// an exit code gets [`PackageOperationMessage::VendorInstallerFailed`]
+/// instead, which says in plain words what the code means and what to do.
 fn failed_operation_item(
     artifact: ArtifactDescriptor,
     plan_action: PlanActionKind,
     error: &crate::error::RabbitError,
 ) -> PackageOperationItem {
-    let error_text = error.to_string();
-    let antivirus_block = matches!(error, RabbitError::WindowsFileBlockedByAntivirus { .. });
+    let (message, message_code) = match error {
+        RabbitError::ProcessFailed {
+            program,
+            exit_code: Some(exit_code),
+            log_path,
+        } => {
+            let meaning = installer_exit_meaning(&artifact, *exit_code);
+            (
+                install_problem::vendor_installer_failed_text(
+                    &english_package_name(&artifact),
+                    *exit_code,
+                    meaning,
+                    log_path.as_deref(),
+                ),
+                PackageOperationMessage::VendorInstallerFailed {
+                    program: program.clone(),
+                    exit_code: *exit_code,
+                    meaning,
+                    log_path: log_path.clone(),
+                },
+            )
+        }
+        _ => {
+            let error_text = error.to_string();
+            (
+                format!("Installation failed: {error_text}"),
+                PackageOperationMessage::InstallFailed {
+                    error: error_text,
+                    antivirus_block: matches!(
+                        error,
+                        RabbitError::WindowsFileBlockedByAntivirus { .. }
+                    ),
+                },
+            )
+        }
+    };
     PackageOperationItem {
         package_id: artifact.package_id.clone(),
         plan_action,
         status: PackageOperationStatus::Failed,
-        message: format!("Installation failed: {error_text}"),
-        message_code: PackageOperationMessage::InstallFailed {
-            error: error_text,
-            antivirus_block,
-        },
+        message,
+        message_code,
         artifact,
         cached_artifact: None,
         install_action: None,
@@ -1373,6 +1472,143 @@ fn failed_operation_item(
         planned_execution: None,
         manual_instruction: None,
     }
+}
+
+/// The report item for a package whose installer RABBIT didn't start
+/// because `open`, programs the installer can't replace while they run,
+/// were running. Nothing of the package changed.
+fn blocking_programs_item(
+    artifact: ArtifactDescriptor,
+    plan_action: PlanActionKind,
+    open: &[RunningProcess],
+) -> PackageOperationItem {
+    let mut programs: Vec<String> = Vec::new();
+    for process in open {
+        if !programs
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&process.name))
+        {
+            programs.push(process.name.clone());
+        }
+    }
+    PackageOperationItem {
+        package_id: artifact.package_id.clone(),
+        plan_action,
+        status: PackageOperationStatus::Failed,
+        message: install_problem::blocking_programs_running_text(
+            &english_package_name(&artifact),
+            &programs,
+        ),
+        message_code: PackageOperationMessage::BlockingProgramsRunning { programs },
+        artifact,
+        cached_artifact: None,
+        install_action: None,
+        backup_paths: Vec::new(),
+        backup_manifest_path: None,
+        planned_execution: None,
+        manual_instruction: None,
+    }
+}
+
+/// The programs that must be closed before `artifact`'s installer runs:
+/// the ones the package's uninstall plan names as `blocking_programs`, as
+/// Surge XT's names its standalone apps. Only for a vendor installer on
+/// Windows, where a running program's files can't be replaced; empty
+/// otherwise. The manifest check keeps screen readers out of that list, so
+/// this never asks a blind user to close theirs.
+fn install_blocking_programs(
+    artifact: &ArtifactDescriptor,
+    resource_path: &Path,
+    target_app_path: Option<&Path>,
+) -> Vec<String> {
+    if artifact.platform != Platform::Windows || artifact.kind != ArtifactKind::Installer {
+        return Vec::new();
+    }
+    let target_app_path = effective_target_app_path(artifact, resource_path, target_app_path);
+    let target = if target_likely_portable(resource_path, target_app_path.as_deref()) {
+        InstallationKind::Portable
+    } else {
+        InstallationKind::Standard
+    };
+    package_specs_by_id(artifact.platform)
+        .remove(&artifact.package_id)
+        .and_then(|spec| {
+            spec.uninstall
+                .plan_for(artifact.platform, target)
+                .map(|plan| plan.blocking_programs.clone())
+        })
+        .unwrap_or_default()
+}
+
+/// The package's name in the English report text: the same short title the
+/// manual instructions use, or the manifest's name for a package without
+/// one.
+fn english_package_name(artifact: &ArtifactDescriptor) -> String {
+    package_title_name(&artifact.package_id)
+        .map(str::to_string)
+        .or_else(|| {
+            package_specs_by_id(artifact.platform)
+                .remove(&artifact.package_id)
+                .map(|spec| spec.display_name)
+        })
+        .unwrap_or_else(|| artifact.package_id.clone())
+}
+
+/// What `exit_code` from `artifact`'s installer means, where RABBIT knows
+/// that installer's codes.
+fn installer_exit_meaning(
+    artifact: &ArtifactDescriptor,
+    exit_code: i32,
+) -> Option<InstallerExitMeaning> {
+    match artifact.package_id.as_str() {
+        crate::package::PACKAGE_SURGE_XT => {
+            surge_xt::exit_meaning(artifact.kind, artifact.platform, exit_code)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a code other than 0 from `artifact`'s installer fails the
+/// package even when its files pass verification. Inno Setup, which runs
+/// Surge XT's install on Windows, rolls back before it ends that way, so an
+/// earlier install's files are all verification would find, and a failed
+/// update would read as installed. Other installers can end non-zero after
+/// a complete install; see `executed_unattended_item`.
+fn installer_exit_code_is_final(artifact: &ArtifactDescriptor) -> bool {
+    match artifact.package_id.as_str() {
+        crate::package::PACKAGE_SURGE_XT => {
+            surge_xt::runs_inno_setup(artifact.kind, artifact.platform)
+        }
+        _ => false,
+    }
+}
+
+/// Where `artifact`'s installer writes its log, for an installer RABBIT
+/// asks for one: in the target's RABBIT logs folder, beside the run's
+/// reports. Only Surge XT's on Windows today.
+fn installer_log_for_artifact(
+    artifact: &ArtifactDescriptor,
+    resource_path: &Path,
+) -> Option<PathBuf> {
+    let name = match artifact.package_id.as_str() {
+        crate::package::PACKAGE_SURGE_XT
+            if surge_xt::runs_inno_setup(artifact.kind, artifact.platform) =>
+        {
+            surge_xt::INSTALLER_LOG_NAME
+        }
+        _ => return None,
+    };
+    Some(crate::report::installer_log_path(resource_path, name))
+}
+
+/// [`installer_log_for_artifact`], for a run that starts the installer.
+/// Inno Setup won't start when it can't create its log, so the folder is
+/// made first, and when that fails the installer runs without a log.
+fn prepared_installer_log(artifact: &ArtifactDescriptor, resource_path: &Path) -> Option<PathBuf> {
+    installer_log_for_artifact(artifact, resource_path).filter(|path| {
+        path.parent()
+            .is_some_and(|folder| std::fs::create_dir_all(folder).is_ok())
+    })
 }
 
 /// Build the report item for a package skipped because a dependency it
@@ -1514,6 +1750,7 @@ fn planned_unattended_item(
         resource_path,
         target_app_path,
         replace_osara_keymap,
+        installer_log_for_artifact(&artifact, resource_path).as_deref(),
     ));
     PackageOperationItem {
         package_id: artifact.package_id.clone(),
@@ -1549,6 +1786,7 @@ fn executed_unattended_item(
         resource_path,
         target_app_path,
         replace_osara_keymap,
+        prepared_installer_log(&planned.artifact, resource_path).as_deref(),
     );
     // Run the planned execution, the package's post-install fixups, and
     // verify the produced files. Original order is preserved (some
@@ -1559,7 +1797,8 @@ fn executed_unattended_item(
     // can return 1223 / non-zero on Cancel from a post-install offer
     // dialog even when the install itself completed, and the user already
     // has the binaries on disk. Surfacing the process error in that case
-    // mis-reports a successful install as a failure.
+    // mis-reports a successful install as a failure. Installers whose exit
+    // code is final are the exception; see `installer_exit_code_is_final`.
     //
     // `install_started_at` is captured *before* the runner so the
     // freshness check below can detect silent no-ops: if the installer
@@ -1605,6 +1844,10 @@ fn executed_unattended_item(
         // before this fix did.
         let _ = entry.restore();
     }
+    let process_result = match process_result {
+        Err(error) if installer_exit_code_is_final(&planned.artifact) => return Err(error),
+        result => result,
+    };
     let post_install_result = post_execute_unattended_artifact(
         &planned.artifact,
         resource_path,
@@ -1890,12 +2133,16 @@ fn operation_timestamp() -> String {
     )
 }
 
+/// The plan for running `artifact`'s installer, extractor or disk image.
+/// `installer_log` is where the installer is told to write its log, from
+/// [`installer_log_for_artifact`]; `None` for one that takes none.
 fn planned_execution_for_artifact(
     artifact: &ArtifactDescriptor,
     cached_artifact: Option<&CachedArtifact>,
     resource_path: &Path,
     target_app_path: Option<&Path>,
     replace_osara_keymap: bool,
+    installer_log: Option<&Path>,
 ) -> PlannedExecutionPlan {
     let artifact_location = cached_artifact
         .map(|cached| cached.path.display().to_string())
@@ -1933,6 +2180,7 @@ fn planned_execution_for_artifact(
             verification_paths,
             requires_elevation,
             freshness_paths,
+            installer_log: None,
         };
     }
 
@@ -1950,6 +2198,7 @@ fn planned_execution_for_artifact(
                 artifact,
                 resource_path,
                 effective_target_app_path.as_deref(),
+                installer_log,
             ),
             working_directory: cached_artifact
                 .and_then(|cached| cached.path.parent().map(Path::to_path_buf)),
@@ -1957,6 +2206,7 @@ fn planned_execution_for_artifact(
             verification_paths,
             requires_elevation,
             freshness_paths,
+            installer_log: installer_log.map(Path::to_path_buf),
         },
         ArtifactKind::Archive | ArtifactKind::SevenZipArchive => PlannedExecutionPlan {
             kind: PlannedExecutionKind::ExtractArchiveAndRunInstaller,
@@ -1968,6 +2218,7 @@ fn planned_execution_for_artifact(
             verification_paths,
             requires_elevation,
             freshness_paths,
+            installer_log: None,
         },
         ArtifactKind::DiskImage => PlannedExecutionPlan {
             kind: PlannedExecutionKind::MountDiskImageAndRunInstaller,
@@ -1978,6 +2229,7 @@ fn planned_execution_for_artifact(
             verification_paths,
             requires_elevation,
             freshness_paths,
+            installer_log: None,
         },
         ArtifactKind::ExtensionBinary => PlannedExecutionPlan {
             kind: PlannedExecutionKind::LaunchInstallerExecutable,
@@ -1989,6 +2241,7 @@ fn planned_execution_for_artifact(
             verification_paths,
             requires_elevation,
             freshness_paths,
+            installer_log: None,
         },
     }
 }
@@ -2061,6 +2314,7 @@ fn installer_arguments_for_artifact(
     artifact: &ArtifactDescriptor,
     resource_path: &Path,
     target_app_path: Option<&Path>,
+    installer_log: Option<&Path>,
 ) -> Vec<String> {
     let per_package = match artifact.package_id.as_str() {
         crate::package::PACKAGE_REAPER => reaper::installer_arguments(
@@ -2079,7 +2333,7 @@ fn installer_arguments_for_artifact(
             jaws_scripts::installer_arguments(artifact.kind, artifact.platform)
         }
         crate::package::PACKAGE_SURGE_XT => {
-            surge_xt::installer_arguments(artifact.kind, artifact.platform)
+            surge_xt::installer_arguments(artifact.kind, artifact.platform, installer_log)
         }
         _ => None,
     };
@@ -2202,7 +2456,7 @@ fn build_manual_instruction(
     ManualInstallInstruction {
         title: format!(
             "Manual install required for {}",
-            package_title_name(package_id)
+            package_title_name(package_id).unwrap_or("package")
         ),
         steps,
         notes,
@@ -2293,8 +2547,10 @@ pub(super) fn target_likely_portable(resource_path: &Path, target_app_path: Opti
         .is_some_and(|target_app_path| path_is_same_or_nested(target_app_path, resource_path))
 }
 
-fn package_title_name(package_id: &str) -> &'static str {
-    match package_id {
+/// The short English title RABBIT's own text gives a package it knows, such
+/// as "SWS"; `None` for any other package.
+fn package_title_name(package_id: &str) -> Option<&'static str> {
+    Some(match package_id {
         crate::package::PACKAGE_REAPER => reaper::TITLE,
         crate::package::PACKAGE_OSARA => osara::TITLE,
         crate::package::PACKAGE_SWS => sws::TITLE,
@@ -2302,8 +2558,8 @@ fn package_title_name(package_id: &str) -> &'static str {
         crate::package::PACKAGE_REAKONTROL => "ReaKontrol",
         crate::package::PACKAGE_JAWS_SCRIPTS => jaws_scripts::TITLE,
         crate::package::PACKAGE_SURGE_XT => surge_xt::TITLE,
-        _ => "package",
-    }
+        _ => return None,
+    })
 }
 
 fn path_is_same_or_nested(path: &Path, root: &Path) -> bool {
@@ -2340,11 +2596,11 @@ mod tests {
 
     use super::snapshot::InstallSnapshot;
     use super::{
-        PackageAutomationSupport, PackageOperationMessage, PackageOperationOptions,
-        PackageOperationStatus, PlannedArtifact, PlannedAutomationKind, PlannedExecutionKind,
-        backup_file_for_unattended_change, dependency_ordered, execute_operation_with,
-        execute_operation_with_process_scan, execute_resolved_package_operation,
-        execute_resolved_package_operation_with_detections,
+        InstallerExitMeaning, PackageAutomationSupport, PackageOperationMessage,
+        PackageOperationOptions, PackageOperationStatus, PlannedArtifact, PlannedAutomationKind,
+        PlannedExecutionKind, ProcessScans, backup_file_for_unattended_change, dependency_ordered,
+        execute_operation_with, execute_operation_with_process_scan,
+        execute_resolved_package_operation, execute_resolved_package_operation_with_detections,
         execute_resolved_package_operation_with_detections_and_progress, first_failed_dependency,
         manifest_snapshot_source, plan_action_for_artifact, take_install_snapshot,
         upsert_unattended_package_receipt,
@@ -2626,8 +2882,14 @@ mod tests {
         };
 
         // A dry run has only the zip's URL, and RABBIT never runs a .zip.
-        let dry =
-            super::planned_execution_for_artifact(&descriptor, None, resource_path, None, true);
+        let dry = super::planned_execution_for_artifact(
+            &descriptor,
+            None,
+            resource_path,
+            None,
+            true,
+            None,
+        );
         assert_eq!(dry.kind, PlannedExecutionKind::LaunchInstallerExecutable);
         assert_eq!(dry.program, None);
         assert_eq!(dry.artifact_location, descriptor.url);
@@ -2649,6 +2911,7 @@ mod tests {
             resource_path,
             None,
             true,
+            None,
         );
         assert_eq!(real.program.as_deref(), Some(unpacked));
 
@@ -2659,7 +2922,8 @@ mod tests {
             channel: None,
             ..descriptor
         };
-        let plain = super::planned_execution_for_artifact(&exe, None, resource_path, None, true);
+        let plain =
+            super::planned_execution_for_artifact(&exe, None, resource_path, None, true, None);
         assert_eq!(plain.program.as_deref(), Some(exe.url.as_str()));
     }
 
@@ -2677,8 +2941,14 @@ mod tests {
             channel: None,
         };
 
-        let plan =
-            super::planned_execution_for_artifact(&descriptor, None, resource_path, None, true);
+        let plan = super::planned_execution_for_artifact(
+            &descriptor,
+            None,
+            resource_path,
+            None,
+            true,
+            None,
+        );
 
         assert_eq!(
             plan.kind,
@@ -2709,6 +2979,7 @@ mod tests {
             resource_path,
             Some(inferred_target),
             false,
+            None,
         );
 
         assert_eq!(
@@ -2741,6 +3012,7 @@ mod tests {
             resource_path,
             Some(portable_target.as_path()),
             false,
+            None,
         );
 
         assert_eq!(
@@ -4409,7 +4681,10 @@ mod tests {
             &options_for_target(&target, &lock_path, false),
             &ProgressReporter::noop(),
             &CancelToken::new(),
-            &|| vec![reaper.clone()],
+            &ProcessScans {
+                running_reaper: &|| vec![reaper.clone()],
+                running_programs: &|_| Vec::new(),
+            },
         )
         .unwrap_err();
 
@@ -4452,7 +4727,10 @@ mod tests {
             &options_for_target(&target, &dir.path().join("install.lock"), true),
             &ProgressReporter::noop(),
             &CancelToken::new(),
-            &|| vec![reaper.clone()],
+            &ProcessScans {
+                running_reaper: &|| vec![reaper.clone()],
+                running_programs: &|_| Vec::new(),
+            },
         )
         .unwrap();
 
@@ -4499,7 +4777,10 @@ mod tests {
             &dry_run,
             &ProgressReporter::noop(),
             &CancelToken::new(),
-            &|| vec![reaper.clone()],
+            &ProcessScans {
+                running_reaper: &|| vec![reaper.clone()],
+                running_programs: &|_| Vec::new(),
+            },
         )
         .unwrap();
         assert_eq!(report.items.len(), 1);
@@ -4512,7 +4793,10 @@ mod tests {
             &options_for_target(&target, &lock_path, false),
             &ProgressReporter::noop(),
             &CancelToken::new(),
-            &|| vec![reaper.clone()],
+            &ProcessScans {
+                running_reaper: &|| vec![reaper.clone()],
+                running_programs: &|_| Vec::new(),
+            },
         )
         .unwrap();
         assert_eq!(
@@ -4750,7 +5034,10 @@ mod tests {
             },
             &ProgressReporter::noop(),
             &CancelToken::new(),
-            &Vec::new,
+            &ProcessScans {
+                running_reaper: &Vec::new,
+                running_programs: &|_| Vec::new(),
+            },
             &snapshot_source,
         )
         .unwrap();
@@ -4772,6 +5059,488 @@ mod tests {
                 existed_before: false,
             }]
         );
+    }
+
+    /// A vendor installer that ended with an exit code is reported in plain
+    /// words: what the code means where RABBIT knows the installer's codes,
+    /// and where its log is. Surge XT's Inno Setup code 5 is the one the
+    /// hardware pass hit. Another package's code, or Surge XT's macOS
+    /// installer's, gets the general advice under the package's short
+    /// title, and the other failures keep their old shape. The report keeps
+    /// the program that failed.
+    #[test]
+    fn a_vendor_installer_exit_code_is_explained() {
+        let log = std::path::PathBuf::from(
+            r"C:\Users\Toni Barth\AppData\Roaming\REAPER\RABBIT\logs\surge-xt-installer-unix-1.log",
+        );
+        let failed =
+            |artifact: ArtifactDescriptor, exit_code, log_path: Option<&std::path::Path>| {
+                super::failed_operation_item(
+                    artifact,
+                    PlanActionKind::Install,
+                    &RabbitError::ProcessFailed {
+                        program: r"C:\cache\setup.exe".to_string(),
+                        exit_code,
+                        log_path: log_path.map(std::path::Path::to_path_buf),
+                    },
+                )
+            };
+        let surge_exe = || {
+            artifact(
+                PACKAGE_SURGE_XT,
+                ArtifactKind::Installer,
+                "surge-xt-setup.exe",
+            )
+        };
+
+        let surge = failed(surge_exe(), Some(5), Some(&log));
+        assert_eq!(surge.status, PackageOperationStatus::Failed);
+        assert_eq!(
+            surge.message_code,
+            PackageOperationMessage::VendorInstallerFailed {
+                program: r"C:\cache\setup.exe".to_string(),
+                exit_code: 5,
+                meaning: Some(InstallerExitMeaning::StoppedAtQuestion),
+                log_path: Some(log.clone()),
+            }
+        );
+        assert_eq!(
+            surge.message,
+            format!(
+                "The installer ended with exit code 5. That means it stopped at a question it \
+                 can't ask while RABBIT runs it unattended, usually because another program has \
+                 one of its files open. Close other programs, especially other music programs \
+                 and Surge XT, then run RABBIT again. The installer's log is at {}.",
+                log.display()
+            )
+        );
+
+        for (code, meaning) in [
+            (2, InstallerExitMeaning::CancelledBeforeInstalling),
+            (7, InstallerExitMeaning::PreparationFailed),
+            (8, InstallerExitMeaning::RestartNeeded),
+        ] {
+            assert!(
+                matches!(
+                    failed(surge_exe(), Some(code), None).message_code,
+                    PackageOperationMessage::VendorInstallerFailed {
+                        exit_code,
+                        meaning: Some(found),
+                        log_path: None,
+                        ..
+                    } if exit_code == code && found == meaning
+                ),
+                "{code}"
+            );
+        }
+
+        let sws = failed(
+            artifact(PACKAGE_SWS, ArtifactKind::Installer, "sws.exe"),
+            Some(5),
+            None,
+        );
+        assert_eq!(
+            sws.message_code,
+            PackageOperationMessage::VendorInstallerFailed {
+                program: r"C:\cache\setup.exe".to_string(),
+                exit_code: 5,
+                meaning: None,
+                log_path: None,
+            }
+        );
+        assert_eq!(
+            sws.message,
+            "The installer ended with exit code 5. Close other programs and run RABBIT again. \
+             If it stops again, install SWS from its publisher's website."
+        );
+
+        let mac = ArtifactDescriptor {
+            platform: Platform::MacOs,
+            ..artifact(PACKAGE_SURGE_XT, ArtifactKind::DiskImage, "surge-xt.dmg")
+        };
+        assert!(matches!(
+            failed(mac, Some(5), None).message_code,
+            PackageOperationMessage::VendorInstallerFailed { meaning: None, .. }
+        ));
+
+        let no_code = failed(surge_exe(), None, None);
+        assert!(
+            matches!(
+                &no_code.message_code,
+                PackageOperationMessage::InstallFailed { error, antivirus_block: false }
+                    if error.ends_with("without an exit code")
+            ),
+            "{:?}",
+            no_code.message_code
+        );
+        let declined = super::failed_operation_item(
+            surge_exe(),
+            PlanActionKind::Install,
+            &RabbitError::UserCancelledElevation {
+                program: "surge-xt-setup.exe".to_string(),
+            },
+        );
+        assert!(
+            matches!(
+                declined.message_code,
+                PackageOperationMessage::InstallFailed {
+                    antivirus_block: false,
+                    ..
+                }
+            ),
+            "{:?}",
+            declined.message_code
+        );
+    }
+
+    /// Surge XT's Windows installer is told not to close programs and to
+    /// write its log into the target's RABBIT logs folder, here a path with
+    /// a space in it, passed without quotes of its own. The plan names the
+    /// same log. Nothing is run.
+    #[test]
+    fn surge_xt_installer_leaves_programs_open_and_writes_a_log() {
+        let resource_path = std::path::Path::new(r"C:\Users\Toni Barth\AppData\Roaming\REAPER");
+        let target = std::path::Path::new(r"C:\Program Files\REAPER (x64)\reaper.exe");
+        let surge = artifact(
+            PACKAGE_SURGE_XT,
+            ArtifactKind::Installer,
+            "surge-xt-win64-NIGHTLY-2026-11-09-abc1234-setup.exe",
+        );
+        let log = super::installer_log_for_artifact(&surge, resource_path).unwrap();
+        assert_eq!(
+            log.parent(),
+            Some(resource_path.join("RABBIT").join("logs").as_path())
+        );
+        let name = log.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with("surge-xt-installer-unix-") && name.ends_with(".log"),
+            "{name}"
+        );
+
+        let plan = super::planned_execution_for_artifact(
+            &surge,
+            None,
+            resource_path,
+            Some(target),
+            false,
+            Some(&log),
+        );
+        let log_argument = format!("/LOG={}", log.display());
+        assert_eq!(
+            plan.arguments,
+            [
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                "/NOCLOSEAPPLICATIONS",
+                "/TYPE=full",
+                "/ALLUSERS",
+                log_argument.as_str(),
+            ]
+        );
+        for switch in [
+            "/CLOSEAPPLICATIONS",
+            "/RESTARTAPPLICATIONS",
+            "/FORCECLOSEAPPLICATIONS",
+        ] {
+            assert!(
+                !plan
+                    .arguments
+                    .iter()
+                    .any(|argument| argument.eq_ignore_ascii_case(switch)),
+                "{switch}: {:?}",
+                plan.arguments
+            );
+        }
+        assert!(
+            !plan.arguments.iter().any(|argument| argument.contains('"')),
+            "{:?}",
+            plan.arguments
+        );
+        assert_eq!(plan.installer_log, Some(log));
+
+        // Without a log, the switch is left out.
+        let plan = super::planned_execution_for_artifact(
+            &surge,
+            None,
+            resource_path,
+            Some(target),
+            false,
+            None,
+        );
+        assert!(
+            !plan
+                .arguments
+                .iter()
+                .any(|argument| argument.starts_with("/LOG")),
+            "{:?}",
+            plan.arguments
+        );
+        assert_eq!(plan.installer_log, None);
+
+        // Only Surge XT's Windows installer takes a log, and only its exit
+        // code fails the package even when verification would pass.
+        assert!(super::installer_exit_code_is_final(&surge));
+        for other in [
+            artifact(PACKAGE_SWS, ArtifactKind::Installer, "sws.exe"),
+            artifact(PACKAGE_REAPER, ArtifactKind::Installer, "reaper.exe"),
+            ArtifactDescriptor {
+                platform: Platform::MacOs,
+                ..artifact(PACKAGE_SURGE_XT, ArtifactKind::DiskImage, "surge-xt.dmg")
+            },
+        ] {
+            assert_eq!(
+                super::installer_log_for_artifact(&other, resource_path),
+                None
+            );
+            assert!(!super::installer_exit_code_is_final(&other));
+        }
+    }
+
+    /// The log's folder is made before the installer starts, because Inno
+    /// Setup won't start when it can't create its log. When the folder
+    /// can't be made, the installer runs without a log rather than not at
+    /// all.
+    #[test]
+    fn the_installer_log_folder_is_made_or_the_log_left_out() {
+        let dir = tempdir().unwrap();
+        let surge = artifact(
+            PACKAGE_SURGE_XT,
+            ArtifactKind::Installer,
+            "surge-xt-setup.exe",
+        );
+        let resource_path = dir.path().join("REAPER");
+
+        let log = super::prepared_installer_log(&surge, &resource_path).unwrap();
+        assert_eq!(
+            log.parent(),
+            Some(resource_path.join("RABBIT").join("logs").as_path())
+        );
+        assert!(log.parent().unwrap().is_dir());
+        assert!(
+            !log.exists(),
+            "only the folder is made; the installer writes the log"
+        );
+
+        let blocked = dir.path().join("Blocked");
+        fs::create_dir_all(&blocked).unwrap();
+        fs::write(blocked.join("RABBIT"), b"a file where the folder would go").unwrap();
+        assert_eq!(super::prepared_installer_log(&surge, &blocked), None);
+    }
+
+    /// The programs to close before an installer runs come from the
+    /// package's uninstall plan: Surge XT's standalone apps for its Windows
+    /// installer, and nothing on macOS or for a package that names none.
+    #[test]
+    fn the_programs_to_close_before_an_install_come_from_the_manifest() {
+        let resource_path = std::path::Path::new(r"C:\Users\me\AppData\Roaming\REAPER");
+        let target = Some(std::path::Path::new(
+            r"C:\Program Files\REAPER (x64)\reaper.exe",
+        ));
+        let surge = artifact(
+            PACKAGE_SURGE_XT,
+            ArtifactKind::Installer,
+            "surge-xt-setup.exe",
+        );
+        assert_eq!(
+            super::install_blocking_programs(&surge, resource_path, target),
+            ["Surge XT.exe", "Surge XT Effects.exe"]
+        );
+        let mac = ArtifactDescriptor {
+            platform: Platform::MacOs,
+            ..artifact(PACKAGE_SURGE_XT, ArtifactKind::DiskImage, "surge-xt.dmg")
+        };
+        assert!(super::install_blocking_programs(&mac, resource_path, target).is_empty());
+        let sws = artifact(PACKAGE_SWS, ArtifactKind::Installer, "sws.exe");
+        assert!(super::install_blocking_programs(&sws, resource_path, target).is_empty());
+    }
+
+    /// While Surge XT's own app is open, its installer isn't started: the
+    /// package fails and names the program to close, and the stand-in
+    /// installer never runs. The scan is asked for the names the manifest
+    /// gives; no real process is looked at.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_open_surge_xt_keeps_its_installer_from_starting() {
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let ran = dir.path().join("installer-ran.txt");
+        let installer = dir.path().join("surge-xt-setup.cmd");
+        fs::write(
+            &installer,
+            format!(
+                "@echo off\r\n> \"{}\" echo ran\r\nexit /b 0\r\n",
+                ran.display()
+            ),
+        )
+        .unwrap();
+        let resource_path = dir.path().join("REAPER");
+        fs::create_dir_all(&resource_path).unwrap();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let running_programs = |names: &[String]| {
+            asked.borrow_mut().push(names.to_vec());
+            vec![
+                RunningProcess {
+                    pid: "77".to_string(),
+                    name: "Surge XT.exe".to_string(),
+                    executable_path: None,
+                },
+                RunningProcess {
+                    pid: "78".to_string(),
+                    name: "surge xt.exe".to_string(),
+                    executable_path: None,
+                },
+            ]
+        };
+
+        let report = execute_operation_with_process_scan(
+            &resource_path,
+            vec![artifact_with_url(
+                PACKAGE_SURGE_XT,
+                ArtifactKind::Installer,
+                "surge-xt-setup.cmd",
+                &installer.display().to_string(),
+            )],
+            &[],
+            cache.path(),
+            &options_for_target(
+                std::path::Path::new(r"C:\Program Files\REAPER (x64)\reaper.exe"),
+                &dir.path().join("install.lock"),
+                false,
+            ),
+            &ProgressReporter::noop(),
+            &CancelToken::new(),
+            &ProcessScans {
+                running_reaper: &Vec::new,
+                running_programs: &running_programs,
+            },
+        )
+        .unwrap();
+
+        let item = &report.items[0];
+        assert_eq!(
+            item.status,
+            PackageOperationStatus::Failed,
+            "{}",
+            item.message
+        );
+        assert_eq!(
+            item.message_code,
+            PackageOperationMessage::BlockingProgramsRunning {
+                programs: vec!["Surge XT.exe".to_string()],
+            }
+        );
+        assert_eq!(
+            item.message,
+            "RABBIT didn't start the installer because Surge XT is open (Surge XT.exe), and the \
+             installer can't replace a program that is running. Close it, then run RABBIT again."
+        );
+        assert_eq!(
+            *asked.borrow(),
+            [vec![
+                "Surge XT.exe".to_string(),
+                "Surge XT Effects.exe".to_string()
+            ]]
+        );
+        assert!(!ran.exists(), "the installer must not start");
+        assert!(report.has_failures());
+        assert!(load_install_state(&resource_path).unwrap().is_none());
+    }
+
+    /// With no Surge XT open, the installer RABBIT starts is told not to
+    /// close programs and to write its log into the target's RABBIT logs
+    /// folder, which is made first so Inno Setup can start. Its exit code 5
+    /// fails the package on its own, whatever Surge XT files this machine
+    /// already has: Inno rolls back before it ends that way, so an earlier
+    /// install's files must not pass for an update. The stand-in only writes
+    /// down the arguments it was given.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn surge_xt_installer_runs_with_its_switches_and_its_exit_code_counts() {
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let arguments = dir.path().join("installer-arguments.txt");
+        let installer = dir.path().join("surge-xt-setup.cmd");
+        fs::write(
+            &installer,
+            format!(
+                "@echo off\r\n> \"{}\" echo %*\r\nexit /b 5\r\n",
+                arguments.display()
+            ),
+        )
+        .unwrap();
+        let resource_path = dir.path().join("REAPER");
+        fs::create_dir_all(&resource_path).unwrap();
+        let logs = resource_path.join("RABBIT").join("logs");
+
+        let report = execute_operation_with_process_scan(
+            &resource_path,
+            vec![artifact_with_url(
+                PACKAGE_SURGE_XT,
+                ArtifactKind::Installer,
+                "surge-xt-setup.cmd",
+                &installer.display().to_string(),
+            )],
+            &[],
+            cache.path(),
+            &options_for_target(
+                std::path::Path::new(r"C:\Program Files\REAPER (x64)\reaper.exe"),
+                &dir.path().join("install.lock"),
+                false,
+            ),
+            &ProgressReporter::noop(),
+            &CancelToken::new(),
+            &ProcessScans {
+                running_reaper: &Vec::new,
+                running_programs: &|_| Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let given = fs::read_to_string(&arguments).expect("the installer ran");
+        let words: Vec<&str> = given
+            .split_whitespace()
+            .map(|word| word.trim_matches('"'))
+            .collect();
+        assert!(words.contains(&"/NOCLOSEAPPLICATIONS"), "{given}");
+        for switch in ["/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"] {
+            assert!(
+                !words.iter().any(|word| word.eq_ignore_ascii_case(switch)),
+                "{given}"
+            );
+        }
+        let start = given.find("/LOG=").expect("a /LOG= argument") + "/LOG=".len();
+        let end = start + given[start..].find(".log").expect("a .log file") + ".log".len();
+        let log = std::path::PathBuf::from(&given[start..end]);
+        assert_eq!(log.parent(), Some(logs.as_path()), "{given}");
+        let name = log.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("surge-xt-installer-unix-"), "{name}");
+        assert!(
+            logs.is_dir(),
+            "the log's folder is made before the installer starts"
+        );
+
+        let item = &report.items[0];
+        assert_eq!(
+            item.status,
+            PackageOperationStatus::Failed,
+            "{}",
+            item.message
+        );
+        assert!(
+            matches!(
+                &item.message_code,
+                PackageOperationMessage::VendorInstallerFailed {
+                    program,
+                    exit_code: 5,
+                    meaning: Some(InstallerExitMeaning::StoppedAtQuestion),
+                    log_path: None,
+                } if program.ends_with("surge-xt-setup.cmd")
+            ),
+            "{:?}",
+            item.message_code
+        );
+        assert!(load_install_state(&resource_path).unwrap().is_none());
     }
 
     fn artifact(package_id: &str, kind: ArtifactKind, file_name: &str) -> ArtifactDescriptor {

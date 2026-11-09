@@ -113,10 +113,12 @@ pub(crate) fn status_label_for_summary(
 /// form (`fallback_english`) when the locale doesn't have the key the
 /// variant maps to — that's the same English string rabbit-core stamps
 /// into the JSON report, so the saved report remains stable while the
-/// wizard renders the user's locale.
+/// wizard renders the user's locale. `package` is the package's name in
+/// the user's language, for the messages that name it.
 pub(crate) fn localized_package_operation_message(
     localizer: &Localizer,
     code: &rabbit_core::operation::PackageOperationMessage,
+    package: &str,
     fallback_english: &str,
 ) -> String {
     use rabbit_core::operation::PackageOperationMessage as Msg;
@@ -167,6 +169,13 @@ pub(crate) fn localized_package_operation_message(
             "package-status-install-failed",
             &[("error", error.as_str())],
         ),
+        // A vendor installer's exit code, and the programs to close before
+        // one can run, are put in plain words by rabbit-core, so the CLI
+        // says the same.
+        Msg::VendorInstallerFailed { .. } | Msg::BlockingProgramsRunning { .. } => {
+            return rabbit_core::operation::localized_install_problem(localizer, code, package)
+                .unwrap_or_else(|| fallback_english.to_string());
+        }
         Msg::SkippedDependencyFailed { dependency } => localizer.format(
             "package-status-skipped-dependency-failed",
             &[("dependency", dependency.as_str())],

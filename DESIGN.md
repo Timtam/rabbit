@@ -175,9 +175,32 @@ questions they cannot reasonably answer.
   The nightly tag is static; the rolling build identity lives in the
   asset filenames (`surge-xt-<platform>-NIGHTLY-<YYYY-MM-DD>-<short-sha>-…`).
   The Windows installer is Inno Setup (`surge-xt-win64-…-setup.exe`,
-  silent flags `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TYPE=full
-  /ALLUSERS`); the nightly channel no longer ships a Win32 setup.exe and
-  has no native ARM64 setup.exe, so Windows-on-arm hosts run the win64
+  silent flags `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+  /NOCLOSEAPPLICATIONS /TYPE=full /ALLUSERS /LOG=<file>`). RABBIT doesn't
+  let Inno close programs through Windows' Restart Manager: Inno registers
+  every file it would install that matches Surge's `CloseApplicationsFilter`,
+  the fonts in `C:\Windows\Fonts` that Surge's uninstaller leaves behind
+  included, so a program holding one of them made setup stop with exit code
+  5, and closing programs could close a screen reader. Instead the install
+  doesn't start while `Surge XT.exe` or `Surge XT Effects.exe` runs (the
+  manifest's `blocking_programs`, which the manifest check keeps free of
+  screen readers). The log goes to
+  `<resource>/RABBIT/logs/surge-xt-installer-<stamp>.log`, passed without
+  quotes of its own: both `Command` and the elevated start quote an argument
+  with spaces as one word, and Inno drops quotes anywhere in a parameter.
+  RABBIT makes the folder first, as the user, and leaves `/LOG=` out when it
+  can't. Accepted risk: Inno writes the log after its own permission prompt,
+  possibly as another administrator account, and refuses to start (exit
+  code 1) when it can't create the log, as with a roaming AppData folder
+  redirected to a share that account can't write to. The user then gets the
+  general advice and no log is named. RABBIT starts the installer without
+  elevation, so declining Inno's own permission prompt ends it with code 2,
+  not 1223. Because Inno rolls back before it ends with any code other than
+  0, that code fails the package even when an earlier install's files pass
+  verification. A non-zero exit code is reported in plain words, with what
+  Inno's codes 2 (in practice a declined prompt), 5, 7 and 8 mean and the
+  log's path. The nightly channel no longer ships a Win32 setup.exe and has
+  no native ARM64 setup.exe, so Windows-on-arm hosts run the win64
   installer under x64 emulation (`ArchitecturesAllowed=x64compatible`).
   The macOS DMG (`surge-xt-macOS-…-dmg`) wraps a `productbuild`
   distribution `.pkg` whose sub-pkgs install the VST3, AU, CLAP, LV2,

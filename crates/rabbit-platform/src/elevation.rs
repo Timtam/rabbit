@@ -1408,6 +1408,81 @@ mod tests {
         assert_eq!(quote_arguments(&[]), "");
     }
 
+    /// How Inno Setup reads its command line: parameters end at a space
+    /// outside quotes, every quote is dropped wherever it is, and a
+    /// backslash is an ordinary character.
+    fn inno_setup_parameters(line: &str) -> Vec<String> {
+        let mut parameters = Vec::new();
+        let mut current = String::new();
+        let mut started = false;
+        let mut in_quote = false;
+        for ch in line.chars() {
+            match ch {
+                '"' => {
+                    in_quote = !in_quote;
+                    started = true;
+                }
+                ch if ch <= ' ' && !in_quote => {
+                    if started {
+                        parameters.push(std::mem::take(&mut current));
+                        started = false;
+                    }
+                }
+                ch => {
+                    current.push(ch);
+                    started = true;
+                }
+            }
+        }
+        if started {
+            parameters.push(current);
+        }
+        parameters
+    }
+
+    /// An Inno Setup `/LOG=` path with spaces, like the one Surge XT's
+    /// installer gets, comes through the elevated start's parameter string
+    /// whole, should RABBIT ever start such an installer elevated; Surge
+    /// XT's raises its own permission prompt today. The argument is quoted
+    /// as one word with nothing added inside, so Inno Setup, which drops the
+    /// quotes, reads the path unchanged. Quotes written into the argument
+    /// itself would come out escaped, and Inno would split the path at its
+    /// space. Nothing is started.
+    #[test]
+    fn an_inno_log_path_with_spaces_arrives_whole() {
+        let log =
+            r"C:\Users\Toni Barth\AppData\Roaming\REAPER\RABBIT\logs\surge-xt-installer-unix-1.log";
+        let arguments: Vec<String> = [
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/NOCLOSEAPPLICATIONS",
+            "/TYPE=full",
+            "/ALLUSERS",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .chain([format!("/LOG={log}")])
+        .collect();
+
+        let line = quote_arguments(&arguments);
+
+        assert_eq!(
+            line,
+            format!(
+                "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCLOSEAPPLICATIONS /TYPE=full \
+                 /ALLUSERS \"/LOG={log}\""
+            )
+        );
+        assert_eq!(inno_setup_parameters(&line), arguments);
+
+        let quoted_by_hand = quote_arguments(&[format!("/LOG=\"{log}\"")]);
+        assert_ne!(
+            inno_setup_parameters(&quoted_by_hand),
+            [format!("/LOG={log}")]
+        );
+    }
+
     /// The script the macOS `run_elevated_and_wait` builds for one program.
     fn single_command_script(program: &str, arguments: &[&str]) -> String {
         administrator_script(

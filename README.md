@@ -33,7 +33,9 @@ RABBIT installs and keeps up to date:
   rather than the official 1.3.4 release (which is from August 2024
   and the project effectively ships through nightlies). Hidden on
   portable REAPER targets because Surge XT's factory data lives at
-  fixed system paths outside any portable REAPER folder.
+  fixed system paths outside any portable REAPER folder. On Windows, close
+  Surge XT before you install or update it: RABBIT doesn't start its
+  installer while Surge XT is open, and says so.
 - **app2clap** *(Windows only, opt-in, standard REAPER installations only)* —
   [app2clap](https://app2clap.jantrid.net/), a CLAP plugin by Jamie Teh
   (jcsteh, of OSARA/NVDA fame) that captures audio from other applications
@@ -821,6 +823,8 @@ Microsoft as a false positive at <https://www.microsoft.com/en-us/wdsi/filesubmi
 ## Reports and logs
 
 Every installation produces a JSON report under `<resource>/RABBIT/logs/`.
+Surge XT's Windows installer writes its own log there too
+(`surge-xt-installer-<stamp>.log`), and RABBIT names it when that install fails.
 Backups go to `<resource>/RABBIT/backups/<timestamp>/`. The download cache is a
 `rabbit-cache` folder in your temporary folder, usually `%TEMP%\rabbit-cache` on
 Windows and `$TMPDIR/rabbit-cache` on macOS. It can be deleted safely at any time, and
