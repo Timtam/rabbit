@@ -186,6 +186,10 @@ from this file and posts it as the GitHub release body.
   everything back and says to wait and try again. From a portable REAPER,
   RABBIT says to uninstall the scripts from the standard REAPER, and how to
   remove them by hand.
+- Brazilian Portuguese (pt-BR) UI translation. The language picker now lists
+  Português (Brasil), it ships in the macOS app bundle, and OS-language
+  auto-detection on first launch covers Portuguese locales (any `pt-*`, which
+  map to pt-BR).
 
 ### Changed
 

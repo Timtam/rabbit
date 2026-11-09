@@ -360,9 +360,11 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
 
 Use the language picker at the bottom of the window. Currently bundled
 languages: English (United States), Deutsch (Deutschland), español (España),
-Français (France) and Italiano (Italia). RABBIT auto-picks your OS language on
-first launch when a translation is available — regional variants fall back to
-the bundled one, so a Mexican Spanish (es-MX) system gets the Spanish UI.
+Français (France), Italiano (Italia) and Português (Brasil). RABBIT auto-picks
+your OS language on first launch when a translation is available — regional
+variants fall back to the bundled one, so a Mexican Spanish (es-MX) system gets
+the Spanish UI, and a European Portuguese (pt-PT) one the Brazilian Portuguese
+UI.
 
 ### Expert mode: pre-release builds
 

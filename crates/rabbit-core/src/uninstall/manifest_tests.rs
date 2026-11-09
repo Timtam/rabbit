@@ -2122,7 +2122,7 @@ fn reapers_macos_plan_reads_in_every_language() {
             "uninstall-kept-reaper-resource",
         ]
     );
-    assert_eq!(embedded_locales().len(), 5);
+    assert_eq!(embedded_locales().len(), 6);
     for &locale in embedded_locales() {
         let localizer = Localizer::embedded(locale).unwrap();
         for key in &keys {
@@ -3167,7 +3167,7 @@ fn surge_xts_macos_plan_reads_in_every_language() {
             "uninstall-kept-surge-factory-copy-macos",
         ]
     );
-    assert_eq!(embedded_locales().len(), 5);
+    assert_eq!(embedded_locales().len(), 6);
     for &locale in embedded_locales() {
         let localizer = Localizer::embedded(locale).unwrap();
         for key in &keys {
