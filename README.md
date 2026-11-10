@@ -33,7 +33,9 @@ RABBIT installs and keeps up to date:
   rather than the official 1.3.4 release (which is from August 2024
   and the project effectively ships through nightlies). Hidden on
   portable REAPER targets because Surge XT's factory data lives at
-  fixed system paths outside any portable REAPER folder.
+  fixed system paths outside any portable REAPER folder. On Windows, close
+  Surge XT before you install or update it: RABBIT doesn't start its
+  installer while Surge XT is open, and says so.
 - **app2clap** *(Windows only, opt-in, standard REAPER installations only)* —
   [app2clap](https://app2clap.jantrid.net/), a CLAP plugin by Jamie Teh
   (jcsteh, of OSARA/NVDA fame) that captures audio from other applications
@@ -220,25 +222,28 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
   anywhere on the page, the arrow keys while the tabs have focus, or
   VoiceOver's own navigation of the tab group. VoiceOver mentions Ctrl+Tab
   the first time the page opens.
-- **What RABBIT can remove:** OSARA, SWS, ReaPack, ReaKontrol, FFmpeg and
-  app2clap (both Windows only), the language packs, Surge XT and REAPER (see
-  below). On Windows that means a standard REAPER; on a Mac, the REAPER app
-  of a standard or a portable REAPER. Every other installed package is listed
-  too, with the reason it can't be ticked.
+- **What RABBIT can remove:** OSARA, SWS, ReaPack, ReaKontrol, FFmpeg,
+  app2clap and the JAWS scripts (all three Windows only), the language packs,
+  Surge XT and REAPER (see below). On Windows that means a standard REAPER;
+  on a Mac, the REAPER app of a standard or a portable REAPER. Every other
+  installed package is listed too, with the reason it can't be ticked.
 - **What is kept:** your settings, such as SWS's grooves, ReaPack's
   repositories and ReaKontrol's FX maps, unless you tick **Also remove
   settings** below the list. `reaper.ini`, `reaper-kb.ini`, your key maps and
   everything ReaPack installed always stay, and so do the key map backups
   OSARA made and OSARA's settings, which live in `reaper-extstate.ini` beside
-  every other extension's. Everything that goes, settings removed with that
-  option included, moves into a backup set under `RABBIT\backups` rather than
-  being deleted. Surge XT and REAPER are the exception; see below.
+  every other extension's. Script files of the JAWS scripts that RABBIT can't
+  be sure the installer added, and those changed since, always stay too.
+  Everything that goes, settings removed with that option included, moves
+  into a backup set under `RABBIT\backups` rather than being deleted. Surge XT
+  and REAPER are the exception, and so are the JAWS scripts' uninstaller
+  folder and registry entry; see below.
 - **Starting it:** the review page says what each package loses and keeps.
   Enter doesn't start an uninstall there; press **Uninstall**. REAPER must be
-  closed, and for app2clap, Surge XT and REAPER itself every REAPER on the
-  computer. On a Mac, uninstalling REAPER needs every REAPER closed only when
-  moving its app takes an administrator's password; otherwise closing that
-  REAPER is enough.
+  closed, and for app2clap, the JAWS scripts, Surge XT and REAPER itself
+  every REAPER on the computer. On a Mac, uninstalling REAPER needs every
+  REAPER closed only when moving its app takes an administrator's password;
+  otherwise closing that REAPER is enough.
 - **Surge XT and REAPER (Windows):** their own uninstallers remove them, with
   administrator rights. Windows asks for your permission once, before
   anything is removed, however many of them you ticked; if you don't allow
@@ -256,6 +261,37 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
   there, the progress page says RABBIT is waiting for them: close the music
   program that has the package open. A removal that finishes only after a
   restart says so on the last page. A portable REAPER stays yours to remove
+  by hand.
+- **The JAWS scripts (Windows):** RABBIT removes them from a standard
+  REAPER. Their two plug-in files in `%APPDATA%\REAPER\UserPlugins` move into
+  the backup set, and so do the script files RABBIT saw their installer add
+  to JAWS's settings folder, `%APPDATA%\Freedom Scientific\JAWS`. Script
+  files RABBIT can't be sure the installer added stay, such as those already
+  there when RABBIT ran the installer, and so do those that changed since,
+  such as `reaper.jkm` with your own key assignments. RABBIT records which
+  script files the installer adds when it runs the installer itself, and
+  only from this version on, so the script files of an install made before,
+  or without RABBIT, stay too. The row's details, and **Show details** on the
+  last page, say how to remove the script files that stay by hand. The
+  installer also left an uninstaller folder,
+  `%ProgramFiles(x86)%\Reaper_JawsScripts`, and an entry in the registry.
+  While either is there, RABBIT removes them after the files, with
+  administrator rights: Windows asks for your permission once, before
+  anything is removed, together with Surge XT and REAPER if you ticked them
+  too, and if you don't allow it, nothing is uninstalled. Review says so,
+  and RABBIT asks you once more before it starts, with **No** selected,
+  because a backup can't bring that folder and entry back. Once both are
+  gone, for example after you restored the scripts from a backup, there is
+  no permission prompt and no question. If that folder or entry isn't
+  exactly as the installer leaves it, RABBIT changes nothing: the row can't
+  be ticked, and its details say why and how to remove the scripts by hand.
+  JAWS can keep running. If it has one of the script files open, nothing of
+  the scripts is removed: wait a moment and uninstall again, and restart
+  JAWS first if that doesn't help. If RABBIT has no record of installing the
+  scripts and finds none of their files for your account, another account
+  most likely installed them: the row can't be ticked, and its details say
+  to uninstall them from that account. From a portable REAPER, RABBIT says
+  to uninstall the scripts from the standard REAPER, and how to remove them
   by hand.
 - **REAPER on a Mac:** RABBIT moves the REAPER app to the Trash, from
   Applications or from a portable REAPER folder. Your settings and extensions
@@ -310,10 +346,12 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
   put back the very files that went instead, **Show details** on the last
   page lists a `rabbit restore-backup` command for each package whose files
   went into a backup set (see [Uninstall](#uninstall) under command-line
-  usage). Surge XT and REAPER don't go into one: install them again. On a
-  Mac, you can also drag REAPER back from the Trash until you empty it; if an
-  administrator's password moved it there, dragging it back may ask for one
-  again. A package you put back from the Trash, or installed again yourself,
+  usage). Surge XT and REAPER don't go into one: install them again. The
+  JAWS scripts' files do, but their uninstaller folder and registry entry
+  don't, so the command brings back only the files. On a Mac, you can also
+  drag REAPER back from the Trash until you empty it; if an administrator's
+  password moved it there, dragging it back may ask for one again. A
+  package you put back from the Trash, or installed again yourself,
   gets its updates offered as usual: when one is out, RABBIT ticks it.
   Language packs are the exception: one you removed or turned down stays
   unticked.
@@ -513,10 +551,11 @@ GITHUB_TOKEN="<your token>" /Applications/Rabbit.app/Contents/MacOS/rabbit   # m
 ### Uninstall
 
 `uninstall` removes packages RABBIT knows how to take off again: today OSARA,
-SWS, ReaPack, ReaKontrol, FFmpeg and app2clap (both Windows only), the language
-packs, Surge XT and REAPER. On Windows, Surge XT and a standard REAPER come off
-through their own uninstallers. On a Mac, RABBIT deletes Surge XT for good and
-moves the REAPER app of a standard or a portable REAPER to the Trash.
+SWS, ReaPack, ReaKontrol, FFmpeg, app2clap and the JAWS scripts (all three
+Windows only), the language packs, Surge XT and REAPER. On Windows, Surge XT
+and a standard REAPER come off through their own uninstallers, and the JAWS
+scripts only from a standard REAPER. On a Mac, RABBIT deletes Surge XT for
+good and moves the REAPER app of a standard or a portable REAPER to the Trash.
 `RABBIT components` says for each package whether RABBIT can
 uninstall it, and if not, why. Name every package with `--package`; there is
 no "remove everything". Like the other commands, it only shows what it would
@@ -542,20 +581,25 @@ RABBIT uninstall --resource-path "$HOME/Library/Application Support/REAPER" \
   folder if nothing else is left in it. On Windows, OSARA also comes off
   Windows' list of installed programs, but only if that entry points into the
   REAPER you named: there is one OSARA entry for the whole computer, and one
-  that belongs to another REAPER stays. The report says which.
+  that belongs to another REAPER stays. The report says which. For the JAWS
+  scripts, it is their two plug-in files and the script files RABBIT
+  recorded their installer adding, each script file only while it still
+  holds what the installer wrote (see below).
 - **What stays:** your settings, such as SWS's grooves and `S&M.ini`,
   ReaPack's repositories and its list of what it installed, and ReaKontrol's
   FX maps. Add `--remove-settings` to remove those too. `reaper.ini`,
   `reaper-kb.ini`, your key maps and everything ReaPack installed always stay,
   even files ReaPack installed among a package's settings. So do the key map
   backups OSARA made, and OSARA's settings, which live in
-  `reaper-extstate.ini` beside every other extension's.
-- **Nothing is deleted for good,** except Surge XT, and REAPER on Windows
-  (see below). A REAPER app on a Mac goes to the Trash. Other removed files
-  move into a backup set under `RABBIT\backups`, and so do settings removed
-  with `--remove-settings`. The run saves a report under `RABBIT\logs`. If
-  REAPER used the language pack you removed, RABBIT sets REAPER back to
-  English.
+  `reaper-extstate.ini` beside every other extension's. Script files of the
+  JAWS scripts that RABBIT can't be sure the installer added, and those
+  changed since, stay too, even with `--remove-settings`.
+- **Nothing is deleted for good,** except Surge XT, REAPER on Windows, and
+  the JAWS scripts' uninstaller folder and registry entry (see below). A
+  REAPER app on a Mac goes to the Trash. Other removed files move into a
+  backup set under `RABBIT\backups`, and so do settings removed with
+  `--remove-settings`. The run saves a report under `RABBIT\logs`. If REAPER
+  used the language pack you removed, RABBIT sets REAPER back to English.
 - **REAPER must be closed.** For REAPER on Windows, Surge XT, app2clap and the
   JAWS scripts, every REAPER on the computer must be closed, portable ones
   included. The same goes for REAPER on a Mac when the administrator command
@@ -565,9 +609,12 @@ RABBIT uninstall --resource-path "$HOME/Library/Application Support/REAPER" \
   closes, which would undo the language reset. The dry run checks this too.
 - **All or nothing up front.** If any package you named can't be uninstalled,
   or one of its files can't be read, `--apply` changes nothing at all and
-  says why. For the JAWS scripts (whichever REAPER you name), a portable
-  REAPER on Windows and a REAPER app on a Mac that RABBIT can't move, it
-  prints how to remove them by hand.
+  says why. For a portable REAPER on Windows and a REAPER app on a Mac that
+  RABBIT can't move, it prints how to remove them by hand. So it does for the
+  JAWS scripts when you name a portable REAPER, which can't remove them (name
+  the standard REAPER instead), when RABBIT doesn't trust their uninstaller
+  folder or registry entry, and when it has no receipt for them and finds
+  none of their files for your account.
 - **Surge XT and REAPER on Windows** come off through their own uninstallers,
   which need administrator rights. The dry run names the packages that need
   them and the uninstaller it would run. With `--apply`, Windows asks for
@@ -586,6 +633,35 @@ RABBIT uninstall --resource-path "$HOME/Library/Application Support/REAPER" \
   and says so. An uninstaller still open after ten minutes stops the run; it
   may be waiting for an answer in a window of its own. What these
   uninstallers remove can't be restored from a backup.
+- **The JAWS scripts** come off only from a standard REAPER, whose resource
+  folder is `%APPDATA%\REAPER`. Their two plug-in files in `UserPlugins` move
+  into the backup set, and so do the script files RABBIT recorded their
+  installer adding to the language folders in
+  `%APPDATA%\Freedom Scientific\JAWS`, each only while it still holds what
+  the installer wrote. A script file that was there before the installer
+  ran, or that changed since, stays, and the report lists it. RABBIT records
+  which script files the installer adds when it runs the installer itself,
+  from this version on; the script files of installs made before, or without
+  RABBIT, stay. The report says how to remove the script files that stay by
+  hand. Once every file is in the backup set, RABBIT removes what the
+  installer left for its own uninstaller, with administrator rights: the
+  folder `%ProgramFiles(x86)%\Reaper_JawsScripts` with its `Uninstall.dat`
+  and `Uninstall.exe`, and the registry entry
+  `HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Reaper_JawsScripts`.
+  The dry run lists each of them and names the scripts among the packages
+  that need administrator rights. Windows asks for permission before
+  anything is removed, in the run's one prompt, the same one Surge XT and
+  REAPER use; declined, nothing is uninstalled and the exit code is 1. This
+  happens only while the folder or the entry is there: once both are gone,
+  the scripts come off with no prompt. A backup can't bring the folder and
+  entry back. RABBIT removes them only when they are exactly as the
+  installer leaves them: the folder owned by an administrator, with nothing
+  else in it, and the entry naming that folder, with no values or subkeys
+  but those the installer writes. Otherwise it changes nothing, prints why
+  and how to remove the scripts by hand, and exits with 2. JAWS itself may
+  keep running. If it has a script file open, the package fails with
+  everything put back: wait a moment, then run `RABBIT uninstall` again, and
+  restart JAWS first if that doesn't help.
 - **REAPER on a Mac** goes to the Trash, from a standard or a portable
   REAPER, and its resource folder stays. The dry run says whether it needs a
   password. If your account may move the app, RABBIT moves it to the Trash
@@ -664,7 +740,7 @@ dry run and `--apply`:
 | Exit code | Meaning |
 |---|---|
 | 0 | Every package was removed (or, in a dry run, can be), or isn't installed, so a script can run twice. Anything of a package RABBIT still finds afterwards is listed, never deleted. A removal that finishes only after a restart also exits with 0, and says to restart. |
-| 1 | A removal failed or was stopped, the Windows permission prompt was declined, or macOS's password window was cancelled or failed. The failed package's files went back where they were, except: what its own uninstaller on Windows already removed; what the administrator command on a Mac already deleted, which the report lists; an app macOS may already have moved to the Trash; and any file that couldn't be moved back, which stays in the backup set and is named in the report. Packages removed before it stay removed. Also when an error stopped RABBIT before anything changed, such as another RABBIT working on the same REAPER, or `--apply` run as root on a Mac; the message says which. |
+| 1 | A removal failed or was stopped, the Windows permission prompt was declined, or macOS's password window was cancelled or failed. The failed package's files went back where they were, except: what its own uninstaller on Windows already removed; what RABBIT already removed of the JAWS scripts' uninstaller folder and registry entry, which the report lists as far as RABBIT knows it; what the administrator command on a Mac already deleted, which the report lists; an app macOS may already have moved to the Trash; and any file that couldn't be moved back, which stays in the backup set and is named in the report. Packages removed before it stay removed. Also when an error stopped RABBIT before anything changed, such as another RABBIT working on the same REAPER, or `--apply` run as root on a Mac; the message says which. |
 | 2 | A package you named can't be uninstalled. Nothing changed. |
 
 To bring a package back, find the uninstall's backup set and restore just that
@@ -690,6 +766,18 @@ moved to the Trash isn't in a backup set either: until you empty the Trash, you
 can drag it back from there. If the administrator command moved it, macOS may
 ask for an administrator's password for that. A restored OSARA isn't back on
 Windows' list of installed programs; installing OSARA again puts it there.
+
+`--package jaws-scripts` brings back the JAWS scripts' plug-in files and the
+script files that went, but not their uninstaller folder and registry entry,
+which no backup holds. If RABBIT installed the scripts and their plug-in files
+haven't changed since, RABBIT lists them as installed again, and as long as
+that folder and entry stay gone, uninstalling them again asks for no
+permission. Scripts installed without RABBIT aren't listed again: RABBIT found
+them through that folder and entry. A script file goes back only into JAWS's
+settings folder: if `%APPDATA%\Freedom Scientific\JAWS` is gone, or the way
+from there down to the file leads through a link or junction, the restore
+changes nothing and says why. If that stops the restore of a whole set,
+restore the set's other packages one at a time with `--package`.
 
 ### Maintain
 
@@ -737,6 +825,8 @@ Microsoft as a false positive at <https://www.microsoft.com/en-us/wdsi/filesubmi
 ## Reports and logs
 
 Every installation produces a JSON report under `<resource>/RABBIT/logs/`.
+Surge XT's Windows installer writes its own log there too
+(`surge-xt-installer-<stamp>.log`), and RABBIT names it when that install fails.
 Backups go to `<resource>/RABBIT/backups/<timestamp>/`. The download cache is a
 `rabbit-cache` folder in your temporary folder, usually `%TEMP%\rabbit-cache` on
 Windows and `$TMPDIR/rabbit-cache` on macOS. It can be deleted safely at any time, and

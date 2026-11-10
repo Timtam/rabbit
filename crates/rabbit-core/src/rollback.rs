@@ -14,6 +14,7 @@ use crate::receipt::{
     InstallState, PackageReceipt, RECEIPT_RELATIVE_PATH, load_install_state, merge_package_receipt,
     receipt_path, save_install_state,
 };
+use crate::uninstall::paths::{ResolvedPattern, pattern_matches};
 
 pub const BACKUP_MANIFEST_FILE: &str = "backup-manifest.json";
 
@@ -150,9 +151,10 @@ pub struct MovedFile {
 pub enum MoveFileError {
     #[error(transparent)]
     NotMoved(RabbitError),
-    /// The file was copied to the set's volume and the copy checked, but the
-    /// original couldn't be deleted, most often because another program has
-    /// it open. The copy was removed again.
+    /// Another program has the file open. On the set's own volume, Windows
+    /// refused to rename it. On another volume, the copy was made and
+    /// checked, but the original couldn't be deleted, so the copy was
+    /// removed again.
     #[error("{} is in use by another program: {source}", path.display())]
     InUse {
         path: PathBuf,
@@ -699,6 +701,12 @@ fn relocate_into_set(
         match fs::rename(original, backup_path) {
             Ok(()) => return Ok(false),
             Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {}
+            Err(source) if held_open_by_another_program(&source) => {
+                return Err(MoveFileError::InUse {
+                    path: original.to_path_buf(),
+                    source,
+                });
+            }
             Err(error) => {
                 return Err(MoveFileError::NotMoved(crate::error::io_error_at(
                     original.to_path_buf(),
@@ -716,6 +724,20 @@ fn relocate_into_set(
         });
     }
     Ok(true)
+}
+
+/// Whether a rename failed because another program has the file open:
+/// Windows refuses to rename a file another program opened without sharing
+/// deletion, or one it locked. Nothing has moved then. Unix lets anyone
+/// rename an open file.
+fn held_open_by_another_program(error: &io::Error) -> bool {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    cfg!(windows)
+        && matches!(
+            error.raw_os_error(),
+            Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+        )
 }
 
 /// Move a file back from a set to where it was, the way it came.
@@ -853,13 +875,25 @@ pub fn restore_backup_set(
         resource_path,
         backup_id,
         options,
-        &crate::install::outside_install_roots(),
+        &crate::install::outside_restore_rules(resource_path),
     )
 }
 
-/// [`restore_backup_set`] with the folders outside the resource folder that
-/// a restore may write to passed in, so tests can use a temporary folder
-/// instead of the user's real CLAP folder.
+/// Where outside the resource folder a restore may put a file back.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OutsideRestoreRules {
+    /// Folders RABBIT copies files into itself, such as the CLAP folder:
+    /// any package's file may go back below one.
+    pub shared_roots: Vec<PathBuf>,
+    /// Each package's `vendor_added_files` patterns, with its id: a file
+    /// goes back where one matches only if it belongs to that package, and
+    /// only through real folders inside the pattern's guard.
+    pub vendor_added: Vec<(String, ResolvedPattern)>,
+}
+
+/// [`restore_backup_set`] with the places outside the resource folder that
+/// a restore may write to passed in, so tests can use temporary folders
+/// instead of the user's real CLAP and vendor folders.
 ///
 /// A set an uninstall wrote records each package it removed. Its files come
 /// back like any set's, but the receipt doesn't: the uninstall never copied
@@ -869,11 +903,11 @@ pub fn restore_backup_set(
 /// comes off `declined_packages`, and REAPER's language goes back if the
 /// uninstall reset it. With `options.package_id`, only that package comes
 /// back.
-fn restore_backup_set_within(
+pub(crate) fn restore_backup_set_within(
     resource_path: &Path,
     backup_id: &str,
     options: &RestoreBackupOptions,
-    outside_roots: &[PathBuf],
+    outside: &OutsideRestoreRules,
 ) -> Result<RestoreBackupReport> {
     let backup_path = backup_set_path(resource_path, backup_id)?;
     if !backup_path.is_dir() {
@@ -951,7 +985,7 @@ fn restore_backup_set_within(
         &backup_path,
         manifest.as_ref(),
         options.package_id.as_deref(),
-        outside_roots,
+        outside,
     )?;
 
     let before_restore_id = format!("{}-before-restore", restore_timestamp());
@@ -1138,16 +1172,12 @@ fn plan_restore(
     backup_path: &Path,
     manifest: Option<&BackupManifest>,
     package_id: Option<&str>,
-    outside_roots: &[PathBuf],
+    outside: &OutsideRestoreRules,
 ) -> Result<RestorePlan> {
     match manifest {
-        Some(manifest) => plan_restore_from_manifest(
-            resource_path,
-            backup_path,
-            manifest,
-            package_id,
-            outside_roots,
-        ),
+        Some(manifest) => {
+            plan_restore_from_manifest(resource_path, backup_path, manifest, package_id, outside)
+        }
         None => plan_restore_from_layout(resource_path, backup_path),
     }
 }
@@ -1160,7 +1190,7 @@ fn plan_restore_from_manifest(
     backup_path: &Path,
     manifest: &BackupManifest,
     package_id: Option<&str>,
-    outside_roots: &[PathBuf],
+    outside: &OutsideRestoreRules,
 ) -> Result<RestorePlan> {
     let mut plan = RestorePlan {
         files: Vec::new(),
@@ -1176,14 +1206,30 @@ fn plan_restore_from_manifest(
             .as_ref()
             .and_then(|recorded| recorded.resource_relative_original(&entry.original_path))
             .unwrap_or_else(|| entry.original_path.clone());
+        // One refused file stops the whole set. Each package an uninstall
+        // recorded can still come back on its own, with only its own files.
         let target_path = restore_target(
             resource_path,
             &original_path,
             recorded
                 .as_ref()
                 .map(|recorded| recorded.resource.as_path()),
-            outside_roots,
-        )?;
+            entry.package_id.as_deref(),
+            outside,
+        )
+        .map_err(|error| match error {
+            RabbitError::BackupRestoreRefused { path, mut reason }
+                if package_id.is_none()
+                    && entry.package_id.is_some()
+                    && manifest.packages.len() > 1 =>
+            {
+                reason.push_str(
+                    "; the set's other packages can be restored one at a time with --package",
+                );
+                RabbitError::BackupRestoreRefused { path, reason }
+            }
+            other => other,
+        })?;
         let source_path = restore_source(backup_path, &entry.backup_path, recorded.as_ref())?;
         let finished = entry.state == BackupEntryState::Done;
 
@@ -1241,7 +1287,13 @@ fn plan_restore_from_layout(resource_path: &Path, backup_path: &Path) -> Result<
                     .to_string(),
             });
         }
-        let target_path = restore_target(resource_path, &relative_path, None, &[])?;
+        let target_path = restore_target(
+            resource_path,
+            &relative_path,
+            None,
+            None,
+            &OutsideRestoreRules::default(),
+        )?;
         files.push(PlannedRestore {
             package_id: None,
             size: fs::metadata(&source_path).with_path(&source_path)?.len(),
@@ -1256,9 +1308,13 @@ fn plan_restore_from_layout(resource_path: &Path, backup_path: &Path) -> Result<
     })
 }
 
-/// Where a file goes back to, refusing anything outside the resource folder
-/// and the outside folders RABBIT installs into, and anything in RABBIT's
-/// own folder except the receipt.
+/// Where a file goes back to, refusing anything in RABBIT's own folder
+/// except the receipt, and anything outside the resource folder except:
+/// - below a folder RABBIT installs into itself, for any package;
+/// - where one of `package_id`'s own `vendor_added_files` patterns matches,
+///   reached through real folders only below the pattern's guard (see
+///   [`check_reached_through_real_folders`]). Another package's file never
+///   goes there.
 ///
 /// `recorded_resource` is where the resource folder was when the set was
 /// written. A portable REAPER can move (a USB drive gets another letter),
@@ -1268,7 +1324,8 @@ fn restore_target(
     resource_path: &Path,
     original_path: &Path,
     recorded_resource: Option<&Path>,
-    outside_roots: &[PathBuf],
+    package_id: Option<&str>,
+    outside: &OutsideRestoreRules,
 ) -> Result<PathBuf> {
     let refuse = |reason: &str| RabbitError::BackupRestoreRefused {
         path: original_path.to_path_buf(),
@@ -1296,15 +1353,78 @@ fn restore_target(
         return Ok(resource_path.join(relative));
     }
 
-    let in_outside_root = outside_roots.iter().any(|root| {
+    let in_shared_root = outside.shared_roots.iter().any(|root| {
         relative_within(original_path, root).is_some_and(|relative| is_plain_relative(&relative))
     });
-    if in_outside_root {
+    if in_shared_root {
+        return Ok(original_path.to_path_buf());
+    }
+    let own_pattern = package_id.and_then(|package_id| {
+        outside
+            .vendor_added
+            .iter()
+            .find(|(owner, pattern)| owner == package_id && pattern_matches(pattern, original_path))
+            .map(|(_, pattern)| pattern)
+    });
+    if let Some(pattern) = own_pattern {
+        let guard_root = pattern.guard.root.as_deref().unwrap_or(&pattern.base);
+        check_reached_through_real_folders(original_path, guard_root)
+            .map_err(|reason| refuse(&reason))?;
         return Ok(original_path.to_path_buf());
     }
     Err(refuse(
         "the path is outside the REAPER resource folder and every other folder RABBIT installs into",
     ))
+}
+
+/// Check that a file may go back to `target`, below `guard_root`, without
+/// following anything there: `guard_root` exists, nothing that exists on
+/// the way from it down to `target` is a symbolic link or junction (nor
+/// `target` itself), and the deepest part of that way that exists is, by
+/// its real path, `guard_root` or inside it. The error says which failed.
+fn check_reached_through_real_folders(
+    target: &Path,
+    guard_root: &Path,
+) -> std::result::Result<(), String> {
+    let unreadable = |path: &Path, error: io::Error| {
+        format!("RABBIT couldn't check {}: {error}", path.display())
+    };
+    let real_root = match fs::canonicalize(guard_root) {
+        Ok(real_root) => real_root,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(format!(
+                "the folder it goes back into, {}, is gone",
+                guard_root.display()
+            ));
+        }
+        Err(error) => return Err(unreadable(guard_root, error)),
+    };
+    let outside = || format!("the way to it leads outside {}", guard_root.display());
+    let Some(below) = relative_within(target, guard_root) else {
+        return Err(outside());
+    };
+    let mut deepest = guard_root.to_path_buf();
+    let mut current = guard_root.to_path_buf();
+    for component in below.components() {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "the way to it leads through {}, a symbolic link or junction, which RABBIT \
+                     never follows",
+                    current.display()
+                ));
+            }
+            Ok(_) => deepest.clone_from(&current),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(unreadable(&current, error)),
+        }
+    }
+    match fs::canonicalize(&deepest) {
+        Ok(real) if real.starts_with(&real_root) => Ok(()),
+        Ok(_) => Err(outside()),
+        Err(error) => Err(unreadable(&deepest, error)),
+    }
 }
 
 /// The copy an entry names, always inside the set being restored.
@@ -1661,12 +1781,14 @@ mod tests {
 
     use super::{
         BACKUP_MANIFEST_FILE, BackupEntryState, BackupManifest, BackupManifestFile,
-        BackupPackageRecord, BackupSetWriter, RestoreBackupActionKind, RestoreBackupOptions,
-        list_backup_sets, load_backup_manifest, relative_within, restore_backup_set,
-        restore_backup_set_within, save_backup_manifest,
+        BackupPackageRecord, BackupSetWriter, OutsideRestoreRules, RestoreBackupActionKind,
+        RestoreBackupOptions, list_backup_sets, load_backup_manifest, relative_within,
+        restore_backup_set, restore_backup_set_within, save_backup_manifest,
     };
     use crate::error::RabbitError;
     use crate::hash::sha256_file;
+    use crate::package::uninstall::UninstallPath;
+    use crate::uninstall::paths::{UninstallRoots, resolve_pattern};
 
     const APPLY: RestoreBackupOptions = RestoreBackupOptions {
         dry_run: false,
@@ -1677,6 +1799,15 @@ mod tests {
     fn write(path: &Path, contents: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
+    }
+
+    /// A restore may write below `root`, a temporary folder standing in for
+    /// the CLAP folder, and nowhere else outside the resource folder.
+    fn shared(root: &Path) -> OutsideRestoreRules {
+        OutsideRestoreRules {
+            shared_roots: vec![root.to_path_buf()],
+            vendor_added: Vec::new(),
+        }
     }
 
     /// A manifest entry the way earlier versions wrote them, after the copy.
@@ -1985,8 +2116,7 @@ mod tests {
         fs::write(&app2clap, b"new app2clap").unwrap();
 
         let report =
-            restore_backup_set_within(&resource, "unix-1", &APPLY, std::slice::from_ref(&clap_dir))
-                .unwrap();
+            restore_backup_set_within(&resource, "unix-1", &APPLY, &shared(&clap_dir)).unwrap();
 
         assert_eq!(fs::read(&app2clap).unwrap(), b"old app2clap");
         assert!(!resource.join("CLAP").exists());
@@ -2007,13 +2137,8 @@ mod tests {
             .as_os_str()
             .to_string_lossy()
             .into_owned();
-        restore_backup_set_within(
-            &resource,
-            &before_restore_id,
-            &APPLY,
-            std::slice::from_ref(&clap_dir),
-        )
-        .unwrap();
+        restore_backup_set_within(&resource, &before_restore_id, &APPLY, &shared(&clap_dir))
+            .unwrap();
         assert_eq!(fs::read(&app2clap).unwrap(), b"new app2clap");
     }
 
@@ -2037,7 +2162,8 @@ mod tests {
             vec![legacy_entry(Some("app2clap"), &app2clap, &copy)],
         );
 
-        restore_backup_set_within(&resource, "unix-1782841261", &APPLY, &[clap_dir]).unwrap();
+        restore_backup_set_within(&resource, "unix-1782841261", &APPLY, &shared(&clap_dir))
+            .unwrap();
 
         assert_eq!(fs::read(&app2clap).unwrap(), b"old app2clap");
         assert!(!resource.join("CLAP").exists());
@@ -2068,7 +2194,9 @@ mod tests {
             ],
         );
 
-        let report = restore_backup_set_within(&resource, "unix-1", &APPLY, &[]).unwrap();
+        let report =
+            restore_backup_set_within(&resource, "unix-1", &APPLY, &OutsideRestoreRules::default())
+                .unwrap();
 
         assert_eq!(fs::read(&keymap).unwrap(), b"own keymap");
         assert_eq!(fs::read(&plugin).unwrap(), b"old kontrol");
@@ -2104,7 +2232,8 @@ mod tests {
         let resource = dir.path().join("NewREAPER");
         fs::rename(&old_resource, &resource).unwrap();
 
-        restore_backup_set_within(&resource, "unix-1", &APPLY, &[]).unwrap();
+        restore_backup_set_within(&resource, "unix-1", &APPLY, &OutsideRestoreRules::default())
+            .unwrap();
 
         assert_eq!(
             fs::read(resource.join("reaper-kb.ini")).unwrap(),
@@ -2153,7 +2282,8 @@ mod tests {
         );
         fs::write(&plugin, b"new plugin").unwrap();
 
-        restore_backup_set_within(&resource, "unix-1", &APPLY, &[]).unwrap();
+        restore_backup_set_within(&resource, "unix-1", &APPLY, &OutsideRestoreRules::default())
+            .unwrap();
         assert_eq!(fs::read(&plugin).unwrap(), b"old plugin");
 
         // Undo it through the absolute path, from the set the restore wrote.
@@ -2163,10 +2293,22 @@ mod tests {
             .into_iter()
             .find(|set| set.reason.as_deref() == Some("before-restore"))
             .expect("the restore wrote a before-restore set");
-        restore_backup_set_within(&absolute_resource, &undo.id, &APPLY, &[]).unwrap();
+        restore_backup_set_within(
+            &absolute_resource,
+            &undo.id,
+            &APPLY,
+            &OutsideRestoreRules::default(),
+        )
+        .unwrap();
         assert_eq!(fs::read(&plugin).unwrap(), b"new plugin");
 
-        restore_backup_set_within(&absolute_resource, "unix-1", &APPLY, &[]).unwrap();
+        restore_backup_set_within(
+            &absolute_resource,
+            "unix-1",
+            &APPLY,
+            &OutsideRestoreRules::default(),
+        )
+        .unwrap();
         assert_eq!(fs::read(&plugin).unwrap(), b"old plugin");
     }
 
@@ -2219,8 +2361,13 @@ mod tests {
             write(&plugin, b"new plugin");
             write_old_set(id, &recorded_resource);
 
-            let report = restore_backup_set_within(&restore_through, id, &APPLY, &[])
-                .unwrap_or_else(|error| panic!("{id}: {error}"));
+            let report = restore_backup_set_within(
+                &restore_through,
+                id,
+                &APPLY,
+                &OutsideRestoreRules::default(),
+            )
+            .unwrap_or_else(|error| panic!("{id}: {error}"));
 
             assert_eq!(fs::read(&keymap).unwrap(), b"own keymap", "{id}");
             assert_eq!(fs::read(&plugin).unwrap(), b"old plugin", "{id}");
@@ -2264,7 +2411,9 @@ mod tests {
         );
         write(&set.join("external/1/app2clap.clap"), b"app2clap");
 
-        let error = restore_backup_set_within(&resource, "unix-1", &APPLY, &[]).unwrap_err();
+        let error =
+            restore_backup_set_within(&resource, "unix-1", &APPLY, &OutsideRestoreRules::default())
+                .unwrap_err();
 
         assert!(
             matches!(error, RabbitError::BackupRestoreRefused { .. }),
@@ -2307,13 +2456,8 @@ mod tests {
                 ],
             );
 
-            let error = restore_backup_set_within(
-                &resource,
-                "unix-1",
-                &APPLY,
-                std::slice::from_ref(&clap_dir),
-            )
-            .unwrap_err();
+            let error = restore_backup_set_within(&resource, "unix-1", &APPLY, &shared(&clap_dir))
+                .unwrap_err();
 
             assert!(
                 matches!(error, RabbitError::BackupRestoreRefused { .. }),
@@ -2323,6 +2467,257 @@ mod tests {
         }
         assert!(!dir.path().join("Elsewhere").exists());
         assert!(!resource.join("RABBIT/locks/package-install.lock").exists());
+    }
+
+    /// The package `scripts` may put files back where the JAWS scripts'
+    /// kind of pattern, `{appdata}/Freedom Scientific/JAWS/*/Settings/*/*`,
+    /// matches below `appdata`, a temporary folder standing in for
+    /// `%APPDATA%`. No other package may, and nothing else outside the
+    /// resource folder is allowed.
+    fn scripts_rules(appdata: &Path) -> OutsideRestoreRules {
+        let roots = UninstallRoots {
+            appdata: Some(appdata.to_path_buf()),
+            ..UninstallRoots::new(&appdata.join("REAPER"))
+        };
+        let patterns = resolve_pattern(
+            &UninstallPath::new("{appdata}/Freedom Scientific/JAWS/*/Settings/*/*"),
+            &roots,
+        )
+        .unwrap();
+        OutsideRestoreRules {
+            shared_roots: Vec::new(),
+            vendor_added: patterns
+                .into_iter()
+                .map(|pattern| ("scripts".to_string(), pattern))
+                .collect(),
+        }
+    }
+
+    /// `name` in JAWS 2025's English settings folder below `appdata`.
+    fn script_file(appdata: &Path, name: &str) -> PathBuf {
+        appdata
+            .join("Freedom Scientific")
+            .join("JAWS")
+            .join("2025")
+            .join("Settings")
+            .join("enu")
+            .join(name)
+    }
+
+    /// A set holding a copy of `path` as `owner`'s file, which is then gone
+    /// from its place, as after an uninstall.
+    fn backed_up_and_gone(resource: &Path, set_id: &str, owner: Option<&str>, path: &Path) {
+        write(path, b"script");
+        let mut writer = BackupSetWriter::new(resource, set_id, "uninstall");
+        writer.copy_file(owner, path).unwrap();
+        fs::remove_file(path).unwrap();
+    }
+
+    /// A package's pattern lets only that package's files back: the scripts'
+    /// file comes back where it was, while the same place refuses another
+    /// package's file and a file of no package, before anything changes.
+    #[test]
+    fn a_vendor_pattern_lets_only_its_own_package_restore_there() {
+        let dir = tempdir().unwrap();
+        let appdata = dir.path().to_path_buf();
+        let resource = appdata.join("REAPER");
+        fs::create_dir_all(&resource).unwrap();
+        let rules = scripts_rules(&appdata);
+        let script = script_file(&appdata, "reaper.jss");
+
+        for (set_id, owner) in [("unix-1", Some("other")), ("unix-2", None)] {
+            backed_up_and_gone(&resource, set_id, owner, &script);
+            let error = restore_backup_set_within(&resource, set_id, &APPLY, &rules).unwrap_err();
+            assert!(
+                matches!(error, RabbitError::BackupRestoreRefused { .. }),
+                "{owner:?}: {error:?}"
+            );
+            assert!(!script.exists(), "{owner:?}");
+        }
+
+        backed_up_and_gone(&resource, "unix-3", Some("scripts"), &script);
+        let report = restore_backup_set_within(&resource, "unix-3", &APPLY, &rules).unwrap();
+        assert_eq!(fs::read(&script).unwrap(), b"script");
+        assert_eq!(report.actions.len(), 1);
+        assert_eq!(report.actions[0].target_path, script);
+        assert!(!resource.join("external").exists());
+    }
+
+    /// A pattern opens only the places it matches, for its own package, and
+    /// only while the folder its guard names is there: anything else
+    /// outside the resource folder is still refused, before anything
+    /// changes.
+    #[test]
+    fn restore_still_refuses_paths_outside_every_known_folder() {
+        let dir = tempdir().unwrap();
+        let appdata = dir.path().join("AppData");
+        let resource = appdata.join("REAPER");
+        let plugin = resource.join("UserPlugins").join("reaper_reapack-x64.dll");
+        write(&plugin, b"new");
+        let set = resource.join("RABBIT/backups/unix-1");
+        let plugin_copy = set.join("UserPlugins").join("reaper_reapack-x64.dll");
+        write(&plugin_copy, b"old");
+        let stray_copy = set.join("external/1/stray.jss");
+        write(&stray_copy, b"stray");
+        let jaws = appdata.join("Freedom Scientific").join("JAWS");
+        fs::create_dir_all(jaws.join("2025").join("Settings").join("enu")).unwrap();
+        let rules = scripts_rules(&appdata);
+
+        let refused = [
+            // One folder too shallow, and one too deep.
+            jaws.join("2025").join("Settings").join("stray.jss"),
+            script_file(&appdata, "x").join("stray.jss"),
+            // Another vendor folder, and somewhere else altogether.
+            appdata
+                .join("Freedom Scientific")
+                .join("Other")
+                .join("stray.jss"),
+            dir.path().join("Elsewhere").join("stray.jss"),
+        ];
+        for refused in refused {
+            save_manifest(
+                &set,
+                "uninstall",
+                vec![
+                    legacy_entry(Some("reapack"), &plugin, &plugin_copy),
+                    legacy_entry(Some("scripts"), &refused, &stray_copy),
+                ],
+            );
+            let error = restore_backup_set_within(&resource, "unix-1", &APPLY, &rules).unwrap_err();
+            assert!(
+                matches!(error, RabbitError::BackupRestoreRefused { .. })
+                    && error
+                        .to_string()
+                        .contains("outside the REAPER resource folder"),
+                "{}: {error:?}",
+                refused.display()
+            );
+            assert_eq!(fs::read(&plugin).unwrap(), b"new", "{}", refused.display());
+            assert!(!refused.exists(), "{}", refused.display());
+        }
+
+        // A place the pattern matches, once the JAWS folder itself is gone,
+        // as after JAWS was uninstalled. The refusal says so, and that the
+        // set's other package can still come back on its own.
+        fs::remove_dir_all(&jaws).unwrap();
+        let script = script_file(&appdata, "reaper.jss");
+        save_backup_manifest(
+            &set,
+            &BackupManifest {
+                schema_version: 1,
+                rabbit_version: "0.4.4".to_string(),
+                created_at: "unix-1".to_string(),
+                reason: "uninstall".to_string(),
+                files: vec![
+                    legacy_entry(Some("reapack"), &plugin, &plugin_copy),
+                    legacy_entry(Some("scripts"), &script, &stray_copy),
+                ],
+                receipt_backup_path: None,
+                packages: ["reapack", "scripts"]
+                    .into_iter()
+                    .map(|id| (id.to_string(), BackupPackageRecord::default()))
+                    .collect(),
+            },
+        )
+        .unwrap();
+        let error = restore_backup_set_within(&resource, "unix-1", &APPLY, &rules).unwrap_err();
+        assert!(
+            matches!(error, RabbitError::BackupRestoreRefused { .. }),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().ends_with(&format!(
+                "the folder it goes back into, {}, is gone; the set's other packages can be \
+                 restored one at a time with --package",
+                jaws.display()
+            )),
+            "{error}"
+        );
+        assert_eq!(fs::read(&plugin).unwrap(), b"new");
+        assert!(!jaws.exists());
+    }
+
+    /// A script file goes back only through real folders below the JAWS
+    /// folder, never through a junction there, which could lead anywhere.
+    #[cfg(windows)]
+    #[test]
+    fn restore_refuses_a_target_behind_a_junction_under_the_vendor_folder() {
+        use crate::uninstall::paths::make_junction;
+
+        let dir = tempdir().unwrap();
+        let appdata = dir.path().join("AppData");
+        let resource = appdata.join("REAPER");
+        fs::create_dir_all(&resource).unwrap();
+        let script = script_file(&appdata, "reaper.jss");
+        backed_up_and_gone(&resource, "unix-1", Some("scripts"), &script);
+        // JAWS 2025's folder is now a junction to a folder elsewhere with the
+        // same layout.
+        let version = appdata.join("Freedom Scientific").join("JAWS").join("2025");
+        fs::remove_dir_all(&version).unwrap();
+        let elsewhere = dir.path().join("Elsewhere");
+        fs::create_dir_all(elsewhere.join("Settings").join("enu")).unwrap();
+        make_junction(&version, &elsewhere);
+
+        let error =
+            restore_backup_set_within(&resource, "unix-1", &APPLY, &scripts_rules(&appdata))
+                .unwrap_err();
+
+        assert!(
+            matches!(error, RabbitError::BackupRestoreRefused { .. })
+                && error.to_string().contains("junction"),
+            "{error:?}"
+        );
+        assert!(
+            !elsewhere
+                .join("Settings")
+                .join("enu")
+                .join("reaper.jss")
+                .exists()
+        );
+        // The junction goes as a link, before the folder it points to.
+        fs::remove_dir(&version).unwrap();
+    }
+
+    /// A junction below the JAWS folder is refused even where it leads to
+    /// another folder inside it, laid out the same: RABBIT follows no link
+    /// there, wherever it points.
+    #[cfg(windows)]
+    #[test]
+    fn restore_refuses_a_junction_under_the_vendor_folder_that_stays_inside_it() {
+        use crate::uninstall::paths::make_junction;
+
+        let dir = tempdir().unwrap();
+        let appdata = dir.path().join("AppData");
+        let resource = appdata.join("REAPER");
+        fs::create_dir_all(&resource).unwrap();
+        let script = script_file(&appdata, "reaper.jss");
+        backed_up_and_gone(&resource, "unix-1", Some("scripts"), &script);
+        // JAWS 2025's folder is now a junction to JAWS 2026's, which has the
+        // same layout.
+        let jaws = appdata.join("Freedom Scientific").join("JAWS");
+        let version = jaws.join("2025");
+        fs::remove_dir_all(&version).unwrap();
+        let newer = jaws.join("2026");
+        fs::create_dir_all(newer.join("Settings").join("enu")).unwrap();
+        make_junction(&version, &newer);
+
+        let error =
+            restore_backup_set_within(&resource, "unix-1", &APPLY, &scripts_rules(&appdata))
+                .unwrap_err();
+
+        assert!(
+            matches!(error, RabbitError::BackupRestoreRefused { .. })
+                && error.to_string().contains("junction"),
+            "{error:?}"
+        );
+        assert!(
+            !newer
+                .join("Settings")
+                .join("enu")
+                .join("reaper.jss")
+                .exists()
+        );
+        fs::remove_dir(&version).unwrap();
     }
 
     /// A finished entry whose copy no longer matches its recorded hash is a
@@ -2341,7 +2736,9 @@ mod tests {
         fs::write(&plugin_copy, b"bit rot").unwrap();
         fs::write(&keymap, b"newer keymap").unwrap();
 
-        let error = restore_backup_set_within(&resource, "unix-1", &APPLY, &[]).unwrap_err();
+        let error =
+            restore_backup_set_within(&resource, "unix-1", &APPLY, &OutsideRestoreRules::default())
+                .unwrap_err();
 
         assert!(
             matches!(error, RabbitError::HashMismatch { .. }),
@@ -2389,8 +2786,7 @@ mod tests {
 
         fs::write(&app2clap, b"new app2clap").unwrap();
         let report =
-            restore_backup_set_within(&resource, "unix-1", &APPLY, std::slice::from_ref(&clap_dir))
-                .unwrap();
+            restore_backup_set_within(&resource, "unix-1", &APPLY, &shared(&clap_dir)).unwrap();
 
         assert_eq!(fs::read(&app2clap).unwrap(), b"old app2clap");
         assert_eq!(fs::read(&keymap).unwrap(), b"own keymap");

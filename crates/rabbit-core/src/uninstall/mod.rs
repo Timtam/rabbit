@@ -31,7 +31,10 @@
 //! so a run that removes either starts one hidden elevated helper before the
 //! first change, and the helper runs both uninstallers when the run reaches
 //! them; see [`helper`] and [`vendor`]. Nothing a vendor's uninstaller
-//! removes goes into a backup.
+//! removes goes into a backup. The same helper removes the uninstaller
+//! folder and registry entry a package's installer leaves in machine-wide
+//! places, once the package's own files are in the backup set; see
+//! [`cleanup`]. A backup can't bring those two back either.
 //!
 //! On macOS a plan's `trees`, whole folders such as app bundles, never go
 //! into a backup either. Each package's [`RemovalRoute`] says how it leaves:
@@ -46,6 +49,7 @@ pub mod admin_batch;
 mod admin_batch_tests;
 #[cfg(test)]
 mod admin_run_tests;
+pub mod cleanup;
 pub mod execute;
 #[cfg(test)]
 mod execute_tests;
@@ -84,6 +88,10 @@ pub use admin_batch::{
     AdminShellEvent, AdminShellRun, AdministratorShell, AdministratorStepKind,
     AdministratorStepRecord, AdministratorStepVerdict, NoAdministratorShell,
     RecordingAdministratorShell, SystemAdministratorShell,
+};
+pub use cleanup::{
+    CleanupJob, CleanupOutcome, CleanupResult, CleanupStatus, CleanupStep, CleanupTarget,
+    PlannedMachineCleanup, check_machine_cleanup, run_machine_cleanup,
 };
 pub use execute::{APP_MANAGEMENT_HINT, execute_uninstall, plan_uninstall_at};
 pub use helper::{
@@ -258,6 +266,12 @@ pub struct UninstallPlanItem {
     /// plan whose uninstaller RABBIT found and trusts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor_run: Option<PlannedVendorRun>,
+    /// What the elevated helper removes once the files are in the backup
+    /// set: the uninstaller folder and registry entry the plan's
+    /// `machine_cleanup` names, when either is there and RABBIT trusts what
+    /// it found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_cleanup: Option<PlannedMachineCleanup>,
     /// Programs that must not be running, from the manifest.
     pub blocking_programs: Vec<String>,
     /// macOS installer receipts the run's administrator command forgets
@@ -271,10 +285,12 @@ pub struct UninstallPlanItem {
     pub requires_elevation: bool,
     /// Something a backup set can't undo: a vendor uninstaller, a removal
     /// that needs administrator rights, or a whole folder going to the Trash
-    /// or away for good.
+    /// or away for good. A planned `machine_cleanup` doesn't count here: the
+    /// plan's own files still go into the backup set.
     pub unbacked: bool,
     /// Ask a Yes/No question, with No focused, before starting: a warning
-    /// asks for it, or the removal can't be undone from a backup.
+    /// asks for it, the removal can't be undone from a backup, or a machine
+    /// cleanup is planned, which a backup can't undo either.
     pub confirm: bool,
     pub warnings: Vec<UninstallWarning>,
     pub notes: Vec<UninstallNote>,
@@ -314,6 +330,22 @@ pub enum Removability {
     /// what was wrong. The user can still uninstall it in Windows Settings.
     NoTrustedUninstaller {
         refusal: VendorRefusal,
+    },
+    /// The uninstaller folder or registry entry the plan's `machine_cleanup`
+    /// names is there, but RABBIT doesn't trust what it found; `refusal`
+    /// says what was wrong. RABBIT removes nothing of the package, and
+    /// `by_hand_key` says how to remove it by hand.
+    CleanupNotTrusted {
+        refusal: VendorRefusal,
+        by_hand_key: String,
+    },
+    /// The package has a `machine_cleanup`, but no receipt, and none of its
+    /// files are in this account: most likely another account installed
+    /// it. Its uninstaller folder and registry entry serve that account
+    /// too, so RABBIT leaves them alone; `by_hand_key` says how to remove
+    /// the package by hand.
+    NoFilesForThisAccount {
+        by_hand_key: String,
     },
     Manual {
         note_key: String,
@@ -409,10 +441,18 @@ impl UninstallPlanItem {
     /// The package's own uninstaller removes it, through RABBIT's elevated
     /// helper: a `vendor_uninstaller` plan RABBIT found an uninstaller for
     /// and that needs administrator rights.
-    pub fn needs_elevated_helper(&self) -> bool {
+    pub fn runs_vendor_uninstaller(&self) -> bool {
         self.strategy == Some(UninstallStrategy::VendorUninstaller)
             && self.vendor_run.is_some()
             && self.requires_elevation
+    }
+
+    /// The run's elevated helper does part of the work: it runs the
+    /// package's own uninstaller, or removes the uninstaller folder and
+    /// registry entry of a planned machine cleanup. Either way Windows asks
+    /// for permission once, before the run's first change.
+    pub fn needs_elevated_helper(&self) -> bool {
+        self.runs_vendor_uninstaller() || self.machine_cleanup.is_some()
     }
 
     /// How the package leaves. Derived from the plan item, so it can't
@@ -442,16 +482,27 @@ impl UninstallPlanItem {
     }
 
     /// RABBIT can remove the package, and its route has every step it
-    /// needs: on the backup set's route, nothing a backup can't undo; a
-    /// vendor's uninstaller only through the elevated helper; the Trash and
-    /// the administrator command whenever the package is removable.
+    /// needs: on the backup set's route, none of the plan's own files beyond
+    /// a backup's reach (a planned machine cleanup is the helper's step, not
+    /// theirs); a vendor's uninstaller only through the elevated helper; the
+    /// Trash and the administrator command whenever the package is
+    /// removable.
     pub fn can_remove(&self) -> bool {
         self.removability.is_removable()
             && match self.route() {
                 RemovalRoute::BackupSet => !self.unbacked,
-                RemovalRoute::Vendor => self.needs_elevated_helper(),
+                RemovalRoute::Vendor => self.runs_vendor_uninstaller(),
                 RemovalRoute::Trash | RemovalRoute::Administrator => true,
             }
+    }
+
+    /// Whether the plan lists `path` among the files the package's
+    /// installer added outside the resource folder, ignoring case as
+    /// Windows does.
+    pub fn lists_vendor_added(&self, path: &Path) -> bool {
+        self.files.iter().any(|file| {
+            file.reason == RemovalReason::VendorAdded && paths::same_ignoring_case(&file.path, path)
+        })
     }
 }
 
@@ -495,6 +546,15 @@ impl Removability {
             Self::NoTrustedUninstaller { refusal } => format!(
                 "RABBIT found no uninstaller for {name} it can trust: {refusal}. You can \
                  uninstall {name} in Windows Settings, under Apps, Installed apps."
+            ),
+            Self::CleanupNotTrusted { refusal, .. } => format!(
+                "RABBIT doesn't trust {name}'s uninstaller folder in Program Files or its \
+                 registry entry ({refusal}), so it has to be removed by hand."
+            ),
+            Self::NoFilesForThisAccount { .. } => format!(
+                "RABBIT doesn't find any of {name}'s files for this account. If another account \
+                 installed it, uninstall it from that account; RABBIT leaves its uninstaller \
+                 folder in Program Files and its registry entry alone."
             ),
             Self::Manual { .. } => {
                 format!("RABBIT can't remove {name} by itself; it has to be removed by hand.")
@@ -604,13 +664,21 @@ pub enum RemovalReason {
     /// The package's settings, removed because "Also remove settings" was
     /// asked for.
     Setting,
+    /// The receipt records that the package's installer added it, outside
+    /// the resource folder, and it matches the plan's `vendor_added_files`.
+    /// Like a receipt file, it goes only while it is unchanged.
+    VendorAdded,
 }
 
 impl RemovalReason {
     /// Whether the manifest vouches for the path, so it goes even if it
-    /// changed since RABBIT installed it.
+    /// changed since RABBIT installed it. Every reason is named, so a new
+    /// one has to be decided here rather than vouched for by default.
     pub fn named_by_manifest(self) -> bool {
-        !matches!(self, Self::Receipt)
+        match self {
+            Self::Receipt | Self::VendorAdded => false,
+            Self::ManifestPath | Self::MatchingUserPlugin | Self::Tree | Self::Setting => true,
+        }
     }
 }
 
@@ -657,6 +725,14 @@ pub enum KeptReason {
     /// what it installed, so the file stays even with "Also remove
     /// settings".
     InstalledByReaPack,
+    /// The receipt lists it among the files the package's installer added,
+    /// but it was already there before the installer ran, so it may be the
+    /// user's own. Never removed, not even with "Also remove settings".
+    ThereBeforeInstall,
+    /// The receipt lists it more than once among the files the package's
+    /// installer added, with hashes that disagree, so RABBIT can't tell
+    /// which record to trust. Never removed.
+    RecordUnclear,
 }
 
 /// Something to tell the user before they decide.
@@ -698,6 +774,12 @@ pub enum UninstallNote {
     OrphanedFromReaPack { reapack_packages: Vec<String> },
     /// The plan's `note_key`: a note on what stays behind.
     Manifest { note_key: String },
+    /// RABBIT's receipt has the package, but no record of a file its
+    /// installer added that RABBIT may remove, so all of them stay.
+    NoVendorRecord,
+    /// The plan's `vendor_added_files.by_hand_note_key`: how to remove by
+    /// hand the files the installer added that stay.
+    VendorFilesByHand { note_key: String },
 }
 
 /// What to uninstall, and how.
@@ -901,6 +983,10 @@ pub struct UninstallReportItem {
     /// How the vendor's own uninstaller went, when one ran or was meant to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<VendorOutcome>,
+    /// How the elevated helper's machine cleanup went, when one ran or was
+    /// meant to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<CleanupOutcome>,
     /// English, for the CLI and the saved report. A UI in another language
     /// goes by `message_code`.
     pub message: String,
@@ -1195,6 +1281,26 @@ pub enum UninstallMessage {
     /// still be running, so what it removed is unknown; the receipt stays
     /// as it was, and the run stopped there.
     VendorLost {
+        error: String,
+    },
+    /// The elevated helper checked the uninstaller folder and registry
+    /// entry again right before removing them, didn't trust what it found,
+    /// and removed nothing. What had moved into the backup set was put
+    /// back, and the run stopped there.
+    CleanupRefused {
+        refusal: VendorRefusal,
+    },
+    /// Removing the uninstaller folder or registry entry failed part way.
+    /// What had moved into the backup set was put back; the item's
+    /// `cleanup` says what of the folder and entry is already gone.
+    CleanupFailed {
+        error: String,
+    },
+    /// RABBIT lost contact with the elevated helper while it removed the
+    /// uninstaller folder and registry entry, so what of them is gone is
+    /// unknown. What had moved into the backup set was put back, and the
+    /// run stopped there.
+    CleanupLost {
         error: String,
     },
     /// The administrator permission prompt was declined, so nothing was

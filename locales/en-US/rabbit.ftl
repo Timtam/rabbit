@@ -67,6 +67,12 @@ uninstall-summary-surge-removes = Surge XT's own uninstaller removes it for ever
 uninstall-summary-surge-keeps = Your own patches, in the Surge XT folder in your Documents, stay.
 uninstall-summary-reaper-windows-removes = REAPER's own uninstaller removes the program. It also removes REAPER's file associations and ReaRoute for every REAPER on this computer.
 uninstall-summary-reaper-keeps = Your settings, extensions and projects stay.
+# The JAWS scripts: two plug-in files in REAPER's UserPlugins folder, and
+# script files their installer adds to JAWS's settings folder, which RABBIT
+# removes only while they are as the installer left them. Keep
+# %APPDATA%\Freedom Scientific\JAWS as it is.
+uninstall-summary-jaws-scripts-removes = Removes the scripts' two plug-in files from REAPER's UserPlugins folder, and any script files RABBIT saw their installer add to JAWS's settings folder.
+uninstall-summary-jaws-scripts-keeps = Script files RABBIT can't be sure the installer added, and those changed since, such as your own key assignments, stay in JAWS's settings folder, %APPDATA%\Freedom Scientific\JAWS.
 # The same two sentences on macOS, where Surge XT has no uninstaller of its
 # own and REAPER is an app. Name the Trash and the Library folder as Finder
 # does in your language.
@@ -105,23 +111,43 @@ uninstall-warning-sws-reapack-scripts = Many REAPER scripts, accessibility scrip
 uninstall-note-reapack-packages-stay = Scripts and extensions you installed with ReaPack stay, but nothing keeps them up to date.
 # A note on what stays behind after Surge XT is uninstalled.
 uninstall-note-surge-fonts-stay = The fonts Surge XT installed stay: its installer marks them never to be removed.
+# A note on the JAWS script files that stay after the JAWS scripts are
+# uninstalled, and how to remove them by hand. Keep %APPDATA%, the folder
+# and file names, and "reaper" (the start of the file names) exactly as they
+# are. For the example language folder, use JAWS's folder for your language:
+# enu for English, deu for German, esn for Spanish, fra for French, ita for
+# Italian.
+uninstall-note-jaws-scripts-by-hand = To remove the script files that stay, delete the files whose names start with reaper from the language folders in %APPDATA%\Freedom Scientific\JAWS, such as 2025\Settings\enu. Copy reaper.jkm, reaper.jcf and reaper.ini somewhere else first if you want to keep your key assignments and settings.
 
 # How to remove a package by hand where RABBIT doesn't, shown line by line.
 # Keep file names, folder paths and %APPDATA% exactly as they are.
-uninstall-manual-jaws-scripts = RABBIT can't remove the JAWS scripts yet. To remove them by hand:
+#
+# The JAWS scripts' steps, shown where RABBIT can't remove them: from a
+# portable REAPER, when it doesn't trust their uninstaller folder or
+# registry entry, when it finds none of their files for this account, and
+# after an uninstall in which it couldn't remove that folder and entry.
+# %ProgramFiles(x86)% is how Windows names the Program Files (x86) folder
+# in a path: keep it exactly as it is, and "reaper" too. For the example
+# language folder, use JAWS's folder for your language, as in
+# uninstall-note-jaws-scripts-by-hand.
+uninstall-by-hand-jaws-scripts = To remove the JAWS scripts by hand:
     1. Close REAPER.
     2. Delete Reaper_ComAccess32.dll and Reaper_ComAccess64.dll from %APPDATA%\REAPER\UserPlugins.
-    The script files stay in JAWS's settings folder, %APPDATA%\Freedom Scientific\JAWS. Some of them hold your own changes, such as your key assignments.
+    3. Delete the folder %ProgramFiles(x86)%\Reaper_JawsScripts. Windows asks for an administrator's permission.
+    4. To remove the script files too, delete the files whose names start with reaper from the language folders in %APPDATA%\Freedom Scientific\JAWS, such as 2025\Settings\enu. Copy reaper.jkm, reaper.jcf and reaper.ini somewhere else first if you want to keep your key assignments and settings.
 uninstall-manual-reaper-portable = RABBIT doesn't remove a portable REAPER: REAPER's own files and yours share its folder. To remove it by hand:
     1. Close REAPER.
     2. Copy anything you want to keep out of the portable REAPER folder, such as projects you saved there, your key maps and your settings.
     3. Delete the portable REAPER folder.
     The backups RABBIT made for this REAPER are in that folder too, in RABBIT\backups, and go with it.
 
-# Why RABBIT didn't start a program's own uninstaller, which it runs with
+# Why RABBIT didn't start a program's own uninstaller, or didn't remove a
+# package's uninstaller folder and registry entry. RABBIT does both with
 # administrator rights. Nothing has changed at that point. RABBIT shows one
-# of these, then uninstall-vendor-refused-nothing-changed.
-# { $package } is the package's name, such as Surge XT or REAPER.
+# of these, then uninstall-vendor-refused-nothing-changed, or, for the folder
+# and registry entry, the steps to remove the package by hand.
+# { $package } is the package's name, such as Surge XT, REAPER or
+# JAWS-for-REAPER scripts.
 # { $path } is a file, a folder or a value as Windows holds it; keep it as it
 # is.
 uninstall-vendor-refused-not-listed = Windows doesn't list { $package } among the programs installed for all users, so RABBIT can't find its uninstaller.
@@ -140,6 +166,14 @@ uninstall-vendor-refused-copy-differs = The copy RABBIT made of { $package }'s u
 uninstall-vendor-refused-unreadable = RABBIT couldn't read { $path } to check { $package }'s uninstaller.
 uninstall-vendor-refused-not-a-vendor-plan = RABBIT has no uninstaller for { $package } that it may run.
 uninstall-vendor-refused-unsupported = RABBIT can run { $package }'s uninstaller only on Windows.
+# { $path } is the name of a value in the package's registry entry.
+uninstall-vendor-refused-unexpected-registry-value = { $package }'s registry entry holds a value RABBIT doesn't expect: { $path }
+# { $path } is the text of a value in the package's registry entry.
+uninstall-vendor-refused-registry-value-mismatch = { $package }'s registry entry points somewhere RABBIT doesn't expect: { $path }
+# The package's registry entry has subkeys, which its installer doesn't write.
+uninstall-vendor-refused-registry-key-has-subkeys = { $package }'s registry entry holds more than RABBIT expects.
+# { $path } is the package's uninstaller folder in Program Files.
+uninstall-vendor-refused-untrusted-folder = An administrator didn't create { $package }'s folder: { $path }
 # Follows each of the messages above. { $package } as above.
 uninstall-vendor-refused-nothing-changed = Nothing was changed. You can uninstall { $package } in Windows Settings, under Apps, Installed apps.
 
@@ -270,6 +304,14 @@ wizard-uninstall-details-portable = { $package } serves every REAPER on this com
 wizard-uninstall-details-no-receipt = RABBIT didn't install this copy of { $package }, so it is most likely your own, and RABBIT leaves it alone.
 wizard-uninstall-details-no-trusted-uninstaller = RABBIT found no uninstaller for { $package } it can trust.
 wizard-uninstall-details-unsafe-path = RABBIT won't remove { $path }. It leaves { $package } alone rather than remove only part of it.
+# The details text of an Uninstall row whose package RABBIT leaves alone
+# because of the uninstaller folder and registry entry its installer left:
+# RABBIT doesn't trust what it found there, or finds none of the package's
+# files for this account. The package's steps to remove it by hand follow.
+# $package is the localized package name. Name Program Files as
+# uninstall-vendor-refused-not-below-program-files does.
+wizard-uninstall-details-cleanup-refused = RABBIT doesn't trust what it found in { $package }'s uninstaller folder in Program Files or in its registry entry, so it leaves { $package } alone.
+wizard-uninstall-details-no-files-for-this-account = RABBIT doesn't find any of { $package }'s files for your account. If another account installed { $package }, uninstall it from that account; until then RABBIT leaves its uninstaller folder in Program Files and its registry entry alone.
 # The details text of a macOS app RABBIT can't move to the Trash, by itself or
 # with an administrator's password: first why, then how to move it there in
 # Finder. $package is the localized package name, $path the app's full macOS
@@ -296,12 +338,24 @@ wizard-uninstall-details-reapack-owned-extensions = ReaPack installed these, and
 wizard-uninstall-details-reapack-records-unreadable = RABBIT couldn't read ReaPack's records to say what it still manages ({ $reason }).
 wizard-uninstall-details-no-receipt-note = RABBIT didn't install this copy. It removes the files { $package } is known to install.
 wizard-uninstall-details-reapack-orphan = ReaPack once installed { $package }. ReaPack is gone, so RABBIT can remove it; ReaPack's records of it stay.
+# A note on a package whose installer added files outside REAPER's folder,
+# when RABBIT has no record of which ones. $package is the localized
+# package name.
+wizard-uninstall-details-no-vendor-record = RABBIT has no record of which files { $package }'s installer added outside REAPER's folder, so all of those stay.
 # The details text of an Uninstall row whose package its own uninstaller
 # removes, with administrator rights. The second line follows the reason
 # RABBIT can't trust a package's own uninstaller; $package is the localized
 # package name.
 wizard-uninstall-details-vendor = Windows asks for your permission before anything is removed.
 wizard-uninstall-details-vendor-by-hand = You can uninstall { $package } yourself in Windows Settings, under Apps, Installed apps.
+# The details text of an Uninstall row whose package's installer left an
+# uninstaller folder in Program Files and a registry entry, which RABBIT
+# removes with administrator rights once the package's files are in the
+# backup. It follows wizard-uninstall-details-files, or takes its place
+# when none of the package's files are left to move. $package is the
+# localized package name. Name Program Files as
+# uninstall-vendor-refused-not-below-program-files does.
+wizard-uninstall-details-machine-cleanup = Only an administrator may remove { $package }'s uninstaller folder in Program Files and its registry entry, so Windows asks for your permission before anything is removed. A backup can't bring those back.
 # The details text of an Uninstall row on macOS, by how the package goes:
 # deleted for good with an administrator's password; to the Trash, moved as
 # you; or into your Trash with an administrator's password, because your
@@ -567,6 +621,13 @@ wizard-error-uninstall-not-enough-space = RABBIT stopped because there isn't eno
 # $package is the localized package name, and $path the full path of the
 # file another program has open.
 wizard-error-uninstall-file-in-use = { $package } wasn't uninstalled, because another program is using { $path }. Close that program, then run RABBIT again.
+# The same, for a file a package's installer added outside REAPER's folder.
+# Only the JAWS scripts' installer adds such files, and JAWS itself may have
+# one open; the program to close would be the user's screen reader, so this
+# says to wait and try again instead. $package is the localized package
+# name, and $path the file's full path as Windows holds it. Keep JAWS as it
+# is.
+wizard-error-uninstall-vendor-file-in-use = { $package } wasn't uninstalled, because JAWS or another program is using { $path }. Wait a moment, then run RABBIT again. If that doesn't help, restart JAWS first.
 # Why an uninstall didn't start on macOS: RABBIT itself runs as root, as under
 # sudo. sudo and root are never translated.
 wizard-error-uninstall-as-root = RABBIT is running as root, as it does under sudo, so it uninstalls nothing. Quit RABBIT and start it as yourself. It asks for an administrator's password by itself when it needs one.
@@ -626,6 +687,19 @@ wizard-done-uninstall-vendor-not-listed = Windows no longer lists { $package } a
 wizard-done-uninstall-working-folder-left = RABBIT couldn't remove { $path }, the folder it ran { $package }'s uninstaller from. Only an administrator can delete it.
 wizard-done-uninstall-restart-list-unreadable = RABBIT couldn't read which files Windows removes at the next restart, so it can't tell whether the files of { $package } that are left go then.
 wizard-done-uninstall-installed-list-unreadable = RABBIT couldn't read Windows' list of installed programs after { $package }'s uninstaller, so it couldn't check whether Windows still lists { $package }.
+# After the elevated helper was to remove the uninstaller folder and
+# registry entry a package's installer left. $package is the localized
+# package name, and $error Windows' own error message or RABBIT's in
+# English. Name Program Files as
+# uninstall-vendor-refused-not-below-program-files does, and "Show
+# details" as wizard-done-show-details does.
+wizard-done-uninstall-cleanup-refused = RABBIT checked { $package }'s uninstaller folder in Program Files and its registry entry again and didn't trust what it found, so it put back what it had moved.
+wizard-done-uninstall-cleanup-failed = RABBIT couldn't remove all of { $package }'s uninstaller folder and registry entry ({ $error }), so it put back what it had moved. Show details lists what is already gone.
+wizard-done-uninstall-cleanup-lost = RABBIT lost contact with its helper while it removed { $package }'s uninstaller folder and registry entry ({ $error }), so it put back what it had moved. Part of that folder or its registry entry may be gone.
+# Instead of wizard-done-uninstall-cleanup-failed, when RABBIT removed
+# nothing of the folder or the registry entry before it failed, so "Show
+# details" lists nothing as gone. $package and $error as above.
+wizard-done-uninstall-cleanup-failed-nothing-gone = RABBIT couldn't remove { $package }'s uninstaller folder and registry entry ({ $error }), so it put back what it had moved. Nothing of that folder or its registry entry was removed.
 # After a macOS removal: to the Trash, or by the administrator command.
 # $package is the localized package name, $path a full macOS path, keep it as
 # it is, $error macOS's own error message, and $programs a list of program
@@ -680,10 +754,17 @@ wizard-close-during-uninstall-body = RABBIT is uninstalling. If you stop now, RA
 wizard-confirm-uninstall-title = Uninstall the ticked packages?
 # $package is the localized package name.
 wizard-confirm-uninstall-unbacked = A backup can't bring { $package } back. To have it again, you install it again.
-# Instead of the sentence above, for a package that goes to the Trash; the
-# second when your account may not move it, so an administrator's password
-# moves it there. $package is the localized package name. Name the Trash as
-# Finder does.
+# Instead of the sentence above, for a package whose files go into a backup
+# while RABBIT removes its uninstaller folder in Program Files and its
+# registry entry with administrator rights. Review shows this sentence too,
+# or the one above when none of the package's files are left to move.
+# $package is the localized package name. Name Program Files as
+# uninstall-vendor-refused-not-below-program-files does.
+wizard-confirm-uninstall-partly-unbacked = A backup can bring back { $package }'s files, but not its uninstaller folder in Program Files and its registry entry, which RABBIT removes with administrator rights.
+# Instead of wizard-confirm-uninstall-unbacked, for a package that goes to
+# the Trash; the second when your account may not move it, so an
+# administrator's password moves it there. $package is the localized
+# package name. Name the Trash as Finder does.
 wizard-confirm-uninstall-trash = { $package } goes to the Trash. You can drag it back from there until you empty the Trash.
 wizard-confirm-uninstall-trash-elevated-macos = { $package } goes to the Trash. You can drag it back from there until you empty the Trash, but macOS may ask for an administrator's password for that.
 wizard-confirm-uninstall-question = Uninstall now?
@@ -761,12 +842,22 @@ wizard-summary-architecture = Architecture: { $architecture }
 # "Show details" after an uninstall. $value is common-yes or common-no.
 wizard-summary-uninstall-remove-settings = Also remove settings: { $value }
 # One line per file, below its package's line. $path is a full path.
+# wizard-summary-left-over can also name a folder, such as a package's
+# uninstaller folder in Program Files, or a registry key as regedit shows
+# it; keep either as it is, never translated.
 wizard-summary-removed-file = Removed: { $path }
 wizard-summary-kept-file = Kept, because it changed since RABBIT installed it: { $path }
 wizard-summary-kept-link = Kept, because it holds a link RABBIT never follows: { $path }
 wizard-summary-kept-reapack = Kept, because ReaPack installed it and keeps track of it: { $path }
 wizard-summary-left-over = Still there: { $path }
 wizard-summary-left-in-backup = Couldn't be put back, still in the backup: { $path }
+# A file a package's installer added outside REAPER's folder that stays:
+# it was there before RABBIT ran that installer, or RABBIT recorded it more
+# than once with contents that disagree. "the installer" is the package's
+# own installer. $path is a full path as Windows holds it, never
+# translated.
+wizard-summary-kept-there-before = Kept, because it was already there when RABBIT ran the installer: { $path }
+wizard-summary-kept-record-unclear = Kept, because RABBIT's records of it disagree: { $path }
 # Below a package its own uninstaller removed: a file Windows removes at the
 # next restart, and the uninstaller itself. $path is a full path, never
 # translated.
@@ -775,9 +866,11 @@ wizard-summary-vendor-uninstaller = Its own uninstaller: { $path }
 # Below a package removed on macOS, one line per path: what went to the Trash
 # and where it is there now, and what the administrator command removed; then
 # the installer receipts macOS still lists, and macOS's own words when a step
-# failed. $path is a full macOS path, keep it as it is; $ids a comma-separated
-# list of receipt names, never translated; $error macOS's own message. Name
-# the Trash as Finder does.
+# failed. On Windows, the line for what was removed with administrator rights
+# also names a package's uninstaller folder in Program Files, and each file
+# in it, that RABBIT removed that way. $path is a full Windows or macOS path,
+# keep it as it is; $ids a comma-separated list of receipt names, never
+# translated; $error macOS's own message. Name the Trash as Finder does.
 wizard-summary-moved-to-trash = Moved to the Trash: { $path }
 wizard-summary-in-trash-as = Now in the Trash: { $path }
 wizard-summary-removed-as-admin = Removed with administrator rights: { $path }
@@ -790,6 +883,13 @@ wizard-summary-macos-said = macOS said: { $error }
 wizard-summary-registry-removed = Taken off Windows' list of installed programs: { $key }
 wizard-summary-registry-kept = Still in Windows' list of installed programs, because it doesn't point into this REAPER: { $key }
 wizard-summary-registry-failed = Still in Windows' list of installed programs, because RABBIT couldn't read or remove it ({ $error }): { $key }
+# Below a package whose uninstaller folder and registry entry RABBIT removed
+# with administrator rights: the registry entry. $key is the entry's
+# registry key as regedit shows it, such as
+# HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Reaper_JawsScripts,
+# and is never translated. The folder and its files are listed with
+# wizard-summary-removed-as-admin.
+wizard-summary-registry-key-removed = Removed from the registry with administrator rights: { $key }
 # $id is the backup set's name, such as uninstall-unix-1782841261.
 wizard-summary-uninstall-backup = Backup set: { $id }
 # One line per uninstalled package. $package is the localized package name,
@@ -828,6 +928,33 @@ package-status-skipped-content-unchanged = The installed copy is identical to th
 package-status-install-failed = Installation failed: { $error }
 package-status-skipped-dependency-failed = Skipped because { $dependency }, which it needs, did not install successfully.
 package-status-cancelled = Not installed: you stopped the setup before RABBIT reached this package.
+# Shown after the package's name when its vendor installer ended with an
+# exit code other than 0. $code is the number. One of the
+# package-status-vendor-exit-* sentences follows, then
+# package-status-vendor-installer-log when the installer left a log.
+package-status-vendor-installer-failed = The installer ended with exit code { $code }.
+# Inno Setup's exit code 2: cancelled before it began installing. RABBIT runs
+# it unattended, so in practice the user declined the Windows permission
+# prompt (User Account Control) the installer raised. "Yes" is the prompt's
+# button.
+package-status-vendor-exit-cancelled-before-installing = That usually means the Windows permission prompt was declined, so nothing changed. Run RABBIT again and choose Yes when Windows asks for permission.
+# Inno Setup's exit code 5: it stopped at a question, such as whether to close
+# programs that use its files, that nobody can answer while RABBIT runs it
+# unattended. $package is the package's name.
+package-status-vendor-exit-stopped-at-question = That means it stopped at a question it can't ask while RABBIT runs it unattended, usually because another program has one of its files open. Close other programs, especially other music programs and { $package }, then run RABBIT again.
+# Inno Setup's exit code 7: its preparation found it can't continue.
+package-status-vendor-exit-preparation-failed = That means it found, while getting ready, that it can't install right now. Restart the computer, then run RABBIT again.
+# Inno Setup's exit code 8: its preparation found Windows must restart first.
+package-status-vendor-exit-restart-needed = That means it found, while getting ready, that Windows has to restart first. Restart the computer, then run RABBIT again.
+# Any other exit code, or an installer whose codes RABBIT doesn't know.
+# $package is the package's name.
+package-status-vendor-exit-unknown = Close other programs and run RABBIT again. If it stops again, install { $package } from its publisher's website.
+# $path is the log file the installer wrote.
+package-status-vendor-installer-log = The installer's log is at { $path }.
+# Shown after the package's name when RABBIT didn't start its installer
+# because the package's own programs were open. $package is the package's
+# name; $programs lists the open programs' file names, such as "Surge XT.exe".
+package-status-blocking-programs-running = RABBIT didn't start the installer because { $package } is open ({ $programs }), and the installer can't replace a program that is running. Close it, then run RABBIT again.
 # $automation is one of the "package-automation-*" labels (vendor installer / archive extraction / ...).
 package-status-dry-run-would-run-unattended = Dry run: RABBIT would download and run this { $automation } unattended.
 # $automation is one of the "package-automation-*" labels.

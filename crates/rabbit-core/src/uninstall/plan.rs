@@ -1,12 +1,16 @@
 //! Building an uninstall plan: which packages can come off, and exactly what
 //! would go and what would stay.
 //!
-//! Candidates come from three places, as the package's plan allows: receipt
+//! Candidates come from four places, as the package's plan allows: receipt
 //! entries with a hash, files whose names match the package's plug-in
-//! prefixes and suffixes, and paths the manifest names. Then everything that
-//! must stay is taken out, every remaining path passes the guard, and
-//! ReaPack's records get their say. A path the guard refuses blocks the whole
-//! package rather than leaving it half removed.
+//! prefixes and suffixes, paths the manifest names, and files the receipt
+//! records as added by the package's installer outside the resource folder.
+//! Then everything that must stay is taken out, every remaining path passes
+//! the guard, and ReaPack's records get their say. A path the guard refuses
+//! blocks the whole package rather than leaving it half removed. Last, the
+//! uninstaller folder and registry entry a plan's `machine_cleanup` names
+//! are checked, read only, for the elevated helper to remove after the
+//! files.
 //!
 //! On macOS a plan's `trees` leave whole. What root deletes passes the
 //! stricter guard of the administrator command here already, so Review never
@@ -15,6 +19,7 @@
 //! decided from that: to the Trash as the user, through the administrator
 //! command, or by hand in Finder.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -27,13 +32,15 @@ use crate::package::uninstall::{
 };
 use crate::package::{InstallDestination, PACKAGE_REAPACK, PACKAGE_REAPER, PackageSpec};
 use crate::reapack::{ReapackOwnership, reapack_ownership, reapack_packages_with_files_under};
-use crate::receipt::{InstallState, PackageReceipt};
+use crate::receipt::{InstallState, PackageReceipt, VendorAddedFile};
 
+use super::cleanup::CleanupJob;
 use super::macos_objects::{ObjectProbe, TreeRoute, tree_route};
 use super::paths::{
-    RemovalGuard, ResolvedPath, UninstallRoots, check_administrator_removal,
-    check_administrator_trash_move, check_removal, expand_wildcard, inside_or_same,
-    is_in_rabbit_folder, resolve_path, same_ignoring_case,
+    RemovalGuard, ResolvedPath, ResolvedPattern, UninstallRoots, check_administrator_removal,
+    check_administrator_trash_move, check_removal, expand_wildcard, folded_components,
+    inside_or_same, is_in_rabbit_folder, pattern_matches, resolve_path, resolve_pattern,
+    same_ignoring_case,
 };
 use super::vendor::{VendorJob, VendorLookup, VendorRefusal, plan_vendor_run};
 use super::{
@@ -122,8 +129,9 @@ fn plan_item(
     // too. Manifests needn't even have a plan for that case; the standard
     // REAPER's plan says what removing the package means. Only a plan that
     // removes something is out of reach here. One that removes nothing,
-    // manual or not_supported, holds whatever the target: the JAWS DLLs'
-    // manual steps are the same from a portable REAPER.
+    // manual or not_supported, holds whatever the target, note and all. A
+    // standard plan with a machine cleanup lends its by-hand steps, so a
+    // portable target still says how to remove the package without RABBIT.
     let (plan, needs_standard_target) =
         if spec.requires_standard_install && input.target == InstallationKind::Portable {
             match spec
@@ -177,6 +185,7 @@ fn plan_item(
         post: plan.map(|plan| plan.post.clone()).unwrap_or_default(),
         registry_cleanup: Vec::new(),
         vendor_run: None,
+        machine_cleanup: None,
         blocking_programs: plan
             .map(|plan| plan.blocking_programs.clone())
             .unwrap_or_default(),
@@ -205,6 +214,15 @@ fn plan_item(
     }
     if needs_standard_target {
         item.removability = Removability::NeedsStandardTarget;
+        if let Some(cleanup) = spec
+            .uninstall
+            .plan_for(input.platform, InstallationKind::Standard)
+            .and_then(|standard| standard.machine_cleanup.as_ref())
+        {
+            item.notes.push(UninstallNote::Manifest {
+                note_key: cleanup.by_hand_key.clone(),
+            });
+        }
         return item;
     }
     let Some(plan) = plan else {
@@ -318,6 +336,43 @@ fn plan_item(
             return item;
         }
     }
+    // The uninstaller folder and registry entry the installer left are
+    // checked here, read only, the way the elevated helper checks them
+    // again right before it deletes anything: what RABBIT can't trust
+    // blocks the whole package before any permission prompt. With neither
+    // there, nothing needs the helper. A package with no receipt and none
+    // of its files here most likely belongs to another account, whose
+    // folder and entry these are too, so it is left to that account.
+    if let Some(cleanup) = &plan.machine_cleanup {
+        let by_hand_key = cleanup.by_hand_key.clone();
+        let found = match input.vendor_lookup.machine_cleanup(&CleanupJob {
+            package_id: &spec.id,
+            spec: cleanup,
+            roots: input.roots,
+        }) {
+            Ok(found) => found,
+            Err(refusal) => {
+                item.removability = Removability::CleanupNotTrusted {
+                    refusal,
+                    by_hand_key,
+                };
+                item.kept = blocked_kept();
+                item.kept.extend(collected.kept);
+                return item;
+            }
+        };
+        if receipt.is_none() && collected.files.is_empty() {
+            item.removability = Removability::NoFilesForThisAccount { by_hand_key };
+            item.kept = blocked_kept();
+            item.kept.extend(collected.kept);
+            return item;
+        }
+        // A backup can't bring the folder and entry back, so a planned
+        // cleanup asks first, though the files still go into the backup
+        // set and `unbacked` stays false.
+        item.confirm |= found.is_some();
+        item.machine_cleanup = found;
+    }
     // Root's first step looks for every REAPER by name: pgrep can't tell
     // the target from a portable one. So the checks RABBIT makes as the
     // user first must ask the same, or the password window would open for
@@ -359,6 +414,17 @@ fn plan_item(
             .all(|file| file.reason == RemovalReason::Tree);
     if receipt.is_none() && !found_by_the_manifest_alone {
         item.notes.push(UninstallNote::NoReceipt);
+    }
+    // The files the installer added outside the resource folder go only
+    // as far as the receipt records them. Whatever stays, the user is told
+    // how to remove it by hand, whether or not RABBIT has a record.
+    if let Some(vendor_added) = &plan.remove.vendor_added_files {
+        if receipt.is_some() && !collected.vendor_files_recorded {
+            item.notes.push(UninstallNote::NoVendorRecord);
+        }
+        item.notes.push(UninstallNote::VendorFilesByHand {
+            note_key: vendor_added.by_hand_note_key.clone(),
+        });
     }
     if let Some(reapack_packages) = orphaned_from {
         item.notes
@@ -496,8 +562,12 @@ fn package_warnings(
     }
     // A vendor's uninstaller plan says in its own summary whom it takes the
     // package from, as Surge XT's "for every music program on this
-    // computer" does.
-    if spec.requires_standard_install && strategy != Some(UninstallStrategy::VendorUninstaller) {
+    // computer" does. A manifest turns the sentence off for a package that
+    // serves one program only, such as the JAWS scripts.
+    if spec.requires_standard_install
+        && spec.uninstall.machine_wide_warning
+        && strategy != Some(UninstallStrategy::VendorUninstaller)
+    {
         warnings.push(UninstallWarning::MachineWide);
     }
     warnings
@@ -543,6 +613,10 @@ struct Collected {
     dirs_if_empty: Vec<PathBuf>,
     /// Candidates that stay, and why.
     kept: Vec<KeptPath>,
+    /// The receipt records some file under the patterns as new from the
+    /// installer: no record of it says it was there before. Whatever
+    /// became of the file or its hash since, RABBIT has a record then.
+    vendor_files_recorded: bool,
 }
 
 struct PackagePlanner<'p> {
@@ -574,6 +648,7 @@ impl PackagePlanner<'_> {
         self.add_matching_user_plugins(&mut candidates)?;
         self.add_trees(&mut candidates)?;
         self.add_receipt_files(&mut candidates, &mut kept);
+        let vendor_files_recorded = self.add_vendor_added_files(&mut candidates, &mut kept)?;
 
         let mut files = Vec::new();
         for candidate in candidates {
@@ -619,6 +694,7 @@ impl PackagePlanner<'_> {
             files,
             dirs_if_empty: self.dirs_if_empty()?,
             kept,
+            vendor_files_recorded,
         })
     }
 
@@ -906,6 +982,109 @@ impl PackagePlanner<'_> {
         }
     }
 
+    /// The files the receipt records as added by the package's installer
+    /// outside the resource folder, where the plan's `vendor_added_files`
+    /// patterns match them. A receipt is a file anyone can edit, so only a
+    /// plain absolute path that matches a pattern counts, and the guard
+    /// checks each one like every other candidate. One file may be recorded
+    /// under two spellings, so the records are grouped by path, ignoring
+    /// case:
+    /// - a file any record says was there before the installer ran stays,
+    ///   listed as kept: it may be the user's own;
+    /// - a file whose records disagree on its hash stays, listed as kept;
+    /// - any other file that is still there is a candidate, with the hash
+    ///   its records agree on, which the engine checks right before it
+    ///   moves. A path a stronger rule found already keeps its own hash.
+    ///
+    /// Records outside every pattern are passed by without a word, such as
+    /// the plug-ins the same snapshot records in UserPlugins. No folder goes
+    /// with the files: JAWS made most of them, and nothing can tell which.
+    /// Returns whether the receipt records any file under the patterns as
+    /// new from the installer, whether or not it still qualifies.
+    fn add_vendor_added_files(
+        &self,
+        candidates: &mut Vec<PlannedRemoval>,
+        kept: &mut Vec<KeptPath>,
+    ) -> Result<bool, Removability> {
+        let Some(vendor_added) = &self.plan.remove.vendor_added_files else {
+            return Ok(false);
+        };
+        // A pattern RABBIT can't place is refused before anything else, as
+        // a manifest path is.
+        let mut patterns = Vec::new();
+        for pattern in &vendor_added.files {
+            patterns.extend(resolve_pattern(pattern, self.roots).map_err(|refusal| {
+                Removability::UnsafePath {
+                    path: PathBuf::from(pattern.as_str()),
+                    refusal,
+                }
+            })?);
+        }
+        let Some(receipt) = self.receipt else {
+            return Ok(false);
+        };
+        // Each file once, in the receipt's order, with the pattern its
+        // first record matched and every record of it.
+        let mut groups: Vec<(&ResolvedPattern, Vec<&VendorAddedFile>)> = Vec::new();
+        let mut group_of: BTreeMap<Vec<String>, usize> = BTreeMap::new();
+        for record in &receipt.vendor_added_files {
+            let Some(pattern) = patterns
+                .iter()
+                .find(|pattern| pattern_matches(pattern, &record.path))
+            else {
+                continue;
+            };
+            let Some(folded) = folded_components(&record.path) else {
+                continue;
+            };
+            match group_of.get(&folded) {
+                Some(&index) => groups[index].1.push(record),
+                None => {
+                    group_of.insert(folded, groups.len());
+                    groups.push((pattern, vec![record]));
+                }
+            }
+        }
+        let mut recorded = false;
+        for (pattern, records) in groups {
+            let first = records[0];
+            let there_before = records.iter().any(|record| record.existed_before);
+            recorded |= !there_before;
+            let reason = if there_before {
+                Some(KeptReason::ThereBeforeInstall)
+            } else if records.iter().any(|record| record.sha256 != first.sha256) {
+                Some(KeptReason::RecordUnclear)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                if fs::symlink_metadata(&first.path).is_ok() {
+                    kept.push(KeptPath {
+                        path: first.path.clone(),
+                        reason,
+                        note_key: None,
+                        exists: true,
+                        removable_with_settings: false,
+                    });
+                }
+                continue;
+            }
+            add_file(
+                candidates,
+                first.path.clone(),
+                RemovalReason::VendorAdded,
+                &pattern.guard,
+            );
+            if let Some(candidate) = candidates.iter_mut().find(|candidate| {
+                candidate.reason == RemovalReason::VendorAdded
+                    && same_ignoring_case(&candidate.path, &first.path)
+            }) {
+                candidate.receipt_sha256 = Some(first.sha256.clone());
+            }
+        }
+        Ok(recorded)
+    }
+
     /// The plan's `registry_cleanup`, with each folder resolved. Nothing is
     /// read from the registry here: the engine reads each entry right
     /// before it would remove it, so a plan stays the same wherever it is
@@ -1028,7 +1207,7 @@ fn add_file(
 
 fn reason_rank(reason: RemovalReason) -> u8 {
     match reason {
-        RemovalReason::Receipt => 0,
+        RemovalReason::Receipt | RemovalReason::VendorAdded => 0,
         RemovalReason::MatchingUserPlugin => 1,
         RemovalReason::ManifestPath | RemovalReason::Tree | RemovalReason::Setting => 2,
     }

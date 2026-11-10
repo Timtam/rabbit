@@ -69,11 +69,11 @@ from this file and posts it as the GitHub release body.
   goes back to English. REAPER must be closed; there is deliberately no
   `--allow-reaper-running`. Ctrl+C stops the run once the step it is on is
   done: a package, or on macOS the administrator command, which can remove
-  several. For the JAWS scripts and a portable REAPER on Windows, which
-  RABBIT can't remove, it prints how to remove them by hand. The exit code
-  is 0 when everything you named is gone or wasn't installed, 2 when
-  something can't be uninstalled, and 1 when a removal failed. The wizard's
-  **Uninstall** tab removes the same packages.
+  several. For a portable REAPER on Windows, which RABBIT can't remove, it
+  prints how to remove it by hand. The exit code is 0 when everything you
+  named is gone or wasn't installed, 2 when something can't be uninstalled,
+  and 1 when a removal failed. The wizard's **Uninstall** tab removes the
+  same packages.
 - `rabbit restore-backup --package <id>` brings one uninstalled package back
   from its backup set: its files, its entry in RABBIT's receipt, and REAPER's
   language if the uninstall reset it and no other language was picked since.
@@ -160,6 +160,32 @@ from this file and posts it as the GitHub release body.
   that command finish, even when it removes more than one package: the
   password window stays until you answer it, and RABBIT stops once the
   command is done.
+- On Windows, the JAWS scripts can be uninstalled too, from a standard REAPER:
+  from the wizard's **Uninstall** tab and with
+  `rabbit uninstall --package jaws-scripts`. Their two plug-in files in
+  REAPER's `UserPlugins` folder move into the backup set, and so do the script
+  files RABBIT recorded their installer adding to JAWS's settings folder,
+  `%APPDATA%\Freedom Scientific\JAWS`. Script files RABBIT can't be sure the
+  installer added, such as those already there when it ran the installer, and
+  those changed since, such as your own key assignments, stay, and RABBIT says
+  how to remove them by hand. From this version on, RABBIT records which
+  script files the scripts' installer adds when RABBIT runs it; the script
+  files of installs made before, or without RABBIT, stay, with the same steps.
+  The installer also leaves an uninstaller folder in Program Files (x86) and a
+  registry entry. While either is there, RABBIT removes them once the files
+  are in the backup set, with administrator rights: Windows asks for your
+  permission once per run, before anything is removed, together with Surge XT
+  and REAPER if you uninstall them too. Review says so beforehand, and the
+  wizard asks once more with **No** selected, because a backup can't bring
+  that folder and entry back. Once both are gone, there is no permission
+  prompt and no question. RABBIT removes them only when they are exactly as
+  the installer leaves them; otherwise it changes nothing and says how to
+  remove the scripts by hand. `rabbit restore-backup --package jaws-scripts`
+  brings the files back, but not the folder and entry. Every REAPER must be
+  closed; JAWS can keep running, and if it has a script file open, RABBIT puts
+  everything back and says to wait and try again. From a portable REAPER,
+  RABBIT says to uninstall the scripts from the standard REAPER, and how to
+  remove them by hand.
 - Brazilian Portuguese (pt-BR) UI translation. The language picker now lists
   Português (Brasil), it ships in the macOS app bundle, and OS-language
   auto-detection on first launch covers Portuguese locales (any `pt-*`, which
@@ -208,10 +234,10 @@ from this file and posts it as the GitHub release body.
   Before, it put each file inside the REAPER resource folder, so a file from
   outside it, such as app2clap's `app2clap.clap` from the CLAP folder, ended
   up in a new `CLAP` folder there instead. A restore now writes nowhere but
-  the resource folder and the CLAP folder, and doesn't run while an install
-  into the same REAPER is running. Backups made from now on note each file
-  before copying it, so even a backup from an interrupted run can be
-  restored.
+  the resource folder, the CLAP folder and, for the JAWS scripts' own files,
+  JAWS's settings folder, and doesn't run while an install into the same
+  REAPER is running. Backups made from now on note each file before copying
+  it, so even a backup from an interrupted run can be restored.
 - `rabbit backups` no longer fails when one backup's manifest is damaged.
   It lists every backup and shows a warning on the damaged one.
 - `rabbit apply-packages` now checks that REAPER is closed before it runs any
@@ -244,6 +270,16 @@ from this file and posts it as the GitHub release body.
   or with an account that isn't an administrator, RABBIT now says so, and
   that nothing was installed. Before, it reported that Surge XT's installer
   had failed. Cancelling that window no longer speaks of a Windows prompt.
+- Installing Surge XT on Windows could stop with "exit code Some(5)" when
+  another program had one of Surge XT's fonts open. RABBIT no longer lets
+  Surge XT's installer close programs, which could also have closed your
+  screen reader. Instead, RABBIT doesn't start the installer while Surge XT
+  itself is open and asks you to close it first. When a vendor's installer
+  stops with an exit code, RABBIT now says in your language what to do, and
+  for Surge XT what the code means; Surge XT's installer also writes a log
+  to `RABBIT\logs`, which the message names. A Surge XT update whose
+  installer stopped is no longer reported as installed because the older
+  version's files were still there.
 
 ## [0.4.4] - 2026-10-13
 

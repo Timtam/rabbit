@@ -12,6 +12,8 @@
 //! that couldn't be carried out safely fails RABBIT's own tests rather than a
 //! user's uninstall.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::{EmbeddedPackageSpec, SupportedPlatform};
@@ -40,6 +42,13 @@ pub struct UninstallSpec {
     /// it asks for one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub always_warn: Vec<AlwaysWarning>,
+    /// Whether the details say that the package serves every REAPER and
+    /// every other program on this computer, which RABBIT says by itself
+    /// for a package that needs a standard REAPER. Turned off for one that
+    /// serves a single program, such as the JAWS scripts. Only a package
+    /// with `requires_standard_install` may turn it off.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub machine_wide_warning: bool,
     /// Folders the package's installer writes to that no receipt path
     /// covers, such as the JAWS scripts' files in JAWS's own settings
     /// folders. RABBIT lists them right before it runs the installer and
@@ -97,9 +106,31 @@ impl UninstallSpec {
                     .map(|kept| kept.note_key.as_str()),
             );
             keys.extend(plan.note_key.as_deref());
+            keys.extend(
+                plan.remove
+                    .vendor_added_files
+                    .as_ref()
+                    .map(|vendor_added| vendor_added.by_hand_note_key.as_str()),
+            );
+            keys.extend(
+                plan.machine_cleanup
+                    .as_ref()
+                    .map(|cleanup| cleanup.by_hand_key.as_str()),
+            );
         }
         keys
     }
+}
+
+/// Serde's default for a flag that is on unless the manifest says
+/// otherwise.
+fn default_true() -> bool {
+    true
+}
+
+/// Leaves a flag that is on by default out of what RABBIT writes.
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// What RABBIT does when ReaPack's records claim one of the files.
@@ -160,7 +191,10 @@ pub struct UninstallPlanSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kept_user_data: Vec<KeptUserData>,
     /// Program names that must not be running. The engine adds "no REAPER at
-    /// all" by itself where it is needed, so a manifest can't forget it.
+    /// all" by itself where it is needed, so a manifest can't forget it. On
+    /// Windows the same names also keep the package's vendor installer from
+    /// starting while one of them runs. A screen reader is never allowed
+    /// here: a blind user can't close it to get past the check.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocking_programs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,6 +202,11 @@ pub struct UninstallPlanSpec {
     /// HKCU uninstall keys a removal leaves pointing at nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub registry_cleanup: Vec<RegistryCleanup>,
+    /// The uninstaller folder and HKLM key a Windows installer leaves
+    /// behind, which only the elevated helper removes, after the plan's own
+    /// files are in the backup set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_cleanup: Option<MachineCleanupSpec>,
     /// macOS installer package ids for `pkgutil --forget`, spelt out in full.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub macos_pkg_forget: Vec<String>,
@@ -202,6 +241,7 @@ impl UninstallPlanSpec {
             && self.blocking_programs.is_empty()
             && self.vendor_uninstaller.is_none()
             && self.registry_cleanup.is_empty()
+            && self.machine_cleanup.is_none()
             && self.macos_pkg_forget.is_empty()
             && self.post.is_empty()
     }
@@ -296,12 +336,109 @@ pub struct UninstallRemoveSpec {
     /// Whole folders such as macOS bundles, removed in this order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trees: Vec<UninstallTree>,
+    /// Files the receipt records as added by the package's installer
+    /// outside the resource folder (`vendor_added_files`), such as the JAWS
+    /// scripts' files in JAWS's settings folders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_added_files: Option<VendorAddedRemoval>,
 }
 
 impl UninstallRemoveSpec {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// Which of the files the receipt records as added by the installer go
+/// with the package. Only a recorded file that matches one of `files`
+/// qualifies, and only while it is unchanged since the install; every
+/// other file stays.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VendorAddedRemoval {
+    /// Patterns written like `install_snapshot` roots, where `*` may stand
+    /// for a whole name at any level. Each lies below one of the package's
+    /// `install_snapshot` roots, since RABBIT records files only there.
+    pub files: Vec<UninstallPath>,
+    /// Says how to remove by hand the files that stay.
+    pub by_hand_note_key: String,
+}
+
+/// What a Windows installer leaves in machine-wide places to find its own
+/// uninstaller: a folder in `{program_files_x86}` and a key in HKLM's list
+/// of installed programs. Only an administrator may remove them, so the
+/// elevated helper does, and only while what is there matches this block
+/// exactly. A backup can't bring them back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineCleanupSpec {
+    /// The folder, below `{program_files_x86}`. It goes after its files,
+    /// and only once it is empty.
+    pub dir: UninstallPath,
+    /// Every file the folder may hold, by name, in the order they are
+    /// deleted. Anything else in the folder refuses the cleanup.
+    pub files: Vec<String>,
+    pub registry: MachineCleanupRegistry,
+    /// The steps to remove the package by hand, for when RABBIT can't.
+    pub by_hand_key: String,
+}
+
+/// The uninstall key a [`MachineCleanupSpec`] deletes last.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineCleanupRegistry {
+    pub hive: RegistryHive,
+    /// One key name under the Uninstall key, such as `Reaper_JawsScripts`.
+    pub key: String,
+    pub view: RegistryViewSpec,
+    /// Every value the key may hold, each with the path it must name: the
+    /// folder, or one of its files. Any other value refuses the cleanup.
+    #[serde(deserialize_with = "values_named_once")]
+    pub values: BTreeMap<String, UninstallPath>,
+}
+
+/// Reads [`MachineCleanupRegistry::values`], refusing a value name given
+/// twice. JSON allows a repeated key and serde keeps only the last, so a
+/// typo in one of the two would otherwise go unnoticed.
+fn values_named_once<'de, D>(deserializer: D) -> Result<BTreeMap<String, UninstallPath>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Values;
+
+    impl<'de> serde::de::Visitor<'de> for Values {
+        type Value = BTreeMap<String, UninstallPath>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a map from value names to paths")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut values = BTreeMap::new();
+            while let Some((name, path)) = map.next_entry::<String, UninstallPath>()? {
+                if values.contains_key(&name) {
+                    return Err(serde::de::Error::custom(format!(
+                        "machine_cleanup.registry.values lists {name:?} twice"
+                    )));
+                }
+                values.insert(name, path);
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_map(Values)
+}
+
+/// The registry view a key lives in. Only the 32-bit view, where a 32-bit
+/// installer's key lands on 64-bit Windows, until a package needs another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryViewSpec {
+    Bit32,
 }
 
 /// A whole folder to remove. The name checks guard against a token or path
@@ -617,6 +754,11 @@ pub enum UninstallPathToken {
     ClapDir,
     CommonProgramFiles,
     ProgramFiles,
+    /// `C:\Program Files (x86)` alone, as Windows names it
+    /// (`FOLDERID_ProgramFilesX86`), never read from the environment: where
+    /// a 32-bit installer writes on 64-bit Windows. `{program_files}`
+    /// stands for both Program Files folders.
+    ProgramFilesX86,
     ProgramData,
     Home,
     Documents,
@@ -637,7 +779,7 @@ pub enum UninstallTokenKind {
 }
 
 impl UninstallPathToken {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Resource,
         Self::AppDir,
         Self::AppPath,
@@ -646,6 +788,7 @@ impl UninstallPathToken {
         Self::ClapDir,
         Self::CommonProgramFiles,
         Self::ProgramFiles,
+        Self::ProgramFilesX86,
         Self::ProgramData,
         Self::Home,
         Self::Documents,
@@ -662,6 +805,7 @@ impl UninstallPathToken {
             Self::ClapDir => "clap_dir",
             Self::CommonProgramFiles => "common_program_files",
             Self::ProgramFiles => "program_files",
+            Self::ProgramFilesX86 => "program_files_x86",
             Self::ProgramData => "program_data",
             Self::Home => "home",
             Self::Documents => "documents",
@@ -681,8 +825,9 @@ impl UninstallPathToken {
     }
 
     /// The only platform the token resolves on, or `None` for both. The
-    /// Windows folders come from Windows environment variables, and `{home}`
-    /// from `$HOME`, which Windows doesn't set.
+    /// Windows folders come from Windows environment variables, or for
+    /// `{program_files_x86}` from Windows' own name for the folder, and
+    /// `{home}` from `$HOME`, which Windows doesn't set.
     pub fn platform(self) -> Option<SupportedPlatform> {
         match self {
             Self::Appdata
@@ -690,6 +835,7 @@ impl UninstallPathToken {
             | Self::ClapDir
             | Self::CommonProgramFiles
             | Self::ProgramFiles
+            | Self::ProgramFilesX86
             | Self::ProgramData => Some(SupportedPlatform::Windows),
             Self::Home => Some(SupportedPlatform::Macos),
             Self::Resource | Self::AppDir | Self::AppPath | Self::Documents => None,
@@ -749,6 +895,9 @@ const MUST_EQUAL: PathUse = PathUse::new("install_location.must_equal", false, f
 const MUST_BE_IN: PathUse = PathUse::new("must_be_in", false, false, false);
 const ONLY_IF_VALUE_IN: PathUse =
     PathUse::new("registry_cleanup.only_if_value_in", false, false, false);
+const MACHINE_CLEANUP_DIR: PathUse = PathUse::new("machine_cleanup.dir", true, false, false);
+const MACHINE_CLEANUP_VALUE: PathUse =
+    PathUse::new("machine_cleanup.registry.values", false, false, false);
 
 /// The load-time rules for a package's uninstall block. Called from
 /// [`super::validate_package_spec`], so a violation panics when the embedded
@@ -761,6 +910,16 @@ pub(super) fn validate_uninstall_spec(spec: &EmbeddedPackageSpec) -> Result<(), 
         .any(|warning| warning.package == spec.id)
     {
         return Err("uninstall warn_when_installed names the package itself".to_string());
+    }
+    // RABBIT says a package serves the whole computer only for one that
+    // needs a standard REAPER, so for any other there is nothing to turn
+    // off, and the flag would mislead whoever reads the manifest.
+    if !uninstall.machine_wide_warning && !spec.requires_standard_install {
+        return Err(
+            "uninstall machine_wide_warning false needs requires_standard_install: only such a \
+             package gets the machine-wide warning"
+                .to_string(),
+        );
     }
     for root in &uninstall.install_snapshot {
         check_snapshot_root(spec, root)
@@ -837,10 +996,12 @@ fn validate_plan(spec: &EmbeddedPackageSpec, plan: &UninstallPlanSpec) -> Result
                 && !remove.matching_user_plugins
                 && remove.paths.is_empty()
                 && remove.trees.is_empty()
+                && remove.vendor_added_files.is_none()
+                && plan.machine_cleanup.is_none()
             {
                 return Err(
                     "a remove_files plan needs something to remove: receipt_files, \
-                     matching_user_plugins, paths or trees"
+                     matching_user_plugins, paths, trees, vendor_added_files or machine_cleanup"
                         .to_string(),
                 );
             }
@@ -868,7 +1029,12 @@ fn validate_plan(spec: &EmbeddedPackageSpec, plan: &UninstallPlanSpec) -> Result
             "a {strategy} plan needs summary keys for the Review page"
         ));
     }
+    // Before the general elevation rules, whose words about macOS would
+    // only confuse here: machine_cleanup states its own elevation and
+    // backup needs.
+    validate_machine_cleanup(spec, plan)?;
     validate_elevation_and_backup(plan)?;
+    validate_vendor_added_files(spec, plan)?;
 
     // The scan matches a file when ANY prefix starts its name, and "" starts
     // every name, so one empty prefix among good ones claims every file with
@@ -963,6 +1129,12 @@ fn validate_plan(spec: &EmbeddedPackageSpec, plan: &UninstallPlanSpec) -> Result
                 "blocking_programs entry {program:?} must be a program name, not a path"
             ));
         }
+        if is_screen_reader_program(program) {
+            return Err(format!(
+                "blocking_programs entry {program:?} is a screen reader, which a blind user \
+                 can't close to get past the check"
+            ));
+        }
         if applies_on_macos
             && !program
                 .chars()
@@ -1022,6 +1194,19 @@ fn is_package_id(id: &str) -> bool {
         && id
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+}
+
+/// Screen readers by their process names, without `.exe`: JAWS, NVDA,
+/// Windows Narrator and macOS VoiceOver.
+const SCREEN_READER_PROGRAMS: &[&str] = &["jfw", "nvda", "narrator", "voiceover"];
+
+/// Whether `program`, a `blocking_programs` entry, is a screen reader.
+/// RABBIT would refuse to uninstall the package, or to start its Windows
+/// installer, while one of these runs, and a blind user can't close it.
+fn is_screen_reader_program(program: &str) -> bool {
+    let name = program.trim().to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    SCREEN_READER_PROGRAMS.contains(&name)
 }
 
 /// Removals that need administrator rights never move root-owned files into
@@ -1097,6 +1282,7 @@ fn validate_files_elevation(plan: &UninstallPlanSpec) -> Result<(), String> {
             ("matching_user_plugins", remove.matching_user_plugins),
             ("paths", !remove.paths.is_empty()),
             ("dirs_if_empty", !remove.dirs_if_empty.is_empty()),
+            ("vendor_added_files", remove.vendor_added_files.is_some()),
             ("registry_cleanup", !plan.registry_cleanup.is_empty()),
         ];
         if let Some((field, _)) = one_by_one.iter().find(|(_, used)| *used) {
@@ -1180,6 +1366,369 @@ fn check_elevated_tree(plan: &UninstallPlanSpec, tree: &UninstallTree) -> Result
             Ok(())
         }
     }
+}
+
+/// The rules for `remove.vendor_added_files`. The files sit outside the
+/// resource folder, so the patterns must keep well away from it:
+/// - only a Windows `remove_files` plan of a package that needs a standard
+///   REAPER, whose resource folder is then `{appdata}/REAPER`;
+/// - each pattern starts with `{appdata}` or `{localappdata}`, spells out
+///   the folder after it, which may not be `REAPER`, and names nothing
+///   called RABBIT. This rule is what keeps the patterns out of the
+///   resource folder. No name may end in a dot or a space, which Windows
+///   drops, so `REAPER.` can't stand in for `REAPER`;
+/// - each pattern lies below an `install_snapshot` root, written the same
+///   way up to there, because RABBIT records added files only below those
+///   roots. The roots don't keep out of the resource folder (the JAWS
+///   scripts list `{appdata}/REAPER/UserPlugins`); the rule above does. A
+///   `*` in the root matches only a `*` in the pattern.
+///
+/// A `*` may stand for a whole name at any level, as in a snapshot root.
+/// The run-time guard checks every matched file again.
+fn validate_vendor_added_files(
+    spec: &EmbeddedPackageSpec,
+    plan: &UninstallPlanSpec,
+) -> Result<(), String> {
+    let Some(vendor_added) = &plan.remove.vendor_added_files else {
+        return Ok(());
+    };
+    if plan.strategy != UninstallStrategy::RemoveFiles
+        || plan.platform != Some(SupportedPlatform::Windows)
+    {
+        return Err(
+            "remove.vendor_added_files needs a remove_files plan with \"platform\": \"windows\": \
+             only RABBIT's Windows installs record the files an installer adds"
+                .to_string(),
+        );
+    }
+    if !spec.requires_standard_install {
+        return Err(
+            "remove.vendor_added_files needs requires_standard_install: only then is the \
+             resource folder {appdata}/REAPER, which the patterns keep out of"
+                .to_string(),
+        );
+    }
+    if vendor_added.files.is_empty() {
+        return Err("remove.vendor_added_files needs at least one pattern in files".to_string());
+    }
+    if vendor_added.by_hand_note_key.is_empty() {
+        return Err(
+            "remove.vendor_added_files needs a by_hand_note_key saying how to remove the files \
+             that stay"
+                .to_string(),
+        );
+    }
+    for pattern in &vendor_added.files {
+        check_vendor_added_pattern(spec, pattern)
+            .map_err(|message| format!("remove.vendor_added_files.files: {message}"))?;
+    }
+    Ok(())
+}
+
+fn check_vendor_added_pattern(
+    spec: &EmbeddedPackageSpec,
+    pattern: &UninstallPath,
+) -> Result<(), String> {
+    let shown = pattern.as_str();
+    let parsed = pattern.parse_pattern()?;
+    let token = match parsed.root {
+        UninstallPathRoot::Token(
+            token @ (UninstallPathToken::Appdata | UninstallPathToken::Localappdata),
+        ) => token,
+        _ => {
+            return Err(format!(
+                "{shown:?} must start with {{appdata}} or {{localappdata}}"
+            ));
+        }
+    };
+    if parsed
+        .components
+        .iter()
+        .any(|component| ends_in_dot_or_space(component))
+    {
+        return Err(format!(
+            "{shown:?} may not end a name with a dot or a space, which Windows drops: \
+             {{appdata}}/REAPER. is {{appdata}}/REAPER"
+        ));
+    }
+    match parsed.components.first() {
+        Some(first) if !first.contains('*') => {
+            if first.eq_ignore_ascii_case("REAPER") {
+                return Err(format!(
+                    "{shown:?} may not reach into a folder called REAPER right below {{appdata}} \
+                     or {{localappdata}}: {{appdata}}/REAPER is the resource folder of a \
+                     standard REAPER, whose files only the receipt names"
+                ));
+            }
+        }
+        _ => {
+            return Err(format!(
+                "{shown:?} must spell out the folder right after {{{}}}",
+                token.name()
+            ));
+        }
+    }
+    if has_rabbit_component(&parsed) {
+        return Err(format!(
+            "{shown:?} reaches into RABBIT's own folder, which holds receipts, backups and logs"
+        ));
+    }
+    let covered = spec
+        .uninstall
+        .install_snapshot
+        .iter()
+        .any(|root| snapshot_root_covers(root, &parsed));
+    if !covered {
+        return Err(format!(
+            "{shown:?} must lie below one of the package's install_snapshot roots, written the \
+             same way up to there: RABBIT records added files only below those"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `pattern` lies below the snapshot root `root`, with at least one
+/// more component. A `*` in the root matches only a `*`.
+fn snapshot_root_covers(root: &UninstallPath, pattern: &ParsedUninstallPath<'_>) -> bool {
+    let Ok(root) = root.parse_pattern() else {
+        return false;
+    };
+    pattern.components.len() > root.components.len() && starts_with_ignoring_case(&root, pattern)
+}
+
+/// Whether `path` is `prefix` or lies below it: the same root, then each of
+/// the prefix's components, compared as text ignoring ASCII case.
+fn starts_with_ignoring_case(
+    prefix: &ParsedUninstallPath<'_>,
+    path: &ParsedUninstallPath<'_>,
+) -> bool {
+    prefix.root == path.root
+        && path
+            .components
+            .get(..prefix.components.len())
+            .is_some_and(|start| {
+                start
+                    .iter()
+                    .zip(&prefix.components)
+                    .all(|(in_path, in_prefix)| in_path.eq_ignore_ascii_case(in_prefix))
+            })
+}
+
+/// Whether any component is called RABBIT, whose folder holds receipts,
+/// backups and logs.
+fn has_rabbit_component(parsed: &ParsedUninstallPath<'_>) -> bool {
+    parsed
+        .components
+        .iter()
+        .any(|component| component.eq_ignore_ascii_case(RABBIT_FOLDER))
+}
+
+/// Windows drops a trailing dot or space from every name in a path, so a
+/// name that ends in one is a second spelling of a shorter name.
+fn ends_in_dot_or_space(name: &str) -> bool {
+    name.ends_with(['.', ' '])
+}
+
+/// The rules for `machine_cleanup`, which the elevated helper carries out
+/// with administrator rights, so everything it may touch is named here
+/// outright:
+/// - only a Windows `remove_files` plan with `elevation: never` and
+///   `backup: move`, of a package that needs a standard REAPER: the plan's
+///   own files go into a backup set as the user, and the cleanup is the one
+///   step with administrator rights;
+/// - the folder is one exact folder below `{program_files_x86}`, and
+///   `files` are plain file names, each once;
+/// - the key is one HKLM key in the 32-bit view, and every value it may
+///   hold names the folder or one of `files` in it. Exactly one names the
+///   folder: RABBIT checks the folder through it.
+fn validate_machine_cleanup(
+    spec: &EmbeddedPackageSpec,
+    plan: &UninstallPlanSpec,
+) -> Result<(), String> {
+    let Some(cleanup) = &plan.machine_cleanup else {
+        return Ok(());
+    };
+    if plan.strategy != UninstallStrategy::RemoveFiles
+        || plan.platform != Some(SupportedPlatform::Windows)
+    {
+        return Err(
+            "machine_cleanup needs a remove_files plan with \"platform\": \"windows\": it \
+             removes what a Windows installer leaves in Program Files and HKLM"
+                .to_string(),
+        );
+    }
+    if plan.elevation != UninstallElevation::Never || plan.backup != UninstallBackup::Move {
+        return Err(
+            "machine_cleanup needs elevation never and backup move: the plan's own files go into \
+             a backup set without administrator rights, and only the cleanup uses them"
+                .to_string(),
+        );
+    }
+    if !spec.requires_standard_install {
+        return Err(
+            "machine_cleanup needs requires_standard_install: the folder and key serve the whole \
+             computer, so only a standard REAPER's uninstall removes them"
+                .to_string(),
+        );
+    }
+
+    check_path(plan, &cleanup.dir, MACHINE_CLEANUP_DIR)?;
+    let dir = cleanup.dir.parse()?;
+    let program_files_x86 = UninstallPathRoot::Token(UninstallPathToken::ProgramFilesX86);
+    if dir.root != program_files_x86 {
+        return Err(format!(
+            "machine_cleanup.dir: {:?} must start with {{program_files_x86}}, the one folder a \
+             32-bit installer writes to",
+            cleanup.dir.as_str()
+        ));
+    }
+    if dir
+        .components
+        .iter()
+        .any(|component| ends_in_dot_or_space(component))
+    {
+        return Err(format!(
+            "machine_cleanup.dir: {:?} may not end a name with a dot or a space, which Windows \
+             drops",
+            cleanup.dir.as_str()
+        ));
+    }
+
+    if cleanup.files.is_empty() {
+        return Err("machine_cleanup.files needs at least one file name".to_string());
+    }
+    for (index, name) in cleanup.files.iter().enumerate() {
+        if !is_plain_file_name(name) {
+            return Err(format!(
+                "machine_cleanup.files entry {name:?} must be a plain file name: no folder, no \
+                 *, no : and nothing else Windows reads another way"
+            ));
+        }
+        if cleanup.files[..index]
+            .iter()
+            .any(|other| other.eq_ignore_ascii_case(name))
+        {
+            return Err(format!(
+                "machine_cleanup.files lists {name:?} twice, ignoring case"
+            ));
+        }
+    }
+
+    let registry = &cleanup.registry;
+    if registry.hive != RegistryHive::Hklm {
+        return Err(
+            "machine_cleanup.registry may only name an HKLM key, which only administrators can \
+             change"
+                .to_string(),
+        );
+    }
+    check_registry_key("machine_cleanup.registry", &registry.key)?;
+    // The 32-bit view is the only one. A new view must be thought through
+    // here first, so this match has no catch-all.
+    match registry.view {
+        RegistryViewSpec::Bit32 => {}
+    }
+    if registry.values.is_empty() {
+        return Err(
+            "machine_cleanup.registry.values needs the values the key holds, one of them naming \
+             the folder"
+                .to_string(),
+        );
+    }
+    let mut naming_the_folder = 0;
+    for (index, (name, path)) in registry.values.iter().enumerate() {
+        if name.is_empty() {
+            return Err(
+                "machine_cleanup.registry.values needs value names; RABBIT never checks a key's \
+                 default value"
+                    .to_string(),
+            );
+        }
+        if registry
+            .values
+            .keys()
+            .take(index)
+            .any(|other| other.eq_ignore_ascii_case(name))
+        {
+            return Err(format!(
+                "machine_cleanup.registry.values lists {name:?} twice, ignoring case"
+            ));
+        }
+        check_path(plan, path, MACHINE_CLEANUP_VALUE)?;
+        let shown = path.as_str();
+        let parsed = path.parse()?;
+        let in_folder = starts_with_ignoring_case(&dir, &parsed);
+        match parsed.components.get(dir.components.len()..) {
+            Some([]) if in_folder => naming_the_folder += 1,
+            Some([file])
+                if in_folder
+                    && cleanup
+                        .files
+                        .iter()
+                        .any(|listed| listed.eq_ignore_ascii_case(file)) => {}
+            _ => {
+                return Err(format!(
+                    "machine_cleanup.registry.values: {name:?} must name machine_cleanup.dir or \
+                     one of machine_cleanup.files in it, not {shown:?}"
+                ));
+            }
+        }
+    }
+    if naming_the_folder != 1 {
+        return Err(
+            "machine_cleanup.registry.values needs exactly one value naming machine_cleanup.dir: \
+             RABBIT checks the folder through it"
+                .to_string(),
+        );
+    }
+
+    if cleanup.by_hand_key.is_empty() {
+        return Err(
+            "machine_cleanup needs a by_hand_key saying how to remove the package by hand"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// A file name on its own: not empty, no folder, nothing Windows reads as
+/// a pattern, a stream or a device, and no trailing dot or space, which
+/// Windows drops, so one name can't be spelt two ways. That also refuses
+/// `.` and `..`.
+fn is_plain_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && !ends_in_dot_or_space(name)
+        && !name.chars().any(|ch| {
+            matches!(
+                ch,
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '{' | '}'
+            ) || ch.is_control()
+        })
+        && !is_windows_device_name(name)
+}
+
+/// Whether Windows may read `name` as a device such as `NUL` or `COM1`.
+/// The part before the first dot decides, so `nul.txt` counts too. This
+/// errs on the side of refusing: newer Windows versions read fewer names
+/// this way.
+fn is_windows_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
+    let named = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
+        .iter()
+        .any(|device| stem.eq_ignore_ascii_case(device));
+    // COM and LPT with one digit, the superscripts 1, 2 and 3 included.
+    let numbered = ["COM", "LPT"].iter().any(|device| {
+        stem.get(..device.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(device))
+            && {
+                let mut rest = stem[device.len()..].chars();
+                matches!(
+                    (rest.next(), rest.next()),
+                    (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+                )
+            }
+    });
+    named || numbered
 }
 
 fn elevation_name(elevation: UninstallElevation) -> &'static str {
@@ -1320,9 +1869,10 @@ fn check_success_exit_codes(vendor: &VendorUninstallerSpec) -> Result<(), String
 /// and never reads a per-user folder, which may belong to another account
 /// than the one it runs as, and which a standard user could rearrange
 /// under an administrator's feet.
-const MACHINE_WIDE_TOKENS: [UninstallPathToken; 3] = [
+const MACHINE_WIDE_TOKENS: [UninstallPathToken; 4] = [
     UninstallPathToken::CommonProgramFiles,
     UninstallPathToken::ProgramFiles,
+    UninstallPathToken::ProgramFilesX86,
     UninstallPathToken::ProgramData,
 ];
 
@@ -1346,8 +1896,8 @@ fn check_leftover_removal(
     if !machine_wide {
         return Err(format!(
             "remove_leftovers: {:?} must start with {{common_program_files}}, \
-             {{program_files}} or {{program_data}}; the elevated helper never reads per-user \
-             folders",
+             {{program_files}}, {{program_files_x86}} or {{program_data}}; the elevated helper \
+             never reads per-user folders",
             path.as_str()
         ));
     }
@@ -1507,11 +2057,7 @@ fn check_snapshot_root(spec: &EmbeddedPackageSpec, root: &UninstallPath) -> Resu
             ));
         }
     }
-    if parsed
-        .components
-        .iter()
-        .any(|component| component.eq_ignore_ascii_case(RABBIT_FOLDER))
-    {
+    if has_rabbit_component(&parsed) {
         return Err(format!(
             "{shown:?} reaches into RABBIT's own folder, which holds receipts, backups and logs"
         ));
@@ -1527,17 +2073,11 @@ fn check_snapshot_root(spec: &EmbeddedPackageSpec, root: &UninstallPath) -> Resu
 /// `{resource}/RAB*` does. Only the last component can hold a `*`. The
 /// run-time guard checks the resolved path as well.
 fn names_rabbit_folder(parsed: &ParsedUninstallPath<'_>) -> bool {
-    if parsed
-        .components
-        .iter()
-        .any(|component| component.eq_ignore_ascii_case(RABBIT_FOLDER))
-    {
-        return true;
-    }
-    parsed
-        .components
-        .last()
-        .is_some_and(|last| wildcard_matches_ignoring_case(last, RABBIT_FOLDER))
+    has_rabbit_component(parsed)
+        || parsed
+            .components
+            .last()
+            .is_some_and(|last| wildcard_matches_ignoring_case(last, RABBIT_FOLDER))
 }
 
 /// `*` matches any run of characters, including none. ASCII case is
@@ -1590,8 +2130,9 @@ fn strategy_name(strategy: UninstallStrategy) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        LeftoverRemoval, UninstallBackup, UninstallPath, UninstallPostStep, UninstallStrategy,
-        UninstallTarget, wildcard_matches_ignoring_case,
+        LeftoverRemoval, MACHINE_WIDE_TOKENS, RegistryHive, RegistryViewSpec, UninstallBackup,
+        UninstallPath, UninstallPostStep, UninstallStrategy, UninstallTarget,
+        wildcard_matches_ignoring_case,
     };
     use crate::model::{InstallationKind, Platform};
     use crate::package::{
@@ -1903,8 +2444,44 @@ mod tests {
             ]
         }"#;
         let jaws = r#"{
+            "machine_wide_warning": false,
+            "install_snapshot": [
+                "{appdata}/Freedom Scientific/JAWS/*/Settings/*",
+                "{appdata}/REAPER/UserPlugins"
+            ],
             "plans": [
-                { "platform": "windows", "strategy": "manual", "note_key": "uninstall-manual-jaws-scripts" }
+                {
+                    "platform": "windows",
+                    "strategy": "remove_files",
+                    "summary": {
+                        "removes_key": "uninstall-summary-jaws-scripts-removes",
+                        "keeps_key": "uninstall-summary-jaws-scripts-keeps"
+                    },
+                    "remove": {
+                        "paths": [
+                            "{appdata}/REAPER/UserPlugins/Reaper_ComAccess32.dll",
+                            "{appdata}/REAPER/UserPlugins/Reaper_ComAccess64.dll"
+                        ],
+                        "vendor_added_files": {
+                            "files": ["{appdata}/Freedom Scientific/JAWS/*/Settings/*/*"],
+                            "by_hand_note_key": "uninstall-note-jaws-scripts-by-hand"
+                        }
+                    },
+                    "machine_cleanup": {
+                        "dir": "{program_files_x86}/Reaper_JawsScripts",
+                        "files": ["Uninstall.dat", "Uninstall.exe"],
+                        "registry": {
+                            "hive": "hklm",
+                            "key": "Reaper_JawsScripts",
+                            "view": "bit32",
+                            "values": {
+                                "UninstallDirectory": "{program_files_x86}/Reaper_JawsScripts",
+                                "Uninstall.dat": "{program_files_x86}/Reaper_JawsScripts/Uninstall.dat"
+                            }
+                        },
+                        "by_hand_key": "uninstall-by-hand-jaws-scripts"
+                    }
+                }
             ]
         }"#;
 
@@ -1988,6 +2565,51 @@ mod tests {
                 )),
             ]
         );
+
+        let jaws = demo_spec(
+            r#""requires_standard_install": true, "supported_platforms": ["windows"],"#,
+            jaws,
+        )
+        .uninstall;
+        assert!(!jaws.machine_wide_warning);
+        let plan = jaws
+            .plan_for(Platform::Windows, InstallationKind::Standard)
+            .expect("the JAWS scripts have a plan on Windows");
+        let vendor_added = plan
+            .remove
+            .vendor_added_files
+            .as_ref()
+            .expect("the plan removes recorded script files");
+        assert_eq!(
+            vendor_added.files,
+            [UninstallPath::new(
+                "{appdata}/Freedom Scientific/JAWS/*/Settings/*/*"
+            )]
+        );
+        let cleanup = plan
+            .machine_cleanup
+            .as_ref()
+            .expect("the plan cleans up the uninstaller folder and key");
+        assert_eq!(
+            cleanup.dir,
+            UninstallPath::new("{program_files_x86}/Reaper_JawsScripts")
+        );
+        assert_eq!(cleanup.files, ["Uninstall.dat", "Uninstall.exe"]);
+        assert_eq!(cleanup.registry.hive, RegistryHive::Hklm);
+        assert_eq!(cleanup.registry.view, RegistryViewSpec::Bit32);
+        assert_eq!(
+            cleanup.registry.values.keys().collect::<Vec<_>>(),
+            ["Uninstall.dat", "UninstallDirectory"]
+        );
+        // The by-hand texts are Fluent keys like the rest, so the shipped
+        // manifest's test checks them once the manifest names them.
+        let keys = jaws.fluent_keys();
+        for key in [
+            "uninstall-note-jaws-scripts-by-hand",
+            "uninstall-by-hand-jaws-scripts",
+        ] {
+            assert!(keys.contains(&key), "{key} is missing from {keys:?}");
+        }
     }
 
     #[test]
@@ -2641,6 +3263,31 @@ mod tests {
         );
     }
 
+    /// A plan never names a screen reader among the programs to close: the
+    /// package couldn't be uninstalled, nor its Windows installer started,
+    /// while it runs, and a blind user can't close it.
+    #[test]
+    fn program_names_never_name_a_screen_reader() {
+        for name in ["jfw.exe", "JFW.EXE", "nvda.exe", "Narrator.exe", "nvda"] {
+            rejects(
+                "",
+                &windows_remove_plans(&format!(r#""blocking_programs": ["Demo.exe", "{name}"]"#)),
+                "is a screen reader",
+            );
+        }
+        rejects(
+            "",
+            &macos_remove_plans(&format!(
+                r#"{ELEVATED_APP_TREE}, "blocking_programs": ["VoiceOver"]"#
+            )),
+            "is a screen reader",
+        );
+        accepts(
+            "",
+            &windows_remove_plans(r#""blocking_programs": ["Surge XT.exe", "nvda_demo.exe"]"#),
+        );
+    }
+
     /// Rule 9: only macOS has Audio Units to refresh.
     #[test]
     fn refresh_audio_units_is_for_macos_plans() {
@@ -3201,6 +3848,14 @@ mod tests {
         ] {
             rejects(windows_only, &with_roots(root), expected);
         }
+        // The 32-bit Program Files folder is a folder to list like the
+        // others, on Windows only.
+        accepts(windows_only, &with_roots(r#""{program_files_x86}/Demo""#));
+        rejects(
+            r#""supported_platforms": ["macos"],"#,
+            &with_roots(r#""{program_files_x86}/Demo""#),
+            "{program_files_x86} exists only on windows, where the package isn't offered",
+        );
         // The plan paths keep their stricter grammar.
         assert!(
             UninstallPath::new("{appdata}/JAWS/*/Settings")
@@ -3212,6 +3867,728 @@ mod tests {
                 .parse_pattern()
                 .is_ok()
         );
+    }
+
+    /// A package offered on Windows only that needs a standard REAPER, like
+    /// the JAWS scripts.
+    const STANDARD_WINDOWS: &str =
+        r#""requires_standard_install": true, "supported_platforms": ["windows"],"#;
+
+    /// The snapshot root the JAWS scripts' manifest lists.
+    const JAWS_ROOT: &str = r#""{appdata}/Freedom Scientific/JAWS/*/Settings/*""#;
+
+    /// An uninstall block listing the snapshot roots `roots` and one
+    /// Windows `remove_files` plan that removes the recorded files matching
+    /// `files`.
+    fn vendor_added_plans(roots: &str, files: &str) -> String {
+        format!(
+            r#"{{ "install_snapshot": [{roots}],
+                 "plans": [{{ "platform": "windows", "strategy": "remove_files", {SUMMARY},
+                     "remove": {{ "vendor_added_files": {{
+                         "files": [{files}], "by_hand_note_key": "test-by-hand" }} }} }}] }}"#
+        )
+    }
+
+    #[test]
+    fn program_files_x86_is_a_windows_machine_wide_folder_token() {
+        use super::{UninstallPathToken, UninstallTokenKind};
+
+        let token = UninstallPathToken::from_name("program_files_x86").unwrap();
+        assert_eq!(token, UninstallPathToken::ProgramFilesX86);
+        assert_eq!(token.kind(), UninstallTokenKind::FolderRoot);
+        assert_eq!(
+            token.platform(),
+            Some(crate::package::SupportedPlatform::Windows)
+        );
+        assert!(MACHINE_WIDE_TOKENS.contains(&token));
+
+        rejects(
+            "",
+            &path_plan("{program_files_x86}/Demo/demo.dll"),
+            "{program_files_x86} exists only on windows",
+        );
+        accepts(
+            "",
+            &windows_remove_plans(r#""keep": ["{program_files_x86}/Demo"]"#),
+        );
+        rejects(
+            "",
+            &windows_remove_plans(r#""keep": ["{program_files_x86}/Demo/RABBIT"]"#),
+            "RABBIT's own folder",
+        );
+        // The elevated helper resolves it itself, so leftovers may sit in it.
+        accepts(
+            "",
+            &leftover_plans(ELEVATED, r#"{ "empty_dir": "{program_files_x86}/Demo" }"#),
+        );
+        rejects(
+            "",
+            &leftover_plans(ELEVATED, r#"{ "empty_dir": "{program_files_x86}" }"#),
+            "is a folder root",
+        );
+        rejects(
+            "",
+            &leftover_plans(ELEVATED, r#"{ "empty_dir": "{localappdata}/Demo" }"#),
+            "{program_files}, {program_files_x86} or {program_data}",
+        );
+    }
+
+    #[test]
+    fn vendor_added_files_need_install_snapshot_roots_that_cover_them() {
+        accepts(
+            STANDARD_WINDOWS,
+            &vendor_added_plans(
+                JAWS_ROOT,
+                r#""{appdata}/Freedom Scientific/JAWS/*/Settings/*/*""#,
+            ),
+        );
+        // Literal names compare ignoring case, and a pattern may go deeper.
+        accepts(
+            STANDARD_WINDOWS,
+            &vendor_added_plans(
+                JAWS_ROOT,
+                r#""{appdata}/freedom scientific/jaws/*/settings/*/reaper*.jss",
+                   "{appdata}/Freedom Scientific/JAWS/*/Settings/*/Sub/*""#,
+            ),
+        );
+        // Any of several roots will do.
+        accepts(
+            STANDARD_WINDOWS,
+            &vendor_added_plans(
+                &format!(r#""{{appdata}}/Demo/Data", {JAWS_ROOT}"#),
+                r#""{appdata}/Freedom Scientific/JAWS/*/Settings/*/*", "{appdata}/Demo/Data/*.ini""#,
+            ),
+        );
+        for (roots, files) in [
+            // No root at all: RABBIT records nothing.
+            ("", r#""{appdata}/Freedom Scientific/JAWS/*/Settings/*/*""#),
+            // The root itself, which names folders, not files below them.
+            (
+                JAWS_ROOT,
+                r#""{appdata}/Freedom Scientific/JAWS/*/Settings/*""#,
+            ),
+            // A * in the root matches only a *.
+            (
+                JAWS_ROOT,
+                r#""{appdata}/Freedom Scientific/JAWS/2025/Settings/enu/*""#,
+            ),
+            // Wider than the root.
+            (
+                JAWS_ROOT,
+                r#""{appdata}/Freedom Scientific/*/*/Settings/*/*""#,
+            ),
+            // Beside it.
+            (JAWS_ROOT, r#""{appdata}/Freedom Scientific/Other/*""#),
+            // Another token, even with the same folders after it.
+            (
+                JAWS_ROOT,
+                r#""{localappdata}/Freedom Scientific/JAWS/*/Settings/*/*""#,
+            ),
+        ] {
+            rejects(
+                STANDARD_WINDOWS,
+                &vendor_added_plans(roots, files),
+                "must lie below one of the package's install_snapshot roots",
+            );
+        }
+    }
+
+    #[test]
+    fn vendor_added_files_start_with_appdata_or_localappdata_and_never_reach_reaper() {
+        accepts(
+            STANDARD_WINDOWS,
+            &vendor_added_plans(
+                r#""{localappdata}/Demo/Data""#,
+                r#""{localappdata}/Demo/Data/*""#,
+            ),
+        );
+        for (root, file, expected) in [
+            (
+                "{program_data}/Demo",
+                "{program_data}/Demo/*",
+                "must start with {appdata} or {localappdata}",
+            ),
+            (
+                "{program_files_x86}/Demo",
+                "{program_files_x86}/Demo/*",
+                "must start with {appdata} or {localappdata}",
+            ),
+            (
+                "{resource}/Demo",
+                "{resource}/Demo/*",
+                "must start with {appdata} or {localappdata}",
+            ),
+            (
+                "{documents}/Demo",
+                "{documents}/Demo/*",
+                "must start with {appdata} or {localappdata}",
+            ),
+            (
+                "{appdata}/Demo",
+                "/Library/Application Support/Demo/*",
+                "must start with {appdata} or {localappdata}",
+            ),
+            // The standard resource folder, which holds RABBIT's own folder
+            // too, however it is spelt.
+            (
+                "{appdata}/REAPER/UserPlugins",
+                "{appdata}/REAPER/UserPlugins/*",
+                "may not reach into a folder called REAPER",
+            ),
+            (
+                "{appdata}/reaper/UserPlugins",
+                "{appdata}/reaper/UserPlugins/*",
+                "may not reach into a folder called REAPER",
+            ),
+            (
+                "{localappdata}/REAPER/Data",
+                "{localappdata}/REAPER/Data/*",
+                "may not reach into a folder called REAPER",
+            ),
+            // Windows drops a trailing dot or space, so these are REAPER too.
+            (
+                "{appdata}/REAPER./UserPlugins",
+                "{appdata}/REAPER./UserPlugins/*",
+                "may not end a name with a dot or a space",
+            ),
+            (
+                "{appdata}/REAPER /UserPlugins",
+                "{appdata}/REAPER /UserPlugins/*",
+                "may not end a name with a dot or a space",
+            ),
+            (
+                "{appdata}/Demo",
+                "{appdata}/Demo/Data./*",
+                "may not end a name with a dot or a space",
+            ),
+            (
+                "{appdata}/Demo",
+                "{appdata}/*/Data/*",
+                "must spell out the folder right after {appdata}",
+            ),
+            (
+                "{appdata}/Demo",
+                "{appdata}/Demo/RABBIT/*",
+                "RABBIT's own folder",
+            ),
+            (
+                "{appdata}/Demo",
+                "{appdata}/Demo/rabbit/*",
+                "RABBIT's own folder",
+            ),
+            (
+                "{appdata}/Demo",
+                "{appdata}/Demo/../x",
+                "may not use . or ..",
+            ),
+            (
+                "{appdata}/Demo",
+                "{appdata}/Demo/a:b",
+                "may not contain ':'",
+            ),
+        ] {
+            rejects(
+                STANDARD_WINDOWS,
+                &vendor_added_plans(&format!("\"{root}\""), &format!("\"{file}\"")),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn vendor_added_files_need_a_windows_remove_files_plan_for_a_standard_reaper() {
+        let block = r#""vendor_added_files": { "files": ["{appdata}/Demo/Data/*"], "by_hand_note_key": "a" }"#;
+        let roots = r#""install_snapshot": ["{appdata}/Demo/Data"],"#;
+        rejects(
+            r#""supported_platforms": ["windows"],"#,
+            &vendor_added_plans(r#""{appdata}/Demo/Data""#, r#""{appdata}/Demo/Data/*""#),
+            "remove.vendor_added_files needs requires_standard_install",
+        );
+        for plans_json in [
+            // Every platform, so macOS too.
+            format!(
+                r#"{{ {roots} "plans": [{{ "strategy": "remove_files", {SUMMARY}, "remove": {{ {block} }} }}] }}"#
+            ),
+            format!(
+                r#"{{ {roots} "plans": [
+                    {{ "platform": "windows", "strategy": "not_supported", "note_key": "a" }},
+                    {{ "platform": "macos", "strategy": "remove_files", {SUMMARY}, "remove": {{ {block} }} }}
+                ] }}"#
+            ),
+            format!(
+                r#"{{ {roots} "plans": [
+                    {{ "platform": "windows", "strategy": "vendor_uninstaller", {SUMMARY}, {INNO_IN_PLACE},
+                       "remove": {{ {block} }} }},
+                    {{ "platform": "macos", "strategy": "not_supported", "note_key": "a" }}
+                ] }}"#
+            ),
+        ] {
+            rejects(
+                r#""requires_standard_install": true,"#,
+                &plans_json,
+                "remove.vendor_added_files needs a remove_files plan with \"platform\": \"windows\"",
+            );
+        }
+        rejects(
+            STANDARD_WINDOWS,
+            &vendor_added_plans(r#""{appdata}/Demo/Data""#, ""),
+            "needs at least one pattern in files",
+        );
+        rejects(
+            STANDARD_WINDOWS,
+            &format!(
+                r#"{{ {roots} "plans": [{{ "platform": "windows", "strategy": "remove_files", {SUMMARY},
+                     "remove": {{ "vendor_added_files": {{ "files": ["{{appdata}}/Demo/Data/*"], "by_hand_note_key": "" }} }} }}] }}"#
+            ),
+            "needs a by_hand_note_key",
+        );
+        // Root never handles files one by one, these included. The general
+        // elevation rules run first, so this is what a macOS plan hears.
+        rejects(
+            r#""requires_standard_install": true,"#,
+            &format!(
+                r#"{{ {roots} "plans": [
+                    {{ "platform": "windows", "strategy": "not_supported", "note_key": "a" }},
+                    {{ "platform": "macos", "strategy": "remove_files", {SUMMARY},
+                       "elevation": "required", "backup": "none",
+                       "remove": {{ {block},
+                           "trees": [{{ "path": "/Applications/Demo.app", "must_end_with": ".app" }}] }} }}
+                ] }}"#
+            ),
+            "may not use vendor_added_files",
+        );
+        // An elevated Windows plan hears that only macOS removes files
+        // with administrator rights; these files go as the user.
+        rejects(
+            STANDARD_WINDOWS,
+            &format!(
+                r#"{{ {roots} "plans": [{{ "platform": "windows", "strategy": "remove_files", {SUMMARY},
+                     "elevation": "required", "backup": "none", "remove": {{ {block} }} }}] }}"#
+            ),
+            "only macOS removes files with administrator rights",
+        );
+    }
+
+    /// A `machine_cleanup` block for the folder `dir` holding `files`, with
+    /// `registry` as its key.
+    fn cleanup_block(dir: &str, files: &str, registry: &str) -> String {
+        format!(
+            r#""machine_cleanup": {{ "dir": "{dir}", "files": [{files}], "registry": {registry},
+                 "by_hand_key": "test-by-hand" }}"#
+        )
+    }
+
+    /// The HKLM key `Demo` in the 32-bit view, holding `values`.
+    fn cleanup_registry(values: &str) -> String {
+        format!(r#"{{ "hive": "hklm", "key": "Demo", "view": "bit32", "values": {{ {values} }} }}"#)
+    }
+
+    /// The JAWS scripts' cleanup, for a folder called Demo.
+    fn demo_cleanup() -> String {
+        cleanup_block(
+            "{program_files_x86}/Demo",
+            r#""Uninstall.dat", "Uninstall.exe""#,
+            &cleanup_registry(
+                r#""UninstallDirectory": "{program_files_x86}/Demo",
+                   "Uninstall.dat": "{program_files_x86}/Demo/Uninstall.dat""#,
+            ),
+        )
+    }
+
+    /// An uninstall block whose only plan is a Windows `remove_files` plan
+    /// with `fields` and nothing else to remove, for a package offered on
+    /// Windows only.
+    fn windows_only_remove_plans(fields: &str) -> String {
+        plans(&[&format!(
+            r#"{{ "platform": "windows", "strategy": "remove_files", {SUMMARY}, {fields} }}"#
+        )])
+    }
+
+    /// Checks that `uninstall` fails to parse with an error naming
+    /// `expected`.
+    fn refuses_to_parse(uninstall: &str, expected: &str) {
+        let source = format!(
+            r#"{{ "id": "demo", "display_name": "Demo", "display_name_key": "a",
+                 "display_description_key": "b", "recommended": false,
+                 "uninstall": {uninstall} }}"#
+        );
+        match parse_embedded_package_spec(&source) {
+            Ok(_) => panic!("{uninstall} should not parse"),
+            Err(error) => assert!(
+                error.to_string().contains(expected),
+                "expected a parse error containing {expected:?}, got {error}"
+            ),
+        }
+    }
+
+    #[test]
+    fn machine_cleanup_needs_a_windows_remove_files_plan_for_a_standard_reaper() {
+        let cleanup = demo_cleanup();
+        // On its own it is something to remove, and beside other files too.
+        accepts(STANDARD_WINDOWS, &windows_only_remove_plans(&cleanup));
+        accepts(
+            STANDARD_WINDOWS,
+            &windows_only_remove_plans(&format!(
+                r#""remove": {{ "receipt_files": true }}, {cleanup}"#
+            )),
+        );
+        rejects(
+            r#""supported_platforms": ["windows"],"#,
+            &windows_only_remove_plans(&cleanup),
+            "machine_cleanup needs requires_standard_install",
+        );
+        for plans_json in [
+            plans(&[&format!(
+                r#"{{ "strategy": "remove_files", {SUMMARY}, {cleanup} }}"#
+            )]),
+            macos_remove_plans(&format!(
+                r#""remove": {{ "receipt_files": true }}, {cleanup}"#
+            )),
+            vendor_plans(&format!("{INNO_IN_PLACE}, {cleanup}")),
+        ] {
+            rejects(
+                r#""requires_standard_install": true,"#,
+                &plans_json,
+                "machine_cleanup needs a remove_files plan with \"platform\": \"windows\"",
+            );
+        }
+        rejects(
+            STANDARD_WINDOWS,
+            &windows_only_remove_plans(
+                &cleanup.replace(r#""by_hand_key": "test-by-hand""#, r#""by_hand_key": """#),
+            ),
+            "machine_cleanup needs a by_hand_key",
+        );
+    }
+
+    #[test]
+    fn machine_cleanup_keeps_the_plans_own_elevation_never_and_backup_move() {
+        let cleanup = demo_cleanup();
+        for elevation_and_backup in [
+            r#""elevation": "required", "backup": "none""#,
+            r#""elevation": "required""#,
+            r#""backup": "none""#,
+            r#""backup": "to_trash""#,
+            r#""elevation": "if_needed", "backup": "to_trash""#,
+        ] {
+            rejects(
+                STANDARD_WINDOWS,
+                &windows_only_remove_plans(&format!("{elevation_and_backup}, {cleanup}")),
+                "machine_cleanup needs elevation never and backup move",
+            );
+        }
+        accepts(
+            STANDARD_WINDOWS,
+            &windows_only_remove_plans(&format!(
+                r#""elevation": "never", "backup": "move", {cleanup}"#
+            )),
+        );
+    }
+
+    #[test]
+    fn machine_cleanup_uses_only_program_files_x86_and_hklm_in_the_32_bit_view() {
+        let in_folder = |dir: &str| {
+            cleanup_block(
+                dir,
+                r#""Uninstall.exe""#,
+                &cleanup_registry(&format!(r#""UninstallDirectory": "{dir}""#)),
+            )
+        };
+        accepts(
+            STANDARD_WINDOWS,
+            &windows_only_remove_plans(&in_folder("{program_files_x86}/Demo")),
+        );
+        accepts(
+            STANDARD_WINDOWS,
+            &windows_only_remove_plans(&in_folder("{program_files_x86}/Demo/Uninstaller")),
+        );
+        for (dir, expected) in [
+            (
+                "{program_files}/Demo",
+                "must start with {program_files_x86}",
+            ),
+            (
+                "{common_program_files}/Demo",
+                "must start with {program_files_x86}",
+            ),
+            ("{program_data}/Demo", "must start with {program_files_x86}"),
+            ("{appdata}/Demo", "must start with {program_files_x86}"),
+            ("{resource}/Demo", "must start with {program_files_x86}"),
+            (
+                "{program_files_x86}",
+                "is a folder root, which is never removed",
+            ),
+            // The field name shows the folder failed, not the value that
+            // repeats it.
+            (
+                "{program_files_x86}/Demo*",
+                r#"machine_cleanup.dir: "{program_files_x86}/Demo*" may not use *"#,
+            ),
+            (
+                "{program_files_x86}/Demo/../Other",
+                r#"machine_cleanup.dir: "{program_files_x86}/Demo/../Other" may not use . or .."#,
+            ),
+            (
+                "{program_files_x86}/RABBIT",
+                r#"machine_cleanup.dir: "{program_files_x86}/RABBIT" reaches into RABBIT's own folder"#,
+            ),
+            (
+                "{program_files_x86}/Demo.",
+                r#"machine_cleanup.dir: "{program_files_x86}/Demo." may not end a name with a dot or a space"#,
+            ),
+            (
+                "{program_files_x86}/Demo /Uninstaller",
+                "may not end a name with a dot or a space",
+            ),
+            ("{app_dir}/Demo", "only for comparison"),
+            ("{app_path}", "allowed only in remove.trees and verify_gone"),
+            ("/Applications/Demo.app", "allowed only in plans with"),
+        ] {
+            rejects(
+                STANDARD_WINDOWS,
+                &windows_only_remove_plans(&in_folder(dir)),
+                expected,
+            );
+        }
+
+        let with_key = |hive: &str, key: &str| {
+            cleanup_block(
+                "{program_files_x86}/Demo",
+                r#""Uninstall.exe""#,
+                &format!(
+                    r#"{{ "hive": "{hive}", "key": "{key}", "view": "bit32",
+                         "values": {{ "UninstallDirectory": "{{program_files_x86}}/Demo" }} }}"#
+                ),
+            )
+        };
+        rejects(
+            STANDARD_WINDOWS,
+            &windows_only_remove_plans(&with_key("hkcu", "Demo")),
+            "may only name an HKLM key",
+        );
+        for key in [r"Software\\Demo", "Demo/Other", ""] {
+            rejects(
+                STANDARD_WINDOWS,
+                &windows_only_remove_plans(&with_key("hklm", key)),
+                "must be one key name under the Uninstall key",
+            );
+        }
+        // Only the 32-bit view exists, and it must be named.
+        refuses_to_parse(
+            &windows_only_remove_plans(&demo_cleanup().replace("bit32", "bit64")),
+            "unknown variant `bit64`",
+        );
+        refuses_to_parse(
+            &windows_only_remove_plans(&demo_cleanup().replace(r#""view": "bit32","#, "")),
+            "missing field `view`",
+        );
+    }
+
+    #[test]
+    fn machine_cleanup_files_are_plain_unique_names() {
+        let listing = |files: &str| {
+            windows_only_remove_plans(&cleanup_block(
+                "{program_files_x86}/Demo",
+                files,
+                &cleanup_registry(r#""UninstallDirectory": "{program_files_x86}/Demo""#),
+            ))
+        };
+        accepts(STANDARD_WINDOWS, &listing(r#""Uninstall.exe""#));
+        accepts(
+            STANDARD_WINDOWS,
+            &listing(r#""Uninstall.dat", "Uninstall.exe", "unins000.dat""#),
+        );
+        // Names that only start like a device are plain.
+        accepts(
+            STANDARD_WINDOWS,
+            &listing(r#""Console.exe", "COM10.dat", "nullsoft.ini", "LPT.txt""#),
+        );
+        for name in [
+            "",
+            "Sub/Uninstall.exe",
+            r"Sub\\Uninstall.exe",
+            "*.exe",
+            "Uninstall.exe:stream",
+            "C:",
+            "a?b",
+            "a|b",
+            "a<b",
+            ".",
+            "..",
+            "Uninstall.exe.",
+            "Uninstall.exe ",
+            "{program_files_x86}",
+            // Devices, with or without an extension.
+            "NUL",
+            "con.txt",
+            "Aux.log.dat",
+            "COM1",
+            "lpt9.dat",
+            "CONOUT$",
+            "COM\u{b9}",
+        ] {
+            rejects(
+                STANDARD_WINDOWS,
+                &listing(&format!("\"{name}\"")),
+                "must be a plain file name",
+            );
+        }
+        rejects(
+            STANDARD_WINDOWS,
+            &listing(r#""Uninstall.exe", "uninstall.EXE""#),
+            "lists \"uninstall.EXE\" twice, ignoring case",
+        );
+        rejects(
+            STANDARD_WINDOWS,
+            &listing(""),
+            "machine_cleanup.files needs at least one file name",
+        );
+    }
+
+    #[test]
+    fn machine_cleanup_registry_values_point_into_its_folder_and_one_names_it() {
+        let holding = |values: &str| {
+            windows_only_remove_plans(&cleanup_block(
+                "{program_files_x86}/Demo",
+                r#""Uninstall.dat", "Uninstall.exe""#,
+                &cleanup_registry(values),
+            ))
+        };
+        accepts(
+            STANDARD_WINDOWS,
+            &holding(r#""UninstallDirectory": "{program_files_x86}/Demo""#),
+        );
+        // Names in the folder compare ignoring case, as Windows does.
+        accepts(
+            STANDARD_WINDOWS,
+            &holding(
+                r#""UninstallDirectory": "{program_files_x86}/demo",
+                   "Uninstall.dat": "{program_files_x86}/DEMO/uninstall.DAT",
+                   "UninstallString": "{program_files_x86}/Demo/Uninstall.exe""#,
+            ),
+        );
+        for (values, expected) in [
+            ("", "needs the values the key holds"),
+            (
+                r#""Uninstall.dat": "{program_files_x86}/Demo/Uninstall.dat""#,
+                "needs exactly one value naming machine_cleanup.dir",
+            ),
+            (
+                r#""UninstallDirectory": "{program_files_x86}/Demo",
+                   "InstallLocation": "{program_files_x86}/Demo""#,
+                "needs exactly one value naming machine_cleanup.dir",
+            ),
+            (
+                r#""UninstallDirectory": "{program_files_x86}/Demo",
+                   "Other": "{program_files_x86}/Other""#,
+                "must name machine_cleanup.dir or one of machine_cleanup.files in it",
+            ),
+            (
+                r#""UninstallDirectory": "{program_files_x86}/Demo",
+                   "Other": "{program_files_x86}/Demo/Other.exe""#,
+                "must name machine_cleanup.dir or one of machine_cleanup.files in it",
+            ),
+            (
+                r#""UninstallDirectory": "{program_files_x86}/Demo",
+                   "Other": "{program_files_x86}/Demo/Sub/Uninstall.dat""#,
+                "must name machine_cleanup.dir or one of machine_cleanup.files in it",
+            ),
+            (
+                r#""UninstallDirectory": "{program_files_x86}/Demo",
+                   "Other": "{program_files_x86}""#,
+                "must name machine_cleanup.dir or one of machine_cleanup.files in it",
+            ),
+            // The native Program Files folder holds another folder, even
+            // one with the same name.
+            (
+                r#""UninstallDirectory": "{program_files}/Demo""#,
+                "must name machine_cleanup.dir or one of machine_cleanup.files in it",
+            ),
+            (
+                r#""UninstallDirectory": "{appdata}/Demo""#,
+                "must name machine_cleanup.dir or one of machine_cleanup.files in it",
+            ),
+            (
+                r#""UninstallDirectory": "{program_files_x86}/Demo",
+                   "Other": "{program_files_x86}/Demo/*.dat""#,
+                r#"machine_cleanup.registry.values: "{program_files_x86}/Demo/*.dat" may not use *"#,
+            ),
+            (
+                r#""UninstallDirectory": "{program_files_x86}/Demo",
+                   "Other": "{program_files_x86}/Demo/../Demo""#,
+                r#"machine_cleanup.registry.values: "{program_files_x86}/Demo/../Demo" may not use . or .."#,
+            ),
+            (r#""": "{program_files_x86}/Demo""#, "needs value names"),
+            (
+                r#""UninstallDirectory": "{program_files_x86}/Demo",
+                   "uninstalldirectory": "{program_files_x86}/Demo""#,
+                "lists \"uninstalldirectory\" twice, ignoring case",
+            ),
+        ] {
+            rejects(STANDARD_WINDOWS, &holding(values), expected);
+        }
+        // JSON allows a name twice with the same spelling, and serde would
+        // keep only the last, so the manifest doesn't even parse.
+        refuses_to_parse(
+            &holding(
+                r#""UninstallDirectory": "{program_files_x86}/Other",
+                   "UninstallDirectory": "{program_files_x86}/Demo""#,
+            ),
+            "machine_cleanup.registry.values lists \"UninstallDirectory\" twice",
+        );
+    }
+
+    #[test]
+    fn a_manual_plan_carries_no_vendor_added_files_or_machine_cleanup() {
+        let roots = r#""install_snapshot": ["{appdata}/Demo/Data"],"#;
+        for fields in [
+            r#""remove": { "vendor_added_files": { "files": ["{appdata}/Demo/Data/*"], "by_hand_note_key": "a" } }"#.to_string(),
+            demo_cleanup(),
+        ] {
+            for strategy in ["manual", "not_supported"] {
+                rejects(
+                    STANDARD_WINDOWS,
+                    &format!(
+                        r#"{{ {roots} "plans": [{{ "platform": "windows", "strategy": "{strategy}",
+                             "note_key": "a", {fields} }}] }}"#
+                    ),
+                    "changes nothing",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn machine_wide_warning_can_be_turned_off_only_for_machine_wide_packages() {
+        let with_warning = |value: &str| {
+            format!(
+                r#"{{ "machine_wide_warning": {value},
+                     "plans": [{{ "strategy": "not_supported", "note_key": "a" }}] }}"#
+            )
+        };
+        let machine_wide = r#""requires_standard_install": true,"#;
+        accepts(machine_wide, &with_warning("false"));
+        accepts(machine_wide, &with_warning("true"));
+        accepts("", &with_warning("true"));
+        rejects(
+            "",
+            &with_warning("false"),
+            "machine_wide_warning false needs requires_standard_install",
+        );
+
+        // On unless a manifest says otherwise, and written out only when off.
+        let default = demo_spec(
+            "",
+            &plans(&[r#"{ "strategy": "not_supported", "note_key": "a" }"#]),
+        )
+        .uninstall;
+        assert!(default.machine_wide_warning);
+        let written = serde_json::to_value(&default).unwrap();
+        assert!(written.get("machine_wide_warning").is_none(), "{written}");
+        let off = demo_spec(machine_wide, &with_warning("false")).uninstall;
+        assert!(!off.machine_wide_warning);
+        let written = serde_json::to_value(&off).unwrap();
+        assert_eq!(written["machine_wide_warning"], serde_json::json!(false));
     }
 
     #[test]
@@ -3234,6 +4611,16 @@ mod tests {
             r#"{ "plans": [{ "strategy": "not_supported", "note_key": "a" }], "requires_reciept": true }"#,
             r#"{ "plans": [{ "strategy": "remove_files", "kep": ["{resource}/reaper.ini"] }] }"#,
             r#"{ "plans": [{ "strategy": "remove_files", "remove": { "receipt_file": true } }] }"#,
+            r#"{ "plans": [{ "strategy": "not_supported", "note_key": "a" }], "machine_wide_warnings": false }"#,
+            r#"{ "plans": [{ "strategy": "remove_files", "remove": { "vendor_added_file": { "files": [] } } }] }"#,
+            r#"{ "plans": [{ "strategy": "remove_files",
+                 "remove": { "vendor_added_files": { "by_hand_note": "a", "files": [] } } }] }"#,
+            r#"{ "plans": [{ "strategy": "remove_files", "machine_cleanups": {} }] }"#,
+            r#"{ "plans": [{ "strategy": "remove_files",
+                 "machine_cleanup": { "file": ["Uninstall.exe"], "dir": "{program_files_x86}/Demo" } }] }"#,
+            r#"{ "plans": [{ "strategy": "remove_files",
+                 "machine_cleanup": { "dir": "{program_files_x86}/Demo", "files": ["Uninstall.exe"],
+                     "registry": { "value": {}, "hive": "hklm", "key": "Demo", "view": "bit32" } } }] }"#,
         ] {
             let source = format!(
                 r#"{{

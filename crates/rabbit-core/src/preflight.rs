@@ -159,8 +159,10 @@ pub fn running_reaper_processes(platform: Option<Platform>) -> Vec<RunningProces
 }
 
 /// The running processes whose name is one of `names`, ignoring case: the
-/// programs an uninstall plan says must be closed first, such as Surge XT's
-/// standalone apps (`Surge XT.exe` on Windows, `Surge XT` on macOS).
+/// programs a package's uninstall plan names as `blocking_programs`, which
+/// must be closed before it is uninstalled or its Windows installer runs,
+/// such as Surge XT's standalone apps (`Surge XT.exe` on Windows,
+/// `Surge XT` on macOS).
 pub fn running_processes_named(names: &[String]) -> Vec<RunningProcess> {
     if names.is_empty() {
         return Vec::new();

@@ -16,24 +16,36 @@
 //!    since. A file only the receipt names that changed since RABBIT
 //!    installed it stays; one the manifest names goes all the same.
 //! 4. Remove the folders the plan says to remove once empty.
-//! 5. Take the package out of the receipt and add it to `declined_packages`,
+//! 5. With a planned machine cleanup, have the elevated helper remove the
+//!    uninstaller folder and registry entry the package's installer left in
+//!    machine-wide places (see [`super::cleanup`]).
+//! 6. Take the package out of the receipt and add it to `declined_packages`,
 //!    so the next install run doesn't tick it again.
-//! 6. Run the plan's post helpers, such as setting REAPER back to no
+//! 7. Run the plan's post helpers, such as setting REAPER back to no
 //!    language pack.
-//! 7. Remove the plan's entries in Windows' list of installed programs, each
+//! 8. Remove the plan's entries in Windows' list of installed programs, each
 //!    only while it still points into this REAPER.
 //!
-//! When a step up to 5 fails, every file the package moved goes back where it
+//! When a step up to 6 fails, every file the package moved goes back where it
 //! was and the receipt stays as it was: the receipt never claims files that
 //! are gone, and never loses an entry for files that are still there. A
 //! post helper or a registry entry that fails leaves the package removed,
 //! with a problem in the report. Packages removed earlier in the run stay
 //! removed; each can be restored from the backup set on its own.
 //!
+//! A machine cleanup runs only once every file moved, since a backup can't
+//! bring back what it removes. When it finishes and removed anything, the
+//! package counts as removed: a receipt that can't be saved then is a
+//! problem to report, and nothing goes back. A cleanup that fails part way
+//! puts the files back and keeps the receipt entry, even when something is
+//! already gone, and the run goes on; one the helper refuses, or loses
+//! contact during, puts them back and stops the run.
+//!
 //! A package whose vendor's uninstaller removes it (Surge XT, a standard
-//! REAPER) needs administrator rights. Once every check has passed and
-//! before the first change, the run starts one elevated helper for all of
-//! them: the run's only Windows permission prompt. Declined, the whole run
+//! REAPER) needs administrator rights, and so does a planned machine
+//! cleanup (the JAWS scripts). Once every check has passed and before the
+//! first change, the run starts one elevated helper for all of them: the
+//! run's only Windows permission prompt. Declined, the whole run
 //! is cancelled with nothing changed; if the helper can't start, nothing
 //! changes either. When the run reaches such a package, the helper runs its
 //! uninstaller, and the package's status follows what the uninstaller did
@@ -93,6 +105,9 @@ use crate::rollback::{BackupPackageRecord, BackupSetWriter, FileDigest, MoveFile
 use super::admin_batch::{
     AdministratorShell, AdministratorStepRecord, dry_run_administrator_steps,
     run_administrator_batch,
+};
+use super::cleanup::{
+    CleanupOutcome, CleanupResult, CleanupStatus, CleanupTarget, PlannedMachineCleanup,
 };
 use super::helper::{ElevatedHelper, ElevatedRunRequest, ElevatedSession, ElevationStartError};
 use super::macos_objects::{MacosObjects, ObjectProbe, TreeRoute, tree_route};
@@ -750,6 +765,16 @@ impl HelperSession {
         }
     }
 
+    /// Have the helper run the package's machine cleanup. Without a helper,
+    /// which happens only if the run never started one for this package,
+    /// it is answered like a lost one: the files go back and the run stops.
+    fn run_cleanup(&mut self, package_id: &str) -> CleanupOutcome {
+        match &mut self.0 {
+            Some(session) => session.run_cleanup(package_id),
+            None => CleanupOutcome::lost(package_id, "RABBIT's elevated helper isn't running"),
+        }
+    }
+
     fn finish(&mut self) {
         if let Some(session) = self.0.take() {
             session.finish();
@@ -766,11 +791,13 @@ impl Drop for HelperSession {
 /// Whether a package's outcome ends the run: a check stopped it, or its
 /// vendor's uninstaller is still open, can't be followed any more, or took
 /// files it must never take. The next package could collide with an
-/// uninstaller still at work, so it isn't started. On macOS, so does a
-/// package the administrator command left half done, an app macOS may or
-/// may not have moved to the Trash, and a Trash move macOS itself refused:
-/// what refused that would refuse the next package too, and the user has
-/// something to do first.
+/// uninstaller still at work, so it isn't started. A machine cleanup ends
+/// it too when the helper refused it, since something changed after
+/// planning, or when RABBIT lost contact with the helper during it. On
+/// macOS, so does a package the administrator command left half done, an
+/// app macOS may or may not have moved to the Trash, and a Trash move macOS
+/// itself refused: what refused that would refuse the next package too, and
+/// the user has something to do first.
 fn stops_the_run(item: &UninstallReportItem) -> bool {
     item.status == UninstallStatus::Blocked
         || matches!(
@@ -778,6 +805,8 @@ fn stops_the_run(item: &UninstallReportItem) -> bool {
             UninstallMessage::VendorStillOpen { .. }
                 | UninstallMessage::VendorRunFailed { .. }
                 | UninstallMessage::VendorLost { .. }
+                | UninstallMessage::CleanupRefused { .. }
+                | UninstallMessage::CleanupLost { .. }
                 | UninstallMessage::ResourceFolderDamaged { .. }
                 | UninstallMessage::AdministratorStepFailed { .. }
                 | UninstallMessage::TrashUnclear { .. }
@@ -869,7 +898,8 @@ struct RemovalRun<'a> {
     digests: Digests,
     reapack_installed: bool,
     progress: &'a ProgressReporter,
-    /// The elevated helper, for packages a vendor's uninstaller removes.
+    /// The elevated helper, for packages a vendor's uninstaller removes
+    /// and for machine cleanups.
     session: HelperSession,
 }
 
@@ -1132,6 +1162,9 @@ impl RemovalRun<'_> {
         item
     }
 
+    /// Move the package's files into the backup set, then, with a planned
+    /// machine cleanup, have the elevated helper remove the uninstaller
+    /// folder and registry entry, then take the package out of the receipt.
     fn remove_started(&mut self, plan_item: &UninstallPlanItem) -> UninstallReportItem {
         let id = plan_item.package_id.as_str();
         let record = BackupPackageRecord {
@@ -1156,10 +1189,37 @@ impl RemovalRun<'_> {
             &mut self.digests,
             self.reapack_installed,
         );
+        let mut cleanup: Option<CleanupOutcome> = None;
+        let mut receipt_problem = None;
         let mut outcome = removal.remove_files();
         if outcome.is_ok() {
             removal.remove_dirs_if_empty();
-            outcome = save_receipt_without(&mut self.state, &self.plan.resource_path, id);
+            // Only once every file is in the backup set: nothing a backup
+            // can't bring back happens unless all of that worked.
+            if plan_item.machine_cleanup.is_some() {
+                let done = self.session.run_cleanup(id);
+                outcome = cleanup_result(&done);
+                cleanup = Some(done);
+            }
+        }
+        if outcome.is_ok() {
+            if cleanup
+                .as_ref()
+                .is_some_and(CleanupOutcome::removed_anything)
+            {
+                // The folder or the entry is gone for good, so the package
+                // is removed whatever the save does, and the receipt in
+                // memory stays without it: a later package's save then
+                // writes that too, as after a move to the Trash.
+                remove_package_receipt(&mut self.state, id);
+                if let Err(error) = save_install_state(&self.plan.resource_path, &self.state) {
+                    receipt_problem = Some(UninstallProblem::ReceiptNotSaved {
+                        error: error.to_string(),
+                    });
+                }
+            } else {
+                outcome = save_receipt_without(&mut self.state, &self.plan.resource_path, id);
+            }
         }
         if let Err(code) = outcome {
             let (put_back, left_in_backup) = removal.put_everything_back();
@@ -1171,6 +1231,7 @@ impl RemovalRun<'_> {
                 let _ = self.backups.forget_package(id);
             }
             item.left_in_backup = left_in_backup;
+            item.cleanup = cleanup;
             return item;
         }
         let mut item = removal.into_item(
@@ -1179,6 +1240,8 @@ impl RemovalRun<'_> {
                 backup_set_id: None,
             },
         );
+        item.cleanup = cleanup;
+        item.problems.extend(receipt_problem);
         self.run_post_steps(plan_item, &mut item);
         // Only once the receipt no longer claims the package: an entry that
         // can't go is a problem to report, never a reason to put the files
@@ -1429,6 +1492,29 @@ fn clean_registry(
     let (entries, problems) = clean_registry_entries(list, &plan_item.registry_cleanup, remove);
     item.registry_entries.extend(entries);
     item.problems.extend(problems);
+}
+
+/// What a machine cleanup's outcome means for its package: it goes on when
+/// everything that was there is gone, or nothing was; otherwise its files
+/// go back, with the message that says why.
+fn cleanup_result(cleanup: &CleanupOutcome) -> std::result::Result<(), UninstallMessage> {
+    let error = || {
+        cleanup
+            .error
+            .clone()
+            .unwrap_or_else(|| "the helper didn't say why".to_string())
+    };
+    match cleanup.status {
+        CleanupStatus::Removed | CleanupStatus::NothingThere => Ok(()),
+        CleanupStatus::Refused => Err(UninstallMessage::CleanupRefused {
+            refusal: cleanup
+                .refusal
+                .clone()
+                .unwrap_or(VendorRefusal::NotAVendorPlan),
+        }),
+        CleanupStatus::Failed => Err(UninstallMessage::CleanupFailed { error: error() }),
+        CleanupStatus::Lost => Err(UninstallMessage::CleanupLost { error: error() }),
+    }
 }
 
 /// Take `package_id` out of the receipt, remember that the user removed it,
@@ -1901,6 +1987,7 @@ fn new_item_for(
         problems: Vec::new(),
         pending_restart: Vec::new(),
         vendor: None,
+        cleanup: None,
         message: String::new(),
         message_code: code,
     }
@@ -1988,6 +2075,21 @@ pub(super) fn english_message(item: &UninstallReportItem, plan: &UninstallPlan) 
              {error}",
             path.display()
         ),
+        // Only the JAWS scripts' installer adds such files. JAWS may hold
+        // one open, and the program to close would be the user's screen
+        // reader, so this says to wait and try again instead.
+        UninstallMessage::FileInUse { path, error }
+            if plan
+                .item(&item.package_id)
+                .is_some_and(|planned| planned.lists_vendor_added(path)) =>
+        {
+            format!(
+                "JAWS or another program is using {}, so RABBIT couldn't remove {name}. Wait a \
+                 moment, then run RABBIT again; if that doesn't help, restart JAWS first. \
+                 ({error})",
+                path.display()
+            )
+        }
         UninstallMessage::FileInUse { path, error } => format!(
             "{} is in use by another program, so RABBIT couldn't remove {name}. Close that \
              program and try again. ({error})",
@@ -2074,6 +2176,22 @@ pub(super) fn english_message(item: &UninstallReportItem, plan: &UninstallPlan) 
             }
             message
         }
+        UninstallMessage::CleanupRefused { refusal } => format!(
+            "RABBIT checked {name}'s uninstaller folder in Program Files and its registry entry \
+             again and didn't trust what it found ({refusal}), so it removed neither and \
+             stopped there."
+        ),
+        // Part of the folder or the entry may be gone, which no backup
+        // brings back, so this never says everything is back in place.
+        UninstallMessage::CleanupFailed { error } => format!(
+            "RABBIT couldn't remove all of {name}'s uninstaller folder and registry entry \
+             ({error}), so it put back what it had moved."
+        ),
+        UninstallMessage::CleanupLost { error } => format!(
+            "RABBIT lost contact with its helper while it removed {name}'s uninstaller folder \
+             and registry entry ({error}), so it put back what it had moved and stopped there. \
+             Part of that folder or its registry entry may be gone."
+        ),
         UninstallMessage::ElevationDeclined if mac => format!(
             "The administrator password prompt was cancelled, so RABBIT uninstalled nothing; \
              {name} is still installed."
@@ -2218,6 +2336,7 @@ pub(super) fn english_message(item: &UninstallReportItem, plan: &UninstallPlan) 
                 | UninstallMessage::ReceiptSaveFailed { .. }
                 | UninstallMessage::PathRefused { .. }
                 | UninstallMessage::Unreadable { .. }
+                | UninstallMessage::CleanupRefused { .. }
         )
     {
         message.push_str(&format!(" Everything of {name} is back in place."));
@@ -2228,6 +2347,19 @@ pub(super) fn english_message(item: &UninstallReportItem, plan: &UninstallPlan) 
              rabbit restore-backup finds them: {}.",
             path_list(&item.left_in_backup)
         ));
+    }
+    // What the elevated helper removed, or in a dry run would remove, one
+    // sentence per step. A dry run asks no helper; it says what the plan
+    // found.
+    if item.status == UninstallStatus::WouldRemove {
+        if let Some(planned) = plan
+            .item(&item.package_id)
+            .and_then(|planned| planned.machine_cleanup.as_ref())
+        {
+            push_planned_cleanup(&mut message, planned);
+        }
+    } else if let Some(cleanup) = &item.cleanup {
+        push_cleanup_steps(&mut message, cleanup);
     }
     let changed: Vec<PathBuf> = item
         .kept
@@ -2315,6 +2447,62 @@ pub(super) fn english_message(item: &UninstallReportItem, plan: &UninstallPlan) 
         message.push_str(&problem.message());
     }
     message
+}
+
+/// One sentence for each thing a planned machine cleanup would remove, in
+/// the order the helper removes them.
+fn push_planned_cleanup(message: &mut String, planned: &PlannedMachineCleanup) {
+    for file in &planned.files {
+        message.push_str(&format!(
+            " With administrator rights, RABBIT would also remove {}.",
+            file.display()
+        ));
+    }
+    if let Some(folder) = &planned.folder {
+        message.push_str(&format!(
+            " With administrator rights, RABBIT would also remove the folder {} once it is empty.",
+            folder.display()
+        ));
+    }
+    if let Some(key) = &planned.registry_key {
+        message.push_str(&format!(
+            " With administrator rights, RABBIT would also remove the registry entry {key}."
+        ));
+    }
+    message.push_str(" Windows asks for permission first, and a backup can't bring these back.");
+}
+
+/// One sentence for each thing a machine cleanup removed, then what is
+/// still there after one that failed. Something gone already before its
+/// step isn't mentioned, and a step that failed is in the message itself.
+fn push_cleanup_steps(message: &mut String, cleanup: &CleanupOutcome) {
+    for step in &cleanup.steps {
+        if step.result != CleanupResult::Removed {
+            continue;
+        }
+        message.push_str(&match &step.target {
+            CleanupTarget::File { path } => format!(
+                " With administrator rights, RABBIT removed {}.",
+                path.display()
+            ),
+            CleanupTarget::Folder { path } => format!(
+                " With administrator rights, RABBIT removed the folder {}.",
+                path.display()
+            ),
+            CleanupTarget::RegistryKey { key } => {
+                format!(" With administrator rights, RABBIT removed the registry entry {key}.")
+            }
+        });
+    }
+    if cleanup.removed_anything() {
+        message.push_str(" A backup can't bring these back.");
+    }
+    if cleanup.status == CleanupStatus::Failed && !cleanup.still_present.is_empty() {
+        message.push_str(&format!(
+            " Still there: {}.",
+            cleanup.still_present.join(", ")
+        ));
+    }
 }
 
 fn path_list(paths: &[PathBuf]) -> String {

@@ -1,8 +1,9 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::artifact::ArtifactKind;
 use crate::model::Platform;
 
+use super::install_problem::{InstallerExitMeaning, inno_setup_exit_meaning};
 use super::{
     PackageAutomationSupport, PlannedAutomationKind, PlannedExecutionKind, PlannedExecutionOverride,
 };
@@ -16,10 +17,15 @@ pub(super) const TITLE: &str = "Surge XT";
 /// loose suffix match is unambiguous.
 const MACOS_PKG_SUFFIX: &str = ".pkg";
 
+/// How the log of Surge XT's Windows installer starts its name in RABBIT's
+/// logs folder; see [`crate::report::installer_log_path`].
+pub(super) const INSTALLER_LOG_NAME: &str = "surge-xt-installer";
+
 /// Surge XT-specific automation routing. Both upstream artifacts ship
-/// vendor installers we run under elevation:
-/// - Windows: Inno Setup `setup.exe` (silent flags below).
-/// - macOS: distribution `.pkg` wrapped in a `.dmg`, executed by
+/// vendor installers that need administrator rights:
+/// - Windows: Inno Setup `setup.exe` (silent flags below). RABBIT starts it
+///   without elevation, and Inno raises the permission prompt itself.
+/// - macOS: distribution `.pkg` wrapped in a `.dmg`, executed elevated by
 ///   `/usr/sbin/installer` via [`run_pkg_installer_from_disk_image`].
 pub(super) fn automation_support_for(
     kind: ArtifactKind,
@@ -36,9 +42,39 @@ pub(super) fn automation_support_for(
     }
 }
 
-pub(super) fn installer_arguments(kind: ArtifactKind, platform: Platform) -> Option<Vec<String>> {
+pub(super) fn installer_arguments(
+    kind: ArtifactKind,
+    platform: Platform,
+    installer_log: Option<&Path>,
+) -> Option<Vec<String>> {
     match (kind, platform) {
-        (ArtifactKind::Installer, Platform::Windows) => Some(surge_xt_inno_setup_arguments()),
+        (ArtifactKind::Installer, Platform::Windows) => {
+            Some(surge_xt_inno_setup_arguments(installer_log))
+        }
+        _ => None,
+    }
+}
+
+/// Whether Surge XT's installer here is Inno Setup's `setup.exe`, on
+/// Windows. It writes the log `/LOG=` asks for, and it rolls back before it
+/// ends with a code other than 0, so that code is final. The macOS `.pkg`
+/// does neither.
+pub(super) fn runs_inno_setup(kind: ArtifactKind, platform: Platform) -> bool {
+    matches!(
+        (kind, platform),
+        (ArtifactKind::Installer, Platform::Windows)
+    )
+}
+
+/// What an exit code of Surge XT's installer means, for the codes Inno
+/// Setup documents and a user can act on.
+pub(super) fn exit_meaning(
+    kind: ArtifactKind,
+    platform: Platform,
+    exit_code: i32,
+) -> Option<InstallerExitMeaning> {
+    match (kind, platform) {
+        (ArtifactKind::Installer, Platform::Windows) => inno_setup_exit_meaning(exit_code),
         _ => None,
     }
 }
@@ -49,19 +85,40 @@ pub(super) fn installer_arguments(kind: ArtifactKind, platform: Platform) -> Opt
 /// Standalone + Effects variants + Data + Patches + Wavetables), and
 /// `/ALLUSERS` forces the per-machine install scope the package ships
 /// with by default (`{commoncf64}\VST3\…` and `{commonappdata}\Surge XT`).
-/// `/CLOSEAPPLICATIONS` plus `/RESTARTAPPLICATIONS` lets the installer
-/// shut down a running standalone Surge XT gracefully before replacing
-/// the binary instead of returning an error.
-fn surge_xt_inno_setup_arguments() -> Vec<String> {
-    vec![
+///
+/// `/NOCLOSEAPPLICATIONS` stops Inno Setup from asking Windows' Restart
+/// Manager to close programs. Inno registers every file it would install
+/// that matches Surge's `CloseApplicationsFilter` (`*.exe,*.vst3,*.ttf`),
+/// including the six fonts in `C:\Windows\Fonts` that Surge's uninstaller
+/// leaves behind and `onlyifdoesntexist` never replaces. When a program had
+/// one of those fonts open and refused to close, Inno asked whether to
+/// abort, `/SUPPRESSMSGBOXES` answered Abort, and setup ended with exit code
+/// 5 having installed nothing. Closing programs could also close the user's
+/// screen reader. A running Surge XT is caught before the installer starts
+/// instead, from the manifest's `blocking_programs`.
+///
+/// `/LOG=<path>` has Inno write its log next to RABBIT's reports, so a
+/// failure can be looked into. The argument carries no quotes of its own:
+/// `Command` on Windows and the elevated start's parameter string both put
+/// an argument with a space in quotes, and Inno's parameter parser drops
+/// quotes wherever they are, so a path with spaces arrives whole. Quotes
+/// written into the argument would reach Inno escaped with backslashes,
+/// which it keeps. RABBIT starts this installer with `Command` today; Inno
+/// raises the permission prompt itself and hands its command line on to the
+/// elevated copy unchanged. Declining that prompt ends it with code 2.
+fn surge_xt_inno_setup_arguments(installer_log: Option<&Path>) -> Vec<String> {
+    let mut arguments = vec![
         "/VERYSILENT".to_string(),
         "/SUPPRESSMSGBOXES".to_string(),
         "/NORESTART".to_string(),
-        "/CLOSEAPPLICATIONS".to_string(),
-        "/RESTARTAPPLICATIONS".to_string(),
+        "/NOCLOSEAPPLICATIONS".to_string(),
         "/TYPE=full".to_string(),
         "/ALLUSERS".to_string(),
-    ]
+    ];
+    if let Some(log) = installer_log {
+        arguments.push(format!("/LOG={}", log.display()));
+    }
+    arguments
 }
 
 pub(super) fn planned_execution_override(

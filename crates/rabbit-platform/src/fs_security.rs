@@ -130,6 +130,14 @@ pub fn machine_program_files_dirs() -> io::Result<Vec<PathBuf>> {
     Ok(folders)
 }
 
+/// `C:\Program Files (x86)` as Windows names it
+/// (`FOLDERID_ProgramFilesX86`), read like [`machine_program_files_dirs`]:
+/// the one folder 32-bit installers write to on 64-bit Windows, never the
+/// native one.
+pub fn machine_program_files_x86_dir() -> io::Result<PathBuf> {
+    imp::known_folder(imp::KnownFolder::ProgramFilesX86)
+}
+
 /// `C:\Program Files\Common Files` as Windows names it
 /// (`FOLDERID_ProgramFilesCommon`), read like
 /// [`machine_program_files_dirs`].
@@ -603,6 +611,7 @@ mod tests {
             create_admin_only_directory(scratch.path(), "rabbit").unwrap_err(),
             program_data_dir().unwrap_err(),
             machine_program_files_dirs().unwrap_err(),
+            machine_program_files_x86_dir().unwrap_err(),
             machine_common_program_files_dir().unwrap_err(),
             file_owner_sid(&file).unwrap_err(),
             LockedFile::open(&file).unwrap_err(),
@@ -714,6 +723,7 @@ mod windows_tests {
     fn machine_folders() -> Vec<String> {
         let mut folders = vec![program_data_dir().unwrap()];
         folders.extend(machine_program_files_dirs().unwrap());
+        folders.push(machine_program_files_x86_dir().unwrap());
         folders.push(machine_common_program_files_dir().unwrap());
         folders
             .iter()
@@ -814,6 +824,29 @@ mod windows_tests {
             common.display()
         );
         same(&common, "CommonProgramW6432");
+    }
+
+    /// RABBIT is built for 64-bit Windows only, where this is
+    /// `C:\Program Files (x86)`, apart from the native folder.
+    #[test]
+    fn the_32_bit_program_files_is_a_known_folder() {
+        let x86 = machine_program_files_x86_dir().unwrap();
+        assert!(x86.is_absolute() && x86.is_dir(), "{}", x86.display());
+        if let Some(from_environment) = std::env::var_os("ProgramFiles(x86)") {
+            assert!(
+                x86.as_os_str().eq_ignore_ascii_case(&from_environment),
+                "{} vs {}",
+                x86.display(),
+                Path::new(&from_environment).display()
+            );
+        }
+        let program_files = machine_program_files_dirs().unwrap();
+        assert_eq!(program_files.get(1), Some(&x86), "{program_files:?}");
+        assert!(
+            !program_files[0]
+                .as_os_str()
+                .eq_ignore_ascii_case(x86.as_os_str())
+        );
     }
 
     #[test]

@@ -240,7 +240,12 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
         let localized_message = localizer
             .as_ref()
             .map(|localizer| {
-                localized_package_operation_message(localizer, &item.message_code, &item.message)
+                localized_package_operation_message(
+                    localizer,
+                    &item.message_code,
+                    &package_name,
+                    &item.message,
+                )
             })
             .unwrap_or_else(|| item.message.clone());
         detail_lines.push(format_localized_message(

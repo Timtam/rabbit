@@ -27,6 +27,7 @@ fn package_operation_messages_localize_into_german() {
     let extension = localized_package_operation_message(
         &de,
         &Msg::ExtensionBinaryInstalled,
+        "OSARA",
         "Single extension binary handled by RABBIT installer.",
     );
     assert!(
@@ -39,6 +40,7 @@ fn package_operation_messages_localize_into_german() {
             installed_version: "8.1.1".to_string(),
             available_version: "8.0".to_string(),
         },
+        "OSARA",
         "Installed version 8.1.1 is current or newer than available version 8.0.",
     );
     assert!(
@@ -50,6 +52,7 @@ fn package_operation_messages_localize_into_german() {
         &Msg::DryRunWouldRunUnattended {
             artifact_kind: rabbit_core::artifact::ArtifactKind::Installer,
         },
+        "OSARA",
         "Dry run: RABBIT would download and run this vendor installer unattended.",
     );
     assert!(

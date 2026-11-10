@@ -20,7 +20,8 @@ use rabbit_core::operation::{
 };
 use rabbit_core::osara_keymap::{OsaraKeymapDefault, OsaraKeymapState, osara_keymap_default};
 use rabbit_core::package::uninstall::{
-    UninstallBackup, UninstallElevation, UninstallPlanSpec, UninstallSpec, UninstallStrategy,
+    MachineCleanupRegistry, RegistryHive, RegistryViewSpec, UninstallBackup, UninstallElevation,
+    UninstallPlanSpec, UninstallSpec, UninstallStrategy,
 };
 use rabbit_core::package::{PACKAGE_OSARA, PackageChannels, STABLE_CHANNEL, remembered_channels};
 use rabbit_core::package::{
@@ -50,12 +51,13 @@ use rabbit_core::self_update::{
 use rabbit_core::setup::{SetupOptions, SetupReport, execute_setup_operation};
 use rabbit_core::uninstall::{
     APP_MANAGEMENT_HINT, AdministratorStepKind, AdministratorStepRecord, ByHandReason,
-    KeptFileReason, KeptReason, LeftoverKind, LeftoverResult, RegistryEntryAction, Removability,
-    RemovalReason, RemovalRoute, SystemMacosObjects, SystemVendorLookup, UninstallMessage,
-    UninstallNote, UninstallPlan, UninstallPlanItem, UninstallReport, UninstallReportItem,
-    UninstallRequest, UninstallServices, UninstallStatus, UninstallWarning, execute_uninstall,
-    plan_uninstall_at,
+    CleanupOutcome, CleanupResult, CleanupTarget, KeptFileReason, KeptReason, LeftoverKind,
+    LeftoverResult, RegistryEntryAction, Removability, RemovalReason, RemovalRoute,
+    SystemMacosObjects, SystemVendorLookup, UninstallMessage, UninstallNote, UninstallPlan,
+    UninstallPlanItem, UninstallReport, UninstallReportItem, UninstallRequest, UninstallServices,
+    UninstallStatus, UninstallWarning, execute_uninstall, plan_uninstall_at,
 };
+use rabbit_platform::{RegistryView, UninstallViews};
 use serde::Serialize;
 
 #[derive(Debug, Parser)]
@@ -661,9 +663,13 @@ Removed files move into a backup set. `rabbit restore-backup --backup-id <id> \
 --package <id> --apply` brings one package back.
 
 On Windows, Surge XT and a standard REAPER are removed by their own \
-uninstallers, which need administrator rights. Windows asks for permission \
-once per run, before anything changes; if you don't allow it, nothing is \
-uninstalled. A backup can't bring back what their uninstallers remove.
+uninstallers, which need administrator rights. The JAWS scripts need them \
+too: their files move into the backup set, then RABBIT removes the \
+uninstaller folder their installer left in Program Files (x86), and its \
+registry entry, when they are there. Windows asks for permission once per \
+run, before anything changes; if you don't allow it, nothing is \
+uninstalled. A backup can't bring back what those uninstallers remove, nor \
+that folder and registry entry.
 
 On macOS, Surge XT is deleted for good with administrator rights: macOS asks \
 once per run for an administrator's name and password, before anything \
@@ -2284,9 +2290,16 @@ fn uninstall_ability_text(item: &UninstallPlanItem) -> String {
             RemovalRoute::Trash => {
                 format!("yes, to the Trash, with rabbit uninstall --package {id}")
             }
+            // The files go into the backup set; the elevated helper then
+            // removes the uninstaller folder and registry entry.
+            RemovalRoute::BackupSet if item.machine_cleanup.is_some() => {
+                format!("yes, with rabbit uninstall --package {id}; Windows asks for permission")
+            }
             RemovalRoute::BackupSet => format!("yes, with rabbit uninstall --package {id}"),
         },
-        Removability::Manual { .. } => {
+        Removability::Manual { .. }
+        | Removability::CleanupNotTrusted { .. }
+        | Removability::NoFilesForThisAccount { .. } => {
             format!("by hand only; rabbit uninstall --package {id} says how")
         }
         // An app that may not be the package at all isn't one to move to
@@ -2770,6 +2783,7 @@ fn validate_reaper_language(
 }
 
 fn print_package_operation_report(report: &PackageOperationReport) {
+    let localizer = cli_localizer();
     println!("Resource path: {}", report.resource_path.display());
     println!("Dry run: {}", yes_no(report.dry_run));
     if let Some(install_report) = &report.install_report {
@@ -2789,7 +2803,10 @@ fn print_package_operation_report(report: &PackageOperationReport) {
         println!("  Kind: {:?}", item.artifact.kind);
         println!("  Version: {}", item.artifact.version);
         println!("  URL: {}", item.artifact.url);
-        println!("  Message: {}", item.message);
+        println!(
+            "  Message: {}",
+            package_operation_message(item, localizer.as_ref())
+        );
         for path in &item.backup_paths {
             println!("  Backup file: {}", path.display());
         }
@@ -2834,6 +2851,39 @@ fn print_package_operation_report(report: &PackageOperationReport) {
     }
 }
 
+/// What the CLI says about a package's result. A vendor installer's exit
+/// code, and the programs to close before an installer can run, are said in
+/// the user's language, as on the wizard's Done page: they tell the user
+/// what to do. Everything else is the report's English text.
+fn package_operation_message(item: &PackageOperationItem, localizer: Option<&Localizer>) -> String {
+    localizer
+        .and_then(|localizer| {
+            let package = localized_package_name(localizer, item);
+            rabbit_core::operation::localized_install_problem(
+                localizer,
+                &item.message_code,
+                &package,
+            )
+        })
+        .unwrap_or_else(|| item.message.clone())
+}
+
+/// The item's package by its name in the localizer's language, or by the
+/// manifest's name when the locale has none.
+fn localized_package_name(localizer: &Localizer, item: &PackageOperationItem) -> String {
+    rabbit_core::package::package_specs_by_id(item.artifact.platform)
+        .remove(&item.package_id)
+        .map(|spec| {
+            let name = localizer.text(&spec.display_name_key);
+            if name.missing {
+                spec.display_name
+            } else {
+                name.value
+            }
+        })
+        .unwrap_or_else(|| item.package_id.clone())
+}
+
 fn print_setup_report(report: &SetupReport) {
     println!("Setup resource path: {}", report.resource_path.display());
     println!("Dry run: {}", yes_no(report.dry_run));
@@ -2847,10 +2897,11 @@ fn print_setup_report(report: &SetupReport) {
 
 /// The embedded translations in the user's language (RABBIT_LOCALE, the
 /// system's, en-US as the fallback), for the text that comes from the
-/// package manifests: descriptions, uninstall notes and instructions. The
-/// CLI's own text stays English. Falling back to the default keeps the
-/// output usable even on hosts where a Fluent file is missing; with no
-/// locale at all, the keys are shown.
+/// package manifests: descriptions, uninstall notes and instructions; and
+/// for what to do about a vendor installer's exit code or programs that
+/// must be closed. The CLI's own text stays English. Falling back to the
+/// default keeps the output usable even on hosts where a Fluent file is
+/// missing; with no locale at all, the keys are shown.
 fn cli_localizer() -> Option<Localizer> {
     Localizer::embedded(&resolve_runtime_locale())
         .or_else(|_| Localizer::embedded(DEFAULT_LOCALE))
@@ -2963,6 +3014,15 @@ fn describe_uninstall_plan(plan: &UninstallPlanSpec, localizer: Option<&Localize
     if plan.strategy == UninstallStrategy::RemoveFiles || plan.backup != UninstallBackup::Move {
         details.push(format!("backup {}", serialized_name(&plan.backup)));
     }
+    // The plan's own elevation stays `never`: only the elevated helper's
+    // cleanup of the uninstaller folder and registry entry needs the rights.
+    if let Some(cleanup) = &plan.machine_cleanup {
+        details.push(format!(
+            "administrator cleanup of {} and {}",
+            cleanup.dir.as_str(),
+            cleanup_registry_key(&cleanup.registry)
+        ));
+    }
     if !details.is_empty() {
         line.push_str(&format!(" ({})", details.join(", ")));
     }
@@ -2979,6 +3039,21 @@ fn describe_uninstall_plan(plan: &UninstallPlanSpec, localizer: Option<&Localize
         }
     }
     line
+}
+
+/// The registry entry a machine cleanup removes, as regedit names it, from
+/// the manifest alone: nothing reads the registry for a listing.
+fn cleanup_registry_key(registry: &MachineCleanupRegistry) -> String {
+    let views = match registry.hive {
+        RegistryHive::Hklm => UninstallViews::local_machine(),
+        RegistryHive::Hkcu => {
+            UninstallViews::current_user_at(r"Software\Microsoft\Windows\CurrentVersion\Uninstall")
+        }
+    };
+    let view = match registry.view {
+        RegistryViewSpec::Bit32 => RegistryView::Bit32,
+    };
+    views.display_key(&registry.key, view)
 }
 
 fn serialized_name<T: Serialize + ?Sized>(value: &T) -> String {
@@ -3344,9 +3419,7 @@ fn write_uninstall_item(
         match removability {
             Removability::Manual { note_key } => {
                 let _ = writeln!(out, "{name}: can't uninstall automatically.");
-                for line in localized_text(localizer, note_key).lines() {
-                    let _ = writeln!(out, "  {line}");
-                }
+                write_indented(out, &localized_text(localizer, note_key));
                 return;
             }
             Removability::NotSupported { note_key } => {
@@ -3369,6 +3442,13 @@ fn write_uninstall_item(
         .filter(|step| step.package_id.as_deref() == Some(item.package_id.as_str()))
         .collect();
     let leftovers = item.status == UninstallStatus::RemovedWithLeftovers;
+    // What the elevated helper removes once the files are in the backup
+    // set: the uninstaller folder and registry entry the installer left.
+    let cleanup = plan.and_then(|plan| plan.machine_cleanup.as_ref());
+    let cleaned_up = item
+        .cleanup
+        .as_ref()
+        .is_some_and(CleanupOutcome::removed_anything);
     let heading = match item.status {
         UninstallStatus::WouldRemove if vendor.is_some() => {
             "will uninstall. Its own uninstaller removes it, with administrator rights; a backup \
@@ -3411,6 +3491,38 @@ fn write_uninstall_item(
                 "removed with administrator rights. A backup can't bring it back.".to_string()
             }
         }
+        UninstallStatus::Removed | UninstallStatus::RemovedWithLeftovers if cleaned_up => {
+            let mut heading = if leftovers {
+                "removed, but RABBIT still finds some of it.".to_string()
+            } else {
+                "removed.".to_string()
+            };
+            heading.push_str(
+                if item.removed.iter().any(|file| file.backup_path.is_some()) {
+                    " Its files are in the backup set; its uninstaller folder and registry entry \
+                     were removed with administrator rights, which a backup can't bring back."
+                } else {
+                    " Its uninstaller folder and registry entry were removed with administrator \
+                     rights, which a backup can't bring back."
+                },
+            );
+            heading
+        }
+        // The files go into the backup set first; only then does the
+        // elevated helper remove the uninstaller folder and registry entry.
+        UninstallStatus::WouldRemove
+            if cleanup.is_some() && plan.is_some_and(|plan| !plan.files.is_empty()) =>
+        {
+            "will uninstall. RABBIT moves its files into a backup set, then removes its \
+             uninstaller folder and registry entry with administrator rights, after a \
+             permission prompt; a backup can't bring those two back."
+                .to_string()
+        }
+        UninstallStatus::WouldRemove if cleanup.is_some() => {
+            "will uninstall. RABBIT removes its uninstaller folder and registry entry with \
+             administrator rights, after a permission prompt; a backup can't bring them back."
+                .to_string()
+        }
         UninstallStatus::WouldRemove => format!(
             "will uninstall. RABBIT moves its files into a backup set; {}.",
             if plan.is_some_and(|plan| plan.requires_elevation) {
@@ -3449,14 +3561,23 @@ fn write_uninstall_item(
         UninstallStatus::NotReached => format!("not reached. {}", cli_item_message(item)),
     };
     let _ = writeln!(out, "{name}: {heading}");
+    if let UninstallMessage::NotRemovable { removability } = &item.message_code {
+        write_by_hand_steps(out, removability, plan, localizer);
+    }
     let would = item.status == UninstallStatus::WouldRemove;
     if !would && !item.status.is_removed() {
         return;
     }
 
     let shown = |path: &Path| display_path(&report.resource_path, path);
+    // Text over several lines, such as steps to do by hand, keeps its
+    // lines, each indented under the first.
     let detail = |out: &mut String, label: &str, text: &str| {
-        let _ = writeln!(out, "  {label:<8} {text}");
+        let mut lines = text.lines();
+        let _ = writeln!(out, "  {label:<8} {}", lines.next().unwrap_or_default());
+        for line in lines {
+            let _ = writeln!(out, "  {:<8} {line}", "");
+        }
     };
     if let Some(vendor) = vendor.filter(|_| would) {
         let mut command = vendor.uninstaller.display().to_string();
@@ -3550,6 +3671,43 @@ fn write_uninstall_item(
     }
     for dir in &item.removed_dirs {
         detail(out, "removed", &format!("{} (an empty folder)", shown(dir)));
+    }
+    // What the elevated helper would remove once the files are in the
+    // backup set, as the plan found it (a dry run asks no helper), or what
+    // it removed. A cleanup that left anything failed, and with it the
+    // package, whose heading already says what is still there.
+    if would {
+        if let Some(cleanup) = cleanup {
+            for file in &cleanup.files {
+                detail(out, "admin", &shown(file));
+            }
+            if let Some(folder) = &cleanup.folder {
+                detail(
+                    out,
+                    "admin",
+                    &format!("{} (once it is empty)", shown(folder)),
+                );
+            }
+            if let Some(key) = &cleanup.registry_key {
+                detail(out, "admin", &format!("{key} (its registry entry)"));
+            }
+        }
+    } else if let Some(outcome) = &item.cleanup {
+        for step in outcome
+            .steps
+            .iter()
+            .filter(|step| step.result == CleanupResult::Removed)
+        {
+            let text = match &step.target {
+                CleanupTarget::File { path } | CleanupTarget::Folder { path } => {
+                    format!("{} (with administrator rights)", shown(path))
+                }
+                CleanupTarget::RegistryKey { key } => {
+                    format!("{key} (its registry entry, with administrator rights)")
+                }
+            };
+            detail(out, "removed", &text);
+        }
     }
     let keep = if would { "keep" } else { "kept" };
     for kept in &item.kept {
@@ -3662,6 +3820,41 @@ fn write_uninstall_item(
     }
 }
 
+/// `text` line by line, each line indented two spaces, as a manual plan's
+/// instructions are.
+fn write_indented(out: &mut String, text: &str) {
+    for line in text.lines() {
+        let _ = writeln!(out, "  {line}");
+    }
+}
+
+/// The steps to remove a package by hand, below the heading that says why
+/// RABBIT leaves it alone: the manifest's, when RABBIT won't touch the
+/// uninstaller folder and registry entry its installer left, and those a
+/// standard plan lends a portable target as a note. Nothing for any other
+/// reason.
+fn write_by_hand_steps(
+    out: &mut String,
+    removability: &Removability,
+    plan: Option<&UninstallPlanItem>,
+    localizer: Option<&Localizer>,
+) {
+    match removability {
+        Removability::CleanupNotTrusted { by_hand_key, .. }
+        | Removability::NoFilesForThisAccount { by_hand_key } => {
+            write_indented(out, &localized_text(localizer, by_hand_key));
+        }
+        Removability::NeedsStandardTarget => {
+            for note in plan.into_iter().flat_map(|plan| &plan.notes) {
+                if let UninstallNote::Manifest { note_key } = note {
+                    write_indented(out, &localized_text(localizer, note_key));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// `path` relative to the resource folder when it is inside it, the way the
 /// user knows it from REAPER; anything else in full.
 fn display_path(resource: &Path, path: &Path) -> String {
@@ -3691,6 +3884,10 @@ fn kept_reason_text(reason: KeptReason) -> &'static str {
             "RABBIT's receipt lists it, but it is outside the REAPER folder and the package \
              doesn't name it"
         }
+        KeptReason::ThereBeforeInstall => {
+            "it was already there when RABBIT ran the package's installer"
+        }
+        KeptReason::RecordUnclear => "RABBIT's records of it disagree",
     }
 }
 
@@ -3741,7 +3938,13 @@ fn uninstall_note_text(note: &UninstallNote, name: &str, localizer: Option<&Loca
                  removes it; ReaPack's records stay."
             )
         }
-        UninstallNote::Manifest { note_key } => localized_text(localizer, note_key),
+        UninstallNote::Manifest { note_key } | UninstallNote::VendorFilesByHand { note_key } => {
+            localized_text(localizer, note_key)
+        }
+        UninstallNote::NoVendorRecord => format!(
+            "RABBIT has no record of which files {name}'s installer added outside REAPER's \
+             folder, so all of those stay."
+        ),
     }
 }
 
@@ -4675,12 +4878,12 @@ mod tests {
         );
         // Manual instructions keep their lines, indented under the plan's.
         let manual = plan(
-            r#"{ "platform": "windows", "strategy": "manual",
-                 "note_key": "uninstall-manual-jaws-scripts" }"#,
+            r#"{ "platform": "windows", "target": "portable", "strategy": "manual",
+                 "note_key": "uninstall-manual-reaper-portable" }"#,
         );
         let described = super::describe_uninstall_plan(&manual, Some(&english));
         let lines: Vec<&str> = described.lines().collect();
-        assert!(lines[0].starts_with("manual: RABBIT can't remove the JAWS scripts yet."));
+        assert!(lines[0].starts_with("manual: RABBIT doesn't remove a portable REAPER:"));
         assert_eq!(lines[1], "      1. Close REAPER.");
         assert!(lines.len() > 3);
         assert!(lines[1..].iter().all(|line| line.starts_with("      ")));
@@ -4837,6 +5040,12 @@ mod tests {
     /// is the user's to remove by hand. On macOS its app could go to the
     /// Trash, but these runs read nothing about macOS apps, so RABBIT can't
     /// check who may move it and leaves it to Finder.
+    ///
+    /// The engine reads this computer's own detection and folders, which
+    /// find the JAWS scripts wherever they are really installed. So every
+    /// run here goes through [`FakeReaper::report`], which keeps it on a
+    /// portable target, where nothing of theirs can be planned, and never
+    /// asks for them.
     struct FakeReaper {
         _dir: tempfile::TempDir,
         resource: PathBuf,
@@ -4874,17 +5083,42 @@ mod tests {
                 remove_settings: false,
                 dry_run: !apply,
                 target_app_path: None,
-                target: None,
+                target: Some(InstallationKind::Portable),
             }
         }
 
         fn run(&self, ids: &[&str], apply: bool) -> rabbit_core::uninstall::UninstallReport {
-            super::uninstall_report(
+            self.report(
                 &self.request(ids, apply),
                 &rabbit_core::uninstall::UninstallServices::without_elevation(),
                 &rabbit_core::cancel::CancelToken::new(),
             )
             .unwrap()
+        }
+
+        /// The CLI's report for `request` on this folder, refused before the
+        /// engine runs unless the request names a portable target and leaves
+        /// out the JAWS scripts, and checked to have been planned for a
+        /// portable one.
+        fn report(
+            &self,
+            request: &rabbit_core::uninstall::UninstallRequest,
+            services: &rabbit_core::uninstall::UninstallServices<'_>,
+            cancel: &rabbit_core::cancel::CancelToken,
+        ) -> Result<rabbit_core::uninstall::UninstallReport, Box<dyn std::error::Error>> {
+            assert_eq!(request.resource_path, self.resource);
+            assert_eq!(request.target, Some(InstallationKind::Portable));
+            assert!(
+                !request
+                    .package_ids
+                    .iter()
+                    .any(|id| id == rabbit_core::package::PACKAGE_JAWS_SCRIPTS),
+                "{:?}",
+                request.package_ids
+            );
+            let report = super::uninstall_report(request, services, cancel)?;
+            assert_eq!(report.target, InstallationKind::Portable);
+            Ok(report)
         }
 
         fn receipt(&self) -> rabbit_core::receipt::InstallState {
@@ -4935,12 +5169,13 @@ mod tests {
         std::fs::write(&reaper.sws, b"SWS again").unwrap();
         let cancel = rabbit_core::cancel::CancelToken::new();
         cancel.cancel();
-        let stopped = super::uninstall_report(
-            &reaper.request(&["sws"], true),
-            &rabbit_core::uninstall::UninstallServices::without_elevation(),
-            &cancel,
-        )
-        .unwrap();
+        let stopped = reaper
+            .report(
+                &reaper.request(&["sws"], true),
+                &rabbit_core::uninstall::UninstallServices::without_elevation(),
+                &cancel,
+            )
+            .unwrap();
         assert_eq!(super::uninstall_exit_code(&stopped), 1);
         assert!(reaper.sws.is_file());
     }
@@ -5094,10 +5329,28 @@ mod tests {
     }
 
     /// Finds every vendor's uninstaller at one fixture path, as if HKLM
-    /// listed it and every check passed. Nothing reads the registry. Only
-    /// Windows has packages a vendor's uninstaller removes.
+    /// listed it and every check passed, and answers every machine cleanup
+    /// with `cleanup`. Nothing reads the registry. Only Windows has packages
+    /// a vendor's uninstaller or a machine cleanup removes.
     #[cfg(windows)]
-    struct FoundIt(PathBuf);
+    struct FoundIt {
+        uninstaller: PathBuf,
+        cleanup: Result<
+            Option<rabbit_core::uninstall::PlannedMachineCleanup>,
+            rabbit_core::uninstall::VendorRefusal,
+        >,
+    }
+
+    #[cfg(windows)]
+    impl FoundIt {
+        /// No machine cleanup's folder or registry entry there.
+        fn new(uninstaller: PathBuf) -> Self {
+            Self {
+                uninstaller,
+                cleanup: Ok(None),
+            }
+        }
+    }
 
     #[cfg(windows)]
     impl rabbit_core::uninstall::VendorLookup for FoundIt {
@@ -5105,50 +5358,87 @@ mod tests {
             &self,
             _job: &rabbit_core::uninstall::VendorJob<'_>,
         ) -> Result<PathBuf, rabbit_core::uninstall::VendorRefusal> {
-            Ok(self.0.clone())
+            Ok(self.uninstaller.clone())
+        }
+
+        fn machine_cleanup(
+            &self,
+            _job: &rabbit_core::uninstall::CleanupJob<'_>,
+        ) -> Result<
+            Option<rabbit_core::uninstall::PlannedMachineCleanup>,
+            rabbit_core::uninstall::VendorRefusal,
+        > {
+            self.cleanup.clone()
         }
     }
 
-    /// A dry run of REAPER on a fake standard REAPER whose uninstaller the
+    /// A report on REAPER for a fake standard REAPER whose uninstaller the
     /// lookup finds, with REAPER's item set to `status` and `code` the way a
-    /// run would leave it. The engine itself is tested in rabbit-core; this
-    /// is about what the CLI makes of a report. No helper can start: the run
-    /// is a dry run, and its helper refuses anyway.
+    /// run would leave it; it is a dry run's when `status` says REAPER would
+    /// go. REAPER's plan is the shipped one, built on temporary folders
+    /// alone rather than by the engine, which reads this computer's own
+    /// detection and folders and so finds the JAWS scripts wherever they are
+    /// really installed. The engine is tested in rabbit-core; this is about
+    /// what the CLI makes of a report.
     #[cfg(windows)]
     fn reaper_report(
         status: rabbit_core::uninstall::UninstallStatus,
         code: rabbit_core::uninstall::UninstallMessage,
         message: &str,
     ) -> (FakeReaper, rabbit_core::uninstall::UninstallReport) {
+        use rabbit_core::model::{ComponentDetection, Platform};
+        use rabbit_core::package::{PACKAGE_REAPER, builtin_package_specs};
         use rabbit_core::uninstall::{
-            NoAdministratorShell, NoElevatedHelper, NoMacosObjects, UninstallServices,
+            NoMacosObjects, UninstallPlanInput, UninstallReport, UninstallRoots, UninstallStatus,
+            build_uninstall_plan,
         };
 
         let reaper = FakeReaper::new();
-        let app = reaper.resource.join("reaper.exe");
-        let lookup = FoundIt(reaper.resource.join("Uninstall.exe"));
-        let mut report = super::uninstall_report(
-            &rabbit_core::uninstall::UninstallRequest {
-                target_app_path: Some(app),
-                target: Some(InstallationKind::Standard),
-                ..reaper.request(&["reaper"], false)
-            },
-            &UninstallServices {
-                vendor_lookup: &lookup,
-                elevated_helper: &NoElevatedHelper,
-                installed_programs: None,
-                macos_objects: &NoMacosObjects,
-                administrator_shell: &NoAdministratorShell,
-            },
-            &rabbit_core::cancel::CancelToken::new(),
-        )
-        .unwrap();
-        // Whatever this computer runs right now, the item reads as asked.
-        report.dry_run = status == rabbit_core::uninstall::UninstallStatus::WouldRemove;
-        let item = &mut report.items[0];
-        item.status = status;
-        item.message_code = code;
-        item.message = message.to_string();
+        // Every folder a plan could name outside the fake REAPER is a
+        // temporary one beside it, and REAPER is the one package detected.
+        let outside = reaper.resource.parent().unwrap();
+        let roots = UninstallRoots {
+            app_path: Some(reaper.resource.join("reaper.exe")),
+            app_dir: Some(reaper.resource.clone()),
+            appdata: Some(outside.join("Roaming")),
+            localappdata: Some(outside.join("Local")),
+            clap_dir: Some(outside.join("CLAP")),
+            common_program_files: Some(outside.join("Common Files")),
+            program_files: vec![outside.join("Program Files")],
+            program_files_x86: Some(outside.join("Program Files (x86)")),
+            program_data: Some(outside.join("ProgramData")),
+            documents: Some(outside.join("Documents")),
+            system_root: outside.join("system"),
+            ..UninstallRoots::new(&reaper.resource)
+        };
+        let detections = [ComponentDetection {
+            installed: true,
+            ..ComponentDetection::not_installed(PACKAGE_REAPER, "REAPER")
+        }];
+        let mut plan = build_uninstall_plan(&UninstallPlanInput {
+            roots: &roots,
+            platform: Platform::Windows,
+            target: InstallationKind::Standard,
+            specs: &builtin_package_specs(Platform::Windows),
+            detections: &detections,
+            state: None,
+            remove_settings: false,
+            vendor_lookup: &FoundIt::new(reaper.resource.join("Uninstall.exe")),
+            objects: &NoMacosObjects,
+        });
+        plan.items.retain(|item| item.package_id == PACKAGE_REAPER);
+        let item = mac_report_item(&plan.items[0], status, code, message);
+        let report = UninstallReport {
+            resource_path: reaper.resource.clone(),
+            backup_set_id: None,
+            plan,
+            ..win_report(
+                status == UninstallStatus::WouldRemove,
+                InstallationKind::Standard,
+                Vec::new(),
+                vec![item],
+            )
+        };
         (reaper, report)
     }
 
@@ -5287,6 +5577,642 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // The JAWS scripts on Windows, from plan data: their files go into the
+    // backup set, then the elevated helper removes the uninstaller folder
+    // and registry entry their installer left. Nothing here touches a real
+    // folder or the registry, so these run anywhere.
+    // -----------------------------------------------------------------------
+
+    const WIN_RESOURCE: &str = "C:/Users/me/AppData/Roaming/REAPER";
+    const JAWS_DLL: &str = "C:/Users/me/AppData/Roaming/REAPER/UserPlugins/Reaper_ComAccess64.dll";
+    const JAWS_SCRIPT: &str =
+        "C:/Users/me/AppData/Roaming/Freedom Scientific/JAWS/2025/Settings/enu/reaper.jss";
+    const JAWS_THERE_BEFORE: &str =
+        "C:/Users/me/AppData/Roaming/Freedom Scientific/JAWS/2025/Settings/enu/reaper.jkm";
+    const JAWS_FOLDER: &str = "C:/Program Files (x86)/Reaper_JawsScripts";
+    const JAWS_UNINSTALL_DAT: &str = "C:/Program Files (x86)/Reaper_JawsScripts/Uninstall.dat";
+    const JAWS_UNINSTALL_EXE: &str = "C:/Program Files (x86)/Reaper_JawsScripts/Uninstall.exe";
+    const JAWS_KEY: &str =
+        r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Reaper_JawsScripts";
+    /// The JAWS scripts' steps to remove them by hand, over several lines.
+    const BY_HAND_KEY: &str = "uninstall-by-hand-jaws-scripts";
+    /// The note on removing by hand the script files that stay.
+    const SCRIPTS_NOTE_KEY: &str = "uninstall-note-jaws-scripts-by-hand";
+
+    /// The uninstaller folder, its two files and the registry entry, as the
+    /// plan found them.
+    fn jaws_cleanup() -> rabbit_core::uninstall::PlannedMachineCleanup {
+        rabbit_core::uninstall::PlannedMachineCleanup {
+            folder: Some(PathBuf::from(JAWS_FOLDER)),
+            files: vec![
+                PathBuf::from(JAWS_UNINSTALL_DAT),
+                PathBuf::from(JAWS_UNINSTALL_EXE),
+            ],
+            registry_key: Some(JAWS_KEY.to_string()),
+            by_hand_key: BY_HAND_KEY.to_string(),
+        }
+    }
+
+    /// The JAWS scripts as the plan describes them on a standard REAPER:
+    /// `files` go into the backup set, and `cleanup` is what the elevated
+    /// helper removes afterwards. A script file that was there before the
+    /// installer ran stays, and a note says how to remove the rest by hand.
+    fn jaws_item(
+        removability: rabbit_core::uninstall::Removability,
+        files: &[(&str, rabbit_core::uninstall::RemovalReason)],
+        cleanup: Option<rabbit_core::uninstall::PlannedMachineCleanup>,
+    ) -> rabbit_core::uninstall::UninstallPlanItem {
+        use rabbit_core::package::uninstall::{UninstallBackup, UninstallStrategy};
+        use rabbit_core::uninstall::{KeptPath, KeptReason, PlannedRemoval, UninstallNote};
+        rabbit_core::uninstall::UninstallPlanItem {
+            package_id: "jaws-scripts".to_string(),
+            display_name: "JAWS scripts".to_string(),
+            installed_version: None,
+            has_receipt: true,
+            depends_on: Vec::new(),
+            removability,
+            strategy: Some(UninstallStrategy::RemoveFiles),
+            backup: UninstallBackup::Move,
+            summary: None,
+            files: files
+                .iter()
+                .map(|(path, reason)| PlannedRemoval {
+                    path: PathBuf::from(path),
+                    reason: *reason,
+                    size: Some(3),
+                    is_dir: false,
+                    receipt_sha256: Some("ab".repeat(32)),
+                    bundle_id: None,
+                    guard: Default::default(),
+                })
+                .collect(),
+            dirs_if_empty: Vec::new(),
+            kept: vec![KeptPath {
+                path: PathBuf::from(JAWS_THERE_BEFORE),
+                reason: KeptReason::ThereBeforeInstall,
+                note_key: None,
+                exists: true,
+                removable_with_settings: false,
+            }],
+            post: Vec::new(),
+            registry_cleanup: Vec::new(),
+            vendor_run: None,
+            confirm: cleanup.is_some(),
+            machine_cleanup: cleanup,
+            blocking_programs: Vec::new(),
+            macos_pkg_forget: Vec::new(),
+            every_reaper_closed: true,
+            requires_elevation: false,
+            unbacked: false,
+            warnings: Vec::new(),
+            notes: vec![UninstallNote::VendorFilesByHand {
+                note_key: SCRIPTS_NOTE_KEY.to_string(),
+            }],
+        }
+    }
+
+    /// A file as the report lists it: moved into the backup set after a
+    /// real run, only named in a dry run.
+    fn jaws_moved(
+        path: &str,
+        reason: rabbit_core::uninstall::RemovalReason,
+        moved: bool,
+    ) -> rabbit_core::uninstall::RemovedFile {
+        rabbit_core::uninstall::RemovedFile {
+            path: PathBuf::from(path),
+            reason,
+            size: 3,
+            changed_since_install: false,
+            backup_path: moved.then(|| {
+                PathBuf::from(WIN_RESOURCE).join("RABBIT/backups/uninstall-1/files/moved")
+            }),
+            trashed_to: None,
+        }
+    }
+
+    fn win_report(
+        dry_run: bool,
+        target: InstallationKind,
+        plan_items: Vec<rabbit_core::uninstall::UninstallPlanItem>,
+        items: Vec<rabbit_core::uninstall::UninstallReportItem>,
+    ) -> rabbit_core::uninstall::UninstallReport {
+        let changed = !dry_run && items.iter().any(|item| item.status.is_removed());
+        rabbit_core::uninstall::UninstallReport {
+            resource_path: PathBuf::from(WIN_RESOURCE),
+            platform: rabbit_core::model::Platform::Windows,
+            target,
+            dry_run,
+            remove_settings: false,
+            preflight: rabbit_core::preflight::PreflightReport {
+                passed: true,
+                checks: Vec::new(),
+            },
+            backup_set_id: changed.then(|| "uninstall-1".to_string()),
+            backup_set_path: None,
+            items,
+            administrator_steps: Vec::new(),
+            plan: rabbit_core::uninstall::UninstallPlan {
+                resource_path: PathBuf::from(WIN_RESOURCE),
+                platform: rabbit_core::model::Platform::Windows,
+                target,
+                remove_settings: false,
+                items: plan_items,
+            },
+            saved_report: None,
+        }
+    }
+
+    fn assert_lines(text: &str, lines: &[String]) {
+        for line in lines {
+            assert!(text.contains(line.as_str()), "{line}\n{text}");
+        }
+    }
+
+    /// A dry run lists the files that go into the backup set, then what the
+    /// elevated helper would remove, in its order: the folder's files, the
+    /// folder once it is empty, the registry entry. It names the permission
+    /// prompt, the script file that stays and the note on removing the rest
+    /// by hand. With no file left to move, it says only the folder and the
+    /// entry go.
+    #[test]
+    fn a_jaws_dry_run_lists_the_files_the_cleanup_and_the_permission_note() {
+        use rabbit_core::uninstall::{
+            Removability, RemovalReason, UninstallMessage, UninstallReportItem, UninstallStatus,
+        };
+
+        let english = rabbit_core::localization::Localizer::embedded("en-US").unwrap();
+        let plan_item = jaws_item(
+            Removability::Removable,
+            &[
+                (JAWS_DLL, RemovalReason::Receipt),
+                (JAWS_SCRIPT, RemovalReason::VendorAdded),
+            ],
+            Some(jaws_cleanup()),
+        );
+        let item = UninstallReportItem {
+            removed: vec![
+                jaws_moved(JAWS_DLL, RemovalReason::Receipt, false),
+                jaws_moved(JAWS_SCRIPT, RemovalReason::VendorAdded, false),
+            ],
+            ..mac_report_item(
+                &plan_item,
+                UninstallStatus::WouldRemove,
+                UninstallMessage::WouldRemove,
+                "",
+            )
+        };
+        let report = win_report(
+            true,
+            InstallationKind::Standard,
+            vec![plan_item],
+            vec![item],
+        );
+        let text = super::uninstall_report_text(&report, Some(&english));
+        assert_lines(
+            &text,
+            &[
+                "JAWS scripts: will uninstall. RABBIT moves its files into a backup set, then \
+                 removes its uninstaller folder and registry entry with administrator rights, \
+                 after a permission prompt; a backup can't bring those two back.\n"
+                    .to_string(),
+                "  remove   UserPlugins/Reaper_ComAccess64.dll\n".to_string(),
+                format!("  remove   {JAWS_SCRIPT}\n"),
+                format!("  admin    {JAWS_UNINSTALL_DAT}\n"),
+                format!("  admin    {JAWS_UNINSTALL_EXE}\n"),
+                format!("  admin    {JAWS_FOLDER} (once it is empty)\n"),
+                format!("  admin    {JAWS_KEY} (its registry entry)\n"),
+                format!(
+                    "  keep     {JAWS_THERE_BEFORE} (it was already there when RABBIT ran the \
+                     package's installer)\n"
+                ),
+                format!("  note     {}\n", english.text(SCRIPTS_NOTE_KEY).value),
+                "Needs administrator rights: JAWS scripts. Windows asks for permission once, \
+                 before anything is removed."
+                    .to_string(),
+            ],
+        );
+        // The files first, then the helper's steps in the order it takes
+        // them.
+        let order: Vec<usize> = [
+            JAWS_SCRIPT,
+            JAWS_UNINSTALL_DAT,
+            JAWS_UNINSTALL_EXE,
+            JAWS_KEY,
+        ]
+        .iter()
+        .map(|needle| text.find(needle).unwrap())
+        .collect();
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
+        assert_eq!(super::uninstall_exit_code(&report), 0);
+
+        let cleanup_only = jaws_item(Removability::Removable, &[], Some(jaws_cleanup()));
+        let report = win_report(
+            true,
+            InstallationKind::Standard,
+            vec![cleanup_only.clone()],
+            vec![mac_report_item(
+                &cleanup_only,
+                UninstallStatus::WouldRemove,
+                UninstallMessage::WouldRemove,
+                "",
+            )],
+        );
+        let text = super::uninstall_report_text(&report, None);
+        assert!(
+            text.contains(
+                "JAWS scripts: will uninstall. RABBIT removes its uninstaller folder and registry \
+                 entry with administrator rights, after a permission prompt; a backup can't bring \
+                 them back.\n"
+            ),
+            "{text}"
+        );
+        assert!(text.contains(&format!("  admin    {JAWS_KEY} (its registry entry)")));
+    }
+
+    /// After a run, the heading says what a backup can't bring back, and the
+    /// lines below name what the helper removed with administrator rights,
+    /// not a file that was gone before its step. The note on removing the
+    /// other script files by hand follows, and the restore command covers
+    /// the files in the backup set. What RABBIT still finds afterwards is a
+    /// leftover, as for any package.
+    #[test]
+    fn a_removed_jaws_names_what_the_helper_removed_with_administrator_rights() {
+        use rabbit_core::uninstall::{
+            CleanupOutcome, CleanupResult, CleanupStatus, CleanupStep, CleanupTarget, Removability,
+            RemovalReason, UninstallMessage, UninstallReportItem, UninstallStatus,
+        };
+
+        let english = rabbit_core::localization::Localizer::embedded("en-US").unwrap();
+        let removed = |target| CleanupStep {
+            target,
+            result: CleanupResult::Removed,
+        };
+        let cleanup = CleanupOutcome {
+            package_id: "jaws-scripts".to_string(),
+            status: CleanupStatus::Removed,
+            refusal: None,
+            steps: vec![
+                CleanupStep {
+                    target: CleanupTarget::File {
+                        path: PathBuf::from(JAWS_UNINSTALL_DAT),
+                    },
+                    result: CleanupResult::NotFound,
+                },
+                removed(CleanupTarget::File {
+                    path: PathBuf::from(JAWS_UNINSTALL_EXE),
+                }),
+                removed(CleanupTarget::Folder {
+                    path: PathBuf::from(JAWS_FOLDER),
+                }),
+                removed(CleanupTarget::RegistryKey {
+                    key: JAWS_KEY.to_string(),
+                }),
+            ],
+            still_present: Vec::new(),
+            error: None,
+        };
+        let plan_item = jaws_item(
+            Removability::Removable,
+            &[
+                (JAWS_DLL, RemovalReason::Receipt),
+                (JAWS_SCRIPT, RemovalReason::VendorAdded),
+            ],
+            Some(jaws_cleanup()),
+        );
+        let item = UninstallReportItem {
+            removed: vec![
+                jaws_moved(JAWS_DLL, RemovalReason::Receipt, true),
+                jaws_moved(JAWS_SCRIPT, RemovalReason::VendorAdded, true),
+            ],
+            cleanup: Some(cleanup.clone()),
+            ..mac_report_item(
+                &plan_item,
+                UninstallStatus::Removed,
+                UninstallMessage::Removed {
+                    backup_set_id: Some("uninstall-1".to_string()),
+                },
+                "RABBIT removed JAWS scripts.",
+            )
+        };
+        let report = win_report(
+            false,
+            InstallationKind::Standard,
+            vec![plan_item.clone()],
+            vec![item],
+        );
+        let text = super::uninstall_report_text(&report, Some(&english));
+        assert_lines(
+            &text,
+            &[
+                "JAWS scripts: removed. Its files are in the backup set; its uninstaller folder \
+                 and registry entry were removed with administrator rights, which a backup can't \
+                 bring back.\n"
+                    .to_string(),
+                "  removed  UserPlugins/Reaper_ComAccess64.dll\n".to_string(),
+                format!("  removed  {JAWS_SCRIPT}\n"),
+                format!("  removed  {JAWS_UNINSTALL_EXE} (with administrator rights)\n"),
+                format!("  removed  {JAWS_FOLDER} (with administrator rights)\n"),
+                format!("  removed  {JAWS_KEY} (its registry entry, with administrator rights)\n"),
+                format!(
+                    "  kept     {JAWS_THERE_BEFORE} (it was already there when RABBIT ran the \
+                     package's installer)\n"
+                ),
+                format!("  note     {}\n", english.text(SCRIPTS_NOTE_KEY).value),
+                "--backup-id uninstall-1 --package jaws-scripts --apply".to_string(),
+            ],
+        );
+        assert!(!text.contains(JAWS_UNINSTALL_DAT), "{text}");
+        assert_eq!(super::uninstall_exit_code(&report), 0);
+
+        // A script file is back by the time RABBIT looks again: a leftover.
+        let left = UninstallReportItem {
+            removed: vec![jaws_moved(JAWS_DLL, RemovalReason::Receipt, true)],
+            leftovers: vec![PathBuf::from(JAWS_SCRIPT)],
+            cleanup: Some(cleanup.clone()),
+            ..mac_report_item(
+                &plan_item,
+                UninstallStatus::RemovedWithLeftovers,
+                UninstallMessage::Removed {
+                    backup_set_id: Some("uninstall-1".to_string()),
+                },
+                "RABBIT removed JAWS scripts.",
+            )
+        };
+        let report = win_report(
+            false,
+            InstallationKind::Standard,
+            vec![plan_item],
+            vec![left],
+        );
+        let text = super::uninstall_report_text(&report, None);
+        assert_lines(
+            &text,
+            &[
+                "JAWS scripts: removed, but RABBIT still finds some of it. Its files are in the \
+                 backup set; its uninstaller folder and registry entry were removed with \
+                 administrator rights, which a backup can't bring back.\n"
+                    .to_string(),
+                format!("  leftover {JAWS_SCRIPT}\n"),
+            ],
+        );
+
+        // A receipt with none of the files left: only the folder and the
+        // entry went, and nothing is in the backup set.
+        let cleanup_only = jaws_item(Removability::Removable, &[], Some(jaws_cleanup()));
+        let item = UninstallReportItem {
+            cleanup: Some(cleanup),
+            ..mac_report_item(
+                &cleanup_only,
+                UninstallStatus::Removed,
+                UninstallMessage::Removed {
+                    backup_set_id: None,
+                },
+                "RABBIT removed JAWS scripts.",
+            )
+        };
+        let report = win_report(
+            false,
+            InstallationKind::Standard,
+            vec![cleanup_only],
+            vec![item],
+        );
+        let text = super::uninstall_report_text(&report, None);
+        assert!(
+            text.contains(
+                "JAWS scripts: removed. Its uninstaller folder and registry entry were removed \
+                 with administrator rights, which a backup can't bring back.\n"
+            ),
+            "{text}"
+        );
+    }
+
+    /// `rabbit components` says Windows asks for permission only while the
+    /// uninstaller folder or registry entry is there to remove, and points
+    /// a package RABBIT leaves alone to the steps to remove it by hand.
+    #[test]
+    fn jaws_components_line_says_windows_asks_for_permission() {
+        use rabbit_core::uninstall::{Removability, RemovalReason, VendorRefusal};
+
+        let files = [(JAWS_DLL, RemovalReason::Receipt)];
+        let with_cleanup = jaws_item(Removability::Removable, &files, Some(jaws_cleanup()));
+        assert!(with_cleanup.can_remove() && with_cleanup.needs_elevated_helper());
+        assert_eq!(
+            super::uninstall_ability_text(&with_cleanup),
+            "yes, with rabbit uninstall --package jaws-scripts; Windows asks for permission"
+        );
+        let without = jaws_item(Removability::Removable, &files, None);
+        assert_eq!(
+            super::uninstall_ability_text(&without),
+            "yes, with rabbit uninstall --package jaws-scripts"
+        );
+        for removability in [
+            Removability::CleanupNotTrusted {
+                refusal: VendorRefusal::RegistryKeyHasSubkeys,
+                by_hand_key: BY_HAND_KEY.to_string(),
+            },
+            Removability::NoFilesForThisAccount {
+                by_hand_key: BY_HAND_KEY.to_string(),
+            },
+        ] {
+            assert_eq!(
+                super::uninstall_ability_text(&jaws_item(removability, &[], None)),
+                "by hand only; rabbit uninstall --package jaws-scripts says how"
+            );
+        }
+    }
+
+    /// The packages listing names the cleanup a plan has the elevated
+    /// helper do, with the folder as the manifest gives it and the registry
+    /// entry as regedit shows it. The plan's own elevation stays `never`.
+    #[test]
+    fn jaws_packages_listing_shows_the_machine_cleanup() {
+        use rabbit_core::package::uninstall::UninstallPlanSpec;
+
+        let plan: UninstallPlanSpec = serde_json::from_str(
+            r#"{
+                "platform": "windows",
+                "strategy": "remove_files",
+                "remove": {
+                    "paths": ["{appdata}/REAPER/UserPlugins/Reaper_ComAccess64.dll"],
+                    "vendor_added_files": {
+                        "files": ["{appdata}/Freedom Scientific/JAWS/*/Settings/*/*"],
+                        "by_hand_note_key": "uninstall-note-jaws-scripts-by-hand"
+                    }
+                },
+                "machine_cleanup": {
+                    "dir": "{program_files_x86}/Reaper_JawsScripts",
+                    "files": ["Uninstall.dat", "Uninstall.exe"],
+                    "registry": {
+                        "hive": "hklm",
+                        "key": "Reaper_JawsScripts",
+                        "view": "bit32",
+                        "values": {
+                            "UninstallDirectory": "{program_files_x86}/Reaper_JawsScripts"
+                        }
+                    },
+                    "by_hand_key": "uninstall-by-hand-jaws-scripts"
+                }
+            }"#,
+        )
+        .unwrap();
+        let expected = format!(
+            "remove_files (backup move, administrator cleanup of \
+             {{program_files_x86}}/Reaper_JawsScripts and {JAWS_KEY})"
+        );
+        assert_eq!(super::describe_uninstall_plan(&plan, None), expected);
+
+        // The shipped JAWS scripts' plan for a standard REAPER reads the same.
+        let windows = rabbit_core::model::Platform::Windows;
+        let shipped = super::builtin_package_specs(windows)
+            .into_iter()
+            .find(|spec| spec.id == "jaws-scripts")
+            .unwrap();
+        let shipped = shipped
+            .uninstall
+            .plan_for(windows, InstallationKind::Standard)
+            .unwrap();
+        assert_eq!(super::describe_uninstall_plan(shipped, None), expected);
+    }
+
+    /// A package RABBIT leaves alone because of its uninstaller folder and
+    /// registry entry, and one on a portable target, print why and then the
+    /// steps to remove it by hand, line by line, and nothing changes.
+    #[test]
+    fn a_blocked_jaws_prints_the_by_hand_steps() {
+        use rabbit_core::uninstall::{
+            Removability, UninstallMessage, UninstallNote, UninstallPlanItem, UninstallStatus,
+            VendorRefusal,
+        };
+
+        let english = rabbit_core::localization::Localizer::embedded("en-US").unwrap();
+        let steps: Vec<String> = english
+            .text(BY_HAND_KEY)
+            .value
+            .lines()
+            .map(|line| format!("  {line}\n"))
+            .collect();
+        assert!(steps.len() > 2, "{steps:?}");
+        let blocked = |plan_item: UninstallPlanItem, target: InstallationKind| {
+            let message = plan_item.removability.message(&plan_item.display_name);
+            let item = mac_report_item(
+                &plan_item,
+                UninstallStatus::Blocked,
+                UninstallMessage::NotRemovable {
+                    removability: plan_item.removability.clone(),
+                },
+                &message,
+            );
+            win_report(true, target, vec![plan_item], vec![item])
+        };
+        let portable = UninstallPlanItem {
+            strategy: None,
+            files: Vec::new(),
+            kept: Vec::new(),
+            notes: vec![UninstallNote::Manifest {
+                note_key: BY_HAND_KEY.to_string(),
+            }],
+            ..jaws_item(Removability::NeedsStandardTarget, &[], None)
+        };
+        for (plan_item, target, message) in [
+            (
+                jaws_item(
+                    Removability::CleanupNotTrusted {
+                        refusal: VendorRefusal::RegistryKeyHasSubkeys,
+                        by_hand_key: BY_HAND_KEY.to_string(),
+                    },
+                    &[],
+                    None,
+                ),
+                InstallationKind::Standard,
+                "RABBIT doesn't trust JAWS scripts's uninstaller folder in Program Files or its \
+                 registry entry (its registry entry has subkeys RABBIT doesn't expect), so it has \
+                 to be removed by hand.",
+            ),
+            (
+                jaws_item(
+                    Removability::NoFilesForThisAccount {
+                        by_hand_key: BY_HAND_KEY.to_string(),
+                    },
+                    &[],
+                    None,
+                ),
+                InstallationKind::Standard,
+                "RABBIT doesn't find any of JAWS scripts's files for this account. If another \
+                 account installed it, uninstall it from that account; RABBIT leaves its \
+                 uninstaller folder in Program Files and its registry entry alone.",
+            ),
+            (
+                portable,
+                InstallationKind::Portable,
+                "JAWS scripts serves every REAPER on this computer, so RABBIT removes it only \
+                 from the standard REAPER, not from a portable one.",
+            ),
+        ] {
+            let report = blocked(plan_item, target);
+            let text = super::uninstall_report_text(&report, Some(&english));
+            let expected = format!("JAWS scripts: blocked. {message}\n{}", steps.concat());
+            assert!(text.contains(&expected), "{expected}\n{text}");
+            assert!(
+                text.contains(
+                    "Blocked: jaws-scripts. Nothing would change with --apply until it is left out."
+                ),
+                "{text}"
+            );
+            assert_eq!(super::uninstall_exit_code(&report), 2);
+        }
+    }
+
+    /// A note over several lines keeps them, each indented under the first,
+    /// so the steps still read one by one below the package.
+    #[test]
+    fn a_note_over_several_lines_keeps_its_lines_indented() {
+        use rabbit_core::uninstall::{
+            Removability, RemovalReason, UninstallMessage, UninstallNote, UninstallPlanItem,
+            UninstallStatus,
+        };
+
+        let english = rabbit_core::localization::Localizer::embedded("en-US").unwrap();
+        let plan_item = UninstallPlanItem {
+            notes: vec![UninstallNote::Manifest {
+                note_key: BY_HAND_KEY.to_string(),
+            }],
+            ..jaws_item(
+                Removability::Removable,
+                &[(JAWS_DLL, RemovalReason::Receipt)],
+                None,
+            )
+        };
+        let item = mac_report_item(
+            &plan_item,
+            UninstallStatus::WouldRemove,
+            UninstallMessage::WouldRemove,
+            "",
+        );
+        let report = win_report(
+            true,
+            InstallationKind::Standard,
+            vec![plan_item],
+            vec![item],
+        );
+        let text = super::uninstall_report_text(&report, Some(&english));
+        let mut lines = english
+            .text(BY_HAND_KEY)
+            .value
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let first = lines.remove(0);
+        let expected = format!(
+            "  note     {first}\n{}",
+            lines
+                .iter()
+                .map(|line| format!("           {line}\n"))
+                .collect::<String>()
+        );
+        assert!(text.contains(&expected), "{expected}\n{text}");
+    }
+
+    // -----------------------------------------------------------------------
     // macOS: the Trash and the administrator command, from plan data. The
     // wording is chosen by the report's platform, so these run anywhere.
     // -----------------------------------------------------------------------
@@ -5342,6 +6268,7 @@ mod tests {
             post: Vec::new(),
             registry_cleanup: Vec::new(),
             vendor_run: None,
+            machine_cleanup: None,
             blocking_programs: Vec::new(),
             macos_pkg_forget: Vec::new(),
             every_reaper_closed: requires_elevation,
@@ -5391,6 +6318,7 @@ mod tests {
             problems: Vec::new(),
             pending_restart: Vec::new(),
             vendor: None,
+            cleanup: None,
             message: message.to_string(),
             message_code: code,
         }
@@ -5680,20 +6608,21 @@ mod tests {
                     owned_by_me: true,
                     dev: 1,
                 });
-            super::uninstall_report(
-                &rabbit_core::uninstall::UninstallRequest {
-                    platform: rabbit_core::model::Platform::MacOs,
-                    target_app_path: Some(app.clone()),
-                    target: Some(InstallationKind::Portable),
-                    ..reaper.request(&["reaper"], false)
-                },
-                &UninstallServices {
-                    macos_objects: &objects,
-                    ..UninstallServices::without_elevation()
-                },
-                &rabbit_core::cancel::CancelToken::new(),
-            )
-            .unwrap()
+            reaper
+                .report(
+                    &rabbit_core::uninstall::UninstallRequest {
+                        platform: rabbit_core::model::Platform::MacOs,
+                        target_app_path: Some(app.clone()),
+                        target: Some(InstallationKind::Portable),
+                        ..reaper.request(&["reaper"], false)
+                    },
+                    &UninstallServices {
+                        macos_objects: &objects,
+                        ..UninstallServices::without_elevation()
+                    },
+                    &rabbit_core::cancel::CancelToken::new(),
+                )
+                .unwrap()
         };
 
         let english = rabbit_core::localization::Localizer::embedded("en-US").unwrap();
@@ -5757,20 +6686,21 @@ mod tests {
         let mistyped = reaper.resource.join("REAPER64.app");
         let objects = FakeMacosObjects::new();
         for apply in [false, true] {
-            let report = super::uninstall_report(
-                &rabbit_core::uninstall::UninstallRequest {
-                    platform: rabbit_core::model::Platform::MacOs,
-                    target_app_path: Some(mistyped.clone()),
-                    target: Some(InstallationKind::Portable),
-                    ..reaper.request(&["reaper"], apply)
-                },
-                &UninstallServices {
-                    macos_objects: &objects,
-                    ..UninstallServices::without_elevation()
-                },
-                &rabbit_core::cancel::CancelToken::new(),
-            )
-            .unwrap();
+            let report = reaper
+                .report(
+                    &rabbit_core::uninstall::UninstallRequest {
+                        platform: rabbit_core::model::Platform::MacOs,
+                        target_app_path: Some(mistyped.clone()),
+                        target: Some(InstallationKind::Portable),
+                        ..reaper.request(&["reaper"], apply)
+                    },
+                    &UninstallServices {
+                        macos_objects: &objects,
+                        ..UninstallServices::without_elevation()
+                    },
+                    &rabbit_core::cancel::CancelToken::new(),
+                )
+                .unwrap();
             let item = report.item("reaper").unwrap();
             assert_eq!(
                 item.status,
@@ -6205,19 +7135,20 @@ mod tests {
     fn uninstall_under_sudo_refuses_in_the_clis_words() {
         let reaper = FakeReaper::new();
         let objects = rabbit_core::uninstall::FakeMacosObjects::new().running_as_root();
-        let error = super::uninstall_report(
-            &rabbit_core::uninstall::UninstallRequest {
-                platform: rabbit_core::model::Platform::MacOs,
-                ..reaper.request(&["sws"], true)
-            },
-            &rabbit_core::uninstall::UninstallServices {
-                macos_objects: &objects,
-                ..rabbit_core::uninstall::UninstallServices::without_elevation()
-            },
-            &rabbit_core::cancel::CancelToken::new(),
-        )
-        .map_err(super::cli_uninstall_error)
-        .unwrap_err();
+        let error = reaper
+            .report(
+                &rabbit_core::uninstall::UninstallRequest {
+                    platform: rabbit_core::model::Platform::MacOs,
+                    ..reaper.request(&["sws"], true)
+                },
+                &rabbit_core::uninstall::UninstallServices {
+                    macos_objects: &objects,
+                    ..rabbit_core::uninstall::UninstallServices::without_elevation()
+                },
+                &rabbit_core::cancel::CancelToken::new(),
+            )
+            .map_err(super::cli_uninstall_error)
+            .unwrap_err();
         assert_eq!(error.to_string(), super::UNINSTALL_AS_ROOT_TEXT);
         assert!(error.to_string().contains("without sudo"), "{error}");
         // Any other error is printed as it is.
@@ -6226,6 +7157,135 @@ mod tests {
         assert_eq!(
             other.to_string(),
             rabbit_core::RabbitError::UnsupportedPlatform.to_string()
+        );
+    }
+
+    /// A failed Surge XT install with `message_code`, as the run reports
+    /// it, with an English text the localized one must replace.
+    fn failed_surge_item(
+        message_code: rabbit_core::operation::PackageOperationMessage,
+    ) -> rabbit_core::operation::PackageOperationItem {
+        failed_item(rabbit_core::package::PACKAGE_SURGE_XT, message_code)
+    }
+
+    /// A failed Windows install of `package_id` with `message_code`, as
+    /// the run reports it, with an English text the localized one must
+    /// replace.
+    fn failed_item(
+        package_id: &str,
+        message_code: rabbit_core::operation::PackageOperationMessage,
+    ) -> rabbit_core::operation::PackageOperationItem {
+        rabbit_core::operation::PackageOperationItem {
+            package_id: package_id.to_string(),
+            plan_action: rabbit_core::plan::PlanActionKind::Install,
+            status: rabbit_core::operation::PackageOperationStatus::Failed,
+            artifact: rabbit_core::artifact::ArtifactDescriptor {
+                package_id: package_id.to_string(),
+                version: rabbit_core::version::Version::parse("2026.11.9").unwrap(),
+                platform: rabbit_core::model::Platform::Windows,
+                architecture: rabbit_core::model::Architecture::X64,
+                kind: rabbit_core::artifact::ArtifactKind::Installer,
+                url: "https://example.test/surge-xt-setup.exe".to_string(),
+                file_name: "surge-xt-setup.exe".to_string(),
+                channel: None,
+            },
+            cached_artifact: None,
+            install_action: None,
+            backup_paths: Vec::new(),
+            backup_manifest_path: None,
+            planned_execution: None,
+            manual_instruction: None,
+            message: "The English text of the report".to_string(),
+            message_code,
+        }
+    }
+
+    /// `rabbit setup` and `rabbit apply-packages` say what a vendor
+    /// installer's exit code means, and which programs to close, in the
+    /// user's language, naming the code and the installer's log, as the
+    /// wizard does, and the package by its name in that language. Without a
+    /// localizer, and for any other message, the report's English text
+    /// stays.
+    #[test]
+    fn installer_problems_are_said_in_every_locale() {
+        use rabbit_core::localization::{DEFAULT_LOCALE, Localizer, embedded_locales};
+        use rabbit_core::operation::{
+            InstallerExitMeaning, PackageOperationMessage, localized_install_problem,
+        };
+
+        let log = PathBuf::from(
+            r"C:\Users\Toni Barth\AppData\Roaming\REAPER\RABBIT\logs\surge-xt-installer-unix-1.log",
+        );
+        let exit_code = failed_surge_item(PackageOperationMessage::VendorInstallerFailed {
+            program: r"C:\cache\surge-xt-setup.exe".to_string(),
+            exit_code: 5,
+            meaning: Some(InstallerExitMeaning::StoppedAtQuestion),
+            log_path: Some(log.clone()),
+        });
+        let open = failed_surge_item(PackageOperationMessage::BlockingProgramsRunning {
+            programs: vec!["Surge XT.exe".to_string()],
+        });
+        for &locale in embedded_locales() {
+            let localizer = Localizer::embedded(locale).unwrap();
+            let surge = localizer.text("package-surge-xt").value;
+            for item in [&exit_code, &open] {
+                let text = super::package_operation_message(item, Some(&localizer));
+                assert_eq!(
+                    Some(text.clone()),
+                    localized_install_problem(&localizer, &item.message_code, &surge),
+                    "{locale}"
+                );
+                assert!(!text.contains("English text"), "{locale}: {text}");
+            }
+            let text = super::package_operation_message(&exit_code, Some(&localizer));
+            assert!(
+                text.contains('5') && text.contains(&log.display().to_string()),
+                "{locale}: {text}"
+            );
+            assert!(
+                super::package_operation_message(&open, Some(&localizer)).contains("Surge XT.exe"),
+                "{locale}"
+            );
+        }
+        let english = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        assert!(
+            super::package_operation_message(&exit_code, Some(&english))
+                .starts_with("The installer ended with exit code 5. That means it stopped")
+        );
+        let german = Localizer::embedded("de-DE").unwrap();
+        assert!(
+            super::package_operation_message(&open, Some(&german)).starts_with(
+                "RABBIT hat das Installationsprogramm nicht gestartet, weil Surge XT geöffnet ist \
+                 (Surge XT.exe)"
+            )
+        );
+        // A package whose name is translated is named in German, not by the
+        // manifest's English name.
+        let jaws = failed_item(
+            rabbit_core::package::PACKAGE_JAWS_SCRIPTS,
+            PackageOperationMessage::VendorInstallerFailed {
+                program: r"C:\cache\jaws-scripts-setup.exe".to_string(),
+                exit_code: 1,
+                meaning: None,
+                log_path: None,
+            },
+        );
+        let text = super::package_operation_message(&jaws, Some(&german));
+        assert!(
+            text.contains("installieren Sie JAWS-Skripte für REAPER") && !text.contains("JAWS-for"),
+            "{text}"
+        );
+        assert_eq!(
+            super::package_operation_message(&exit_code, None),
+            "The English text of the report"
+        );
+        let other = failed_surge_item(PackageOperationMessage::InstallFailed {
+            error: "disk full".to_string(),
+            antivirus_block: false,
+        });
+        assert_eq!(
+            super::package_operation_message(&other, Some(&german)),
+            "The English text of the report"
         );
     }
 }

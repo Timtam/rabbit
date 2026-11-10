@@ -1,4 +1,5 @@
-//! Removing junctions and empty folders without ever following a link.
+//! Removing junctions, files and empty folders without ever following a
+//! link.
 //!
 //! Surge XT's installer makes `SurgeXTData` junctions in the CLAP and VST3
 //! `Surge Synth Team` folders that point into `C:\ProgramData\Surge XT`,
@@ -6,12 +7,16 @@
 //! never touching what they point to, and then the `Surge Synth Team`
 //! folders, but only when they are empty.
 //!
+//! The JAWS scripts leave an uninstaller folder in Program Files (x86)
+//! with two files in it. RABBIT's elevated helper removes those files one
+//! by one, then the folder once it is empty.
+//!
 //! Each function opens the path itself, never a link's target, checks what
 //! it opened, and deletes through that same handle, so the thing checked is
 //! the thing deleted. Links further up the path are followed as usual: the
 //! caller's root guard checks those.
 //!
-//! Windows only; elsewhere both fail as `Unsupported`.
+//! Windows only; elsewhere every function fails as `Unsupported`.
 
 use std::io;
 use std::path::Path;
@@ -32,6 +37,15 @@ pub fn remove_junction(path: &Path) -> io::Result<()> {
 /// folder.
 pub fn remove_empty_dir(path: &Path) -> io::Result<()> {
     imp::remove_empty_dir(path)
+}
+
+/// Remove the regular file at `path`. Refused, as `InvalidInput`, when
+/// `path` is a reparse point of any kind, such as a symbolic link or a
+/// junction, or a folder. A file another program holds open without
+/// letting others delete it fails, and stays. So does a read-only file:
+/// Windows refuses to delete one this way.
+pub fn remove_regular_file(path: &Path) -> io::Result<()> {
+    imp::remove_regular_file(path)
 }
 
 #[cfg(windows)]
@@ -78,6 +92,18 @@ mod imp {
         delete_on_close(&handle)
     }
 
+    pub(super) fn remove_regular_file(path: &Path) -> io::Result<()> {
+        let handle = open_no_follow(path, DELETE | FILE_READ_ATTRIBUTES)?;
+        let attributes = attribute_tag(&handle)?.FileAttributes;
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(refused(path, "is a link"));
+        }
+        if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            return Err(refused(path, "is a folder"));
+        }
+        delete_on_close(&handle)
+    }
+
     /// Mark the open file or folder for deletion. It goes when the last
     /// handle to it closes; RABBIT's closes when `handle` drops.
     fn delete_on_close(handle: &File) -> io::Result<()> {
@@ -114,7 +140,7 @@ mod imp {
     fn unsupported() -> io::Error {
         io::Error::new(
             io::ErrorKind::Unsupported,
-            "junctions only exist on Windows",
+            "RABBIT removes junctions, files and folders this way only on Windows",
         )
     }
 
@@ -123,6 +149,10 @@ mod imp {
     }
 
     pub(super) fn remove_empty_dir(_path: &Path) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    pub(super) fn remove_regular_file(_path: &Path) -> io::Result<()> {
         Err(unsupported())
     }
 }
@@ -161,6 +191,19 @@ mod tests {
             assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
         }
         assert!(folder.is_dir());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn off_windows_removing_a_regular_file_is_unsupported() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("Uninstall.dat");
+        std::fs::write(&file, b"uninstall log").unwrap();
+
+        let error = super::remove_regular_file(&file).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert_eq!(std::fs::read(&file).unwrap(), b"uninstall log");
     }
 }
 
@@ -263,6 +306,98 @@ mod windows_tests {
         let error = remove_empty_dir(&layout.data_file).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(layout.data_file.is_file());
+    }
+
+    #[test]
+    fn a_regular_file_is_removed_through_its_own_handle() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("Uninstall.dat");
+        fs::write(&file, b"uninstall log").unwrap();
+        let neighbour = scratch.path().join("Uninstall.exe");
+        fs::write(&neighbour, b"uninstaller").unwrap();
+
+        remove_regular_file(&file).unwrap();
+
+        assert!(!exists_itself(&file));
+        assert_eq!(fs::read(&neighbour).unwrap(), b"uninstaller");
+        assert_eq!(
+            remove_regular_file(&file).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn a_folder_or_junction_is_not_removed_as_a_file() {
+        // The junction leads to a folder holding `data_file`, the sentinel.
+        let layout = layout();
+        let empty_folder = layout.vendor_folder.join("empty");
+        fs::create_dir(&empty_folder).unwrap();
+        let data_folder = layout.data_file.parent().unwrap().to_path_buf();
+
+        for path in [
+            &layout.junction,
+            &empty_folder,
+            &layout.vendor_folder,
+            &data_folder,
+        ] {
+            let error = remove_regular_file(path).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{path:?}");
+            assert!(exists_itself(path), "{path:?}");
+        }
+        assert_eq!(fs::read(&layout.data_file).unwrap(), b"user patch");
+
+        // A symbolic link to a file is refused too, where this account may
+        // make one: that takes Developer Mode or administrator rights.
+        let link = layout.vendor_folder.join("patch link.fxp");
+        if std::os::windows::fs::symlink_file(&layout.data_file, &link).is_ok() {
+            let error = remove_regular_file(&link).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert!(exists_itself(&link));
+            assert_eq!(fs::read(&layout.data_file).unwrap(), b"user patch");
+        }
+    }
+
+    #[test]
+    fn a_file_held_open_without_delete_sharing_stays() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("Uninstall.exe");
+        fs::write(&file, b"uninstaller").unwrap();
+        let holder = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&file)
+            .unwrap();
+
+        assert!(remove_regular_file(&file).is_err());
+        assert_eq!(fs::read(&file).unwrap(), b"uninstaller");
+
+        drop(holder);
+        remove_regular_file(&file).unwrap();
+        assert!(!exists_itself(&file));
+    }
+
+    #[test]
+    fn a_read_only_file_stays() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("Uninstall.dat");
+        fs::write(&file, b"uninstall log").unwrap();
+        let writable = fs::metadata(&file).unwrap().permissions();
+        let mut read_only = writable.clone();
+        read_only.set_readonly(true);
+        fs::set_permissions(&file, read_only).unwrap();
+
+        let error = remove_regular_file(&file).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert_eq!(fs::read(&file).unwrap(), b"uninstall log");
+        // Writable again, as it was, so the temp folder can go.
+        fs::set_permissions(&file, writable).unwrap();
+        remove_regular_file(&file).unwrap();
+        assert!(!exists_itself(&file));
     }
 
     #[test]

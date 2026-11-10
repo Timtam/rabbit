@@ -14,7 +14,8 @@ use rabbit_core::progress::{ProgressEvent, ProgressReporter, RemovalMethod};
 use rabbit_core::report::SavedReportPaths;
 use rabbit_core::uninstall::{
     ANY_REAPER_PROCESS_CHECK, AdministratorStepKind, AdministratorStepRecord,
-    AdministratorStepVerdict, BACKUP_SPACE_CHECK, ByHandReason, KeptFile, KeptFileReason,
+    AdministratorStepVerdict, BACKUP_SPACE_CHECK, ByHandReason, CleanupOutcome, CleanupResult,
+    CleanupStatus, CleanupStep, CleanupTarget, KeptFile, KeptFileReason, KeptPath, KeptReason,
     LeftoverKind, LeftoverOutcome, LeftoverResult, NoMacosObjects, NothingListed,
     PROGRAMS_RUNNING_CHECK, RegistryEntryAction, RegistryEntryOutcome, Removability, RemovalReason,
     RemovedFile, UninstallMessage, UninstallPlanItem, UninstallProblem, UninstallReport,
@@ -26,8 +27,10 @@ use tempfile::tempdir;
 
 use super::support::*;
 use super::uninstall::{
-    MAC_REAPER_APP, MAC_RESOURCE, admin_surge, item, list_for, mac_plan, plan, removable_sws,
-    root_moved_reaper, sws_with_settings, target, tick, trash_reaper,
+    JAWS, JAWS_DLL, JAWS_FOLDER, JAWS_KEY, JAWS_SCRIPT, MAC_REAPER_APP, MAC_RESOURCE,
+    SCRIPTS_NOTE_KEY, admin_surge, by_hand_lines_en, item, jaws_folder_file, jaws_with_cleanup,
+    list_for, mac_plan, plan, removable_sws, root_moved_reaper, sws_with_settings, target, tick,
+    trash_reaper,
 };
 use crate::wizard::*;
 
@@ -445,6 +448,11 @@ fn no_request_without_a_writable_target_or_a_tick() {
 /// page's details name the backup and the command that brings SWS back,
 /// and the rebuilt Install tab offers SWS again, unticked. Once SWS is put
 /// back by hand, its update is ticked.
+///
+/// The rows are planned on temporary folders alone. The engine and the
+/// Install tab read this computer's own detection and folders, which find
+/// the JAWS scripts wherever they are really installed, so the target is
+/// a portable REAPER, where nothing of theirs can be planned.
 #[test]
 fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
     let dir = tempdir().unwrap();
@@ -472,9 +480,11 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
                 detection
             })
             .collect();
-    let mut list = uninstall_list_for_target(
+    let roots = |target: &TargetRow| fixture_roots(model.platform, &target.path, dir.path());
+    let mut list = uninstall_list_with_roots(
         &model,
         &target,
+        &roots(&target),
         &detections,
         &NothingListed,
         &NoMacosObjects,
@@ -484,6 +494,7 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
     let request = uninstall_request_for_target(&model, &target, &list, true).unwrap();
     assert_eq!(request.package_ids, ["sws"]);
     assert!(request.remove_settings);
+    assert_eq!(request.target, Some(InstallationKind::Portable));
 
     let dry_run = UninstallRequest {
         dry_run: true,
@@ -501,6 +512,13 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
         UninstallStatus::WouldRemove
     );
     assert!(plugin.exists(), "a dry run changes nothing");
+    let jaws = preview.plan.item("jaws-scripts");
+    assert!(
+        jaws.is_none_or(|jaws| jaws.files.is_empty()
+            && jaws.machine_cleanup.is_none()
+            && !jaws.can_remove()),
+        "{jaws:?}"
+    );
 
     let report = execute_uninstall(
         &request,
@@ -554,9 +572,10 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
     let sws_rows = |target: &TargetRow| {
         let plan = wizard_package_plan_for_target_with_available(&model, Some(target), &available)
             .unwrap();
-        let list = uninstall_list_for_target(
+        let list = uninstall_list_with_roots(
             &model,
             target,
+            &roots(target),
             &plan.detections,
             &NothingListed,
             &NoMacosObjects,
@@ -884,6 +903,7 @@ fn report_item(
         problems: Vec::new(),
         pending_restart: Vec::new(),
         vendor: None,
+        cleanup: None,
         message: format!("English message for {package_id}."),
         message_code,
     }
@@ -1459,6 +1479,55 @@ fn done_reads_in_every_locale() {
             declined("surge-xt"),
             declined("reaper"),
         ]),
+        jaws_report(vec![jaws_failed(UninstallMessage::CleanupRefused {
+            refusal: VendorRefusal::UntrustedFolder {
+                path: PathBuf::from(JAWS_FOLDER),
+            },
+        })]),
+        jaws_report(vec![UninstallReportItem {
+            cleanup: Some(jaws_cleanup_failed_at_once()),
+            ..jaws_failed(UninstallMessage::CleanupFailed {
+                error: "Access is denied.".to_string(),
+            })
+        }]),
+        jaws_report(vec![jaws_failed(UninstallMessage::CleanupLost {
+            error: "the pipe broke".to_string(),
+        })]),
+        jaws_report(vec![jaws_failed(UninstallMessage::FileInUse {
+            path: PathBuf::from(JAWS_SCRIPT),
+            error: "sharing violation".to_string(),
+        })]),
+        // What the helper removed with administrator rights, the script
+        // files kept and the note on removing them by hand; and what a
+        // failed cleanup left.
+        jaws_report_planned(
+            UninstallPlanItem {
+                kept: vec![
+                    KeptPath {
+                        path: PathBuf::from(JAWS_SCRIPT).with_file_name("reaper.jkm"),
+                        reason: KeptReason::ThereBeforeInstall,
+                        note_key: None,
+                        exists: true,
+                        removable_with_settings: false,
+                    },
+                    KeptPath {
+                        path: PathBuf::from(JAWS_SCRIPT).with_file_name("reaper.jcf"),
+                        reason: KeptReason::RecordUnclear,
+                        note_key: None,
+                        exists: true,
+                        removable_with_settings: false,
+                    },
+                ],
+                ..jaws_with_cleanup()
+            },
+            vec![jaws_removed()],
+        ),
+        jaws_report(vec![UninstallReportItem {
+            cleanup: Some(jaws_cleanup_failed()),
+            ..jaws_failed(UninstallMessage::CleanupFailed {
+                error: "Access is denied.".to_string(),
+            })
+        }]),
     ];
     let statuses = [
         UninstallStatus::Removed,
@@ -2099,6 +2168,475 @@ fn each_vendor_outcome_reads_as_a_sentence() {
         outcome(&report(vendor_outcomes())).status,
         UninstallOutcomeStatus::Cancelled,
         "REAPER's uninstaller was cancelled by the user"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The JAWS scripts: what Done and Show details say about the elevated
+// helper's cleanup of the uninstaller folder and registry entry, the script
+// files that stay, and JAWS holding a script file open.
+// ---------------------------------------------------------------------------
+
+/// `items`, with the JAWS scripts' plan item behind them: a plug-in from
+/// the receipt and a script file their installer added go into the backup,
+/// then the elevated helper removes the uninstaller folder and entry.
+fn jaws_report(items: Vec<UninstallReportItem>) -> UninstallReport {
+    jaws_report_planned(jaws_with_cleanup(), items)
+}
+
+/// `items`, with `planned` as the JAWS scripts' plan item.
+fn jaws_report_planned(
+    planned: UninstallPlanItem,
+    items: Vec<UninstallReportItem>,
+) -> UninstallReport {
+    UninstallReport {
+        plan: plan(vec![planned]),
+        ..report(items)
+    }
+}
+
+fn jaws_failed(message_code: UninstallMessage) -> UninstallReportItem {
+    report_item("jaws-scripts", UninstallStatus::Failed, message_code)
+}
+
+/// The JAWS scripts removed: both files went into the backup set, then the
+/// helper removed the uninstaller folder and registry entry.
+fn jaws_removed() -> UninstallReportItem {
+    UninstallReportItem {
+        cleanup: Some(jaws_cleanup(
+            CleanupStatus::Removed,
+            jaws_cleanup_steps(),
+            &[],
+        )),
+        ..removed("jaws-scripts", &[JAWS_DLL, JAWS_SCRIPT])
+    }
+}
+
+fn jaws_cleanup(
+    status: CleanupStatus,
+    steps: Vec<CleanupStep>,
+    still_present: &[&str],
+) -> CleanupOutcome {
+    CleanupOutcome {
+        package_id: "jaws-scripts".to_string(),
+        status,
+        refusal: None,
+        steps,
+        still_present: still_present.iter().map(ToString::to_string).collect(),
+        error: None,
+    }
+}
+
+fn file_step(path: &str, result: CleanupResult) -> CleanupStep {
+    CleanupStep {
+        target: CleanupTarget::File {
+            path: PathBuf::from(path),
+        },
+        result,
+    }
+}
+
+fn folder_step(result: CleanupResult) -> CleanupStep {
+    CleanupStep {
+        target: CleanupTarget::Folder {
+            path: PathBuf::from(JAWS_FOLDER),
+        },
+        result,
+    }
+}
+
+fn key_step(result: CleanupResult) -> CleanupStep {
+    CleanupStep {
+        target: CleanupTarget::RegistryKey {
+            key: JAWS_KEY.to_string(),
+        },
+        result,
+    }
+}
+
+/// Every step of a cleanup that went through. `Uninstall.dat` was gone
+/// already, which counts as gone but isn't listed as removed.
+fn jaws_cleanup_steps() -> Vec<CleanupStep> {
+    vec![
+        file_step(&jaws_folder_file("Uninstall.dat"), CleanupResult::NotFound),
+        file_step(&jaws_folder_file("Uninstall.exe"), CleanupResult::Removed),
+        folder_step(CleanupResult::Removed),
+        key_step(CleanupResult::Removed),
+    ]
+}
+
+/// A cleanup that stopped when Windows wouldn't delete `Uninstall.exe`:
+/// `Uninstall.dat` is gone, the folder and the registry entry are still
+/// there.
+fn jaws_cleanup_failed() -> CleanupOutcome {
+    CleanupOutcome {
+        error: Some("Access is denied.".to_string()),
+        ..jaws_cleanup(
+            CleanupStatus::Failed,
+            vec![
+                file_step(&jaws_folder_file("Uninstall.dat"), CleanupResult::Removed),
+                file_step(
+                    &jaws_folder_file("Uninstall.exe"),
+                    CleanupResult::Failed {
+                        error: "Access is denied.".to_string(),
+                    },
+                ),
+            ],
+            &[JAWS_FOLDER, JAWS_KEY],
+        )
+    }
+}
+
+/// A cleanup whose first delete failed: Windows wouldn't delete
+/// `Uninstall.dat`, so nothing is gone.
+fn jaws_cleanup_failed_at_once() -> CleanupOutcome {
+    CleanupOutcome {
+        error: Some("Access is denied.".to_string()),
+        ..jaws_cleanup(
+            CleanupStatus::Failed,
+            vec![file_step(
+                &jaws_folder_file("Uninstall.dat"),
+                CleanupResult::Failed {
+                    error: "Access is denied.".to_string(),
+                },
+            )],
+            &[JAWS_FOLDER, JAWS_KEY],
+        )
+    }
+}
+
+/// `cleanup` failed, so the scripts' files went back.
+fn jaws_cleanup_failed_item(cleanup: CleanupOutcome) -> UninstallReportItem {
+    UninstallReportItem {
+        put_back: vec![PathBuf::from(JAWS_DLL), PathBuf::from(JAWS_SCRIPT)],
+        cleanup: Some(cleanup),
+        ..jaws_failed(UninstallMessage::CleanupFailed {
+            error: "Access is denied.".to_string(),
+        })
+    }
+}
+
+/// After the helper removed the JAWS scripts' uninstaller folder and
+/// registry entry, Show details lists what it removed with administrator
+/// rights, file by file, then the folder and the entry as regedit names
+/// it, after the files that went into the backup. A file that was gone
+/// already isn't listed as removed. The restore command follows, for the
+/// files in the backup set.
+#[test]
+fn done_lists_the_cleanup_with_administrator_rights_and_the_registry_key() {
+    let report = jaws_report_planned(
+        UninstallPlanItem {
+            notes: Vec::new(),
+            ..jaws_with_cleanup()
+        },
+        vec![jaws_removed()],
+    );
+    let outcome = outcome(&report);
+    assert_eq!(outcome.status, UninstallOutcomeStatus::Success);
+    assert_eq!(outcome.heading, format!("RABBIT uninstalled {JAWS}."));
+    assert_eq!(
+        outcome.detail_lines,
+        [
+            "Target: C:/REAPER".to_string(),
+            "Also remove settings: no".to_string(),
+            format!("{JAWS}: Uninstalled"),
+            format!("  Removed: {JAWS_DLL}"),
+            format!("  Removed: {JAWS_SCRIPT}"),
+            format!(
+                "  Removed with administrator rights: {}",
+                jaws_folder_file("Uninstall.exe")
+            ),
+            format!("  Removed with administrator rights: {JAWS_FOLDER}"),
+            format!("  Removed from the registry with administrator rights: {JAWS_KEY}"),
+            "Backup set: uninstall-unix-1".to_string(),
+            format!(
+                "To put {JAWS} back, close REAPER and run: rabbit restore-backup --resource-path \
+                 \"C:/REAPER\" --backup-id uninstall-unix-1 --package jaws-scripts --apply"
+            ),
+        ]
+    );
+}
+
+/// A cleanup that stopped part way put the scripts' files back, and Done
+/// says Show details lists what is already gone. It does: what the helper
+/// removed with administrator rights, then the folder and the registry
+/// entry that are still there, with Windows' reason and the steps to
+/// remove the rest by hand below. A lost helper reports no steps, so
+/// nothing is listed as gone.
+#[test]
+fn show_details_after_a_failed_cleanup_lists_what_is_gone_and_what_is_still_there() {
+    let failed = UninstallReportItem {
+        put_back: vec![PathBuf::from(JAWS_DLL), PathBuf::from(JAWS_SCRIPT)],
+        cleanup: Some(jaws_cleanup_failed()),
+        ..jaws_failed(UninstallMessage::CleanupFailed {
+            error: format!("{}: Access is denied.", jaws_folder_file("Uninstall.exe")),
+        })
+    };
+    let outcome = outcome(&jaws_report(vec![failed]));
+    assert_eq!(outcome.status, UninstallOutcomeStatus::Failed);
+    assert!(
+        outcome
+            .status_text
+            .contains("Show details lists what is already gone."),
+        "{}",
+        outcome.status_text
+    );
+    let package = outcome
+        .detail_lines
+        .iter()
+        .position(|line| line == &format!("{JAWS}: Couldn't be uninstalled"))
+        .unwrap_or_else(|| panic!("{:#?}", outcome.detail_lines));
+    let expected: Vec<String> = [
+        format!(
+            "  Removed with administrator rights: {}",
+            jaws_folder_file("Uninstall.dat")
+        ),
+        format!("  Still there: {JAWS_FOLDER}"),
+        format!("  Still there: {JAWS_KEY}"),
+        format!(
+            "  RABBIT couldn't remove all of {JAWS}'s uninstaller folder and registry entry ({}: \
+             Access is denied.), so it put back what it had moved. Show details lists what is \
+             already gone.",
+            jaws_folder_file("Uninstall.exe")
+        ),
+    ]
+    .into_iter()
+    .chain(by_hand_lines_en().iter().map(|line| format!("  {line}")))
+    .collect();
+    assert_eq!(
+        outcome.detail_lines[package + 1..package + 1 + expected.len()],
+        expected[..]
+    );
+    let details = outcome.detail_lines.join("\n");
+    assert!(
+        !details.contains(&format!(
+            "Removed with administrator rights: {}",
+            jaws_folder_file("Uninstall.exe")
+        )),
+        "{details}"
+    );
+    // The script files went back, so the note on removing those that stay
+    // by hand is for a removed package only.
+    let note = en().text(SCRIPTS_NOTE_KEY).value;
+    assert!(!details.contains(&note), "{details}");
+    assert!(!details.contains("restore-backup"), "{details}");
+
+    let lost = UninstallReportItem {
+        cleanup: Some(CleanupOutcome::lost("jaws-scripts", "the pipe broke")),
+        ..jaws_failed(UninstallMessage::CleanupLost {
+            error: "the pipe broke".to_string(),
+        })
+    };
+    let details = outcome_details(&jaws_report(vec![lost]));
+    assert!(!details.contains("administrator rights:"), "{details}");
+    assert!(!details.contains("Still there:"), "{details}");
+}
+
+fn outcome_details(report: &UninstallReport) -> String {
+    outcome(report).detail_lines.join("\n")
+}
+
+/// Once the scripts are gone, the script files their installer added that
+/// stay, because they were there before RABBIT ran the installer or
+/// RABBIT's records of them disagree, are listed by name, as long as they
+/// are there; the keeps sentence only said such files stay. The note on
+/// removing them by hand follows.
+#[test]
+fn show_details_lists_files_kept_because_they_were_there_before_and_the_by_hand_note() {
+    let settings = "C:/Users/me/AppData/Roaming/Freedom Scientific/JAWS/2025/Settings/enu";
+    let kept = |name: &str, reason, exists| KeptPath {
+        path: PathBuf::from(format!("{settings}/{name}")),
+        reason,
+        note_key: None,
+        exists,
+        removable_with_settings: false,
+    };
+    let planned = UninstallPlanItem {
+        kept: vec![
+            kept("reaper.jkm", KeptReason::ThereBeforeInstall, true),
+            kept("reaper.jcf", KeptReason::RecordUnclear, true),
+            kept("reaper.jsb", KeptReason::ThereBeforeInstall, false),
+            kept("reaper.ini", KeptReason::UserData, true),
+        ],
+        ..jaws_with_cleanup()
+    };
+    let report = jaws_report_planned(planned.clone(), vec![jaws_removed()]);
+    let lines = outcome(&report).detail_lines;
+    let first = lines
+        .iter()
+        .position(|line| line.contains("reaper.jkm"))
+        .unwrap_or_else(|| panic!("{lines:#?}"));
+    assert_eq!(
+        lines[first..first + 3],
+        [
+            format!(
+                "  Kept, because it was already there when RABBIT ran the installer: \
+                 {settings}/reaper.jkm"
+            ),
+            format!("  Kept, because RABBIT's records of it disagree: {settings}/reaper.jcf"),
+            format!("  {}", en().text(SCRIPTS_NOTE_KEY).value),
+        ]
+    );
+    // The note names reaper.ini by itself, so look for the paths.
+    let details = lines.join("\n");
+    for name in ["reaper.jsb", "reaper.ini"] {
+        let path = format!("{settings}/{name}");
+        assert!(!details.contains(&path), "{path}\n{details}");
+    }
+
+    // A package that stayed keeps all of its files, so listing some as
+    // kept would suggest the others went, and the note on removing them by
+    // hand waits until the package is gone.
+    let report = jaws_report_planned(
+        planned,
+        vec![jaws_failed(UninstallMessage::FileInUse {
+            path: PathBuf::from(JAWS_SCRIPT),
+            error: "sharing violation".to_string(),
+        })],
+    );
+    let details = outcome_details(&report);
+    assert!(!details.contains("Kept, because"), "{details}");
+    assert!(
+        !details.contains(&en().text(SCRIPTS_NOTE_KEY).value),
+        "{details}"
+    );
+}
+
+/// The helper didn't trust the folder or entry when it checked them again:
+/// Done says what was put back, why in the user's language, and then the
+/// steps to remove the scripts by hand, each on a line of its own, as the
+/// row said them.
+#[test]
+fn done_after_a_refused_cleanup_shows_the_reason_and_the_by_hand_steps() {
+    let report = jaws_report(vec![jaws_failed(UninstallMessage::CleanupRefused {
+        refusal: VendorRefusal::RegistryKeyHasSubkeys,
+    })]);
+    let expected: Vec<String> = [
+        format!(
+            "RABBIT checked {JAWS}'s uninstaller folder in Program Files and its registry entry \
+             again and didn't trust what it found, so it put back what it had moved."
+        ),
+        format!("{JAWS}'s registry entry holds more than RABBIT expects."),
+    ]
+    .into_iter()
+    .chain(by_hand_lines_en())
+    .collect();
+    assert_eq!(uninstall_reasons(&en(), &report), expected);
+
+    let outcome = outcome(&report);
+    assert_eq!(outcome.status, UninstallOutcomeStatus::Failed);
+    let details = outcome.detail_lines;
+    let first = details
+        .iter()
+        .position(|line| line.trim() == expected[2])
+        .unwrap_or_else(|| panic!("{details:#?}"));
+    let indented: Vec<String> = expected[2..]
+        .iter()
+        .map(|line| format!("  {line}"))
+        .collect();
+    assert_eq!(details[first..first + indented.len()], indented[..]);
+}
+
+/// A cleanup that failed part way, or lost its helper, puts back what had
+/// moved, and Done says so with Windows' or RABBIT's own words. Part of the
+/// folder or entry may be gone, and without a receipt nothing may be left
+/// to find the scripts by, so the steps to remove them by hand follow. When
+/// the first delete failed, nothing is gone, and Done says that rather than
+/// pointing to Show details.
+#[test]
+fn a_failed_or_lost_cleanup_says_what_was_put_back() {
+    let reasons = |item| uninstall_reasons(&en(), &jaws_report(vec![item]));
+    let then_by_hand = |first: String| {
+        std::iter::once(first)
+            .chain(by_hand_lines_en())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        reasons(jaws_cleanup_failed_item(jaws_cleanup_failed())),
+        then_by_hand(format!(
+            "RABBIT couldn't remove all of {JAWS}'s uninstaller folder and registry entry (Access \
+             is denied.), so it put back what it had moved. Show details lists what is already \
+             gone."
+        ))
+    );
+    assert_eq!(
+        reasons(jaws_cleanup_failed_item(jaws_cleanup_failed_at_once())),
+        then_by_hand(format!(
+            "RABBIT couldn't remove {JAWS}'s uninstaller folder and registry entry (Access is \
+             denied.), so it put back what it had moved. Nothing of that folder or its registry \
+             entry was removed."
+        ))
+    );
+    assert_eq!(
+        reasons(UninstallReportItem {
+            cleanup: Some(CleanupOutcome::lost("jaws-scripts", "the pipe broke")),
+            ..jaws_failed(UninstallMessage::CleanupLost {
+                error: "the pipe broke".to_string(),
+            })
+        }),
+        then_by_hand(format!(
+            "RABBIT lost contact with its helper while it removed {JAWS}'s uninstaller folder \
+             and registry entry (the pipe broke), so it put back what it had moved. Part of that \
+             folder or its registry entry may be gone."
+        ))
+    );
+}
+
+/// After a cleanup whose first delete failed, Show details lists nothing as
+/// removed with administrator rights, only the folder and registry entry
+/// that are still there.
+#[test]
+fn show_details_after_a_cleanup_that_removed_nothing_lists_only_what_is_still_there() {
+    let report = jaws_report(vec![
+        jaws_cleanup_failed_item(jaws_cleanup_failed_at_once()),
+    ]);
+    let lines = outcome(&report).detail_lines;
+    let package = lines
+        .iter()
+        .position(|line| line == &format!("{JAWS}: Couldn't be uninstalled"))
+        .unwrap_or_else(|| panic!("{lines:#?}"));
+    assert_eq!(
+        lines[package + 1..package + 3],
+        [
+            format!("  Still there: {JAWS_FOLDER}"),
+            format!("  Still there: {JAWS_KEY}"),
+        ]
+    );
+    let details = lines.join("\n");
+    assert!(!details.contains("administrator rights:"), "{details}");
+    assert!(!details.contains("already gone"), "{details}");
+}
+
+/// JAWS may hold a script file its installer added open. Closing the
+/// user's screen reader is no answer, so Done says to wait and try again,
+/// then to restart JAWS, however Windows spells the path. A plug-in in
+/// REAPER's folder gets the usual sentence.
+#[test]
+fn a_jaws_file_in_use_says_to_wait_and_then_restart_jaws() {
+    let reasons = |path: &str| {
+        uninstall_reasons(
+            &en(),
+            &jaws_report(vec![jaws_failed(UninstallMessage::FileInUse {
+                path: PathBuf::from(path),
+                error: "sharing violation".to_string(),
+            })]),
+        )
+    };
+    for path in [JAWS_SCRIPT.to_string(), JAWS_SCRIPT.to_uppercase()] {
+        assert_eq!(
+            reasons(&path),
+            [format!(
+                "{JAWS} wasn't uninstalled, because JAWS or another program is using {path}. \
+                 Wait a moment, then run RABBIT again. If that doesn't help, restart JAWS first."
+            )]
+        );
+    }
+    assert_eq!(
+        reasons(JAWS_DLL),
+        [format!(
+            "{JAWS} wasn't uninstalled, because another program is using {JAWS_DLL}. Close that \
+             program, then run RABBIT again."
+        )]
     );
 }
 

@@ -17,8 +17,15 @@
 //! helper -> RABBIT  {"event":"still-waiting","package_id":"surge-xt","seconds":30}
 //! helper -> RABBIT  {"event":"waiting-for-files","package_id":"surge-xt","seconds":30}
 //! helper -> RABBIT  {"event":"finished","package_id":"surge-xt","outcome":{...}}
+//! RABBIT -> helper  {"order":"run","package_id":"jaws-scripts"}
+//! helper -> RABBIT  {"event":"started","package_id":"jaws-scripts"}
+//! helper -> RABBIT  {"event":"cleanup-finished","package_id":"jaws-scripts","outcome":{...}}
 //! RABBIT -> helper  {"order":"quit"}
 //! ```
+//!
+//! A package's manifest decides what the helper does for it: run its
+//! vendor's uninstaller, or delete what its installer left in machine-wide
+//! places ([`super::cleanup`]). RABBIT never sends a path either way.
 //!
 //! The helper trusts very little:
 //! - It talks only to the process its command line names as its parent, and
@@ -27,7 +34,7 @@
 //!   in that order. Any other order is refused, and ends the session.
 //! - It looks every package up itself, in the manifests built into RABBIT,
 //!   and repeats every check from HKLM and the real file system before it
-//!   starts anything ([`super::vendor`]).
+//!   starts or deletes anything ([`super::vendor`], [`super::cleanup`]).
 //! - It never reads HKCU, `%APPDATA%` or any other per-user place: when a
 //!   standard user types an administrator's password, the helper runs as
 //!   that administrator, another account. The machine-wide folders it reads
@@ -51,11 +58,13 @@
 //! refuse in this crate's own tests too. Tests use
 //! [`InProcessElevatedHelper`], which runs the same helper loop on a thread,
 //! with no rights beyond the test's own, and refuses Windows' real list of
-//! installed programs.
+//! installed programs and any machine-wide folder outside the temporary
+//! folder.
 
 use std::collections::HashMap;
+use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
@@ -66,9 +75,12 @@ use rabbit_platform::{
 use serde::{Deserialize, Serialize};
 
 use crate::model::{InstallationKind, Platform};
-use crate::package::uninstall::{UninstallElevation, UninstallStrategy, VendorUninstallerSpec};
+use crate::package::uninstall::{
+    MachineCleanupSpec, UninstallElevation, UninstallStrategy, VendorUninstallerSpec,
+};
 use crate::package::{PackageSpec, builtin_package_specs};
 
+use super::cleanup::{CleanupJob, CleanupOutcome, run_machine_cleanup};
 use super::paths::{UninstallRoots, absolute};
 use super::vendor::{
     SystemVendorEnvironment, VendorEnvironment, VendorEvent, VendorJob, VendorOutcome,
@@ -111,6 +123,8 @@ const ORDER_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long RABBIT waits for an answer about a package it knows nothing of.
 const UNKNOWN_PACKAGE_WAIT: Duration = Duration::from_secs(120);
+/// How long RABBIT waits for a machine cleanup: a few checks and deletes.
+const CLEANUP_WAIT: Duration = Duration::from_secs(60);
 /// How long RABBIT waits for the helper to end after the last order.
 const FINISH_WAIT: Duration = Duration::from_secs(10);
 
@@ -264,6 +278,12 @@ pub enum HelperEvent {
     Finished {
         package_id: String,
         outcome: Box<VendorOutcome>,
+    },
+    /// The package's machine cleanup has ended, in place of `Finished` for
+    /// a package whose manifest names one.
+    CleanupFinished {
+        package_id: String,
+        outcome: Box<CleanupOutcome>,
     },
     /// The helper refused the last order, and ended the session.
     Refused { reason: HelperRefusal },
@@ -442,27 +462,39 @@ pub(crate) fn serve(
         if send(channel, &started).is_err() {
             return HELPER_EXIT_PIPE_FAILED;
         }
-        // A broken pipe while the uninstaller runs changes nothing about
-        // the run: it goes on to its end, and only the telling stops.
-        let outcome = run_package(&package_id, args.target, specs, roots, env, &mut |event| {
-            let event = match event {
-                VendorEvent::Launched => HelperEvent::VendorLaunched {
-                    package_id: package_id.clone(),
-                },
-                VendorEvent::StillWaiting { seconds } => HelperEvent::StillWaiting {
-                    package_id: package_id.clone(),
-                    seconds,
-                },
-                VendorEvent::WaitingForFiles { seconds } => HelperEvent::WaitingForFiles {
-                    package_id: package_id.clone(),
-                    seconds,
-                },
+        let finished = if let Some(spec) = elevated_cleanup_plan(specs, &package_id, args.target) {
+            let job = CleanupJob {
+                package_id: &package_id,
+                spec,
+                roots,
             };
-            let _ = send(channel, &event);
-        });
-        let finished = HelperEvent::Finished {
-            package_id: package_id.clone(),
-            outcome: Box::new(outcome),
+            HelperEvent::CleanupFinished {
+                package_id: package_id.clone(),
+                outcome: Box::new(run_machine_cleanup(&job, env)),
+            }
+        } else {
+            // A broken pipe while the uninstaller runs changes nothing about
+            // the run: it goes on to its end, and only the telling stops.
+            let outcome = run_package(&package_id, args.target, specs, roots, env, &mut |event| {
+                let event = match event {
+                    VendorEvent::Launched => HelperEvent::VendorLaunched {
+                        package_id: package_id.clone(),
+                    },
+                    VendorEvent::StillWaiting { seconds } => HelperEvent::StillWaiting {
+                        package_id: package_id.clone(),
+                        seconds,
+                    },
+                    VendorEvent::WaitingForFiles { seconds } => HelperEvent::WaitingForFiles {
+                        package_id: package_id.clone(),
+                        seconds,
+                    },
+                };
+                let _ = send(channel, &event);
+            });
+            HelperEvent::Finished {
+                package_id: package_id.clone(),
+                outcome: Box::new(outcome),
+            }
         };
         if send(channel, &finished).is_err() {
             return HELPER_EXIT_PIPE_FAILED;
@@ -488,6 +520,29 @@ pub fn elevated_vendor_plan<'a>(
     elevated_vendor_run
         .then_some(plan.vendor_uninstaller.as_ref())
         .flatten()
+}
+
+/// The machine cleanup of `package_id` for a `target` REAPER on Windows, as
+/// the manifests built into RABBIT say: only that of a Windows
+/// `remove_files` plan, for a package that needs a standard REAPER, and
+/// only for a standard REAPER. Validation keeps it apart from
+/// [`elevated_vendor_plan`]: no plan has both.
+pub fn elevated_cleanup_plan<'a>(
+    specs: &'a [PackageSpec],
+    package_id: &str,
+    target: InstallationKind,
+) -> Option<&'a MachineCleanupSpec> {
+    let spec = specs.iter().find(|spec| spec.id == package_id)?;
+    // The folder and the key serve the whole computer, so only a standard
+    // REAPER's uninstall removes them.
+    if !spec.requires_standard_install || target != InstallationKind::Standard {
+        return None;
+    }
+    let plan = spec.uninstall.plan_for(Platform::Windows, target)?;
+    if plan.strategy != UninstallStrategy::RemoveFiles {
+        return None;
+    }
+    plan.machine_cleanup.as_ref()
 }
 
 /// Run one package's elevated steps.
@@ -516,6 +571,8 @@ pub(crate) fn run_package(
 pub struct MachineFolders {
     /// `C:\Program Files`, then `C:\Program Files (x86)`.
     pub program_files: Vec<PathBuf>,
+    /// `C:\Program Files (x86)` alone, where a 32-bit installer writes.
+    pub program_files_x86: PathBuf,
     pub common_program_files: PathBuf,
     pub program_data: PathBuf,
 }
@@ -529,6 +586,7 @@ impl MachineFolders {
     pub fn of_this_computer() -> io::Result<Self> {
         Ok(Self {
             program_files: rabbit_platform::machine_program_files_dirs()?,
+            program_files_x86: rabbit_platform::machine_program_files_x86_dir()?,
             common_program_files: rabbit_platform::machine_common_program_files_dir()?,
             program_data: rabbit_platform::program_data_dir()?,
         })
@@ -552,6 +610,7 @@ pub fn helper_roots(args: &HelperArgs, folders: &MachineFolders) -> UninstallRoo
         clap_dir: None,
         common_program_files: Some(folders.common_program_files.clone()),
         program_files: folders.program_files.clone(),
+        program_files_x86: Some(folders.program_files_x86.clone()),
         program_data: Some(folders.program_data.clone()),
         home: None,
         documents: None,
@@ -652,17 +711,26 @@ pub trait ElevatedSession {
     /// later call with a failure that changed nothing.
     fn run(&mut self, package_id: &str, on_event: &mut dyn FnMut(&VendorEvent)) -> VendorOutcome;
 
+    /// Run `package_id`'s machine cleanup and wait for it. A session that
+    /// has lost its helper, or loses it now, answers with
+    /// [`CleanupStatus::Lost`](super::cleanup::CleanupStatus::Lost).
+    fn run_cleanup(&mut self, package_id: &str) -> CleanupOutcome;
+
     /// Tell the helper to end, and wait a moment for it to.
     fn finish(self: Box<Self>);
 }
 
-/// How long to wait for word on each package: its uninstaller's time
-/// limit, then as long again for Inno's after-run checks, and a margin.
+/// How long to wait for word on each package: for a vendor's uninstaller,
+/// its time limit, then as long again for Inno's after-run checks, and a
+/// margin; for a machine cleanup, [`CLEANUP_WAIT`].
 fn package_waits(specs: &[PackageSpec], request: &ElevatedRunRequest) -> HashMap<String, Duration> {
     request
         .package_ids
         .iter()
         .filter_map(|id| {
+            if elevated_cleanup_plan(specs, id, request.target).is_some() {
+                return Some((id.clone(), CLEANUP_WAIT));
+            }
             let plan = elevated_vendor_plan(specs, id, request.target)?;
             let seconds = plan.timeout_seconds.saturating_mul(2).saturating_add(120);
             Some((id.clone(), Duration::from_secs(seconds)))
@@ -718,14 +786,49 @@ impl<C: LineChannel> ChannelSession<C> {
         }
     }
 
-    /// Mark the session lost and say so for `package_id`.
-    fn lose(&mut self, package_id: &str, launched: bool, why: String) -> VendorOutcome {
+    /// Mark the session lost, and say so for `package_id`.
+    fn lost_contact(&mut self, package_id: &str, why: String) -> String {
         let error = format!(
             "RABBIT lost contact with its helper ({why}), so it can't tell how {package_id} \
              ended"
         );
         self.lost = Some(why);
+        error
+    }
+
+    /// Mark the session lost and say so for `package_id`'s vendor run.
+    fn lose(&mut self, package_id: &str, launched: bool, why: String) -> VendorOutcome {
+        let error = self.lost_contact(package_id, why);
         VendorOutcome::failed(package_id, launched, error)
+    }
+
+    /// Mark the session lost and say so for `package_id`'s machine cleanup.
+    fn lose_cleanup(&mut self, package_id: &str, why: String) -> CleanupOutcome {
+        let error = self.lost_contact(package_id, why);
+        CleanupOutcome::lost(package_id, error)
+    }
+
+    /// Send the order to run `package_id`, and say how long to wait for its
+    /// answers.
+    fn order_run(&mut self, package_id: &str) -> io::Result<Duration> {
+        let order = HelperOrder::Run {
+            package_id: package_id.to_string(),
+        };
+        send(&mut self.channel, &order)?;
+        Ok(self
+            .waits
+            .get(package_id)
+            .copied()
+            .unwrap_or(UNKNOWN_PACKAGE_WAIT))
+    }
+
+    /// The helper's next message, or why there is none.
+    fn next_event(&mut self, wait: Duration) -> Result<HelperEvent, String> {
+        match self.channel.read_line(wait) {
+            Ok(Some(line)) => serde_json::from_str(&line).map_err(|error| error.to_string()),
+            Ok(None) => Err("it ended".to_string()),
+            Err(error) => Err(error.to_string()),
+        }
     }
 }
 
@@ -738,27 +841,15 @@ impl<C: LineChannel + 'static> ElevatedSession for ChannelSession<C> {
                 format!("RABBIT had already lost contact with its helper ({why})"),
             );
         }
-        let order = HelperOrder::Run {
-            package_id: package_id.to_string(),
+        let wait = match self.order_run(package_id) {
+            Ok(wait) => wait,
+            Err(error) => return self.lose(package_id, false, error.to_string()),
         };
-        if let Err(error) = send(&mut self.channel, &order) {
-            return self.lose(package_id, false, error.to_string());
-        }
-        let wait = self
-            .waits
-            .get(package_id)
-            .copied()
-            .unwrap_or(UNKNOWN_PACKAGE_WAIT);
         let mut launched = false;
         loop {
-            let line = match self.channel.read_line(wait) {
-                Ok(Some(line)) => line,
-                Ok(None) => return self.lose(package_id, launched, "it ended".to_string()),
-                Err(error) => return self.lose(package_id, launched, error.to_string()),
-            };
-            let event = match serde_json::from_str::<HelperEvent>(&line) {
+            let event = match self.next_event(wait) {
                 Ok(event) => event,
-                Err(error) => return self.lose(package_id, launched, error.to_string()),
+                Err(why) => return self.lose(package_id, launched, why),
             };
             match event {
                 HelperEvent::Started { package_id: id } if id == package_id => {}
@@ -789,6 +880,50 @@ impl<C: LineChannel + 'static> ElevatedSession for ChannelSession<C> {
                 other => {
                     return self.lose(package_id, launched, format!("it sent {other:?}"));
                 }
+            }
+        }
+    }
+
+    /// Only `Started`, then `CleanupFinished`, both for `package_id`, are
+    /// answers to a cleanup. Anything else means RABBIT and its helper
+    /// disagree about the package, so the session ends there.
+    fn run_cleanup(&mut self, package_id: &str) -> CleanupOutcome {
+        if let Some(why) = &self.lost {
+            return CleanupOutcome::lost(
+                package_id,
+                format!("RABBIT had already lost contact with its helper ({why})"),
+            );
+        }
+        let wait = match self.order_run(package_id) {
+            Ok(wait) => wait,
+            Err(error) => return self.lose_cleanup(package_id, error.to_string()),
+        };
+        let mut started = false;
+        loop {
+            let event = match self.next_event(wait) {
+                Ok(event) => event,
+                Err(why) => return self.lose_cleanup(package_id, why),
+            };
+            match event {
+                HelperEvent::Started { package_id: id } if !started && id == package_id => {
+                    started = true;
+                }
+                HelperEvent::CleanupFinished {
+                    package_id: id,
+                    outcome,
+                } if started && id == package_id && outcome.package_id == package_id => {
+                    return *outcome;
+                }
+                // A refused order ends the helper's session, so this one is
+                // over as if the helper were lost.
+                HelperEvent::Refused { reason } => {
+                    self.lost = Some(reason.to_string());
+                    return CleanupOutcome::lost(
+                        package_id,
+                        format!("RABBIT's helper refused to clean up {package_id}: {reason}"),
+                    );
+                }
+                other => return self.lose_cleanup(package_id, format!("it sent {other:?}")),
             }
         }
     }
@@ -909,7 +1044,9 @@ fn start_system_helper(
 /// A helper for tests: the same helper loop on a thread of this process,
 /// with this process's rights, against the given environment. It refuses an
 /// environment that reads Windows' real list of installed programs, so it
-/// can never run a vendor's real uninstaller.
+/// can never run a vendor's real uninstaller, and machine-wide folders that
+/// aren't all below the temporary folder, so a machine cleanup can never
+/// reach the real Program Files.
 pub struct InProcessElevatedHelper {
     env: Arc<dyn VendorEnvironment>,
     specs: Vec<PackageSpec>,
@@ -949,6 +1086,7 @@ impl ElevatedHelper for InProcessElevatedHelper {
                     .to_string(),
             ));
         }
+        all_below_temp_folder(&self.folders).map_err(ElevationStartError::Failed)?;
         if self.declines {
             return Err(ElevationStartError::Declined);
         }
@@ -975,5 +1113,70 @@ impl ElevatedHelper for InProcessElevatedHelper {
         );
         session.await_ready(std::process::id())?;
         Ok(Box::new(session))
+    }
+}
+
+/// Check that every one of `folders` lies strictly below this process's
+/// temporary folder, by their real paths, so links and short names can't
+/// lead out of it. A folder that isn't there yet counts by its nearest
+/// parent that is.
+fn all_below_temp_folder(folders: &MachineFolders) -> Result<(), String> {
+    let temp = fs::canonicalize(std::env::temp_dir())
+        .map_err(|error| format!("the temporary folder can't be found: {error}"))?;
+    let every_folder = folders.program_files.iter().chain([
+        &folders.program_files_x86,
+        &folders.common_program_files,
+        &folders.program_data,
+    ]);
+    for folder in every_folder {
+        let below = real_path(folder).is_ok_and(|real| real != temp && real.starts_with(&temp));
+        if !below {
+            return Err(format!(
+                "an in-process helper only works with folders below the temporary folder, not {}",
+                folder.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `path`'s real path: that of its nearest existing parent, with the rest
+/// of `path` added. Only a full path without `.` or `..` has one, and none
+/// passes through a link whose target isn't there.
+fn real_path(path: &Path) -> io::Result<PathBuf> {
+    let plain = path.is_absolute()
+        && path
+            .components()
+            .all(|component| !matches!(component, Component::CurDir | Component::ParentDir));
+    if !plain {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} isn't a plain full path", path.display()),
+        ));
+    }
+    let mut existing = path;
+    let mut missing = Vec::new();
+    loop {
+        match fs::canonicalize(existing) {
+            Ok(real) => {
+                return Ok(missing
+                    .iter()
+                    .rev()
+                    .fold(real, |real, name| real.join(name)));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                // Something is there, so it is a link that leads nowhere,
+                // and may lead anywhere later.
+                if fs::symlink_metadata(existing).is_ok() {
+                    return Err(error);
+                }
+                let (Some(name), Some(parent)) = (existing.file_name(), existing.parent()) else {
+                    return Err(error);
+                };
+                missing.push(name);
+                existing = parent;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }

@@ -12,14 +12,18 @@ use crate::artifact::{ArtifactKind, CachedArtifact};
 use crate::disk_image::extract_user_plugin_from_disk_image;
 use crate::error::{IoPathContext, RabbitError, Result};
 use crate::hash::sha256_file;
-use crate::package::{InstallDestination, PACKAGE_FFMPEG, PackageSpec, package_specs_by_id};
+use crate::model::{InstallationKind, Platform};
+use crate::package::{
+    InstallDestination, PACKAGE_FFMPEG, PackageSpec, builtin_package_specs, package_specs_by_id,
+};
 use crate::preflight::{PreflightOptions, PreflightReport, run_install_preflight};
 use crate::progress::{ProgressEvent, ProgressReporter};
 use crate::receipt::{
     InstallState, PackageReceiptParams, load_install_state, save_install_state,
     upsert_package_receipt,
 };
-use crate::rollback::BackupSetWriter;
+use crate::rollback::{BackupSetWriter, OutsideRestoreRules};
+use crate::uninstall::paths::{UninstallRoots, resolve_pattern};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallOptions {
@@ -412,11 +416,63 @@ fn resolve_install_target(
 }
 
 /// The folders outside any resource folder that RABBIT copies files into
-/// itself, and so the only outside places a backup restore may write to.
-/// Vendor installers write elsewhere too, but RABBIT never backs up what
-/// they replace. A new outside [`InstallDestination`] belongs here too.
+/// itself, and so the outside places a backup restore may write any
+/// package's files to. Vendor installers write elsewhere too, but RABBIT
+/// never backs up what they replace; only an uninstall moves files of
+/// theirs, which [`outside_restore_rules`] lets back for their package
+/// alone. A new outside [`InstallDestination`] belongs here too.
 pub(crate) fn outside_install_roots() -> Vec<PathBuf> {
     rabbit_platform::windows_clap_dir().into_iter().collect()
+}
+
+/// Where outside the resource folder at `resource` a restore may put files
+/// back on this computer: the folders of [`outside_install_roots`] for any
+/// package, and each built-in package's `vendor_added_files` patterns for
+/// that package alone, such as the JAWS scripts' files in JAWS's settings
+/// folder.
+pub(crate) fn outside_restore_rules(resource: &Path) -> OutsideRestoreRules {
+    let Some(platform) = Platform::current() else {
+        return OutsideRestoreRules {
+            shared_roots: outside_install_roots(),
+            vendor_added: Vec::new(),
+        };
+    };
+    outside_restore_rules_with(
+        &builtin_package_specs(platform),
+        platform,
+        &UninstallRoots::for_target(platform, resource, None),
+        outside_install_roots(),
+    )
+}
+
+/// [`outside_restore_rules`] for these packages, with their paths' tokens
+/// standing for `roots`. Only the plan for a standard REAPER can have
+/// `vendor_added_files`, and a pattern whose token stands for nothing here
+/// allows nothing.
+pub(crate) fn outside_restore_rules_with(
+    specs: &[PackageSpec],
+    platform: Platform,
+    roots: &UninstallRoots,
+    shared_roots: Vec<PathBuf>,
+) -> OutsideRestoreRules {
+    let mut vendor_added = Vec::new();
+    for spec in specs {
+        let Some(files) = spec
+            .uninstall
+            .plan_for(platform, InstallationKind::Standard)
+            .and_then(|plan| plan.remove.vendor_added_files.as_ref())
+        else {
+            continue;
+        };
+        for pattern in &files.files {
+            let resolved = resolve_pattern(pattern, roots).unwrap_or_default();
+            vendor_added.extend(resolved.into_iter().map(|found| (spec.id.clone(), found)));
+        }
+    }
+    OutsideRestoreRules {
+        shared_roots,
+        vendor_added,
+    }
 }
 
 fn classify_action(dry_run: bool, target_exists: bool, target_matches: bool) -> InstallFileAction {

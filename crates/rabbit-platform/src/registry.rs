@@ -9,15 +9,22 @@
 //! for machine-wide installs.
 //!
 //! [`HkcuUninstallRoot`] also changes per-user entries: it reads one whole,
-//! writes one back exactly as it was, and deletes one. Nothing here writes to
-//! HKLM.
+//! writes one back exactly as it was, and deletes one.
 //!
-//! [`UninstallViews`] and [`pending_file_renames`] only read. They serve the
-//! trust checks before a vendor uninstaller runs with administrator rights,
-//! which believe HKLM alone, because only administrators can change it.
+//! [`UninstallViews`] and [`pending_file_renames`] read. They serve the
+//! trust checks before an elevated step, such as running a vendor
+//! uninstaller, which believe HKLM alone, because only administrators can
+//! change it.
+//!
+//! [`UninstallViews::delete_entry_in_view`] is the only write to HKLM. It
+//! deletes one uninstall entry in one view, and only RABBIT's elevated
+//! helper calls it, after those checks. Under HKCU it deletes only in a
+//! test's own key, and this crate's own tests never delete in HKLM.
 //!
 //! On non-Windows platforms the readers return `None` or nothing, an entry
-//! is never there, and writing one fails as unsupported.
+//! is never there, and writing one fails as unsupported. Deleting one in a
+//! view checks the name and the root first, as on Windows, and then fails
+//! as unsupported.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -35,6 +42,10 @@ const UNINSTALL_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Unins
 
 /// The machine-wide list of installed programs, under HKLM.
 const MACHINE_UNINSTALL_KEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
+
+/// How every test's own key under HKCU starts. Under HKCU,
+/// [`UninstallViews::delete_entry_in_view`] deletes only below such a key.
+const TEST_LIST_PREFIX: &str = "Software\\RABBIT-test-";
 
 /// Where Windows keeps the file operations it finishes at the next restart.
 const SESSION_MANAGER_KEY: &str = "SYSTEM\\CurrentControlSet\\Control\\Session Manager";
@@ -207,9 +218,9 @@ fn wide_string(value: &str) -> Vec<u16> {
 }
 
 /// A key under `HKEY_CURRENT_USER` whose subkeys are uninstall entries, the
-/// way Windows keeps its per-user list of installed programs. RABBIT only
-/// ever changes per-user entries, so the hive is fixed; the path is explicit
-/// so a test can point at a throwaway key instead of the real list.
+/// way Windows keeps its per-user list of installed programs. This type
+/// only ever changes per-user entries, so the hive is fixed; the path is
+/// explicit so a test can point at a throwaway key instead of the real list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HkcuUninstallRoot {
     path: String,
@@ -235,7 +246,8 @@ impl HkcuUninstallRoot {
     /// Every value of the entry `name`, or `None` when there is no such
     /// entry. Always `None` off Windows.
     pub fn read_entry(&self, name: &str) -> io::Result<Option<UninstallEntry>> {
-        imp::read_entry(&self.entry_path(name)?)
+        let entry = imp::read_entry(Hive::CurrentUser, &self.entry_path(name)?, None)?;
+        Ok(entry.map(|entry| entry.values))
     }
 
     /// Make the entry `name` hold exactly `entry`'s values: create it when
@@ -263,15 +275,16 @@ impl HkcuUninstallRoot {
 /// `<root>\<name>`. An empty root or name, a root with a separator at either
 /// end, and a name with a separator are refused, so a call only ever reaches
 /// one entry right below the root: never the root itself, a key above it, or
-/// one deeper down.
+/// one deeper down. A NUL in either is refused too: Windows would read only
+/// the text before it, which can name another entry.
 fn child_key_path(root: &str, name: &str) -> io::Result<String> {
-    if root.is_empty() || root.starts_with('\\') || root.ends_with('\\') {
+    if root.is_empty() || root.starts_with('\\') || root.ends_with('\\') || root.contains('\0') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{root:?} isn't a registry key path"),
         ));
     }
-    if name.is_empty() || name.contains('\\') {
+    if name.is_empty() || name.contains('\\') || name.contains('\0') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{name:?} isn't one key name"),
@@ -304,7 +317,8 @@ enum Hive {
     CurrentUser,
 }
 
-/// A list of uninstall entries, read in every registry view. Only reads.
+/// A list of uninstall entries, read in every registry view. It reads,
+/// except for [`Self::delete_entry_in_view`].
 ///
 /// The real list is HKLM's, [`Self::local_machine`]. Only administrators
 /// can change it, which is why an elevated uninstall may trust what it
@@ -389,6 +403,96 @@ impl UninstallViews {
         }
         Ok(found)
     }
+
+    /// Every value of the entry `key_name` as `view` holds it, with its
+    /// type and bytes, and how many subkeys the entry has. `None` when the
+    /// entry isn't in that view, and always off Windows. A key that is
+    /// there but can't be opened is an error, never "missing".
+    pub fn read_entry_in_view(
+        &self,
+        key_name: &str,
+        view: RegistryView,
+    ) -> io::Result<Option<ViewEntry>> {
+        let path = child_key_path(&self.path, key_name)?;
+        imp::read_entry(self.hive, &path, Some(view))
+    }
+
+    /// Delete the entry `key_name`, with its values, in `view`. `Ok(false)`
+    /// when it isn't there.
+    ///
+    /// An entry with subkeys fails and stays, because no installer RABBIT
+    /// cleans up after writes one.
+    ///
+    /// Checked in this order, on every platform: the name, as in every call
+    /// here, refused as `InvalidInput`; then the root, refused as
+    /// `PermissionDenied` unless this is HKLM's real list or a test's own
+    /// key under HKCU, `Software\RABBIT-test-*`, spelt exactly so. In this
+    /// crate's own test builds HKLM is refused too. A delete that passes
+    /// both checks fails as unsupported off Windows.
+    ///
+    /// This is RABBIT's only write to HKLM, and only the elevated helper
+    /// calls it, once its checks of the entry have passed.
+    pub fn delete_entry_in_view(&self, key_name: &str, view: RegistryView) -> io::Result<bool> {
+        let path = child_key_path(&self.path, key_name)?;
+        self.check_may_delete(key_name, view)?;
+        imp::delete_entry_in_view(self.hive, &path, view, &self.display_key(key_name, view))
+    }
+
+    /// Refuse, as `PermissionDenied`, a root [`Self::delete_entry_in_view`]
+    /// must not delete in. This crate's own tests never delete in HKLM:
+    /// CI's Windows runners are administrators, so such a delete would
+    /// really happen there.
+    fn check_may_delete(&self, key_name: &str, view: RegistryView) -> io::Result<()> {
+        let why = if cfg!(test) && self.is_local_machine() {
+            "its own tests never delete in HKLM"
+        } else if !self.may_delete_entries() {
+            "under HKCU it deletes only in a test's own key"
+        } else {
+            return Ok(());
+        };
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "RABBIT won't delete {}: {why}",
+                self.display_key(key_name, view)
+            ),
+        ))
+    }
+
+    /// The entry `key_name` in `view` as regedit names it, for messages and
+    /// reports. HKLM's 32-bit view is
+    /// `HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\<key>`,
+    /// its 64-bit view the same without `WOW6432Node`. Under HKCU, which
+    /// shares one key between both views, it is `HKCU\<root>\<key>`.
+    pub fn display_key(&self, key_name: &str, view: RegistryView) -> String {
+        match self.hive {
+            Hive::CurrentUser => format!("HKCU\\{}\\{key_name}", self.path),
+            Hive::LocalMachine => match (view, self.path.strip_prefix("SOFTWARE\\")) {
+                (RegistryView::Bit32, Some(rest)) => {
+                    format!("HKLM\\SOFTWARE\\WOW6432Node\\{rest}\\{key_name}")
+                }
+                _ => format!("HKLM\\{}\\{key_name}", self.path),
+            },
+        }
+    }
+
+    /// Whether [`Self::delete_entry_in_view`] may delete here: in HKLM's
+    /// real list, or below a test's own key under HKCU. Never anywhere
+    /// else in HKCU, such as the real per-user list of installed programs.
+    fn may_delete_entries(&self) -> bool {
+        self.is_local_machine()
+            || (self.hive == Hive::CurrentUser && self.path.starts_with(TEST_LIST_PREFIX))
+    }
+}
+
+/// One uninstall entry as one registry view holds it, as
+/// [`UninstallViews::read_entry_in_view`] read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewEntry {
+    /// Every value, with its type and bytes.
+    pub values: UninstallEntry,
+    /// How many subkeys the entry has. Installers write none.
+    pub subkeys: u32,
 }
 
 /// The values one view of an uninstall entry held, as
@@ -564,9 +668,20 @@ impl RegistryValue {
     /// A `REG_SZ` value, stored the way Windows stores one: UTF-16 with a
     /// closing NUL.
     pub fn string(name: impl Into<String>, text: &str) -> Self {
+        Self::text(name.into(), REG_SZ_KIND, text)
+    }
+
+    /// A `REG_EXPAND_SZ` value, stored like [`Self::string`], with nothing
+    /// expanded. For tests that write a value of the type an installer
+    /// might have chosen.
+    pub fn expandable_string(name: impl Into<String>, text: &str) -> Self {
+        Self::text(name.into(), REG_EXPAND_SZ_KIND, text)
+    }
+
+    fn text(name: String, kind: u32, text: &str) -> Self {
         Self {
-            name: name.into(),
-            kind: REG_SZ_KIND,
+            name,
+            kind,
             data: text
                 .encode_utf16()
                 .chain(Some(0))
@@ -577,6 +692,14 @@ impl RegistryValue {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Whether this is a `REG_SZ` value, whose text means exactly what it
+    /// says. A `REG_EXPAND_SZ` value may name variables such as
+    /// `%ProgramFiles%`, which each reader expands from its own
+    /// environment, so a check that wants an exact path refuses it.
+    pub fn is_plain_string(&self) -> bool {
+        self.kind == REG_SZ_KIND
     }
 
     /// The text of a `REG_SZ` or `REG_EXPAND_SZ` value, without its closing
@@ -614,11 +737,13 @@ mod imp {
     use windows_sys::Win32::System::Registry::{
         HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, KEY_SET_VALUE,
         KEY_WOW64_32KEY, KEY_WOW64_64KEY, REG_OPTION_NON_VOLATILE, RegCloseKey, RegCreateKeyExW,
-        RegDeleteKeyW, RegDeleteValueW, RegEnumValueW, RegOpenKeyExW, RegQueryInfoKeyW,
-        RegQueryValueExW, RegSetValueExW,
+        RegDeleteKeyExW, RegDeleteKeyW, RegDeleteValueW, RegEnumValueW, RegOpenKeyExW,
+        RegQueryInfoKeyW, RegQueryValueExW, RegSetValueExW,
     };
 
-    use super::{Hive, RegistryValue, RegistryView, UninstallEntry, same_value_name, wide_string};
+    use super::{
+        Hive, RegistryValue, RegistryView, UninstallEntry, ViewEntry, same_value_name, wide_string,
+    };
 
     /// How often reading one value may find it grew since its size was
     /// asked for, before the read gives up.
@@ -639,6 +764,13 @@ mod imp {
         match hive {
             Hive::LocalMachine => HKEY_LOCAL_MACHINE,
             Hive::CurrentUser => HKEY_CURRENT_USER,
+        }
+    }
+
+    fn view_flag(view: RegistryView) -> u32 {
+        match view {
+            RegistryView::Bit64 => KEY_WOW64_64KEY,
+            RegistryView::Bit32 => KEY_WOW64_32KEY,
         }
     }
 
@@ -672,11 +804,7 @@ mod imp {
         view: RegistryView,
         names: &[&str],
     ) -> io::Result<Option<Vec<Option<String>>>> {
-        let view_flag = match view {
-            RegistryView::Bit64 => KEY_WOW64_64KEY,
-            RegistryView::Bit32 => KEY_WOW64_32KEY,
-        };
-        let Some(key) = open_for_reading(hive, path, view_flag)? else {
+        let Some(key) = open_for_reading(hive, path, view_flag(view))? else {
             return Ok(None);
         };
         let mut values = Vec::with_capacity(names.len());
@@ -743,33 +871,29 @@ mod imp {
         )))
     }
 
-    pub(super) fn read_entry(path: &str) -> io::Result<Option<UninstallEntry>> {
-        let path = wide_string(path);
-        let mut hkey: HKEY = ptr::null_mut();
-        // SAFETY: `path` is NUL-terminated and outlives the call, and `hkey`
-        // is a valid place for the handle.
-        let status = unsafe {
-            RegOpenKeyExW(
-                HKEY_CURRENT_USER,
-                path.as_ptr(),
-                0,
-                KEY_QUERY_VALUE,
-                &mut hkey,
-            )
-        };
-        if is_missing(status) {
+    /// Every value of `path` and its number of subkeys, or `None` when the
+    /// key is missing. Without a view, the key is opened as this process
+    /// sees it, which is right for HKCU: both views share it.
+    pub(super) fn read_entry(
+        hive: Hive,
+        path: &str,
+        view: Option<RegistryView>,
+    ) -> io::Result<Option<ViewEntry>> {
+        let Some(key) = open_for_reading(hive, path, view.map_or(0, view_flag))? else {
             return Ok(None);
-        }
-        check(status)?;
-        let key = OpenKey(hkey);
-        Ok(Some(UninstallEntry::new(read_values(&key)?)))
+        };
+        Ok(Some(ViewEntry {
+            values: UninstallEntry::new(read_values(&key)?),
+            subkeys: subkey_count(&key)?,
+        }))
     }
 
     pub(super) fn write_entry(path: &str, entry: &UninstallEntry) -> io::Result<()> {
         let path = wide_string(path);
         let mut hkey: HKEY = ptr::null_mut();
-        // SAFETY: as in `read_entry`; the class, the security attributes and
-        // the disposition may all be null.
+        // SAFETY: `path` is NUL-terminated and outlives the call, and `hkey`
+        // is a valid place for the handle. The class, the security
+        // attributes and the disposition may all be null.
         let status = unsafe {
             RegCreateKeyExW(
                 HKEY_CURRENT_USER,
@@ -827,6 +951,63 @@ mod imp {
             return Ok(false);
         }
         check(status).map(|()| true)
+    }
+
+    /// Delete `path` in `view`, unless it has subkeys. `shown` names the
+    /// entry in the error for one that has.
+    pub(super) fn delete_entry_in_view(
+        hive: Hive,
+        path: &str,
+        view: RegistryView,
+        shown: &str,
+    ) -> io::Result<bool> {
+        let flag = view_flag(view);
+        // Looked at first only for a clear message: the delete below
+        // refuses a key with subkeys by itself, also one made since.
+        match open_for_reading(hive, path, flag)? {
+            None => return Ok(false),
+            Some(key) if subkey_count(&key)? > 0 => {
+                return Err(io::Error::new(
+                    io::ErrorKind::DirectoryNotEmpty,
+                    format!("RABBIT won't delete {shown}: it has subkeys"),
+                ));
+            }
+            Some(_) => {}
+        }
+        let path = wide_string(path);
+        // RegDeleteKeyExW, not RegDeleteTreeW: it deletes one key in the
+        // view asked for, and refuses one with subkeys.
+        // SAFETY: `path` is NUL-terminated and outlives the call; the
+        // reserved argument is zero as required.
+        let status = unsafe { RegDeleteKeyExW(hive_key(hive), path.as_ptr(), flag, 0) };
+        if is_missing(status) {
+            return Ok(false);
+        }
+        check(status).map(|()| true)
+    }
+
+    /// How many subkeys an open key has.
+    fn subkey_count(key: &OpenKey) -> io::Result<u32> {
+        let mut subkeys = 0u32;
+        // SAFETY: every pointer is either null, which the API allows for
+        // the facts not asked for, or a valid place for a count.
+        check(unsafe {
+            RegQueryInfoKeyW(
+                key.0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null(),
+                &mut subkeys,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        })?;
+        Ok(subkeys)
     }
 
     fn read_values(key: &OpenKey) -> io::Result<Vec<RegistryValue>> {
@@ -930,7 +1111,11 @@ mod imp {
 mod imp {
     use std::io;
 
-    use super::{Hive, RegistryValue, RegistryView, UninstallEntry};
+    use super::{Hive, RegistryValue, RegistryView, UninstallEntry, ViewEntry};
+
+    fn unsupported() -> io::Error {
+        io::Error::new(io::ErrorKind::Unsupported, "only Windows has a registry")
+    }
 
     pub(super) fn read_view_values(
         _hive: Hive,
@@ -949,19 +1134,29 @@ mod imp {
         Ok(None)
     }
 
-    pub(super) fn read_entry(_path: &str) -> io::Result<Option<UninstallEntry>> {
+    pub(super) fn read_entry(
+        _hive: Hive,
+        _path: &str,
+        _view: Option<RegistryView>,
+    ) -> io::Result<Option<ViewEntry>> {
         Ok(None)
     }
 
     pub(super) fn write_entry(_path: &str, _entry: &UninstallEntry) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "only Windows has a registry",
-        ))
+        Err(unsupported())
     }
 
     pub(super) fn delete_entry(_path: &str) -> io::Result<bool> {
         Ok(false)
+    }
+
+    pub(super) fn delete_entry_in_view(
+        _hive: Hive,
+        _path: &str,
+        _view: RegistryView,
+        _shown: &str,
+    ) -> io::Result<bool> {
+        Err(unsupported())
     }
 }
 
@@ -988,17 +1183,47 @@ mod tests {
             root.entry_path("OSARA").unwrap(),
             "Software\\RABBIT-test-paths\\OSARA"
         );
-        for name in ["", "OSARA\\Child", "\\OSARA", "OSARA\\"] {
+        // A test key that is never created, so nothing here can reach a
+        // real one even if a check below were missing.
+        let views = UninstallViews::current_user_at("Software\\RABBIT-test-never-created");
+        for name in ["", "OSARA\\Child", "\\OSARA", "OSARA\\", "OSARA\0Child"] {
             let error = root.delete_entry(name).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name:?}");
             let error = root.read_entry(name).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name:?}");
+            for view in RegistryView::ALL {
+                let error = views.read_entry_in_view(name, view).unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name:?}");
+                let error = views.delete_entry_in_view(name, view).unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name:?}");
+            }
         }
         for path in ["", "\\Software", "Software\\"] {
             let error = HkcuUninstallRoot::at(path)
                 .write_entry("OSARA", &UninstallEntry::default())
                 .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{path:?}");
+        }
+        // A NUL in the root is refused too. Never with a write: Windows
+        // would see only the text before the NUL, here a test key that is
+        // never created.
+        let error = child_key_path("Software\0RABBIT", "OSARA").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let nul_root = "Software\\RABBIT-test-never-created\0RABBIT";
+        let error = HkcuUninstallRoot::at(nul_root)
+            .delete_entry("OSARA")
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let error = HkcuUninstallRoot::at(nul_root)
+            .read_entry("OSARA")
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let nul_views = UninstallViews::current_user_at(nul_root);
+        for view in RegistryView::ALL {
+            let error = nul_views.read_entry_in_view("OSARA", view).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{view:?}");
+            let error = nul_views.delete_entry_in_view("OSARA", view).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{view:?}");
         }
     }
 
@@ -1029,6 +1254,124 @@ mod tests {
         );
         assert_eq!(entry.string_value("NoModify"), None);
         assert_eq!(entry.string_value("Publisher"), None);
+    }
+
+    #[test]
+    fn an_expandable_value_is_not_a_plain_string() {
+        let plain = RegistryValue::string("UninstallDirectory", "C:\\Program Files (x86)\\Vendor");
+        let expandable =
+            RegistryValue::expandable_string("UninstallDirectory", "%ProgramFiles(x86)%\\Vendor");
+        let number = RegistryValue {
+            name: "NoModify".to_string(),
+            kind: 4,
+            data: 1u32.to_le_bytes().to_vec(),
+        };
+
+        assert!(plain.is_plain_string());
+        assert!(!expandable.is_plain_string());
+        assert!(!number.is_plain_string());
+        // Both string types still read as text, and nothing is expanded.
+        assert_eq!(
+            expandable.as_string().as_deref(),
+            Some("%ProgramFiles(x86)%\\Vendor")
+        );
+        assert_eq!(expandable.kind, REG_EXPAND_SZ_KIND);
+        assert_eq!(
+            expandable.data,
+            utf16_bytes("%ProgramFiles(x86)%\\Vendor\0"),
+            "stored with its closing NUL, like a plain string"
+        );
+        assert_eq!(expandable.name(), "UninstallDirectory");
+    }
+
+    #[test]
+    fn the_32_bit_view_is_displayed_as_wow6432node() {
+        let machine = UninstallViews::local_machine();
+        assert_eq!(
+            machine.display_key("Reaper_JawsScripts", RegistryView::Bit32),
+            "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Reaper_JawsScripts"
+        );
+        assert_eq!(
+            machine.display_key("Reaper_JawsScripts", RegistryView::Bit64),
+            "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Reaper_JawsScripts"
+        );
+        // HKCU has one key for both views.
+        let test_list = UninstallViews::current_user_at("Software\\RABBIT-test-list");
+        for view in RegistryView::ALL {
+            assert_eq!(
+                test_list.display_key("Reaper_JawsScripts", view),
+                "HKCU\\Software\\RABBIT-test-list\\Reaper_JawsScripts"
+            );
+        }
+    }
+
+    /// Only asks; never deletes anything.
+    #[test]
+    fn entries_are_deleted_only_in_hklm_or_a_tests_own_key() {
+        assert!(UninstallViews::local_machine().may_delete_entries());
+        for path in [
+            "Software\\RABBIT-test-",
+            "Software\\RABBIT-test-1234",
+            "Software\\RABBIT-test-1234\\Deeper",
+        ] {
+            assert!(
+                UninstallViews::current_user_at(path).may_delete_entries(),
+                "{path}"
+            );
+        }
+        for path in [
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+            "Software\\RABBIT-test",
+            "Software\\RABBIT",
+            // Spelt exactly as the tests spell it, or not at all.
+            "SOFTWARE\\RABBIT-test-1234",
+            "Software\\rabbit-test-1234",
+            "Software\\Classes\\RABBIT-test-1234",
+            "RABBIT-test-1234",
+            "",
+        ] {
+            assert!(
+                !UninstallViews::current_user_at(path).may_delete_entries(),
+                "{path}"
+            );
+        }
+
+        // A refused root is refused before the registry is asked anything.
+        // This one is a test key in all but its spelling, and never made.
+        let refused = UninstallViews::current_user_at("SOFTWARE\\RABBIT-test-never-created");
+        for view in RegistryView::ALL {
+            let error = refused.delete_entry_in_view("OSARA", view).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        }
+    }
+
+    /// Only asks; never calls the delete on HKLM, so even a missing check
+    /// deletes nothing there.
+    #[test]
+    fn this_crates_own_tests_never_delete_in_hklm() {
+        let machine = UninstallViews::local_machine();
+        for view in RegistryView::ALL {
+            let error = machine
+                .check_may_delete("Reaper_JawsScripts", view)
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&machine.display_key("Reaper_JawsScripts", view)),
+                "{error}"
+            );
+        }
+        // A test's own key under HKCU still passes.
+        let test_list = UninstallViews::current_user_at("Software\\RABBIT-test-1234");
+        for view in RegistryView::ALL {
+            assert!(
+                test_list
+                    .check_may_delete("Reaper_JawsScripts", view)
+                    .is_ok()
+            );
+        }
     }
 
     #[test]
@@ -1181,15 +1524,32 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
     }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn off_windows_no_entry_reads_in_a_view_and_none_is_deleted() {
+        let machine = UninstallViews::local_machine();
+        let test_list = UninstallViews::current_user_at("Software\\RABBIT-test-elsewhere");
+        for view in RegistryView::ALL {
+            assert_eq!(machine.read_entry_in_view("REAPER", view).unwrap(), None);
+            assert_eq!(test_list.read_entry_in_view("REAPER", view).unwrap(), None);
+            let error = test_list.delete_entry_in_view("REAPER", view).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        }
+    }
 }
 
 #[cfg(all(test, windows))]
 mod windows_tests {
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use windows_sys::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
     use windows_sys::Win32::System::Registry::{
-        HKEY_CURRENT_USER, REG_DWORD, REG_EXPAND_SZ, REG_MULTI_SZ, RegDeleteKeyW, RegDeleteTreeW,
+        HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_ENUMERATE_SUB_KEYS, KEY_WOW64_32KEY,
+        KEY_WOW64_64KEY, REG_DWORD, REG_EXPAND_SZ, REG_MULTI_SZ, RegCloseKey, RegDeleteKeyW,
+        RegDeleteTreeW, RegEnumKeyExW, RegOpenKeyExW,
     };
 
     use super::*;
@@ -1197,8 +1557,6 @@ mod windows_tests {
     fn utf16_le(text: &str) -> Vec<u8> {
         text.encode_utf16().flat_map(u16::to_le_bytes).collect()
     }
-
-    const THROWAWAY_PREFIX: &str = "Software\\RABBIT-test-";
 
     /// A key of one test's own under `HKCU\Software`, deleted with
     /// everything in it when dropped, also when the test panics. No test
@@ -1216,7 +1574,7 @@ mod windows_tests {
                 .unwrap_or_default();
             Self {
                 path: format!(
-                    "{THROWAWAY_PREFIX}{}-{nanos}-{}",
+                    "{TEST_LIST_PREFIX}{}-{nanos}-{}",
                     std::process::id(),
                     NEXT.fetch_add(1, Ordering::Relaxed)
                 ),
@@ -1225,6 +1583,10 @@ mod windows_tests {
 
         fn root(&self) -> HkcuUninstallRoot {
             HkcuUninstallRoot::at(self.path.clone())
+        }
+
+        fn views(&self) -> UninstallViews {
+            UninstallViews::current_user_at(self.path.clone())
         }
 
         /// The key's name right below `HKCU\Software`.
@@ -1236,7 +1598,7 @@ mod windows_tests {
     impl Drop for ThrowawayKey {
         fn drop(&mut self) {
             // The recursive delete only ever sees a name this guard made up.
-            if !self.path.starts_with(THROWAWAY_PREFIX) || self.name().contains('\\') {
+            if !self.path.starts_with(TEST_LIST_PREFIX) || self.name().contains('\\') {
                 return;
             }
             let path = wide_string(&self.path);
@@ -1355,6 +1717,307 @@ mod windows_tests {
             !machine
                 .key_exists("RABBIT-test-no-program-is-called-this")
                 .unwrap()
+        );
+        for view in RegistryView::ALL {
+            assert_eq!(
+                machine
+                    .read_entry_in_view("RABBIT-test-no-program-is-called-this", view)
+                    .unwrap(),
+                None
+            );
+        }
+    }
+
+    /// The names of the entries in HKLM's list as one view holds them. The
+    /// view flag goes straight to Windows, not through [`RegistryView`], so
+    /// this is a yardstick for the code under test. Only reads.
+    fn machine_entry_names(view_flag: u32) -> Vec<String> {
+        let path = wide_string(MACHINE_UNINSTALL_KEY);
+        let mut hkey: HKEY = std::ptr::null_mut();
+        // SAFETY: `path` is NUL-terminated and outlives the call, and `hkey`
+        // is a valid place for the handle.
+        let status = unsafe {
+            RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                path.as_ptr(),
+                0,
+                KEY_ENUMERATE_SUB_KEYS | view_flag,
+                &mut hkey,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS, "HKLM's list opens for reading");
+        let mut names = Vec::new();
+        for index in 0u32.. {
+            // A key name has at most 255 characters.
+            let mut name = [0u16; 256];
+            let mut length = name.len() as u32;
+            // SAFETY: `name` holds `length` units, and the reserved, class
+            // and time pointers may be null.
+            let status = unsafe {
+                RegEnumKeyExW(
+                    hkey,
+                    index,
+                    name.as_mut_ptr(),
+                    &mut length,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if status == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            assert_eq!(status, ERROR_SUCCESS, "listing HKLM's entries");
+            names.push(String::from_utf16_lossy(&name[..length as usize]));
+        }
+        // SAFETY: the handle came from the open above, and only this closes
+        // it.
+        unsafe { RegCloseKey(hkey) };
+        names
+    }
+
+    /// Reads the real HKLM list, and only reads it. An entry one view holds
+    /// and the other doesn't must read in that view alone, which only
+    /// happens if the view asked for reaches Windows. The JAWS scripts'
+    /// entry is one such: it is only in the 32-bit view.
+    #[test]
+    fn an_entry_in_one_machine_view_reads_in_that_view_alone() {
+        let native = machine_entry_names(KEY_WOW64_64KEY);
+        let wow = machine_entry_names(KEY_WOW64_32KEY);
+        // Key names ignore case.
+        let lowercase = |names: &[String]| -> HashSet<String> {
+            names.iter().map(|name| name.to_lowercase()).collect()
+        };
+        let (native_names, wow_names) = (lowercase(&native), lowercase(&wow));
+        let only_in_one = native
+            .iter()
+            .filter(|name| !wow_names.contains(&name.to_lowercase()))
+            .map(|name| (name, RegistryView::Bit64))
+            .chain(
+                wow.iter()
+                    .filter(|name| !native_names.contains(&name.to_lowercase()))
+                    .map(|name| (name, RegistryView::Bit32)),
+            );
+
+        let machine = UninstallViews::local_machine();
+        let mut checked = 0;
+        for (name, view) in only_in_one {
+            // An entry this account may not read says nothing either way.
+            let (Ok(in_native), Ok(in_wow)) = (
+                machine.read_entry_in_view(name, RegistryView::Bit64),
+                machine.read_entry_in_view(name, RegistryView::Bit32),
+            ) else {
+                continue;
+            };
+            assert_eq!(in_native.is_some(), view == RegistryView::Bit64, "{name}");
+            assert_eq!(in_wow.is_some(), view == RegistryView::Bit32, "{name}");
+            assert_eq!(machine.views_with_key(name).unwrap(), [view], "{name}");
+            checked += 1;
+        }
+        if checked == 0 {
+            eprintln!("no entry in HKLM's list is in one view only, so the views went unchecked");
+        }
+    }
+
+    /// A plain string, an expandable string and a number, so the view tests
+    /// see each kind come back with its type. Not an entry the JAWS cleanup
+    /// would accept: that wants plain strings only.
+    fn mixed_type_entry() -> UninstallEntry {
+        UninstallEntry::new(vec![
+            RegistryValue::string(
+                "UninstallDirectory",
+                "C:\\Program Files (x86)\\Reaper_JawsScripts",
+            ),
+            RegistryValue::expandable_string(
+                "Uninstall.dat",
+                "%ProgramFiles(x86)%\\Reaper_JawsScripts\\Uninstall.dat",
+            ),
+            RegistryValue {
+                name: "NoModify".to_string(),
+                kind: REG_DWORD,
+                data: 1u32.to_le_bytes().to_vec(),
+            },
+        ])
+    }
+
+    #[test]
+    fn an_entry_reads_whole_in_one_view_with_its_subkey_count() {
+        let key = ThrowawayKey::new();
+        let views = key.views();
+        key.root()
+            .write_entry("Reaper_JawsScripts", &mixed_type_entry())
+            .unwrap();
+
+        // HKCU\Software is one key in both views, so both read the same.
+        for view in RegistryView::ALL {
+            let entry = views
+                .read_entry_in_view("Reaper_JawsScripts", view)
+                .unwrap()
+                .unwrap();
+            assert_eq!(entry.values, mixed_type_entry(), "{view:?}");
+            assert_eq!(entry.subkeys, 0, "{view:?}");
+            let value = |name: &str| {
+                entry
+                    .values
+                    .values()
+                    .iter()
+                    .find(|value| value.name() == name)
+                    .unwrap()
+                    .clone()
+            };
+            assert!(value("UninstallDirectory").is_plain_string());
+            assert!(!value("Uninstall.dat").is_plain_string());
+            assert!(!value("NoModify").is_plain_string());
+        }
+
+        // Subkeys are counted, not read.
+        let entry_path = format!("{}\\Reaper_JawsScripts", key.path);
+        for child in ["One", "Two"] {
+            HkcuUninstallRoot::at(entry_path.clone())
+                .write_entry(child, &osara_entry())
+                .unwrap();
+        }
+        for view in RegistryView::ALL {
+            let entry = views
+                .read_entry_in_view("Reaper_JawsScripts", view)
+                .unwrap()
+                .unwrap();
+            assert_eq!(entry.subkeys, 2, "{view:?}");
+            assert_eq!(entry.values, mixed_type_entry(), "{view:?}");
+        }
+
+        // An entry or a root that isn't there reads as nothing.
+        for view in RegistryView::ALL {
+            assert_eq!(views.read_entry_in_view("Surge XT", view).unwrap(), None);
+            let missing = UninstallViews::current_user_at(format!("{}\\Missing", key.path));
+            assert_eq!(
+                missing
+                    .read_entry_in_view("Reaper_JawsScripts", view)
+                    .unwrap(),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn deleting_an_entry_in_a_view_says_whether_it_was_there() {
+        let key = ThrowawayKey::new();
+        let views = key.views();
+        for view in RegistryView::ALL {
+            key.root()
+                .write_entry("Reaper_JawsScripts", &mixed_type_entry())
+                .unwrap();
+            key.root().write_entry("Neighbour", &osara_entry()).unwrap();
+
+            assert!(
+                views
+                    .delete_entry_in_view("Reaper_JawsScripts", view)
+                    .unwrap()
+            );
+
+            // Gone in both views, since HKCU shares one key; the
+            // neighbouring entry stays.
+            assert!(
+                views
+                    .views_with_key("Reaper_JawsScripts")
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(key.root().read_entry("Reaper_JawsScripts").unwrap(), None);
+            assert_eq!(
+                key.root().read_entry("Neighbour").unwrap(),
+                Some(osara_entry())
+            );
+            assert!(
+                !views
+                    .delete_entry_in_view("Reaper_JawsScripts", view)
+                    .unwrap()
+            );
+        }
+        // A test root that doesn't exist has no entries either.
+        let missing = UninstallViews::current_user_at(format!("{}\\Missing", key.path));
+        for view in RegistryView::ALL {
+            assert!(
+                !missing
+                    .delete_entry_in_view("Reaper_JawsScripts", view)
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn an_entry_with_subkeys_is_not_deleted_in_a_view() {
+        let key = ThrowawayKey::new();
+        let views = key.views();
+        key.root()
+            .write_entry("Reaper_JawsScripts", &mixed_type_entry())
+            .unwrap();
+        let entry = HkcuUninstallRoot::at(format!("{}\\Reaper_JawsScripts", key.path));
+        entry.write_entry("Child", &osara_entry()).unwrap();
+
+        for view in RegistryView::ALL {
+            let error = views
+                .delete_entry_in_view("Reaper_JawsScripts", view)
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::DirectoryNotEmpty, "{error}");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&views.display_key("Reaper_JawsScripts", view)),
+                "{error}"
+            );
+            assert_eq!(
+                key.root().read_entry("Reaper_JawsScripts").unwrap(),
+                Some(mixed_type_entry())
+            );
+            assert_eq!(entry.read_entry("Child").unwrap(), Some(osara_entry()));
+        }
+
+        // Once the test removes its own subkey, the entry goes.
+        assert!(entry.delete_entry("Child").unwrap());
+        assert!(
+            views
+                .delete_entry_in_view("Reaper_JawsScripts", RegistryView::Bit32)
+                .unwrap()
+        );
+        assert_eq!(key.root().read_entry("Reaper_JawsScripts").unwrap(), None);
+    }
+
+    #[test]
+    fn deleting_in_a_view_refuses_any_hkcu_root_but_a_test_one() {
+        let key = ThrowawayKey::new();
+        key.root()
+            .write_entry("Reaper_JawsScripts", &mixed_type_entry())
+            .unwrap();
+        // The same key, spelt differently: Windows reads it as the test's
+        // own, but RABBIT only deletes below the exact spelling.
+        let respelled =
+            UninstallViews::current_user_at(key.path.replacen("Software", "SOFTWARE", 1));
+        assert_eq!(
+            respelled
+                .read_entry_in_view("Reaper_JawsScripts", RegistryView::Bit32)
+                .unwrap()
+                .map(|entry| entry.values),
+            Some(mixed_type_entry())
+        );
+
+        for view in RegistryView::ALL {
+            let error = respelled
+                .delete_entry_in_view("Reaper_JawsScripts", view)
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        }
+
+        assert_eq!(
+            key.root().read_entry("Reaper_JawsScripts").unwrap(),
+            Some(mixed_type_entry())
+        );
+        // Windows' own per-user list is never a root deletes may happen in.
+        // Only asked; nothing is deleted there.
+        assert!(
+            !UninstallViews::current_user_at(HkcuUninstallRoot::installed_programs().path())
+                .may_delete_entries()
         );
     }
 

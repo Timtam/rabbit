@@ -66,6 +66,7 @@ use crate::package::uninstall::{
     wildcard_matches_ignoring_case,
 };
 
+use super::cleanup::{CleanupJob, PlannedMachineCleanup, check_machine_cleanup};
 use super::paths::{
     PathRefusal, ResolvedPath, UninstallRoots, check_link_removal, check_removal, inside_or_same,
     resolve_path, same_folder, same_ignoring_case, strictly_inside,
@@ -84,10 +85,11 @@ pub const VERIFY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// from, under ProgramData.
 pub const WORKING_FOLDER_PREFIX: &str = "RABBIT-uninstall";
 
-/// What the vendor runner reads and acts on. The elevated helper's
-/// environment reads HKLM and the real file system and starts real
-/// programs; tests give a throwaway registry key, fixture folders and
-/// fixture programs instead.
+/// What the vendor runner and the machine cleanup read and act on. The
+/// elevated helper's environment reads HKLM and the real file system,
+/// starts real programs and deletes for real; tests give a throwaway
+/// registry key, fixture folders and fixture programs instead. Every delete
+/// with administrator rights goes through here.
 pub trait VendorEnvironment: Send + Sync {
     /// The list of installed programs the uninstaller is looked up in:
     /// HKLM's, the one only administrators can change, in the helper.
@@ -121,6 +123,22 @@ pub trait VendorEnvironment: Send + Sync {
     fn now(&self) -> Instant;
 
     fn sleep(&self, duration: Duration);
+
+    /// Delete the regular file `path`. A link, a junction or a folder there
+    /// is refused and stays: the last component is never followed. Links
+    /// further up the path are, so the caller checks those first. For a
+    /// machine cleanup.
+    fn remove_file_no_follow(&self, path: &Path) -> io::Result<()>;
+
+    /// Delete the folder `path` if it is empty. A link or a junction there
+    /// is refused and stays; links further up the path are followed, as for
+    /// [`Self::remove_file_no_follow`]. For a machine cleanup.
+    fn remove_empty_dir(&self, path: &Path) -> io::Result<()>;
+
+    /// Delete the entry `key` in `view` of [`Self::uninstall_views`]'s list,
+    /// unless it has subkeys. `Ok(false)` when it isn't there. For a machine
+    /// cleanup.
+    fn delete_uninstall_entry(&self, key: &str, view: RegistryView) -> io::Result<bool>;
 }
 
 /// A vendor uninstaller to start, with its arguments.
@@ -209,20 +227,41 @@ impl VendorEnvironment for SystemVendorEnvironment {
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
     }
+
+    fn remove_file_no_follow(&self, path: &Path) -> io::Result<()> {
+        rabbit_platform::remove_regular_file(path)
+    }
+
+    fn remove_empty_dir(&self, path: &Path) -> io::Result<()> {
+        rabbit_platform::remove_empty_dir(path)
+    }
+
+    fn delete_uninstall_entry(&self, key: &str, view: RegistryView) -> io::Result<bool> {
+        self.views.delete_entry_in_view(key, view)
+    }
 }
 
-/// Looks a vendor's uninstaller up before a run, the way the elevated
-/// helper does again right before it starts it, and changes nothing. RABBIT
-/// shows the answer before anything happens: a package whose uninstaller it
-/// can't trust can't be ticked, and no permission prompt is raised for it.
+/// Looks a vendor's uninstaller, or a machine cleanup, up before a run, the
+/// way the elevated helper does again right before it starts or deletes
+/// anything, and changes nothing. RABBIT shows the answer before anything
+/// happens: a package whose uninstaller or uninstaller folder it can't
+/// trust can't be ticked, and no permission prompt is raised for it.
 pub trait VendorLookup {
     /// The uninstaller `job` names, once every check passes, or why not.
     fn locate(&self, job: &VendorJob<'_>) -> Result<PathBuf, VendorRefusal>;
+
+    /// What `job`'s machine cleanup would remove, once every check passes:
+    /// `None` when neither its folder nor its registry entry is there. Or
+    /// why not.
+    fn machine_cleanup(
+        &self,
+        job: &CleanupJob<'_>,
+    ) -> Result<Option<PlannedMachineCleanup>, VendorRefusal>;
 }
 
 /// The real lookup: Windows' list of programs installed for every user
 /// (HKLM) and the real folders, read only. Only RABBIT's own entry points
-/// use it; it never starts anything.
+/// use it; it never starts or deletes anything.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemVendorLookup;
 
@@ -236,11 +275,26 @@ impl VendorLookup for SystemVendorLookup {
         };
         locate_uninstaller(job, &env).map(|located| located.program)
     }
+
+    fn machine_cleanup(
+        &self,
+        job: &CleanupJob<'_>,
+    ) -> Result<Option<PlannedMachineCleanup>, VendorRefusal> {
+        if !cfg!(windows) {
+            return Err(VendorRefusal::Unsupported);
+        }
+        let env = LookupOnly {
+            views: UninstallViews::local_machine(),
+        };
+        check_machine_cleanup(job, &env)
+    }
 }
 
 /// A lookup that finds nothing, as on a computer where Windows lists no
 /// program for every user. For listings and tests that never run a vendor's
-/// uninstaller.
+/// uninstaller or a machine cleanup. A machine cleanup is refused, not
+/// taken as nothing there: a lookup that didn't look can't say a package's
+/// uninstaller folder and registry entry are gone.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NothingListed;
 
@@ -248,18 +302,26 @@ impl VendorLookup for NothingListed {
     fn locate(&self, _job: &VendorJob<'_>) -> Result<PathBuf, VendorRefusal> {
         Err(VendorRefusal::NotListed)
     }
+
+    fn machine_cleanup(
+        &self,
+        _job: &CleanupJob<'_>,
+    ) -> Result<Option<PlannedMachineCleanup>, VendorRefusal> {
+        Err(VendorRefusal::NotListed)
+    }
 }
 
 /// What [`SystemVendorLookup`] reads through: a list of installed programs
-/// and the owners of files. Everything that would change something refuses.
-struct LookupOnly {
-    views: UninstallViews,
+/// and the owners of files. Everything that would change something refuses,
+/// every delete included.
+pub(super) struct LookupOnly {
+    pub(super) views: UninstallViews,
 }
 
 fn read_only() -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
-        "looking an uninstaller up changes nothing",
+        "looking an uninstaller or a cleanup up changes nothing",
     )
 }
 
@@ -299,6 +361,18 @@ impl VendorEnvironment for LookupOnly {
     }
 
     fn sleep(&self, _duration: Duration) {}
+
+    fn remove_file_no_follow(&self, _path: &Path) -> io::Result<()> {
+        Err(read_only())
+    }
+
+    fn remove_empty_dir(&self, _path: &Path) -> io::Result<()> {
+        Err(read_only())
+    }
+
+    fn delete_uninstall_entry(&self, _key: &str, _view: RegistryView) -> io::Result<bool> {
+        Err(read_only())
+    }
 }
 
 /// What running a vendor's uninstaller would do, as the plan sees it before
@@ -421,7 +495,8 @@ pub enum VendorEvent {
     WaitingForFiles { seconds: u64 },
 }
 
-/// Why RABBIT didn't start a vendor's uninstaller. Nothing changed.
+/// Why RABBIT didn't start a vendor's uninstaller, or didn't remove a
+/// package's uninstaller folder and registry entry. Nothing changed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum VendorRefusal {
@@ -453,6 +528,20 @@ pub enum VendorRefusal {
     CopyDiffers,
     #[error("RABBIT couldn't check {what}: {error}")]
     Unreadable { what: String, error: String },
+    /// The registry entry holds a value the manifest doesn't list, or a
+    /// listed one that holds no text. `value` is the value's name.
+    #[error("its registry entry holds a value RABBIT doesn't expect: {value}")]
+    UnexpectedRegistryValue { value: String },
+    /// A value of the registry entry names another path than the manifest
+    /// gives, or names it as a `REG_EXPAND_SZ` rather than a plain string.
+    /// `found` is the value's text.
+    #[error("its registry entry points somewhere RABBIT doesn't expect: {found}")]
+    RegistryValueMismatch { found: String },
+    #[error("its registry entry has subkeys RABBIT doesn't expect")]
+    RegistryKeyHasSubkeys,
+    /// The uninstaller folder itself isn't owned by an administrator.
+    #[error("an administrator didn't create its folder: {}", path.display())]
+    UntrustedFolder { path: PathBuf },
     #[error("its plan has no uninstaller RABBIT runs with administrator rights")]
     NotAVendorPlan,
     #[error("only Windows runs a vendor's uninstaller")]
@@ -480,30 +569,45 @@ impl VendorRefusal {
             Self::NotBelowProgramFiles { .. } => "uninstall-vendor-refused-not-below-program-files",
             Self::CopyDiffers => "uninstall-vendor-refused-copy-differs",
             Self::Unreadable { .. } => "uninstall-vendor-refused-unreadable",
+            Self::UnexpectedRegistryValue { .. } => {
+                "uninstall-vendor-refused-unexpected-registry-value"
+            }
+            Self::RegistryValueMismatch { .. } => {
+                "uninstall-vendor-refused-registry-value-mismatch"
+            }
+            Self::RegistryKeyHasSubkeys => "uninstall-vendor-refused-registry-key-has-subkeys",
+            Self::UntrustedFolder { .. } => "uninstall-vendor-refused-untrusted-folder",
             Self::NotAVendorPlan => "uninstall-vendor-refused-not-a-vendor-plan",
             Self::Unsupported => "uninstall-vendor-refused-unsupported",
         }
     }
 
     /// The arguments [`VendorRefusal::fluent_key`]'s message takes:
-    /// `package`, the package's name, and for most also `path`.
+    /// `package`, the package's name, and for most also `path`, which for a
+    /// registry value is its name or its text.
     pub fn fluent_arguments(&self, package: &str) -> Vec<(&'static str, String)> {
         let mut arguments = vec![("package", package.to_string())];
         let path = match self {
-            Self::UnclearCommand { value } => Some(value.clone()),
+            Self::UnclearCommand { value } | Self::UnexpectedRegistryValue { value } => {
+                Some(value.clone())
+            }
             Self::NotAFullPath { path }
             | Self::WrongFolder { path }
             | Self::ForeignFile { path }
             | Self::FolderOrLink { path }
             | Self::UntrustedOwner { path }
+            | Self::UntrustedFolder { path }
             | Self::NotInInstallFolder { path, .. } => Some(path.display().to_string()),
-            Self::InstallLocationMismatch { found, .. } => Some(found.clone()),
+            Self::InstallLocationMismatch { found, .. } | Self::RegistryValueMismatch { found } => {
+                Some(found.clone())
+            }
             Self::NotBelowProgramFiles { folder } => Some(folder.display().to_string()),
             Self::Unreadable { what, .. } => Some(what.clone()),
             Self::UnknownFolder { token } => Some(token.clone()),
             Self::NotListed
             | Self::InstallLocationMissing
             | Self::CopyDiffers
+            | Self::RegistryKeyHasSubkeys
             | Self::NotAVendorPlan
             | Self::Unsupported => None,
         };
@@ -511,7 +615,7 @@ impl VendorRefusal {
         arguments
     }
 
-    fn unreadable(what: impl std::fmt::Display, error: &io::Error) -> Self {
+    pub(super) fn unreadable(what: impl std::fmt::Display, error: &io::Error) -> Self {
         Self::Unreadable {
             what: what.to_string(),
             error: error.to_string(),
@@ -903,7 +1007,7 @@ pub fn is_full_drive_path(path: &Path) -> bool {
 /// An install folder as Windows' list holds it, made comparable: no
 /// surrounding blanks or quotes, no trailing separator. It must be a full
 /// path on a drive letter, like the uninstaller.
-fn install_folder_from(value: &str) -> Result<PathBuf, VendorRefusal> {
+pub(super) fn install_folder_from(value: &str) -> Result<PathBuf, VendorRefusal> {
     let mut text = value.trim();
     if let Some(unquoted) = text
         .strip_prefix('"')
@@ -1026,7 +1130,7 @@ fn check_uninstaller_folder(
 /// `folder` must exist, and its real path must be the path itself, ignoring
 /// case: no junction or link anywhere along it, and no folder that only
 /// stands in for another. Returns the real path.
-fn check_reached_without_links(folder: &Path) -> Result<PathBuf, VendorRefusal> {
+pub(super) fn check_reached_without_links(folder: &Path) -> Result<PathBuf, VendorRefusal> {
     let real = fs::canonicalize(folder)
         .map_err(|error| VendorRefusal::unreadable(folder.display(), &error))?;
     let is_reparse_point = rabbit_platform::is_reparse_point(folder)
@@ -1046,8 +1150,45 @@ fn check_folder_contents(
     folder: &Path,
     only_files: &str,
 ) -> Result<(), VendorRefusal> {
+    check_folder_entries(env, folder, &|name| {
+        wildcard_matches_ignoring_case(only_files, name)
+    })
+    .map(|_| ())
+}
+
+/// [`check_folder_contents`] with a list of exact names instead of a
+/// pattern: every entry must be named like one of `names`, ignoring case.
+/// Returns the entries in the order of `names`.
+pub(super) fn check_folder_holds_only(
+    env: &dyn VendorEnvironment,
+    folder: &Path,
+    names: &[String],
+) -> Result<Vec<PathBuf>, VendorRefusal> {
+    let position = |name: &str| {
+        names
+            .iter()
+            .position(|listed| listed.eq_ignore_ascii_case(name))
+    };
+    let mut entries = check_folder_entries(env, folder, &|name| position(name).is_some())?;
+    entries.sort_by_key(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .and_then(position)
+    });
+    Ok(entries)
+}
+
+/// Every entry in `folder` must be a regular file, not a link or any other
+/// reparse point, named well, and owned by an administrator. Returns the
+/// entries.
+fn check_folder_entries(
+    env: &dyn VendorEnvironment,
+    folder: &Path,
+    named_well: &dyn Fn(&str) -> bool,
+) -> Result<Vec<PathBuf>, VendorRefusal> {
     let entries = fs::read_dir(folder)
         .map_err(|error| VendorRefusal::unreadable(folder.display(), &error))?;
+    let mut checked = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| VendorRefusal::unreadable(folder.display(), &error))?;
         let path = entry.path();
@@ -1058,16 +1199,13 @@ fn check_folder_contents(
         if is_reparse_point || !metadata.file_type().is_file() {
             return Err(VendorRefusal::FolderOrLink { path });
         }
-        let named_well = entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| wildcard_matches_ignoring_case(only_files, name));
-        if !named_well {
+        if !entry.file_name().to_str().is_some_and(named_well) {
             return Err(VendorRefusal::ForeignFile { path });
         }
         check_owner(env, &path)?;
+        checked.push(path);
     }
-    Ok(())
+    Ok(checked)
 }
 
 /// The uninstaller itself must be a regular file an administrator owns.
@@ -1084,7 +1222,8 @@ fn check_program_file(env: &dyn VendorEnvironment, program: &Path) -> Result<(),
     check_owner(env, program)
 }
 
-fn check_owner(env: &dyn VendorEnvironment, path: &Path) -> Result<(), VendorRefusal> {
+/// `path` must be owned by an administrator, SYSTEM or TrustedInstaller.
+pub(super) fn check_owner(env: &dyn VendorEnvironment, path: &Path) -> Result<(), VendorRefusal> {
     match env.owner_is_trusted(path) {
         Ok(true) => Ok(()),
         Ok(false) => Err(VendorRefusal::UntrustedOwner {
@@ -1096,7 +1235,7 @@ fn check_owner(env: &dyn VendorEnvironment, path: &Path) -> Result<(), VendorRef
 
 /// `path` resolved for these roots. A token that stands for nothing here
 /// means RABBIT can't check what the plan asks for.
-fn resolve(
+pub(super) fn resolve(
     path: &UninstallPath,
     roots: &UninstallRoots,
 ) -> Result<Vec<ResolvedPath>, VendorRefusal> {
