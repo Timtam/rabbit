@@ -22,7 +22,7 @@ use crate::receipt::{
     InstallState, PackageReceiptParams, load_install_state, save_install_state,
     upsert_package_receipt,
 };
-use crate::rollback::{BackupSetWriter, OutsideRestoreRules};
+use crate::rollback::{BackupSetWriter, OutsideRestoreRules, UPDATE_BACKUP_REASON};
 use crate::uninstall::paths::{UninstallRoots, resolve_pattern};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,9 +125,9 @@ pub fn install_cached_artifacts_with_progress(
     let mut replacement_backups: Option<BackupSetWriter> = None;
     let new_backup_set = || {
         if options.dry_run {
-            BackupSetWriter::planning(resource_path, &timestamp, "install-replacement")
+            BackupSetWriter::planning(resource_path, &timestamp, UPDATE_BACKUP_REASON)
         } else {
-            BackupSetWriter::new(resource_path, &timestamp, "install-replacement")
+            BackupSetWriter::new(resource_path, &timestamp, UPDATE_BACKUP_REASON)
         }
     };
 
@@ -273,7 +273,10 @@ pub fn install_cached_artifacts_with_progress(
     }
 
     // The receipt joins the replaced files' set, copied before the new
-    // receipt is saved, so restoring the set brings back both together.
+    // receipt is saved, so the set keeps what it said before the update. A
+    // restore never copies it back, because that would undo every change
+    // to it since, so it refuses this set until it can go back to an
+    // earlier version by changing only that package's entry.
     if let Some(backups) = &mut replacement_backups {
         report.receipt_backup_path = backups.copy_receipt_if_present()?;
         report.backup_manifest_path = Some(backups.manifest_path());
@@ -1035,6 +1038,73 @@ mod tests {
             "1.2.6"
         );
         assert!(!plugins.join("reaper_reapack-x64.dll.rabbit-tmp").exists());
+    }
+
+    /// The set a real update writes holds the replaced file and a copy of
+    /// the receipt from before. Restoring it, whole or for the package, is
+    /// refused until RABBIT can go back to an earlier version, and nothing
+    /// changes: the newer file and the current receipt stay byte for byte.
+    #[test]
+    fn an_update_s_backup_is_not_restored_yet() {
+        use crate::rollback::{
+            OutsideRestoreRules, RestoreBackupOptions, restore_backup_set_within,
+        };
+
+        let dir = tempdir().unwrap();
+        let options = InstallOptions {
+            dry_run: false,
+            allow_reaper_running: true,
+            target_app_path: None,
+            package_variants: Default::default(),
+        };
+        let old = cached_artifact(
+            dir.path(),
+            PACKAGE_REAPACK,
+            "reaper_reapack-x64.dll",
+            b"old",
+        );
+        install_cached_artifacts(dir.path(), &[old], &options).unwrap();
+        let new = cached_artifact(
+            dir.path(),
+            PACKAGE_REAPACK,
+            "reaper_reapack-x64.dll",
+            b"new",
+        );
+        let report = install_cached_artifacts(dir.path(), &[new], &options).unwrap();
+        assert!(report.receipt_backup_path.is_some());
+        let set = report.backup_manifest_path.unwrap();
+        let set_id = set.parent().unwrap().file_name().unwrap().to_str().unwrap();
+        let plugin = dir
+            .path()
+            .join("UserPlugins")
+            .join("reaper_reapack-x64.dll");
+        let receipt = dir.path().join("RABBIT").join("install-state.json");
+        let receipt_now = fs::read(&receipt).unwrap();
+
+        for (dry_run, package_id) in [
+            (true, None),
+            (false, None),
+            (false, Some(PACKAGE_REAPACK.to_string())),
+        ] {
+            let error = restore_backup_set_within(
+                dir.path(),
+                set_id,
+                &RestoreBackupOptions {
+                    dry_run,
+                    allow_reaper_running: true,
+                    package_id: package_id.clone(),
+                },
+                &OutsideRestoreRules::default(),
+            )
+            .unwrap_err();
+
+            assert!(
+                matches!(&error, RabbitError::EarlierVersionNotYet { backup_id } if backup_id == set_id),
+                "{dry_run} {package_id:?}: {error:?}"
+            );
+            assert_eq!(fs::read(&plugin).unwrap(), b"new");
+            assert_eq!(fs::read(&receipt).unwrap(), receipt_now);
+        }
     }
 
     #[test]

@@ -35,6 +35,14 @@ const MANIFEST_STAGING_FILE: &str = "backup-manifest.json.rabbit-tmp";
 /// The reason recorded for the set that holds the files a restore replaced.
 const BEFORE_RESTORE_REASON: &str = "before-restore";
 
+/// The reason recorded for the set that holds the files an update replaced,
+/// with a copy of RABBIT's receipt from before it.
+pub(crate) const UPDATE_BACKUP_REASON: &str = "install-replacement";
+
+/// The reason recorded for a set that holds only a copy of RABBIT's
+/// receipt, made after vendor installers ran.
+pub(crate) const RECORDS_BACKUP_REASON: &str = "unattended-receipt-update";
+
 /// The folder beside `RABBIT/backups` where delete (still to come) moves a
 /// set before it removes anything, so a restore never finds half a set.
 /// Restore only looks here, and never creates it.
@@ -251,8 +259,9 @@ pub enum RestoreBackupActionKind {
 /// Writes one backup set under `RABBIT/backups/<id>/`, keeping its manifest
 /// up to date after every step. Installs, the unattended installers' key map
 /// and receipt backups, restore itself and uninstall all write their sets
-/// through it, so every set has the same layout and every set can be
-/// restored.
+/// through it, so every set has the same layout and a restore reads them
+/// all the same way. Which sets a restore takes is up to the restore (see
+/// [`restore_backup_set`]).
 ///
 /// Installs and restore copy files in and leave the originals alone.
 /// Uninstall moves them in (see [`BackupSetWriter::move_file`]) and can move
@@ -370,7 +379,9 @@ impl BackupSetWriter {
     }
 
     /// Copy RABBIT's receipt into the set, when there is one, and record it
-    /// as the set's receipt backup.
+    /// as the set's receipt backup. A restore never copies it back, because
+    /// that would undo every change to the receipt since; it stays in the
+    /// set for anyone who needs it by hand.
     pub fn copy_receipt_if_present(&mut self) -> Result<Option<PathBuf>> {
         let receipt = receipt_path(&self.resource_path);
         if !receipt.is_file() {
@@ -928,6 +939,17 @@ pub fn list_backup_sets(resource_path: &Path) -> Result<Vec<BackupSet>> {
     Ok(sets)
 }
 
+/// Restore the set `backup_id` names in `RABBIT/backups`, or with
+/// `options.dry_run` say what a restore would do.
+///
+/// A restore never copies a receipt file over RABBIT's receipt: that would
+/// undo every change to it since the set was made, uninstalls included.
+/// So, before anything changes and in a dry run too, it refuses a set an
+/// update wrote ([`RabbitError::EarlierVersionNotYet`]), a set that holds
+/// only a copy of the receipt ([`RabbitError::RecordsOnly`]), and any other
+/// set that holds a copy of it ([`RabbitError::ReceiptInSet`]). A set an
+/// uninstall wrote merges each package's own entry into the receipt
+/// instead.
 pub fn restore_backup_set(
     resource_path: &Path,
     backup_id: &str,
@@ -942,8 +964,9 @@ pub fn restore_backup_set(
 /// a restore may write to coming from `outside`. Tests pass temporary
 /// folders there instead of the user's real CLAP and vendor folders.
 ///
-/// The set is found before anything else is read, so `outside` is only
-/// called once the id named a set.
+/// The set is found, and refused if it is one a restore never takes,
+/// before anything else is read, so `outside` is only called once the id
+/// named a set that may be restored.
 fn restore_backup_set_with(
     resource_path: &Path,
     backup_id: &str,
@@ -951,7 +974,81 @@ fn restore_backup_set_with(
     outside: impl FnOnce() -> OutsideRestoreRules,
 ) -> Result<RestoreBackupReport> {
     let backup_path = set_to_restore(resource_path, backup_id)?;
-    restore_found_set(resource_path, backup_id, backup_path, options, &outside())
+    let manifest = load_backup_manifest(&backup_path)?;
+    refuse_sets_a_restore_does_not_take(resource_path, backup_id, &backup_path, manifest.as_ref())?;
+    restore_found_set(
+        resource_path,
+        backup_id,
+        backup_path,
+        manifest,
+        options,
+        &outside(),
+    )
+}
+
+/// Refuse a set whose restore would put back an earlier copy of RABBIT's
+/// receipt, or files that only go with one:
+/// - a set an update wrote, whether or not it holds a receipt copy: its
+///   files belong to the receipt entry from before the update, which no
+///   restore puts back yet;
+/// - a set that holds only a copy of the receipt;
+/// - any other set that holds a copy of it, by its manifest or, without
+///   one, by its layout (see [`set_holds_receipt`]).
+///
+/// [`restore_target`] never puts a file back into RABBIT's folder anyway.
+/// This says why in plain words, and refuses the whole set before any file
+/// of it is read or changed.
+fn refuse_sets_a_restore_does_not_take(
+    resource_path: &Path,
+    backup_id: &str,
+    backup_path: &Path,
+    manifest: Option<&BackupManifest>,
+) -> Result<()> {
+    let backup_id = backup_id.to_string();
+    match manifest.map(|manifest| manifest.reason.as_str()) {
+        Some(UPDATE_BACKUP_REASON) => Err(RabbitError::EarlierVersionNotYet { backup_id }),
+        Some(RECORDS_BACKUP_REASON) => Err(RabbitError::RecordsOnly { backup_id }),
+        _ if set_holds_receipt(resource_path, backup_path, manifest)? => {
+            Err(RabbitError::ReceiptInSet {
+                backup_id,
+                backup_path: backup_path.to_path_buf(),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Whether a set holds a copy of RABBIT's receipt. With a manifest: an
+/// entry whose original, read the way [`restore_target`] reads it, is the
+/// receipt, or a `receipt_backup_path`. Without one: the receipt's place in
+/// the set's layout, which mirrors the resource folder. A name the file
+/// system would open as the receipt's counts too (see [`may_open_as`]).
+fn set_holds_receipt(
+    resource_path: &Path,
+    backup_path: &Path,
+    manifest: Option<&BackupManifest>,
+) -> Result<bool> {
+    let Some(manifest) = manifest else {
+        let mut files = Vec::new();
+        let mut links = Vec::new();
+        collect_relative_files(backup_path, backup_path, &mut files, &mut links)?;
+        return Ok(files.iter().any(|relative| is_receipt(relative)));
+    };
+    Ok(manifest.receipt_backup_path.is_some()
+        || manifest.files.iter().any(|entry| {
+            let (original_path, recorded) = recorded_original(entry);
+            // A path this can't place is refused by `restore_target` too.
+            inside_resource_folder(
+                resource_path,
+                &original_path,
+                recorded
+                    .as_ref()
+                    .map(|recorded| recorded.resource.as_path()),
+            )
+            .ok()
+            .flatten()
+            .is_some_and(|relative| is_receipt(&relative))
+        }))
 }
 
 /// Where outside the resource folder a restore may put a file back.
@@ -979,8 +1076,9 @@ pub(crate) fn restore_backup_set_within(
     restore_backup_set_with(resource_path, backup_id, options, || outside.clone())
 }
 
-/// Restore the set `backup_id` names, already found at `backup_path`,
-/// writing outside the resource folder only where `outside` allows.
+/// Restore the set `backup_id` names, already found at `backup_path` with
+/// its `manifest` read and not refused, writing outside the resource folder
+/// only where `outside` allows.
 ///
 /// A set an uninstall wrote records each package it removed. Its files come
 /// back like any set's, but the receipt doesn't: the uninstall never copied
@@ -994,10 +1092,10 @@ fn restore_found_set(
     resource_path: &Path,
     backup_id: &str,
     backup_path: PathBuf,
+    manifest: Option<BackupManifest>,
     options: &RestoreBackupOptions,
     outside: &OutsideRestoreRules,
 ) -> Result<RestoreBackupReport> {
-    let manifest = load_backup_manifest(&backup_path)?;
     let packages = packages_to_restore(backup_id, manifest.as_ref(), options)?;
 
     let preflight = run_install_preflight(
@@ -1153,8 +1251,8 @@ fn packages_to_restore(
         reason,
     };
     // Only an uninstall set knows which receipt entry goes with a package.
-    // Restoring one package's files from an install's set would leave the
-    // receipt describing the newer version.
+    // Restoring one package's files from any other set would leave the
+    // receipt describing other files. An update's set never gets here.
     let Some(packages) = recorded else {
         return Err(refuse(
             "only a set an uninstall wrote can restore one package; restore this set as a \
@@ -1285,11 +1383,7 @@ fn plan_restore_from_manifest(
         .iter()
         .filter(|entry| package_id.is_none() || entry.package_id.as_deref() == package_id)
     {
-        let recorded = recorded_set_location(&entry.backup_path);
-        let original_path = recorded
-            .as_ref()
-            .and_then(|recorded| recorded.resource_relative_original(&entry.original_path))
-            .unwrap_or_else(|| entry.original_path.clone());
+        let (original_path, recorded) = recorded_original(entry);
         // One refused file stops the whole set. Each package an uninstall
         // recorded can still come back on its own, with only its own files.
         let target_path = restore_target(
@@ -1399,8 +1493,9 @@ fn plan_restore_from_layout(resource_path: &Path, backup_path: &Path) -> Result<
     })
 }
 
-/// Where a file goes back to, refusing anything in RABBIT's own folder
-/// except the receipt, and anything outside the resource folder except:
+/// Where a file goes back to, refusing anything in RABBIT's own folder,
+/// the receipt included (see [`is_in_rabbit_folder`]), and anything outside
+/// the resource folder except:
 /// - below a folder RABBIT installs into itself, for any package;
 /// - where one of `package_id`'s own `vendor_added_files` patterns matches,
 ///   reached through real folders only below the pattern's guard (see
@@ -1423,23 +1518,15 @@ fn restore_target(
         reason: reason.to_string(),
     };
 
-    let inside_relative = if original_path.is_relative() {
-        if !is_plain_relative(original_path) {
+    // The receipt is no exception: copying an old one back would undo
+    // every change to it since. Sets that hold one are refused before this
+    // with a reason of their own (see `refuse_sets_a_restore_does_not_take`).
+    if let Some(relative) = inside_resource_folder(resource_path, original_path, recorded_resource)?
+    {
+        if is_in_rabbit_folder(&relative) {
             return Err(refuse(
-                "the path is not a plain path inside the resource folder",
+                "restore never puts a file back into RABBIT's own folder",
             ));
-        }
-        Some(original_path.to_path_buf())
-    } else {
-        let resource = absolute_without_dots(resource_path).with_path(resource_path)?;
-        relative_within(original_path, &resource)
-            .or_else(|| recorded_resource.and_then(|old| relative_within(original_path, old)))
-            .filter(|relative| is_plain_relative(relative))
-    };
-
-    if let Some(relative) = inside_relative {
-        if first_component_is(&relative, "RABBIT") && !same_path(&relative, RECEIPT_RELATIVE_PATH) {
-            return Err(refuse("restore never writes into RABBIT's own folder"));
         }
         return Ok(resource_path.join(relative));
     }
@@ -1466,6 +1553,31 @@ fn restore_target(
     Err(refuse(
         "the path is outside the REAPER resource folder and every other folder RABBIT installs into",
     ))
+}
+
+/// Where `original_path`, as a set records it, lies inside the resource
+/// folder: a relative path as it is, and an absolute one when it lies
+/// inside `resource_path`, or inside `recorded_resource`, where the
+/// resource folder was when the set was written. `None` for an absolute
+/// path outside both. A relative path that isn't a plain path is refused.
+fn inside_resource_folder(
+    resource_path: &Path,
+    original_path: &Path,
+    recorded_resource: Option<&Path>,
+) -> Result<Option<PathBuf>> {
+    if original_path.is_relative() {
+        if !is_plain_relative(original_path) {
+            return Err(RabbitError::BackupRestoreRefused {
+                path: original_path.to_path_buf(),
+                reason: "the path is not a plain path inside the resource folder".to_string(),
+            });
+        }
+        return Ok(Some(original_path.to_path_buf()));
+    }
+    let resource = absolute_without_dots(resource_path).with_path(resource_path)?;
+    Ok(relative_within(original_path, &resource)
+        .or_else(|| recorded_resource.and_then(|old| relative_within(original_path, old)))
+        .filter(|relative| is_plain_relative(relative)))
 }
 
 /// Check that a file may go back to `target`, below `guard_root`, without
@@ -1579,6 +1691,18 @@ impl RecordedSet {
             && same_components(original, &self.resource.join(&self.inside)))
         .then(|| self.inside.clone())
     }
+}
+
+/// Where the file of a set's entry came from, as restore reads it, and
+/// where the set was when it recorded the entry. See
+/// [`RecordedSet::resource_relative_original`].
+fn recorded_original(entry: &BackupManifestFile) -> (PathBuf, Option<RecordedSet>) {
+    let recorded = recorded_set_location(&entry.backup_path);
+    let original = recorded
+        .as_ref()
+        .and_then(|recorded| recorded.resource_relative_original(&entry.original_path))
+        .unwrap_or_else(|| entry.original_path.clone());
+    (original, recorded)
 }
 
 /// Where a set was when it recorded `backup_path`, read from the last
@@ -1973,6 +2097,57 @@ fn first_component_is(path: &Path, name: &str) -> bool {
         .is_some_and(|first| first == fold_case(name))
 }
 
+/// Whether `relative`, a plain path inside the resource folder, leads into
+/// RABBIT's own folder, by a first name the file system may open as
+/// `RABBIT` (see [`may_open_as`]).
+fn is_in_rabbit_folder(relative: &Path) -> bool {
+    matches!(
+        relative.components().next(),
+        Some(Component::Normal(name)) if may_open_as(name, "RABBIT")
+    )
+}
+
+/// Whether `relative`, a path inside the resource folder or a set, names
+/// RABBIT's receipt, `RABBIT/install-state.json`, by names the file system
+/// may open as those (see [`may_open_as`]).
+fn is_receipt(relative: &Path) -> bool {
+    let receipt: Vec<Component<'_>> = Path::new(RECEIPT_RELATIVE_PATH).components().collect();
+    let names: Vec<Component<'_>> = relative.components().collect();
+    names.len() == receipt.len()
+        && names.iter().zip(&receipt).all(|pair| match pair {
+            (Component::Normal(name), Component::Normal(expected)) => {
+                may_open_as(name, &expected.to_string_lossy())
+            }
+            _ => false,
+        })
+}
+
+/// Whether the file system may open `name`, one name of a path, as
+/// `expected`, one of RABBIT's own names. Windows and macOS usually ignore
+/// upper and lower case. Windows also drops trailing dots and spaces, and
+/// reads from the first `:` on as a stream of the same file or folder, so
+/// `rabbit`, `RABBIT.` and `RABBIT::$INDEX_ALLOCATION` all open `RABBIT`
+/// there. A refusal built on this may also catch a name that is really
+/// another one, which is harmless; missing one could let a restore write
+/// into RABBIT's folder.
+fn may_open_as(name: &OsStr, expected: &str) -> bool {
+    let name = name.to_string_lossy();
+    let name = if cfg!(windows) {
+        name.split(':')
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(['.', ' '])
+    } else {
+        name.as_ref()
+    };
+    if cfg!(any(windows, target_os = "macos")) {
+        name.to_uppercase() == expected.to_uppercase()
+            || name.to_lowercase() == expected.to_lowercase()
+    } else {
+        name == expected
+    }
+}
+
 fn same_path(left: &Path, right: &str) -> bool {
     let right = comparable_components(Path::new(right));
     right.is_some() && comparable_components(left) == right
@@ -2063,15 +2238,18 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        BACKUP_MANIFEST_FILE, BackupEntryState, BackupManifest, BackupManifestFile,
-        BackupPackageRecord, BackupSetWriter, DELETING_DIR, FoundBackupSet, OutsideRestoreRules,
-        RestoreBackupActionKind, RestoreBackupOptions, backup_id_is_well_formed, find_backup_set,
+        BACKUP_MANIFEST_FILE, BEFORE_RESTORE_REASON, BackupEntryState, BackupManifest,
+        BackupManifestFile, BackupPackageRecord, BackupSetWriter, DELETING_DIR, FoundBackupSet,
+        OutsideRestoreRules, RECORDS_BACKUP_REASON, RestoreBackupActionKind, RestoreBackupOptions,
+        UPDATE_BACKUP_REASON, backup_id_is_well_formed, find_backup_set, is_receipt,
         is_windows_device_name, list_backup_sets, load_backup_manifest, relative_within,
-        restore_backup_set, restore_backup_set_within, save_backup_manifest,
+        restore_backup_set, restore_backup_set_with, restore_backup_set_within, restore_target,
+        save_backup_manifest,
     };
     use crate::error::RabbitError;
     use crate::hash::sha256_file;
     use crate::package::uninstall::UninstallPath;
+    use crate::receipt::{InstallState, PackageReceipt, load_install_state, save_install_state};
     use crate::uninstall::paths::{UninstallRoots, resolve_pattern};
 
     const APPLY: RestoreBackupOptions = RestoreBackupOptions {
@@ -2079,6 +2257,13 @@ mod tests {
         allow_reaper_running: true,
         package_id: None,
     };
+
+    /// The reason of the sets the tests of paths and copies write. A
+    /// restore reads every set it takes the same way. Older versions wrote
+    /// most of these paths into update sets, which it refuses for now
+    /// (`EarlierVersionNotYet`), so these use the other kind of set that
+    /// holds any package's files: the one a restore writes.
+    const RESTORABLE_REASON: &str = BEFORE_RESTORE_REASON;
 
     fn write(path: &Path, contents: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2238,9 +2423,9 @@ mod tests {
     }
 
     /// Only an uninstall set records which receipt entry goes with a
-    /// package. Restoring one package from an install's set would leave the
-    /// receipt describing the newer version, so it is refused, and nothing
-    /// changes.
+    /// package. Restoring one package from any other set, here one a
+    /// restore wrote, would leave the receipt describing other files, so it
+    /// is refused, and nothing changes.
     #[test]
     fn only_an_uninstall_set_restores_one_package() {
         let dir = tempdir().unwrap();
@@ -2251,7 +2436,7 @@ mod tests {
         write(&backup, b"old");
         save_manifest(
             &set,
-            "install-replacement",
+            BEFORE_RESTORE_REASON,
             vec![legacy_entry(Some("reapack"), &target, &backup)],
         );
 
@@ -2277,42 +2462,466 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"old");
     }
 
+    /// A set without a manifest that holds a copy of RABBIT's receipt, as
+    /// a before-restore set from an older version can, is refused: copying
+    /// the copy back would undo every change to the receipt since. The
+    /// receipt stays as it is, byte for byte, and so does the copy, in a dry
+    /// run too.
     #[test]
-    fn restore_can_restore_receipt_backup() {
+    fn a_set_without_a_manifest_holding_the_receipt_is_refused() {
         let dir = tempdir().unwrap();
         let receipt = dir.path().join("RABBIT/install-state.json");
-        fs::create_dir_all(receipt.parent().unwrap()).unwrap();
-        fs::write(
-            &receipt,
-            br#"{"schema_version":1,"packages":{"reapack":"new"}}"#,
-        )
-        .unwrap();
-        let backup_receipt = dir
-            .path()
-            .join("RABBIT/backups/unix-1/RABBIT/install-state.json");
-        fs::create_dir_all(backup_receipt.parent().unwrap()).unwrap();
-        fs::write(
-            &backup_receipt,
-            br#"{"schema_version":1,"packages":{"reapack":"old"}}"#,
-        )
-        .unwrap();
+        let current = br#"{"schema_version":1,"packages":{"reapack":"new"}}"#;
+        write(&receipt, current);
+        let plugin = dir.path().join("UserPlugins/reaper_reapack-x64.dll");
+        write(&plugin, b"new");
+        let set = dir.path().join("RABBIT/backups/unix-1");
+        let copy = set.join("RABBIT/install-state.json");
+        let old = br#"{"schema_version":1,"packages":{"reapack":"old"}}"#;
+        write(&copy, old);
+        write(&set.join("UserPlugins/reaper_reapack-x64.dll"), b"old");
 
-        let report = restore_backup_set(
-            dir.path(),
-            "unix-1",
-            &RestoreBackupOptions {
-                dry_run: false,
-                allow_reaper_running: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let error = refused_with(dir.path(), dir.path(), "unix-1", None);
+
+        assert!(
+            matches!(&error, RabbitError::ReceiptInSet { backup_id, backup_path }
+                if backup_id == "unix-1" && *backup_path == set),
+            "{error:?}"
+        );
+        assert_eq!(fs::read(&receipt).unwrap(), current);
+        assert_eq!(fs::read(&copy).unwrap(), old);
+        assert_eq!(fs::read(&plugin).unwrap(), b"new");
+    }
+
+    /// The set an update writes, built the way an install builds it: the
+    /// old copy of each file it replaced, and a copy of the receipt from
+    /// before, when there was one. Restoring it whole, or one package of
+    /// it, is refused in a dry run and for real, with a receipt copy or
+    /// without, and nothing changes, the receipt least of all.
+    #[test]
+    fn an_update_set_is_refused_until_earlier_versions_can_come_back() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugin = resource.join("UserPlugins/reaper_reapack-x64.dll");
+        let receipt = resource.join("RABBIT/install-state.json");
+        // The first update over a file installed by hand finds no receipt
+        // to copy.
+        write(&plugin, b"reapack by hand");
+        let mut writer = BackupSetWriter::new(&resource, "unix-0", UPDATE_BACKUP_REASON);
+        writer.copy_file(Some("reapack"), &plugin).unwrap();
+        assert_eq!(writer.copy_receipt_if_present().unwrap(), None);
+        write(&plugin, b"reapack 1.2.4");
+        write(&receipt, b"records from before the update");
+        let mut writer = BackupSetWriter::new(&resource, "unix-1", UPDATE_BACKUP_REASON);
+        writer.copy_file(Some("reapack"), &plugin).unwrap();
+        writer.copy_receipt_if_present().unwrap().unwrap();
+        fs::write(&plugin, b"reapack 1.2.5").unwrap();
+        fs::write(&receipt, b"records from after the update").unwrap();
+
+        for id in ["unix-0", "unix-1"] {
+            for package in [None, Some("reapack")] {
+                let error = refused_with(dir.path(), &resource, id, package);
+                assert!(
+                    matches!(&error, RabbitError::EarlierVersionNotYet { backup_id } if backup_id == id),
+                    "{id} {package:?}: {error:?}"
+                );
+            }
+        }
+        assert_eq!(
+            fs::read(&receipt).unwrap(),
+            b"records from after the update"
+        );
+        assert_eq!(fs::read(&plugin).unwrap(), b"reapack 1.2.5");
+    }
+
+    /// The set written after vendor installers ran holds only a copy of the
+    /// receipt, so there is nothing to restore from it.
+    #[test]
+    fn a_records_only_set_has_nothing_to_restore() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let receipt = resource.join("RABBIT/install-state.json");
+        write(&receipt, b"records from before the installers");
+        let id = "unattended-unix-1-2";
+        BackupSetWriter::new(&resource, id, RECORDS_BACKUP_REASON)
+            .copy_receipt_if_present()
+            .unwrap()
+            .unwrap();
+        fs::write(&receipt, b"records from after the installers").unwrap();
+
+        let error = refused_with(dir.path(), &resource, id, None);
+
+        assert!(
+            matches!(&error, RabbitError::RecordsOnly { backup_id } if backup_id == id),
+            "{error:?}"
+        );
+        assert_eq!(
+            fs::read(&receipt).unwrap(),
+            b"records from after the installers"
+        );
+    }
+
+    /// A restore of an update's set used to copy its receipt back as an
+    /// ordinary file, so the current receipt went into the set that restore
+    /// wrote. Restoring that set would bring it back, so it is refused,
+    /// whole and for one package, however its manifest records the receipt:
+    /// relative, as now; absolute, as older versions did, also inside the
+    /// folder a portable REAPER has moved from since; through a relative
+    /// resource path an older RABBIT was given; or only as the manifest's
+    /// receipt backup. Any other kind of set holding a copy is refused the
+    /// same way.
+    #[test]
+    fn a_before_restore_set_holding_the_receipt_is_refused() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugin = resource.join("UserPlugins/reaper_reapack-x64.dll");
+        let receipt = resource.join("RABBIT/install-state.json");
+        write(&plugin, b"reapack 1.2.5");
+        write(&receipt, b"records from after the update");
+        let id = "restore-unix-1-before-restore";
+        let mut writer = BackupSetWriter::new(&resource, id, BEFORE_RESTORE_REASON);
+        writer.copy_file(Some("reapack"), &plugin).unwrap();
+        writer.copy_file(None, &receipt).unwrap();
+        fs::write(&plugin, b"reapack 1.2.4").unwrap();
+        fs::write(&receipt, b"records changed since").unwrap();
+        let set = writer.path().to_path_buf();
+
+        for package in [None, Some("reapack")] {
+            let error = refused_with(dir.path(), &resource, id, package);
+            assert!(
+                matches!(&error, RabbitError::ReceiptInSet { backup_id, backup_path }
+                    if backup_id == id && *backup_path == set),
+                "{package:?}: {error:?}"
+            );
+        }
+
+        let plugin_entry = legacy_entry(
+            Some("reapack"),
+            &Path::new("UserPlugins").join("reaper_reapack-x64.dll"),
+            &set.join("UserPlugins").join("reaper_reapack-x64.dll"),
+        );
+        let receipt_copy = set.join("RABBIT").join("install-state.json");
+        let absolute = legacy_entry(None, &std::path::absolute(&receipt).unwrap(), &receipt_copy);
+        let through_relative_resource = BackupManifestFile {
+            original_path: Path::new("REAPER")
+                .join("RABBIT")
+                .join("install-state.json"),
+            backup_path: Path::new("REAPER")
+                .join("RABBIT")
+                .join("backups")
+                .join(id)
+                .join("RABBIT")
+                .join("install-state.json"),
+            ..absolute.clone()
+        };
+        // A portable REAPER that moved since: the entry names the receipt
+        // inside the folder it was in when the set was written.
+        let old_resource = std::path::absolute(dir.path().join("OldREAPER")).unwrap();
+        let in_moved_folder = BackupManifestFile {
+            original_path: old_resource.join("RABBIT").join("install-state.json"),
+            backup_path: old_resource
+                .join("RABBIT")
+                .join("backups")
+                .join(id)
+                .join("RABBIT")
+                .join("install-state.json"),
+            ..absolute.clone()
+        };
+        let mut manifests = Vec::new();
+        for receipt_entry in [absolute, through_relative_resource, in_moved_folder] {
+            manifests.push((
+                BEFORE_RESTORE_REASON,
+                vec![plugin_entry.clone(), receipt_entry],
+                None,
+            ));
+        }
+        manifests.push((
+            BEFORE_RESTORE_REASON,
+            vec![plugin_entry.clone()],
+            Some(receipt_copy.clone()),
+        ));
+        for reason in ["uninstall", "osara-keymap-replacement", "something-newer"] {
+            let receipt_entry =
+                legacy_entry(None, Path::new("RABBIT/install-state.json"), &receipt_copy);
+            manifests.push((reason, vec![plugin_entry.clone(), receipt_entry], None));
+        }
+        for (reason, files, receipt_backup_path) in manifests {
+            save_backup_manifest(
+                &set,
+                &BackupManifest {
+                    schema_version: 1,
+                    rabbit_version: "0.4.4".to_string(),
+                    created_at: id.to_string(),
+                    reason: reason.to_string(),
+                    files: files.clone(),
+                    receipt_backup_path,
+                    packages: Default::default(),
+                },
+            )
+            .unwrap();
+
+            let error = refused_with(dir.path(), &resource, id, None);
+
+            assert!(
+                matches!(&error, RabbitError::ReceiptInSet { .. }),
+                "{reason} {files:?}: {error:?}"
+            );
+        }
+        assert_eq!(fs::read(&receipt).unwrap(), b"records changed since");
+        assert_eq!(fs::read(&plugin).unwrap(), b"reapack 1.2.4");
+    }
+
+    /// A set a restore wrote that holds no receipt copy, such as one from a
+    /// restore of an uninstall's set, restores as before, and the receipt
+    /// stays as it is.
+    #[test]
+    fn a_before_restore_set_without_the_receipt_still_restores() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugin = resource.join("UserPlugins/reaper_sws-x64.dll");
+        let receipt = resource.join("RABBIT/install-state.json");
+        write(&plugin, b"sws before the restore");
+        write(&receipt, b"records");
+        let id = "restore-unix-1-before-restore";
+        BackupSetWriter::new(&resource, id, BEFORE_RESTORE_REASON)
+            .copy_file(Some("sws"), &plugin)
+            .unwrap();
+        fs::write(&plugin, b"sws the restore brought back").unwrap();
+
+        let report =
+            restore_backup_set_within(&resource, id, &APPLY, &OutsideRestoreRules::default())
+                .unwrap();
+
+        assert_eq!(fs::read(&plugin).unwrap(), b"sws before the restore");
+        assert_eq!(report.actions.len(), 1);
+        assert!(report.packages.is_empty());
+        assert_eq!(fs::read(&receipt).unwrap(), b"records");
+    }
+
+    /// The key map OSARA's replaced restores as before, and the receipt
+    /// stays as it is.
+    #[test]
+    fn a_key_map_set_still_restores() {
+        let dir = tempdir().unwrap();
+        let (resource, keymap) = keymap_set(dir.path());
+        let receipt = resource.join("RABBIT/install-state.json");
+        write(&receipt, b"records");
+
+        restore_backup_set_within(&resource, "unix-1", &APPLY, &OutsideRestoreRules::default())
+            .unwrap();
+
+        assert_eq!(fs::read(&keymap).unwrap(), b"own keymap");
+        assert_eq!(fs::read(&receipt).unwrap(), b"records");
+    }
+
+    /// A receipt entry for `id`, as an install of version 1.0 writes one.
+    fn receipt_entry(id: &str) -> PackageReceipt {
+        PackageReceipt {
+            id: id.to_string(),
+            version: Some(crate::version::Version::parse("1.0").unwrap()),
+            source_url: None,
+            source_sha256: None,
+            variant: None,
+            channel: None,
+            installed_files: Vec::new(),
+            installed_at: Some("unix-1".to_string()),
+            rabbit_version: Some("0.4.4".to_string()),
+            architecture: None,
+            vendor_added_files: Vec::new(),
+        }
+    }
+
+    /// An uninstall's set holds no receipt copy. Restoring it merges the
+    /// package's own entry into the current receipt, which keeps every
+    /// entry it gained since, and saves the receipt through that merge.
+    #[test]
+    fn an_uninstall_set_merges_its_package_into_the_current_receipt() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugin = resource.join("UserPlugins/reaper_sws-x64.dll");
+        write(&plugin, b"sws");
+        let mut writer = BackupSetWriter::new(&resource, "uninstall-unix-1", "uninstall");
+        writer
+            .record_package(
+                "sws",
+                BackupPackageRecord {
+                    receipt: Some(receipt_entry("sws")),
+                    langpack_before: None,
+                },
+            )
+            .unwrap();
+        writer.move_file(Some("sws"), &plugin, None, false).unwrap();
+        // Since the uninstall, ReaPack came in, and SWS is declined.
+        let mut since = InstallState::default();
+        since
+            .packages
+            .insert("reapack".to_string(), receipt_entry("reapack"));
+        since.declined_packages.insert("sws".to_string());
+        save_install_state(&resource, &since).unwrap();
+
+        let report =
+            restore_backup_set_within(&resource, "uninstall-unix-1", &APPLY, &Default::default())
+                .unwrap();
+
+        assert_eq!(fs::read(&plugin).unwrap(), b"sws");
+        assert!(report.packages[0].receipt_merged, "{report:?}");
+        let state = load_install_state(&resource).unwrap().unwrap();
+        assert_eq!(state.packages.get("sws"), Some(&receipt_entry("sws")));
+        assert_eq!(
+            state.packages.get("reapack"),
+            Some(&receipt_entry("reapack"))
+        );
+        assert!(state.declined_packages.is_empty());
+    }
+
+    /// Restore puts no file back into RABBIT's own folder, the receipt
+    /// included, whether a set records it relative or absolute, and other
+    /// files of the resource folder still go back.
+    #[test]
+    fn restore_puts_no_file_back_into_rabbit_s_folder_the_receipt_included() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let absolute = super::absolute_without_dots(&resource).unwrap();
+        let refused = [
+            PathBuf::from("RABBIT/install-state.json"),
+            absolute.join("RABBIT").join("install-state.json"),
+            PathBuf::from("RABBIT/logs/report.json"),
+        ];
+        assert_refused_as_rabbit_s_folder(&resource, &refused);
 
         assert_eq!(
-            fs::read_to_string(&receipt).unwrap(),
-            r#"{"schema_version":1,"packages":{"reapack":"old"}}"#
+            restore_target(
+                &resource,
+                Path::new("reaper-kb.ini"),
+                None,
+                None,
+                &OutsideRestoreRules::default()
+            )
+            .unwrap(),
+            resource.join("reaper-kb.ini")
         );
-        assert!(report.actions[0].current_backup_path.is_some());
+        assert!(is_receipt(Path::new("RABBIT/install-state.json")));
+        for other in [
+            "RABBIT/install-state.json.rabbit-tmp",
+            "RABBIT/logs/install-state.json",
+            "install-state.json",
+            "UserPlugins/RABBIT/install-state.json",
+        ] {
+            assert!(!is_receipt(Path::new(other)), "{other}");
+        }
+    }
+
+    /// Check that `restore_target` refuses each of `paths` as a path into
+    /// RABBIT's own folder.
+    fn assert_refused_as_rabbit_s_folder(resource: &Path, paths: &[PathBuf]) {
+        for path in paths {
+            let error = restore_target(resource, path, None, None, &OutsideRestoreRules::default())
+                .unwrap_err();
+            assert!(
+                matches!(&error, RabbitError::BackupRestoreRefused { reason, .. }
+                    if reason.contains("RABBIT's own folder")),
+                "{path:?}: {error:?}"
+            );
+        }
+    }
+
+    /// Windows and macOS usually ignore upper and lower case, so a path
+    /// into `rabbit` is a path into RABBIT's folder there, and a copy of
+    /// `rabbit/INSTALL-STATE.JSON` is a copy of the receipt, in a set with
+    /// a manifest and in one without.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn a_receipt_in_another_case_is_still_the_receipt() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let receipt = resource.join("RABBIT/install-state.json");
+        write(&receipt, b"records");
+        let absolute = super::absolute_without_dots(&resource).unwrap();
+        assert_refused_as_rabbit_s_folder(
+            &resource,
+            &[
+                PathBuf::from("rabbit/INSTALL-STATE.JSON"),
+                absolute.join("Rabbit").join("Install-State.json"),
+            ],
+        );
+        assert!(is_receipt(Path::new("rabbit/INSTALL-STATE.JSON")));
+
+        let layout_set = resource.join("RABBIT/backups/unix-1");
+        write(
+            &layout_set.join("rabbit/INSTALL-STATE.JSON"),
+            b"old records",
+        );
+        let error = refused_with(dir.path(), &resource, "unix-1", None);
+        assert!(
+            matches!(&error, RabbitError::ReceiptInSet { .. }),
+            "{error:?}"
+        );
+
+        let manifest_set = resource.join("RABBIT/backups/unix-2");
+        let copy = manifest_set.join("rabbit/INSTALL-STATE.JSON");
+        write(&copy, b"old records");
+        save_manifest(
+            &manifest_set,
+            BEFORE_RESTORE_REASON,
+            vec![legacy_entry(
+                None,
+                Path::new("rabbit/INSTALL-STATE.JSON"),
+                &copy,
+            )],
+        );
+        let error = refused_with(dir.path(), &resource, "unix-2", None);
+        assert!(
+            matches!(&error, RabbitError::ReceiptInSet { .. }),
+            "{error:?}"
+        );
+        assert_eq!(fs::read(&receipt).unwrap(), b"records");
+    }
+
+    /// Windows also opens a name without its trailing dots and spaces, and
+    /// takes what follows a `:` as a stream of the same file or folder, so
+    /// those spellings lead into RABBIT's folder too. So does an absolute
+    /// path to the receipt whose resource folder is in another case.
+    #[cfg(windows)]
+    #[test]
+    fn windows_refuses_every_spelling_it_opens_as_the_receipt() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let receipt = resource.join("RABBIT/install-state.json");
+        write(&receipt, b"records");
+        let absolute = super::absolute_without_dots(&resource).unwrap();
+        let shouting = PathBuf::from(absolute.to_string_lossy().to_uppercase())
+            .join("RABBIT")
+            .join("INSTALL-STATE.JSON");
+        let spellings = [
+            "RABBIT./install-state.json",
+            "RABBIT /install-state.json",
+            "RABBIT::$INDEX_ALLOCATION/install-state.json",
+            "RABBIT/install-state.json::$DATA",
+            "RABBIT/install-state.json. .",
+        ]
+        .map(PathBuf::from);
+        assert_refused_as_rabbit_s_folder(&resource, &spellings);
+        assert_refused_as_rabbit_s_folder(&resource, std::slice::from_ref(&shouting));
+        for spelling in &spellings {
+            assert!(is_receipt(spelling), "{spelling:?}");
+        }
+
+        let set = resource.join("RABBIT/backups/unix-1");
+        let copy = set.join("RABBIT/install-state.json");
+        write(&copy, b"old records");
+        for original in [shouting, spellings[0].clone()] {
+            save_manifest(
+                &set,
+                BEFORE_RESTORE_REASON,
+                vec![legacy_entry(None, &original, &copy)],
+            );
+            let error = refused_with(dir.path(), &resource, "unix-1", None);
+            assert!(
+                matches!(&error, RabbitError::ReceiptInSet { .. }),
+                "{original:?}: {error:?}"
+            );
+        }
+        assert_eq!(fs::read(&receipt).unwrap(), b"records");
     }
 
     /// The writer's layout: files inside the resource folder keep their
@@ -2395,7 +3004,7 @@ mod tests {
         let app2clap = clap_dir.join("app2clap.clap");
         write(&app2clap, b"old app2clap");
         fs::create_dir_all(&resource).unwrap();
-        let mut writer = BackupSetWriter::new(&resource, "unix-1", "install-replacement");
+        let mut writer = BackupSetWriter::new(&resource, "unix-1", RESTORABLE_REASON);
         writer.copy_file(Some("app2clap"), &app2clap).unwrap();
         fs::write(&app2clap, b"new app2clap").unwrap();
 
@@ -2427,9 +3036,12 @@ mod tests {
     }
 
     /// Sets written by earlier versions store app2clap's copy under a
-    /// made-up `CLAP/` folder with its absolute original path, as
-    /// `unix-1782841261` on the maintainer's machine does. Restore follows
-    /// the original path, not the copy's place in the set.
+    /// made-up `CLAP/` folder with its absolute original path, as the
+    /// update set `unix-1782841261` on the maintainer's machine does.
+    /// Restore follows the original path, not the copy's place in the set.
+    /// This is tested on a before-restore set: an update set with these
+    /// paths is refused until earlier versions can come back (see
+    /// `RESTORABLE_REASON`).
     #[test]
     fn restores_an_older_app2clap_backup_to_its_absolute_original_path() {
         let dir = tempdir().unwrap();
@@ -2442,7 +3054,7 @@ mod tests {
         write(&copy, b"old app2clap");
         save_manifest(
             &set,
-            "install-replacement",
+            RESTORABLE_REASON,
             vec![legacy_entry(Some("app2clap"), &app2clap, &copy)],
         );
 
@@ -2453,9 +3065,11 @@ mod tests {
         assert!(!resource.join("CLAP").exists());
     }
 
-    /// Unattended sets record a path relative to the resource folder,
-    /// install-replacement sets an absolute one. Both are on users' machines
-    /// today, and both go back to the same place.
+    /// Unattended sets record a path relative to the resource folder, and
+    /// older versions' update sets an absolute one. Every set a restore
+    /// takes reads both forms the same way, and both go back to the same
+    /// place. Update sets themselves are refused for now (see
+    /// `RESTORABLE_REASON`).
     #[test]
     fn restores_relative_and_absolute_original_paths() {
         let dir = tempdir().unwrap();
@@ -2471,7 +3085,7 @@ mod tests {
         write(&plugin_copy, b"old kontrol");
         save_manifest(
             &set,
-            "install-replacement",
+            RESTORABLE_REASON,
             vec![
                 legacy_entry(Some("osara"), Path::new("reaper-kb.ini"), &keymap_copy),
                 legacy_entry(Some("reakontrol"), &plugin, &plugin_copy),
@@ -2503,7 +3117,7 @@ mod tests {
         write(&plugin_copy, b"old kontrol");
         save_manifest(
             &set,
-            "install-replacement",
+            RESTORABLE_REASON,
             vec![
                 legacy_entry(Some("osara"), Path::new("reaper-kb.ini"), &keymap_copy),
                 legacy_entry(
@@ -2555,7 +3169,7 @@ mod tests {
         let plugin = resource.join("UserPlugins").join("reaper_demo.dll");
         write(&plugin, b"old plugin");
 
-        let mut writer = BackupSetWriter::new(&resource, "unix-1", "install-replacement");
+        let mut writer = BackupSetWriter::new(&resource, "unix-1", RESTORABLE_REASON);
         writer.copy_file(Some("demo"), &plugin).unwrap();
         assert!(writer.path().is_absolute(), "{:?}", writer.path());
         let manifest = load_backup_manifest(writer.path()).unwrap().unwrap();
@@ -2575,7 +3189,7 @@ mod tests {
         let undo = list_backup_sets(&resource)
             .unwrap()
             .into_iter()
-            .find(|set| set.reason.as_deref() == Some("before-restore"))
+            .find(|set| set.id != "unix-1" && set.reason.as_deref() == Some(BEFORE_RESTORE_REASON))
             .expect("the restore wrote a before-restore set");
         restore_backup_set_within(
             &absolute_resource,
@@ -2600,8 +3214,11 @@ mod tests {
     /// paths: every copy as `<that path>/RABBIT/backups/<id>/...`, and an
     /// install replacement's original as `<that path>/UserPlugins/...`,
     /// while the unattended key map backup recorded its original inside the
-    /// resource folder. Such sets are on users' machines, and they restore
-    /// again, to the right place, through a relative or an absolute path.
+    /// resource folder. Such sets are on users' machines. Every set a
+    /// restore takes reads these paths the same way, and restores again, to
+    /// the right place, through a relative or an absolute path. Update sets
+    /// that hold them are refused for now (see `RESTORABLE_REASON`), so a
+    /// before-restore set stands in for one here.
     #[test]
     fn older_sets_with_relative_paths_restore_again() {
         let (_dir, base) = relative_tempdir();
@@ -2626,7 +3243,7 @@ mod tests {
             };
             save_manifest(
                 &set,
-                "install-replacement",
+                RESTORABLE_REASON,
                 vec![
                     entry(PathBuf::from("reaper-kb.ini"), Path::new("reaper-kb.ini")),
                     entry(recorded_resource.join(&plugin_inside), &plugin_inside),
@@ -2708,9 +3325,8 @@ mod tests {
     }
 
     /// A manifest can only send files to the resource folder (but not
-    /// RABBIT's own folder, except the receipt) and the outside folders
-    /// RABBIT installs into. Anything else stops the restore before the
-    /// first file is replaced.
+    /// RABBIT's own folder) and the outside folders RABBIT installs into.
+    /// Anything else stops the restore before the first file is replaced.
     #[test]
     fn refuses_targets_outside_known_roots_before_changing_anything() {
         let dir = tempdir().unwrap();
@@ -2733,7 +3349,7 @@ mod tests {
         ] {
             save_manifest(
                 &set,
-                "install-replacement",
+                RESTORABLE_REASON,
                 vec![
                     legacy_entry(Some("reapack"), &plugin, &plugin_copy),
                     legacy_entry(None, &refused, &stray_copy),
@@ -3014,7 +3630,7 @@ mod tests {
         let plugin = resource.join("UserPlugins").join("reaper_reapack-x64.dll");
         write(&keymap, b"osara keymap");
         write(&plugin, b"new");
-        let mut writer = BackupSetWriter::new(&resource, "unix-1", "install-replacement");
+        let mut writer = BackupSetWriter::new(&resource, "unix-1", RESTORABLE_REASON);
         writer.copy_file(Some("osara"), &keymap).unwrap();
         let plugin_copy = writer.copy_file(Some("reapack"), &plugin).unwrap();
         fs::write(&plugin_copy, b"bit rot").unwrap();
@@ -3047,7 +3663,7 @@ mod tests {
         write(&app2clap, b"old app2clap");
         write(&keymap, b"own keymap");
 
-        let mut writer = BackupSetWriter::new(&resource, "unix-1", "install-replacement");
+        let mut writer = BackupSetWriter::new(&resource, "unix-1", RESTORABLE_REASON);
         let copied = writer.begin_entry(Some("app2clap"), &app2clap).unwrap();
         let copy = writer.manifest.files[copied].backup_path.clone();
         fs::create_dir_all(copy.parent().unwrap()).unwrap();
@@ -3330,6 +3946,40 @@ mod tests {
         }
         found.sort();
         found
+    }
+
+    /// Restore `backup_id` from `resource`, or only `package_id` from it, in
+    /// a dry run and for real, expecting the same refusal both times, and
+    /// check that no file or link below `dir` changed. The refusal comes
+    /// before the places outside the resource folder are even looked up,
+    /// and its text is plain English, with no command line in it.
+    fn refused_with(
+        dir: &Path,
+        resource: &Path,
+        backup_id: &str,
+        package_id: Option<&str>,
+    ) -> RabbitError {
+        let before = snapshot(dir);
+        let mut errors = Vec::new();
+        for dry_run in [true, false] {
+            let options = RestoreBackupOptions {
+                dry_run,
+                package_id: package_id.map(ToString::to_string),
+                ..APPLY
+            };
+            errors.push(
+                restore_backup_set_with(resource, backup_id, &options, || {
+                    panic!("a refused set looked up where outside files go")
+                })
+                .unwrap_err(),
+            );
+            assert_eq!(snapshot(dir), before, "{backup_id:?} changed something");
+        }
+        let refusal = errors.pop().unwrap();
+        let text = refusal.to_string();
+        assert_eq!(errors[0].to_string(), text, "the dry run said otherwise");
+        assert!(!text.contains("--") && !text.contains("rabbit "), "{text}");
+        refusal
     }
 
     /// Restore `backup_id` from `resource` for real, expecting a refusal,
@@ -3800,7 +4450,7 @@ mod tests {
         // A set whose manifest names a copy in a folder that is now a link.
         let plugin = resource.join("UserPlugins").join("reaper_demo.dll");
         write(&plugin, b"old");
-        let mut writer = BackupSetWriter::new(&resource, "unix-2", "install-replacement");
+        let mut writer = BackupSetWriter::new(&resource, "unix-2", RESTORABLE_REASON);
         writer.copy_file(Some("demo"), &plugin).unwrap();
         fs::write(&plugin, b"new").unwrap();
         let manifest_set = writer.path().to_path_buf();

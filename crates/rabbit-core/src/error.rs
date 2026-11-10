@@ -120,6 +120,35 @@ pub enum RabbitError {
         reason: String,
     },
 
+    /// A backup set an update wrote, whole or for one package. Putting its
+    /// files back would leave RABBIT's receipt describing the newer
+    /// version, so it is refused, with nothing changed, until RABBIT can go
+    /// back to an earlier version by changing only that package's entry.
+    #[error(
+        "The backup {backup_id} holds files an update replaced, and RABBIT can't restore earlier versions yet. The backup stays as it is"
+    )]
+    EarlierVersionNotYet { backup_id: String },
+
+    /// A backup set that holds only a copy of RABBIT's receipt, made after
+    /// vendor installers ran. Nothing in it goes back.
+    #[error(
+        "The backup {backup_id} holds only a copy of RABBIT's records, so there is nothing in it to restore"
+    )]
+    RecordsOnly { backup_id: String },
+
+    /// A backup set that holds a copy of RABBIT's receipt, such as one a
+    /// restore of an update's set wrote. Copying it back would undo every
+    /// change to the receipt since, uninstalls included, so the set is
+    /// refused, with nothing changed. `backup_path` is the set's folder,
+    /// where the copy stays.
+    #[error(
+        "The backup {backup_id} holds a copy of RABBIT's records, so RABBIT doesn't restore it: copying the records back would undo every change to them since the backup was made. The copy stays in the backup"
+    )]
+    ReceiptInSet {
+        backup_id: String,
+        backup_path: PathBuf,
+    },
+
     #[error("no artifact found for {package_id} on {platform:?}/{architecture:?}")]
     NoArtifactFound {
         package_id: String,

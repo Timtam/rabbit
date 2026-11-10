@@ -227,6 +227,15 @@ from this file and posts it as the GitHub release body.
   and anything from the last dot on. Every name RABBIT ships under works. A
   copy renamed to anything else can no longer install Surge XT, and can't
   uninstall Surge XT or REAPER.
+- Restoring a backup never copies RABBIT's records back over the current
+  ones any more. That undid every change to them since the backup was made,
+  uninstalls included. Restoring an uninstall's backup still puts back each
+  package's own entry. For now, `rabbit restore-backup` can't restore a
+  backup from an update, which holds the files the update replaced, or a
+  backup that holds only a copy of RABBIT's records. It also refuses any
+  other backup that holds a copy of the records, such as one an earlier
+  version made while restoring an update's backup, and says which folder
+  the copy stays in. A refused restore changes nothing.
 
 ### Fixed
 
@@ -237,7 +246,8 @@ from this file and posts it as the GitHub release body.
   the resource folder, the CLAP folder and, for the JAWS scripts' own files,
   JAWS's settings folder, and doesn't run while an install into the same
   REAPER is running. Backups made from now on note each file before copying
-  it, so even a backup from an interrupted run can be restored.
+  it, so even a backup from an interrupted run can be restored, except, for
+  now, one from an update.
 - `rabbit backups` no longer fails when one backup's manifest is damaged.
   It lists every backup and shows a warning on the damaged one.
 - `rabbit apply-packages` now checks that REAPER is closed before it runs any

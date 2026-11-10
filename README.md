@@ -753,7 +753,7 @@ RABBIT restore-backup --resource-path "%APPDATA%\REAPER" \
 ```
 
 Its files come back, its settings too if `--remove-settings` removed them. It
-goes back into RABBIT's receipt and is no longer skipped, and REAPER's language
+goes back into RABBIT's records and is no longer skipped, and REAPER's language
 goes back to it if the uninstall changed that and you haven't picked another
 language since. Without `--package`, every package in the set comes back. An
 uninstall that stopped partway through a package restores the same way. Two
@@ -779,12 +779,23 @@ from there down to the file leads through a link or junction, the restore
 changes nothing and says why. If that stops the restore of a whole set,
 restore the set's other packages one at a time with `--package`.
 
+A restore never copies RABBIT's records (its receipt,
+`RABBIT\install-state.json`) back from a backup: that would undo every change
+to them since the backup was made, uninstalls included. Restoring an
+uninstall's backup puts back only each package's own entry, as above. So RABBIT
+doesn't restore a backup that holds a copy of its records, such as one an older
+version of RABBIT made when it restored an update's backup. The copy stays in
+the backup, and the message names its folder. Backups from updates, which hold
+the files an update replaced, can't be restored yet either, and neither can the
+backups that hold only a copy of RABBIT's records. Nothing changes, and each of
+these backups stays as it is.
+
 ### Maintain
 
 ```
-RABBIT backups --resource-path "%APPDATA%\REAPER"          # list rollback sets
+RABBIT backups --resource-path "%APPDATA%\REAPER"          # list backup sets
 RABBIT restore-backup --resource-path "%APPDATA%\REAPER" \
-     --backup-id unix-1234567890 --apply                  # roll back one set
+     --backup-id uninstall-unix-1234567890 --apply         # restore one set
 ```
 
 ### Update RABBIT itself

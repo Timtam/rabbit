@@ -1585,7 +1585,8 @@ Extension files:
   `external/<n>/`, beside a `<file>.rabbit-origin` note of their original
   path. Each manifest entry is saved, through a temp file and a rename,
   before its copy starts and marked done after, so an interrupted run
-  still leaves a set that can be restored. Every path a set records is
+  still leaves a set whose manifest names every copy in it. A set an
+  update wrote isn't restored yet (see below). Every path a set records is
   absolute, so a set written through a relative `--resource-path` restores
   from any folder; older sets that recorded relative paths are read by their
   `RABBIT/backups/<id>` part. Restore puts each file back at its recorded
@@ -1602,19 +1603,34 @@ Extension files:
   the reason, such as that JAWS's folder is gone; in a whole set that
   records several packages, the message adds that the set's other packages
   can be restored one at a time with `--package`.
-- Restoring a set an uninstall wrote never copies a receipt file back: the
-  receipt has moved on since. Each package's recorded entry is merged into
-  the current receipt instead, the package comes off `declined_packages`,
-  and the `langpack=` value its uninstall replaced goes back, but only while
-  `reaper.ini` still says `<>`. `restore-backup --package` does this for one
-  package of the set. A package installed again since its uninstall is
-  refused, with nothing changed, because its newer receipt entry describes
-  newer files; so is `--package` for a set an install wrote, which records
-  no receipt entry per package. A receipt entry that is still the very one
-  the set recorded is no reinstall: the uninstall stopped before it reached
-  the receipt (RABBIT was ended halfway through the package, or a failed
-  package's files couldn't all go back), or an earlier restore from the set
-  put the entry back. Its files are restored and the entry stays as it is.
+- A restore never copies a receipt file over `RABBIT/install-state.json`:
+  an old copy would undo every change to the receipt since, uninstalls
+  included. Restore puts no file from a set back anywhere in `RABBIT/`,
+  under any name Windows or macOS would open as it: in another case, and on
+  Windows with trailing dots or spaces, or a `:` stream. Only the merge
+  below changes the receipt. Before anything changes, in a dry run too, it
+  refuses a set an update wrote (`install-replacement`), whole or with
+  `--package`, because its files belong to the receipt entry from before the
+  update, until RABBIT can go back to an earlier version by changing only
+  that package's entry. It also refuses a set that holds only a receipt copy
+  (`unattended-receipt-update`), and any other set that holds a copy of the
+  receipt, by its manifest or, without one, by its layout, such as the set a
+  restore of an update's set wrote in earlier versions. The copy stays in
+  the set for anyone who needs it by hand. Updates and the unattended
+  installers still copy the receipt into their sets.
+- Restoring a set an uninstall wrote merges each package's recorded entry
+  into the current receipt instead, the package comes off
+  `declined_packages`, and the `langpack=` value its uninstall replaced goes
+  back, but only while `reaper.ini` still says `<>`. `restore-backup
+  --package` does this for one package of the set. A package installed
+  again since its uninstall is refused, with nothing changed, because its
+  newer receipt entry describes newer files; so is `--package` for any other
+  set, which records no receipt entry per package. A receipt entry that is
+  still the very one the set recorded is no reinstall: the uninstall stopped
+  before it reached the receipt (RABBIT was ended halfway through the
+  package, or a failed package's files couldn't all go back), or an earlier
+  restore from the set put the entry back. Its files are restored and the
+  entry stays as it is.
 - Uninstall removes only regular files a RABBIT receipt lists with a hash,
   files the package manifest names, and files the receipt records the
   package's installer adding where the plan's `vendor_added_files` patterns

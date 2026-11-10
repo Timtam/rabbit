@@ -1217,7 +1217,9 @@ fn run_restore_backup(command: Command) -> Result<(), Box<dyn std::error::Error>
 
 /// A restore's error as the CLI prints it. An id that names no backup set
 /// gets the command that lists the sets there are, which the engine leaves
-/// to the CLI. Anything else is printed as it is.
+/// to the CLI. A set refused because it holds a copy of RABBIT's records
+/// gets the folder that copy stays in, for anyone who needs it by hand.
+/// Anything else is printed as it is.
 fn cli_restore_error(
     error: rabbit_core::RabbitError,
     resource_path: &Path,
@@ -1228,6 +1230,9 @@ fn cli_restore_error(
             resource_path.display()
         )
         .into(),
+        rabbit_core::RabbitError::ReceiptInSet {
+            ref backup_path, ..
+        } => format!("{error}, in the folder \"{}\".", backup_path.display()).into(),
         other => other.into(),
     }
 }
@@ -4315,6 +4320,59 @@ mod tests {
         assert!(!engine.contains("rabbit backups"), "{engine}");
         // Nothing was made by looking.
         assert!(!resource.join("RABBIT").exists());
+    }
+
+    /// A backup holding a copy of RABBIT's records is refused, and the CLI
+    /// adds the folder the copy stays in. A backup an update wrote is
+    /// refused in the engine's own words. Neither changes the records.
+    #[test]
+    fn restore_backup_refuses_copies_of_the_records_and_says_where_they_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let receipt = resource.join("RABBIT").join("install-state.json");
+        std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+        std::fs::write(&receipt, b"records").unwrap();
+        let set_with_a_receipt_copy = resource.join("RABBIT").join("backups").join("unix-1");
+        std::fs::create_dir_all(set_with_a_receipt_copy.join("RABBIT")).unwrap();
+        std::fs::write(
+            set_with_a_receipt_copy
+                .join("RABBIT")
+                .join("install-state.json"),
+            b"old records",
+        )
+        .unwrap();
+        rabbit_core::rollback::BackupSetWriter::new(&resource, "unix-2", "install-replacement")
+            .copy_receipt_if_present()
+            .unwrap()
+            .unwrap();
+
+        let restore = |backup_id: &str| {
+            let args: Vec<std::ffi::OsString> = vec![
+                "rabbit".into(),
+                "restore-backup".into(),
+                "--resource-path".into(),
+                resource.clone().into_os_string(),
+                "--backup-id".into(),
+                backup_id.into(),
+            ];
+            super::run_args(args).unwrap_err().to_string()
+        };
+
+        assert_eq!(
+            restore("unix-1"),
+            format!(
+                "The backup unix-1 holds a copy of RABBIT's records, so RABBIT doesn't restore \
+                 it: copying the records back would undo every change to them since the backup \
+                 was made. The copy stays in the backup, in the folder \"{}\".",
+                set_with_a_receipt_copy.display()
+            )
+        );
+        assert_eq!(
+            restore("unix-2"),
+            "The backup unix-2 holds files an update replaced, and RABBIT can't restore \
+             earlier versions yet. The backup stays as it is"
+        );
+        assert_eq!(std::fs::read(&receipt).unwrap(), b"records");
     }
 
     /// In a debug build, clap's parser alone takes more than the 1 MB of
