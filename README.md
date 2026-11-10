@@ -756,16 +756,22 @@ Its files come back, its settings too if `--remove-settings` removed them. It
 goes back into RABBIT's records and is no longer skipped, and REAPER's language
 goes back to it if the uninstall changed that and you haven't picked another
 language since. Without `--package`, every package in the set comes back. An
-uninstall that stopped partway through a package restores the same way. Two
-limits: a package you installed again after uninstalling it can't be restored
-from the old set, because the newer copy is in the way (uninstall it first);
-and a removal that a backup can't hold, by Surge XT's or REAPER's own
-uninstaller on Windows or by the administrator command deleting Surge XT on a
-Mac, can't be restored: install the package again instead. A REAPER app RABBIT
-moved to the Trash isn't in a backup set either: until you empty the Trash, you
-can drag it back from there. If the administrator command moved it, macOS may
-ask for an administrator's password for that. A restored OSARA isn't back on
-Windows' list of installed programs; installing OSARA again puts it there.
+uninstall that stopped partway through a package restores the same way. A
+package the set records with none of its files in it, as when they were already
+gone when it was uninstalled, has nothing to bring back: `--package` says so,
+and restoring the whole set leaves it out and names it, so RABBIT doesn't count
+it as installed again. Two limits: a package you installed again after
+uninstalling it can't be restored from the old set, because the newer copy is
+in the way (uninstall it first); and a removal that a backup can't hold, by
+Surge XT's or REAPER's own uninstaller on Windows or by the administrator
+command deleting Surge XT on a Mac, can't be restored: install the package
+again instead. A REAPER app RABBIT moved to the Trash isn't in a backup set
+either: until you empty the Trash, you can drag it back from there. If the
+administrator command moved it, macOS may ask for an administrator's password
+for that. A restored OSARA isn't back on Windows' list of installed programs;
+installing OSARA again puts it there. On a Mac, run `restore-backup --apply` as
+yourself: run as root, as with `sudo`, it refuses and changes nothing, as
+`uninstall --apply` does.
 
 `--package jaws-scripts` brings back the JAWS scripts' plug-in files and the
 script files that went, but not their uninstaller folder and registry entry,

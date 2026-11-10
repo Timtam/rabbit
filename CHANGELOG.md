@@ -236,6 +236,11 @@ from this file and posts it as the GitHub release body.
   other backup that holds a copy of the records, such as one an earlier
   version made while restoring an update's backup, and says which folder
   the copy stays in. A refused restore changes nothing.
+- On a Mac, `rabbit restore-backup --apply` no longer runs as root, as with
+  `sudo`, just as `rabbit uninstall --apply` doesn't: the files it puts
+  back, the backup of the files they replace and RABBIT's records would all
+  be root's. It changes nothing and says to run it as yourself. A dry run
+  still works.
 
 ### Fixed
 
@@ -250,6 +255,19 @@ from this file and posts it as the GitHub release body.
   now, one from an update.
 - `rabbit backups` no longer fails when one backup's manifest is damaged.
   It lists every backup and shows a warning on the damaged one.
+- Restoring an uninstall's backup no longer counts a package as installed
+  when none of its files are in the backup, as when they were already gone
+  when it was uninstalled. Before, the restore put its entry back into
+  RABBIT's records and took it off the list of packages you uninstalled.
+  Now `rabbit restore-backup --package` says there is nothing of it to
+  restore and changes nothing, and restoring the whole backup leaves it
+  out, names it, and brings back the rest. A backup with nothing at all to
+  bring back is refused the same way.
+- `rabbit install-extension --apply` no longer runs while another copy of
+  RABBIT is installing, uninstalling or restoring a backup in the same
+  REAPER, just as the other commands that install don't. It says another
+  installation is in progress and changes nothing. Before, both could change
+  the same files and backups at once.
 - `rabbit apply-packages` now checks that REAPER is closed before it runs any
   installer, as `rabbit setup` and the wizard already did. Before, it ran
   installers such as REAPER's and OSARA's while REAPER was open, and only
@@ -308,7 +326,10 @@ from this file and posts it as the GitHub release body.
   inside one. `rabbit backups` lists such a link with a warning and never
   looks into it. When `RABBIT` or its backups folder is a link, it lists
   nothing and says why. Backups kept behind such a link have to be moved
-  back into a real folder before RABBIT lists or restores them.
+  back into a real folder before RABBIT lists or restores them. A restore
+  also never puts a file back into the CLAP folder through a link or
+  junction below it, or by a name there that Windows could open as another
+  one; it changes nothing and says why.
 
 ## [0.4.4] - 2026-10-13
 

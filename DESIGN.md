@@ -1599,10 +1599,16 @@ Extension files:
   the file may be a link or junction, the file included, and the deepest of
   those that exists must lie, by its real path, inside that folder's real
   path. That folder itself, and what lies above it, may be reached through
-  a link. A path refused stops the restore before anything changes, with
-  the reason, such as that JAWS's folder is gone; in a whole set that
-  records several packages, the message adds that the set's other packages
-  can be restored one at a time with `--package`.
+  a link. Below the CLAP folder the same holds, except that the folder may
+  be missing: nothing below it can be a link then, and the restore makes it
+  again, as an install would. A name below it with a `:`, or on Windows one
+  ending in a dot or space, is refused, since the file system could open it
+  as another name; the file goes back to the CLAP folder joined with the
+  names below it, the same path the check looked at, never a `\\?\`
+  spelling of it. A path refused stops the restore before anything changes,
+  with the reason, such as that JAWS's folder is gone; in a whole set, the
+  message adds that the set's other packages can be restored one at a time
+  with `--package` when another package has a file in the set.
 - A restore never copies a receipt file over `RABBIT/install-state.json`:
   an old copy would undo every change to the receipt since, uninstalls
   included. Restore puts no file from a set back anywhere in `RABBIT/`,
@@ -1631,6 +1637,31 @@ Extension files:
   package, or a failed package's files couldn't all go back), or an earlier
   restore from the set put the entry back. Its files are restored and the
   entry stays as it is.
+- An uninstall records each package before it moves anything, and keeps the
+  record when it found none of the package's files to move, or stopped
+  before any copy of them finished. A package has a file in the set when
+  the restore would put back one of its entries, by the rule it follows for
+  every entry: a finished entry, or a pending one whose copy is complete.
+  `--package` for a package with none is refused (`NothingOfItInSet`),
+  before anything changes and in a dry run too. A whole-set restore leaves
+  such a package out: its entry isn't merged, it stays on
+  `declined_packages`, its `langpack=` value isn't put back, a newer entry
+  for it is no reinstall that refuses the set, and the report names it
+  under `skipped_packages`. A set with no file at all to put back is refused
+  like `--package`, as a set holding only a receipt copy is, rather than
+  reported as restored. This is decided before the lock; the plan, made
+  under it, must agree, or the restore stops with nothing changed, as when
+  an uninstall finished writing the set in between.
+- A real restore on macOS refuses when RABBIT itself runs as root, as under
+  `sudo`, as an uninstall does: what it puts back, the before-restore set
+  and the receipt would all be root's. The refusal comes after the set is
+  found and the set and package refusals, before the REAPER check, the
+  install lock and any change. A dry run still works. The check comes
+  through the restore's environment, so tests run it on every platform.
+- `rabbit install-extension --apply` takes the install lock across its
+  download, install and receipt change, as the package operation does, so
+  it never writes files, a backup set or the receipt while another RABBIT
+  installs, uninstalls or restores on the same REAPER.
 - Uninstall removes only regular files a RABBIT receipt lists with a hash,
   files the package manifest names, and files the receipt records the
   package's installer adding where the plan's `vendor_added_files` patterns

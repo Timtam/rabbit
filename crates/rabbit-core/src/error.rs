@@ -149,6 +149,31 @@ pub enum RabbitError {
         backup_path: PathBuf,
     },
 
+    /// Packages an uninstall's backup set records, but none of whose files
+    /// are in it: the uninstall found none to move, for example, or stopped
+    /// before any copy of them finished. Putting back their records alone
+    /// would make RABBIT count them as installed with no files there, so a
+    /// restore of one of them is refused, and so is a restore of a whole
+    /// set that has nothing else to put back. Nothing changes.
+    #[error(
+        "None of the files of {} are in the backup {backup_id}, so there is nothing to restore. RABBIT's records stay as they are",
+        names_in_a_sentence(.package_ids)
+    )]
+    NothingOfItInSet {
+        backup_id: String,
+        package_ids: Vec<String>,
+    },
+
+    /// A real restore of a backup was started on macOS with RABBIT itself
+    /// running as root, as under `sudo`. Refused after the set is found and
+    /// the set and package refusals, before the REAPER check, the lock and
+    /// any change: the files it puts back, the backup of the files they
+    /// replace and RABBIT's records would all be root's.
+    #[error(
+        "RABBIT is running as root, as it does under sudo, and doesn't restore backups like that: the files it puts back, the backup of the files they replace and RABBIT's records would all be root's. Run RABBIT as yourself, not with sudo"
+    )]
+    RestoreAsRoot,
+
     #[error("no artifact found for {package_id} on {platform:?}/{architecture:?}")]
     NoArtifactFound {
         package_id: String,
@@ -283,6 +308,15 @@ fn process_end_text(exit_code: Option<i32>) -> String {
     }
 }
 
+/// Names as a sentence lists them: `a`, `a and b`, `a, b and c`.
+fn names_in_a_sentence(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [name] => name.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 /// Where [`RabbitError::ProcessFailed`] names the installer's log, if any.
 fn process_log_text(log_path: Option<&std::path::Path>) -> String {
     log_path
@@ -405,6 +439,30 @@ mod tests {
             assert!(!text.contains("Some("), "{text}");
             assert!(!text.contains("None"), "{text}");
         }
+    }
+
+    /// A refusal of packages with no file in a backup names them as a
+    /// sentence lists them.
+    #[test]
+    fn nothing_of_it_names_its_packages_as_a_sentence() {
+        let text = |ids: &[&str]| {
+            RabbitError::NothingOfItInSet {
+                backup_id: "uninstall-unix-1".to_string(),
+                package_ids: ids.iter().map(ToString::to_string).collect(),
+            }
+            .to_string()
+        };
+
+        assert!(
+            text(&["sws"]).starts_with("None of the files of sws are in the backup"),
+            "{}",
+            text(&["sws"])
+        );
+        assert!(text(&["ffmpeg", "sws"]).starts_with("None of the files of ffmpeg and sws are"));
+        assert!(
+            text(&["ffmpeg", "reapack", "sws"])
+                .starts_with("None of the files of ffmpeg, reapack and sws are")
+        );
     }
 
     /// `ERROR_VIRUS_INFECTED` (225) and `ERROR_VIRUS_DELETED` (226) exist

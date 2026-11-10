@@ -13,6 +13,7 @@ use rabbit_core::latest::fetch_latest_versions_on;
 use rabbit_core::localization::{
     DEFAULT_LOCALE, LocalizedText, Localizer, available_locales, resolve_runtime_locale,
 };
+use rabbit_core::lock::acquire_package_install_lock;
 use rabbit_core::model::{Architecture, ComponentDetection, InstallationKind, Platform};
 use rabbit_core::operation::{
     PackageOperationItem, PackageOperationOptions, PackageOperationReport, PackageOperationStatus,
@@ -33,14 +34,15 @@ use rabbit_core::plan::{
 };
 use rabbit_core::portable::{PortabilityCheckStatus, PortabilityReport, check_portable_runtime};
 use rabbit_core::preflight::{
-    PreflightOptions, PreflightReport, PreflightStatus, run_install_preflight,
+    PreflightOptions, PreflightReport, PreflightStatus, ensure_resource_path_ready,
+    run_install_preflight,
 };
 use rabbit_core::progress::{ProgressEvent, ProgressReporter};
 use rabbit_core::report::{default_report_path, save_json_and_text_reports};
 use rabbit_core::resource::{ResourceInitActionKind, ResourceInitReport, initialize_resource_path};
 use rabbit_core::rollback::{
     BackupSet, RestoreBackupActionKind, RestoreBackupOptions, RestoreBackupReport, RestoredPackage,
-    list_backup_sets, restore_backup_set,
+    SkippedPackageReason, list_backup_sets, restore_backup_set,
 };
 use rabbit_core::self_update::{
     ApplySelfUpdateOptions, DEFAULT_SELF_UPDATE_MANIFEST_URL, SelfUpdateApplyReport,
@@ -1215,11 +1217,18 @@ fn run_restore_backup(command: Command) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
+/// What `rabbit restore-backup --apply` says when RABBIT runs as root on
+/// macOS, as under sudo: the engine refuses before anything happens.
+const RESTORE_AS_ROOT_TEXT: &str = "rabbit restore-backup --apply doesn't run as root, as it \
+     would under sudo: the files it puts back, the backup of the files they replace and RABBIT's \
+     records would all be root's. Run it again as yourself, without sudo.";
+
 /// A restore's error as the CLI prints it. An id that names no backup set
 /// gets the command that lists the sets there are, which the engine leaves
 /// to the CLI. A set refused because it holds a copy of RABBIT's records
-/// gets the folder that copy stays in, for anyone who needs it by hand.
-/// Anything else is printed as it is.
+/// gets the folder that copy stays in, for anyone who needs it by hand. The
+/// refusal to run as root is said in the CLI's own words. Anything else is
+/// printed as it is.
 fn cli_restore_error(
     error: rabbit_core::RabbitError,
     resource_path: &Path,
@@ -1233,6 +1242,7 @@ fn cli_restore_error(
         rabbit_core::RabbitError::ReceiptInSet {
             ref backup_path, ..
         } => format!("{error}, in the folder \"{}\".", backup_path.display()).into(),
+        rabbit_core::RabbitError::RestoreAsRoot => RESTORE_AS_ROOT_TEXT.into(),
         other => other.into(),
     }
 }
@@ -1303,10 +1313,11 @@ fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Err
         return Ok(());
     }
     let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
-    let cached = download_artifacts(&artifacts, &cache_dir)?;
-    let report = install_cached_artifacts(
+    let report = apply_install_extension(
         &resource_path,
-        &cached,
+        &package,
+        &artifacts,
+        &cache_dir,
         &InstallOptions {
             dry_run: false,
             allow_reaper_running,
@@ -1314,7 +1325,6 @@ fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Err
             package_variants: Default::default(),
         },
     )?;
-    forget_refusals_of_named(&resource_path, &package, true);
     let report_path = selected_report_path(
         Some(&resource_path),
         report_path,
@@ -1328,6 +1338,29 @@ fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Err
         print_install_report(&report);
     }
     Ok(())
+}
+
+/// What `install-extension --apply` changes, once its artifacts are
+/// resolved: it downloads them, installs them and takes the named packages
+/// off the list of refusals. All of that holds the per-target lock, as the
+/// package operation does, so it never writes files, a backup set or the
+/// receipt while another RABBIT installs, uninstalls or restores on this
+/// REAPER. With the lock held elsewhere it fails before anything changes.
+fn apply_install_extension(
+    resource_path: &Path,
+    package_ids: &[String],
+    artifacts: &[ArtifactDescriptor],
+    cache_dir: &Path,
+    options: &InstallOptions,
+) -> Result<InstallReport, Box<dyn std::error::Error>> {
+    ensure_resource_path_ready(resource_path, false)?;
+    // Named, not `_`: the guard must live to the end of this function, or
+    // the lock would be let go before anything is written.
+    let _install_lock = acquire_package_install_lock(resource_path)?;
+    let cached = download_artifacts(artifacts, cache_dir)?;
+    let report = install_cached_artifacts(resource_path, &cached, options)?;
+    forget_refusals_of_named(resource_path, package_ids, true);
+    Ok(report)
 }
 
 fn run_apply_packages(command: Command) -> Result<(), Box<dyn std::error::Error>> {
@@ -2474,6 +2507,25 @@ fn print_restore_backup_report(report: &RestoreBackupReport) {
     }
     for package in &report.packages {
         print_restored_package(package, report.dry_run);
+    }
+    for package in &report.skipped_packages {
+        println!("{}", package.package_id);
+        println!("  {}", skipped_package_text(package.reason, report.dry_run));
+    }
+}
+
+/// Why a restore of a whole set left a package out, or in a dry run would,
+/// as the CLI says it.
+fn skipped_package_text(reason: SkippedPackageReason, dry_run: bool) -> &'static str {
+    match (reason, dry_run) {
+        (SkippedPackageReason::NothingOfItInSet, true) => {
+            "Would not be restored: none of its files are in this backup. RABBIT's records of \
+             it would stay as they are."
+        }
+        (SkippedPackageReason::NothingOfItInSet, false) => {
+            "Not restored: none of its files are in this backup. RABBIT's records of it stay as \
+             they are."
+        }
     }
 }
 
@@ -4373,6 +4425,204 @@ mod tests {
              earlier versions yet. The backup stays as it is"
         );
         assert_eq!(std::fs::read(&receipt).unwrap(), b"records");
+    }
+
+    /// A package an uninstall's backup records with none of its files is
+    /// refused with `--package` in the engine's own words, and a dry run of
+    /// the whole set leaves it out, names it, and goes ahead with the rest.
+    #[test]
+    fn restore_backup_refuses_a_package_with_nothing_in_the_backup() {
+        use rabbit_core::rollback::{RestoreBackupOptions, SkippedPackageReason};
+
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugin = resource.join("UserPlugins").join("reaper_sws-x64.dll");
+        std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        std::fs::write(&plugin, b"sws").unwrap();
+        let mut writer =
+            rabbit_core::rollback::BackupSetWriter::new(&resource, "uninstall-unix-1", "uninstall");
+        for package in ["reapack", "sws"] {
+            writer
+                .record_package(
+                    package,
+                    rabbit_core::rollback::BackupPackageRecord::default(),
+                )
+                .unwrap();
+        }
+        writer.move_file(Some("sws"), &plugin, None, false).unwrap();
+        let restore = |package: Option<&str>| {
+            let mut args: Vec<std::ffi::OsString> = vec![
+                "rabbit".into(),
+                "restore-backup".into(),
+                "--resource-path".into(),
+                resource.clone().into_os_string(),
+                "--backup-id".into(),
+                "uninstall-unix-1".into(),
+                "--allow-reaper-running".into(),
+            ];
+            if let Some(package) = package {
+                args.extend(["--package".into(), package.into()]);
+            }
+            super::run_args(args)
+        };
+
+        assert_eq!(
+            restore(Some("reapack")).unwrap_err().to_string(),
+            "None of the files of reapack are in the backup uninstall-unix-1, so there is \
+             nothing to restore. RABBIT's records stay as they are"
+        );
+        restore(None).unwrap();
+        assert!(!plugin.exists());
+        // What that dry run reported, and how the CLI words it.
+        let report = rabbit_core::rollback::restore_backup_set(
+            &resource,
+            "uninstall-unix-1",
+            &RestoreBackupOptions {
+                dry_run: true,
+                allow_reaper_running: true,
+                package_id: None,
+            },
+        )
+        .unwrap();
+        let restored: Vec<&str> = report
+            .packages
+            .iter()
+            .map(|package| package.package_id.as_str())
+            .collect();
+        assert_eq!(restored, ["sws"]);
+        let skipped: Vec<(&str, SkippedPackageReason)> = report
+            .skipped_packages
+            .iter()
+            .map(|package| (package.package_id.as_str(), package.reason))
+            .collect();
+        assert_eq!(
+            skipped,
+            [("reapack", SkippedPackageReason::NothingOfItInSet)]
+        );
+        assert!(!plugin.exists());
+        assert_eq!(
+            super::skipped_package_text(SkippedPackageReason::NothingOfItInSet, true),
+            "Would not be restored: none of its files are in this backup. RABBIT's records of \
+             it would stay as they are."
+        );
+        assert_eq!(
+            super::skipped_package_text(SkippedPackageReason::NothingOfItInSet, false),
+            "Not restored: none of its files are in this backup. RABBIT's records of it stay as \
+             they are."
+        );
+    }
+
+    /// Run as root on macOS, as under sudo, `restore-backup --apply`
+    /// refuses in the CLI's own words, without suggesting sudo.
+    #[test]
+    fn restore_backup_under_sudo_refuses_in_the_clis_words() {
+        let error = super::cli_restore_error(
+            rabbit_core::RabbitError::RestoreAsRoot,
+            std::path::Path::new("REAPER"),
+        );
+        assert_eq!(error.to_string(), super::RESTORE_AS_ROOT_TEXT);
+        assert!(error.to_string().contains("without sudo"), "{error}");
+    }
+
+    /// `install-extension --apply` takes the per-target lock, as the
+    /// package operation does, so it never writes files, a backup set or the
+    /// receipt while another RABBIT installs, uninstalls or restores on the
+    /// same REAPER. With the lock held it fails with the lock error and
+    /// changes nothing, though the artifact is already in the cache. Once
+    /// the lock is free, the same artifact installs.
+    #[test]
+    fn install_extension_takes_the_lock() {
+        /// Every file below `root`, with what it holds.
+        fn files_below(root: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+            let mut found = Vec::new();
+            let mut folders = vec![root.to_path_buf()];
+            while let Some(folder) = folders.pop() {
+                for entry in std::fs::read_dir(&folder).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        folders.push(path);
+                    } else {
+                        let contents = std::fs::read(&path).unwrap();
+                        found.push((path, contents));
+                    }
+                }
+            }
+            found.sort();
+            found
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugin = resource.join("UserPlugins").join("reaper_reapack-x64.dll");
+        std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        std::fs::write(&plugin, b"reapack 1.2.4").unwrap();
+        let cache = dir.path().join("cache");
+        let cached = cache
+            .join("reapack")
+            .join("1.2.5")
+            .join("reaper_reapack-x64.dll");
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, b"reapack 1.2.5").unwrap();
+        // Already in the cache, so nothing is downloaded.
+        let artifact = rabbit_core::artifact::ArtifactDescriptor {
+            package_id: "reapack".to_string(),
+            version: rabbit_core::version::Version::parse("1.2.5").unwrap(),
+            platform: rabbit_core::model::Platform::current().unwrap(),
+            architecture: rabbit_core::model::Architecture::current(),
+            kind: rabbit_core::artifact::ArtifactKind::ExtensionBinary,
+            url: "https://example.test/reaper_reapack-x64.dll".to_string(),
+            file_name: "reaper_reapack-x64.dll".to_string(),
+            channel: None,
+        };
+        let options = rabbit_core::install::InstallOptions {
+            dry_run: false,
+            allow_reaper_running: true,
+            target_app_path: None,
+            package_variants: Default::default(),
+        };
+        let packages = vec!["reapack".to_string()];
+        let apply = || {
+            super::apply_install_extension(
+                &resource,
+                &packages,
+                std::slice::from_ref(&artifact),
+                &cache,
+                &options,
+            )
+        };
+        // ReaPack was uninstalled before, so the run also takes it off the
+        // list of refusals, which must wait for the lock as well.
+        let mut state = rabbit_core::receipt::InstallState::default();
+        state.declined_packages.insert("reapack".to_string());
+        rabbit_core::receipt::save_install_state(&resource, &state).unwrap();
+        let other_rabbit = rabbit_core::lock::acquire_package_install_lock(&resource).unwrap();
+        let before = files_below(dir.path());
+        assert!(
+            before
+                .iter()
+                .any(|(path, _)| path.ends_with("install-state.json")),
+            "{before:?}"
+        );
+
+        let error = apply().unwrap_err();
+
+        assert!(
+            matches!(
+                error.downcast_ref::<rabbit_core::RabbitError>(),
+                Some(rabbit_core::RabbitError::PackageInstallInProgress { .. })
+            ),
+            "{error}"
+        );
+        assert_eq!(files_below(dir.path()), before);
+        drop(other_rabbit);
+        let report = apply().unwrap();
+        assert_eq!(std::fs::read(&plugin).unwrap(), b"reapack 1.2.5");
+        assert!(report.backup_manifest_path.is_some(), "{report:?}");
+        assert!(!rabbit_core::receipt::declined_packages(&resource).contains("reapack"));
+        assert!(
+            !rabbit_core::lock::default_package_install_lock_path(&resource).exists(),
+            "the lock went with the run"
+        );
     }
 
     /// In a debug build, clap's parser alone takes more than the 1 MB of
