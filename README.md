@@ -796,6 +796,13 @@ the files an update replaced, can't be restored yet either, and neither can the
 backups that hold only a copy of RABBIT's records. Nothing changes, and each of
 these backups stays as it is.
 
+A `restore-backup --apply` that finishes saves a report in `RABBIT\logs`. When
+it replaced files, it also names the backup set it made of them: restoring that
+set undoes the restore as far as those files go, while files the restore added
+and RABBIT's records stay as they are. A restore stopped by an error saves no
+report yet, but `rabbit backups` lists that set, as
+`restore-unix-<time>-before-restore`.
+
 ### Maintain
 
 ```

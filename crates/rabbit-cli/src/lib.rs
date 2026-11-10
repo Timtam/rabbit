@@ -38,7 +38,7 @@ use rabbit_core::preflight::{
     run_install_preflight,
 };
 use rabbit_core::progress::{ProgressEvent, ProgressReporter};
-use rabbit_core::report::{default_report_path, save_json_and_text_reports};
+use rabbit_core::report::{SavedReportPaths, default_report_path, save_json_and_text_reports};
 use rabbit_core::resource::{ResourceInitActionKind, ResourceInitReport, initialize_resource_path};
 use rabbit_core::rollback::{
     BackupSet, RestoreBackupActionKind, RestoreBackupOptions, RestoreBackupReport, RestoredPackage,
@@ -260,7 +260,7 @@ enum Command {
         #[arg(long)]
         report_path: Option<PathBuf>,
         /// Save a JSON run report under the resource folder's `RABBIT`
-        /// directory, so there is a record of what happened.
+        /// directory. A run with --apply always saves one there.
         #[arg(long)]
         save_report: bool,
         /// Print the result as JSON instead of human-readable text.
@@ -1202,13 +1202,14 @@ fn run_restore_backup(command: Command) -> Result<(), Box<dyn std::error::Error>
         },
     )
     .map_err(|error| cli_restore_error(error, &resource_path))?;
-    let report_path = selected_report_path(
-        Some(&resource_path),
+    save_cli_report(
+        &resource_path,
+        report.saved_report.as_ref(),
         report_path,
         save_report,
         "restore-backup",
+        &report,
     )?;
-    save_optional_report(report_path.as_deref(), &report)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -1574,19 +1575,14 @@ fn run_uninstall(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     )
     .map_err(cli_uninstall_error)?;
     drop(ctrl_c);
-    // A run with --apply saved its report under RABBIT/logs by itself;
-    // `--save-report` only adds one where that didn't happen, such as a dry
-    // run.
-    let report_path = if report.saved_report.is_some() && report_path.is_none() {
-        None
-    } else {
-        selected_report_path(Some(&resource_path), report_path, save_report, "uninstall")?
-    };
-    save_optional_report(report_path.as_deref(), &report)?;
-    if let Some(saved) = &report.saved_report {
-        eprintln!("Report saved (JSON): {}", saved.json_path.display());
-        eprintln!("Report saved (text): {}", saved.text_path.display());
-    }
+    save_cli_report(
+        &resource_path,
+        report.saved_report.as_ref(),
+        report_path,
+        save_report,
+        "uninstall",
+        &report,
+    )?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -2233,6 +2229,40 @@ where
     Ok(())
 }
 
+/// Save the report of a command that saves its own with --apply, such as
+/// `uninstall` and `restore-backup`, and say where it went. A run with
+/// --apply saved it under RABBIT/logs by itself (`saved`); `--save-report`
+/// only adds one where that didn't happen, such as a dry run.
+/// `--report-path` writes where it says either way.
+fn save_cli_report<T>(
+    resource_path: &Path,
+    saved: Option<&SavedReportPaths>,
+    report_path: Option<PathBuf>,
+    save_report: bool,
+    operation_name: &str,
+    report: &T,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    T: serde::Serialize + ?Sized,
+{
+    let report_path = if saved.is_some() && report_path.is_none() {
+        None
+    } else {
+        selected_report_path(
+            Some(resource_path),
+            report_path,
+            save_report,
+            operation_name,
+        )?
+    };
+    save_optional_report(report_path.as_deref(), report)?;
+    if let Some(saved) = saved {
+        eprintln!("Report saved (JSON): {}", saved.json_path.display());
+        eprintln!("Report saved (text): {}", saved.text_path.display());
+    }
+    Ok(())
+}
+
 fn selected_report_path(
     resource_path: Option<&Path>,
     explicit_report_path: Option<PathBuf>,
@@ -2478,40 +2508,61 @@ fn print_backup_sets(backup_sets: &[BackupSet]) {
 }
 
 fn print_restore_backup_report(report: &RestoreBackupReport) {
-    println!("Resource path: {}", report.resource_path.display());
-    println!("Backup id: {}", report.backup_id);
-    println!("Backup path: {}", report.backup_path.display());
-    println!("Dry run: {}", yes_no(report.dry_run));
-    print_preflight_report(&report.preflight);
+    print!("{}", restore_backup_report_text(report));
+}
+
+/// A restore's report as text: the set, the preflight, each file, the
+/// packages, and last the backup of what the restore replaced, when it
+/// made one. Restoring that backup puts those files back.
+fn restore_backup_report_text(report: &RestoreBackupReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Resource path: {}", report.resource_path.display());
+    let _ = writeln!(out, "Backup id: {}", report.backup_id);
+    let _ = writeln!(out, "Backup path: {}", report.backup_path.display());
+    let _ = writeln!(out, "Dry run: {}", yes_no(report.dry_run));
+    out.push_str(&preflight_report_text(&report.preflight));
     for action in &report.actions {
         let verb = match action.action {
             RestoreBackupActionKind::WouldRestore => "Would restore",
             RestoreBackupActionKind::Restored => "Restored",
         };
-        println!("  {verb}: {}", action.target_path.display());
-        println!("    Source: {}", action.source_path.display());
+        let _ = writeln!(out, "  {verb}: {}", action.target_path.display());
+        let _ = writeln!(out, "    Source: {}", action.source_path.display());
         if let Some(current_backup_path) = &action.current_backup_path {
-            println!("    Current file backup: {}", current_backup_path.display());
+            let _ = writeln!(
+                out,
+                "    Current file backup: {}",
+                current_backup_path.display()
+            );
         }
-        println!("    Size: {}", action.size);
-        println!("    SHA-256: {}", action.sha256);
+        let _ = writeln!(out, "    Size: {}", action.size);
+        let _ = writeln!(out, "    SHA-256: {}", action.sha256);
     }
     for target in &report.skipped_targets {
-        println!(
+        let _ = writeln!(
+            out,
             "  Skipped: {} (its backup never finished, so the file was never changed)",
             target.display()
         );
     }
     if let Some(package_id) = &report.package_id {
-        println!("Package: {package_id}");
+        let _ = writeln!(out, "Package: {package_id}");
     }
     for package in &report.packages {
-        print_restored_package(package, report.dry_run);
+        write_restored_package(&mut out, package, report.dry_run);
     }
     for package in &report.skipped_packages {
-        println!("{}", package.package_id);
-        println!("  {}", skipped_package_text(package.reason, report.dry_run));
+        let _ = writeln!(out, "{}", package.package_id);
+        let _ = writeln!(
+            out,
+            "  {}",
+            skipped_package_text(package.reason, report.dry_run)
+        );
     }
+    if let Some(set_id) = &report.before_restore_set_id {
+        let _ = writeln!(out, "Backup of what this restore replaced: {set_id}");
+    }
+    out
 }
 
 /// Why a restore of a whole set left a package out, or in a dry run would,
@@ -2531,15 +2582,16 @@ fn skipped_package_text(reason: SkippedPackageReason, dry_run: bool) -> &'static
 
 /// What a restore did for a package from an uninstall set, besides putting
 /// its files back.
-fn print_restored_package(package: &RestoredPackage, dry_run: bool) {
+fn write_restored_package(out: &mut String, package: &RestoredPackage, dry_run: bool) {
     let (back, off) = if dry_run {
         ("would go back", "would come off")
     } else {
         ("went back", "came off")
     };
-    println!("{}", package.package_id);
+    let _ = writeln!(out, "{}", package.package_id);
     if package.receipt_merged {
-        println!(
+        let _ = writeln!(
+            out,
             "  Its entry in RABBIT's receipt {back}, and it {off} the list of packages you \
              uninstalled or turned down."
         );
@@ -2551,12 +2603,14 @@ fn print_restored_package(package: &RestoredPackage, dry_run: bool) {
         } else {
             ("came back", "is")
         };
-        println!(
+        let _ = writeln!(
+            out,
             "  RABBIT's receipt still had its entry, so only its files {files}. It {list} off \
              the list of packages you uninstalled or turned down."
         );
     } else {
-        println!(
+        let _ = writeln!(
+            out,
             "  It {off} the list of packages you uninstalled or turned down. RABBIT had no \
              receipt for this copy, so it has none now either."
         );
@@ -2564,18 +2618,22 @@ fn print_restored_package(package: &RestoredPackage, dry_run: bool) {
     let Some(value) = &package.langpack_before else {
         return;
     };
-    match (&package.langpack_error, package.langpack_restored) {
-        (Some(error), _) => println!(
+    let _ = match (&package.langpack_error, package.langpack_restored) {
+        (Some(error), _) => writeln!(
+            out,
             "  REAPER's language could not be set back to {value} ({error}). Choose it in \
              REAPER's preferences."
         ),
-        (None, true) if dry_run => println!("  REAPER's language would be set back to {value}."),
-        (None, true) => println!("  REAPER's language is set back to {value}."),
-        (None, false) => println!(
+        (None, true) if dry_run => {
+            writeln!(out, "  REAPER's language would be set back to {value}.")
+        }
+        (None, true) => writeln!(out, "  REAPER's language is set back to {value}."),
+        (None, false) => writeln!(
+            out,
             "  REAPER's language stays as it is: one was chosen since the uninstall, so RABBIT \
              doesn't set it back to {value}."
         ),
-    }
+    };
 }
 
 /// Parse repeated `--package-variant <package>=<variant>` flags into the map
@@ -4032,10 +4090,20 @@ fn platform_name(platform: Platform) -> &'static str {
 }
 
 fn print_preflight_report(report: &PreflightReport) {
-    println!("Preflight passed: {}", yes_no(report.passed));
+    print!("{}", preflight_report_text(report));
+}
+
+fn preflight_report_text(report: &PreflightReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Preflight passed: {}", yes_no(report.passed));
     for check in &report.checks {
-        println!("  {}: {:?}: {}", check.name, check.status, check.message);
+        let _ = writeln!(
+            out,
+            "  {}: {:?}: {}",
+            check.name, check.status, check.message
+        );
     }
+    out
 }
 
 fn print_plan(plan: &rabbit_core::plan::InstallPlan) {
@@ -4510,6 +4578,111 @@ mod tests {
             "Not restored: none of its files are in this backup. RABBIT's records of it stay as \
              they are."
         );
+    }
+
+    /// `restore-backup --apply` always saves its report under RABBIT/logs,
+    /// as `uninstall --apply` does, and the report names the backup of what
+    /// the restore replaced, which the text says last. A dry run saves a
+    /// report only with --save-report, and `--report-path` writes where it
+    /// says.
+    #[test]
+    fn restore_backup_apply_always_saves_a_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugin = resource.join("UserPlugins").join("reaper_demo.dll");
+        std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        std::fs::write(&plugin, b"older").unwrap();
+        rabbit_core::rollback::BackupSetWriter::new(&resource, "unix-1", "before-restore")
+            .copy_file(None, &plugin)
+            .unwrap();
+        std::fs::write(&plugin, b"newer").unwrap();
+        let logs = resource.join("RABBIT").join("logs");
+        let logged = || -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(&logs)
+                .map(|entries| {
+                    entries
+                        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                        .collect()
+                })
+                .unwrap_or_default();
+            names.sort();
+            names
+        };
+        let restore = |extra: &[&str]| {
+            let mut args: Vec<std::ffi::OsString> = vec![
+                "rabbit".into(),
+                "restore-backup".into(),
+                "--resource-path".into(),
+                resource.clone().into_os_string(),
+                "--backup-id".into(),
+                "unix-1".into(),
+                "--allow-reaper-running".into(),
+            ];
+            args.extend(extra.iter().map(Into::into));
+            super::run_args(args).unwrap();
+        };
+        let is_report = |names: &[String]| {
+            names.len() == 2
+                && names[0].starts_with("restore-backup-unix-")
+                && names[0].ends_with(".json")
+                && names[1] == names[0].replace(".json", ".txt")
+        };
+
+        restore(&[]);
+        assert!(logged().is_empty());
+        assert_eq!(std::fs::read(&plugin).unwrap(), b"newer");
+
+        restore(&["--save-report"]);
+        assert!(is_report(&logged()), "{:?}", logged());
+        std::fs::remove_dir_all(&logs).unwrap();
+
+        restore(&["--apply"]);
+        assert_eq!(std::fs::read(&plugin).unwrap(), b"older");
+        let names = logged();
+        assert!(is_report(&names), "{names:?}");
+        let envelope: rabbit_core::report::SavedJsonReport =
+            serde_json::from_str(&std::fs::read_to_string(logs.join(&names[0])).unwrap()).unwrap();
+        let report: rabbit_core::rollback::RestoreBackupReport =
+            serde_json::from_value(envelope.report).unwrap();
+        assert!(!report.dry_run);
+        let set_id = report
+            .before_restore_set_id
+            .clone()
+            .expect("the backup of what the restore replaced");
+        assert_eq!(
+            std::fs::read(
+                resource
+                    .join("RABBIT")
+                    .join("backups")
+                    .join(&set_id)
+                    .join("UserPlugins")
+                    .join("reaper_demo.dll")
+            )
+            .unwrap(),
+            b"newer"
+        );
+        let line = format!("Backup of what this restore replaced: {set_id}\n");
+        let text = super::restore_backup_report_text(&report);
+        assert!(text.ends_with(&line), "{text}");
+        let unchanged = rabbit_core::rollback::RestoreBackupReport {
+            before_restore_set_id: None,
+            ..report
+        };
+        let text = super::restore_backup_report_text(&unchanged);
+        assert!(
+            !text.contains("Backup of what this restore replaced"),
+            "{text}"
+        );
+
+        // `--report-path` still writes where it says, beside the report the
+        // restore saved by itself.
+        std::fs::remove_dir_all(&logs).unwrap();
+        let elsewhere = dir.path().join("elsewhere").join("r.json");
+        restore(&["--apply", "--report-path", elsewhere.to_str().unwrap()]);
+        assert!(elsewhere.is_file());
+        assert!(elsewhere.with_extension("txt").is_file());
+        let names = logged();
+        assert!(is_report(&names), "{names:?}");
     }
 
     /// Run as root on macOS, as under sudo, `restore-backup --apply`

@@ -57,6 +57,51 @@ where
     })
 }
 
+/// [`save_json_and_text_reports`], but never over another report: when a
+/// `.json` or `.txt` report of that name is already there, the report goes
+/// to `<name>-2` and so on. The `.json` file is claimed before anything is
+/// written, so two runs in the same second, which ask for the same
+/// [`default_report_path`], keep a report each.
+pub fn save_new_json_and_text_reports<T>(json_path: &Path, report: &T) -> Result<SavedReportPaths>
+where
+    T: Serialize + ?Sized,
+{
+    if let Some(parent) = json_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).with_path(parent)?;
+    }
+    let stem = json_path.file_stem().unwrap_or_default();
+    let mut attempt = 1u32;
+    loop {
+        let candidate = if attempt == 1 {
+            json_path.to_path_buf()
+        } else {
+            let mut name = stem.to_os_string();
+            name.push(format!("-{attempt}"));
+            if let Some(extension) = json_path.extension() {
+                name.push(".");
+                name.push(extension);
+            }
+            json_path.with_file_name(name)
+        };
+        attempt += 1;
+        if fs::symlink_metadata(text_report_path_for_json_path(&candidate)).is_ok() {
+            continue;
+        }
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => return save_json_and_text_reports(&candidate, report),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(crate::error::io_error_at(candidate, error)),
+        }
+    }
+}
+
 pub fn default_report_path(resource_path: &Path, operation_name: &str) -> PathBuf {
     logs_dir(resource_path).join(format!("{operation_name}-{}.json", report_timestamp()))
 }
@@ -224,7 +269,10 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{save_json_and_text_reports, save_json_report, text_report_path_for_json_path};
+    use super::{
+        save_json_and_text_reports, save_json_report, save_new_json_and_text_reports,
+        text_report_path_for_json_path,
+    };
 
     #[test]
     fn saves_report_envelope_to_nested_path() {
@@ -265,6 +313,37 @@ mod tests {
         assert!(content.contains("report:"));
         assert!(content.contains("ok: true"));
         assert!(content.contains("- name: OSARA"));
+    }
+
+    /// A report saved where one is already there, as by a run in the same
+    /// second, goes beside it under `-2`, and the earlier one stays as it
+    /// was. A text report alone takes the name too.
+    #[test]
+    fn a_new_report_never_replaces_one_already_there() {
+        let dir = tempdir().unwrap();
+        let logs = dir.path().join("RABBIT").join("logs");
+        let json_path = logs.join("restore-backup-unix-1.json");
+
+        let first = save_new_json_and_text_reports(&json_path, &json!({"run": 1})).unwrap();
+        assert_eq!(first.json_path, json_path);
+        let second = save_new_json_and_text_reports(&json_path, &json!({"run": 2})).unwrap();
+        assert_eq!(second.json_path, logs.join("restore-backup-unix-1-2.json"));
+        assert_eq!(second.text_path, logs.join("restore-backup-unix-1-2.txt"));
+        let first_content = std::fs::read_to_string(&first.json_path).unwrap();
+        assert!(first_content.contains("\"run\": 1"), "{first_content}");
+        let second_content = std::fs::read_to_string(&second.json_path).unwrap();
+        assert!(second_content.contains("\"run\": 2"), "{second_content}");
+
+        std::fs::write(logs.join("restore-backup-unix-2.txt"), "someone's").unwrap();
+        let third =
+            save_new_json_and_text_reports(&logs.join("restore-backup-unix-2.json"), &json!({}))
+                .unwrap();
+        assert_eq!(third.json_path, logs.join("restore-backup-unix-2-2.json"));
+        assert_eq!(
+            std::fs::read_to_string(logs.join("restore-backup-unix-2.txt")).unwrap(),
+            "someone's"
+        );
+        assert!(!logs.join("restore-backup-unix-2.json").exists());
     }
 
     #[test]

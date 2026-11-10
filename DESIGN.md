@@ -1583,7 +1583,12 @@ Extension files:
   Files from inside the resource folder keep their relative path in the
   set; files from outside it (app2clap's CLAP folder) go under
   `external/<n>/`, beside a `<file>.rabbit-origin` note of their original
-  path. Each manifest entry is saved, through a temp file and a rename,
+  path. `<n>` is one above the highest number the set's manifest or its
+  `external` folder already uses, so an outside file never lands on
+  another's place, whatever a put-back took out of the set. When the
+  `external` folder can't be listed, the file is refused, and an origin
+  note or a copy is never written over another file's.
+  Each manifest entry is saved, through a temp file and a rename,
   before its copy starts and marked done after, so an interrupted run
   still leaves a set whose manifest names every copy in it. A set an
   update wrote isn't restored yet (see below). Every path a set records is
@@ -1652,6 +1657,18 @@ Extension files:
   reported as restored. This is decided before the lock; the plan, made
   under it, must agree, or the restore stops with nothing changed, as when
   an uninstall finished writing the set in between.
+- A real restore first copies each file it replaces into a set of its own,
+  `restore-unix-<s>-before-restore` (or `-2` and so on), written like any
+  other, and its report names that set as `before_restore_set_id`.
+  Restoring it puts those files back; files the restore added, and the
+  receipt, stay as they are. A restore that replaced nothing writes no set
+  and names none, and neither does a dry run. Every real restore that
+  finishes saves its report as `RABBIT/logs/restore-backup-unix-<s>.json`
+  and `.txt` (or `-2` and so on, never over another report), still under
+  the install lock, as every real uninstall does. One stopped by an error
+  saves none yet; `rabbit backups` still lists its before-restore set. A
+  dry run saves nothing; `--save-report` and `--report-path` save its
+  report.
 - A real restore on macOS refuses when RABBIT itself runs as root, as under
   `sudo`, as an uninstall does: what it puts back, the before-restore set
   and the receipt would all be root's. The refusal comes after the set is
@@ -1700,7 +1717,16 @@ Extension files:
   stays; when it works, the entry goes and the package joins
   `declined_packages`. The set records each package's receipt entry, and the
   `langpack=` value REAPER had when the removal set it back to no language
-  pack, never a copy of `reaper.ini`.
+  pack, never a copy of `reaper.ini`. A removed package's report item names
+  the set only when the set records the package and holds a file of it that
+  a restore would put back, by the restore's own rule (see above). One that
+  put nothing there is removed with no set named, even when other packages
+  of the run filled one: a package of the administrator command whose trees
+  were gone before root's turn, one whose apps were gone before their turn
+  to go to the Trash and whose settings stayed out of the set, or one that
+  moved no file. A set that ends the run holding only package records, with
+  no file and no copy of the receipt, is removed again, so a run whose
+  packages all moved nothing names no set at all.
 - A plan's `vendor_added_files` patterns pick files from the receipt's
   `vendor_added_files` records, never from a folder listing. A receipt is a
   file anyone can edit, so only a plain absolute path counts, and only where

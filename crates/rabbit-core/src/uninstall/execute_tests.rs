@@ -216,7 +216,8 @@ fn save_receipt(fixture: &Fixture, packages: &[(&str, &[&str])]) -> InstallState
     state
 }
 
-fn manifest(report: &UninstallReport) -> BackupManifest {
+/// The manifest of the run's backup set.
+pub(super) fn manifest(report: &UninstallReport) -> BackupManifest {
     let set = report.backup_set_path.as_ref().expect("a backup set");
     serde_json::from_str(&fs::read_to_string(set.join(BACKUP_MANIFEST_FILE)).unwrap()).unwrap()
 }
@@ -462,6 +463,102 @@ fn a_changed_receipt_file_stays_and_a_changed_manifest_file_goes() {
         "{}",
         demo.message
     );
+}
+
+/// The run's backup set is named only for a package with a file in it. A
+/// package that moved no file, because its only file changed since RABBIT
+/// installed it and stays, is removed with no set named, though the set
+/// records it and holds another package's files. The other package keeps
+/// the set's id, and so does the report.
+#[test]
+fn a_package_that_moved_no_file_isnt_named_with_the_backup_set() {
+    let fixture = Fixture::new();
+    let data = fixture.file("Data/demo.dat");
+    let plugin = fixture.file("UserPlugins/reaper_other.dll");
+    save_receipt(
+        &fixture,
+        &[
+            ("demo", &["Data/demo.dat"]),
+            ("other", &["UserPlugins/reaper_other.dll"]),
+        ],
+    );
+    fs::write(&data, b"the user's own changes").unwrap();
+    let harness = Harness::new(
+        &fixture,
+        vec![demo_spec("demo"), demo_spec("other")],
+        &["demo", "other"],
+    );
+
+    let report = harness.apply(&["demo", "other"]);
+
+    let set_id = report.backup_set_id.clone().expect("a backup set");
+    let other = report.item("other").unwrap();
+    assert_eq!(other.status, UninstallStatus::Removed, "{}", other.message);
+    assert_eq!(
+        other.message_code,
+        UninstallMessage::Removed {
+            backup_set_id: Some(set_id.clone())
+        }
+    );
+    assert!(other.message.contains(&set_id), "{}", other.message);
+    assert!(!plugin.exists());
+
+    let demo = report.item("demo").unwrap();
+    assert_eq!(demo.status, UninstallStatus::Removed, "{}", demo.message);
+    assert_eq!(
+        demo.message_code,
+        UninstallMessage::Removed {
+            backup_set_id: None
+        }
+    );
+    assert!(!demo.message.contains(&set_id), "{}", demo.message);
+    assert!(demo.removed.is_empty());
+    assert_eq!(fs::read(&data).unwrap(), b"the user's own changes");
+
+    // The set records both packages, and holds a file of one.
+    let manifest = manifest(&report);
+    assert!(manifest.packages.contains_key("demo") && manifest.packages.contains_key("other"));
+    assert!(
+        manifest
+            .files
+            .iter()
+            .all(|entry| entry.package_id.as_deref() == Some("other"))
+    );
+}
+
+/// When no package of the run moved a file, the set would hold records
+/// alone, which a restore refuses. So no set is left, and neither the
+/// report nor the package names one.
+#[test]
+fn a_run_that_moved_no_file_leaves_no_backup_set() {
+    let fixture = Fixture::new();
+    let data = fixture.file("Data/demo.dat");
+    save_receipt(&fixture, &[("demo", &["Data/demo.dat"])]);
+    fs::write(&data, b"the user's own changes").unwrap();
+    let harness = Harness::new(&fixture, vec![demo_spec("demo")], &["demo"]);
+
+    let report = harness.apply(&["demo"]);
+
+    let demo = report.item("demo").unwrap();
+    assert_eq!(demo.status, UninstallStatus::Removed, "{}", demo.message);
+    assert_eq!(
+        demo.message_code,
+        UninstallMessage::Removed {
+            backup_set_id: None
+        }
+    );
+    assert!(demo.removed.is_empty());
+    assert_eq!(fs::read(&data).unwrap(), b"the user's own changes");
+    assert_eq!(report.backup_set_id, None);
+    assert_eq!(report.backup_set_path, None);
+    let backups = fixture.resource.join("RABBIT").join("backups");
+    let sets: Vec<_> = fs::read_dir(&backups)
+        .map(|entries| entries.map(|entry| entry.unwrap().path()).collect())
+        .unwrap_or_default();
+    assert!(sets.is_empty(), "{sets:?}");
+    // RABBIT's receipt forgets the package all the same.
+    let state = load_install_state(&fixture.resource).unwrap().unwrap();
+    assert!(!state.packages.contains_key("demo"));
 }
 
 /// When a file can't be moved, the files that already moved go back, the
@@ -854,10 +951,9 @@ fn the_language_is_reset_only_when_its_pack_was_removed() {
     assert_eq!(item.kept[0].reason, KeptFileReason::ChangedSinceInstall);
     assert!(pack.is_file());
     assert_eq!(fs::read_to_string(&ini).unwrap(), selected);
-    assert_eq!(
-        manifest(&report).packages["langpack-demo"].langpack_before,
-        None
-    );
+    // Nothing moved, so the run leaves no backup set, and with it no
+    // language to set back.
+    assert_eq!(report.backup_set_path, None);
 
     // Removed, but REAPER uses another pack: that one is the user's choice.
     let fixture = Fixture::new();

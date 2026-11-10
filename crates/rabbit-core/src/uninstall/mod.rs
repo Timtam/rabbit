@@ -1182,7 +1182,9 @@ impl UninstallProblem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "kebab-case")]
 pub enum UninstallMessage {
-    /// Removed. `backup_set_id` is the set its files went into.
+    /// Removed. `backup_set_id` is the set its files went into, and `None`
+    /// when none of its files did, even when the run wrote a set for other
+    /// packages.
     Removed {
         backup_set_id: Option<String>,
     },

@@ -241,6 +241,15 @@ from this file and posts it as the GitHub release body.
   back, the backup of the files they replace and RABBIT's records would all
   be root's. It changes nothing and says to run it as yourself. A dry run
   still works.
+- `rabbit restore-backup --apply` now saves a report in `RABBIT\logs` every
+  time it finishes, like `rabbit uninstall --apply`:
+  `restore-backup-unix-<time>.json` and `.txt`. `--save-report` still saves
+  one for a dry run. When the restore replaced files, the report, the
+  command's text and its `--json` output name the backup RABBIT made of
+  them, so the restore can be undone: restoring that backup puts those files
+  back. A restore stopped by an error saves no report yet, but
+  `rabbit backups` lists the backup it made, as
+  `restore-unix-<time>-before-restore`.
 
 ### Fixed
 
@@ -263,6 +272,21 @@ from this file and posts it as the GitHub release body.
   restore and changes nothing, and restoring the whole backup leaves it
   out, names it, and brings back the rest. A backup with nothing at all to
   bring back is refused the same way.
+- An uninstall's report, as saved in `RABBIT\logs` and printed by
+  `rabbit uninstall --json`, no longer names the run's backup for a package
+  that put nothing into it: one that moved no file, or, on a Mac, one whose
+  apps or plug-ins were all gone before its turn, such as REAPER.app or
+  Surge XT, unless its settings went into the backup. Show details and the
+  command's text already named the backup only for packages whose files
+  went into it. When no package of the run put a file into the backup, the
+  run now leaves no backup. Before, it left one with nothing in it to
+  restore, and the report, Show details and the command's text named it.
+- When an uninstall couldn't put all of a failed package's files back, a
+  later file from outside the REAPER resource folder in the same run, such
+  as one from JAWS's settings folder, could be given the place in the
+  backup of a file with the same name that stayed there. Its move was then
+  refused, and that package's uninstall failed. Each file from outside the
+  resource folder now gets a place of its own.
 - `rabbit install-extension --apply` no longer runs while another copy of
   RABBIT is installing, uninstalling or restoring a backup in the same
   REAPER, just as the other commands that install don't. It says another
