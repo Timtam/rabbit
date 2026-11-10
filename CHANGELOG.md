@@ -281,6 +281,25 @@ from this file and posts it as the GitHub release body.
   installer stopped is no longer reported as installed because the older
   version's files were still there.
 
+### Security
+
+- `rabbit restore-backup` no longer accepts a backup id that leads out of
+  RABBIT's backups folder, such as `D:` on Windows. Before, `--backup-id D:`
+  read a backup from the current folder of drive D:, and could restore the
+  files there into REAPER. An id must now be the exact name of a folder in
+  RABBIT's backups folder, with the same upper and lower case; when only
+  the case differs, the error names the backup that is there. On Windows,
+  names Windows would read as another name or as a device, such as
+  `unix-1.` or `CON`, are refused too. `rabbit backups` lists a folder with
+  such a name with a warning, and never looks inside it. An id that names
+  no backup now says the backup was deleted or never existed.
+- Restoring a backup never follows a symbolic link or junction any more:
+  not as `RABBIT`, not as its backups folder, not as a backup, and not
+  inside one. `rabbit backups` lists such a link with a warning and never
+  looks into it. When `RABBIT` or its backups folder is a link, it lists
+  nothing and says why. Backups kept behind such a link have to be moved
+  back into a real folder before RABBIT lists or restores them.
+
 ## [0.4.4] - 2026-10-13
 
 ### Changed

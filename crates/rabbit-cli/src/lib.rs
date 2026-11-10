@@ -1198,7 +1198,8 @@ fn run_restore_backup(command: Command) -> Result<(), Box<dyn std::error::Error>
             allow_reaper_running,
             package_id: package.map(|id| id.trim().to_string()),
         },
-    )?;
+    )
+    .map_err(|error| cli_restore_error(error, &resource_path))?;
     let report_path = selected_report_path(
         Some(&resource_path),
         report_path,
@@ -1212,6 +1213,23 @@ fn run_restore_backup(command: Command) -> Result<(), Box<dyn std::error::Error>
         print_restore_backup_report(&report);
     }
     Ok(())
+}
+
+/// A restore's error as the CLI prints it. An id that names no backup set
+/// gets the command that lists the sets there are, which the engine leaves
+/// to the CLI. Anything else is printed as it is.
+fn cli_restore_error(
+    error: rabbit_core::RabbitError,
+    resource_path: &Path,
+) -> Box<dyn std::error::Error> {
+    match error {
+        rabbit_core::RabbitError::BackupSetNotFound { .. } => format!(
+            "{error}. rabbit backups --resource-path \"{}\" lists what is left.",
+            resource_path.display()
+        )
+        .into(),
+        other => other.into(),
+    }
 }
 
 fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Error>> {
@@ -4255,6 +4273,48 @@ mod tests {
             .join()
             .expect("the command must not overflow its stack")
             .unwrap();
+    }
+
+    /// An id that names no backup set says the set was deleted or never
+    /// existed, and gives the command that lists what is left. The engine's
+    /// own message has no CLI syntax in it.
+    #[test]
+    fn restore_backup_says_how_to_list_what_is_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        std::fs::create_dir_all(&resource).unwrap();
+
+        let args: Vec<std::ffi::OsString> = vec![
+            "rabbit".into(),
+            "restore-backup".into(),
+            "--resource-path".into(),
+            resource.clone().into_os_string(),
+            "--backup-id".into(),
+            "unix-1".into(),
+        ];
+        let error = super::run_args(args).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            format!(
+                "The backup unix-1 was deleted or never existed. rabbit backups --resource-path \
+                 \"{}\" lists what is left.",
+                resource.display()
+            )
+        );
+        let engine = rabbit_core::rollback::restore_backup_set(
+            &resource,
+            "unix-1",
+            &rabbit_core::rollback::RestoreBackupOptions {
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!engine.contains("rabbit backups"), "{engine}");
+        // Nothing was made by looking.
+        assert!(!resource.join("RABBIT").exists());
     }
 
     /// In a debug build, clap's parser alone takes more than the 1 MB of

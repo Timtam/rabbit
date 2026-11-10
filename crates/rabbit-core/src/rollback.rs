@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf, Prefix};
@@ -34,6 +35,11 @@ const MANIFEST_STAGING_FILE: &str = "backup-manifest.json.rabbit-tmp";
 /// The reason recorded for the set that holds the files a restore replaced.
 const BEFORE_RESTORE_REASON: &str = "before-restore";
 
+/// The folder beside `RABBIT/backups` where delete (still to come) moves a
+/// set before it removes anything, so a restore never finds half a set.
+/// Restore only looks here, and never creates it.
+const DELETING_DIR: &str = "backups-deleting";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupSet {
     pub id: String,
@@ -43,8 +49,10 @@ pub struct BackupSet {
     pub manifest_path: Option<PathBuf>,
     pub files: Vec<PathBuf>,
     /// Set when part of this set could not be read, most often a damaged
-    /// manifest. The set is still listed; restoring it will fail with the
-    /// full error.
+    /// manifest; when the entry or something in it is a symbolic link or
+    /// junction, which RABBIT never follows; or when its name is not one
+    /// RABBIT gives a backup. The set is still listed. Restoring it may be
+    /// refused, with the full error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }
@@ -814,9 +822,22 @@ fn remove_empty_dirs(folder: &Path) {
     let _ = fs::remove_dir(folder);
 }
 
+/// Every set in `RABBIT/backups`, by id.
+///
+/// No symbolic link or junction is ever followed. When `RABBIT` or
+/// `RABBIT/backups` is one, nothing is listed and the error says why: the
+/// sets it leads to may belong to another REAPER, or to nobody, and an
+/// empty list would say there are none. A link directly in
+/// `RABBIT/backups` is listed with a warning that it isn't a backup RABBIT
+/// made, and a link inside a set is listed by name. Neither is looked into.
+///
+/// A folder whose name restore would refuse (see
+/// [`backup_id_is_well_formed`]) is listed the same way as a link: with a
+/// warning, and never looked into. On Windows a path through `unix-1.`
+/// would open `unix-1`, so its listing would show another set's files.
 pub fn list_backup_sets(resource_path: &Path) -> Result<Vec<BackupSet>> {
     let backups_root = backups_root(resource_path);
-    if !backups_root.is_dir() {
+    if !is_real_folder(&resource_path.join("RABBIT"))? || !is_real_folder(&backups_root)? {
         return Ok(Vec::new());
     }
 
@@ -824,9 +845,9 @@ pub fn list_backup_sets(resource_path: &Path) -> Result<Vec<BackupSet>> {
     for entry in fs::read_dir(&backups_root).with_path(&backups_root)? {
         let entry = entry.with_path(&backups_root)?;
         let path = entry.path();
-        if !path.is_dir() {
+        let Ok(kind) = entry.file_type() else {
             continue;
-        }
+        };
         let Some(id) = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -834,6 +855,34 @@ pub fn list_backup_sets(resource_path: &Path) -> Result<Vec<BackupSet>> {
         else {
             continue;
         };
+        // Why this entry is no set, if it isn't one.
+        let not_a_set = if kind.is_symlink() {
+            Some(
+                "this is a symbolic link or junction, not a backup RABBIT made, and RABBIT \
+                 never looks inside it",
+            )
+        } else if !kind.is_dir() {
+            continue;
+        } else if !backup_id_is_well_formed(&id) {
+            Some(
+                "its name is not one RABBIT gives a backup, so it is not a backup RABBIT made, \
+                 and RABBIT never looks inside it or restores it",
+            )
+        } else {
+            None
+        };
+        if let Some(why) = not_a_set {
+            sets.push(BackupSet {
+                id,
+                path,
+                created_at: None,
+                reason: None,
+                manifest_path: None,
+                files: Vec::new(),
+                warning: Some(why.to_string()),
+            });
+            continue;
+        }
         // One damaged set must not hide all the others: a manifest that
         // can't be read, or files that can't be listed, are reported on that
         // set and the listing goes on.
@@ -843,10 +892,23 @@ pub fn list_backup_sets(resource_path: &Path) -> Result<Vec<BackupSet>> {
             None
         });
         let mut files = Vec::new();
-        if let Err(error) = collect_relative_files(&path, &path, &mut files) {
+        let mut links = Vec::new();
+        if let Err(error) = collect_relative_files(&path, &path, &mut files, &mut links) {
             warnings.push(format!(
                 "not every file in this set could be listed: {error}"
             ));
+        }
+        if !links.is_empty() {
+            links.sort();
+            let names: Vec<String> = links
+                .iter()
+                .map(|link| link.display().to_string())
+                .collect();
+            warnings.push(format!(
+                "these are symbolic links or junctions, which RABBIT never follows: {}",
+                names.join(", ")
+            ));
+            files.append(&mut links);
         }
         files.sort();
         sets.push(BackupSet {
@@ -871,12 +933,25 @@ pub fn restore_backup_set(
     backup_id: &str,
     options: &RestoreBackupOptions,
 ) -> Result<RestoreBackupReport> {
-    restore_backup_set_within(
-        resource_path,
-        backup_id,
-        options,
-        &crate::install::outside_restore_rules(resource_path),
-    )
+    restore_backup_set_with(resource_path, backup_id, options, || {
+        crate::install::outside_restore_rules(resource_path)
+    })
+}
+
+/// [`restore_backup_set`], with the places outside the resource folder that
+/// a restore may write to coming from `outside`. Tests pass temporary
+/// folders there instead of the user's real CLAP and vendor folders.
+///
+/// The set is found before anything else is read, so `outside` is only
+/// called once the id named a set.
+fn restore_backup_set_with(
+    resource_path: &Path,
+    backup_id: &str,
+    options: &RestoreBackupOptions,
+    outside: impl FnOnce() -> OutsideRestoreRules,
+) -> Result<RestoreBackupReport> {
+    let backup_path = set_to_restore(resource_path, backup_id)?;
+    restore_found_set(resource_path, backup_id, backup_path, options, &outside())
 }
 
 /// Where outside the resource folder a restore may put a file back.
@@ -894,6 +969,18 @@ pub(crate) struct OutsideRestoreRules {
 /// [`restore_backup_set`] with the places outside the resource folder that
 /// a restore may write to passed in, so tests can use temporary folders
 /// instead of the user's real CLAP and vendor folders.
+#[cfg(test)]
+pub(crate) fn restore_backup_set_within(
+    resource_path: &Path,
+    backup_id: &str,
+    options: &RestoreBackupOptions,
+    outside: &OutsideRestoreRules,
+) -> Result<RestoreBackupReport> {
+    restore_backup_set_with(resource_path, backup_id, options, || outside.clone())
+}
+
+/// Restore the set `backup_id` names, already found at `backup_path`,
+/// writing outside the resource folder only where `outside` allows.
 ///
 /// A set an uninstall wrote records each package it removed. Its files come
 /// back like any set's, but the receipt doesn't: the uninstall never copied
@@ -903,16 +990,13 @@ pub(crate) struct OutsideRestoreRules {
 /// comes off `declined_packages`, and REAPER's language goes back if the
 /// uninstall reset it. With `options.package_id`, only that package comes
 /// back.
-pub(crate) fn restore_backup_set_within(
+fn restore_found_set(
     resource_path: &Path,
     backup_id: &str,
+    backup_path: PathBuf,
     options: &RestoreBackupOptions,
     outside: &OutsideRestoreRules,
 ) -> Result<RestoreBackupReport> {
-    let backup_path = backup_set_path(resource_path, backup_id)?;
-    if !backup_path.is_dir() {
-        return Err(RabbitError::BackupNotFound(backup_path));
-    }
     let manifest = load_backup_manifest(&backup_path)?;
     let packages = packages_to_restore(backup_id, manifest.as_ref(), options)?;
 
@@ -1271,7 +1355,14 @@ fn plan_restore_from_manifest(
 /// resource folder, so each file goes back to the same relative place.
 fn plan_restore_from_layout(resource_path: &Path, backup_path: &Path) -> Result<RestorePlan> {
     let mut relative_files = Vec::new();
-    collect_relative_files(backup_path, backup_path, &mut relative_files)?;
+    let mut links = Vec::new();
+    collect_relative_files(backup_path, backup_path, &mut relative_files, &mut links)?;
+    // A link in the set could lead anywhere, so the whole set is refused.
+    if let Some(link) = links.into_iter().min() {
+        return Err(RabbitError::BackupPathIsLink {
+            path: backup_path.join(link),
+        });
+    }
     relative_files.sort();
 
     let mut files = Vec::with_capacity(relative_files.len());
@@ -1434,7 +1525,8 @@ fn check_reached_through_real_folders(
 /// resource path. Either way the part after the set folder finds the copy,
 /// also when the set has moved with its resource folder or the restore runs
 /// from another folder. Only a recorded path without that part is read as
-/// relative to the set itself.
+/// relative to the set itself. Nothing on the way to the copy, nor the copy
+/// itself, may be a symbolic link or junction.
 fn restore_source(
     backup_path: &Path,
     recorded_backup_path: &Path,
@@ -1449,6 +1541,7 @@ fn restore_source(
         Some(relative)
             if is_plain_relative(&relative) && !same_path(&relative, BACKUP_MANIFEST_FILE) =>
         {
+            check_no_link_in_set(backup_path, &relative)?;
             Ok(backup_path.join(relative))
         }
         _ => Err(RabbitError::BackupRestoreRefused {
@@ -1573,23 +1666,53 @@ fn restore_file(action: &mut RestoreBackupAction, backups: &mut BackupSetWriter)
 
 /// The files of a set, relative to it, leaving out the manifest, its
 /// staging file and the origin notes, none of which are backed-up files.
-fn collect_relative_files(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+/// Symbolic links and junctions go into `links` instead, by their path in
+/// the set, and are never followed.
+fn collect_relative_files(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<PathBuf>,
+    links: &mut Vec<PathBuf>,
+) -> Result<()> {
     for entry in fs::read_dir(current).with_path(current)? {
         let entry = entry.with_path(current)?;
         let path = entry.path();
-        if path.is_dir() {
-            collect_relative_files(root, &path, files)?;
-        } else if path.is_file() {
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| RabbitError::BackupNotFound(root.to_path_buf()))?;
-            if relative == Path::new(BACKUP_MANIFEST_FILE)
-                || relative == Path::new(MANIFEST_STAGING_FILE)
-                || relative.to_string_lossy().ends_with(ORIGIN_SIDECAR_SUFFIX)
-            {
-                continue;
-            }
+        // The entry's own type: unlike `Path::is_dir`, it doesn't follow a
+        // link. Rust reports a junction as a link on Windows.
+        let kind = entry.file_type().with_path(&path)?;
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| RabbitError::BackupNotFound(root.to_path_buf()))?;
+        if kind.is_symlink() {
+            links.push(relative.to_path_buf());
+        } else if kind.is_dir() {
+            collect_relative_files(root, &path, files, links)?;
+        } else if kind.is_file()
+            && relative != Path::new(BACKUP_MANIFEST_FILE)
+            && relative != Path::new(MANIFEST_STAGING_FILE)
+            && !relative.to_string_lossy().ends_with(ORIGIN_SIDECAR_SUFFIX)
+        {
             files.push(relative.to_path_buf());
+        }
+    }
+    Ok(())
+}
+
+/// Check that nothing on the way from the set folder `set` down to
+/// `relative` inside it, `relative` itself included, is a symbolic link or
+/// junction. A part that isn't there ends the check: there is nothing below
+/// it to follow.
+fn check_no_link_in_set(set: &Path, relative: &Path) -> Result<()> {
+    let mut current = set.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(RabbitError::BackupPathIsLink { path: current });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error).with_path(current),
         }
     }
     Ok(())
@@ -1608,10 +1731,18 @@ pub fn save_backup_manifest(backup_set: &Path, manifest: &BackupManifest) -> Res
     Ok(path)
 }
 
+/// A set's manifest, or `None` when it has none. A manifest that is a
+/// symbolic link or junction is refused, never read.
 fn load_backup_manifest(backup_set: &Path) -> Result<Option<BackupManifest>> {
     let path = backup_set.join(BACKUP_MANIFEST_FILE);
-    if !path.is_file() {
-        return Ok(None);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(RabbitError::BackupPathIsLink { path });
+        }
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_path(path),
     }
 
     let content = fs::read_to_string(&path).with_path(&path)?;
@@ -1619,17 +1750,169 @@ fn load_backup_manifest(backup_set: &Path) -> Result<Option<BackupManifest>> {
     Ok(Some(manifest))
 }
 
-fn backup_set_path(resource_path: &Path, backup_id: &str) -> Result<PathBuf> {
-    if backup_id.is_empty()
-        || backup_id == "."
-        || backup_id == ".."
-        || backup_id.contains('/')
-        || backup_id.contains('\\')
-    {
+/// Where a backup set id leads, as [`find_backup_set`] found it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FoundBackupSet {
+    /// The set's folder in `RABBIT/backups`.
+    pub(crate) set: Option<PathBuf>,
+    /// The folder of the same name in `RABBIT/backups-deleting`: a set
+    /// whose deletion started and didn't finish.
+    pub(crate) deleting: Option<PathBuf>,
+    /// When `set` is `None`, the name of a set in `RABBIT/backups` that
+    /// differs from the id only in upper and lower case. It is only named,
+    /// so the person learns the set is still there, and never used.
+    pub(crate) other_case: Option<String>,
+}
+
+/// Find the set `backup_id` names, in `RABBIT/backups` and in
+/// `RABBIT/backups-deleting`, without following any link.
+///
+/// The id must be well-formed (see [`backup_id_is_well_formed`]), or it is
+/// refused before anything is read. It is then used only where it equals,
+/// byte for byte, the name of an entry `read_dir` lists in one of those
+/// folders, so a name that differs only in case is no match, even where
+/// the file system would open it; such a set in `RABBIT/backups` is only
+/// named, in `other_case`. Nothing else is ever joined to either
+/// folder. `RABBIT`, both folders and each set found must be real folders,
+/// not symbolic links or junctions; a link anywhere there is an error. A
+/// folder that isn't there counts as empty, and none is created.
+pub(crate) fn find_backup_set(resource_path: &Path, backup_id: &str) -> Result<FoundBackupSet> {
+    if !backup_id_is_well_formed(backup_id) {
         return Err(RabbitError::InvalidBackupId(backup_id.to_string()));
     }
+    let rabbit = resource_path.join("RABBIT");
+    if !is_real_folder(&rabbit)? {
+        return Ok(FoundBackupSet::default());
+    }
+    let (set, other_case) = find_folder_named(&rabbit.join("backups"), backup_id)?;
+    let (deleting, _) = find_folder_named(&rabbit.join(DELETING_DIR), backup_id)?;
+    Ok(FoundBackupSet {
+        set,
+        deleting,
+        other_case,
+    })
+}
 
-    Ok(backups_root(resource_path).join(backup_id))
+/// The set `backup_id` names in `RABBIT/backups`, for a restore (see
+/// [`find_backup_set`]). A set found only in `RABBIT/backups-deleting` is
+/// being deleted and is refused. An id found in neither names a set that
+/// was deleted or never existed, unless a set's name differs from it only
+/// in case; then that set is named instead, and still not restored.
+fn set_to_restore(resource_path: &Path, backup_id: &str) -> Result<PathBuf> {
+    match find_backup_set(resource_path, backup_id)? {
+        FoundBackupSet { set: Some(set), .. } => Ok(set),
+        FoundBackupSet {
+            deleting: Some(_), ..
+        } => Err(RabbitError::BackupSetBeingDeleted {
+            backup_id: backup_id.to_string(),
+        }),
+        FoundBackupSet {
+            other_case: Some(existing),
+            ..
+        } => Err(RabbitError::BackupIdDiffersInCase {
+            backup_id: backup_id.to_string(),
+            existing,
+        }),
+        FoundBackupSet { .. } => Err(RabbitError::BackupSetNotFound {
+            backup_id: backup_id.to_string(),
+        }),
+    }
+}
+
+/// The entry of `folder` whose name is exactly `name`, when `folder` and
+/// that entry are both real folders. `None` when either isn't there or
+/// isn't a folder; an error when either is a symbolic link or junction.
+///
+/// With no exact match, also the name of a real folder there whose name
+/// differs from `name` only in upper and lower case and could be a set's,
+/// the first by byte order if there are several. It is only named, never
+/// used.
+fn find_folder_named(folder: &Path, name: &str) -> Result<(Option<PathBuf>, Option<String>)> {
+    if !is_real_folder(folder)? {
+        return Ok((None, None));
+    }
+    let lowercase = name.to_lowercase();
+    let mut other_case: Option<String> = None;
+    for entry in fs::read_dir(folder).with_path(folder)? {
+        let entry = entry.with_path(folder)?;
+        let entry_name = entry.file_name();
+        if entry_name == OsStr::new(name) {
+            let path = entry.path();
+            return Ok((is_real_folder(&path)?.then_some(path), None));
+        }
+        // A real folder whose name differs only in case is noted, never
+        // used. Its type is the entry's own, which never follows a link.
+        if let Some(entry_name) = entry_name.to_str()
+            && entry_name.to_lowercase() == lowercase
+            && backup_id_is_well_formed(entry_name)
+            && entry.file_type().is_ok_and(|kind| kind.is_dir())
+            && other_case.as_deref().is_none_or(|found| entry_name < found)
+        {
+            other_case = Some(entry_name.to_string());
+        }
+    }
+    Ok((None, other_case))
+}
+
+/// Whether `path` is a real folder, by its own metadata: `false` when
+/// nothing is there or something other than a folder is, and an error when
+/// it is a symbolic link or junction, which is never followed. Rust reports
+/// a junction as a link on Windows.
+fn is_real_folder(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(RabbitError::BackupPathIsLink {
+            path: path.to_path_buf(),
+        }),
+        Ok(metadata) => Ok(metadata.is_dir()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_path(path),
+    }
+}
+
+/// Whether `backup_id` can name a set at all: exactly one plain name, with
+/// no `:`, `/`, `\` or NUL in it. Joined to the backups folder, `D:` and
+/// `C:foo` would leave it for a drive's current folder on Windows, and so
+/// would `x:stream`, for drive X. `unix-1:stream` would name a stream of
+/// the folder `unix-1`. On Windows the name also
+/// mustn't end in a dot or a space, which Windows drops, so `unix-1.` would
+/// open `unix-1`, nor be a device name such as `CON`, which opens the
+/// device in any folder.
+fn backup_id_is_well_formed(backup_id: &str) -> bool {
+    let mut components = Path::new(backup_id).components();
+    let one_name = matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(name)), None) if name == OsStr::new(backup_id)
+    );
+    one_name
+        && !backup_id.contains([':', '/', '\\', '\0'])
+        && !(cfg!(windows)
+            && (backup_id.ends_with(['.', ' ']) || is_windows_device_name(backup_id)))
+}
+
+/// Whether Windows opens a device for `name` rather than a file or folder
+/// of that name: `CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, or `COM`
+/// or `LPT` followed by one digit or a superscript 1, 2 or 3. Any case,
+/// alone or before an extension, with any spaces before the extension:
+/// `con.txt` and `NUL .log` are devices too.
+fn is_windows_device_name(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    let numbered = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+        .is_some_and(|number| {
+            matches!(number, "¹" | "²" | "³")
+                || (number.len() == 1 && number.bytes().all(|byte| byte.is_ascii_digit()))
+        });
+    numbered
+        || matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        )
 }
 
 fn backups_root(resource_path: &Path) -> PathBuf {
@@ -1781,8 +2064,9 @@ mod tests {
 
     use super::{
         BACKUP_MANIFEST_FILE, BackupEntryState, BackupManifest, BackupManifestFile,
-        BackupPackageRecord, BackupSetWriter, OutsideRestoreRules, RestoreBackupActionKind,
-        RestoreBackupOptions, list_backup_sets, load_backup_manifest, relative_within,
+        BackupPackageRecord, BackupSetWriter, DELETING_DIR, FoundBackupSet, OutsideRestoreRules,
+        RestoreBackupActionKind, RestoreBackupOptions, backup_id_is_well_formed, find_backup_set,
+        is_windows_device_name, list_backup_sets, load_backup_manifest, relative_within,
         restore_backup_set, restore_backup_set_within, save_backup_manifest,
     };
     use crate::error::RabbitError;
@@ -2984,6 +3268,598 @@ mod tests {
                 root
             ),
             None
+        );
+    }
+
+    /// A resource folder in `dir` whose set `unix-1` holds the key map
+    /// OSARA's replaced. `reaper-kb.ini` is OSARA's now, so a restore of
+    /// `unix-1` would change it back to `own keymap`.
+    fn keymap_set(dir: &Path) -> (PathBuf, PathBuf) {
+        let resource = dir.join("REAPER");
+        let keymap = resource.join("reaper-kb.ini");
+        write(&keymap, b"own keymap");
+        BackupSetWriter::new(&resource, "unix-1", "osara-keymap-replacement")
+            .copy_file(Some("osara"), &keymap)
+            .unwrap();
+        fs::write(&keymap, b"osara keymap").unwrap();
+        (resource, keymap)
+    }
+
+    /// Another resource folder in `dir`, `Other`, with a set `unix-1` of its
+    /// own, holding another key map. A restore that followed a link to it
+    /// would put that key map into the REAPER being restored.
+    fn other_resource(dir: &Path) -> PathBuf {
+        let other = dir.join("Other");
+        let keymap = other.join("reaper-kb.ini");
+        write(&keymap, b"another keymap");
+        BackupSetWriter::new(&other, "unix-1", "osara-keymap-replacement")
+            .copy_file(Some("osara"), &keymap)
+            .unwrap();
+        other
+    }
+
+    /// Make `link` point to the folder `target`: a junction on Windows,
+    /// which needs no administrator rights, a symbolic link elsewhere.
+    fn link_folder(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        crate::uninstall::paths::make_junction(link, target);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    /// Every file and link below `root`, each file with what it holds,
+    /// found without following any link. Folders are left out: a refused
+    /// restore may still have made the empty folder its lock goes in.
+    fn snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+        let mut found = Vec::new();
+        let mut folders = vec![root.to_path_buf()];
+        while let Some(folder) = folders.pop() {
+            for entry in fs::read_dir(&folder).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let kind = entry.file_type().unwrap();
+                if kind.is_symlink() {
+                    found.push((path, None));
+                } else if kind.is_dir() {
+                    folders.push(path);
+                } else {
+                    let contents = fs::read(&path).unwrap();
+                    found.push((path, Some(contents)));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// Restore `backup_id` from `resource` for real, expecting a refusal,
+    /// and check that no file or link below `dir` changed.
+    fn refused(dir: &Path, resource: &Path, backup_id: &str) -> RabbitError {
+        let before = snapshot(dir);
+        let error =
+            restore_backup_set_within(resource, backup_id, &APPLY, &OutsideRestoreRules::default())
+                .unwrap_err();
+        assert_eq!(snapshot(dir), before, "{backup_id:?} changed something");
+        error
+    }
+
+    #[test]
+    fn a_backup_id_is_exactly_one_plain_name() {
+        for id in [
+            "unix-1",
+            "unix-5-2",
+            "uninstall-unix-1700000000",
+            "unattended-unix-1700000000-123456789",
+            "restore-unix-1700000000-before-restore",
+        ] {
+            assert!(backup_id_is_well_formed(id), "{id:?}");
+        }
+        for id in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            r"a\b",
+            "/unix-1",
+            "unix-1/",
+            "D:",
+            "C:foo",
+            "x:stream",
+            "unix-1:stream",
+            "unix-1::$INDEX_ALLOCATION",
+            r"\\?\C:\x",
+            r"\\server\share",
+            "a\0b",
+        ] {
+            assert!(!backup_id_is_well_formed(id), "{id:?}");
+        }
+        #[cfg(windows)]
+        for id in ["unix-1.", "unix-1 ", "CON", "NUL", "con.txt", "Lpt1.log"] {
+            assert!(!backup_id_is_well_formed(id), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn windows_device_names_are_known_in_any_case_and_before_an_extension() {
+        for name in [
+            "CON",
+            "con",
+            "Con.txt",
+            "PRN",
+            "AUX",
+            "NUL",
+            "nul.tar.gz",
+            "NUL .log",
+            "COM1",
+            "com9",
+            "COM0",
+            "LPT1",
+            "lpt9.txt",
+            "COM¹",
+            "LPT³",
+            "CONIN$",
+            "conout$",
+        ] {
+            assert!(is_windows_device_name(name), "{name:?}");
+        }
+        for name in [
+            "unix-1",
+            "CONSOLE",
+            "con-1",
+            "xnul",
+            "COM",
+            "COM10",
+            "LPTx",
+            "uninstall-unix-1700000000",
+        ] {
+            assert!(!is_windows_device_name(name), "{name:?}");
+        }
+    }
+
+    /// An id that could make the path leave `RABBIT/backups`, such as `D:`
+    /// on Windows, is refused before anything is read, with nothing
+    /// changed. Before, `D:` loaded a manifest from D:'s current folder, or
+    /// restored that folder's files into REAPER.
+    #[test]
+    fn ids_that_could_leave_the_backups_folder_are_refused() {
+        let dir = tempdir().unwrap();
+        let (resource, keymap) = keymap_set(dir.path());
+
+        for id in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            r"a\b",
+            "unix-1/",
+            "../backups/unix-1",
+            "D:",
+            "C:foo",
+            "x:stream",
+            "unix-1:stream",
+            "unix-1::$INDEX_ALLOCATION",
+            r"\\?\C:\x",
+            "a\0b",
+        ] {
+            let error = refused(dir.path(), &resource, id);
+            assert!(
+                matches!(&error, RabbitError::InvalidBackupId(refused) if refused == id),
+                "{id:?}: {error:?}"
+            );
+        }
+        assert_eq!(fs::read(&keymap).unwrap(), b"osara keymap");
+    }
+
+    /// Windows drops a trailing dot or space, so `unix-1.` opened `unix-1`,
+    /// and a device name opens the device in any folder. Both are refused.
+    #[cfg(windows)]
+    #[test]
+    fn windows_refuses_ids_it_would_read_as_another_name_or_a_device() {
+        let dir = tempdir().unwrap();
+        let (resource, keymap) = keymap_set(dir.path());
+
+        for id in [
+            "unix-1.", "unix-1 ", "unix-1. ", "CON", "NUL", "con.txt", "NUL .txt", "lpt1",
+            "COM9.log", "COM¹",
+        ] {
+            let error = refused(dir.path(), &resource, id);
+            assert!(
+                matches!(&error, RabbitError::InvalidBackupId(refused) if refused == id),
+                "{id:?}: {error:?}"
+            );
+        }
+        assert_eq!(fs::read(&keymap).unwrap(), b"osara keymap");
+    }
+
+    /// Through a `\\?\` path, a folder named like a device can be made in
+    /// `RABBIT/backups`, as on Windows 11. It is listed as no backup and
+    /// never looked into, and its name is still refused as an id, so the
+    /// device is never opened in its place. Where the folder can't be made,
+    /// the id is refused all the same.
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_named_like_a_device_is_never_restored() {
+        let dir = tempdir().unwrap();
+        let (resource, keymap) = keymap_set(dir.path());
+        let backups = std::path::absolute(resource.join("RABBIT").join("backups")).unwrap();
+        let made = fs::create_dir(format!(r"\\?\{}\CON", backups.display())).is_ok();
+
+        if made {
+            let sets = list_backup_sets(&resource).unwrap();
+            let ids: Vec<&str> = sets.iter().map(|set| set.id.as_str()).collect();
+            assert_eq!(ids, ["CON", "unix-1"]);
+            assert!(sets[0].manifest_path.is_none() && sets[0].files.is_empty());
+            let warning = sets[0].warning.as_deref().unwrap();
+            assert!(
+                warning.contains("not one RABBIT gives a backup"),
+                "{warning}"
+            );
+            assert!(sets[1].warning.is_none() && sets[1].manifest_path.is_some());
+        }
+        let error = refused(dir.path(), &resource, "CON");
+
+        assert!(
+            matches!(&error, RabbitError::InvalidBackupId(id) if id == "CON"),
+            "made: {made}, {error:?}"
+        );
+        assert_eq!(fs::read(&keymap).unwrap(), b"osara keymap");
+    }
+
+    /// Windows opens `unix-1` for a path through `unix-1.`, so a folder
+    /// named `unix-1.`, which only a `\\?\` path can make, would be listed
+    /// with the manifest and files of `unix-1`. It is listed as no backup,
+    /// never looked into, and its name is refused as an id.
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_whose_name_windows_would_change_is_never_looked_into() {
+        let dir = tempdir().unwrap();
+        let (resource, keymap) = keymap_set(dir.path());
+        let backups = std::path::absolute(resource.join("RABBIT").join("backups")).unwrap();
+        fs::create_dir(format!(r"\\?\{}\unix-1.", backups.display())).unwrap();
+
+        let sets = list_backup_sets(&resource).unwrap();
+
+        let ids: Vec<&str> = sets.iter().map(|set| set.id.as_str()).collect();
+        assert_eq!(ids, ["unix-1", "unix-1."]);
+        assert!(sets[0].warning.is_none() && sets[0].manifest_path.is_some());
+        let dotted = &sets[1];
+        assert!(dotted.manifest_path.is_none() && dotted.reason.is_none());
+        assert!(dotted.files.is_empty(), "{:?}", dotted.files);
+        let warning = dotted.warning.as_deref().unwrap();
+        assert!(
+            warning.contains("not one RABBIT gives a backup"),
+            "{warning}"
+        );
+
+        let error = refused(dir.path(), &resource, "unix-1.");
+        assert!(
+            matches!(&error, RabbitError::InvalidBackupId(id) if id == "unix-1."),
+            "{error:?}"
+        );
+        assert_eq!(fs::read(&keymap).unwrap(), b"osara keymap");
+    }
+
+    /// Only the exact name of a set counts, byte for byte, even where the
+    /// file system ignores case and would open the set. The error names
+    /// the set that is there, so nobody is told it is gone.
+    #[test]
+    fn a_name_that_differs_only_in_case_is_no_set() {
+        let dir = tempdir().unwrap();
+        let (resource, keymap) = keymap_set(dir.path());
+
+        for id in ["UNIX-1", "Unix-1"] {
+            let error = refused(dir.path(), &resource, id);
+            assert!(
+                matches!(
+                    &error,
+                    RabbitError::BackupIdDiffersInCase { backup_id, existing }
+                        if backup_id == id && existing == "unix-1"
+                ),
+                "{id:?}: {error:?}"
+            );
+            let message = error.to_string();
+            assert!(message.contains("there is one named unix-1"), "{message}");
+            assert!(!message.contains("deleted"), "{message}");
+        }
+        assert_eq!(fs::read(&keymap).unwrap(), b"osara keymap");
+    }
+
+    #[test]
+    fn an_id_with_no_set_was_deleted_or_never_existed() {
+        let dir = tempdir().unwrap();
+        let (resource, keymap) = keymap_set(dir.path());
+
+        let error = refused(dir.path(), &resource, "unix-2");
+
+        assert!(
+            matches!(&error, RabbitError::BackupSetNotFound { backup_id } if backup_id == "unix-2"),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().contains("deleted or never existed"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&keymap).unwrap(), b"osara keymap");
+
+        // A REAPER with no RABBIT folder has no sets, and gets none of
+        // RABBIT's folders from looking.
+        let fresh = dir.path().join("Fresh");
+        fs::create_dir_all(&fresh).unwrap();
+        let error = refused(dir.path(), &fresh, "unix-1");
+        assert!(
+            matches!(error, RabbitError::BackupSetNotFound { .. }),
+            "{error:?}"
+        );
+        assert!(!fresh.join("RABBIT").exists());
+    }
+
+    /// A set whose deletion started and didn't finish sits in
+    /// `RABBIT/backups-deleting`. Part of it may be gone, so restore refuses
+    /// it. A set of the same name back in `RABBIT/backups` restores, and
+    /// the unfinished deletion is left alone.
+    #[test]
+    fn a_set_found_only_among_unfinished_deletions_is_being_deleted() {
+        let dir = tempdir().unwrap();
+        let (resource, keymap) = keymap_set(dir.path());
+        let rabbit = resource.join("RABBIT");
+        let deleting = rabbit.join(DELETING_DIR).join("unix-1");
+        fs::create_dir_all(deleting.parent().unwrap()).unwrap();
+        fs::rename(rabbit.join("backups").join("unix-1"), &deleting).unwrap();
+
+        let error = refused(dir.path(), &resource, "unix-1");
+
+        assert!(
+            matches!(&error, RabbitError::BackupSetBeingDeleted { backup_id } if backup_id == "unix-1"),
+            "{error:?}"
+        );
+        assert_eq!(
+            find_backup_set(&resource, "unix-1").unwrap(),
+            FoundBackupSet {
+                set: None,
+                deleting: Some(deleting.clone()),
+                other_case: None,
+            }
+        );
+
+        fs::write(&keymap, b"own keymap").unwrap();
+        BackupSetWriter::new(&resource, "unix-1", "osara-keymap-replacement")
+            .copy_file(Some("osara"), &keymap)
+            .unwrap();
+        fs::write(&keymap, b"osara keymap").unwrap();
+        let set = rabbit.join("backups").join("unix-1");
+        assert_eq!(
+            find_backup_set(&resource, "unix-1").unwrap(),
+            FoundBackupSet {
+                set: Some(set.clone()),
+                deleting: Some(deleting.clone()),
+                other_case: None,
+            }
+        );
+        let unfinished = snapshot(&deleting);
+
+        let report =
+            restore_backup_set_within(&resource, "unix-1", &APPLY, &OutsideRestoreRules::default())
+                .unwrap();
+
+        assert_eq!(report.backup_path, set);
+        assert_eq!(fs::read(&keymap).unwrap(), b"own keymap");
+        assert_eq!(snapshot(&deleting), unfinished);
+    }
+
+    /// The set an id names exactly restores as before, and looking for
+    /// unfinished deletions never makes their folder.
+    #[test]
+    fn the_set_an_id_names_restores_and_no_deletions_folder_appears() {
+        let dir = tempdir().unwrap();
+        let (resource, keymap) = keymap_set(dir.path());
+
+        let report =
+            restore_backup_set_within(&resource, "unix-1", &APPLY, &OutsideRestoreRules::default())
+                .unwrap();
+
+        assert_eq!(
+            report.backup_path,
+            resource.join("RABBIT").join("backups").join("unix-1")
+        );
+        assert_eq!(fs::read(&keymap).unwrap(), b"own keymap");
+        assert!(!resource.join("RABBIT").join(DELETING_DIR).exists());
+    }
+
+    /// A junction or symbolic link in `RABBIT/backups` is no set RABBIT
+    /// made. It is listed as such, never looked into, and never restored,
+    /// wherever it leads: here to another REAPER's set.
+    #[test]
+    fn a_set_that_is_a_link_is_listed_as_no_backup_and_never_restored() {
+        let dir = tempdir().unwrap();
+        let (resource, keymap) = keymap_set(dir.path());
+        let other = other_resource(dir.path());
+        let link = resource.join("RABBIT").join("backups").join("unix-9");
+        link_folder(&link, &other.join("RABBIT").join("backups").join("unix-1"));
+
+        let error = refused(dir.path(), &resource, "unix-9");
+
+        assert!(
+            matches!(&error, RabbitError::BackupPathIsLink { path } if *path == link),
+            "{error:?}"
+        );
+        assert_eq!(fs::read(&keymap).unwrap(), b"osara keymap");
+        let sets = list_backup_sets(&resource).unwrap();
+        assert_eq!(sets.len(), 2);
+        assert_eq!(sets[0].id, "unix-1");
+        assert!(sets[0].warning.is_none());
+        assert_eq!(sets[1].id, "unix-9");
+        assert!(sets[1].manifest_path.is_none() && sets[1].reason.is_none());
+        assert!(sets[1].files.is_empty());
+        let warning = sets[1].warning.as_deref().unwrap();
+        assert!(warning.contains("not a backup RABBIT made"), "{warning}");
+    }
+
+    /// When `RABBIT/backups` is a junction or symbolic link, nothing in it
+    /// is listed or restored: its sets may be another REAPER's.
+    #[test]
+    fn a_backups_folder_that_is_a_link_lists_and_restores_nothing() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let keymap = resource.join("reaper-kb.ini");
+        write(&keymap, b"osara keymap");
+        let other = other_resource(dir.path());
+        let backups = resource.join("RABBIT").join("backups");
+        fs::create_dir_all(backups.parent().unwrap()).unwrap();
+        link_folder(&backups, &other.join("RABBIT").join("backups"));
+
+        let error = refused(dir.path(), &resource, "unix-1");
+
+        assert!(
+            matches!(&error, RabbitError::BackupPathIsLink { path } if *path == backups),
+            "{error:?}"
+        );
+        assert_eq!(fs::read(&keymap).unwrap(), b"osara keymap");
+        let error = list_backup_sets(&resource).unwrap_err();
+        assert!(
+            matches!(&error, RabbitError::BackupPathIsLink { path } if *path == backups),
+            "{error:?}"
+        );
+    }
+
+    /// The same when `RABBIT` itself is a junction or symbolic link.
+    #[test]
+    fn a_rabbit_folder_that_is_a_link_lists_and_restores_nothing() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let keymap = resource.join("reaper-kb.ini");
+        write(&keymap, b"osara keymap");
+        let other = other_resource(dir.path());
+        let rabbit = resource.join("RABBIT");
+        link_folder(&rabbit, &other.join("RABBIT"));
+
+        let error = refused(dir.path(), &resource, "unix-1");
+
+        assert!(
+            matches!(&error, RabbitError::BackupPathIsLink { path } if *path == rabbit),
+            "{error:?}"
+        );
+        assert_eq!(fs::read(&keymap).unwrap(), b"osara keymap");
+        let error = list_backup_sets(&resource).unwrap_err();
+        assert!(
+            matches!(&error, RabbitError::BackupPathIsLink { path } if *path == rabbit),
+            "{error:?}"
+        );
+    }
+
+    /// Restore looks among unfinished deletions too, and follows no link
+    /// there either.
+    #[test]
+    fn a_deletions_folder_that_is_a_link_stops_a_restore() {
+        let dir = tempdir().unwrap();
+        let (resource, keymap) = keymap_set(dir.path());
+        let other = other_resource(dir.path());
+        let deleting = resource.join("RABBIT").join(DELETING_DIR);
+        link_folder(&deleting, &other.join("RABBIT").join("backups"));
+
+        let error = refused(dir.path(), &resource, "unix-1");
+
+        assert!(
+            matches!(&error, RabbitError::BackupPathIsLink { path } if *path == deleting),
+            "{error:?}"
+        );
+        assert_eq!(fs::read(&keymap).unwrap(), b"osara keymap");
+    }
+
+    /// A junction or symbolic link inside a set is listed by name and
+    /// never looked into. A set restored by its layout is refused whole,
+    /// and so is a copy its manifest names behind such a link.
+    #[test]
+    fn a_link_inside_a_set_is_listed_by_name_and_never_followed() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let keymap = resource.join("reaper-kb.ini");
+        write(&keymap, b"osara keymap");
+        let elsewhere = dir.path().join("Elsewhere");
+        write(&elsewhere.join("reaper-kb.ini"), b"another keymap");
+        // A set without a manifest, restored by its layout.
+        let layout_set = resource.join("RABBIT").join("backups").join("unix-1");
+        write(&layout_set.join("reaper-kb.ini"), b"own keymap");
+        let layout_link = layout_set.join("Linked");
+        link_folder(&layout_link, &elsewhere);
+
+        let sets = list_backup_sets(&resource).unwrap();
+        assert_eq!(
+            sets[0].files,
+            vec![PathBuf::from("Linked"), PathBuf::from("reaper-kb.ini")]
+        );
+        let warning = sets[0].warning.as_deref().unwrap();
+        assert!(warning.contains("Linked"), "{warning}");
+
+        let error = refused(dir.path(), &resource, "unix-1");
+        assert!(
+            matches!(&error, RabbitError::BackupPathIsLink { path } if *path == layout_link),
+            "{error:?}"
+        );
+        assert_eq!(fs::read(&keymap).unwrap(), b"osara keymap");
+
+        // A set whose manifest names a copy in a folder that is now a link.
+        let plugin = resource.join("UserPlugins").join("reaper_demo.dll");
+        write(&plugin, b"old");
+        let mut writer = BackupSetWriter::new(&resource, "unix-2", "install-replacement");
+        writer.copy_file(Some("demo"), &plugin).unwrap();
+        fs::write(&plugin, b"new").unwrap();
+        let manifest_set = writer.path().to_path_buf();
+        let plugins_link = manifest_set.join("UserPlugins");
+        let moved = dir.path().join("MovedPlugins");
+        fs::rename(&plugins_link, &moved).unwrap();
+        link_folder(&plugins_link, &moved);
+
+        let error = refused(dir.path(), &resource, "unix-2");
+        assert!(
+            matches!(&error, RabbitError::BackupPathIsLink { path } if *path == plugins_link),
+            "{error:?}"
+        );
+        assert_eq!(fs::read(&plugin).unwrap(), b"new");
+    }
+
+    /// A copy, or a manifest, that is a symbolic link to a file is never
+    /// read, even when the file it leads to holds the very bytes the
+    /// manifest expects. Windows needs extra rights for links to files, so
+    /// this runs where they need none.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_link_in_a_set_is_never_read() {
+        let dir = tempdir().unwrap();
+        let (resource, keymap) = keymap_set(dir.path());
+        let set = resource.join("RABBIT").join("backups").join("unix-1");
+        let copy = set.join("reaper-kb.ini");
+        let elsewhere = dir.path().join("elsewhere-kb.ini");
+        fs::rename(&copy, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &copy).unwrap();
+
+        let error = refused(dir.path(), &resource, "unix-1");
+        assert!(
+            matches!(&error, RabbitError::BackupPathIsLink { path } if *path == copy),
+            "{error:?}"
+        );
+        assert_eq!(fs::read(&keymap).unwrap(), b"osara keymap");
+        let sets = list_backup_sets(&resource).unwrap();
+        assert_eq!(sets[0].files, vec![PathBuf::from("reaper-kb.ini")]);
+        let warning = sets[0].warning.as_deref().unwrap();
+        assert!(warning.contains("reaper-kb.ini"), "{warning}");
+
+        let manifest = set.join(BACKUP_MANIFEST_FILE);
+        let moved_manifest = dir.path().join("elsewhere-manifest.json");
+        fs::rename(&manifest, &moved_manifest).unwrap();
+        std::os::unix::fs::symlink(&moved_manifest, &manifest).unwrap();
+
+        let error = refused(dir.path(), &resource, "unix-1");
+        assert!(
+            matches!(&error, RabbitError::BackupPathIsLink { path } if *path == manifest),
+            "{error:?}"
+        );
+        let sets = list_backup_sets(&resource).unwrap();
+        assert!(sets[0].manifest_path.is_none());
+        let warning = sets[0].warning.as_deref().unwrap();
+        let refusal = RabbitError::BackupPathIsLink { path: manifest };
+        assert!(
+            warning.contains(&format!("the backup manifest could not be read: {refusal}")),
+            "{warning}"
         );
     }
 }

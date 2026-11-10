@@ -67,8 +67,41 @@ pub enum RabbitError {
         actual: String,
     },
 
-    #[error("invalid backup id: {0}")]
+    /// A backup set id that can't name a set at all: not exactly one plain
+    /// folder name, or one Windows would read as a drive, a stream or a
+    /// device. Refused before anything is read.
+    #[error(
+        "\"{0}\" can't be a backup id: an id is the name of one backup in RABBIT's backups folder, and RABBIT never names a backup like that"
+    )]
     InvalidBackupId(String),
+
+    /// A well-formed backup set id that names no folder in RABBIT's backups
+    /// folder, nor in its folder of unfinished deletions.
+    #[error("The backup {backup_id} was deleted or never existed")]
+    BackupSetNotFound { backup_id: String },
+
+    /// A backup set id that names no set exactly, while a set whose name
+    /// differs only in upper and lower case is there. Only exact names
+    /// count, so it isn't restored, but it isn't gone either.
+    #[error(
+        "There is no backup named {backup_id}. Backup names must match exactly, upper and lower case included; there is one named {existing}"
+    )]
+    BackupIdDiffersInCase { backup_id: String, existing: String },
+
+    /// A backup set id that names only a set whose deletion started and
+    /// didn't finish. Part of it may be gone already, so it isn't restored.
+    #[error(
+        "The backup {backup_id} is being deleted: a deletion of it started and didn't finish, so RABBIT doesn't restore it"
+    )]
+    BackupSetBeingDeleted { backup_id: String },
+
+    /// RABBIT's folder, its backups folder, a backup set, or something in a
+    /// set is a symbolic link or junction. RABBIT never follows one there,
+    /// wherever it leads.
+    #[error(
+        "RABBIT doesn't use {path}: it is a symbolic link or junction, and RABBIT never follows one in its backups"
+    )]
+    BackupPathIsLink { path: PathBuf },
 
     #[error("backup not found at {0}")]
     BackupNotFound(PathBuf),
