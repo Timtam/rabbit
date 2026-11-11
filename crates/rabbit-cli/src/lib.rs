@@ -50,7 +50,7 @@ use rabbit_core::resource::{ResourceInitActionKind, ResourceInitReport, initiali
 use rabbit_core::restore_refusal::RestoreRefusal;
 use rabbit_core::rollback::{
     BackupEntryState, KeymapOrigin, RestoreBackupActionKind, RestoreBackupOptions,
-    RestoreBackupReport, RestoredPackage, SkippedPackageReason, list_backup_sets,
+    RestoreBackupReport, RestoreStatus, RestoredPackage, SkippedPackageReason, list_backup_sets,
     restore_backup_set,
 };
 use rabbit_core::self_update::{
@@ -1254,7 +1254,54 @@ fn run_restore_backup(command: Command) -> Result<(), Box<dyn std::error::Error>
     } else {
         print_restore_backup_report(&report);
     }
-    Ok(())
+    // A backup that wasn't restored exits with 1, its message on stderr,
+    // after the report, which names what went back and what didn't.
+    match not_restored_text(&report) {
+        Some(text) => Err(text.into()),
+        None => Ok(()),
+    }
+}
+
+/// What `rabbit restore-backup` says on stderr when the backup wasn't
+/// restored after its checks passed, because a file or RABBIT's records
+/// failed partway: why, and how the files ended up. `None` for a backup
+/// that was restored, or in a dry run would be.
+fn not_restored_text(report: &RestoreBackupReport) -> Option<String> {
+    let why = report.error.as_deref().map_or_else(String::new, |error| {
+        format!(": {}", error.trim_end_matches('.'))
+    });
+    let id = &report.backup_id;
+    match report.status {
+        RestoreStatus::Restored | RestoreStatus::WouldRestore => None,
+        RestoreStatus::NotRestored | RestoreStatus::NotReached => Some(format!(
+            "The backup {id} wasn't restored{why}. Every file the restore had changed is as it \
+             was before, and so are RABBIT's records."
+        )),
+        RestoreStatus::FilesLeft => {
+            let left = report
+                .actions
+                .iter()
+                .filter(|action| {
+                    matches!(
+                        action.action,
+                        RestoreBackupActionKind::Left | RestoreBackupActionKind::Missing
+                    )
+                })
+                .count();
+            let files = if left == 1 { "file" } else { "files" };
+            let mut text = format!(
+                "The restore of the backup {id} failed partway{why}. {left} {files} couldn't be \
+                 put back as before; the report names each. RABBIT's records are as they were."
+            );
+            if let Some(set_id) = &report.before_restore_set_id {
+                let _ = write!(
+                    text,
+                    " What the restore replaced is in the backup {set_id}."
+                );
+            }
+            Some(text)
+        }
+    }
 }
 
 /// What `rabbit restore-backup --apply` says when RABBIT runs as root on
@@ -3016,8 +3063,9 @@ fn print_restore_backup_report(report: &RestoreBackupReport) {
 }
 
 /// A restore's report as text: the set, the preflight, each file, the
-/// packages, and last the backup of what the restore replaced, when it
-/// made one. Restoring that backup puts those files back.
+/// packages, then why the backup wasn't restored, if it wasn't, and last
+/// the backup of what the restore replaced, when it made one and kept it.
+/// Restoring that backup puts those files back.
 fn restore_backup_report_text(report: &RestoreBackupReport) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Resource path: {}", report.resource_path.display());
@@ -3029,9 +3077,16 @@ fn restore_backup_report_text(report: &RestoreBackupReport) -> String {
         let verb = match action.action {
             RestoreBackupActionKind::WouldRestore => "Would restore",
             RestoreBackupActionKind::Restored => "Restored",
+            RestoreBackupActionKind::PutBack => "Put back as it was",
+            RestoreBackupActionKind::Left => "Left as the backup had it",
+            RestoreBackupActionKind::Missing => "Left missing",
+            RestoreBackupActionKind::NotRestored => "Not restored",
         };
         let _ = writeln!(out, "  {verb}: {}", action.target_path.display());
         let _ = writeln!(out, "    Source: {}", action.source_path.display());
+        if let Some(error) = &action.error {
+            let _ = writeln!(out, "    Why: {error}");
+        }
         if let Some(current_backup_path) = &action.current_backup_path {
             let _ = writeln!(
                 out,
@@ -3062,6 +3117,27 @@ fn restore_backup_report_text(report: &RestoreBackupReport) -> String {
             "  {}",
             skipped_package_text(package.reason, report.dry_run)
         );
+    }
+    let why = report.error.as_deref().map_or_else(String::new, |error| {
+        format!(" {}", error.trim_end_matches('.'))
+    });
+    match report.status {
+        RestoreStatus::NotRestored | RestoreStatus::NotReached => {
+            let _ = writeln!(
+                out,
+                "Not restored:{why}. Every file it had changed was put back as it was, and \
+                 RABBIT's records stay as they are."
+            );
+        }
+        RestoreStatus::FilesLeft => {
+            let _ = writeln!(
+                out,
+                "Failed partway:{why}. The files marked left above couldn't be put back as they \
+                 were: each is as the backup had it, or missing where it says so, and its current \
+                 file backup is the file it replaced. RABBIT's records stay as they are."
+            );
+        }
+        RestoreStatus::Restored | RestoreStatus::WouldRestore => {}
     }
     if let Some(set_id) = &report.before_restore_set_id {
         let _ = writeln!(out, "Backup of what this restore replaced: {set_id}");
@@ -5195,6 +5271,161 @@ mod tests {
         assert!(elsewhere.with_extension("txt").is_file());
         let names = logged();
         assert!(is_report(&names), "{names:?}");
+    }
+
+    /// A restore that failed partway: its text names each file put back,
+    /// left as the backup had it, left missing or not restored, says why
+    /// it failed, and names the backup that keeps what the files left
+    /// replaced. The message for stderr says the backup wasn't restored, or
+    /// failed partway, and how many files couldn't be put back; a restored
+    /// backup has none.
+    #[test]
+    fn restore_backup_text_names_files_put_back_or_left() {
+        use rabbit_core::rollback::{RestoreBackupActionKind, RestoreStatus};
+
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugins = resource.join("UserPlugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let mut writer =
+            rabbit_core::rollback::BackupSetWriter::new(&resource, "unix-1", "before-restore");
+        for name in ["first.dll", "second.dll", "third.dll", "fourth.dll"] {
+            std::fs::write(plugins.join(name), name).unwrap();
+            writer.copy_file(None, &plugins.join(name)).unwrap();
+        }
+        let preview = rabbit_core::rollback::restore_backup_set(
+            &resource,
+            "unix-1",
+            &rabbit_core::rollback::RestoreBackupOptions {
+                dry_run: true,
+                allow_reaper_running: true,
+                package_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(super::not_restored_text(&preview), None);
+
+        let mut files_left = preview.clone();
+        files_left.dry_run = false;
+        files_left.status = RestoreStatus::FilesLeft;
+        files_left.error = Some("the disk is full.".to_string());
+        files_left.before_restore_set_id = Some("restore-unix-2-before-restore".to_string());
+        let kinds = [
+            RestoreBackupActionKind::Left,
+            RestoreBackupActionKind::Missing,
+            RestoreBackupActionKind::PutBack,
+            RestoreBackupActionKind::NotRestored,
+        ];
+        for (action, kind) in files_left.actions.iter_mut().zip(kinds) {
+            action.action = kind;
+        }
+        files_left.actions[0].error = Some("it is in use".to_string());
+        files_left.actions[1].error = Some("it is locked".to_string());
+        let text = super::restore_backup_report_text(&files_left);
+        for line in [
+            format!(
+                "  Left as the backup had it: {}\n",
+                plugins.join("first.dll").display()
+            ),
+            "    Why: it is in use\n".to_string(),
+            format!("  Left missing: {}\n", plugins.join("second.dll").display()),
+            "    Why: it is locked\n".to_string(),
+            format!(
+                "  Put back as it was: {}\n",
+                plugins.join("third.dll").display()
+            ),
+            format!("  Not restored: {}\n", plugins.join("fourth.dll").display()),
+            "Failed partway: the disk is full. The files marked left above couldn't be put \
+             back as they were: each is as the backup had it, or missing where it says so, and \
+             its current file backup is the file it replaced. RABBIT's records stay as they \
+             are.\n"
+                .to_string(),
+        ] {
+            assert!(text.contains(&line), "{line:?} in {text}");
+        }
+        assert!(
+            text.ends_with("Backup of what this restore replaced: restore-unix-2-before-restore\n"),
+            "{text}"
+        );
+        assert_eq!(
+            super::not_restored_text(&files_left).unwrap(),
+            "The restore of the backup unix-1 failed partway: the disk is full. 2 files \
+             couldn't be put back as before; the report names each. RABBIT's records are as \
+             they were. What the restore replaced is in the backup \
+             restore-unix-2-before-restore."
+        );
+
+        let not_restored = rabbit_core::rollback::RestoreBackupReport {
+            status: RestoreStatus::NotRestored,
+            before_restore_set_id: None,
+            ..files_left
+        };
+        let text = super::restore_backup_report_text(&not_restored);
+        assert!(
+            text.ends_with(
+                "Not restored: the disk is full. Every file it had changed was put back as it \
+                 was, and RABBIT's records stay as they are.\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(
+            super::not_restored_text(&not_restored).unwrap(),
+            "The backup unix-1 wasn't restored: the disk is full. Every file the restore had \
+             changed is as it was before, and so are RABBIT's records."
+        );
+    }
+
+    /// `restore-backup --apply` that fails partway exits with 1 and says
+    /// why on stderr, after the report, which it saves. What it changed is
+    /// back as it was. Windows refuses to read a file another program holds
+    /// open with no sharing, which fails the restore at that file.
+    #[cfg(windows)]
+    #[test]
+    fn restore_backup_that_fails_partway_exits_with_its_message() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugins = resource.join("UserPlugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let mut writer =
+            rabbit_core::rollback::BackupSetWriter::new(&resource, "unix-1", "before-restore");
+        for name in ["first.dll", "second.dll"] {
+            std::fs::write(plugins.join(name), b"older").unwrap();
+            writer.copy_file(None, &plugins.join(name)).unwrap();
+            std::fs::write(plugins.join(name), b"newer").unwrap();
+        }
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(plugins.join("second.dll"))
+            .unwrap();
+
+        let error = super::run_args(vec![
+            "rabbit".into(),
+            "restore-backup".into(),
+            "--resource-path".into(),
+            resource.clone().into_os_string(),
+            "--backup-id".into(),
+            "unix-1".into(),
+            "--allow-reaper-running".into(),
+            "--apply".into(),
+        ])
+        .unwrap_err();
+        drop(held);
+
+        let message = error.to_string();
+        assert!(
+            message.starts_with("The backup unix-1 wasn't restored: "),
+            "{message}"
+        );
+        for name in ["first.dll", "second.dll"] {
+            assert_eq!(std::fs::read(plugins.join(name)).unwrap(), b"newer");
+        }
+        let logs: Vec<_> = std::fs::read_dir(resource.join("RABBIT").join("logs"))
+            .unwrap()
+            .collect();
+        assert_eq!(logs.len(), 2);
     }
 
     /// `--save-report` never writes over another report of the same name,

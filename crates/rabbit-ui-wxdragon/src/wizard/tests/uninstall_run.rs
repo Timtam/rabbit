@@ -234,6 +234,30 @@ fn the_administrator_prompt_counts_no_phase() {
     assert_eq!(state.percentage(), 100);
 }
 
+/// The wizard doesn't restore backups until Phase 2 of the backup plan:
+/// until then a restore's events are neither spoken nor counted, and move
+/// no focus.
+#[test]
+fn restore_events_say_and_count_nothing_yet() {
+    let mut state = ProgressUiState::new(WizardMode::Uninstall, 1, 0);
+    for event in [
+        ProgressEvent::RestoreStarted {
+            set_id: "uninstall-unix-1".to_string(),
+            package_id: Some("sws".to_string()),
+        },
+        ProgressEvent::RestoreCompleted {
+            set_id: "uninstall-unix-1".to_string(),
+            package_id: None,
+            status: rabbit_core::rollback::RestoreStatus::Restored,
+        },
+    ] {
+        assert!(!is_spoken(&event), "{event:?}");
+        state.record(&event);
+        assert_eq!(state.percentage(), 0);
+        assert!(!state.moves_focus_to_log(&event));
+    }
+}
+
 /// macOS's password window keeps its own text, which names osascript, so
 /// RABBIT says what it is for, in the user's language; Windows' permission
 /// prompt names RABBIT, and nothing new is said there.

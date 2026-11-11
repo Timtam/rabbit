@@ -992,16 +992,10 @@ fn read_set(
         None => seconds_in_set_id(&id),
     };
     let manifest_file = path.join(BACKUP_MANIFEST_FILE);
-    let fingerprint = match fs::symlink_metadata(&manifest_file) {
-        Ok(metadata) if metadata.is_file() => SetFingerprint::Manifest {
-            length: metadata.len(),
-            modified: metadata.modified().ok(),
-        },
-        _ => SetFingerprint::Contents {
-            file_count: walk.file_count,
-            size: walk.size,
-        },
-    };
+    let fingerprint = manifest_fingerprint(&path).unwrap_or(SetFingerprint::Contents {
+        file_count: walk.file_count,
+        size: walk.size,
+    });
     let (receipt_copy, holds_receipt) = match &manifest {
         Some(manifest) => {
             let recorded = manifest.receipt_backup_path.clone().or_else(|| {
@@ -1052,6 +1046,30 @@ fn read_set(
         path,
         kind,
     }
+}
+
+/// The fingerprint of the set at `set_path` as it is now, taken as the
+/// overview takes it (see [`SetFingerprint`]): a restore compares it with
+/// the one listed. Without a manifest, the set is walked without following
+/// any link, and no file is opened.
+pub(crate) fn current_fingerprint(set_path: &Path) -> SetFingerprint {
+    manifest_fingerprint(set_path).unwrap_or_else(|| {
+        let walk = walk_set(set_path);
+        SetFingerprint::Contents {
+            file_count: walk.file_count,
+            size: walk.size,
+        }
+    })
+}
+
+/// The fingerprint of the set at `set_path` by its manifest, when it has
+/// one that is a regular file.
+fn manifest_fingerprint(set_path: &Path) -> Option<SetFingerprint> {
+    let metadata = fs::symlink_metadata(set_path.join(BACKUP_MANIFEST_FILE)).ok()?;
+    metadata.is_file().then(|| SetFingerprint::Manifest {
+        length: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
 }
 
 /// An entry with every field but the essentials empty.

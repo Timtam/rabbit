@@ -1757,14 +1757,62 @@ Extension files:
   Restoring it puts those files back; files the restore added, the
   receipt and REAPER's language stay as they are. A restore that replaced
   nothing writes no set and names none, and neither does a dry run. Every
-  real restore that finishes saves its report as
+  real restore that gets past its checks saves its report as
   `RABBIT/logs/restore-backup-unix-<s>.json` and `.txt` (or `-2` and so on,
   never over another report), still under the install lock, as every real
-  uninstall does. One stopped by an error
-  saves none yet; `rabbit backups` still lists its before-restore set. A
-  dry run saves nothing; `--save-report` saves its report under a free name
-  the same way, and `--report-path` writes where it says. An uninstall's
-  report is saved the same way, never over another.
+  uninstall does, also when a backup wasn't restored or the run was
+  stopped. A refusal before anything changed saves none. A dry run saves
+  nothing; `--save-report` saves its report under a free name the same
+  way, and `--report-path` writes where it says. An uninstall's report is
+  saved the same way, never over another.
+- A restore is all or nothing per backup. It checks everything first, then
+  puts the files back one by one, each file it replaces into the
+  before-restore set first. When a file fails, or the receipt can't be
+  saved, every file it changed goes back as it was, newest first: a file it
+  replaced from the before-restore set, checked against the hash recorded
+  there, and a file it added is removed, with the folders it made for it
+  once they are empty. Receipt entries and the `langpack=` line are merged
+  only once every file is back. Such a backup is `not-restored`, and its
+  before-restore set, whose copies are then all on disk again, goes again.
+  A file that can't be put back is `left`, as the backup had it, or
+  `missing`, when the restore had removed the file it replaces and its own
+  copy never took its place; the backup is `files-left`, and its
+  before-restore set stays, with the only copy of what that file replaced.
+  Each file's `action` says `restored`, `put-back`, `left`, `missing` or
+  `not-restored`, and `restore-backup` exits with 1 after the report when
+  the backup wasn't restored. `files-left` is no stop: a stop only gives
+  `not-reached` to the backups not reached, and sets the run's `stopped`.
+  A target that is no longer a regular file when its turn comes stops the
+  backup before it changes. Discarding a before-restore set removes no copy
+  while `RABBIT`, `RABBIT/backups`, the set or a folder in it is a link.
+  Tests fail single steps through a test-only hook (`restore_seam`).
+- `restore_backups` restores several backups in the order given, under one
+  lock, each with its own before-restore set; `restore_backup_set` is the
+  same for one. An item (`RestoreItem`) names a set by its exact id, a
+  package or the whole set, and optionally the fingerprint the caller
+  listed. Refusals of the whole run are an error, before anything changes:
+  the lock, root on macOS, a place RABBIT can't write to, and REAPER or
+  programs that the restored packages need closed, checked for all of them
+  together. A refusal of one backup's own, such as its set, its package, a
+  file, a reinstall, or a fingerprint that differs from the one listed
+  (`changed-since-listed`, compared before the lock and again right before
+  the backup's turn), leaves it `not-restored` with that refusal, and the
+  run goes on. Each backup's set is found again in `RABBIT/backups` right
+  before its turn, so one that became a link meanwhile is refused alone,
+  and what runs is scanned again for its own packages before every backup
+  after the first, as an uninstall scans before each package. Each backup
+  is checked again and planned right before its turn, against the receipt
+  as the backups before it left it, so a dry run checks each against the
+  receipt as it is. A run whose every backup was refused by its own checks
+  takes no lock and saves no report. The cancel token is read
+  before each backup: the one running finishes, the rest are
+  `not-reached`, and the report says the run was stopped. Each backup the
+  run reaches sends `RestoreStarted` and `RestoreCompleted` with its
+  status; the wizard ignores them until it restores (backup plan Phase 2).
+  The quick plan, a dry run with `quick`, reads and hashes no file: a copy
+  counts by the size its entry recorded, as in the overview, so only a
+  copy changed at the same size goes unnoticed, and a set without a
+  manifest gets no hashes. A real run always hashes every copy.
 - A real restore on macOS refuses when RABBIT itself runs as root, as under
   `sudo`, as an uninstall does: what it puts back, the before-restore set
   and the receipt would all be root's. The refusal comes after the set is

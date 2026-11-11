@@ -305,8 +305,9 @@ pub enum RestoreRefusal {
     )]
     ChangedWhileRead { backup_id: String },
 
-    /// The set changed since it was listed. Reserved for restoring several
-    /// backups at once (backup plan 1b2).
+    /// The set changed since it was listed: its fingerprint differs from
+    /// the one the restore was given (see
+    /// [`crate::rollback::RestoreItem::fingerprint`]).
     #[error(
         "The backup {backup_id} changed since RABBIT listed it. Nothing changed; look at the backups again, then restore"
     )]

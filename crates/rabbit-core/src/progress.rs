@@ -1,4 +1,4 @@
-//! Progress-event plumbing for the install and uninstall pipelines.
+//! Progress-event plumbing for the install, uninstall and restore pipelines.
 //!
 //! The setup pipeline is normally silent until its final [`SetupReport`] is
 //! returned: callers see a finished result, not the per-package boundaries
@@ -36,10 +36,13 @@
 
 use std::sync::Arc;
 
-/// A single progress signal emitted by the install or uninstall pipeline.
-/// The variants cover the three observable phases of an install (download,
-/// install, configuration) plus per-byte progress within a download, and the
-/// removal of each package in an uninstall.
+use crate::rollback::RestoreStatus;
+
+/// A single progress signal emitted by the install, uninstall or restore
+/// pipeline. The variants cover the three observable phases of an install
+/// (download, install, configuration) plus per-byte progress within a
+/// download, the removal of each package in an uninstall, and each backup a
+/// restore brings back.
 ///
 /// Events carry only the package / step identity, not an "n of N" count.
 /// UIs already know how many packages they queued (from the install plan)
@@ -117,6 +120,22 @@ pub enum ProgressEvent {
     /// without an answer. It may be behind another window. Sent at most
     /// once per run.
     AdministratorStillWaiting { seconds: u64 },
+    /// A restore is about to bring back one backup: the set `set_id`, whole
+    /// or only `package_id` of it. Restores run one backup at a time, so
+    /// their events never interleave.
+    RestoreStarted {
+        set_id: String,
+        package_id: Option<String>,
+    },
+    /// The restore is done with that backup, and `status` says what came of
+    /// it. It fires after every `RestoreStarted`, also when a check refused
+    /// the backup or it failed partway. A backup the run was stopped before
+    /// sends neither.
+    RestoreCompleted {
+        set_id: String,
+        package_id: Option<String>,
+        status: RestoreStatus,
+    },
 }
 
 /// How an uninstall removes a package.

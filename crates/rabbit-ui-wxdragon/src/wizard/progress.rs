@@ -164,6 +164,9 @@ impl ProgressUiState {
             ProgressEvent::ConfigurationCompleted { .. } => {
                 self.completed_phases += 1;
             }
+            // The wizard doesn't restore backups until Phase 2 of the
+            // backup plan, so a restore's events count nothing yet.
+            ProgressEvent::RestoreStarted { .. } | ProgressEvent::RestoreCompleted { .. } => {}
         }
     }
 }
@@ -290,5 +293,9 @@ pub fn is_spoken(event: &ProgressEvent) -> bool {
         | ProgressEvent::DownloadCompleted { .. }
         | ProgressEvent::InstallCompleted { .. }
         | ProgressEvent::ConfigurationCompleted { .. } => false,
+        // The wizard doesn't restore backups until Phase 2 of the backup
+        // plan, which decides what a restore says. Until then it says
+        // nothing.
+        ProgressEvent::RestoreStarted { .. } | ProgressEvent::RestoreCompleted { .. } => false,
     }
 }

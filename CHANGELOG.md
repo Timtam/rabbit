@@ -263,15 +263,26 @@ from this file and posts it as the GitHub release body.
   before. The message says to close REAPER before restoring, not before
   installing extensions.
 - `rabbit restore-backup --apply` now saves a report in `RABBIT\logs` every
-  time it finishes, like `rabbit uninstall --apply`:
-  `restore-backup-unix-<time>.json` and `.txt`. `--save-report` still saves
-  one for a dry run, under a name of its own, never over another report.
-  When the restore replaced files, the report, the command's text and its
-  `--json` output name the backup RABBIT made of them: restoring that backup
-  puts those files back. Files the restore added, RABBIT's records and
-  REAPER's language stay as they are. A restore stopped by an error saves no
-  report yet, but `rabbit backups` lists the backup it made, as
-  `restore-unix-<time>-before-restore`.
+  time it gets past its checks, like `rabbit uninstall --apply`, also when
+  the restore fails: `restore-backup-unix-<time>.json` and `.txt`.
+  `--save-report` still saves one for a dry run, under a name of its own,
+  never over another report. When the restore replaced files, the report,
+  the command's text and its `--json` output name the backup RABBIT made of
+  them: restoring that backup puts those files back. Files the restore
+  added, RABBIT's records and REAPER's language stay as they are.
+- A restore is now all or nothing. Before, when a file failed partway, the
+  files before it stayed restored, RABBIT's records stayed as they were, and
+  no report was saved. Now, when a file can't be restored, or RABBIT's
+  records can't be saved, the restore puts back every file it had already
+  replaced, removes every file it added, and leaves RABBIT's records and
+  REAPER's language as they were. `rabbit restore-backup` then exits with 1
+  and says why, and its text and report name each file that was put back. A
+  file that couldn't be put back either is named too: it stays as the
+  backup had it, or is missing when the restore had already removed the
+  file it replaces, and the backup RABBIT made of what it replaced is kept
+  and named. The report's `status` says whether the backup came back
+  (`files-left` when a file couldn't be put back), and each file's `action`
+  how it ended up.
 - An update's backup no longer holds a copy of RABBIT's records, and RABBIT
   no longer makes a backup that holds nothing but a copy of them after a
   vendor installer runs. A restore never copies them back, so they only took

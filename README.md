@@ -811,12 +811,22 @@ backups that hold only a copy of RABBIT's records, which older versions made
 after vendor installers ran. Nothing changes, and each of these backups stays as
 it is. RABBIT no longer puts a copy of its records into any backup.
 
-A `restore-backup --apply` that finishes saves a report in `RABBIT\logs`. When
-it replaced files, it also names the backup set it made of them: restoring that
-set undoes the restore as far as those files go, while files the restore added,
-RABBIT's records and REAPER's language stay as they are. A restore stopped by
-an error saves no report yet, but `rabbit backups` lists that set, as
-`restore-unix-<time>-before-restore`.
+A `restore-backup --apply` that gets past its checks saves a report in
+`RABBIT\logs`, also when it fails. When it replaced files, it also names the
+backup set it made of them: restoring that set undoes the restore as far as
+those files go, while files the restore added, RABBIT's records and REAPER's
+language stay as they are.
+
+A restore is all or nothing. If a file can't be restored, for example because
+another program holds the file it replaces open, or RABBIT's records can't be
+saved, the restore puts back every file it had already replaced, removes every
+file it added, and leaves RABBIT's records and REAPER's language as they were.
+It then exits with 1 and says why, and its text and report name each file it
+put back. A file that can't be put back either is named too: it stays as the
+backup had it, or is missing if the restore had already removed the file it
+replaces. The backup set of what it replaced is then kept and named, so you can
+restore that set once the file is free again. Exit code 0 means the backup came
+back, or in a dry run would.
 
 RABBIT never follows a symbolic link or junction in its backups. If `RABBIT` or
 `RABBIT\backups` is one, `rabbit backups` and `restore-backup` say so and
