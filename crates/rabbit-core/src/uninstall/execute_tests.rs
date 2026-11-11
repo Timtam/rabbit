@@ -23,9 +23,9 @@ use super::tests::{
     Fixture, installed, remove_files, remove_files_with, running, script_path, spec, write,
 };
 use super::{
-    BACKUP_SPACE_CHECK, KeptFile, KeptFileReason, KeptReason, NoAdministratorShell,
-    NoElevatedHelper, NoMacosObjects, NothingListed, RemovalReason, UninstallMessage,
-    UninstallProblem, UninstallReport, UninstallRequest, UninstallStatus,
+    BACKUP_FOLDER_CHECK, BACKUP_SPACE_CHECK, KeptFile, KeptFileReason, KeptReason,
+    NoAdministratorShell, NoElevatedHelper, NoMacosObjects, NothingListed, RemovalReason,
+    UninstallMessage, UninstallProblem, UninstallReport, UninstallRequest, UninstallStatus,
 };
 #[cfg(windows)]
 use super::{RegistryEntryAction, RegistryEntryOutcome};
@@ -803,6 +803,91 @@ fn the_free_space_check_blocks_a_move_to_another_volume() {
         assert!(report.blocked_before_changes());
         assert!(plugin.is_file());
     }
+}
+
+/// `RABBIT` or `RABBIT/backups` as a junction or symbolic link blocks the
+/// whole run, in a dry run and for real, before anything moves: a restore
+/// never follows a link there, so the backup set, the only copy of what
+/// moves, couldn't bring anything back. Nothing goes where the link leads.
+#[test]
+fn a_linked_backups_folder_blocks_the_run_before_anything_moves() {
+    for linked in [&["RABBIT"][..], &["RABBIT", "backups"][..]] {
+        let fixture = Fixture::new();
+        let plugin = fixture.file("UserPlugins/reaper_demo.dll");
+        let link = linked
+            .iter()
+            .fold(fixture.resource.clone(), |path, name| path.join(name));
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        let elsewhere = fixture.dir.path().join("Elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        #[cfg(windows)]
+        crate::uninstall::paths::make_junction(&link, &elsewhere);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        let harness = Harness::new(&fixture, vec![demo_spec("demo")], &["demo"]);
+
+        for report in [harness.dry_run(&["demo"]), harness.apply(&["demo"])] {
+            let demo = report.item("demo").unwrap();
+            assert_eq!(demo.status, UninstallStatus::Blocked, "{linked:?}");
+            let UninstallMessage::ChecksFailed { checks } = &demo.message_code else {
+                panic!("{linked:?}: {:?}", demo.message_code);
+            };
+            assert_eq!(checks.len(), 1, "{linked:?}: {checks:?}");
+            assert_eq!(checks[0].name, BACKUP_FOLDER_CHECK);
+            assert!(
+                checks[0].message.contains(&link.display().to_string()),
+                "{}",
+                checks[0].message
+            );
+            assert!(report.blocked_before_changes());
+            assert_eq!(report.backup_set_id, None);
+            assert!(plugin.is_file());
+        }
+        // Where `RABBIT` is the link, the lock and the run's report went
+        // there, as into any `RABBIT`, but no backup did.
+        let backups = if linked.len() == 1 {
+            elsewhere.join("backups")
+        } else {
+            elsewhere.clone()
+        };
+        assert!(
+            !backups.exists() || fs::read_dir(&backups).unwrap().next().is_none(),
+            "{linked:?}"
+        );
+    }
+}
+
+/// The report of a run is never written over another report of the same
+/// name, as one saved by a run in the same second: each names the backup
+/// set of its own run.
+#[test]
+fn a_run_s_report_never_replaces_another_report() {
+    let fixture = Fixture::new();
+    let plugin = fixture.file("UserPlugins/reaper_demo.dll");
+    let logs = fixture.resource.join("RABBIT").join("logs");
+    fs::create_dir_all(&logs).unwrap();
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let taken: Vec<PathBuf> = (now..now + 10)
+        .map(|seconds| logs.join(format!("uninstall-unix-{seconds}.json")))
+        .collect();
+    for path in &taken {
+        fs::write(path, b"another run's report").unwrap();
+    }
+    let harness = Harness::new(&fixture, vec![demo_spec("demo")], &["demo"]);
+
+    let report = harness.apply(&["demo"]);
+
+    assert_eq!(status(&report, "demo"), UninstallStatus::Removed);
+    assert!(!plugin.exists());
+    for path in &taken {
+        assert_eq!(fs::read(path).unwrap(), b"another run's report");
+    }
+    let saved = report.saved_report.expect("the run's report");
+    assert!(!taken.contains(&saved.json_path), "{saved:?}");
+    assert!(saved.json_path.is_file() && saved.text_path.is_file());
 }
 
 /// The cancel token is read between packages: the package that is running

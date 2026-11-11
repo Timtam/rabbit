@@ -1579,7 +1579,13 @@ Extension files:
   or `--replace-osara-keymap` / `--preserve-osara-keymap`.
 - Do not overwrite or delete user-created `reaKontrol/fxMaps` content during a
   ReaKontrol install or update.
-- Back up every overwritten file under `RABBIT/backups/<timestamp>/`.
+- RABBIT's own file installs and uninstalls back up the files they replace
+  or remove under `RABBIT/backups/<id>/`, named by what made them:
+  `unix-<s>` for an update, `uninstall-unix-<s>`,
+  `restore-unix-<s>-before-restore`, and `unattended-unix-<s>-<n>` for the
+  key map and receipt copies made when vendor installers run, or `-2` and
+  so on when a set already has that id. Vendor installers, and OSARA's
+  macOS archive, overwrite files with no backup.
   Files from inside the resource folder keep their relative path in the
   set; files from outside it (app2clap's CLAP folder) go under
   `external/<n>/`, beside a `<file>.rabbit-origin` note of their original
@@ -1587,18 +1593,22 @@ Extension files:
   `external` folder already uses, so an outside file never lands on
   another's place, whatever a put-back took out of the set. When the
   `external` folder can't be listed, the file is refused, and an origin
-  note or a copy is never written over another file's.
+  note or a copy is never written over a file the set already holds,
+  inside the resource folder too.
   Each manifest entry is saved, through a temp file and a rename,
   before its copy starts and marked done after, so an interrupted run
   still leaves a set whose manifest names every copy in it. A set an
-  update wrote isn't restored yet (see below). Every path a set records is
-  absolute, so a set written through a relative `--resource-path` restores
-  from any folder; older sets that recorded relative paths are read by their
-  `RABBIT/backups/<id>` part. Restore puts each file back at its recorded
-  path and takes the install lock. Outside the resource folder it writes
-  only below a folder RABBIT installs into itself (the CLAP folder), for any
-  package, or where one of the entry's own package's `vendor_added_files`
-  patterns matches; another package's file never goes there. For a pattern,
+  update wrote isn't restored yet (see below). Every path a set records to
+  its copy is absolute, so a set written through a relative
+  `--resource-path` restores from any folder; older sets that recorded
+  relative paths are read by their `RABBIT/backups/<id>` part. A file from
+  outside the resource folder records its absolute original path, and a
+  file inside it its path relative to the resource folder. Restore puts
+  each file back at its recorded path and takes the install lock. Outside
+  the resource folder it writes only below a folder RABBIT installs into
+  itself (the CLAP folder), for any package, or where one of the entry's
+  own package's `vendor_added_files` patterns matches; another package's
+  file never goes there. For a pattern,
   the folder before its first `*` (`%APPDATA%\Freedom Scientific\JAWS` for
   the JAWS scripts) must exist, nothing that exists below it on the way to
   the file may be a link or junction, the file included, and the deepest of
@@ -1606,14 +1616,42 @@ Extension files:
   path. That folder itself, and what lies above it, may be reached through
   a link. Below the CLAP folder the same holds, except that the folder may
   be missing: nothing below it can be a link then, and the restore makes it
-  again, as an install would. A name below it with a `:`, or on Windows one
-  ending in a dot or space, is refused, since the file system could open it
-  as another name; the file goes back to the CLAP folder joined with the
-  names below it, the same path the check looked at, never a `\\?\`
-  spelling of it. A path refused stops the restore before anything changes,
-  with the reason, such as that JAWS's folder is gone; in a whole set, the
-  message adds that the set's other packages can be restored one at a time
-  with `--package` when another package has a file in the set.
+  again, as an install would. Below either, the file goes back to that
+  folder joined with the names below it, the same path the check looked
+  at, never the recorded spelling, which may be a `\\?\` one. Inside the
+  resource folder, the file's own place must not be a link, and the
+  deepest part of the way to it that exists must lie, by its real path,
+  inside the resource folder's real path and outside `RABBIT`'s, as
+  uninstall's guard has it; a link that stays inside is followed.
+  Anywhere, a name with a `:`, or on Windows one ending in a dot or space
+  or naming a device such as `CON` or `COM1.clap`, is refused, since the
+  file system could open it as another name or as the device. A set that
+  names one place twice, by names the file system reads as the same, is
+  refused: the second file would replace the first, and the before-restore
+  set would lose the file that was there. The temporary file a restore
+  writes first is made new, so a link at its name stops the restore, and
+  only a regular file at the target is backed up. A path refused stops the
+  restore before anything changes, with the reason, such as that JAWS's
+  folder is gone; in a whole set, the message adds that the set's other
+  packages can be restored one at a time with `--package` when another
+  package has a file in the set. An entry whose copy doesn't come back is
+  left out and never refused, since nothing is written for it.
+- Restore uses a set id only when it is one plain name, with no `:`,
+  slash or NUL, and on Windows no trailing dot or space and no device name
+  such as `CON`. It must also equal, byte for byte, a folder `read_dir`
+  lists in `RABBIT/backups`. When only the case differs, the error names
+  the set that is there, and so it does when the id names a set once its
+  dots and spaces at the end are gone, as when it was copied with the
+  period after it; neither is restored. `RABBIT`, `RABBIT/backups` and the
+  set must be real folders. Restore and `rabbit backups` never follow a
+  link or junction there or inside a set: a link or a badly named folder
+  is listed with a warning and never looked into. An uninstall refuses the
+  whole run before anything changes while `RABBIT` or `RABBIT/backups` is a
+  link (the `backup-folder` check), and its writer refuses to record a
+  package there should one appear in between: its set is the only copy of
+  what it moves. Updates and the unattended installers' key map and
+  receipt copies still write through such a link; those sets are listed
+  and restored once the folder is a real one again.
 - A restore never copies a receipt file over `RABBIT/install-state.json`:
   an old copy would undo every change to the receipt since, uninstalls
   included. Restore puts no file from a set back anywhere in `RABBIT/`,
@@ -1650,25 +1688,29 @@ Extension files:
   `--package` for a package with none is refused (`NothingOfItInSet`),
   before anything changes and in a dry run too. A whole-set restore leaves
   such a package out: its entry isn't merged, it stays on
-  `declined_packages`, its `langpack=` value isn't put back, a newer entry
-  for it is no reinstall that refuses the set, and the report names it
-  under `skipped_packages`. A set with no file at all to put back is refused
-  like `--package`, as a set holding only a receipt copy is, rather than
-  reported as restored. This is decided before the lock; the plan, made
-  under it, must agree, or the restore stops with nothing changed, as when
-  an uninstall finished writing the set in between.
+  `declined_packages`, its `langpack=` value isn't put back, and the report
+  names it under `skipped_packages`. A newer receipt entry for it doesn't
+  count as a reinstall, so it refuses nothing, and neither does a place one
+  of its entries couldn't go back to. A set with no file at all to put back
+  is refused like `--package`, as a set holding only a receipt copy is,
+  rather than reported as restored. This is decided before the lock. Under
+  it, the manifest is read again and must be the same, and the plan must
+  agree, or the restore stops with nothing changed, as when an uninstall
+  wrote more of the set in between.
 - A real restore first copies each file it replaces into a set of its own,
   `restore-unix-<s>-before-restore` (or `-2` and so on), written like any
   other, and its report names that set as `before_restore_set_id`.
-  Restoring it puts those files back; files the restore added, and the
-  receipt, stay as they are. A restore that replaced nothing writes no set
-  and names none, and neither does a dry run. Every real restore that
-  finishes saves its report as `RABBIT/logs/restore-backup-unix-<s>.json`
-  and `.txt` (or `-2` and so on, never over another report), still under
-  the install lock, as every real uninstall does. One stopped by an error
+  Restoring it puts those files back; files the restore added, the
+  receipt and REAPER's language stay as they are. A restore that replaced
+  nothing writes no set and names none, and neither does a dry run. Every
+  real restore that finishes saves its report as
+  `RABBIT/logs/restore-backup-unix-<s>.json` and `.txt` (or `-2` and so on,
+  never over another report), still under the install lock, as every real
+  uninstall does. One stopped by an error
   saves none yet; `rabbit backups` still lists its before-restore set. A
-  dry run saves nothing; `--save-report` and `--report-path` save its
-  report.
+  dry run saves nothing; `--save-report` saves its report under a free name
+  the same way, and `--report-path` writes where it says. An uninstall's
+  report is saved the same way, never over another.
 - A real restore on macOS refuses when RABBIT itself runs as root, as under
   `sudo`, as an uninstall does: what it puts back, the before-restore set
   and the receipt would all be root's. The refusal comes after the set is

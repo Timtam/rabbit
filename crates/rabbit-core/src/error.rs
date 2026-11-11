@@ -88,6 +88,16 @@ pub enum RabbitError {
     )]
     BackupIdDiffersInCase { backup_id: String, existing: String },
 
+    /// A backup set id that names no set only because of the dots or spaces
+    /// at its end, while the id without them names a set exactly: it was
+    /// copied with the period after it, for example. Only exact ids are
+    /// used, so the set isn't restored, but it is named. On Windows such an
+    /// id isn't even well-formed, since Windows drops those characters.
+    #[error(
+        "\"{backup_id}\" names no backup: RABBIT never ends a backup's name in a dot or a space. There is one named {existing}"
+    )]
+    BackupIdEndsInDotOrSpace { backup_id: String, existing: String },
+
     /// A backup set id that names only a set whose deletion started and
     /// didn't finish. Part of it may be gone already, so it isn't restored.
     #[error(

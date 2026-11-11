@@ -38,7 +38,10 @@ use rabbit_core::preflight::{
     run_install_preflight,
 };
 use rabbit_core::progress::{ProgressEvent, ProgressReporter};
-use rabbit_core::report::{SavedReportPaths, default_report_path, save_json_and_text_reports};
+use rabbit_core::report::{
+    SavedReportPaths, default_report_path, save_json_and_text_reports,
+    save_new_json_and_text_reports,
+};
 use rabbit_core::resource::{ResourceInitActionKind, ResourceInitReport, initialize_resource_path};
 use rabbit_core::rollback::{
     BackupSet, RestoreBackupActionKind, RestoreBackupOptions, RestoreBackupReport, RestoredPackage,
@@ -2232,8 +2235,10 @@ where
 /// Save the report of a command that saves its own with --apply, such as
 /// `uninstall` and `restore-backup`, and say where it went. A run with
 /// --apply saved it under RABBIT/logs by itself (`saved`); `--save-report`
-/// only adds one where that didn't happen, such as a dry run.
-/// `--report-path` writes where it says either way.
+/// only adds one where that didn't happen, such as a dry run, under a name
+/// no other report has: the one a real run saved in the same second is the
+/// record of its backup set, and is never written over. `--report-path`
+/// writes where it says either way.
 fn save_cli_report<T>(
     resource_path: &Path,
     saved: Option<&SavedReportPaths>,
@@ -2245,17 +2250,16 @@ fn save_cli_report<T>(
 where
     T: serde::Serialize + ?Sized,
 {
-    let report_path = if saved.is_some() && report_path.is_none() {
-        None
-    } else {
-        selected_report_path(
-            Some(resource_path),
-            report_path,
-            save_report,
-            operation_name,
-        )?
-    };
-    save_optional_report(report_path.as_deref(), report)?;
+    if report_path.is_some() {
+        save_optional_report(report_path.as_deref(), report)?;
+    } else if save_report && saved.is_none() {
+        let saved = save_new_json_and_text_reports(
+            &default_report_path(resource_path, operation_name),
+            report,
+        )?;
+        eprintln!("Report saved (JSON): {}", saved.json_path.display());
+        eprintln!("Report saved (text): {}", saved.text_path.display());
+    }
     if let Some(saved) = saved {
         eprintln!("Report saved (JSON): {}", saved.json_path.display());
         eprintln!("Report saved (text): {}", saved.text_path.display());
@@ -3338,8 +3342,9 @@ fn uninstall_report_text(report: &UninstallReport, localizer: Option<&Localizer>
             })
             .collect();
         if restorable.is_empty() {
-            // Only what a failed package couldn't put back is in it.
-            let _ = writeln!(out, "Backup set: {set_id}.");
+            // Only what a failed package couldn't put back is in it. No
+            // period after the id: one copied with it names no set.
+            let _ = writeln!(out, "Backup set: {set_id}");
         } else {
             let names: Vec<&str> = restorable
                 .iter()
@@ -4683,6 +4688,68 @@ mod tests {
         assert!(elsewhere.with_extension("txt").is_file());
         let names = logged();
         assert!(is_report(&names), "{names:?}");
+    }
+
+    /// `--save-report` never writes over another report of the same name,
+    /// such as the one a real restore or uninstall saved in the same
+    /// second, which names that run's backup set: it saves under a free
+    /// name. `--report-path` still writes where it says.
+    #[test]
+    fn save_report_never_replaces_another_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let logs = resource.join("RABBIT").join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        for operation in ["restore-backup", "uninstall"] {
+            let taken: Vec<std::path::PathBuf> = (now..now + 10)
+                .map(|seconds| logs.join(format!("{operation}-unix-{seconds}.json")))
+                .collect();
+            for path in &taken {
+                std::fs::write(path, b"a real run's report").unwrap();
+            }
+
+            super::save_cli_report(
+                &resource,
+                None,
+                None,
+                true,
+                operation,
+                &serde_json::json!({"dry_run": true}),
+            )
+            .unwrap();
+
+            for path in &taken {
+                assert_eq!(std::fs::read(path).unwrap(), b"a real run's report");
+            }
+            let saved = std::fs::read_dir(&logs)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(operation)
+                        && !taken.contains(path)
+                })
+                .count();
+            assert_eq!(saved, 2, "{operation}: a .json and a .txt");
+
+            super::save_cli_report(
+                &resource,
+                None,
+                Some(taken[0].clone()),
+                false,
+                operation,
+                &serde_json::json!({"named": true}),
+            )
+            .unwrap();
+            let named = std::fs::read_to_string(&taken[0]).unwrap();
+            assert!(named.contains("\"named\": true"), "{named}");
+        }
     }
 
     /// Run as root on macOS, as under sudo, `restore-backup --apply`
@@ -7666,7 +7733,7 @@ mod tests {
             )
         };
         let text = super::uninstall_report_text(&report, None);
-        assert!(text.contains(&format!("Backup set: {set_id}.\n")), "{text}");
+        assert!(text.contains(&format!("Backup set: {set_id}\n")), "{text}");
         assert!(!text.contains("restore-backup"), "{text}");
     }
 

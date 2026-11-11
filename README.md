@@ -744,7 +744,8 @@ dry run and `--apply`:
 | 2 | A package you named can't be uninstalled. Nothing changed. |
 
 To bring a package back, find the uninstall's backup set and restore just that
-package from it:
+package from it, giving the set's id exactly as `rabbit backups` lists it, upper
+and lower case included:
 
 ```
 RABBIT backups --resource-path "%APPDATA%\REAPER"
@@ -798,10 +799,17 @@ these backups stays as it is.
 
 A `restore-backup --apply` that finishes saves a report in `RABBIT\logs`. When
 it replaced files, it also names the backup set it made of them: restoring that
-set undoes the restore as far as those files go, while files the restore added
-and RABBIT's records stay as they are. A restore stopped by an error saves no
-report yet, but `rabbit backups` lists that set, as
+set undoes the restore as far as those files go, while files the restore added,
+RABBIT's records and REAPER's language stay as they are. A restore stopped by
+an error saves no report yet, but `rabbit backups` lists that set, as
 `restore-unix-<time>-before-restore`.
+
+RABBIT never follows a symbolic link or junction in its backups. If `RABBIT` or
+`RABBIT\backups` is one, `rabbit backups` and `restore-backup` say so and
+change nothing, and so does `uninstall`, whose backup would be the only copy of
+what it removes. Make it a real folder again, with the backups inside it,
+first. A restore also never writes through a link or junction that leads out of
+the resource folder or into `RABBIT`.
 
 ### Maintain
 
@@ -851,10 +859,14 @@ Microsoft as a false positive at <https://www.microsoft.com/en-us/wdsi/filesubmi
 Every installation produces a JSON report under `<resource>/RABBIT/logs/`.
 Surge XT's Windows installer writes its own log there too
 (`surge-xt-installer-<stamp>.log`), and RABBIT names it when that install fails.
-Backups go to `<resource>/RABBIT/backups/<timestamp>/`. The download cache is a
-`rabbit-cache` folder in your temporary folder, usually `%TEMP%\rabbit-cache` on
-Windows and `$TMPDIR/rabbit-cache` on macOS. It can be deleted safely at any time, and
-the CLI's `--cache-dir` points a single run somewhere else.
+Backups go to `<resource>/RABBIT/backups/<id>/`, named by what made them:
+`unix-<time>` for an update, `uninstall-unix-<time>`,
+`restore-unix-<time>-before-restore`, and `unattended-unix-<time>-<n>` for the
+copies of the key map and of RABBIT's records made when vendor installers run.
+The download cache is a `rabbit-cache` folder in your temporary folder, usually
+`%TEMP%\rabbit-cache` on Windows and `$TMPDIR/rabbit-cache` on macOS. It can be
+deleted safely at any time, and the CLI's `--cache-dir` points a single run
+somewhere else.
 
 ## Made with the help of AI
 
