@@ -73,12 +73,20 @@ from this file and posts it as the GitHub release body.
   prints how to remove it by hand. The exit code is 0 when everything you
   named is gone or wasn't installed, 2 when something can't be uninstalled,
   and 1 when a removal failed. The wizard's **Uninstall** tab removes the
-  same packages.
+  same packages. A run that moved no file leaves no backup set, and the
+  report names the set only for packages whose files went into it. While
+  `RABBIT` or its `backups` folder is a symbolic link or junction, an
+  uninstall changes nothing and says why: RABBIT never restores a backup
+  from behind one, and the backup would be the only copy of what it removes.
 - `rabbit restore-backup --package <id>` brings one uninstalled package back
-  from its backup set: its files, its entry in RABBIT's receipt, and REAPER's
+  from its backup set: its files, its entry in RABBIT's records, and REAPER's
   language if the uninstall reset it and no other language was picked since.
-  Restoring an uninstall's whole set does the same for every package in it,
-  and an uninstall that stopped partway through a package restores too.
+  Restoring an uninstall's whole set does the same for every package with
+  files in it, and an uninstall that stopped partway through a package
+  restores too. A package none of whose files are in the backup, as when
+  they were already gone, has nothing to restore: `--package` says so, and
+  the whole restore leaves it out and names it. A backup with nothing at all
+  to bring back is refused the same way.
 - `rabbit components` says for each package whether RABBIT can uninstall it,
   and if not, why.
 - OSARA can be uninstalled too, from the wizard's **Uninstall** tab and with
@@ -227,6 +235,30 @@ from this file and posts it as the GitHub release body.
   and anything from the last dot on. Every name RABBIT ships under works. A
   copy renamed to anything else can no longer install Surge XT, and can't
   uninstall Surge XT or REAPER.
+- Restoring a backup never copies RABBIT's records back over the current
+  ones any more. That undid every change to them since the backup was made.
+  Restoring an uninstall's backup puts back each package's own entry. For
+  now, `rabbit restore-backup` can't restore a backup from an update, which
+  holds the files the update replaced, or a backup that holds only a copy of
+  RABBIT's records. It also refuses any other backup that holds a copy of
+  the records, such as one an older RABBIT made while restoring an update's
+  backup, and says which folder the copy stays in. A refused restore changes
+  nothing.
+- On a Mac, `rabbit restore-backup --apply` no longer runs as root, as with
+  `sudo`, just as `rabbit uninstall --apply` doesn't: the files it puts
+  back, the backup of the files they replace and RABBIT's records would all
+  be root's. It changes nothing and says to run it as yourself. A dry run
+  still works.
+- `rabbit restore-backup --apply` now saves a report in `RABBIT\logs` every
+  time it finishes, like `rabbit uninstall --apply`:
+  `restore-backup-unix-<time>.json` and `.txt`. `--save-report` still saves
+  one for a dry run, under a name of its own, never over another report.
+  When the restore replaced files, the report, the command's text and its
+  `--json` output name the backup RABBIT made of them: restoring that backup
+  puts those files back. Files the restore added, RABBIT's records and
+  REAPER's language stay as they are. A restore stopped by an error saves no
+  report yet, but `rabbit backups` lists the backup it made, as
+  `restore-unix-<time>-before-restore`.
 
 ### Fixed
 
@@ -237,9 +269,15 @@ from this file and posts it as the GitHub release body.
   the resource folder, the CLAP folder and, for the JAWS scripts' own files,
   JAWS's settings folder, and doesn't run while an install into the same
   REAPER is running. Backups made from now on note each file before copying
-  it, so even a backup from an interrupted run can be restored.
+  it, so even a backup from an interrupted run can be restored, except, for
+  now, one from an update.
 - `rabbit backups` no longer fails when one backup's manifest is damaged.
   It lists every backup and shows a warning on the damaged one.
+- `rabbit install-extension --apply` no longer runs while another copy of
+  RABBIT is installing, uninstalling or restoring a backup in the same
+  REAPER, just as the other commands that install don't. It says another
+  installation is in progress and changes nothing. Before, both could change
+  the same files and backups at once.
 - `rabbit apply-packages` now checks that REAPER is closed before it runs any
   installer, as `rabbit setup` and the wizard already did. Before, it ran
   installers such as REAPER's and OSARA's while REAPER was open, and only
@@ -280,6 +318,35 @@ from this file and posts it as the GitHub release body.
   to `RABBIT\logs`, which the message names. A Surge XT update whose
   installer stopped is no longer reported as installed because the older
   version's files were still there.
+
+### Security
+
+- `rabbit restore-backup` no longer accepts a backup id that leads out of
+  RABBIT's backups folder, such as `D:` on Windows. Before, `--backup-id D:`
+  read a backup from the current folder of drive D:, and could restore the
+  files there into REAPER. An id must now be the exact name of a folder in
+  RABBIT's backups folder, with the same upper and lower case; when only
+  the case differs, the error names the backup that is there. On Windows,
+  names Windows would read as another name or as a device, such as
+  `unix-1.` or `CON`, are refused too. `rabbit backups` lists a folder with
+  such a name with a warning, and never looks inside it. An id that names
+  no backup now says the backup was deleted or never existed. One copied
+  with the period after it is refused too, and the message names the
+  backup it would name without the period.
+- Restoring a backup never follows a symbolic link or junction any more:
+  not as `RABBIT`, not as its backups folder, not as a backup, and not
+  inside one. `rabbit backups` lists such a link with a warning and never
+  looks into it. When `RABBIT` or its backups folder is a link, it lists
+  nothing and says why. Backups kept behind such a link, including those an
+  update or OSARA's key map replacement still makes there, have to be moved
+  back into a real folder before RABBIT lists or restores them; an
+  uninstall doesn't run until then. A restore also never puts a file back
+  through a link or junction that leads out of the REAPER resource folder or
+  into `RABBIT`, nor over one, nor through one below the CLAP folder, and
+  never by a name that Windows could open as another one or as a device,
+  such as `CON`. It refuses a backup that names one place twice, and never
+  writes through a link at the temporary name it writes first. Each time it
+  changes nothing and says why.
 
 ## [0.4.4] - 2026-10-13
 

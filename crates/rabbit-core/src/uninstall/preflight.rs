@@ -38,6 +38,9 @@ pub const PROGRAMS_RUNNING_CHECK: &str = "programs-running";
 /// The check that fails when the backup's volume lacks room for the files
 /// that have to be copied there from another volume.
 pub const BACKUP_SPACE_CHECK: &str = "backup-space";
+/// The check that fails when `RABBIT` or `RABBIT/backups` is a symbolic
+/// link or junction while a package would move files into the backup set.
+pub const BACKUP_FOLDER_CHECK: &str = "backup-folder";
 /// Room the backup's volume must keep beyond the copied files themselves:
 /// enough for the set's manifest and notes, and so that a removal never
 /// fills a drive to its last byte.
@@ -113,6 +116,9 @@ pub fn run_uninstall_preflight_with_processes(
         reaper_processes,
         other_processes,
     ));
+    if items.iter().any(|item| writes_backup_set(item)) {
+        checks.extend(backup_folder_check(&plan.resource_path));
+    }
 
     // macOS can refuse to move files out of UserPlugins for reasons that
     // have nothing to do with REAPER (Full Disk Access, App Management).
@@ -147,6 +153,43 @@ fn backup_set_files(item: &UninstallPlanItem) -> impl Iterator<Item = &PlannedRe
     item.files.iter().filter(move |file| {
         route != RemovalRoute::Vendor
             && !(route.takes_whole_objects() && file.reason == RemovalReason::Tree)
+    })
+}
+
+/// Whether removing `item` writes the run's backup set: every package on
+/// the backup set's route, and one going to the Trash with any file besides
+/// its trees, such as its settings. Both are recorded in the set before
+/// anything of them moves. A vendor's uninstaller and the administrator
+/// command put nothing there.
+fn writes_backup_set(item: &UninstallPlanItem) -> bool {
+    match item.route() {
+        RemovalRoute::BackupSet => true,
+        RemovalRoute::Trash => item
+            .files
+            .iter()
+            .any(|file| file.reason != RemovalReason::Tree),
+        RemovalRoute::Vendor | RemovalRoute::Administrator => false,
+    }
+}
+
+/// The failed check when `RABBIT` or `RABBIT/backups` in `resource_path` is
+/// a symbolic link or junction, or `None`. A restore never follows one
+/// there, so a backup set behind it couldn't bring anything back, and the
+/// files an uninstall moves have no other copy. The whole run is refused
+/// before anything changes, rather than each package when its turn comes.
+/// Only a failure is reported, as the free-space check reports only when it
+/// matters.
+fn backup_folder_check(resource_path: &Path) -> Option<PreflightCheck> {
+    let link = crate::rollback::linked_backups_folder(resource_path)?;
+    Some(PreflightCheck {
+        name: BACKUP_FOLDER_CHECK.to_string(),
+        status: PreflightStatus::Fail,
+        message: format!(
+            "{} is a symbolic link or junction. RABBIT doesn't move files into a backup behind \
+             one, because it never restores a backup from there. Make it a real folder again, \
+             with the backups inside it, then uninstall.",
+            link.display()
+        ),
     })
 }
 

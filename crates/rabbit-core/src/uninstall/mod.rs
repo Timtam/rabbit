@@ -81,7 +81,7 @@ use crate::package::uninstall::{
     UninstallBackup, UninstallPostStep, UninstallStrategy, UninstallSummary,
 };
 use crate::preflight::{PreflightCheck, PreflightReport};
-use crate::report::{SavedReportPaths, default_report_path, save_json_and_text_reports};
+use crate::report::{SavedReportPaths, default_report_path, save_new_json_and_text_reports};
 use crate::version::Version;
 
 pub use admin_batch::{
@@ -109,8 +109,9 @@ pub use paths::{
 };
 pub use plan::{UninstallPlanInput, build_uninstall_plan};
 pub use preflight::{
-    ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, BACKUP_SPACE_MARGIN, PROGRAMS_RUNNING_CHECK,
-    UninstallPreflightOptions, run_uninstall_preflight, run_uninstall_preflight_with_processes,
+    ANY_REAPER_PROCESS_CHECK, BACKUP_FOLDER_CHECK, BACKUP_SPACE_CHECK, BACKUP_SPACE_MARGIN,
+    PROGRAMS_RUNNING_CHECK, UninstallPreflightOptions, run_uninstall_preflight,
+    run_uninstall_preflight_with_processes,
 };
 pub(crate) use registry::{points_into, program_named_by};
 pub use vendor::{
@@ -941,9 +942,11 @@ impl UninstallReport {
     }
 }
 
-/// Save `report` as `RABBIT/logs/uninstall-unix-<time>.json` and `.txt`.
+/// Save `report` as `RABBIT/logs/uninstall-unix-<time>.json` and `.txt`,
+/// or `-2` and so on when a report of that name is there already: each one
+/// is the record of the backup set its run made, and is never written over.
 pub fn save_uninstall_report(report: &UninstallReport) -> crate::Result<SavedReportPaths> {
-    save_json_and_text_reports(
+    save_new_json_and_text_reports(
         &default_report_path(&report.resource_path, "uninstall"),
         report,
     )
@@ -1182,7 +1185,9 @@ impl UninstallProblem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "kebab-case")]
 pub enum UninstallMessage {
-    /// Removed. `backup_set_id` is the set its files went into.
+    /// Removed. `backup_set_id` is the set its files went into, and `None`
+    /// when none of its files did, even when the run wrote a set for other
+    /// packages.
     Removed {
         backup_set_id: Option<String>,
     },

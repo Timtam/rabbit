@@ -744,7 +744,8 @@ dry run and `--apply`:
 | 2 | A package you named can't be uninstalled. Nothing changed. |
 
 To bring a package back, find the uninstall's backup set and restore just that
-package from it:
+package from it, giving the set's id exactly as `rabbit backups` lists it, upper
+and lower case included:
 
 ```
 RABBIT backups --resource-path "%APPDATA%\REAPER"
@@ -753,19 +754,25 @@ RABBIT restore-backup --resource-path "%APPDATA%\REAPER" \
 ```
 
 Its files come back, its settings too if `--remove-settings` removed them. It
-goes back into RABBIT's receipt and is no longer skipped, and REAPER's language
+goes back into RABBIT's records and is no longer skipped, and REAPER's language
 goes back to it if the uninstall changed that and you haven't picked another
 language since. Without `--package`, every package in the set comes back. An
-uninstall that stopped partway through a package restores the same way. Two
-limits: a package you installed again after uninstalling it can't be restored
-from the old set, because the newer copy is in the way (uninstall it first);
-and a removal that a backup can't hold, by Surge XT's or REAPER's own
-uninstaller on Windows or by the administrator command deleting Surge XT on a
-Mac, can't be restored: install the package again instead. A REAPER app RABBIT
-moved to the Trash isn't in a backup set either: until you empty the Trash, you
-can drag it back from there. If the administrator command moved it, macOS may
-ask for an administrator's password for that. A restored OSARA isn't back on
-Windows' list of installed programs; installing OSARA again puts it there.
+uninstall that stopped partway through a package restores the same way. A
+package the set records with none of its files in it, as when they were already
+gone when it was uninstalled, has nothing to bring back: `--package` says so,
+and restoring the whole set leaves it out and names it, so RABBIT doesn't count
+it as installed again. Two limits: a package you installed again after
+uninstalling it can't be restored from the old set, because the newer copy is
+in the way (uninstall it first); and a removal that a backup can't hold, by
+Surge XT's or REAPER's own uninstaller on Windows or by the administrator
+command deleting Surge XT on a Mac, can't be restored: install the package
+again instead. A REAPER app RABBIT moved to the Trash isn't in a backup set
+either: until you empty the Trash, you can drag it back from there. If the
+administrator command moved it, macOS may ask for an administrator's password
+for that. A restored OSARA isn't back on Windows' list of installed programs;
+installing OSARA again puts it there. On a Mac, run `restore-backup --apply` as
+yourself: run as root, as with `sudo`, it refuses and changes nothing, as
+`uninstall --apply` does.
 
 `--package jaws-scripts` brings back the JAWS scripts' plug-in files and the
 script files that went, but not their uninstaller folder and registry entry,
@@ -779,12 +786,37 @@ from there down to the file leads through a link or junction, the restore
 changes nothing and says why. If that stops the restore of a whole set,
 restore the set's other packages one at a time with `--package`.
 
+A restore never copies RABBIT's records (its receipt,
+`RABBIT\install-state.json`) back from a backup: that would undo every change
+to them since the backup was made, uninstalls included. Restoring an
+uninstall's backup puts back only each package's own entry, as above. So RABBIT
+doesn't restore a backup that holds a copy of its records, such as one an older
+version of RABBIT made when it restored an update's backup. The copy stays in
+the backup, and the message names its folder. Backups from updates, which hold
+the files an update replaced, can't be restored yet either, and neither can the
+backups that hold only a copy of RABBIT's records. Nothing changes, and each of
+these backups stays as it is.
+
+A `restore-backup --apply` that finishes saves a report in `RABBIT\logs`. When
+it replaced files, it also names the backup set it made of them: restoring that
+set undoes the restore as far as those files go, while files the restore added,
+RABBIT's records and REAPER's language stay as they are. A restore stopped by
+an error saves no report yet, but `rabbit backups` lists that set, as
+`restore-unix-<time>-before-restore`.
+
+RABBIT never follows a symbolic link or junction in its backups. If `RABBIT` or
+`RABBIT\backups` is one, `rabbit backups` and `restore-backup` say so and
+change nothing, and so does `uninstall`, whose backup would be the only copy of
+what it removes. Make it a real folder again, with the backups inside it,
+first. A restore also never writes through a link or junction that leads out of
+the resource folder or into `RABBIT`.
+
 ### Maintain
 
 ```
-RABBIT backups --resource-path "%APPDATA%\REAPER"          # list rollback sets
+RABBIT backups --resource-path "%APPDATA%\REAPER"          # list backup sets
 RABBIT restore-backup --resource-path "%APPDATA%\REAPER" \
-     --backup-id unix-1234567890 --apply                  # roll back one set
+     --backup-id uninstall-unix-1234567890 --apply         # restore one set
 ```
 
 ### Update RABBIT itself
@@ -827,10 +859,14 @@ Microsoft as a false positive at <https://www.microsoft.com/en-us/wdsi/filesubmi
 Every installation produces a JSON report under `<resource>/RABBIT/logs/`.
 Surge XT's Windows installer writes its own log there too
 (`surge-xt-installer-<stamp>.log`), and RABBIT names it when that install fails.
-Backups go to `<resource>/RABBIT/backups/<timestamp>/`. The download cache is a
-`rabbit-cache` folder in your temporary folder, usually `%TEMP%\rabbit-cache` on
-Windows and `$TMPDIR/rabbit-cache` on macOS. It can be deleted safely at any time, and
-the CLI's `--cache-dir` points a single run somewhere else.
+Backups go to `<resource>/RABBIT/backups/<id>/`, named by what made them:
+`unix-<time>` for an update, `uninstall-unix-<time>`,
+`restore-unix-<time>-before-restore`, and `unattended-unix-<time>-<n>` for the
+copies of the key map and of RABBIT's records made when vendor installers run.
+The download cache is a `rabbit-cache` folder in your temporary folder, usually
+`%TEMP%\rabbit-cache` on Windows and `$TMPDIR/rabbit-cache` on macOS. It can be
+deleted safely at any time, and the CLI's `--cache-dir` points a single run
+somewhere else.
 
 ## Made with the help of AI
 

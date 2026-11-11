@@ -463,6 +463,8 @@ pub(crate) fn execute_uninstall_in(
 
     let backup_folder = backup_volume_folder(&resource);
     let mut backup_set = None;
+    // The packages the set holds a file of, which its id goes to.
+    let mut in_backup_set: BTreeSet<String> = BTreeSet::new();
     let mut outcomes: Vec<UninstallReportItem> = Vec::new();
     let mut administrator_steps: Vec<AdministratorStepRecord> = Vec::new();
     if request.dry_run {
@@ -540,11 +542,20 @@ pub(crate) fn execute_uninstall_in(
                                 };
                                 outcomes.extend(run.remove_all(&rest, cancel));
                                 run.session.finish();
+                                // A set of records alone, from packages that
+                                // moved no file, brings nothing back, so it
+                                // goes too, and the report names no set.
+                                run.backups.forget_packages_if_no_file();
                                 if !run.backups.discard_if_empty() {
                                     backup_set = Some((
                                         run.backups.set_id(),
                                         run.backups.path().to_path_buf(),
                                     ));
+                                    in_backup_set = rest
+                                        .iter()
+                                        .map(|item| item.package_id.clone())
+                                        .filter(|id| run.backups.holds_package(id))
+                                        .collect();
                                 }
                             }
                         }
@@ -566,8 +577,16 @@ pub(crate) fn execute_uninstall_in(
     }
     let backup_set_id = backup_set.as_ref().map(|(id, _)| id.clone());
     for item in &mut items {
+        // Only a package with a file in the set can come back from it, so
+        // only such a package is named with it. Another package of the same
+        // run may have put nothing there: one of the administrator command
+        // whose trees were gone before root's turn, one whose apps were gone
+        // before their turn to go to the Trash and whose settings stayed
+        // out, or one that moved no file at all.
         if let UninstallMessage::Removed { backup_set_id: id } = &mut item.message_code {
-            id.clone_from(&backup_set_id);
+            *id = backup_set_id
+                .clone()
+                .filter(|_| in_backup_set.contains(&item.package_id));
         }
         item.message = english_message(item, &plan);
     }
@@ -1360,8 +1379,8 @@ impl RemovalRun<'_> {
         }
         removal.remove_dirs_if_empty();
         // Every app was gone before its turn: nothing went to the Trash, so
-        // nothing may be said to have moved there. The run fills in the
-        // backup set for settings that went into one.
+        // nothing may be said to have moved there. The run names the backup
+        // set only when some of its settings went into it.
         let code = match trashed.first() {
             Some(file) => UninstallMessage::MovedToTrash {
                 trashed_to: file.trashed_to.clone(),

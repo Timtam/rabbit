@@ -1548,6 +1548,58 @@ fn an_app_gone_before_its_turn_isnt_reported_as_moved_to_the_trash() {
     assert!(run.objects.trashed().is_empty());
 }
 
+/// A REAPER.app gone before its turn, on either route, put nothing into
+/// the backup set the extension's plug-in went into in the same run. So
+/// REAPER is removed with no set named, while the extension and the report
+/// name it.
+#[test]
+fn an_app_gone_before_its_turn_isnt_named_with_another_packages_backup_set() {
+    for (elevation, app) in [("if_needed", owned_by_root()), ("never", owned_by_me())] {
+        let mac = Mac::new();
+        let gone = mac.app();
+        let run = Run::new(
+            &mac,
+            vec![reaper_spec(elevation), extension()],
+            mac.objects(app),
+        )
+        .changing_before_scan(0, move || fs::remove_dir_all(&gone).unwrap());
+
+        let report = run.run(&[PACKAGE_REAPER, EXT]);
+
+        let set_id = report.backup_set_id.clone().expect("the extension's set");
+        let ext = item(&report, EXT);
+        assert_eq!(
+            ext.message_code,
+            UninstallMessage::Removed {
+                backup_set_id: Some(set_id.clone())
+            },
+            "{elevation}"
+        );
+        assert!(!mac.plug_in().exists());
+        let reaper = item(&report, PACKAGE_REAPER);
+        assert_eq!(
+            reaper.status,
+            UninstallStatus::Removed,
+            "{elevation}: {}",
+            reaper.message
+        );
+        assert_eq!(
+            reaper.message_code,
+            UninstallMessage::Removed {
+                backup_set_id: None
+            },
+            "{elevation}"
+        );
+        assert!(
+            !reaper.message.contains(&set_id),
+            "{elevation}: {}",
+            reaper.message
+        );
+        assert_eq!(run.shell.calls(), 0, "{elevation}");
+        assert!(run.objects.trashed().is_empty(), "{elevation}");
+    }
+}
+
 /// More steps than one prompt takes: the run is refused before any prompt,
 /// with nothing changed, and the dry run says the same.
 #[test]
@@ -1789,6 +1841,121 @@ fn settings_come_back_when_the_app_doesnt_go_to_the_trash() {
         );
         assert!(join(&mac.app(), "Contents/MacOS/REAPER").is_file());
     }
+}
+
+/// With "Also remove settings", an app gone before its turn to go to the
+/// Trash still leaves its settings to go into the backup set. When they
+/// went, REAPER is named with the set. When they were gone too, the set
+/// records REAPER but holds none of its files, so only the extension,
+/// whose plug-in went in, is named with it.
+#[test]
+fn an_app_gone_before_its_turn_is_named_with_the_set_only_when_its_settings_went_in() {
+    for settings_there in [true, false] {
+        let mac = Mac::new();
+        let demo = mac.fixture.resource.join("Demo");
+        super::tests::write(&demo.join("settings.ini"), b"mine");
+        let app = mac.app();
+        let gone = demo.clone();
+        let run = Run::new(
+            &mac,
+            vec![reaper_with_settings(), extension()],
+            mac.objects(owned_by_me()),
+        )
+        .removing_settings()
+        .changing_before_scan(0, move || {
+            fs::remove_dir_all(&app).unwrap();
+            if !settings_there {
+                fs::remove_dir_all(&gone).unwrap();
+            }
+        });
+
+        let report = run.run(&[PACKAGE_REAPER, EXT]);
+
+        let set_id = report.backup_set_id.clone().expect("a backup set");
+        assert_eq!(
+            item(&report, EXT).message_code,
+            UninstallMessage::Removed {
+                backup_set_id: Some(set_id.clone())
+            }
+        );
+        let reaper = item(&report, PACKAGE_REAPER);
+        assert_eq!(
+            reaper.status,
+            UninstallStatus::Removed,
+            "{}",
+            reaper.message
+        );
+        assert_eq!(
+            reaper.message_code,
+            UninstallMessage::Removed {
+                backup_set_id: settings_there.then(|| set_id.clone())
+            },
+            "settings there: {settings_there}"
+        );
+        assert_eq!(
+            reaper.message.contains(&set_id),
+            settings_there,
+            "{}",
+            reaper.message
+        );
+        assert!(!demo.exists());
+        assert!(run.objects.trashed().is_empty());
+        let manifest = super::execute_tests::manifest(&report);
+        assert!(manifest.packages.contains_key(PACKAGE_REAPER));
+        assert_eq!(
+            manifest
+                .files
+                .iter()
+                .any(|entry| entry.package_id.as_deref() == Some(PACKAGE_REAPER)),
+            settings_there
+        );
+    }
+}
+
+/// Alone in its run, a REAPER.app gone before its turn to go to the Trash,
+/// whose settings were gone too, leaves no backup set: it would hold
+/// REAPER's record alone, and nothing comes back from that.
+#[test]
+fn an_app_and_its_settings_gone_before_their_turn_leave_no_backup_set() {
+    let mac = Mac::new();
+    let demo = mac.fixture.resource.join("Demo");
+    super::tests::write(&demo.join("settings.ini"), b"mine");
+    let app = mac.app();
+    let gone = demo.clone();
+    let run = Run::new(
+        &mac,
+        vec![reaper_with_settings()],
+        mac.objects(owned_by_me()),
+    )
+    .removing_settings()
+    .changing_before_scan(0, move || {
+        fs::remove_dir_all(&app).unwrap();
+        fs::remove_dir_all(&gone).unwrap();
+    });
+
+    let report = run.run(&[PACKAGE_REAPER]);
+
+    let reaper = item(&report, PACKAGE_REAPER);
+    assert_eq!(
+        reaper.status,
+        UninstallStatus::Removed,
+        "{}",
+        reaper.message
+    );
+    assert_eq!(
+        reaper.message_code,
+        UninstallMessage::Removed {
+            backup_set_id: None
+        }
+    );
+    assert_eq!(report.backup_set_id, None);
+    assert_eq!(report.backup_set_path, None);
+    let backups = mac.fixture.resource.join("RABBIT").join("backups");
+    let sets: Vec<_> = fs::read_dir(&backups)
+        .map(|entries| entries.map(|entry| entry.unwrap().path()).collect())
+        .unwrap_or_default();
+    assert!(sets.is_empty(), "{sets:?}");
+    assert!(run.objects.trashed().is_empty());
 }
 
 fn plan_for(platform: Platform) -> UninstallPlan {

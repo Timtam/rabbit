@@ -13,6 +13,7 @@ use rabbit_core::latest::fetch_latest_versions_on;
 use rabbit_core::localization::{
     DEFAULT_LOCALE, LocalizedText, Localizer, available_locales, resolve_runtime_locale,
 };
+use rabbit_core::lock::acquire_package_install_lock;
 use rabbit_core::model::{Architecture, ComponentDetection, InstallationKind, Platform};
 use rabbit_core::operation::{
     PackageOperationItem, PackageOperationOptions, PackageOperationReport, PackageOperationStatus,
@@ -33,14 +34,18 @@ use rabbit_core::plan::{
 };
 use rabbit_core::portable::{PortabilityCheckStatus, PortabilityReport, check_portable_runtime};
 use rabbit_core::preflight::{
-    PreflightOptions, PreflightReport, PreflightStatus, run_install_preflight,
+    PreflightOptions, PreflightReport, PreflightStatus, ensure_resource_path_ready,
+    run_install_preflight,
 };
 use rabbit_core::progress::{ProgressEvent, ProgressReporter};
-use rabbit_core::report::{default_report_path, save_json_and_text_reports};
+use rabbit_core::report::{
+    SavedReportPaths, default_report_path, save_json_and_text_reports,
+    save_new_json_and_text_reports,
+};
 use rabbit_core::resource::{ResourceInitActionKind, ResourceInitReport, initialize_resource_path};
 use rabbit_core::rollback::{
     BackupSet, RestoreBackupActionKind, RestoreBackupOptions, RestoreBackupReport, RestoredPackage,
-    list_backup_sets, restore_backup_set,
+    SkippedPackageReason, list_backup_sets, restore_backup_set,
 };
 use rabbit_core::self_update::{
     ApplySelfUpdateOptions, DEFAULT_SELF_UPDATE_MANIFEST_URL, SelfUpdateApplyReport,
@@ -258,7 +263,7 @@ enum Command {
         #[arg(long)]
         report_path: Option<PathBuf>,
         /// Save a JSON run report under the resource folder's `RABBIT`
-        /// directory, so there is a record of what happened.
+        /// directory. A run with --apply always saves one there.
         #[arg(long)]
         save_report: bool,
         /// Print the result as JSON instead of human-readable text.
@@ -1198,20 +1203,52 @@ fn run_restore_backup(command: Command) -> Result<(), Box<dyn std::error::Error>
             allow_reaper_running,
             package_id: package.map(|id| id.trim().to_string()),
         },
-    )?;
-    let report_path = selected_report_path(
-        Some(&resource_path),
+    )
+    .map_err(|error| cli_restore_error(error, &resource_path))?;
+    save_cli_report(
+        &resource_path,
+        report.saved_report.as_ref(),
         report_path,
         save_report,
         "restore-backup",
+        &report,
     )?;
-    save_optional_report(report_path.as_deref(), &report)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         print_restore_backup_report(&report);
     }
     Ok(())
+}
+
+/// What `rabbit restore-backup --apply` says when RABBIT runs as root on
+/// macOS, as under sudo: the engine refuses before anything happens.
+const RESTORE_AS_ROOT_TEXT: &str = "rabbit restore-backup --apply doesn't run as root, as it \
+     would under sudo: the files it puts back, the backup of the files they replace and RABBIT's \
+     records would all be root's. Run it again as yourself, without sudo.";
+
+/// A restore's error as the CLI prints it. An id that names no backup set
+/// gets the command that lists the sets there are, which the engine leaves
+/// to the CLI. A set refused because it holds a copy of RABBIT's records
+/// gets the folder that copy stays in, for anyone who needs it by hand. The
+/// refusal to run as root is said in the CLI's own words. Anything else is
+/// printed as it is.
+fn cli_restore_error(
+    error: rabbit_core::RabbitError,
+    resource_path: &Path,
+) -> Box<dyn std::error::Error> {
+    match error {
+        rabbit_core::RabbitError::BackupSetNotFound { .. } => format!(
+            "{error}. rabbit backups --resource-path \"{}\" lists what is left.",
+            resource_path.display()
+        )
+        .into(),
+        rabbit_core::RabbitError::ReceiptInSet {
+            ref backup_path, ..
+        } => format!("{error}, in the folder \"{}\".", backup_path.display()).into(),
+        rabbit_core::RabbitError::RestoreAsRoot => RESTORE_AS_ROOT_TEXT.into(),
+        other => other.into(),
+    }
 }
 
 fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Error>> {
@@ -1280,10 +1317,11 @@ fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Err
         return Ok(());
     }
     let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
-    let cached = download_artifacts(&artifacts, &cache_dir)?;
-    let report = install_cached_artifacts(
+    let report = apply_install_extension(
         &resource_path,
-        &cached,
+        &package,
+        &artifacts,
+        &cache_dir,
         &InstallOptions {
             dry_run: false,
             allow_reaper_running,
@@ -1291,7 +1329,6 @@ fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Err
             package_variants: Default::default(),
         },
     )?;
-    forget_refusals_of_named(&resource_path, &package, true);
     let report_path = selected_report_path(
         Some(&resource_path),
         report_path,
@@ -1305,6 +1342,29 @@ fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Err
         print_install_report(&report);
     }
     Ok(())
+}
+
+/// What `install-extension --apply` changes, once its artifacts are
+/// resolved: it downloads them, installs them and takes the named packages
+/// off the list of refusals. All of that holds the per-target lock, as the
+/// package operation does, so it never writes files, a backup set or the
+/// receipt while another RABBIT installs, uninstalls or restores on this
+/// REAPER. With the lock held elsewhere it fails before anything changes.
+fn apply_install_extension(
+    resource_path: &Path,
+    package_ids: &[String],
+    artifacts: &[ArtifactDescriptor],
+    cache_dir: &Path,
+    options: &InstallOptions,
+) -> Result<InstallReport, Box<dyn std::error::Error>> {
+    ensure_resource_path_ready(resource_path, false)?;
+    // Named, not `_`: the guard must live to the end of this function, or
+    // the lock would be let go before anything is written.
+    let _install_lock = acquire_package_install_lock(resource_path)?;
+    let cached = download_artifacts(artifacts, cache_dir)?;
+    let report = install_cached_artifacts(resource_path, &cached, options)?;
+    forget_refusals_of_named(resource_path, package_ids, true);
+    Ok(report)
 }
 
 fn run_apply_packages(command: Command) -> Result<(), Box<dyn std::error::Error>> {
@@ -1518,19 +1578,14 @@ fn run_uninstall(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     )
     .map_err(cli_uninstall_error)?;
     drop(ctrl_c);
-    // A run with --apply saved its report under RABBIT/logs by itself;
-    // `--save-report` only adds one where that didn't happen, such as a dry
-    // run.
-    let report_path = if report.saved_report.is_some() && report_path.is_none() {
-        None
-    } else {
-        selected_report_path(Some(&resource_path), report_path, save_report, "uninstall")?
-    };
-    save_optional_report(report_path.as_deref(), &report)?;
-    if let Some(saved) = &report.saved_report {
-        eprintln!("Report saved (JSON): {}", saved.json_path.display());
-        eprintln!("Report saved (text): {}", saved.text_path.display());
-    }
+    save_cli_report(
+        &resource_path,
+        report.saved_report.as_ref(),
+        report_path,
+        save_report,
+        "uninstall",
+        &report,
+    )?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -2177,6 +2232,41 @@ where
     Ok(())
 }
 
+/// Save the report of a command that saves its own with --apply, such as
+/// `uninstall` and `restore-backup`, and say where it went. A run with
+/// --apply saved it under RABBIT/logs by itself (`saved`); `--save-report`
+/// only adds one where that didn't happen, such as a dry run, under a name
+/// no other report has: the one a real run saved in the same second is the
+/// record of its backup set, and is never written over. `--report-path`
+/// writes where it says either way.
+fn save_cli_report<T>(
+    resource_path: &Path,
+    saved: Option<&SavedReportPaths>,
+    report_path: Option<PathBuf>,
+    save_report: bool,
+    operation_name: &str,
+    report: &T,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    T: serde::Serialize + ?Sized,
+{
+    if report_path.is_some() {
+        save_optional_report(report_path.as_deref(), report)?;
+    } else if save_report && saved.is_none() {
+        let saved = save_new_json_and_text_reports(
+            &default_report_path(resource_path, operation_name),
+            report,
+        )?;
+        eprintln!("Report saved (JSON): {}", saved.json_path.display());
+        eprintln!("Report saved (text): {}", saved.text_path.display());
+    }
+    if let Some(saved) = saved {
+        eprintln!("Report saved (JSON): {}", saved.json_path.display());
+        eprintln!("Report saved (text): {}", saved.text_path.display());
+    }
+    Ok(())
+}
+
 fn selected_report_path(
     resource_path: Option<&Path>,
     explicit_report_path: Option<PathBuf>,
@@ -2422,49 +2512,90 @@ fn print_backup_sets(backup_sets: &[BackupSet]) {
 }
 
 fn print_restore_backup_report(report: &RestoreBackupReport) {
-    println!("Resource path: {}", report.resource_path.display());
-    println!("Backup id: {}", report.backup_id);
-    println!("Backup path: {}", report.backup_path.display());
-    println!("Dry run: {}", yes_no(report.dry_run));
-    print_preflight_report(&report.preflight);
+    print!("{}", restore_backup_report_text(report));
+}
+
+/// A restore's report as text: the set, the preflight, each file, the
+/// packages, and last the backup of what the restore replaced, when it
+/// made one. Restoring that backup puts those files back.
+fn restore_backup_report_text(report: &RestoreBackupReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Resource path: {}", report.resource_path.display());
+    let _ = writeln!(out, "Backup id: {}", report.backup_id);
+    let _ = writeln!(out, "Backup path: {}", report.backup_path.display());
+    let _ = writeln!(out, "Dry run: {}", yes_no(report.dry_run));
+    out.push_str(&preflight_report_text(&report.preflight));
     for action in &report.actions {
         let verb = match action.action {
             RestoreBackupActionKind::WouldRestore => "Would restore",
             RestoreBackupActionKind::Restored => "Restored",
         };
-        println!("  {verb}: {}", action.target_path.display());
-        println!("    Source: {}", action.source_path.display());
+        let _ = writeln!(out, "  {verb}: {}", action.target_path.display());
+        let _ = writeln!(out, "    Source: {}", action.source_path.display());
         if let Some(current_backup_path) = &action.current_backup_path {
-            println!("    Current file backup: {}", current_backup_path.display());
+            let _ = writeln!(
+                out,
+                "    Current file backup: {}",
+                current_backup_path.display()
+            );
         }
-        println!("    Size: {}", action.size);
-        println!("    SHA-256: {}", action.sha256);
+        let _ = writeln!(out, "    Size: {}", action.size);
+        let _ = writeln!(out, "    SHA-256: {}", action.sha256);
     }
     for target in &report.skipped_targets {
-        println!(
+        let _ = writeln!(
+            out,
             "  Skipped: {} (its backup never finished, so the file was never changed)",
             target.display()
         );
     }
     if let Some(package_id) = &report.package_id {
-        println!("Package: {package_id}");
+        let _ = writeln!(out, "Package: {package_id}");
     }
     for package in &report.packages {
-        print_restored_package(package, report.dry_run);
+        write_restored_package(&mut out, package, report.dry_run);
+    }
+    for package in &report.skipped_packages {
+        let _ = writeln!(out, "{}", package.package_id);
+        let _ = writeln!(
+            out,
+            "  {}",
+            skipped_package_text(package.reason, report.dry_run)
+        );
+    }
+    if let Some(set_id) = &report.before_restore_set_id {
+        let _ = writeln!(out, "Backup of what this restore replaced: {set_id}");
+    }
+    out
+}
+
+/// Why a restore of a whole set left a package out, or in a dry run would,
+/// as the CLI says it.
+fn skipped_package_text(reason: SkippedPackageReason, dry_run: bool) -> &'static str {
+    match (reason, dry_run) {
+        (SkippedPackageReason::NothingOfItInSet, true) => {
+            "Would not be restored: none of its files are in this backup. RABBIT's records of \
+             it would stay as they are."
+        }
+        (SkippedPackageReason::NothingOfItInSet, false) => {
+            "Not restored: none of its files are in this backup. RABBIT's records of it stay as \
+             they are."
+        }
     }
 }
 
 /// What a restore did for a package from an uninstall set, besides putting
 /// its files back.
-fn print_restored_package(package: &RestoredPackage, dry_run: bool) {
+fn write_restored_package(out: &mut String, package: &RestoredPackage, dry_run: bool) {
     let (back, off) = if dry_run {
         ("would go back", "would come off")
     } else {
         ("went back", "came off")
     };
-    println!("{}", package.package_id);
+    let _ = writeln!(out, "{}", package.package_id);
     if package.receipt_merged {
-        println!(
+        let _ = writeln!(
+            out,
             "  Its entry in RABBIT's receipt {back}, and it {off} the list of packages you \
              uninstalled or turned down."
         );
@@ -2476,12 +2607,14 @@ fn print_restored_package(package: &RestoredPackage, dry_run: bool) {
         } else {
             ("came back", "is")
         };
-        println!(
+        let _ = writeln!(
+            out,
             "  RABBIT's receipt still had its entry, so only its files {files}. It {list} off \
              the list of packages you uninstalled or turned down."
         );
     } else {
-        println!(
+        let _ = writeln!(
+            out,
             "  It {off} the list of packages you uninstalled or turned down. RABBIT had no \
              receipt for this copy, so it has none now either."
         );
@@ -2489,18 +2622,22 @@ fn print_restored_package(package: &RestoredPackage, dry_run: bool) {
     let Some(value) = &package.langpack_before else {
         return;
     };
-    match (&package.langpack_error, package.langpack_restored) {
-        (Some(error), _) => println!(
+    let _ = match (&package.langpack_error, package.langpack_restored) {
+        (Some(error), _) => writeln!(
+            out,
             "  REAPER's language could not be set back to {value} ({error}). Choose it in \
              REAPER's preferences."
         ),
-        (None, true) if dry_run => println!("  REAPER's language would be set back to {value}."),
-        (None, true) => println!("  REAPER's language is set back to {value}."),
-        (None, false) => println!(
+        (None, true) if dry_run => {
+            writeln!(out, "  REAPER's language would be set back to {value}.")
+        }
+        (None, true) => writeln!(out, "  REAPER's language is set back to {value}."),
+        (None, false) => writeln!(
+            out,
             "  REAPER's language stays as it is: one was chosen since the uninstall, so RABBIT \
              doesn't set it back to {value}."
         ),
-    }
+    };
 }
 
 /// Parse repeated `--package-variant <package>=<variant>` flags into the map
@@ -3205,8 +3342,9 @@ fn uninstall_report_text(report: &UninstallReport, localizer: Option<&Localizer>
             })
             .collect();
         if restorable.is_empty() {
-            // Only what a failed package couldn't put back is in it.
-            let _ = writeln!(out, "Backup set: {set_id}.");
+            // Only what a failed package couldn't put back is in it. No
+            // period after the id: one copied with it names no set.
+            let _ = writeln!(out, "Backup set: {set_id}");
         } else {
             let names: Vec<&str> = restorable
                 .iter()
@@ -3957,10 +4095,20 @@ fn platform_name(platform: Platform) -> &'static str {
 }
 
 fn print_preflight_report(report: &PreflightReport) {
-    println!("Preflight passed: {}", yes_no(report.passed));
+    print!("{}", preflight_report_text(report));
+}
+
+fn preflight_report_text(report: &PreflightReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Preflight passed: {}", yes_no(report.passed));
     for check in &report.checks {
-        println!("  {}: {:?}: {}", check.name, check.status, check.message);
+        let _ = writeln!(
+            out,
+            "  {}: {:?}: {}",
+            check.name, check.status, check.message
+        );
     }
+    out
 }
 
 fn print_plan(plan: &rabbit_core::plan::InstallPlan) {
@@ -4255,6 +4403,466 @@ mod tests {
             .join()
             .expect("the command must not overflow its stack")
             .unwrap();
+    }
+
+    /// An id that names no backup set says the set was deleted or never
+    /// existed, and gives the command that lists what is left. The engine's
+    /// own message has no CLI syntax in it.
+    #[test]
+    fn restore_backup_says_how_to_list_what_is_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        std::fs::create_dir_all(&resource).unwrap();
+
+        let args: Vec<std::ffi::OsString> = vec![
+            "rabbit".into(),
+            "restore-backup".into(),
+            "--resource-path".into(),
+            resource.clone().into_os_string(),
+            "--backup-id".into(),
+            "unix-1".into(),
+        ];
+        let error = super::run_args(args).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            format!(
+                "The backup unix-1 was deleted or never existed. rabbit backups --resource-path \
+                 \"{}\" lists what is left.",
+                resource.display()
+            )
+        );
+        let engine = rabbit_core::rollback::restore_backup_set(
+            &resource,
+            "unix-1",
+            &rabbit_core::rollback::RestoreBackupOptions {
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!engine.contains("rabbit backups"), "{engine}");
+        // Nothing was made by looking.
+        assert!(!resource.join("RABBIT").exists());
+    }
+
+    /// A backup holding a copy of RABBIT's records is refused, and the CLI
+    /// adds the folder the copy stays in. A backup an update wrote is
+    /// refused in the engine's own words. Neither changes the records.
+    #[test]
+    fn restore_backup_refuses_copies_of_the_records_and_says_where_they_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let receipt = resource.join("RABBIT").join("install-state.json");
+        std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+        std::fs::write(&receipt, b"records").unwrap();
+        let set_with_a_receipt_copy = resource.join("RABBIT").join("backups").join("unix-1");
+        std::fs::create_dir_all(set_with_a_receipt_copy.join("RABBIT")).unwrap();
+        std::fs::write(
+            set_with_a_receipt_copy
+                .join("RABBIT")
+                .join("install-state.json"),
+            b"old records",
+        )
+        .unwrap();
+        rabbit_core::rollback::BackupSetWriter::new(&resource, "unix-2", "install-replacement")
+            .copy_receipt_if_present()
+            .unwrap()
+            .unwrap();
+
+        let restore = |backup_id: &str| {
+            let args: Vec<std::ffi::OsString> = vec![
+                "rabbit".into(),
+                "restore-backup".into(),
+                "--resource-path".into(),
+                resource.clone().into_os_string(),
+                "--backup-id".into(),
+                backup_id.into(),
+            ];
+            super::run_args(args).unwrap_err().to_string()
+        };
+
+        assert_eq!(
+            restore("unix-1"),
+            format!(
+                "The backup unix-1 holds a copy of RABBIT's records, so RABBIT doesn't restore \
+                 it: copying the records back would undo every change to them since the backup \
+                 was made. The copy stays in the backup, in the folder \"{}\".",
+                set_with_a_receipt_copy.display()
+            )
+        );
+        assert_eq!(
+            restore("unix-2"),
+            "The backup unix-2 holds files an update replaced, and RABBIT can't restore \
+             earlier versions yet. The backup stays as it is"
+        );
+        assert_eq!(std::fs::read(&receipt).unwrap(), b"records");
+    }
+
+    /// A package an uninstall's backup records with none of its files is
+    /// refused with `--package` in the engine's own words, and a dry run of
+    /// the whole set leaves it out, names it, and goes ahead with the rest.
+    #[test]
+    fn restore_backup_refuses_a_package_with_nothing_in_the_backup() {
+        use rabbit_core::rollback::{RestoreBackupOptions, SkippedPackageReason};
+
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugin = resource.join("UserPlugins").join("reaper_sws-x64.dll");
+        std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        std::fs::write(&plugin, b"sws").unwrap();
+        let mut writer =
+            rabbit_core::rollback::BackupSetWriter::new(&resource, "uninstall-unix-1", "uninstall");
+        for package in ["reapack", "sws"] {
+            writer
+                .record_package(
+                    package,
+                    rabbit_core::rollback::BackupPackageRecord::default(),
+                )
+                .unwrap();
+        }
+        writer.move_file(Some("sws"), &plugin, None, false).unwrap();
+        let restore = |package: Option<&str>| {
+            let mut args: Vec<std::ffi::OsString> = vec![
+                "rabbit".into(),
+                "restore-backup".into(),
+                "--resource-path".into(),
+                resource.clone().into_os_string(),
+                "--backup-id".into(),
+                "uninstall-unix-1".into(),
+                "--allow-reaper-running".into(),
+            ];
+            if let Some(package) = package {
+                args.extend(["--package".into(), package.into()]);
+            }
+            super::run_args(args)
+        };
+
+        assert_eq!(
+            restore(Some("reapack")).unwrap_err().to_string(),
+            "None of the files of reapack are in the backup uninstall-unix-1, so there is \
+             nothing to restore. RABBIT's records stay as they are"
+        );
+        restore(None).unwrap();
+        assert!(!plugin.exists());
+        // What that dry run reported, and how the CLI words it.
+        let report = rabbit_core::rollback::restore_backup_set(
+            &resource,
+            "uninstall-unix-1",
+            &RestoreBackupOptions {
+                dry_run: true,
+                allow_reaper_running: true,
+                package_id: None,
+            },
+        )
+        .unwrap();
+        let restored: Vec<&str> = report
+            .packages
+            .iter()
+            .map(|package| package.package_id.as_str())
+            .collect();
+        assert_eq!(restored, ["sws"]);
+        let skipped: Vec<(&str, SkippedPackageReason)> = report
+            .skipped_packages
+            .iter()
+            .map(|package| (package.package_id.as_str(), package.reason))
+            .collect();
+        assert_eq!(
+            skipped,
+            [("reapack", SkippedPackageReason::NothingOfItInSet)]
+        );
+        assert!(!plugin.exists());
+        assert_eq!(
+            super::skipped_package_text(SkippedPackageReason::NothingOfItInSet, true),
+            "Would not be restored: none of its files are in this backup. RABBIT's records of \
+             it would stay as they are."
+        );
+        assert_eq!(
+            super::skipped_package_text(SkippedPackageReason::NothingOfItInSet, false),
+            "Not restored: none of its files are in this backup. RABBIT's records of it stay as \
+             they are."
+        );
+    }
+
+    /// `restore-backup --apply` always saves its report under RABBIT/logs,
+    /// as `uninstall --apply` does, and the report names the backup of what
+    /// the restore replaced, which the text says last. A dry run saves a
+    /// report only with --save-report, and `--report-path` writes where it
+    /// says.
+    #[test]
+    fn restore_backup_apply_always_saves_a_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugin = resource.join("UserPlugins").join("reaper_demo.dll");
+        std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        std::fs::write(&plugin, b"older").unwrap();
+        rabbit_core::rollback::BackupSetWriter::new(&resource, "unix-1", "before-restore")
+            .copy_file(None, &plugin)
+            .unwrap();
+        std::fs::write(&plugin, b"newer").unwrap();
+        let logs = resource.join("RABBIT").join("logs");
+        let logged = || -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(&logs)
+                .map(|entries| {
+                    entries
+                        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                        .collect()
+                })
+                .unwrap_or_default();
+            names.sort();
+            names
+        };
+        let restore = |extra: &[&str]| {
+            let mut args: Vec<std::ffi::OsString> = vec![
+                "rabbit".into(),
+                "restore-backup".into(),
+                "--resource-path".into(),
+                resource.clone().into_os_string(),
+                "--backup-id".into(),
+                "unix-1".into(),
+                "--allow-reaper-running".into(),
+            ];
+            args.extend(extra.iter().map(Into::into));
+            super::run_args(args).unwrap();
+        };
+        let is_report = |names: &[String]| {
+            names.len() == 2
+                && names[0].starts_with("restore-backup-unix-")
+                && names[0].ends_with(".json")
+                && names[1] == names[0].replace(".json", ".txt")
+        };
+
+        restore(&[]);
+        assert!(logged().is_empty());
+        assert_eq!(std::fs::read(&plugin).unwrap(), b"newer");
+
+        restore(&["--save-report"]);
+        assert!(is_report(&logged()), "{:?}", logged());
+        std::fs::remove_dir_all(&logs).unwrap();
+
+        restore(&["--apply"]);
+        assert_eq!(std::fs::read(&plugin).unwrap(), b"older");
+        let names = logged();
+        assert!(is_report(&names), "{names:?}");
+        let envelope: rabbit_core::report::SavedJsonReport =
+            serde_json::from_str(&std::fs::read_to_string(logs.join(&names[0])).unwrap()).unwrap();
+        let report: rabbit_core::rollback::RestoreBackupReport =
+            serde_json::from_value(envelope.report).unwrap();
+        assert!(!report.dry_run);
+        let set_id = report
+            .before_restore_set_id
+            .clone()
+            .expect("the backup of what the restore replaced");
+        assert_eq!(
+            std::fs::read(
+                resource
+                    .join("RABBIT")
+                    .join("backups")
+                    .join(&set_id)
+                    .join("UserPlugins")
+                    .join("reaper_demo.dll")
+            )
+            .unwrap(),
+            b"newer"
+        );
+        let line = format!("Backup of what this restore replaced: {set_id}\n");
+        let text = super::restore_backup_report_text(&report);
+        assert!(text.ends_with(&line), "{text}");
+        let unchanged = rabbit_core::rollback::RestoreBackupReport {
+            before_restore_set_id: None,
+            ..report
+        };
+        let text = super::restore_backup_report_text(&unchanged);
+        assert!(
+            !text.contains("Backup of what this restore replaced"),
+            "{text}"
+        );
+
+        // `--report-path` still writes where it says, beside the report the
+        // restore saved by itself.
+        std::fs::remove_dir_all(&logs).unwrap();
+        let elsewhere = dir.path().join("elsewhere").join("r.json");
+        restore(&["--apply", "--report-path", elsewhere.to_str().unwrap()]);
+        assert!(elsewhere.is_file());
+        assert!(elsewhere.with_extension("txt").is_file());
+        let names = logged();
+        assert!(is_report(&names), "{names:?}");
+    }
+
+    /// `--save-report` never writes over another report of the same name,
+    /// such as the one a real restore or uninstall saved in the same
+    /// second, which names that run's backup set: it saves under a free
+    /// name. `--report-path` still writes where it says.
+    #[test]
+    fn save_report_never_replaces_another_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let logs = resource.join("RABBIT").join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        for operation in ["restore-backup", "uninstall"] {
+            let taken: Vec<std::path::PathBuf> = (now..now + 10)
+                .map(|seconds| logs.join(format!("{operation}-unix-{seconds}.json")))
+                .collect();
+            for path in &taken {
+                std::fs::write(path, b"a real run's report").unwrap();
+            }
+
+            super::save_cli_report(
+                &resource,
+                None,
+                None,
+                true,
+                operation,
+                &serde_json::json!({"dry_run": true}),
+            )
+            .unwrap();
+
+            for path in &taken {
+                assert_eq!(std::fs::read(path).unwrap(), b"a real run's report");
+            }
+            let saved = std::fs::read_dir(&logs)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(operation)
+                        && !taken.contains(path)
+                })
+                .count();
+            assert_eq!(saved, 2, "{operation}: a .json and a .txt");
+
+            super::save_cli_report(
+                &resource,
+                None,
+                Some(taken[0].clone()),
+                false,
+                operation,
+                &serde_json::json!({"named": true}),
+            )
+            .unwrap();
+            let named = std::fs::read_to_string(&taken[0]).unwrap();
+            assert!(named.contains("\"named\": true"), "{named}");
+        }
+    }
+
+    /// Run as root on macOS, as under sudo, `restore-backup --apply`
+    /// refuses in the CLI's own words, without suggesting sudo.
+    #[test]
+    fn restore_backup_under_sudo_refuses_in_the_clis_words() {
+        let error = super::cli_restore_error(
+            rabbit_core::RabbitError::RestoreAsRoot,
+            std::path::Path::new("REAPER"),
+        );
+        assert_eq!(error.to_string(), super::RESTORE_AS_ROOT_TEXT);
+        assert!(error.to_string().contains("without sudo"), "{error}");
+    }
+
+    /// `install-extension --apply` takes the per-target lock, as the
+    /// package operation does, so it never writes files, a backup set or the
+    /// receipt while another RABBIT installs, uninstalls or restores on the
+    /// same REAPER. With the lock held it fails with the lock error and
+    /// changes nothing, though the artifact is already in the cache. Once
+    /// the lock is free, the same artifact installs.
+    #[test]
+    fn install_extension_takes_the_lock() {
+        /// Every file below `root`, with what it holds.
+        fn files_below(root: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+            let mut found = Vec::new();
+            let mut folders = vec![root.to_path_buf()];
+            while let Some(folder) = folders.pop() {
+                for entry in std::fs::read_dir(&folder).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        folders.push(path);
+                    } else {
+                        let contents = std::fs::read(&path).unwrap();
+                        found.push((path, contents));
+                    }
+                }
+            }
+            found.sort();
+            found
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugin = resource.join("UserPlugins").join("reaper_reapack-x64.dll");
+        std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        std::fs::write(&plugin, b"reapack 1.2.4").unwrap();
+        let cache = dir.path().join("cache");
+        let cached = cache
+            .join("reapack")
+            .join("1.2.5")
+            .join("reaper_reapack-x64.dll");
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, b"reapack 1.2.5").unwrap();
+        // Already in the cache, so nothing is downloaded.
+        let artifact = rabbit_core::artifact::ArtifactDescriptor {
+            package_id: "reapack".to_string(),
+            version: rabbit_core::version::Version::parse("1.2.5").unwrap(),
+            platform: rabbit_core::model::Platform::current().unwrap(),
+            architecture: rabbit_core::model::Architecture::current(),
+            kind: rabbit_core::artifact::ArtifactKind::ExtensionBinary,
+            url: "https://example.test/reaper_reapack-x64.dll".to_string(),
+            file_name: "reaper_reapack-x64.dll".to_string(),
+            channel: None,
+        };
+        let options = rabbit_core::install::InstallOptions {
+            dry_run: false,
+            allow_reaper_running: true,
+            target_app_path: None,
+            package_variants: Default::default(),
+        };
+        let packages = vec!["reapack".to_string()];
+        let apply = || {
+            super::apply_install_extension(
+                &resource,
+                &packages,
+                std::slice::from_ref(&artifact),
+                &cache,
+                &options,
+            )
+        };
+        // ReaPack was uninstalled before, so the run also takes it off the
+        // list of refusals, which must wait for the lock as well.
+        let mut state = rabbit_core::receipt::InstallState::default();
+        state.declined_packages.insert("reapack".to_string());
+        rabbit_core::receipt::save_install_state(&resource, &state).unwrap();
+        let other_rabbit = rabbit_core::lock::acquire_package_install_lock(&resource).unwrap();
+        let before = files_below(dir.path());
+        assert!(
+            before
+                .iter()
+                .any(|(path, _)| path.ends_with("install-state.json")),
+            "{before:?}"
+        );
+
+        let error = apply().unwrap_err();
+
+        assert!(
+            matches!(
+                error.downcast_ref::<rabbit_core::RabbitError>(),
+                Some(rabbit_core::RabbitError::PackageInstallInProgress { .. })
+            ),
+            "{error}"
+        );
+        assert_eq!(files_below(dir.path()), before);
+        drop(other_rabbit);
+        let report = apply().unwrap();
+        assert_eq!(std::fs::read(&plugin).unwrap(), b"reapack 1.2.5");
+        assert!(report.backup_manifest_path.is_some(), "{report:?}");
+        assert!(!rabbit_core::receipt::declined_packages(&resource).contains("reapack"));
+        assert!(
+            !rabbit_core::lock::default_package_install_lock_path(&resource).exists(),
+            "the lock went with the run"
+        );
     }
 
     /// In a debug build, clap's parser alone takes more than the 1 MB of
@@ -7125,7 +7733,7 @@ mod tests {
             )
         };
         let text = super::uninstall_report_text(&report, None);
-        assert!(text.contains(&format!("Backup set: {set_id}.\n")), "{text}");
+        assert!(text.contains(&format!("Backup set: {set_id}\n")), "{text}");
         assert!(!text.contains("restore-backup"), "{text}");
     }
 

@@ -40,7 +40,7 @@ use crate::receipt::{
     InstallState, PackageReceiptParams, load_install_state, save_install_state,
     upsert_package_receipt,
 };
-use crate::rollback::BackupSetWriter;
+use crate::rollback::{BackupSetWriter, RECORDS_BACKUP_REASON};
 use crate::uninstall::UninstallRoots;
 
 use self::osara::osara_manual_steps;
@@ -1016,7 +1016,7 @@ fn execute_operation_with(
                 let mut backups = BackupSetWriter::new(
                     resource_path,
                     &operation_timestamp(),
-                    "unattended-receipt-update",
+                    RECORDS_BACKUP_REASON,
                 );
                 receipt_backup_path = backups.copy_receipt_if_present()?;
                 if receipt_backup_path.is_some() {

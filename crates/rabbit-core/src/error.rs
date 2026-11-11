@@ -67,8 +67,51 @@ pub enum RabbitError {
         actual: String,
     },
 
-    #[error("invalid backup id: {0}")]
+    /// A backup set id that can't name a set at all: not exactly one plain
+    /// folder name, or one Windows would read as a drive, a stream or a
+    /// device. Refused before anything is read.
+    #[error(
+        "\"{0}\" can't be a backup id: an id is the name of one backup in RABBIT's backups folder, and RABBIT never names a backup like that"
+    )]
     InvalidBackupId(String),
+
+    /// A well-formed backup set id that names no folder in RABBIT's backups
+    /// folder, nor in its folder of unfinished deletions.
+    #[error("The backup {backup_id} was deleted or never existed")]
+    BackupSetNotFound { backup_id: String },
+
+    /// A backup set id that names no set exactly, while a set whose name
+    /// differs only in upper and lower case is there. Only exact names
+    /// count, so it isn't restored, but it isn't gone either.
+    #[error(
+        "There is no backup named {backup_id}. Backup names must match exactly, upper and lower case included; there is one named {existing}"
+    )]
+    BackupIdDiffersInCase { backup_id: String, existing: String },
+
+    /// A backup set id that names no set only because of the dots or spaces
+    /// at its end, while the id without them names a set exactly: it was
+    /// copied with the period after it, for example. Only exact ids are
+    /// used, so the set isn't restored, but it is named. On Windows such an
+    /// id isn't even well-formed, since Windows drops those characters.
+    #[error(
+        "\"{backup_id}\" names no backup: RABBIT never ends a backup's name in a dot or a space. There is one named {existing}"
+    )]
+    BackupIdEndsInDotOrSpace { backup_id: String, existing: String },
+
+    /// A backup set id that names only a set whose deletion started and
+    /// didn't finish. Part of it may be gone already, so it isn't restored.
+    #[error(
+        "The backup {backup_id} is being deleted: a deletion of it started and didn't finish, so RABBIT doesn't restore it"
+    )]
+    BackupSetBeingDeleted { backup_id: String },
+
+    /// RABBIT's folder, its backups folder, a backup set, or something in a
+    /// set is a symbolic link or junction. RABBIT never follows one there,
+    /// wherever it leads.
+    #[error(
+        "RABBIT doesn't use {path}: it is a symbolic link or junction, and RABBIT never follows one in its backups"
+    )]
+    BackupPathIsLink { path: PathBuf },
 
     #[error("backup not found at {0}")]
     BackupNotFound(PathBuf),
@@ -86,6 +129,60 @@ pub enum RabbitError {
         package_id: String,
         reason: String,
     },
+
+    /// A backup set an update wrote, whole or for one package. Putting its
+    /// files back would leave RABBIT's receipt describing the newer
+    /// version, so it is refused, with nothing changed, until RABBIT can go
+    /// back to an earlier version by changing only that package's entry.
+    #[error(
+        "The backup {backup_id} holds files an update replaced, and RABBIT can't restore earlier versions yet. The backup stays as it is"
+    )]
+    EarlierVersionNotYet { backup_id: String },
+
+    /// A backup set that holds only a copy of RABBIT's receipt, made after
+    /// vendor installers ran. Nothing in it goes back.
+    #[error(
+        "The backup {backup_id} holds only a copy of RABBIT's records, so there is nothing in it to restore"
+    )]
+    RecordsOnly { backup_id: String },
+
+    /// A backup set that holds a copy of RABBIT's receipt, such as one a
+    /// restore of an update's set wrote. Copying it back would undo every
+    /// change to the receipt since, uninstalls included, so the set is
+    /// refused, with nothing changed. `backup_path` is the set's folder,
+    /// where the copy stays.
+    #[error(
+        "The backup {backup_id} holds a copy of RABBIT's records, so RABBIT doesn't restore it: copying the records back would undo every change to them since the backup was made. The copy stays in the backup"
+    )]
+    ReceiptInSet {
+        backup_id: String,
+        backup_path: PathBuf,
+    },
+
+    /// Packages an uninstall's backup set records, but none of whose files
+    /// are in it: the uninstall found none to move, for example, or stopped
+    /// before any copy of them finished. Putting back their records alone
+    /// would make RABBIT count them as installed with no files there, so a
+    /// restore of one of them is refused, and so is a restore of a whole
+    /// set that has nothing else to put back. Nothing changes.
+    #[error(
+        "None of the files of {} are in the backup {backup_id}, so there is nothing to restore. RABBIT's records stay as they are",
+        names_in_a_sentence(.package_ids)
+    )]
+    NothingOfItInSet {
+        backup_id: String,
+        package_ids: Vec<String>,
+    },
+
+    /// A real restore of a backup was started on macOS with RABBIT itself
+    /// running as root, as under `sudo`. Refused after the set is found and
+    /// the set and package refusals, before the REAPER check, the lock and
+    /// any change: the files it puts back, the backup of the files they
+    /// replace and RABBIT's records would all be root's.
+    #[error(
+        "RABBIT is running as root, as it does under sudo, and doesn't restore backups like that: the files it puts back, the backup of the files they replace and RABBIT's records would all be root's. Run RABBIT as yourself, not with sudo"
+    )]
+    RestoreAsRoot,
 
     #[error("no artifact found for {package_id} on {platform:?}/{architecture:?}")]
     NoArtifactFound {
@@ -221,6 +318,15 @@ fn process_end_text(exit_code: Option<i32>) -> String {
     }
 }
 
+/// Names as a sentence lists them: `a`, `a and b`, `a, b and c`.
+fn names_in_a_sentence(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [name] => name.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 /// Where [`RabbitError::ProcessFailed`] names the installer's log, if any.
 fn process_log_text(log_path: Option<&std::path::Path>) -> String {
     log_path
@@ -343,6 +449,30 @@ mod tests {
             assert!(!text.contains("Some("), "{text}");
             assert!(!text.contains("None"), "{text}");
         }
+    }
+
+    /// A refusal of packages with no file in a backup names them as a
+    /// sentence lists them.
+    #[test]
+    fn nothing_of_it_names_its_packages_as_a_sentence() {
+        let text = |ids: &[&str]| {
+            RabbitError::NothingOfItInSet {
+                backup_id: "uninstall-unix-1".to_string(),
+                package_ids: ids.iter().map(ToString::to_string).collect(),
+            }
+            .to_string()
+        };
+
+        assert!(
+            text(&["sws"]).starts_with("None of the files of sws are in the backup"),
+            "{}",
+            text(&["sws"])
+        );
+        assert!(text(&["ffmpeg", "sws"]).starts_with("None of the files of ffmpeg and sws are"));
+        assert!(
+            text(&["ffmpeg", "reapack", "sws"])
+                .starts_with("None of the files of ffmpeg, reapack and sws are")
+        );
     }
 
     /// `ERROR_VIRUS_INFECTED` (225) and `ERROR_VIRUS_DELETED` (226) exist
