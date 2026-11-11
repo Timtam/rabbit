@@ -794,8 +794,9 @@ doesn't restore a backup that holds a copy of its records, such as one an older
 version of RABBIT made when it restored an update's backup. The copy stays in
 the backup, and the message names its folder. Backups from updates, which hold
 the files an update replaced, can't be restored yet either, and neither can the
-backups that hold only a copy of RABBIT's records. Nothing changes, and each of
-these backups stays as it is.
+backups that hold only a copy of RABBIT's records, which older versions made
+after vendor installers ran. Nothing changes, and each of these backups stays as
+it is. RABBIT no longer puts a copy of its records into any backup.
 
 A `restore-backup --apply` that finishes saves a report in `RABBIT\logs`. When
 it replaced files, it also names the backup set it made of them: restoring that
@@ -806,7 +807,8 @@ an error saves no report yet, but `rabbit backups` lists that set, as
 
 RABBIT never follows a symbolic link or junction in its backups. If `RABBIT` or
 `RABBIT\backups` is one, `rabbit backups` and `restore-backup` say so and
-change nothing, and so does `uninstall`, whose backup would be the only copy of
+change nothing, and so do installing, whose backup would be the only copy of
+what an update replaces, and `uninstall`, whose backup would be the only copy of
 what it removes. Make it a real folder again, with the backups inside it,
 first. A restore also never writes through a link or junction that leads out of
 the resource folder or into `RABBIT`.
@@ -862,7 +864,7 @@ Surge XT's Windows installer writes its own log there too
 Backups go to `<resource>/RABBIT/backups/<id>/`, named by what made them:
 `unix-<time>` for an update, `uninstall-unix-<time>`,
 `restore-unix-<time>-before-restore`, and `unattended-unix-<time>-<n>` for the
-copies of the key map and of RABBIT's records made when vendor installers run.
+key map OSARA's key map replaced.
 The download cache is a `rabbit-cache` folder in your temporary folder, usually
 `%TEMP%\rabbit-cache` on Windows and `$TMPDIR/rabbit-cache` on macOS. It can be
 deleted safely at any time, and the CLI's `--cache-dir` points a single run

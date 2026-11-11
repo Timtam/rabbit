@@ -8,11 +8,12 @@ use crate::model::Platform;
 use crate::osara_keymap::script_key;
 use crate::package::PACKAGE_OSARA;
 use crate::reapack::extract_scr_lines;
+use crate::rollback::{BackupSetWriter, KEYMAP_BACKUP_REASON, KeymapOrigin};
 use crate::text_file::{read_text_file_lossless, write_text_file_lossless};
 
 use super::{
     PackageAutomationSupport, PlannedAutomationKind, PlannedExecutionKind,
-    PlannedExecutionOverride, UnattendedPostInstallReport, backup_file_for_unattended_change,
+    PlannedExecutionOverride, UnattendedPostInstallReport, operation_timestamp,
     replace_file_from_source, target_likely_portable,
 };
 
@@ -40,15 +41,15 @@ pub(super) fn automation_support_for(
 }
 
 /// OSARA-specific message variant used when the unattended path also applied
-/// the key-map replacement step. Returns `None` when the replacement was not
-/// requested (caller should fall back to the generic message). The pair
-/// is (English text for the saved JSON report, structured code for the
-/// localizable UI surface).
+/// the key-map replacement step. Returns `None` when the key map wasn't
+/// replaced, because it wasn't asked for or its step failed (caller should
+/// fall back to the generic message). The pair is (English text for the
+/// saved JSON report, structured code for the localizable UI surface).
 pub(super) fn unattended_install_message(
-    replace_osara_keymap: bool,
+    keymap_replaced: bool,
     keymap_was_backed_up: bool,
 ) -> Option<(String, super::PackageOperationMessage)> {
-    if !replace_osara_keymap {
+    if !keymap_replaced {
         return None;
     }
     Some(if keymap_was_backed_up {
@@ -109,12 +110,14 @@ pub(super) fn receipt_paths(resource_path: &Path, replace_osara_keymap: bool) ->
 
 /// Post-install fixups specific to OSARA: clean up the portable
 /// uninstaller stub on Windows and apply the key-map replacement when the
-/// user opted into it.
+/// user opted into it. `keymap_replacement` is `None` without the
+/// replacement, and otherwise what the key map was before OSARA's install
+/// (see [`apply_osara_keymap_replacement`]).
 pub(super) fn post_install_unattended(
     resource_path: &Path,
     platform: Platform,
     target_app_path: Option<&Path>,
-    replace_osara_keymap: bool,
+    keymap_replacement: Option<KeymapOrigin>,
 ) -> Result<UnattendedPostInstallReport> {
     let mut report = UnattendedPostInstallReport::default();
     if matches!(platform, Platform::Windows)
@@ -127,8 +130,8 @@ pub(super) fn post_install_unattended(
             std::fs::remove_file(&uninstall_path).with_path(&uninstall_path)?;
         }
     }
-    if replace_osara_keymap {
-        report = apply_osara_keymap_replacement(resource_path)?;
+    if let Some(origin) = keymap_replacement {
+        report = apply_osara_keymap_replacement(resource_path, origin)?;
     }
     Ok(report)
 }
@@ -398,8 +401,15 @@ pub(super) fn osara_manual_steps(
     steps
 }
 
+/// Replace `reaper-kb.ini` with OSARA's key map, keeping the scripts it
+/// registers. An existing `reaper-kb.ini` goes into a key map set first,
+/// which records `origin`: what the key map was, as read before OSARA's
+/// install overwrote the OSARA key map it is compared with. When that
+/// backup can't be made, as while the set would go behind a link, the key
+/// map stays as it is, and the error says why.
 pub(super) fn apply_osara_keymap_replacement(
     resource_path: &Path,
+    origin: KeymapOrigin,
 ) -> Result<UnattendedPostInstallReport> {
     let replacement_source = resource_path.join("KeyMaps").join("OSARA.ReaperKeyMap");
     if !replacement_source.is_file() {
@@ -442,17 +452,19 @@ pub(super) fn apply_osara_keymap_replacement(
             .filter(|line| script_key(line).is_none_or(|key| registered.insert(owned_key(key))))
             .collect();
 
-        let (backup_path, backup_manifest_path) = backup_file_for_unattended_change(
-            resource_path,
-            PACKAGE_OSARA,
-            &current_keymap,
-            "osara-keymap-replacement",
-        )?;
-        report.backup_paths.push(backup_path);
-        report.backup_manifest_path = Some(backup_manifest_path);
+        // The origin is noted before the copy, so the set never holds the
+        // key map without it.
+        let mut backups =
+            BackupSetWriter::new(resource_path, &operation_timestamp(), KEYMAP_BACKUP_REASON);
+        backups.set_keymap_origin(origin)?;
+        report
+            .backup_paths
+            .push(backups.copy_file(Some(PACKAGE_OSARA), &current_keymap)?);
+        report.backup_manifest_path = Some(backups.manifest_path());
     }
 
     replace_file_from_source(&replacement_source, &current_keymap)?;
+    report.keymap_replaced = true;
 
     if !preserved_scr_lines.is_empty() {
         append_lines_preserving_newline(&current_keymap, &preserved_scr_lines)?;
@@ -493,6 +505,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::apply_osara_keymap_replacement;
+    use crate::osara_keymap::osara_keymap_state;
+    use crate::rollback::{BackupManifest, KEYMAP_BACKUP_REASON, KeymapOrigin};
 
     fn seed_osara_replacement_source(resource_path: &std::path::Path, body: &str) {
         let keymaps = resource_path.join("KeyMaps");
@@ -512,7 +526,7 @@ mod tests {
                         SCR 260 32060 RScafef00d \"Script: midi.lua\" midi.lua\r\n";
         fs::write(resource_path.join("reaper-kb.ini"), existing).unwrap();
 
-        let report = apply_osara_keymap_replacement(resource_path).unwrap();
+        let report = apply_osara_keymap_replacement(resource_path, KeymapOrigin::Unknown).unwrap();
 
         let new_contents = fs::read_to_string(resource_path.join("reaper-kb.ini")).unwrap();
         assert!(new_contents.starts_with("osara keymap\r\n"));
@@ -554,7 +568,7 @@ mod tests {
         )
         .unwrap();
 
-        apply_osara_keymap_replacement(resource_path).unwrap();
+        apply_osara_keymap_replacement(resource_path, KeymapOrigin::Unknown).unwrap();
 
         // The same script registered in another section stays.
         assert_eq!(
@@ -577,7 +591,7 @@ mod tests {
         )
         .unwrap();
 
-        apply_osara_keymap_replacement(resource_path).unwrap();
+        apply_osara_keymap_replacement(resource_path, KeymapOrigin::Unknown).unwrap();
 
         assert_eq!(
             fs::read_to_string(resource_path.join("reaper-kb.ini")).unwrap(),
@@ -591,7 +605,7 @@ mod tests {
         let resource_path = dir.path();
         seed_osara_replacement_source(resource_path, "osara keymap\r\n");
 
-        let report = apply_osara_keymap_replacement(resource_path).unwrap();
+        let report = apply_osara_keymap_replacement(resource_path, KeymapOrigin::Unknown).unwrap();
 
         assert_eq!(
             fs::read_to_string(resource_path.join("reaper-kb.ini")).unwrap(),
@@ -616,7 +630,7 @@ mod tests {
         existing.extend_from_slice(b"s tool.lua\" tool.lua\r\n");
         fs::write(resource_path.join("reaper-kb.ini"), &existing).unwrap();
 
-        apply_osara_keymap_replacement(resource_path).unwrap();
+        apply_osara_keymap_replacement(resource_path, KeymapOrigin::Unknown).unwrap();
 
         let new_contents = fs::read(resource_path.join("reaper-kb.ini")).unwrap();
         let lossy = String::from_utf8_lossy(&new_contents);
@@ -638,7 +652,7 @@ mod tests {
         )
         .unwrap();
 
-        apply_osara_keymap_replacement(resource_path).unwrap();
+        apply_osara_keymap_replacement(resource_path, KeymapOrigin::Unknown).unwrap();
 
         let new_contents = fs::read_to_string(resource_path.join("reaper-kb.ini")).unwrap();
         assert!(!new_contents.contains("\r\n"));
@@ -646,6 +660,93 @@ mod tests {
             new_contents,
             "osara keymap\nSCR 4 0 RSdeadbeef \"Script: foo.lua\" foo.lua\n"
         );
+    }
+
+    /// The key map backup records what the key map was, read before OSARA's
+    /// install, for each state: the user's own key map, OSARA's unchanged
+    /// one, REAPER's default keys (a `reaper-kb.ini` with only script
+    /// lines, which still goes into a backup), and unknown, with no OSARA
+    /// key map to compare with. The install then brings a newer OSARA key
+    /// map, which would make an unchanged one read as changed.
+    #[test]
+    fn the_key_map_backup_records_what_the_key_map_was() {
+        let older_osara = "KEY 1 65 40001 0\r\n";
+        let newer_osara = "KEY 1 65 40001 0\r\nKEY 1 66 40002 0\r\n";
+        let cases = [
+            (
+                "KEY 1 65 40044 0\r\n",
+                Some(older_osara),
+                KeymapOrigin::OwnKeymap,
+            ),
+            (older_osara, Some(older_osara), KeymapOrigin::UnchangedOsara),
+            (
+                "SCR 4 0 RSabc \"Custom: x.lua\" x.lua\r\n",
+                Some(older_osara),
+                KeymapOrigin::DefaultKeys,
+            ),
+            ("KEY 1 65 40044 0\r\n", None, KeymapOrigin::Unknown),
+        ];
+        for (keymap, osara_before, expected) in cases {
+            let dir = tempdir().unwrap();
+            let resource_path = dir.path();
+            fs::write(resource_path.join("reaper-kb.ini"), keymap).unwrap();
+            if let Some(osara) = osara_before {
+                seed_osara_replacement_source(resource_path, osara);
+            }
+            let origin = KeymapOrigin::from(osara_keymap_state(resource_path));
+            seed_osara_replacement_source(resource_path, newer_osara);
+
+            let report = apply_osara_keymap_replacement(resource_path, origin).unwrap();
+
+            let manifest: BackupManifest = serde_json::from_str(
+                &fs::read_to_string(report.backup_manifest_path.unwrap()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(manifest.keymap_origin, Some(expected), "{keymap:?}");
+            assert!(report.keymap_replaced);
+            assert_eq!(manifest.reason, KEYMAP_BACKUP_REASON);
+            assert!(manifest.created_unix.is_some());
+            assert_eq!(
+                fs::read_to_string(&report.backup_paths[0]).unwrap(),
+                keymap,
+                "{expected:?}"
+            );
+        }
+    }
+
+    /// Should `RABBIT` or `RABBIT/backups` have become a link after the
+    /// checks before the run, the key map's backup is refused, and
+    /// `reaper-kb.ini` stays the user's, byte for byte, with nothing
+    /// written where the link leads.
+    #[test]
+    fn the_key_map_stays_when_its_backup_would_go_behind_a_link() {
+        for linked in [&["RABBIT"][..], &["RABBIT", "backups"][..]] {
+            let dir = tempdir().unwrap();
+            let resource_path = dir.path().join("REAPER");
+            fs::create_dir_all(&resource_path).unwrap();
+            fs::write(resource_path.join("reaper-kb.ini"), "KEY 1 65 40044 0\r\n").unwrap();
+            seed_osara_replacement_source(&resource_path, "osara keymap\r\n");
+            let link = linked
+                .iter()
+                .fold(resource_path.clone(), |path, name| path.join(name));
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            let elsewhere = dir.path().join("Elsewhere");
+            fs::create_dir_all(&elsewhere).unwrap();
+            crate::uninstall::paths::link_folder(&link, &elsewhere);
+
+            let error = apply_osara_keymap_replacement(&resource_path, KeymapOrigin::OwnKeymap)
+                .unwrap_err();
+
+            assert!(
+                matches!(&error, crate::error::RabbitError::BackupPathIsLink { path } if *path == link),
+                "{linked:?}: {error:?}"
+            );
+            assert_eq!(
+                fs::read_to_string(resource_path.join("reaper-kb.ini")).unwrap(),
+                "KEY 1 65 40044 0\r\n"
+            );
+            assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "{linked:?}");
+        }
     }
 }
 

@@ -1583,9 +1583,12 @@ Extension files:
   or remove under `RABBIT/backups/<id>/`, named by what made them:
   `unix-<s>` for an update, `uninstall-unix-<s>`,
   `restore-unix-<s>-before-restore`, and `unattended-unix-<s>-<n>` for the
-  key map and receipt copies made when vendor installers run, or `-2` and
-  so on when a set already has that id. Vendor installers, and OSARA's
-  macOS archive, overwrite files with no backup.
+  key map OSARA's key map replaces, or `-2` and so on when a set already has
+  that id. Earlier versions also wrote an `unattended-unix-<s>-<n>` set
+  holding only a copy of the receipt after vendor installers ran
+  (`unattended-receipt-update`); RABBIT writes none any more, and no longer
+  copies the receipt into an update's set either. Vendor installers, and
+  OSARA's macOS archive, overwrite files with no backup.
   Files from inside the resource folder keep their relative path in the
   set; files from outside it (app2clap's CLAP folder) go under
   `external/<n>/`, beside a `<file>.rabbit-origin` note of their original
@@ -1645,13 +1648,29 @@ Extension files:
   period after it; neither is restored. `RABBIT`, `RABBIT/backups` and the
   set must be real folders. Restore and `rabbit backups` never follow a
   link or junction there or inside a set: a link or a badly named folder
-  is listed with a warning and never looked into. An uninstall refuses the
-  whole run before anything changes while `RABBIT` or `RABBIT/backups` is a
-  link (the `backup-folder` check), and its writer refuses to record a
-  package there should one appear in between: its set is the only copy of
-  what it moves. Updates and the unattended installers' key map and
-  receipt copies still write through such a link; those sets are listed
-  and restored once the folder is a real one again.
+  is listed with a warning and never looked into. So no run writes a set
+  while `RABBIT` or `RABBIT/backups` is a link. An uninstall refuses the
+  whole run before anything changes (the `backup-folder` check), and so
+  does an install: the install preflight has the same check, failing in a
+  dry run too, so setup's first step, which makes RABBIT's folders, stops
+  before it makes any; the package operation (the wizard's install,
+  `setup`, `apply-packages`) and `install-extension --apply` check it
+  before the lock or any download. Should the folder become a link in
+  between, the package operation usually finds it before the writer does:
+  it runs the install preflight again for each extension file it installs,
+  and that stops the rest of the run with the `backup-folder` error, as a
+  REAPER started mid-run does; what installed before it stays installed
+  and in the receipt. Past those checks, the writer refuses every write to
+  a set while `RABBIT`, `RABBIT/backups` or the set's own folder is a link
+  (`BackupPathIsLink`), its first write and every later one, before
+  anything is written. Then an update stops before it replaces the file,
+  and its staged copy goes again. OSARA's key map replacement leaves
+  `reaper-kb.ini` as it is, while OSARA itself is installed: its item says
+  only that OSARA was installed, not that the key map was replaced, and
+  the receipt doesn't list `reaper-kb.ini` among OSARA's files. A restore
+  stops at the first file it would back up, with the files before it
+  restored, as on any failed copy. An uninstall's package fails, and what
+  of it already moved goes back where it can.
 - A restore never copies a receipt file over `RABBIT/install-state.json`:
   an old copy would undo every change to the receipt since, uninstalls
   included. Restore puts no file from a set back anywhere in `RABBIT/`,
@@ -1665,8 +1684,38 @@ Extension files:
   (`unattended-receipt-update`), and any other set that holds a copy of the
   receipt, by its manifest or, without one, by its layout, such as the set a
   restore of an update's set wrote in earlier versions. The copy stays in
-  the set for anyone who needs it by hand. Updates and the unattended
-  installers still copy the receipt into their sets.
+  the set for anyone who needs it by hand. No run copies the receipt into a
+  set any more.
+- What a set records besides its files, in fields that are optional in the
+  manifest, so `schema_version` stays 1, older manifests load and restore as
+  before, and older versions ignore the fields:
+  - Every set: `created_unix`, the seconds since 1970 (UTC) when its folder
+    was made. `created_at` stays the id RABBIT asked for, which the folder
+    lacks when it got `-2`.
+  - An update's set (`install-replacement`): `replaced`, for each package
+    whose files it holds, the package's receipt entry from before the
+    update, or none when the receipt had none (a copy RABBIT didn't
+    install), and the version that replaced it. Each record is saved before
+    the package's first file is copied in, so the set never holds a file
+    without it; when that first copy fails, the record goes again, and so
+    does a set left empty. One install call writes one set: the wizard one
+    per package, `install-extension` one for all its packages. The records
+    aren't in `packages`, which older versions read as an uninstall's
+    whatever the set's reason: they would merge the old entry back while
+    only the replaced files came back.
+  - An uninstall's set: in `packages`, each package's receipt entry, the
+    `langpack=` value (below), and `with_settings`, whether this uninstall
+    moved the package's settings into the set: `false` when it records the
+    package, `true` once a settings file has moved, and `false` again when
+    a failed package's settings all went back. `None` in older sets.
+  - A key map set (`osara-keymap-replacement`): `keymap_origin`, what
+    `reaper-kb.ini` was, read before OSARA's install, which overwrites the
+    OSARA key map it is compared with: `own-keymap`, `unchanged-osara`,
+    `default-keys` (a `reaper-kb.ini` without key bindings or custom
+    actions, which still goes into a set) or `unknown` (no OSARA key map to
+    compare with, or one of the two unreadable). A value a later version
+    writes reads as `unknown`.
+  - A before-restore set: its files only.
 - Restoring a set an uninstall wrote merges each package's recorded entry
   into the current receipt instead, the package comes off
   `declined_packages`, and the `langpack=` value its uninstall replaced goes
@@ -1674,7 +1723,9 @@ Extension files:
   --package` does this for one package of the set. A package installed
   again since its uninstall is refused, with nothing changed, because its
   newer receipt entry describes newer files; so is `--package` for any other
-  set, which records no receipt entry per package. A receipt entry that is
+  set, which records no receipt entry in `packages`. An update's set keeps
+  its entries in `replaced` instead, which no restore merges: it is refused
+  whole and with `--package` (`EarlierVersionNotYet`). A receipt entry that is
   still the very one the set recorded is no reinstall: the uninstall stopped
   before it reached the receipt (RABBIT was ended halfway through the
   package, or a failed package's files couldn't all go back), or an earlier

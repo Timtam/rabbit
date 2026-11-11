@@ -259,6 +259,18 @@ from this file and posts it as the GitHub release body.
   REAPER's language stay as they are. A restore stopped by an error saves no
   report yet, but `rabbit backups` lists the backup it made, as
   `restore-unix-<time>-before-restore`.
+- An update's backup no longer holds a copy of RABBIT's records, and RABBIT
+  no longer makes a backup that holds nothing but a copy of them after a
+  vendor installer runs. A restore never copies them back, so they only took
+  up room. Instead, an update's backup notes, for each package whose files
+  it holds, RABBIT's record of that package from before the update and the
+  version that replaced it. Older backups stay as they are.
+- Installing and updating now change nothing while `RABBIT` or its `backups`
+  folder is a symbolic link or junction, and say why, as uninstalling does:
+  RABBIT keeps its backups there and never restores one from behind a link.
+  This holds for the wizard, `rabbit setup`, `rabbit apply-packages`,
+  `rabbit install-extension --apply` and `rabbit init-resource`, and a dry
+  run or `rabbit preflight` reports it too.
 
 ### Fixed
 
@@ -318,6 +330,10 @@ from this file and posts it as the GitHub release body.
   to `RABBIT\logs`, which the message names. A Surge XT update whose
   installer stopped is no longer reported as installed because the older
   version's files were still there.
+- When RABBIT can't back up your `reaper-kb.ini` before OSARA's key map
+  replaces it, it leaves your key map as it is, as before, but no longer
+  says that it replaced it. It now says only that OSARA was installed, and
+  its records no longer list your key map as one of OSARA's files.
 
 ### Security
 
@@ -338,9 +354,9 @@ from this file and posts it as the GitHub release body.
   inside one. `rabbit backups` lists such a link with a warning and never
   looks into it. When `RABBIT` or its backups folder is a link, it lists
   nothing and says why. Backups kept behind such a link, including those an
-  update or OSARA's key map replacement still makes there, have to be moved
-  back into a real folder before RABBIT lists or restores them; an
-  uninstall doesn't run until then. A restore also never puts a file back
+  update or OSARA's key map replacement made there before, have to be moved
+  back into a real folder before RABBIT lists or restores them; an install
+  or uninstall doesn't run until then. A restore also never puts a file back
   through a link or junction that leads out of the REAPER resource folder or
   into `RABBIT`, nor over one, nor through one below the CLAP folder, and
   never by a name that Windows could open as another one or as a device,

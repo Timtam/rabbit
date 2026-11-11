@@ -34,8 +34,8 @@ use rabbit_core::plan::{
 };
 use rabbit_core::portable::{PortabilityCheckStatus, PortabilityReport, check_portable_runtime};
 use rabbit_core::preflight::{
-    PreflightOptions, PreflightReport, PreflightStatus, ensure_resource_path_ready,
-    run_install_preflight,
+    PreflightOptions, PreflightReport, PreflightStatus, ensure_backups_folder_is_real,
+    ensure_resource_path_ready, run_install_preflight,
 };
 use rabbit_core::progress::{ProgressEvent, ProgressReporter};
 use rabbit_core::report::{
@@ -1349,7 +1349,9 @@ fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Err
 /// off the list of refusals. All of that holds the per-target lock, as the
 /// package operation does, so it never writes files, a backup set or the
 /// receipt while another RABBIT installs, uninstalls or restores on this
-/// REAPER. With the lock held elsewhere it fails before anything changes.
+/// REAPER. With the lock held elsewhere it fails before anything changes,
+/// and so it does while `RABBIT` or `RABBIT/backups` is a link, where the
+/// update's backup set would go.
 fn apply_install_extension(
     resource_path: &Path,
     package_ids: &[String],
@@ -1358,6 +1360,7 @@ fn apply_install_extension(
     options: &InstallOptions,
 ) -> Result<InstallReport, Box<dyn std::error::Error>> {
     ensure_resource_path_ready(resource_path, false)?;
+    ensure_backups_folder_is_real(resource_path)?;
     // Named, not `_`: the guard must live to the end of this function, or
     // the lock would be let go before anything is written.
     let _install_lock = acquire_package_install_lock(resource_path)?;
@@ -2449,9 +2452,6 @@ fn print_install_report(report: &InstallReport) {
     println!("Dry run: {}", yes_no(report.dry_run));
     print_preflight_report(&report.preflight);
     println!("Receipt written: {}", yes_no(report.receipt_written));
-    if let Some(receipt_backup_path) = &report.receipt_backup_path {
-        println!("Receipt backup: {}", receipt_backup_path.display());
-    }
     if let Some(backup_manifest_path) = &report.backup_manifest_path {
         println!("Backup manifest: {}", backup_manifest_path.display());
     }
@@ -2925,12 +2925,6 @@ fn print_package_operation_report(report: &PackageOperationReport) {
     println!("Dry run: {}", yes_no(report.dry_run));
     if let Some(install_report) = &report.install_report {
         print_preflight_report(&install_report.preflight);
-    }
-    if let Some(path) = &report.receipt_backup_path {
-        println!("Receipt backup: {}", path.display());
-    }
-    if let Some(path) = &report.receipt_backup_manifest_path {
-        println!("Backup manifest: {}", path.display());
     }
 
     for item in &report.items {
@@ -4466,10 +4460,23 @@ mod tests {
             b"old records",
         )
         .unwrap();
-        rabbit_core::rollback::BackupSetWriter::new(&resource, "unix-2", "install-replacement")
-            .copy_receipt_if_present()
-            .unwrap()
+        // An update's set, as RABBIT writes one now: ReaPack's record, the
+        // file the update replaced, and no copy of the records.
+        let plugin = resource.join("UserPlugins").join("reaper_reapack-x64.dll");
+        std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        std::fs::write(&plugin, b"reapack 1.2.4").unwrap();
+        let mut update =
+            rabbit_core::rollback::BackupSetWriter::new(&resource, "unix-2", "install-replacement");
+        update
+            .record_replaced(
+                "reapack",
+                rabbit_core::rollback::ReplacedPackageRecord {
+                    receipt: None,
+                    replaced_by: Some(rabbit_core::version::Version::parse("1.2.5").unwrap()),
+                },
+            )
             .unwrap();
+        update.copy_file(Some("reapack"), &plugin).unwrap();
 
         let restore = |backup_id: &str| {
             let args: Vec<std::ffi::OsString> = vec![
@@ -4863,6 +4870,97 @@ mod tests {
             !rabbit_core::lock::default_package_install_lock_path(&resource).exists(),
             "the lock went with the run"
         );
+    }
+
+    /// `install-extension --apply` refuses while `RABBIT` or its `backups`
+    /// folder is a junction (on Windows) or a symbolic link, as an uninstall
+    /// does: the update's backup would go behind it, where no restore
+    /// looks. It fails with the preflight's `backup-folder` check before it
+    /// takes the lock, so nothing changes, not even where the link leads,
+    /// though the artifact is already in the cache. rabbit-core's link
+    /// helper is for its own tests, so this one makes the link itself.
+    #[test]
+    fn install_extension_refuses_a_linked_backups_folder() {
+        for linked in [&["RABBIT"][..], &["RABBIT", "backups"][..]] {
+            let dir = tempfile::tempdir().unwrap();
+            let resource = dir.path().join("REAPER");
+            let plugin = resource.join("UserPlugins").join("reaper_reapack-x64.dll");
+            std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+            std::fs::write(&plugin, b"reapack 1.2.4").unwrap();
+            let link = linked
+                .iter()
+                .fold(resource.clone(), |path, name| path.join(name));
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            let elsewhere = dir.path().join("Elsewhere");
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            #[cfg(windows)]
+            {
+                let windows_path =
+                    |path: &std::path::Path| path.to_string_lossy().replace('/', "\\");
+                let made = std::process::Command::new("cmd")
+                    .args(["/C", "mklink", "/J"])
+                    .arg(windows_path(&link))
+                    .arg(windows_path(&elsewhere))
+                    .output()
+                    .unwrap();
+                assert!(made.status.success(), "{made:?}");
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+            let cache = dir.path().join("cache");
+            let cached = cache
+                .join("reapack")
+                .join("1.2.5")
+                .join("reaper_reapack-x64.dll");
+            std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+            std::fs::write(&cached, b"reapack 1.2.5").unwrap();
+            let artifact = rabbit_core::artifact::ArtifactDescriptor {
+                package_id: "reapack".to_string(),
+                version: rabbit_core::version::Version::parse("1.2.5").unwrap(),
+                platform: rabbit_core::model::Platform::current().unwrap(),
+                architecture: rabbit_core::model::Architecture::current(),
+                kind: rabbit_core::artifact::ArtifactKind::ExtensionBinary,
+                url: "https://example.test/reaper_reapack-x64.dll".to_string(),
+                file_name: "reaper_reapack-x64.dll".to_string(),
+                channel: None,
+            };
+
+            let error = super::apply_install_extension(
+                &resource,
+                &["reapack".to_string()],
+                std::slice::from_ref(&artifact),
+                &cache,
+                &rabbit_core::install::InstallOptions {
+                    dry_run: false,
+                    allow_reaper_running: true,
+                    target_app_path: None,
+                    package_variants: Default::default(),
+                },
+            )
+            .unwrap_err();
+
+            assert!(
+                matches!(
+                    error.downcast_ref::<rabbit_core::RabbitError>(),
+                    Some(rabbit_core::RabbitError::PreflightFailed { message })
+                        if message.starts_with("backup-folder: ")
+                            && message.contains(&link.display().to_string())
+                ),
+                "{linked:?}: {error}"
+            );
+            assert_eq!(std::fs::read(&plugin).unwrap(), b"reapack 1.2.4");
+            assert_eq!(
+                std::fs::read_dir(&elsewhere).unwrap().count(),
+                0,
+                "{linked:?}"
+            );
+            // The lock's folder outlives the lock, so it shows whether the
+            // run ever took it.
+            assert!(
+                !resource.join("RABBIT").join("locks").exists(),
+                "{linked:?}"
+            );
+        }
     }
 
     /// In a debug build, clap's parser alone takes more than the 1 MB of

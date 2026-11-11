@@ -13,10 +13,11 @@ use crate::preflight::{PreflightOptions, PreflightReport, run_install_preflight}
 use crate::reaper_ini::{lang_pack_setting, restore_lang_pack_if_cleared};
 use crate::receipt::{
     InstallState, PackageReceipt, RECEIPT_RELATIVE_PATH, load_install_state, merge_package_receipt,
-    receipt_path, save_install_state,
+    save_install_state,
 };
 use crate::report::{SavedReportPaths, default_report_path, save_new_json_and_text_reports};
 use crate::uninstall::paths::{ResolvedPattern, pattern_matches};
+use crate::version::Version;
 
 pub const BACKUP_MANIFEST_FILE: &str = "backup-manifest.json";
 
@@ -37,12 +38,19 @@ const MANIFEST_STAGING_FILE: &str = "backup-manifest.json.rabbit-tmp";
 const BEFORE_RESTORE_REASON: &str = "before-restore";
 
 /// The reason recorded for the set that holds the files an update replaced,
-/// with a copy of RABBIT's receipt from before it.
+/// with what it replaced of each package (see [`BackupManifest::replaced`]).
+/// Earlier versions put a copy of RABBIT's whole receipt from before the
+/// update there instead.
 pub(crate) const UPDATE_BACKUP_REASON: &str = "install-replacement";
 
 /// The reason recorded for a set that holds only a copy of RABBIT's
-/// receipt, made after vendor installers ran.
+/// receipt. Earlier versions made one after vendor installers ran; RABBIT
+/// makes none any more, and a restore refuses the old ones.
 pub(crate) const RECORDS_BACKUP_REASON: &str = "unattended-receipt-update";
+
+/// The reason recorded for the set that holds `reaper-kb.ini` from just
+/// before OSARA's key map replaced it.
+pub(crate) const KEYMAP_BACKUP_REASON: &str = "osara-keymap-replacement";
 
 /// The folder beside `RABBIT/backups` where delete (still to come) moves a
 /// set before it removes anything, so a restore never finds half a set.
@@ -66,18 +74,48 @@ pub struct BackupSet {
     pub warning: Option<String>,
 }
 
+/// A set's `backup-manifest.json`. Fields added since the first version
+/// are optional in the file, so older manifests still load, and
+/// `schema_version` stays 1: older versions ignore fields they don't know.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupManifest {
     pub schema_version: u32,
     pub rabbit_version: String,
+    /// The id RABBIT asked for when it made the set. The folder is named
+    /// `<id>-2` and so on when a set already had that id.
     pub created_at: String,
+    /// When the set was made, in seconds since 1970 (UTC). `None` in sets
+    /// from earlier versions, whose only date is the one in their id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_unix: Option<u64>,
     pub reason: String,
     pub files: Vec<BackupManifestFile>,
+    /// Where a copy of RABBIT's whole receipt is in the set. Only earlier
+    /// versions made one: in an update's set, and in a set of its own after
+    /// vendor installers ran. A restore never copies it back.
     pub receipt_backup_path: Option<PathBuf>,
     /// The packages an uninstall removed into this set, by id. Empty, and
     /// left out of the file, for every other kind of set.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub packages: BTreeMap<String, BackupPackageRecord>,
+    /// For a set that keeps files something replaced: each package whose
+    /// files it holds, by id, with what RABBIT's receipt said about it
+    /// before and the version that replaced it. An update's set records it
+    /// now, and a before-restore set may too (see [`BackupSetWriter::record_replaced`]).
+    /// Not in `packages`: older versions read every record there as an
+    /// uninstall's, whatever the set's reason, and would merge the old entry
+    /// back while only the replaced files came back. Empty, and left out of
+    /// the file, in uninstall and key map sets, and in every set from
+    /// earlier versions; their update sets hold a copy of the whole receipt
+    /// instead.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub replaced: BTreeMap<String, ReplacedPackageRecord>,
+    /// For the set that holds `reaper-kb.ini` from before OSARA's key map
+    /// replaced it: what that key map was, as RABBIT read it just before
+    /// OSARA's install. `None` for every other kind of set, and in key map
+    /// sets from earlier versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keymap_origin: Option<KeymapOrigin>,
 }
 
 /// What an uninstall set records about one package it removed, so a later
@@ -97,6 +135,49 @@ pub struct BackupPackageRecord {
     /// so a restore puts back only this one line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub langpack_before: Option<String>,
+    /// Whether the uninstall moved the package's settings into the set, as
+    /// "Also remove settings" and `--remove-settings` ask. `false` when it
+    /// moved none, also when they were asked for and there were none to
+    /// move. `None` in sets from earlier versions, which didn't record it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with_settings: Option<bool>,
+}
+
+/// What a set records about one package whose files something replaced:
+/// an update, in its `install-replacement` set. The record is saved before
+/// the first of the package's files is copied into the set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacedPackageRecord {
+    /// The package's receipt entry from just before its files were
+    /// replaced. `None` when the receipt had none: the copy replaced wasn't
+    /// one RABBIT installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<PackageReceipt>,
+    /// The version that replaced it, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_by: Option<Version>,
+}
+
+/// What `reaper-kb.ini` was before OSARA's key map replaced it, as RABBIT
+/// read it just before OSARA's install (see
+/// [`crate::osara_keymap::OsaraKeymapState`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KeymapOrigin {
+    /// The user's own key map: it differed from the OSARA key map installed
+    /// then.
+    OwnKeymap,
+    /// OSARA's key map, unchanged apart from script registrations.
+    UnchangedOsara,
+    /// REAPER's default keys: a `reaper-kb.ini` without key bindings or
+    /// custom actions. It still goes into a set, because the file exists.
+    DefaultKeys,
+    /// RABBIT couldn't tell: there was no OSARA key map to compare it with,
+    /// or one of the two couldn't be read. A value a later version wrote,
+    /// which this one doesn't know, reads as this too, so its manifest
+    /// still loads.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,11 +371,22 @@ pub enum RestoreBackupActionKind {
 }
 
 /// Writes one backup set under `RABBIT/backups/<id>/`, keeping its manifest
-/// up to date after every step. Installs, the unattended installers' key map
-/// and receipt backups, restore itself and uninstall all write their sets
-/// through it, so every set has the same layout and a restore reads them
-/// all the same way. Which sets a restore takes is up to the restore (see
-/// [`restore_backup_set`]).
+/// up to date after every step. Updates, OSARA's key map replacement,
+/// restore itself and uninstall all write their sets through it, so every
+/// set has the same layout and a restore reads them all the same way. Which
+/// sets a restore takes is up to the restore (see [`restore_backup_set`]).
+///
+/// Every set records when it was made (`created_unix`). What else a set
+/// records depends on what made it: an uninstall records each package it
+/// removes ([`Self::record_package`]), an update what replaced each package
+/// ([`Self::record_replaced`]), and OSARA's key map replacement what the
+/// key map was ([`Self::set_keymap_origin`]). Each record is saved before
+/// the first file it belongs to goes into the set.
+///
+/// The writer never writes a set behind a symbolic link or junction: while
+/// `RABBIT`, `RABBIT/backups` or the set's own folder is one, every record
+/// and every file is refused before it is written (see
+/// [`Self::start_or_check`]).
 ///
 /// Installs and restore copy files in and leave the originals alone.
 /// Uninstall moves them in (see [`BackupSetWriter::move_file`]) and can move
@@ -349,10 +441,14 @@ impl BackupSetWriter {
                 schema_version: 1,
                 rabbit_version: env!("CARGO_PKG_VERSION").to_string(),
                 created_at: set_id.to_string(),
+                // Set when the set's folder is made (see `start`).
+                created_unix: None,
                 reason: reason.to_string(),
                 files: Vec::new(),
                 receipt_backup_path: None,
                 packages: BTreeMap::new(),
+                replaced: BTreeMap::new(),
+                keymap_origin: None,
             },
             planning,
             started: false,
@@ -441,23 +537,6 @@ impl BackupSetWriter {
         }
         self.finish_entry(index)?;
         Ok(entry.backup_path)
-    }
-
-    /// Copy RABBIT's receipt into the set, when there is one, and record it
-    /// as the set's receipt backup. A restore never copies it back, because
-    /// that would undo every change to the receipt since; it stays in the
-    /// set for anyone who needs it by hand.
-    pub fn copy_receipt_if_present(&mut self) -> Result<Option<PathBuf>> {
-        let receipt = receipt_path(&self.resource_path);
-        if !receipt.is_file() {
-            return Ok(None);
-        }
-        let backup_path = self.copy_file(None, &receipt)?;
-        self.manifest.receipt_backup_path = Some(backup_path.clone());
-        if !self.planning {
-            self.save()?;
-        }
-        Ok(Some(backup_path))
     }
 
     /// Move `original` into the set and say where it went. Uninstall's way
@@ -563,18 +642,16 @@ impl BackupSetWriter {
     /// The set is the only copy of the files an uninstall moves, so it is
     /// never made behind a link: when `RABBIT` or `RABBIT/backups` is a
     /// symbolic link or junction, which a restore never follows (see
-    /// [`find_backup_set`]), this refuses with
-    /// [`RabbitError::BackupPathIsLink`] before the first file moves.
-    /// Uninstall's checks before changes refuse such a run already; this
-    /// holds should the folder become a link in between.
+    /// [`find_backup_set`]), the record is refused with
+    /// [`RabbitError::BackupPathIsLink`] before the package's first file
+    /// moves (see [`Self::start_or_check`]). Uninstall's checks before
+    /// changes refuse such a run already; this holds should the folder
+    /// become a link in between.
     pub fn record_package(&mut self, package_id: &str, record: BackupPackageRecord) -> Result<()> {
         if self.planning {
             return Ok(());
         }
-        if !self.started {
-            check_backups_folder_is_real(&self.resource_path)?;
-        }
-        self.start()?;
+        self.start_or_check()?;
         self.manifest
             .packages
             .insert(package_id.to_string(), record);
@@ -600,6 +677,90 @@ impl BackupSetWriter {
         self.save()
     }
 
+    /// Record whether the uninstall moved `package_id`'s settings into the
+    /// set, for a package recorded with [`Self::record_package`]. Saved when
+    /// it changes. The uninstall records `false` with the package, and
+    /// `true` once a settings file has moved.
+    pub fn set_with_settings(&mut self, package_id: &str, with_settings: bool) -> Result<()> {
+        if self.planning {
+            return Ok(());
+        }
+        let Some(record) = self.manifest.packages.get_mut(package_id) else {
+            return Ok(());
+        };
+        if record.with_settings == Some(with_settings) {
+            return Ok(());
+        }
+        record.with_settings = Some(with_settings);
+        self.save()
+    }
+
+    /// Record what replaced `package_id`'s files in this set: RABBIT's
+    /// receipt entry for the package from just before, and the version that
+    /// replaced it. Saved before the first of the package's files is copied
+    /// in, as an uninstall records a package before it moves any, so the set
+    /// never holds a file of the package without the record. Refused, as
+    /// every write is, while the set would be behind a link (see
+    /// [`Self::start_or_check`]).
+    ///
+    /// A package recorded already keeps its first record, which describes
+    /// the package as it was before this run. Any set that keeps a
+    /// package's files because something replaced them can record the
+    /// package this way, a before-restore set too.
+    pub fn record_replaced(
+        &mut self,
+        package_id: &str,
+        record: ReplacedPackageRecord,
+    ) -> Result<()> {
+        if self.planning || self.manifest.replaced.contains_key(package_id) {
+            return Ok(());
+        }
+        self.start_or_check()?;
+        self.manifest
+            .replaced
+            .insert(package_id.to_string(), record);
+        let saved = self.save();
+        if saved.is_err() {
+            // Not on disk, so not in the set: the package's files won't go
+            // in either.
+            self.manifest.replaced.remove(package_id);
+        }
+        saved
+    }
+
+    /// Forget what [`Self::record_replaced`] recorded of `package_id` when
+    /// the set holds no entry of the package: copying its first file failed
+    /// before the entry was saved, as when the file couldn't be read. A set
+    /// left with nothing in it is removed again, so such a failure leaves no
+    /// set, as it did before the record came first. Best effort.
+    pub(crate) fn forget_replaced_without_entry(&mut self, package_id: &str) {
+        if !self.started
+            || self.planning
+            || self
+                .manifest
+                .files
+                .iter()
+                .any(|entry| entry.package_id.as_deref() == Some(package_id))
+        {
+            return;
+        }
+        if self.manifest.replaced.remove(package_id).is_some() {
+            let _ = self.save();
+        }
+        self.discard_if_empty();
+    }
+
+    /// Record what the key map this set is about to hold was, as RABBIT
+    /// read it before OSARA's install. Call it before the key map is copied
+    /// in, so the set never holds the file without it.
+    pub fn set_keymap_origin(&mut self, origin: KeymapOrigin) -> Result<()> {
+        self.manifest.keymap_origin = Some(origin);
+        if self.started && !self.planning {
+            self.save()?;
+        }
+        Ok(())
+    }
+
     /// Forget a package recorded with [`Self::record_package`], after its
     /// files were put back: the set no longer holds it.
     pub fn forget_package(&mut self, package_id: &str) -> Result<()> {
@@ -622,18 +783,17 @@ impl BackupSetWriter {
             && holds_a_file_of(&self.set_path, &self.manifest, package_id)
     }
 
-    /// Forget every recorded package when the set holds no file at all and
-    /// no copy of the receipt: records alone bring nothing back, and a
-    /// restore refuses such a set ([`RabbitError::NothingOfItInSet`]).
-    /// [`Self::discard_if_empty`] then removes it. An uninstall records each
-    /// package before it moves anything, so a run whose packages moved no
-    /// file would otherwise leave a set to name that nothing can come back
-    /// from. A set with any file entry stays as it is.
+    /// Forget every recorded package when the set holds no file at all:
+    /// records alone bring nothing back, and a restore refuses such a set
+    /// ([`RabbitError::NothingOfItInSet`]). [`Self::discard_if_empty`] then
+    /// removes it. An uninstall records each package before it moves
+    /// anything, so a run whose packages moved no file would otherwise leave
+    /// a set to name that nothing can come back from. A set with any file
+    /// entry stays as it is.
     pub(crate) fn forget_packages_if_no_file(&mut self) {
         if !self.started
             || self.planning
             || !self.manifest.files.is_empty()
-            || self.manifest.receipt_backup_path.is_some()
             || self.manifest.packages.is_empty()
         {
             return;
@@ -652,7 +812,7 @@ impl BackupSetWriter {
         }
         if !self.manifest.files.is_empty()
             || !self.manifest.packages.is_empty()
-            || self.manifest.receipt_backup_path.is_some()
+            || !self.manifest.replaced.is_empty()
         {
             return false;
         }
@@ -700,7 +860,7 @@ impl BackupSetWriter {
         original: &Path,
         digest: FileDigest,
     ) -> Result<usize> {
-        self.start()?;
+        self.start_or_check()?;
         let slot = self.slot_for(original)?;
         self.manifest.files.push(BackupManifestFile {
             package_id: package_id.map(ToString::to_string),
@@ -731,11 +891,21 @@ impl BackupSetWriter {
 
     /// Claim the set's folder on the first write. Two runs in the same
     /// second ask for the same id; the second gets `<id>-2` instead of
-    /// writing into the first one's set and replacing its manifest.
+    /// writing into the first one's set and replacing its manifest. The
+    /// time the folder is made goes into the manifest as `created_unix`.
+    ///
+    /// Refused with [`RabbitError::BackupPathIsLink`], before anything is
+    /// written, when `RABBIT` or `RABBIT/backups` is a symbolic link or
+    /// junction: a restore never follows one there, so the set couldn't
+    /// bring anything back. Every run that writes a set refuses such a
+    /// folder before it changes anything; this holds should the folder
+    /// become a link in between, and [`Self::start_or_check`] checks again
+    /// before every later write.
     fn start(&mut self) -> Result<()> {
         if self.started || self.planning {
             return Ok(());
         }
+        check_backups_folder_is_real(&self.resource_path)?;
         let backups = backups_root(&self.resource_path);
         fs::create_dir_all(&backups).with_path(&backups)?;
         let set_id = self.manifest.created_at.clone();
@@ -750,7 +920,25 @@ impl BackupSetWriter {
                 Err(error) => return Err(crate::error::io_error_at(self.set_path.clone(), error)),
             }
         }
+        self.manifest.created_unix = seconds_since_1970();
         self.started = true;
+        Ok(())
+    }
+
+    /// Start the set on its first write (see [`Self::start`]), and before
+    /// every later one check again that it isn't behind a link: `RABBIT`,
+    /// `RABBIT/backups` or the set's own folder may have become one since.
+    /// Refused with [`RabbitError::BackupPathIsLink`] before anything is
+    /// written, so a set that started in a real folder never writes a
+    /// record or a file through a link later either.
+    fn start_or_check(&mut self) -> Result<()> {
+        if self.planning || !self.started {
+            return self.start();
+        }
+        check_backups_folder_is_real(&self.resource_path)?;
+        // A set folder that is gone is made again by the write, as before;
+        // only a link is refused.
+        is_real_folder(&self.set_path)?;
         Ok(())
     }
 
@@ -2949,11 +3137,16 @@ fn temporary_restore_path(target_path: &Path) -> PathBuf {
 }
 
 fn restore_timestamp() -> String {
-    let seconds = SystemTime::now()
+    format!("restore-unix-{}", seconds_since_1970().unwrap_or_default())
+}
+
+/// The time now, in seconds since 1970 (UTC). `None` on a clock set before
+/// 1970.
+fn seconds_since_1970() -> Option<u64> {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
+        .ok()
         .map(|duration| duration.as_secs())
-        .unwrap_or_default();
-    format!("restore-unix-{seconds}")
 }
 
 #[cfg(test)]
@@ -2966,11 +3159,12 @@ mod tests {
     use super::{
         BACKUP_MANIFEST_FILE, BEFORE_RESTORE_REASON, BackupEntryState, BackupEnvironment,
         BackupManifest, BackupManifestFile, BackupPackageRecord, BackupSetWriter, DELETING_DIR,
-        FoundBackupSet, OutsideRestoreRules, PlannedRestore, RECORDS_BACKUP_REASON,
-        RestoreBackupActionKind, RestoreBackupOptions, RestorePlan, SkippedPackage,
-        SkippedPackageReason, UPDATE_BACKUP_REASON, backup_id_is_well_formed,
-        check_plan_matches_packages, find_backup_set, is_receipt, is_windows_device_name,
-        linked_backups_folder, list_backup_sets, load_backup_manifest, relative_within,
+        FoundBackupSet, KEYMAP_BACKUP_REASON, KeymapOrigin, OutsideRestoreRules, PlannedRestore,
+        RECORDS_BACKUP_REASON, ReplacedPackageRecord, RestoreBackupActionKind,
+        RestoreBackupOptions, RestorePlan, SkippedPackage, SkippedPackageReason,
+        UPDATE_BACKUP_REASON, backup_id_is_well_formed, check_plan_matches_packages,
+        find_backup_set, is_receipt, is_windows_device_name, linked_backups_folder,
+        list_backup_sets, load_backup_manifest, packages_to_restore, relative_within,
         restore_backup_set, restore_backup_set_with, restore_backup_set_within, restore_target,
         save_backup_manifest,
     };
@@ -2978,7 +3172,7 @@ mod tests {
     use crate::hash::sha256_file;
     use crate::package::uninstall::UninstallPath;
     use crate::receipt::{InstallState, PackageReceipt, load_install_state, save_install_state};
-    use crate::uninstall::paths::{UninstallRoots, resolve_pattern};
+    use crate::uninstall::paths::{UninstallRoots, link_folder, resolve_pattern};
 
     const APPLY: RestoreBackupOptions = RestoreBackupOptions {
         dry_run: false,
@@ -3030,10 +3224,13 @@ mod tests {
                 schema_version: 1,
                 rabbit_version: "0.4.4".to_string(),
                 created_at: set.file_name().unwrap().to_string_lossy().into_owned(),
+                created_unix: None,
                 reason: reason.to_string(),
                 files,
                 receipt_backup_path: None,
                 packages: Default::default(),
+                replaced: Default::default(),
+                keymap_origin: None,
             },
         )
         .unwrap();
@@ -3053,6 +3250,7 @@ mod tests {
                 schema_version: 1,
                 rabbit_version: "0.1.0".to_string(),
                 created_at: "unix-1".to_string(),
+                created_unix: None,
                 reason: "install-replacement".to_string(),
                 files: vec![BackupManifestFile {
                     package_id: Some("reapack".to_string()),
@@ -3064,6 +3262,8 @@ mod tests {
                 }],
                 receipt_backup_path: None,
                 packages: Default::default(),
+                replaced: Default::default(),
+                keymap_origin: None,
             },
         )
         .unwrap();
@@ -3221,32 +3421,81 @@ mod tests {
         assert_eq!(fs::read(&plugin).unwrap(), b"new");
     }
 
-    /// The set an update writes, built the way an install builds it: the
-    /// old copy of each file it replaced, and a copy of the receipt from
-    /// before, when there was one. Restoring it whole, or one package of
-    /// it, is refused in a dry run and for real, with a receipt copy or
-    /// without, and nothing changes, the receipt least of all.
+    /// Add to the set `id` what earlier versions put into an update's set,
+    /// and into a set of its own after vendor installers ran: a copy of
+    /// RABBIT's receipt, with an entry for it and the manifest's
+    /// `receipt_backup_path`. Makes the set when it isn't there.
+    fn add_receipt_copy(resource: &Path, id: &str, reason: &str) {
+        let set = resource.join("RABBIT").join("backups").join(id);
+        let mut manifest = load_backup_manifest(&set)
+            .unwrap()
+            .unwrap_or_else(|| BackupManifest {
+                schema_version: 1,
+                rabbit_version: "0.4.4".to_string(),
+                created_at: id.to_string(),
+                created_unix: None,
+                reason: reason.to_string(),
+                files: Vec::new(),
+                receipt_backup_path: None,
+                packages: Default::default(),
+                replaced: Default::default(),
+                keymap_origin: None,
+            });
+        let copy = set.join("RABBIT").join("install-state.json");
+        write(
+            &copy,
+            &fs::read(resource.join("RABBIT").join("install-state.json")).unwrap(),
+        );
+        manifest.files.push(legacy_entry(
+            None,
+            &Path::new("RABBIT").join("install-state.json"),
+            &copy,
+        ));
+        manifest.receipt_backup_path = Some(copy);
+        save_backup_manifest(&set, &manifest).unwrap();
+    }
+
+    /// What an update records of ReaPack when version 1.2.5 replaces the
+    /// version 1.0 the receipt lists.
+    fn reapack_replaced() -> ReplacedPackageRecord {
+        ReplacedPackageRecord {
+            receipt: Some(receipt_entry("reapack")),
+            replaced_by: Some(crate::version::Version::parse("1.2.5").unwrap()),
+        }
+    }
+
+    /// The sets an update writes: the old copy of each file it replaced,
+    /// with a copy of the receipt from before, when there was one, as
+    /// earlier versions wrote them, or with each package's record, as this
+    /// one does. Restoring one whole, or one package of it, is refused in a
+    /// dry run and for real, and nothing changes, the receipt least of all.
     #[test]
     fn an_update_set_is_refused_until_earlier_versions_can_come_back() {
         let dir = tempdir().unwrap();
         let resource = dir.path().join("REAPER");
         let plugin = resource.join("UserPlugins/reaper_reapack-x64.dll");
         let receipt = resource.join("RABBIT/install-state.json");
-        // The first update over a file installed by hand finds no receipt
+        // The first update over a file installed by hand found no receipt
         // to copy.
         write(&plugin, b"reapack by hand");
-        let mut writer = BackupSetWriter::new(&resource, "unix-0", UPDATE_BACKUP_REASON);
-        writer.copy_file(Some("reapack"), &plugin).unwrap();
-        assert_eq!(writer.copy_receipt_if_present().unwrap(), None);
+        BackupSetWriter::new(&resource, "unix-0", UPDATE_BACKUP_REASON)
+            .copy_file(Some("reapack"), &plugin)
+            .unwrap();
         write(&plugin, b"reapack 1.2.4");
         write(&receipt, b"records from before the update");
-        let mut writer = BackupSetWriter::new(&resource, "unix-1", UPDATE_BACKUP_REASON);
+        BackupSetWriter::new(&resource, "unix-1", UPDATE_BACKUP_REASON)
+            .copy_file(Some("reapack"), &plugin)
+            .unwrap();
+        add_receipt_copy(&resource, "unix-1", UPDATE_BACKUP_REASON);
+        let mut writer = BackupSetWriter::new(&resource, "unix-2", UPDATE_BACKUP_REASON);
+        writer
+            .record_replaced("reapack", reapack_replaced())
+            .unwrap();
         writer.copy_file(Some("reapack"), &plugin).unwrap();
-        writer.copy_receipt_if_present().unwrap().unwrap();
         fs::write(&plugin, b"reapack 1.2.5").unwrap();
         fs::write(&receipt, b"records from after the update").unwrap();
 
-        for id in ["unix-0", "unix-1"] {
+        for id in ["unix-0", "unix-1", "unix-2"] {
             for package in [None, Some("reapack")] {
                 let error = refused_with(dir.path(), &resource, id, package);
                 assert!(
@@ -3262,8 +3511,34 @@ mod tests {
         assert_eq!(fs::read(&plugin).unwrap(), b"reapack 1.2.5");
     }
 
-    /// The set written after vendor installers ran holds only a copy of the
-    /// receipt, so there is nothing to restore from it.
+    /// A set an update writes now keeps its records apart from an
+    /// uninstall's, so the rule older versions read sets by finds no
+    /// package in it: they restore its files only, and never merge the
+    /// recorded entry back.
+    #[test]
+    fn an_update_set_s_records_are_no_uninstall_records() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugin = resource.join("UserPlugins/reaper_reapack-x64.dll");
+        write(&plugin, b"reapack 1.2.4");
+        let mut writer = BackupSetWriter::new(&resource, "unix-1", UPDATE_BACKUP_REASON);
+        writer
+            .record_replaced("reapack", reapack_replaced())
+            .unwrap();
+        writer.copy_file(Some("reapack"), &plugin).unwrap();
+        let manifest = load_backup_manifest(writer.path()).unwrap().unwrap();
+
+        let packages =
+            packages_to_restore("unix-1", writer.path(), Some(&manifest), &APPLY).unwrap();
+
+        assert!(manifest.packages.is_empty());
+        assert_eq!(manifest.replaced["reapack"], reapack_replaced());
+        assert!(packages.restore.is_empty() && packages.skipped.is_empty());
+    }
+
+    /// The set written after vendor installers ran, by earlier versions,
+    /// holds only a copy of the receipt, so there is nothing to restore
+    /// from it.
     #[test]
     fn a_records_only_set_has_nothing_to_restore() {
         let dir = tempdir().unwrap();
@@ -3271,10 +3546,7 @@ mod tests {
         let receipt = resource.join("RABBIT/install-state.json");
         write(&receipt, b"records from before the installers");
         let id = "unattended-unix-1-2";
-        BackupSetWriter::new(&resource, id, RECORDS_BACKUP_REASON)
-            .copy_receipt_if_present()
-            .unwrap()
-            .unwrap();
+        add_receipt_copy(&resource, id, RECORDS_BACKUP_REASON);
         fs::write(&receipt, b"records from after the installers").unwrap();
 
         let error = refused_with(dir.path(), &resource, id, None);
@@ -3380,10 +3652,13 @@ mod tests {
                     schema_version: 1,
                     rabbit_version: "0.4.4".to_string(),
                     created_at: id.to_string(),
+                    created_unix: None,
                     reason: reason.to_string(),
                     files: files.clone(),
                     receipt_backup_path,
                     packages: Default::default(),
+                    replaced: Default::default(),
+                    keymap_origin: None,
                 },
             )
             .unwrap();
@@ -3475,6 +3750,7 @@ mod tests {
                 BackupPackageRecord {
                     receipt: Some(receipt_entry("sws")),
                     langpack_before: None,
+                    with_settings: None,
                 },
             )
             .unwrap();
@@ -3522,6 +3798,7 @@ mod tests {
             let record = BackupPackageRecord {
                 receipt: Some(receipt_entry(id)),
                 langpack_before: (id == "langpack-de").then(|| "German.ReaperLangPack".to_string()),
+                with_settings: None,
             };
             writer.record_package(id, record).unwrap();
         }
@@ -3594,6 +3871,7 @@ mod tests {
             BackupPackageRecord {
                 receipt: Some(receipt_entry("reapack")),
                 langpack_before: None,
+                with_settings: None,
             },
         );
         save_backup_manifest(&set, &manifest).unwrap();
@@ -3677,6 +3955,7 @@ mod tests {
             let record = BackupPackageRecord {
                 receipt: Some(receipt_entry(package)),
                 langpack_before: None,
+                with_settings: None,
             };
             writer.record_package(package, record).unwrap();
         }
@@ -3729,6 +4008,7 @@ mod tests {
                 let record = BackupPackageRecord {
                     receipt: Some(receipt_entry(id)),
                     langpack_before: None,
+                    with_settings: None,
                 };
                 writer.record_package(id, record).unwrap();
             }
@@ -3784,6 +4064,7 @@ mod tests {
         let record = BackupPackageRecord {
             receipt: Some(receipt_entry("sws")),
             langpack_before: None,
+            with_settings: None,
         };
         writer.record_package("sws", record).unwrap();
         let entry = writer.begin_entry(Some("sws"), &sws).unwrap();
@@ -3829,6 +4110,7 @@ mod tests {
             let record = BackupPackageRecord {
                 receipt: Some(receipt_entry(package)),
                 langpack_before: None,
+                with_settings: None,
             };
             writer.record_package(package, record).unwrap();
         }
@@ -5076,6 +5358,7 @@ mod tests {
                 schema_version: 1,
                 rabbit_version: "0.4.4".to_string(),
                 created_at: "unix-1".to_string(),
+                created_unix: None,
                 reason: "uninstall".to_string(),
                 files: vec![
                     legacy_entry(Some("reapack"), &plugin, &plugin_copy),
@@ -5086,6 +5369,8 @@ mod tests {
                     .into_iter()
                     .map(|id| (id.to_string(), BackupPackageRecord::default()))
                     .collect(),
+                replaced: Default::default(),
+                keymap_origin: None,
             },
         )
         .unwrap();
@@ -5627,15 +5912,6 @@ mod tests {
             .copy_file(Some("osara"), &keymap)
             .unwrap();
         other
-    }
-
-    /// Make `link` point to the folder `target`: a junction on Windows,
-    /// which needs no administrator rights, a symbolic link elsewhere.
-    fn link_folder(link: &Path, target: &Path) {
-        #[cfg(windows)]
-        crate::uninstall::paths::make_junction(link, target);
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(target, link).unwrap();
     }
 
     /// Every file and link below `root`, each file with what it holds,
@@ -6272,51 +6548,420 @@ mod tests {
         );
     }
 
-    /// An uninstall's set is the only copy of the files it moves, so the
-    /// writer never makes one behind a link a restore wouldn't follow:
-    /// recording the first package is refused, before anything moves, and
-    /// nothing is written where the link leads.
+    /// No writer makes a set behind a link a restore wouldn't follow. An
+    /// uninstall's set is the only copy of the files it moves; an update's
+    /// or a key map's holds the only copy of what they replace. So the first
+    /// write is refused, whatever it is: an uninstall's package record, an
+    /// update's record, a file copied or moved in. Nothing is written where
+    /// the link leads, and the file stays where it was.
     #[test]
-    fn an_uninstall_set_is_never_made_behind_a_link() {
+    fn no_set_is_ever_made_behind_a_link() {
+        type FirstWrite = fn(&mut BackupSetWriter, &Path) -> super::Result<()>;
+        let first_writes: [(&str, FirstWrite); 4] = [
+            ("uninstall record", |writer, _| {
+                writer.record_package("sws", BackupPackageRecord::default())
+            }),
+            ("update record", |writer, _| {
+                writer.record_replaced("sws", ReplacedPackageRecord::default())
+            }),
+            ("copy", |writer, plugin| {
+                writer.copy_file(Some("sws"), plugin).map(|_| ())
+            }),
+            ("move", |writer, plugin| {
+                writer
+                    .move_file(Some("sws"), plugin, None, false)
+                    .map(|_| ())
+                    .map_err(|error| match error {
+                        super::MoveFileError::NotMoved(error) => error,
+                        other => panic!("{other:?}"),
+                    })
+            }),
+        ];
         let dir = tempdir().unwrap();
         for (index, linked) in [&["RABBIT"][..], &["RABBIT", "backups"][..]]
             .into_iter()
             .enumerate()
         {
-            let resource = dir.path().join(format!("REAPER-{index}"));
-            let plugin = resource.join("UserPlugins").join("reaper_sws-x64.dll");
-            write(&plugin, b"sws");
-            let link = linked
-                .iter()
-                .fold(resource.clone(), |path, name| path.join(name));
-            fs::create_dir_all(link.parent().unwrap()).unwrap();
-            let elsewhere = dir.path().join(format!("Elsewhere-{index}"));
-            fs::create_dir_all(&elsewhere).unwrap();
-            link_folder(&link, &elsewhere);
+            for (what, first_write) in first_writes {
+                let resource = dir.path().join(format!("REAPER-{index}-{what}"));
+                let plugin = resource.join("UserPlugins").join("reaper_sws-x64.dll");
+                write(&plugin, b"sws");
+                let link = linked
+                    .iter()
+                    .fold(resource.clone(), |path, name| path.join(name));
+                fs::create_dir_all(link.parent().unwrap()).unwrap();
+                let elsewhere = dir.path().join(format!("Elsewhere-{index}-{what}"));
+                fs::create_dir_all(&elsewhere).unwrap();
+                link_folder(&link, &elsewhere);
 
-            assert_eq!(linked_backups_folder(&resource).as_ref(), Some(&link));
-            let mut writer = BackupSetWriter::new(&resource, "uninstall-unix-1", "uninstall");
-            let error = writer
-                .record_package("sws", BackupPackageRecord::default())
-                .unwrap_err();
+                assert_eq!(linked_backups_folder(&resource).as_ref(), Some(&link));
+                let mut writer = BackupSetWriter::new(&resource, "unix-1", "any");
+                let error = first_write(&mut writer, &plugin).unwrap_err();
 
-            assert!(
-                matches!(&error, RabbitError::BackupPathIsLink { path } if *path == link),
-                "{linked:?}: {error:?}"
-            );
-            assert!(!writer.is_started());
-            assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "{linked:?}");
-            assert_eq!(fs::read(&plugin).unwrap(), b"sws");
+                assert!(
+                    matches!(&error, RabbitError::BackupPathIsLink { path } if *path == link),
+                    "{linked:?} {what}: {error:?}"
+                );
+                assert!(!writer.is_started(), "{linked:?} {what}");
+                assert_eq!(
+                    fs::read_dir(&elsewhere).unwrap().count(),
+                    0,
+                    "{linked:?} {what}"
+                );
+                assert_eq!(fs::read(&plugin).unwrap(), b"sws", "{linked:?} {what}");
+            }
         }
         // A real folder, or none yet, is no link, and the set is made.
+        for (what, first_write) in first_writes {
+            let resource = dir.path().join(format!("REAPER-{what}"));
+            let plugin = resource.join("UserPlugins").join("reaper_sws-x64.dll");
+            write(&plugin, b"sws");
+            assert_eq!(linked_backups_folder(&resource), None);
+            let mut writer = BackupSetWriter::new(&resource, "unix-1", "any");
+            first_write(&mut writer, &plugin).unwrap();
+            assert!(writer.path().is_dir(), "{what}");
+            assert_eq!(linked_backups_folder(&resource), None);
+        }
+    }
+
+    /// A set that started in a real folder writes nothing more once `RABBIT`,
+    /// `RABBIT/backups` or the set's own folder has become a link, with
+    /// what was there moved behind it: each later write is refused before
+    /// it is written, whatever it is, nothing changes where the link leads,
+    /// and the file stays where it was.
+    #[test]
+    fn a_started_set_writes_nothing_through_a_link_made_since() {
+        type LaterWrite = fn(&mut BackupSetWriter, &Path) -> super::Result<()>;
+        let later_writes: [(&str, LaterWrite); 4] = [
+            ("uninstall record", |writer, _| {
+                writer.record_package("reapack", BackupPackageRecord::default())
+            }),
+            ("update record", |writer, _| {
+                writer.record_replaced("reapack", ReplacedPackageRecord::default())
+            }),
+            ("copy", |writer, plugin| {
+                writer.copy_file(Some("reapack"), plugin).map(|_| ())
+            }),
+            ("move", |writer, plugin| {
+                writer
+                    .move_file(Some("reapack"), plugin, None, false)
+                    .map(|_| ())
+                    .map_err(|error| match error {
+                        super::MoveFileError::NotMoved(error) => error,
+                        other => panic!("{other:?}"),
+                    })
+            }),
+        ];
+        let dir = tempdir().unwrap();
+        for linked in ["RABBIT", "backups", "set"] {
+            for (what, later_write) in later_writes {
+                let resource = dir.path().join(format!("REAPER-{linked}-{what}"));
+                let sws = resource.join("UserPlugins").join("reaper_sws-x64.dll");
+                let reapack = resource.join("UserPlugins").join("reaper_reapack-x64.dll");
+                write(&sws, b"sws");
+                write(&reapack, b"reapack");
+                let mut writer = BackupSetWriter::new(&resource, "unix-1", "any");
+                writer.copy_file(Some("sws"), &sws).unwrap();
+                let link = match linked {
+                    "RABBIT" => resource.join("RABBIT"),
+                    "backups" => resource.join("RABBIT").join("backups"),
+                    _ => writer.path().to_path_buf(),
+                };
+                let elsewhere = dir.path().join(format!("Elsewhere-{linked}-{what}"));
+                fs::rename(&link, &elsewhere).unwrap();
+                link_folder(&link, &elsewhere);
+                let before = snapshot(&elsewhere);
+
+                let error = later_write(&mut writer, &reapack).unwrap_err();
+
+                assert!(
+                    matches!(&error, RabbitError::BackupPathIsLink { path } if *path == link),
+                    "{linked} {what}: {error:?}"
+                );
+                assert_eq!(snapshot(&elsewhere), before, "{linked} {what}");
+                assert_eq!(fs::read(&reapack).unwrap(), b"reapack", "{linked} {what}");
+            }
+        }
+    }
+
+    /// Every set records when it was made, in seconds since 1970, whatever
+    /// writes it first: a file, an uninstall's package record or an
+    /// update's record. `created_at` stays the id asked for, also when the
+    /// folder got `-2`. A planning writer writes nothing.
+    #[test]
+    fn every_set_records_when_it_was_made() {
+        let dir = tempdir().unwrap();
         let resource = dir.path().join("REAPER");
-        assert_eq!(linked_backups_folder(&resource), None);
-        let mut writer = BackupSetWriter::new(&resource, "uninstall-unix-1", "uninstall");
-        writer
+        let plugin = resource.join("UserPlugins").join("reaper_sws-x64.dll");
+        write(&plugin, b"sws");
+        let now = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        };
+
+        let before = now();
+        let mut by_file = BackupSetWriter::new(&resource, "unix-1", UPDATE_BACKUP_REASON);
+        by_file.copy_file(Some("sws"), &plugin).unwrap();
+        let mut by_package = BackupSetWriter::new(&resource, "unix-1", "uninstall");
+        by_package
             .record_package("sws", BackupPackageRecord::default())
             .unwrap();
-        assert!(writer.path().is_dir());
-        assert_eq!(linked_backups_folder(&resource), None);
+        let mut by_update = BackupSetWriter::new(&resource, "unix-1", UPDATE_BACKUP_REASON);
+        by_update
+            .record_replaced("sws", ReplacedPackageRecord::default())
+            .unwrap();
+        let after = now();
+
+        for (writer, id) in [
+            (&by_file, "unix-1"),
+            (&by_package, "unix-1-2"),
+            (&by_update, "unix-1-3"),
+        ] {
+            assert_eq!(writer.set_id(), id);
+            let manifest = load_backup_manifest(writer.path()).unwrap().unwrap();
+            assert_eq!(manifest.created_at, "unix-1");
+            let made = manifest.created_unix.expect("a time");
+            assert!(before <= made && made <= after, "{before} {made} {after}");
+        }
+        let mut planning = BackupSetWriter::planning(&resource, "unix-9", UPDATE_BACKUP_REASON);
+        planning
+            .record_replaced("sws", ReplacedPackageRecord::default())
+            .unwrap();
+        planning.copy_file(Some("sws"), &plugin).unwrap();
+        assert!(!planning.path().exists());
+    }
+
+    /// An update's set records each package before the first of its files
+    /// goes in: its receipt entry from before, or none for a copy RABBIT
+    /// didn't install, and the version that replaced it. A second record of
+    /// the same package keeps the first. In the file, a missing entry is
+    /// simply left out.
+    #[test]
+    fn an_update_set_records_each_package_before_its_files() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let reapack = resource.join("UserPlugins").join("reaper_reapack-x64.dll");
+        let sws = resource.join("UserPlugins").join("reaper_sws-x64.dll");
+        write(&reapack, b"reapack 1.0");
+        write(&sws, b"sws by hand");
+        let by_hand = ReplacedPackageRecord {
+            receipt: None,
+            replaced_by: Some(crate::version::Version::parse("2.14").unwrap()),
+        };
+        let mut writer = BackupSetWriter::new(&resource, "unix-1", UPDATE_BACKUP_REASON);
+
+        writer
+            .record_replaced("reapack", reapack_replaced())
+            .unwrap();
+        let on_disk = load_backup_manifest(writer.path()).unwrap().unwrap();
+        assert!(on_disk.files.is_empty(), "the record comes first");
+        assert_eq!(on_disk.replaced["reapack"], reapack_replaced());
+        writer.copy_file(Some("reapack"), &reapack).unwrap();
+        writer.record_replaced("sws", by_hand.clone()).unwrap();
+        writer.copy_file(Some("sws"), &sws).unwrap();
+        writer
+            .record_replaced("reapack", ReplacedPackageRecord::default())
+            .unwrap();
+
+        let manifest = load_backup_manifest(writer.path()).unwrap().unwrap();
+        assert_eq!(manifest.reason, UPDATE_BACKUP_REASON);
+        assert_eq!(manifest.replaced.len(), 2);
+        assert_eq!(manifest.replaced["reapack"], reapack_replaced());
+        assert_eq!(manifest.replaced["sws"], by_hand);
+        assert_eq!(manifest.receipt_backup_path, None);
+        assert!(manifest.packages.is_empty());
+        let json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(writer.path().join(BACKUP_MANIFEST_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["replaced"]["reapack"]["replaced_by"], "1.2.5");
+        assert_eq!(json["replaced"]["reapack"]["receipt"]["id"], "reapack");
+        assert_eq!(
+            json["replaced"]["sws"],
+            serde_json::json!({ "replaced_by": "2.14" })
+        );
+        assert!(json.get("packages").is_none() && json.get("keymap_origin").is_none());
+    }
+
+    /// When the first file of a package can't be copied, as when it can't
+    /// be read, the update's record of the package goes again, and a set
+    /// with nothing else in it with it: no set holds a record without any
+    /// file. A record whose package already has a file in the set stays.
+    #[test]
+    fn a_failed_first_copy_leaves_no_record_behind() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let reapack = resource.join("UserPlugins").join("reaper_reapack-x64.dll");
+        let gone = resource.join("UserPlugins").join("reaper_sws-x64.dll");
+        let mut writer = BackupSetWriter::new(&resource, "unix-1", UPDATE_BACKUP_REASON);
+
+        writer
+            .record_replaced("sws", ReplacedPackageRecord::default())
+            .unwrap();
+        assert!(writer.copy_file(Some("sws"), &gone).is_err());
+        writer.forget_replaced_without_entry("sws");
+        assert!(!writer.path().exists());
+
+        write(&reapack, b"reapack 1.0");
+        let mut writer = BackupSetWriter::new(&resource, "unix-2", UPDATE_BACKUP_REASON);
+        writer
+            .record_replaced("reapack", reapack_replaced())
+            .unwrap();
+        writer.copy_file(Some("reapack"), &reapack).unwrap();
+        writer
+            .record_replaced("sws", ReplacedPackageRecord::default())
+            .unwrap();
+        assert!(writer.copy_file(Some("sws"), &gone).is_err());
+        writer.forget_replaced_without_entry("sws");
+        writer.forget_replaced_without_entry("reapack");
+
+        let manifest = load_backup_manifest(writer.path()).unwrap().unwrap();
+        let recorded: Vec<&String> = manifest.replaced.keys().collect();
+        assert_eq!(recorded, ["reapack"]);
+        assert_eq!(manifest.files.len(), 1);
+    }
+
+    /// A key map set records what the key map was, for each state, as a
+    /// kebab-case word, and reads it back. A word a later version may write
+    /// reads as unknown, so its manifest still loads.
+    #[test]
+    fn a_key_map_set_records_what_the_key_map_was() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let keymap = resource.join("reaper-kb.ini");
+        write(&keymap, b"KEY 1 65 40001 0\r\n");
+        for (index, (origin, word)) in [
+            (KeymapOrigin::OwnKeymap, "own-keymap"),
+            (KeymapOrigin::UnchangedOsara, "unchanged-osara"),
+            (KeymapOrigin::DefaultKeys, "default-keys"),
+            (KeymapOrigin::Unknown, "unknown"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("unattended-unix-{index}-0");
+            let mut writer = BackupSetWriter::new(&resource, &id, KEYMAP_BACKUP_REASON);
+            writer.set_keymap_origin(origin).unwrap();
+            writer.copy_file(Some("osara"), &keymap).unwrap();
+
+            let manifest = load_backup_manifest(writer.path()).unwrap().unwrap();
+            assert_eq!(manifest.keymap_origin, Some(origin));
+            let json: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(writer.path().join(BACKUP_MANIFEST_FILE)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(json["keymap_origin"], word);
+        }
+        let later: KeymapOrigin = serde_json::from_str("\"a-later-kind\"").unwrap();
+        assert_eq!(later, KeymapOrigin::Unknown);
+    }
+
+    /// Manifests written before these fields existed still load, with each
+    /// new field empty, and restore exactly as before: an uninstall's set
+    /// merges its package back, a key map set puts the key map back, and an
+    /// update's set is refused. Saved again, they gain none of the fields.
+    #[test]
+    fn older_manifests_without_the_new_fields_still_load_and_restore() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugin = resource.join("UserPlugins").join("reaper_sws-x64.dll");
+        let keymap = resource.join("reaper-kb.ini");
+        let reapack = resource.join("UserPlugins").join("reaper_reapack-x64.dll");
+        let backups = std::path::absolute(resource.join("RABBIT").join("backups")).unwrap();
+        let entry = |package: &str, original: &str, set: &str, contents: &[u8]| {
+            let copy = original
+                .split('/')
+                .fold(backups.join(set), |path, name| path.join(name));
+            write(&copy, contents);
+            serde_json::json!({
+                "package_id": package,
+                "original_path": original,
+                "backup_path": copy,
+                "size": contents.len(),
+                "sha256": sha256_file(&copy).unwrap(),
+                "state": "done",
+            })
+        };
+        let manifests = [
+            serde_json::json!({
+                "schema_version": 1,
+                "rabbit_version": "0.5.0",
+                "created_at": "uninstall-unix-1",
+                "reason": "uninstall",
+                "files": [entry("sws", "UserPlugins/reaper_sws-x64.dll", "uninstall-unix-1", b"sws")],
+                "receipt_backup_path": null,
+                "packages": { "sws": { "receipt": receipt_entry("sws") } },
+            }),
+            serde_json::json!({
+                "schema_version": 1,
+                "rabbit_version": "0.4.4",
+                "created_at": "unattended-unix-2-0",
+                "reason": KEYMAP_BACKUP_REASON,
+                "files": [entry("osara", "reaper-kb.ini", "unattended-unix-2-0", b"own keymap")],
+                "receipt_backup_path": null,
+            }),
+            serde_json::json!({
+                "schema_version": 1,
+                "rabbit_version": "0.4.4",
+                "created_at": "unix-3",
+                "reason": UPDATE_BACKUP_REASON,
+                "files": [entry(
+                    "reapack",
+                    "UserPlugins/reaper_reapack-x64.dll",
+                    "unix-3",
+                    b"reapack 1.0",
+                )],
+                "receipt_backup_path": null,
+            }),
+        ];
+        for manifest in &manifests {
+            let set = backups.join(manifest["created_at"].as_str().unwrap());
+            fs::write(
+                set.join(BACKUP_MANIFEST_FILE),
+                serde_json::to_string_pretty(manifest).unwrap(),
+            )
+            .unwrap();
+            let loaded = load_backup_manifest(&set).unwrap().unwrap();
+            assert_eq!(loaded.created_unix, None);
+            assert!(loaded.replaced.is_empty());
+            assert_eq!(loaded.keymap_origin, None);
+            assert!(
+                loaded
+                    .packages
+                    .values()
+                    .all(|record| record.with_settings.is_none())
+            );
+            let again = serde_json::to_value(&loaded).unwrap();
+            for field in ["created_unix", "replaced", "keymap_origin"] {
+                assert!(again.get(field).is_none(), "{field}");
+            }
+            assert_eq!(again.get("packages"), manifest.get("packages"));
+        }
+        write(&keymap, b"osara keymap");
+        write(&reapack, b"reapack 1.2.5");
+        let mut since = InstallState::default();
+        since.declined_packages.insert("sws".to_string());
+        save_install_state(&resource, &since).unwrap();
+
+        let rules = OutsideRestoreRules::default();
+        let report =
+            restore_backup_set_within(&resource, "uninstall-unix-1", &APPLY, &rules).unwrap();
+        assert!(report.packages[0].receipt_merged);
+        restore_backup_set_within(&resource, "unattended-unix-2-0", &APPLY, &rules).unwrap();
+        let refused = refused_with(dir.path(), &resource, "unix-3", None);
+
+        assert_eq!(fs::read(&plugin).unwrap(), b"sws");
+        let state = load_install_state(&resource).unwrap().unwrap();
+        assert_eq!(state.packages.get("sws"), Some(&receipt_entry("sws")));
+        assert!(state.declined_packages.is_empty());
+        assert_eq!(fs::read(&keymap).unwrap(), b"own keymap");
+        assert!(
+            matches!(&refused, RabbitError::EarlierVersionNotYet { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(fs::read(&reapack).unwrap(), b"reapack 1.2.5");
     }
 
     /// The manifest is read again under the lock. An uninstall still at
@@ -6337,6 +6982,7 @@ mod tests {
             let record = BackupPackageRecord {
                 receipt: Some(receipt_entry("sws")),
                 langpack_before: None,
+                with_settings: None,
             };
             writer.record_package("sws", record).unwrap();
             writer.move_file(Some("sws"), &first, None, false).unwrap();
@@ -6390,6 +7036,7 @@ mod tests {
             let record = BackupPackageRecord {
                 receipt: Some(receipt_entry(id)),
                 langpack_before: None,
+                with_settings: None,
             };
             writer.record_package(id, record).unwrap();
         }

@@ -26,7 +26,7 @@ use super::admin_batch::{
 use super::macos_objects::{
     FakeMacosObjects, MacosObjects, NoMacosObjects, SystemMacosObjects, TrashErrorKind,
 };
-use super::macos_plan_tests::link_folder;
+use super::paths::link_folder;
 use super::tests::write;
 
 const SURGE_APP: &str = "/Applications/Surge.app";

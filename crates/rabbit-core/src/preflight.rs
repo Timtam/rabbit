@@ -58,6 +58,11 @@ pub struct RunningProcess {
 /// running. Its failure message starts with this name and a colon.
 pub const REAPER_PROCESS_CHECK: &str = "reaper-process";
 
+/// The name of the preflight check that fails while `RABBIT` or
+/// `RABBIT/backups` is a symbolic link or junction, where a run would write
+/// a backup set. Install and uninstall share it.
+pub const BACKUP_FOLDER_CHECK: &str = "backup-folder";
+
 /// The running REAPER processes that would stop an install into
 /// `resource_path` (for the REAPER at `target_app_path`): exactly the ones
 /// the install's own preflight refuses to work around. Lets the wizard warn
@@ -128,6 +133,9 @@ pub fn run_install_preflight_with_processes(
         &relevant_processes,
         options.allow_reaper_running || options.dry_run,
     ));
+    // Nothing allows a linked backups folder, so a dry run fails on it too
+    // and says what a real run would.
+    checks.extend(backup_folder_check(resource_path));
 
     // macOS: rehearse the actual overwrite into UserPlugins so a permission
     // block (Full Disk Access / App Management on Sonoma+ / immutable flag /
@@ -152,6 +160,42 @@ pub fn ensure_resource_path_ready(resource_path: &Path, dry_run: bool) -> Result
         });
     }
     Ok(())
+}
+
+/// Only the install preflight's backup folder check (see
+/// [`backup_folder_check`]), failing with the same
+/// [`RabbitError::PreflightFailed`] text the full preflight gives. For the
+/// runs that start with [`ensure_resource_path_ready`] rather than the whole
+/// preflight: the package operation and `rabbit install-extension --apply`,
+/// which check it before they take the lock or download anything.
+pub fn ensure_backups_folder_is_real(resource_path: &Path) -> Result<()> {
+    match backup_folder_check(resource_path) {
+        Some(check) => Err(RabbitError::PreflightFailed {
+            message: format!("{}: {}", check.name, check.message),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The failed check when `RABBIT` or `RABBIT/backups` in `resource_path` is
+/// a symbolic link or junction, or `None`. An install keeps what it
+/// replaces there, the files an update replaces and the key map OSARA's
+/// replaces, and a restore never follows a link there, so such a backup
+/// couldn't bring anything back. The whole run is refused before anything
+/// changes, as an uninstall is. Only a failure is reported.
+pub(crate) fn backup_folder_check(resource_path: &Path) -> Option<PreflightCheck> {
+    let link = crate::rollback::linked_backups_folder(resource_path)?;
+    Some(PreflightCheck {
+        name: BACKUP_FOLDER_CHECK.to_string(),
+        status: PreflightStatus::Fail,
+        message: format!(
+            "{} is a symbolic link or junction. RABBIT doesn't install while it is, because it \
+             keeps a backup of what an install replaces there and never restores a backup from \
+             behind a link. Make it a real folder again, with the backups inside it, then \
+             install.",
+            link.display()
+        ),
+    })
 }
 
 pub fn running_reaper_processes(platform: Option<Platform>) -> Vec<RunningProcess> {
@@ -1165,5 +1209,88 @@ mod tests {
         );
         // The original plugin must still be intact (rehearsal failed safe).
         assert!(user_plugins.join("reaper_kontrol.dylib").exists());
+    }
+
+    /// While `RABBIT` or `RABBIT/backups` is a junction or symbolic link,
+    /// the install preflight fails its `backup-folder` check, naming the
+    /// link, in a dry run too, since nothing allows it. So the first step of
+    /// a setup, which makes RABBIT's folders, stops before it makes any, and
+    /// nothing goes where the link leads. A real folder, or none yet, adds
+    /// no check.
+    #[test]
+    fn a_linked_backups_folder_fails_the_install_preflight() {
+        let dir = tempdir().unwrap();
+        for (index, linked) in [&["RABBIT"][..], &["RABBIT", "backups"][..]]
+            .into_iter()
+            .enumerate()
+        {
+            let resource = dir.path().join(format!("REAPER-{index}"));
+            let link = linked
+                .iter()
+                .fold(resource.clone(), |path, name| path.join(name));
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            let elsewhere = dir.path().join(format!("Elsewhere-{index}"));
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            crate::uninstall::paths::link_folder(&link, &elsewhere);
+
+            for dry_run in [true, false] {
+                let options = PreflightOptions {
+                    dry_run,
+                    allow_reaper_running: true,
+                    target_app_path: None,
+                };
+                let report = run_install_preflight_with_processes(&resource, &options, &[]);
+
+                assert!(!report.passed, "{linked:?} {dry_run}");
+                let check = report
+                    .checks
+                    .iter()
+                    .find(|check| check.name == super::BACKUP_FOLDER_CHECK)
+                    .expect("the backup folder check");
+                assert_eq!(check.status, PreflightStatus::Fail);
+                assert!(
+                    check.message.contains(&link.display().to_string()),
+                    "{}",
+                    check.message
+                );
+                let error = super::ensure_backups_folder_is_real(&resource).unwrap_err();
+                assert!(
+                    matches!(&error, crate::error::RabbitError::PreflightFailed { message }
+                        if message.starts_with("backup-folder: ")),
+                    "{error:?}"
+                );
+
+                let error = crate::resource::initialize_resource_path(
+                    &resource,
+                    &crate::resource::ResourceInitOptions {
+                        dry_run,
+                        portable: true,
+                        include_extension_support_dirs: true,
+                        allow_reaper_running: true,
+                        target_app_path: None,
+                    },
+                )
+                .unwrap_err();
+                assert!(
+                    error.to_string().contains("backup-folder: "),
+                    "{linked:?} {dry_run}: {error}"
+                );
+                assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+                assert!(!resource.join("UserPlugins").exists());
+                assert!(!resource.join("reaper.ini").exists());
+            }
+        }
+
+        let resource = dir.path().join("REAPER");
+        let report =
+            run_install_preflight_with_processes(&resource, &options_for_target(None, true), &[]);
+        assert!(
+            report
+                .checks
+                .iter()
+                .all(|check| check.name != super::BACKUP_FOLDER_CHECK),
+            "{report:?}"
+        );
+        super::ensure_backups_folder_is_real(&resource).unwrap();
     }
 }

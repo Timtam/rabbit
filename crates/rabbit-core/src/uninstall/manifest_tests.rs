@@ -26,10 +26,10 @@ use super::admin_batch::{
 };
 use super::execute::{UninstallEnvironment, execute_uninstall_in};
 use super::macos_plan_tests::{
-    DISK, MacFixture, OneVolume, SURGE_XT_TREES, join, link_folder, my_trash, owned_by_me,
-    owned_by_root, snapshot,
+    DISK, MacFixture, OneVolume, SURGE_XT_TREES, join, my_trash, owned_by_me, owned_by_root,
+    snapshot,
 };
-use super::paths::pattern_matches;
+use super::paths::{link_folder, pattern_matches};
 use super::tests::{
     Fixture, FoundAt, cleanup_found, detection, installed, script_file, script_path,
     script_plugins, scripts_fixture, write,

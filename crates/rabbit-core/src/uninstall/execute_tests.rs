@@ -1295,14 +1295,10 @@ fn settings_move_into_the_set_only_when_asked() {
     let preset = fixture.file("DemoData/presets/one.preset");
     let elsewhere = fixture.dir.path().join("Elsewhere");
     let outside = write(&elsewhere.join("mine.preset"), b"mine");
-    #[cfg(windows)]
-    super::paths::make_junction(
+    super::paths::link_folder(
         &fixture.resource.join("DemoData").join("linked"),
         &elsewhere,
     );
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&elsewhere, fixture.resource.join("DemoData").join("linked"))
-        .unwrap();
     let harness = Harness::new(&fixture, specs(), &["demo"]);
     let report = harness.run(&UninstallRequest {
         remove_settings: true,
@@ -1313,6 +1309,66 @@ fn settings_move_into_the_set_only_when_asked() {
     assert_eq!(demo.kept.len(), 1);
     assert_eq!(demo.kept[0].reason, KeptFileReason::HoldsLink);
     assert!(preset.is_file() && outside.is_file());
+}
+
+/// The set records, for each package, whether this uninstall moved its
+/// settings into it: `true` when "Also remove settings" moved them, and
+/// `false` without it, or when they were asked for and none moved, as when
+/// the only settings folder holds a link and stays whole.
+#[test]
+fn the_set_records_whether_it_holds_the_package_s_settings() {
+    let specs = || {
+        vec![spec(
+            "demo",
+            "",
+            &remove_files(
+                r#""remove": { "matching_user_plugins": true },
+                   "kept_user_data": [
+                       { "path": "{resource}/Demo.ini", "note_key": "test-settings" },
+                       { "path": "{resource}/DemoData", "note_key": "test-data" }
+                   ]"#,
+            ),
+        )]
+    };
+    let with_settings = |report: &UninstallReport| {
+        assert_eq!(status(report, "demo"), UninstallStatus::Removed);
+        manifest(report).packages["demo"].with_settings
+    };
+
+    let fixture = Fixture::new();
+    fixture.file("UserPlugins/reaper_demo.dll");
+    fixture.file("Demo.ini");
+    let harness = Harness::new(&fixture, specs(), &["demo"]);
+    assert_eq!(with_settings(&harness.apply(&["demo"])), Some(false));
+
+    let fixture = Fixture::new();
+    fixture.file("UserPlugins/reaper_demo.dll");
+    fixture.file("Demo.ini");
+    fixture.file("DemoData/presets/one.preset");
+    let harness = Harness::new(&fixture, specs(), &["demo"]);
+    let report = harness.run(&UninstallRequest {
+        remove_settings: true,
+        ..harness.request(&["demo"])
+    });
+    assert_eq!(with_settings(&report), Some(true));
+    assert!(!fixture.resource.join("Demo.ini").exists());
+
+    let fixture = Fixture::new();
+    fixture.file("UserPlugins/reaper_demo.dll");
+    let preset = fixture.file("DemoData/presets/one.preset");
+    let elsewhere = fixture.dir.path().join("Elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    super::paths::link_folder(
+        &fixture.resource.join("DemoData").join("linked"),
+        &elsewhere,
+    );
+    let harness = Harness::new(&fixture, specs(), &["demo"]);
+    let report = harness.run(&UninstallRequest {
+        remove_settings: true,
+        ..harness.request(&["demo"])
+    });
+    assert_eq!(with_settings(&report), Some(false));
+    assert!(preset.is_file());
 }
 
 /// The shipped plans carried out, not only planned: SWS and the German

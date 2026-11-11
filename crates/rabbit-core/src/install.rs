@@ -22,7 +22,9 @@ use crate::receipt::{
     InstallState, PackageReceiptParams, load_install_state, save_install_state,
     upsert_package_receipt,
 };
-use crate::rollback::{BackupSetWriter, OutsideRestoreRules, UPDATE_BACKUP_REASON};
+use crate::rollback::{
+    BackupSetWriter, OutsideRestoreRules, ReplacedPackageRecord, UPDATE_BACKUP_REASON,
+};
 use crate::uninstall::paths::{UninstallRoots, resolve_pattern};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +44,11 @@ pub struct InstallReport {
     pub dry_run: bool,
     pub preflight: PreflightReport,
     pub receipt_written: bool,
+    /// Always `None` now. Earlier versions copied RABBIT's whole receipt
+    /// into the update's backup set and named the copy here. The set records
+    /// each replaced package's own entry instead (see
+    /// [`crate::rollback::BackupManifest::replaced`]). Kept so saved reports
+    /// and `--json` output keep their shape.
     pub receipt_backup_path: Option<PathBuf>,
     pub backup_manifest_path: Option<PathBuf>,
     pub actions: Vec<InstallFileReport>,
@@ -121,7 +128,8 @@ pub fn install_cached_artifacts_with_progress(
     let mut state = load_install_state(resource_path)?.unwrap_or_default();
     // Created on the first file this run replaces, so a run that only adds
     // files leaves no empty set behind. A dry run plans the same paths
-    // without writing anything.
+    // without writing anything. One set holds every package this call
+    // replaces files of, and records each of them (see `UpdateBackup`).
     let mut replacement_backups: Option<BackupSetWriter> = None;
     let new_backup_set = || {
         if options.dry_run {
@@ -194,10 +202,17 @@ pub fn install_cached_artifacts_with_progress(
                 None
             } else {
                 let backups = if replaces {
-                    Some((
-                        replacement_backups.get_or_insert_with(new_backup_set),
+                    Some(UpdateBackup {
+                        writer: replacement_backups.get_or_insert_with(new_backup_set),
                         package_id,
-                    ))
+                        // The package's own entry is updated only after all
+                        // of its files, so `state` still holds the one from
+                        // before this install.
+                        replaced: ReplacedPackageRecord {
+                            receipt: state.packages.get(package_id).cloned(),
+                            replaced_by: Some(artifact.descriptor.version.clone()),
+                        },
+                    })
                 } else {
                     None
                 };
@@ -272,13 +287,10 @@ pub fn install_cached_artifacts_with_progress(
         });
     }
 
-    // The receipt joins the replaced files' set, copied before the new
-    // receipt is saved, so the set keeps what it said before the update. A
-    // restore never copies it back, because that would undo every change
-    // to it since, so it refuses this set until it can go back to an
-    // earlier version by changing only that package's entry.
-    if let Some(backups) = &mut replacement_backups {
-        report.receipt_backup_path = backups.copy_receipt_if_present()?;
+    // No copy of the receipt joins the set: it records each replaced
+    // package's own entry from before, and a restore never copies a receipt
+    // back, which would undo every change to it since.
+    if let Some(backups) = &replacement_backups {
         report.backup_manifest_path = Some(backups.manifest_path());
     }
     if !options.dry_run && !artifacts.is_empty() {
@@ -611,6 +623,33 @@ fn lookup_install_spec(package_id: &str, platform: crate::model::Platform) -> Re
         })
 }
 
+/// Where an update keeps a file it is about to replace, and what it records
+/// about the file's package first.
+struct UpdateBackup<'a> {
+    writer: &'a mut BackupSetWriter,
+    package_id: &'a str,
+    /// The package's receipt entry from before this install and the version
+    /// replacing it. The set records it before the package's first file.
+    replaced: ReplacedPackageRecord,
+}
+
+impl UpdateBackup<'_> {
+    /// Record the package, if the set hasn't yet, then copy `target_path`
+    /// into the set. When the copy fails before the set noted it, the
+    /// record goes again, and so does a set left empty.
+    fn copy(self, target_path: &Path) -> Result<PathBuf> {
+        let Self {
+            writer,
+            package_id,
+            replaced,
+        } = self;
+        writer.record_replaced(package_id, replaced)?;
+        writer
+            .copy_file(Some(package_id), target_path)
+            .inspect_err(|_| writer.forget_replaced_without_entry(package_id))
+    }
+}
+
 /// Copy a verified file into place. With `backups`, the file it replaces is
 /// copied into that backup set first, after the new file is staged and
 /// checked, so a download that fails its check leaves no backup behind.
@@ -619,7 +658,7 @@ fn install_extension_file(
     source_path: &Path,
     source_sha256: &str,
     target_path: &Path,
-    backups: Option<(&mut BackupSetWriter, &str)>,
+    backups: Option<UpdateBackup<'_>>,
 ) -> Result<Option<PathBuf>> {
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent).with_path(parent)?;
@@ -642,7 +681,7 @@ fn install_extension_file(
     }
 
     let backup_path = match backups {
-        Some((backups, package_id)) => match backups.copy_file(Some(package_id), target_path) {
+        Some(backup) => match backup.copy(target_path) {
             Ok(path) => Some(path),
             Err(error) => {
                 let _ = fs::remove_file(&temp_path);
@@ -727,7 +766,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        InstallFileAction, InstallOptions, install_cached_artifacts, resolve_install_target,
+        InstallFileAction, InstallOptions, UpdateBackup, install_cached_artifacts,
+        install_extension_file, resolve_install_target,
     };
     use crate::artifact::{ArtifactDescriptor, ArtifactKind, CachedArtifact};
     use crate::error::RabbitError;
@@ -738,6 +778,9 @@ mod tests {
     use crate::package::{InstallDestination, PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK};
     use crate::receipt::{
         InstallState, InstalledFileReceipt, PackageReceipt, load_install_state, save_install_state,
+    };
+    use crate::rollback::{
+        BackupManifest, BackupSetWriter, ReplacedPackageRecord, UPDATE_BACKUP_REASON,
     };
     use crate::version::Version;
 
@@ -980,7 +1023,7 @@ mod tests {
             dir.path(),
             &InstallState {
                 schema_version: 1,
-                packages,
+                packages: packages.clone(),
                 declined_packages: Default::default(),
                 applied_configuration: Default::default(),
             },
@@ -1008,22 +1051,20 @@ mod tests {
         assert_eq!(report.actions[0].action, InstallFileAction::Replaced);
         let backup = report.actions[0].backup_path.as_ref().unwrap();
         assert_eq!(fs::read(backup).unwrap(), b"old");
-        let receipt_backup = report.receipt_backup_path.as_ref().unwrap();
-        let backed_up_state: InstallState =
-            serde_json::from_str(&fs::read_to_string(receipt_backup).unwrap()).unwrap();
+        // The set holds the replaced file and records ReaPack's entry from
+        // before, not a copy of the whole receipt.
+        assert_eq!(report.receipt_backup_path, None);
+        let backup_manifest = update_set(&report);
+        assert_eq!(backup_manifest.reason, "install-replacement");
+        assert_eq!(backup_manifest.files.len(), 1);
+        assert_eq!(backup_manifest.receipt_backup_path, None);
         assert_eq!(
-            backed_up_state.packages[PACKAGE_REAPACK]
-                .version
-                .as_ref()
-                .unwrap()
-                .raw(),
-            "1.2.5"
+            backup_manifest.replaced[PACKAGE_REAPACK],
+            ReplacedPackageRecord {
+                receipt: Some(packages[PACKAGE_REAPACK].clone()),
+                replaced_by: Some(Version::parse("1.2.6").unwrap()),
+            }
         );
-        let backup_manifest_path = report.backup_manifest_path.as_ref().unwrap();
-        let backup_manifest: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(backup_manifest_path).unwrap()).unwrap();
-        assert_eq!(backup_manifest["reason"], "install-replacement");
-        assert_eq!(backup_manifest["files"].as_array().unwrap().len(), 2);
         assert_eq!(
             fs::read(plugins.join("reaper_reapack-x64.dll")).unwrap(),
             b"new"
@@ -1040,10 +1081,11 @@ mod tests {
         assert!(!plugins.join("reaper_reapack-x64.dll.rabbit-tmp").exists());
     }
 
-    /// The set a real update writes holds the replaced file and a copy of
-    /// the receipt from before. Restoring it, whole or for the package, is
-    /// refused until RABBIT can go back to an earlier version, and nothing
-    /// changes: the newer file and the current receipt stay byte for byte.
+    /// The set a real update writes holds the replaced file and the
+    /// package's entry from before. Restoring it, whole or for the package,
+    /// is refused until RABBIT can go back to an earlier version, and
+    /// nothing changes: the newer file and the current receipt stay byte for
+    /// byte.
     #[test]
     fn an_update_s_backup_is_not_restored_yet() {
         use crate::rollback::{
@@ -1071,7 +1113,8 @@ mod tests {
             b"new",
         );
         let report = install_cached_artifacts(dir.path(), &[new], &options).unwrap();
-        assert!(report.receipt_backup_path.is_some());
+        assert_eq!(report.receipt_backup_path, None);
+        assert!(update_set(&report).replaced.contains_key(PACKAGE_REAPACK));
         let set = report.backup_manifest_path.unwrap();
         let set_id = set.parent().unwrap().file_name().unwrap().to_str().unwrap();
         let plugin = dir
@@ -1105,6 +1148,249 @@ mod tests {
             assert_eq!(fs::read(&plugin).unwrap(), b"new");
             assert_eq!(fs::read(&receipt).unwrap(), receipt_now);
         }
+    }
+
+    /// The manifest of the update set `report` names.
+    fn update_set(report: &super::InstallReport) -> BackupManifest {
+        let path = report.backup_manifest_path.as_ref().expect("an update set");
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    const APPLY: InstallOptions = InstallOptions {
+        dry_run: false,
+        allow_reaper_running: true,
+        target_app_path: None,
+        package_variants: BTreeMap::new(),
+    };
+
+    /// An update over a copy RABBIT didn't install, which the receipt has no
+    /// entry for, records that there was none, and the version that
+    /// replaced it.
+    #[test]
+    fn an_update_over_a_copy_installed_by_hand_records_no_entry() {
+        let dir = tempdir().unwrap();
+        let plugins = dir.path().join("UserPlugins");
+        fs::create_dir_all(&plugins).unwrap();
+        fs::write(plugins.join("reaper_reapack-x64.dll"), b"by hand").unwrap();
+        let artifact = cached_artifact(
+            dir.path(),
+            PACKAGE_REAPACK,
+            "reaper_reapack-x64.dll",
+            b"new",
+        );
+
+        let report = install_cached_artifacts(dir.path(), &[artifact], &APPLY).unwrap();
+
+        let manifest = update_set(&report);
+        assert_eq!(
+            manifest.replaced[PACKAGE_REAPACK],
+            ReplacedPackageRecord {
+                receipt: None,
+                replaced_by: Some(Version::parse("1.2.6").unwrap()),
+            }
+        );
+        assert_eq!(
+            fs::read(&manifest.files[0].backup_path).unwrap(),
+            b"by hand"
+        );
+        assert_eq!(report.receipt_backup_path, None);
+        assert!(
+            manifest
+                .files
+                .iter()
+                .all(|file| !file.original_path.starts_with("RABBIT"))
+        );
+    }
+
+    /// One install of several packages, as `rabbit install-extension` makes,
+    /// writes one set for the two whose files it replaces. It records each
+    /// one's entry from before (one RABBIT installed, one by hand) and the
+    /// version that replaced it, keeps no copy of the receipt, and leaves
+    /// out OSARA, whose file it only added.
+    #[test]
+    fn one_install_records_every_package_it_replaced_in_one_set() {
+        let dir = tempdir().unwrap();
+        let plugins = dir.path().join("UserPlugins");
+        fs::create_dir_all(&plugins).unwrap();
+        fs::write(plugins.join("reaper_reapack-x64.dll"), b"reapack 1.0").unwrap();
+        fs::write(plugins.join("reaper_kontrol.dll"), b"reakontrol by hand").unwrap();
+        let mut state = InstallState::default();
+        let reapack_before = PackageReceipt {
+            id: PACKAGE_REAPACK.to_string(),
+            version: Some(Version::parse("1.0").unwrap()),
+            source_url: None,
+            source_sha256: None,
+            variant: None,
+            channel: None,
+            installed_files: vec![InstalledFileReceipt {
+                path: PathBuf::from("UserPlugins/reaper_reapack-x64.dll"),
+                sha256: None,
+                size: Some(11),
+            }],
+            installed_at: Some("unix-1".to_string()),
+            rabbit_version: Some("0.4.4".to_string()),
+            architecture: Some(Architecture::X64),
+            vendor_added_files: Vec::new(),
+        };
+        state
+            .packages
+            .insert(PACKAGE_REAPACK.to_string(), reapack_before.clone());
+        save_install_state(dir.path(), &state).unwrap();
+        let artifacts = [
+            cached_artifact(
+                dir.path(),
+                PACKAGE_REAPACK,
+                "reaper_reapack-x64.dll",
+                b"new",
+            ),
+            cached_artifact(dir.path(), PACKAGE_REAKONTROL, "reaper_kontrol.dll", b"new"),
+            cached_artifact(dir.path(), PACKAGE_OSARA, "reaper_osara64.dll", b"new"),
+        ];
+
+        let report = install_cached_artifacts(dir.path(), &artifacts, &APPLY).unwrap();
+
+        let manifest = update_set(&report);
+        let sets = fs::read_dir(dir.path().join("RABBIT").join("backups"))
+            .unwrap()
+            .count();
+        assert_eq!(sets, 1);
+        let version = Some(Version::parse("1.2.6").unwrap());
+        assert_eq!(
+            manifest.replaced,
+            BTreeMap::from([
+                (
+                    PACKAGE_REAPACK.to_string(),
+                    ReplacedPackageRecord {
+                        receipt: Some(reapack_before),
+                        replaced_by: version.clone(),
+                    }
+                ),
+                (
+                    PACKAGE_REAKONTROL.to_string(),
+                    ReplacedPackageRecord {
+                        receipt: None,
+                        replaced_by: version,
+                    }
+                ),
+            ])
+        );
+        assert_eq!(manifest.files.len(), 2);
+        assert_eq!(manifest.receipt_backup_path, None);
+        assert!(
+            manifest
+                .files
+                .iter()
+                .all(|file| !file.original_path.starts_with("RABBIT"))
+        );
+        assert_eq!(report.receipt_backup_path, None);
+        let state = load_install_state(dir.path()).unwrap().unwrap();
+        for package in [PACKAGE_REAPACK, PACKAGE_REAKONTROL, PACKAGE_OSARA] {
+            assert_eq!(
+                state.packages[package].version.as_ref().unwrap().raw(),
+                "1.2.6"
+            );
+        }
+    }
+
+    /// What an update records of a package: no entry, and the version
+    /// replacing it.
+    fn replaced_by_1_2_6() -> ReplacedPackageRecord {
+        ReplacedPackageRecord {
+            receipt: None,
+            replaced_by: Some(Version::parse("1.2.6").unwrap()),
+        }
+    }
+
+    /// Should `RABBIT` or `RABBIT/backups` become a link after the checks
+    /// before the run, the update stops before it replaces the file: the
+    /// old file stays byte for byte, the staged new one goes again, and
+    /// nothing is written where the link leads.
+    #[test]
+    fn an_update_replaces_nothing_when_its_backup_would_go_behind_a_link() {
+        for linked in [&["RABBIT"][..], &["RABBIT", "backups"][..]] {
+            let dir = tempdir().unwrap();
+            let resource = dir.path().join("REAPER");
+            let target = resource.join("UserPlugins").join("reaper_reapack-x64.dll");
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::write(&target, b"old").unwrap();
+            let source = dir.path().join("reaper_reapack-x64.dll");
+            fs::write(&source, b"new").unwrap();
+            let link = linked
+                .iter()
+                .fold(resource.clone(), |path, name| path.join(name));
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            let elsewhere = dir.path().join("Elsewhere");
+            fs::create_dir_all(&elsewhere).unwrap();
+            crate::uninstall::paths::link_folder(&link, &elsewhere);
+            let mut writer = BackupSetWriter::new(&resource, "unix-1", UPDATE_BACKUP_REASON);
+
+            let error = install_extension_file(
+                &source,
+                &sha256_file(&source).unwrap(),
+                &target,
+                Some(UpdateBackup {
+                    writer: &mut writer,
+                    package_id: PACKAGE_REAPACK,
+                    replaced: replaced_by_1_2_6(),
+                }),
+            )
+            .unwrap_err();
+
+            assert!(
+                matches!(&error, RabbitError::BackupPathIsLink { path } if *path == link),
+                "{linked:?}: {error:?}"
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"old");
+            assert!(
+                !target
+                    .with_file_name("reaper_reapack-x64.dll.rabbit-tmp")
+                    .exists()
+            );
+            assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "{linked:?}");
+        }
+    }
+
+    /// When the first file of a package can't be copied into the set, the
+    /// package's record goes again: a set the failure would leave empty is
+    /// removed, and one that holds another package's file keeps only that
+    /// package's record.
+    #[test]
+    fn a_first_copy_that_fails_leaves_no_record_of_its_package() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugins = resource.join("UserPlugins");
+        fs::create_dir_all(&plugins).unwrap();
+        let missing = plugins.join("reaper_reapack-x64.dll");
+        let kontrol = plugins.join("reaper_kontrol.dll");
+        fs::write(&kontrol, b"reakontrol by hand").unwrap();
+        fn backup<'a>(writer: &'a mut BackupSetWriter, package_id: &'a str) -> UpdateBackup<'a> {
+            UpdateBackup {
+                writer,
+                package_id,
+                replaced: replaced_by_1_2_6(),
+            }
+        }
+
+        let mut alone = BackupSetWriter::new(&resource, "unix-1", UPDATE_BACKUP_REASON);
+        backup(&mut alone, PACKAGE_REAPACK)
+            .copy(&missing)
+            .unwrap_err();
+        assert!(!alone.path().exists());
+
+        let mut shared = BackupSetWriter::new(&resource, "unix-2", UPDATE_BACKUP_REASON);
+        backup(&mut shared, PACKAGE_REAKONTROL)
+            .copy(&kontrol)
+            .unwrap();
+        backup(&mut shared, PACKAGE_REAPACK)
+            .copy(&missing)
+            .unwrap_err();
+        let manifest: BackupManifest =
+            serde_json::from_str(&fs::read_to_string(shared.manifest_path()).unwrap()).unwrap();
+        assert_eq!(
+            manifest.replaced,
+            BTreeMap::from([(PACKAGE_REAKONTROL.to_string(), replaced_by_1_2_6())])
+        );
+        assert_eq!(manifest.files.len(), 1);
     }
 
     #[test]

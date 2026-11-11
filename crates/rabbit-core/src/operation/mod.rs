@@ -28,19 +28,20 @@ use crate::install::{
     InstallFileReport, InstallOptions, InstallReport, install_cached_artifacts_with_progress,
 };
 use crate::model::{Architecture, ComponentDetection, InstallationKind, Platform};
+use crate::osara_keymap::osara_keymap_state;
 use crate::package::package_specs_by_id;
 use crate::package::uninstall::UninstallPath;
 use crate::plan::PlanActionKind;
 use crate::preflight::{
-    RunningProcess, ensure_reaper_closed_with_processes, ensure_resource_path_ready,
-    running_processes_named, running_reaper_processes,
+    RunningProcess, ensure_backups_folder_is_real, ensure_reaper_closed_with_processes,
+    ensure_resource_path_ready, running_processes_named, running_reaper_processes,
 };
 use crate::progress::{ProgressEvent, ProgressReporter};
 use crate::receipt::{
     InstallState, PackageReceiptParams, load_install_state, save_install_state,
     upsert_package_receipt,
 };
-use crate::rollback::{BackupSetWriter, RECORDS_BACKUP_REASON};
+use crate::rollback::KeymapOrigin;
 use crate::uninstall::UninstallRoots;
 
 use self::osara::osara_manual_steps;
@@ -92,7 +93,14 @@ pub struct PackageOperationReport {
     pub resource_path: PathBuf,
     pub dry_run: bool,
     pub install_report: Option<InstallReport>,
+    /// Always `None` now. Earlier versions copied RABBIT's receipt into a
+    /// backup set of its own after vendor installers ran, and named the
+    /// copy here; nothing could use it, since a restore never copies the
+    /// receipt back. Kept so saved reports and `--json` output keep their
+    /// shape.
     pub receipt_backup_path: Option<PathBuf>,
+    /// Always `None` now, with `receipt_backup_path`: the manifest of that
+    /// set.
     pub receipt_backup_manifest_path: Option<PathBuf>,
     pub items: Vec<PackageOperationItem>,
 }
@@ -346,6 +354,9 @@ pub enum PackageOperationStatus {
 pub(super) struct UnattendedPostInstallReport {
     pub(super) backup_paths: Vec<PathBuf>,
     pub(super) backup_manifest_path: Option<PathBuf>,
+    /// Whether OSARA's key map replacement replaced `reaper-kb.ini`. Only
+    /// then does the item say so, and the receipt list the file as OSARA's.
+    pub(super) keymap_replaced: bool,
 }
 
 pub fn package_automation_support(
@@ -667,6 +678,12 @@ fn execute_operation_with(
     snapshot_source: &SnapshotSource<'_>,
 ) -> Result<PackageOperationReport> {
     ensure_resource_path_ready(resource_path, options.dry_run)?;
+    // Updates and OSARA's key map replacement keep what they replace in
+    // `RABBIT/backups`, and a restore never follows a link there. So a
+    // linked `RABBIT` or `RABBIT/backups` stops the run here, before the
+    // lock, a download or an installer, in a dry run too, as it stops an
+    // uninstall.
+    ensure_backups_folder_is_real(resource_path)?;
 
     let _install_lock = if options.dry_run {
         None
@@ -828,8 +845,6 @@ fn execute_operation_with(
         .collect();
     let deferred_handles: Vec<DownloadHandle> = handle_iter.collect();
 
-    let mut receipt_backup_path = None;
-    let mut receipt_backup_manifest_path = None;
     let mut unattended_state = if options.dry_run || unattended_installable.is_empty() {
         None
     } else {
@@ -954,14 +969,17 @@ fn execute_operation_with(
             progress.report(ProgressEvent::InstallStarted {
                 package_id: package_id.clone(),
             });
-            match executed_unattended_item(
+            let keymap_replaced = match executed_unattended_item(
                 planned,
                 &cached,
                 resource_path,
                 options.target_app_path.as_deref(),
                 options.replace_osara_keymap,
             ) {
-                Ok(item) => items.push(item),
+                Ok((item, keymap_replaced)) => {
+                    items.push(item);
+                    keymap_replaced
+                }
                 Err(error) => {
                     items.push(failed_operation_item(
                         planned.artifact.clone(),
@@ -974,15 +992,17 @@ fn execute_operation_with(
                     });
                     continue;
                 }
-            }
+            };
             if let Some(state) = &mut unattended_state {
+                // `reaper-kb.ini` is OSARA's only when its key map replaced
+                // it: one whose backup couldn't be made is still the user's.
                 match upsert_unattended_package_receipt(
                     state,
                     resource_path,
                     &planned.artifact,
                     &cached,
                     options.target_app_path.as_deref(),
-                    options.replace_osara_keymap,
+                    keymap_replaced,
                     snapshot.as_ref(),
                 ) {
                     Ok(()) => unattended_receipts_updated = true,
@@ -1008,34 +1028,17 @@ fn execute_operation_with(
                 package_id: package_id.clone(),
             });
         }
-        // Best-effort receipt persistence: run the backup + save for the
-        // packages that DID install, and never let a failure HERE mask a
-        // package error already recorded above.
-        let receipt_save_result: Result<()> = if unattended_receipts_updated {
-            (|| {
-                let mut backups = BackupSetWriter::new(
-                    resource_path,
-                    &operation_timestamp(),
-                    RECORDS_BACKUP_REASON,
-                );
-                receipt_backup_path = backups.copy_receipt_if_present()?;
-                if receipt_backup_path.is_some() {
-                    receipt_backup_manifest_path = Some(backups.manifest_path());
-                }
-                if let Some(state) = &unattended_state {
-                    save_install_state(resource_path, state)?;
-                }
-                Ok(())
-            })()
-        } else {
-            Ok(())
-        };
-        // A failure persisting the receipts is a genuine bookkeeping error
-        // (RABBIT's on-disk state would be inconsistent) that is not tied to
-        // any single package, so it still aborts. Per-package install
-        // failures were already recorded as Failed items above and do not
-        // reach here.
-        receipt_save_result?;
+        // Save the receipt for the packages that DID install. No copy of
+        // the old receipt goes into a backup first: a restore never copies
+        // one back, and the save itself is atomic (see
+        // `save_install_state`). A failure persisting the receipts is a
+        // genuine bookkeeping error (RABBIT's on-disk state would be
+        // inconsistent) that is not tied to any single package, so it still
+        // aborts. Per-package install failures were already recorded as
+        // Failed items above and do not reach here.
+        if unattended_receipts_updated && let Some(state) = &unattended_state {
+            save_install_state(resource_path, state)?;
+        }
     }
 
     // Staged-only downloads are collected AFTER the installs above: they are
@@ -1170,7 +1173,8 @@ fn execute_operation_with(
             }
             Err(error) => {
                 // A preflight failure is a global precondition (REAPER is
-                // running, or the resource dir isn't writable), not this
+                // running, the resource dir isn't writable, or RABBIT's
+                // backups folder has become a link), not this
                 // package's fault. Keep it fatal — as the old single-batch
                 // install did — instead of demoting it to a per-package
                 // failure and mis-reporting "completed with errors" when the
@@ -1195,8 +1199,8 @@ fn execute_operation_with(
         resource_path: resource_path.to_path_buf(),
         dry_run: options.dry_run,
         install_report,
-        receipt_backup_path,
-        receipt_backup_manifest_path,
+        receipt_backup_path: None,
+        receipt_backup_manifest_path: None,
         items,
     })
 }
@@ -1717,19 +1721,17 @@ fn dependency_ordered(planned: Vec<PlannedArtifact>) -> Vec<PlannedArtifact> {
 
 /// Fold a single-package install report into the running direct-install
 /// report surfaced in the operation result. Actions accumulate; the first
-/// receipt-backup path/manifest seen is kept as representative. Each
-/// per-package call that replaces files writes its own timestamped backup
-/// set, and every set stays on disk and is listed by `RABBIT backups` for
-/// rollback — the report just needs one path to show the user.
+/// backup manifest seen is kept as representative. Each per-package call
+/// that replaces files writes its own timestamped backup set, and every set
+/// stays on disk and is listed by `RABBIT backups` for rollback — the
+/// report just needs one path to show the user. No install names a receipt
+/// backup any more (see [`InstallReport::receipt_backup_path`]).
 fn merge_install_report(target: &mut Option<InstallReport>, source: InstallReport) {
     match target {
         None => *target = Some(source),
         Some(existing) => {
             existing.actions.extend(source.actions);
             existing.receipt_written |= source.receipt_written;
-            if existing.receipt_backup_path.is_none() {
-                existing.receipt_backup_path = source.receipt_backup_path;
-            }
             if existing.backup_manifest_path.is_none() {
                 existing.backup_manifest_path = source.backup_manifest_path;
             }
@@ -1773,13 +1775,17 @@ fn planned_unattended_item(
     }
 }
 
+/// Run `planned`'s installer, its package's steps after it, and the checks
+/// that it landed. Returns the item, and whether OSARA's key map
+/// replacement replaced `reaper-kb.ini` (always `false` for any other
+/// package).
 fn executed_unattended_item(
     planned: &PlannedArtifact,
     cached_artifact: &CachedArtifact,
     resource_path: &Path,
     target_app_path: Option<&Path>,
     replace_osara_keymap: bool,
-) -> Result<PackageOperationItem> {
+) -> Result<(PackageOperationItem, bool)> {
     let planned_execution = planned_execution_for_artifact(
         &planned.artifact,
         Some(cached_artifact),
@@ -1835,6 +1841,12 @@ fn executed_unattended_item(
             )
         })
         .flatten();
+    // OSARA with the key map replacement: what `reaper-kb.ini` is, read now,
+    // because the install overwrites the OSARA key map it is compared with.
+    // The key map's backup records it.
+    let keymap_replacement = (planned.artifact.package_id == crate::package::PACKAGE_OSARA
+        && replace_osara_keymap)
+        .then(|| KeymapOrigin::from(osara_keymap_state(resource_path)));
 
     let install_started_at = SystemTime::now();
     let process_result = execute_planned_execution(&planned_execution, false);
@@ -1852,7 +1864,7 @@ fn executed_unattended_item(
         &planned.artifact,
         resource_path,
         target_app_path,
-        replace_osara_keymap,
+        keymap_replacement,
     );
     let post_install = match verify_planned_execution_paths(&planned_execution) {
         Ok(()) => {
@@ -1882,9 +1894,13 @@ fn executed_unattended_item(
         policy.enforce();
     }
 
+    // A key map step that failed, as when its backup was refused, left
+    // `reaper-kb.ini` as it was, so the item says only that OSARA was
+    // installed.
+    let keymap_replaced = post_install.keymap_replaced;
     let (message, message_code) = match planned.artifact.package_id.as_str() {
         crate::package::PACKAGE_OSARA => osara::unattended_install_message(
-            replace_osara_keymap,
+            keymap_replaced,
             !post_install.backup_paths.is_empty(),
         )
         .unwrap_or_else(|| {
@@ -1899,7 +1915,7 @@ fn executed_unattended_item(
         ),
     };
 
-    Ok(PackageOperationItem {
+    let item = PackageOperationItem {
         package_id: planned.artifact.package_id.clone(),
         plan_action: planned.plan_action,
         status: PackageOperationStatus::InstalledOrChecked,
@@ -1912,7 +1928,8 @@ fn executed_unattended_item(
         backup_manifest_path: post_install.backup_manifest_path,
         planned_execution: Some(planned_execution),
         manual_instruction: None,
-    })
+    };
+    Ok((item, keymap_replaced))
 }
 
 /// List the folders `artifact`'s manifest names under
@@ -2063,36 +2080,24 @@ fn receipt_paths_for_artifact(
     Ok(paths)
 }
 
+/// The package's own steps after its installer ran. `keymap_replacement` is
+/// `Some` for OSARA with the key map replacement: what the key map was
+/// before the install (see [`osara::post_install_unattended`]).
 fn post_execute_unattended_artifact(
     artifact: &ArtifactDescriptor,
     resource_path: &Path,
     target_app_path: Option<&Path>,
-    replace_osara_keymap: bool,
+    keymap_replacement: Option<KeymapOrigin>,
 ) -> Result<UnattendedPostInstallReport> {
     if artifact.package_id == crate::package::PACKAGE_OSARA {
         return osara::post_install_unattended(
             resource_path,
             artifact.platform,
             target_app_path,
-            replace_osara_keymap,
+            keymap_replacement,
         );
     }
     Ok(UnattendedPostInstallReport::default())
-}
-
-/// Back up one file a post-install step is about to change (OSARA's
-/// replacement of `reaper-kb.ini`) into a set of its own. Returns the copy's
-/// path and the set's manifest. Files outside the resource folder are
-/// accepted too; the shared writer keeps them recoverable.
-pub(super) fn backup_file_for_unattended_change(
-    resource_path: &Path,
-    package_id: &str,
-    source_path: &Path,
-    reason: &str,
-) -> Result<(PathBuf, PathBuf)> {
-    let mut backups = BackupSetWriter::new(resource_path, &operation_timestamp(), reason);
-    let backup_path = backups.copy_file(Some(package_id), source_path)?;
-    Ok((backup_path, backups.manifest_path()))
 }
 
 pub(super) fn replace_file_from_source(source_path: &Path, target_path: &Path) -> Result<()> {
@@ -2598,9 +2603,9 @@ mod tests {
     use super::{
         InstallerExitMeaning, PackageAutomationSupport, PackageOperationMessage,
         PackageOperationOptions, PackageOperationStatus, PlannedArtifact, PlannedAutomationKind,
-        PlannedExecutionKind, ProcessScans, backup_file_for_unattended_change, dependency_ordered,
-        execute_operation_with, execute_operation_with_process_scan,
-        execute_resolved_package_operation, execute_resolved_package_operation_with_detections,
+        PlannedExecutionKind, ProcessScans, dependency_ordered, execute_operation_with,
+        execute_operation_with_process_scan, execute_resolved_package_operation,
+        execute_resolved_package_operation_with_detections,
         execute_resolved_package_operation_with_detections_and_progress, first_failed_dependency,
         manifest_snapshot_source, plan_action_for_artifact, take_install_snapshot,
         upsert_unattended_package_receipt,
@@ -3770,13 +3775,180 @@ mod tests {
             std::fs::read(&report.items[0].backup_paths[0]).unwrap(),
             b"old keymap"
         );
-        assert!(report.items[0].backup_manifest_path.is_some());
+        // There was no OSARA key map to compare the old one with.
+        assert_eq!(
+            keymap_set_manifest(&report).keymap_origin,
+            Some(crate::rollback::KeymapOrigin::Unknown)
+        );
         assert!(
             report.items[0]
                 .message
                 .contains("applied the OSARA key map replacement")
         );
         assert!(!resource_path.join("osara").join("uninstall.exe").exists());
+    }
+
+    /// The manifest of the key map set the run's one item names.
+    #[cfg(target_os = "windows")]
+    fn keymap_set_manifest(
+        report: &super::PackageOperationReport,
+    ) -> crate::rollback::BackupManifest {
+        let path = report.items[0]
+            .backup_manifest_path
+            .as_ref()
+            .expect("a key map set");
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// The key map's backup records what the key map was before OSARA's
+    /// installer ran. Here it was the OSARA key map installed then; the
+    /// installer brings another one, so a look afterwards would have taken
+    /// it for the user's own.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_key_map_set_records_the_key_map_as_it_was_before_the_installer() {
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let source_path = dir.path().join("osara-installer.cmd");
+        std::fs::write(&source_path, osara_mock_installer_script()).unwrap();
+        let resource_path = dir.path().join("PortableREAPER");
+        std::fs::create_dir_all(resource_path.join("KeyMaps")).unwrap();
+        std::fs::write(resource_path.join("reaper-kb.ini"), b"KEY 1 65 40001 0\r\n").unwrap();
+        std::fs::write(
+            resource_path.join("KeyMaps").join("OSARA.ReaperKeyMap"),
+            b"KEY 1 65 40001 0\r\n",
+        )
+        .unwrap();
+
+        let report = execute_resolved_package_operation(
+            &resource_path,
+            vec![artifact_with_url(
+                PACKAGE_OSARA,
+                ArtifactKind::Installer,
+                "osara-installer.cmd",
+                &source_path.display().to_string(),
+            )],
+            cache.path(),
+            &PackageOperationOptions {
+                dry_run: false,
+                allow_reaper_running: false,
+                stage_unsupported: false,
+                replace_osara_keymap: true,
+                target_app_path: Some(resource_path.join("reaper.exe")),
+                lock_path: Some(dir.path().join("install.lock")),
+                force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
+                package_channels: Default::default(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.items[0].status,
+            PackageOperationStatus::InstalledOrChecked
+        );
+        let manifest = keymap_set_manifest(&report);
+        assert_eq!(
+            manifest.keymap_origin,
+            Some(crate::rollback::KeymapOrigin::UnchangedOsara)
+        );
+        assert_eq!(
+            std::fs::read(&report.items[0].backup_paths[0]).unwrap(),
+            b"KEY 1 65 40001 0\r\n"
+        );
+    }
+
+    /// `RABBIT/backups` becomes a junction while OSARA's installer runs,
+    /// after the checks before the run. The key map's backup is refused, so
+    /// `reaper-kb.ini` stays the user's. OSARA itself is installed, and its
+    /// item says only that: it never claims the key map was replaced, and
+    /// the receipt doesn't list the user's key map as one of OSARA's files.
+    /// Nothing is written where the junction leads.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_key_map_whose_backup_is_refused_stays_the_users_and_isnt_claimed() {
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let elsewhere = dir.path().join("Elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        // The stand-in installer turns `RABBIT\backups` into a junction once
+        // it has written OSARA's files.
+        let junction = [
+            "mkdir \"!DEST!\\RABBIT\" 2>nul".to_string(),
+            "rmdir \"!DEST!\\RABBIT\\backups\" 2>nul".to_string(),
+            format!(
+                "mklink /J \"!DEST!\\RABBIT\\backups\" \"{}\" >nul || exit /b 5",
+                elsewhere.display()
+            ),
+            "exit /b 0".to_string(),
+        ]
+        .join("\r\n");
+        let script = osara_mock_installer_script().replace("exit /b 0", &junction);
+        let source_path = dir.path().join("osara-installer.cmd");
+        std::fs::write(&source_path, script).unwrap();
+        let resource_path = dir.path().join("PortableREAPER");
+        std::fs::create_dir_all(&resource_path).unwrap();
+        std::fs::write(resource_path.join("reaper-kb.ini"), b"old keymap").unwrap();
+
+        let report = execute_resolved_package_operation(
+            &resource_path,
+            vec![artifact_with_url(
+                PACKAGE_OSARA,
+                ArtifactKind::Installer,
+                "osara-installer.cmd",
+                &source_path.display().to_string(),
+            )],
+            cache.path(),
+            &PackageOperationOptions {
+                dry_run: false,
+                allow_reaper_running: false,
+                stage_unsupported: false,
+                replace_osara_keymap: true,
+                target_app_path: Some(resource_path.join("reaper.exe")),
+                lock_path: Some(dir.path().join("install.lock")),
+                force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
+                package_channels: Default::default(),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            crate::rollback::linked_backups_folder(&resource_path).is_some(),
+            "the installer made no junction"
+        );
+        let item = &report.items[0];
+        assert_eq!(
+            item.status,
+            PackageOperationStatus::InstalledOrChecked,
+            "{}",
+            item.message
+        );
+        assert_eq!(
+            std::fs::read(resource_path.join("reaper-kb.ini")).unwrap(),
+            b"old keymap"
+        );
+        assert_eq!(item.message, super::DEFAULT_UNATTENDED_INSTALL_MESSAGE);
+        assert_eq!(
+            item.message_code,
+            PackageOperationMessage::UnattendedInstalled
+        );
+        assert!(item.backup_paths.is_empty() && item.backup_manifest_path.is_none());
+        let state = load_install_state(&resource_path).unwrap().unwrap();
+        let recorded: Vec<_> = state.packages[PACKAGE_OSARA]
+            .installed_files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
+        assert!(
+            !recorded.contains(&std::path::PathBuf::from("reaper-kb.ini")),
+            "{recorded:?}"
+        );
+        assert!(
+            recorded.contains(&std::path::Path::new("KeyMaps").join("OSARA.ReaperKeyMap")),
+            "{recorded:?}"
+        );
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
     }
 
     #[cfg(target_os = "windows")]
@@ -4104,9 +4276,12 @@ mod tests {
         );
     }
 
+    /// Vendor installers write no backup of RABBIT's records any more: the
+    /// receipt gains both packages, and no set holding only a copy of the
+    /// old one appears.
     #[cfg(target_os = "windows")]
     #[test]
-    fn unattended_installers_backup_existing_receipt_once_and_merge_package_state() {
+    fn unattended_installers_merge_package_state_without_a_records_only_backup() {
         let dir = tempdir().unwrap();
         let cache = tempdir().unwrap();
         let osara_source = dir.path().join("osara-installer.cmd");
@@ -4150,21 +4325,18 @@ mod tests {
 
         assert!(
             report
-                .receipt_backup_path
-                .as_ref()
-                .is_some_and(|path| path.is_file())
+                .items
+                .iter()
+                .all(|item| item.status == PackageOperationStatus::InstalledOrChecked),
+            "{report:?}"
         );
+        assert_eq!(report.receipt_backup_path, None);
+        assert_eq!(report.receipt_backup_manifest_path, None);
+        let backups = resource_path.join("RABBIT").join("backups");
         assert!(
-            report
-                .receipt_backup_manifest_path
-                .as_ref()
-                .is_some_and(|path| path.is_file())
-        );
-        assert_eq!(
-            std::fs::read_dir(resource_path.join("RABBIT").join("backups"))
-                .unwrap()
-                .count(),
-            1
+            !backups.exists() || std::fs::read_dir(&backups).unwrap().count() == 0,
+            "{:?}",
+            std::fs::read_dir(&backups).map(|entries| entries.count())
         );
 
         let state = load_install_state(&resource_path).unwrap().unwrap();
@@ -4443,6 +4615,76 @@ mod tests {
                 assert!(message.contains("read-only"));
             }
             other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// While `RABBIT` or `RABBIT/backups` is a junction or symbolic link,
+    /// the package operation (the wizard's install, `rabbit setup` and
+    /// `apply-packages`) stops before anything changes, in a dry run and for
+    /// real, with the preflight's `backup-folder` check naming the link: no
+    /// lock, no download, the plug-in an update would replace as it was,
+    /// and nothing where the link leads.
+    #[test]
+    fn a_linked_backups_folder_stops_the_run_before_anything_changes() {
+        for linked in [&["RABBIT"][..], &["RABBIT", "backups"][..]] {
+            for dry_run in [true, false] {
+                let dir = tempdir().unwrap();
+                let cache = tempdir().unwrap();
+                let source = dir.path().join("reaper_reapack-x64.dll");
+                fs::write(&source, b"reapack 1.2.5").unwrap();
+                let resource_path = dir.path().join("REAPER");
+                let plugin = resource_path
+                    .join("UserPlugins")
+                    .join("reaper_reapack-x64.dll");
+                fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+                fs::write(&plugin, b"reapack 1.2.4").unwrap();
+                let link = linked
+                    .iter()
+                    .fold(resource_path.clone(), |path, name| path.join(name));
+                fs::create_dir_all(link.parent().unwrap()).unwrap();
+                let elsewhere = dir.path().join("Elsewhere");
+                fs::create_dir_all(&elsewhere).unwrap();
+                crate::uninstall::paths::link_folder(&link, &elsewhere);
+                // The lock's folder outlives the lock, so it shows whether
+                // the run ever took it.
+                let locks = dir.path().join("locks");
+                let lock_path = locks.join("install.lock");
+
+                let error = execute_resolved_package_operation(
+                    &resource_path,
+                    vec![artifact_with_url(
+                        PACKAGE_REAPACK,
+                        ArtifactKind::ExtensionBinary,
+                        "reaper_reapack-x64.dll",
+                        &source.display().to_string(),
+                    )],
+                    cache.path(),
+                    &PackageOperationOptions {
+                        dry_run,
+                        allow_reaper_running: true,
+                        stage_unsupported: false,
+                        replace_osara_keymap: false,
+                        target_app_path: None,
+                        lock_path: Some(lock_path.clone()),
+                        force_reinstall_packages: Vec::new(),
+                        package_variants: Default::default(),
+                        package_channels: Default::default(),
+                    },
+                )
+                .unwrap_err();
+
+                match &error {
+                    RabbitError::PreflightFailed { message } => {
+                        assert!(message.starts_with("backup-folder: "), "{message}");
+                        assert!(message.contains(&link.display().to_string()), "{message}");
+                    }
+                    other => panic!("{linked:?} {dry_run}: {other:?}"),
+                }
+                assert_eq!(fs::read(&plugin).unwrap(), b"reapack 1.2.4");
+                assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+                assert_eq!(fs::read_dir(cache.path()).unwrap().count(), 0);
+                assert!(!locks.exists());
+            }
         }
     }
 
@@ -4803,36 +5045,6 @@ mod tests {
             report.items[0].status,
             PackageOperationStatus::SkippedCurrent
         );
-    }
-
-    /// The unattended backup used to refuse files outside the resource
-    /// folder. Through the shared writer they are kept, under `external/`
-    /// with a note of where they came from.
-    #[test]
-    fn unattended_backups_accept_files_outside_the_resource_folder() {
-        let dir = tempdir().unwrap();
-        let resource_path = dir.path().join("REAPER");
-        fs::create_dir_all(&resource_path).unwrap();
-        let outside = dir.path().join("CLAP").join("app2clap.clap");
-        fs::create_dir_all(outside.parent().unwrap()).unwrap();
-        fs::write(&outside, b"app2clap").unwrap();
-
-        let (backup_path, manifest_path) = backup_file_for_unattended_change(
-            &resource_path,
-            "app2clap",
-            &outside,
-            "test-replacement",
-        )
-        .unwrap();
-
-        assert_eq!(fs::read(&backup_path).unwrap(), b"app2clap");
-        assert!(backup_path.starts_with(resource_path.join("RABBIT").join("backups")));
-        assert_eq!(
-            backup_path.parent().unwrap().parent().unwrap().file_name(),
-            Some(std::ffi::OsStr::new("external"))
-        );
-        assert!(manifest_path.is_file());
-        assert!(outside.is_file(), "a backup copies; the original stays");
     }
 
     /// The receipt step puts what the install snapshot found on the

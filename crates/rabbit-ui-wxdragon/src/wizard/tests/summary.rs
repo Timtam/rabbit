@@ -184,6 +184,9 @@ fn setup_summary_includes_manual_instruction_notes() {
     );
 }
 
+/// An update's backup set holds the replaced files and no copy of RABBIT's
+/// records, so the summary names the backup files and the set's manifest,
+/// and no receipt backup.
 #[test]
 fn setup_summary_includes_backup_paths_when_present() {
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
@@ -223,9 +226,7 @@ fn setup_summary_includes_backup_paths_when_present() {
                     checks: Vec::new(),
                 },
                 receipt_written: true,
-                receipt_backup_path: Some(PathBuf::from(
-                    "C:/PortableREAPER/RABBIT/backups/unix-1/RABBIT/install-state.json",
-                )),
+                receipt_backup_path: None,
                 backup_manifest_path: Some(PathBuf::from(
                     "C:/PortableREAPER/RABBIT/backups/unix-1/backup-manifest.json",
                 )),
@@ -285,18 +286,33 @@ fn setup_summary_includes_backup_paths_when_present() {
         summary
             .detail_lines
             .iter()
-            .any(|line| line.contains("Receipt backup:"))
-    );
-    assert!(
-        summary
-            .detail_lines
-            .iter()
             .any(|line| line.contains("Backup manifest:"))
     );
+    assert_no_receipt_backup_line(&summary);
 }
 
+/// No line of `summary` names a receipt backup, in English or German.
+fn assert_no_receipt_backup_line(summary: &WizardInstallSummary) {
+    for locale in [DEFAULT_LOCALE, "de-DE"] {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let line = localizer
+            .format("wizard-summary-receipt-backup", &[("path", "")])
+            .value;
+        let label = line.trim_end();
+        assert!(
+            !summary.detail_lines.iter().any(|line| line.contains(label)),
+            "{locale}: {:#?}",
+            summary.detail_lines
+        );
+    }
+}
+
+/// Vendor installers no longer leave a backup of RABBIT's records, so after
+/// them the summary has no receipt backup line. A key map OSARA's replaced
+/// is still named, with its set's manifest; a run that backed up nothing
+/// names no backup at all.
 #[test]
-fn setup_summary_includes_unattended_receipt_backup_paths() {
+fn setup_summary_names_no_receipt_backup_after_vendor_installers() {
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
     let model = model_from_plan(
         &localizer,
@@ -310,70 +326,52 @@ fn setup_summary_includes_unattended_receipt_backup_paths() {
             notes: Vec::new(),
         },
     );
-    let report = SetupReport {
-        resource_path: PathBuf::from("C:/PortableREAPER"),
-        dry_run: false,
-        resource_init: ResourceInitReport {
-            resource_path: PathBuf::from("C:/PortableREAPER"),
-            dry_run: false,
-            portable: true,
-            preflight: PreflightReport {
-                passed: true,
-                checks: Vec::new(),
-            },
-            actions: Vec::new(),
-        },
-        package_operation: PackageOperationReport {
-            resource_path: PathBuf::from("C:/PortableREAPER"),
-            dry_run: false,
-            install_report: None,
-            receipt_backup_path: Some(PathBuf::from(
-                "C:/PortableREAPER/RABBIT/backups/unattended-1/RABBIT/install-state.json",
-            )),
-            receipt_backup_manifest_path: Some(PathBuf::from(
-                "C:/PortableREAPER/RABBIT/backups/unattended-1/backup-manifest.json",
-            )),
-            items: vec![PackageOperationItem {
+    let set = "C:/PortableREAPER/RABBIT/backups/unattended-unix-1-0";
+    for keymap_backed_up in [true, false] {
+        let mut report = empty_setup_report(PathBuf::from("C:/PortableREAPER"));
+        report.dry_run = false;
+        report.package_operation.dry_run = false;
+        report.package_operation.items.push(PackageOperationItem {
+            package_id: PACKAGE_OSARA.to_string(),
+            plan_action: PlanActionKind::Install,
+            status: PackageOperationStatus::InstalledOrChecked,
+            artifact: ArtifactDescriptor {
                 package_id: PACKAGE_OSARA.to_string(),
-                plan_action: PlanActionKind::Install,
-                status: PackageOperationStatus::InstalledOrChecked,
-                artifact: ArtifactDescriptor {
-                    package_id: PACKAGE_OSARA.to_string(),
-                    version: Version::parse("2026.1").unwrap(),
-                    platform: Platform::Windows,
-                    architecture: Architecture::X64,
-                    kind: ArtifactKind::Installer,
-                    url: "https://example.test/osara.exe".to_string(),
-                    file_name: "osara.exe".to_string(),
-                    channel: None,
-                },
-                cached_artifact: None,
-                install_action: None,
-                backup_paths: Vec::new(),
-                backup_manifest_path: None,
-                planned_execution: None,
-                manual_instruction: None,
-                message: "RABBIT ran the upstream installer unattended, verified the expected target paths, and updated the RABBIT receipt.".to_string(),
-                message_code: rabbit_core::operation::PackageOperationMessage::UnattendedInstalled,
-            }],
-        },
-        configuration_steps: Vec::new(),
-    };
+                version: Version::parse("2026.1").unwrap(),
+                platform: Platform::Windows,
+                architecture: Architecture::X64,
+                kind: ArtifactKind::Installer,
+                url: "https://example.test/osara.exe".to_string(),
+                file_name: "osara.exe".to_string(),
+                channel: None,
+            },
+            cached_artifact: None,
+            install_action: None,
+            backup_paths: if keymap_backed_up {
+                vec![PathBuf::from(format!("{set}/reaper-kb.ini"))]
+            } else {
+                Vec::new()
+            },
+            backup_manifest_path: keymap_backed_up
+                .then(|| PathBuf::from(format!("{set}/backup-manifest.json"))),
+            planned_execution: None,
+            manual_instruction: None,
+            message: "RABBIT ran the upstream installer unattended, verified the expected target paths, and updated the RABBIT receipt.".to_string(),
+            message_code: rabbit_core::operation::PackageOperationMessage::UnattendedInstalled,
+        });
 
-    let summary = summarize_setup_report(&model, &report);
+        let summary = summarize_setup_report(&model, &report);
 
-    assert!(
-        summary
-            .detail_lines
-            .iter()
-            .any(|line| line.contains("Receipt backup:"))
-    );
-    assert!(
-        summary
-            .detail_lines
-            .iter()
-            .any(|line| line.contains("Backup manifest:"))
-    );
+        for label in ["Backup file:", "Backup manifest:", "Backup files created:"] {
+            assert_eq!(
+                summary.detail_lines.iter().any(|line| line.contains(label)),
+                keymap_backed_up,
+                "{label}: {:#?}",
+                summary.detail_lines
+            );
+        }
+        assert_no_receipt_backup_line(&summary);
+    }
 }
 
 /// A run with a failed package renders the "finished with errors"

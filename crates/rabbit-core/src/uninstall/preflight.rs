@@ -40,7 +40,8 @@ pub const PROGRAMS_RUNNING_CHECK: &str = "programs-running";
 pub const BACKUP_SPACE_CHECK: &str = "backup-space";
 /// The check that fails when `RABBIT` or `RABBIT/backups` is a symbolic
 /// link or junction while a package would move files into the backup set.
-pub const BACKUP_FOLDER_CHECK: &str = "backup-folder";
+/// An install's preflight has the same check, by the same name.
+pub use crate::preflight::BACKUP_FOLDER_CHECK;
 /// Room the backup's volume must keep beyond the copied files themselves:
 /// enough for the set's manifest and notes, and so that a removal never
 /// fills a drive to its last byte.
