@@ -163,7 +163,7 @@ fn saved(report: &RestoreRunReport) -> serde_json::Value {
 
 /// Every file and link below `root`, each file with what it holds, found
 /// without following any link.
-fn snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+pub(super) fn snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
     let mut found = Vec::new();
     let mut folders = vec![root.to_path_buf()];
     while let Some(folder) = folders.pop() {
@@ -1438,7 +1438,7 @@ fn each_backup_is_checked_against_the_records_the_ones_before_it_left() {
 /// as a program its uninstall needs closed, as the only package a test's
 /// computer knows.
 #[cfg(any(windows, target_os = "macos"))]
-fn sws_needing_closed(program: &str) -> Vec<crate::package::PackageSpec> {
+pub(super) fn sws_needing_closed(program: &str) -> Vec<crate::package::PackageSpec> {
     let platform = crate::model::Platform::current().expect("tests run on Windows or macOS");
     let mut spec = crate::package::builtin_package_specs(platform)
         .into_iter()
@@ -1452,7 +1452,7 @@ fn sws_needing_closed(program: &str) -> Vec<crate::package::PackageSpec> {
 
 /// The program [`sws_needing_closed`] names, running.
 #[cfg(any(windows, target_os = "macos"))]
-fn demo_tool() -> crate::preflight::RunningProcess {
+pub(super) fn demo_tool() -> crate::preflight::RunningProcess {
     crate::preflight::RunningProcess {
         pid: "300".to_string(),
         name: "demo tool.exe".to_string(),

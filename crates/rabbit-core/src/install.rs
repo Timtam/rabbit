@@ -779,7 +779,6 @@ mod tests {
     use crate::receipt::{
         InstallState, InstalledFileReceipt, PackageReceipt, load_install_state, save_install_state,
     };
-    use crate::restore_refusal::{RestoreRefusal, refusal};
     use crate::rollback::{
         BackupManifest, BackupSetWriter, ReplacedPackageRecord, UPDATE_BACKUP_REASON,
     };
@@ -1082,15 +1081,14 @@ mod tests {
         assert!(!plugins.join("reaper_reapack-x64.dll.rabbit-tmp").exists());
     }
 
-    /// The set a real update writes holds the replaced file and the
-    /// package's entry from before. Restoring it, whole or for the package,
-    /// is refused until RABBIT can go back to an earlier version, and
-    /// nothing changes: the newer file and the current receipt stay byte for
-    /// byte.
+    /// An update's backup takes the package back to the version before
+    /// it: its file, and RABBIT's entry for it, exactly as it was before the
+    /// update. A dry run changes nothing. The newer version goes into a
+    /// backup of its own, which takes the package forward again.
     #[test]
-    fn an_update_s_backup_is_not_restored_yet() {
+    fn an_update_s_backup_goes_back_to_the_version_before() {
         use crate::rollback::{
-            OutsideRestoreRules, RestoreBackupOptions, restore_backup_set_within,
+            OutsideRestoreRules, RestoreBackupOptions, RestoreStatus, restore_backup_set_within,
         };
 
         let dir = tempdir().unwrap();
@@ -1100,13 +1098,15 @@ mod tests {
             target_app_path: None,
             package_variants: Default::default(),
         };
-        let old = cached_artifact(
+        let mut old = cached_artifact(
             dir.path(),
             PACKAGE_REAPACK,
             "reaper_reapack-x64.dll",
             b"old",
         );
+        old.descriptor.version = Version::parse("1.2.5").unwrap();
         install_cached_artifacts(dir.path(), &[old], &options).unwrap();
+        let before = load_install_state(dir.path()).unwrap().unwrap();
         let new = cached_artifact(
             dir.path(),
             PACKAGE_REAPACK,
@@ -1123,32 +1123,45 @@ mod tests {
             .join("UserPlugins")
             .join("reaper_reapack-x64.dll");
         let receipt = dir.path().join("RABBIT").join("install-state.json");
+        let after = load_install_state(dir.path()).unwrap().unwrap();
         let receipt_now = fs::read(&receipt).unwrap();
-
-        for (dry_run, package_id) in [
-            (true, None),
-            (false, None),
-            (false, Some(PACKAGE_REAPACK.to_string())),
-        ] {
-            let error = restore_backup_set_within(
+        let restore = |dry_run: bool, set_id: &str| {
+            restore_backup_set_within(
                 dir.path(),
                 set_id,
                 &RestoreBackupOptions {
                     dry_run,
                     allow_reaper_running: true,
-                    package_id: package_id.clone(),
+                    package_id: Some(PACKAGE_REAPACK.to_string()),
                 },
                 &OutsideRestoreRules::default(),
             )
-            .unwrap_err();
+            .unwrap()
+        };
 
-            assert!(
-                matches!(refusal(&error), RestoreRefusal::EarlierVersionNotYet { backup_id } if backup_id == set_id),
-                "{dry_run} {package_id:?}: {error:?}"
-            );
-            assert_eq!(fs::read(&plugin).unwrap(), b"new");
-            assert_eq!(fs::read(&receipt).unwrap(), receipt_now);
-        }
+        let preview = restore(true, set_id);
+        assert_eq!(preview.status, RestoreStatus::WouldRestore);
+        assert_eq!(fs::read(&plugin).unwrap(), b"new");
+        assert_eq!(fs::read(&receipt).unwrap(), receipt_now);
+
+        let back = restore(false, set_id);
+        assert_eq!(back.status, RestoreStatus::Restored);
+        assert_eq!(fs::read(&plugin).unwrap(), b"old");
+        let state = load_install_state(dir.path()).unwrap().unwrap();
+        assert_eq!(state.packages, before.packages);
+        let swap = back.swap.as_ref().unwrap();
+        assert_eq!(swap.version, Some(Version::parse("1.2.5").unwrap()));
+        assert_eq!(
+            swap.replaced_version,
+            Some(Version::parse("1.2.6").unwrap())
+        );
+        assert_eq!(swap.entry, crate::rollback::SwappedEntry::Replaced);
+
+        let forward = restore(false, back.before_restore_set_id.as_deref().unwrap());
+        assert_eq!(forward.status, RestoreStatus::Restored);
+        assert_eq!(fs::read(&plugin).unwrap(), b"new");
+        let state = load_install_state(dir.path()).unwrap().unwrap();
+        assert_eq!(state.packages, after.packages);
     }
 
     /// The manifest of the update set `report` names.

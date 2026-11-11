@@ -35,19 +35,17 @@ use crate::receipt::{InstallState, PackageReceipt, load_install_state};
 use crate::restore_refusal::{RestoreRefusal, TargetRefusal};
 use crate::rollback::{
     BACKUP_MANIFEST_FILE, BEFORE_RESTORE_REASON, BackupEntryState, BackupEnvironment,
-    BackupManifest, BackupManifestFile, BackupSet, DELETING_DIR, EntryPlace, KEYMAP_BACKUP_REASON,
+    BackupManifest, BackupManifestFile, BackupSet, DELETING_DIR, KEYMAP_BACKUP_REASON,
     KeymapOrigin, OutsideRestoreRules, RECORDS_BACKUP_REASON, UPDATE_BACKUP_REASON,
-    backup_id_is_well_formed, backups_root, copy_in_set, entry_place, find_backup_set,
-    inside_place_by_text, is_outside_file_in_layout, is_real_file, is_real_folder, is_receipt,
-    is_receipt_entry, is_set_bookkeeping, load_backup_manifest, manifest_holds_receipt,
-    manifest_refusal, restore_place_by_text, same_place, set_to_restore,
+    backup_id_is_well_formed, backups_root, copy_in_set, earlier_entry_in, files_only_in_newer,
+    find_backup_set, first_file_not_kept, inside_place_by_text, is_keymap_entry,
+    is_outside_file_in_layout, is_real_folder, is_receipt, is_receipt_entry, is_set_bookkeeping,
+    is_version_entry, load_backup_manifest, manifest_holds_receipt, manifest_refusal,
+    others_of_its_group_installed, read_receipt_copy, receipt_copy_of, receipt_place_by_text,
+    restore_place_by_text, same_place, set_to_restore, swap_package_ids, takes_by_swap,
 };
 use crate::uninstall::execute::UNINSTALL_BACKUP_REASON;
 use crate::version::Version;
-
-/// The key map's name in the resource folder. A set entry whose original
-/// is this file is a key map, whatever made the set.
-const KEYMAP_FILE: &str = "reaper-kb.ini";
 
 /// What made a backup set, as the overview reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,9 +140,6 @@ impl BackupItem {
 ///
 /// For earlier versions, the statuses follow the rules of the swap that
 /// changes only the restored package's receipt entry (backup plan 6.4).
-/// `restore_backup_set` still refuses an update's set as a whole until that
-/// swap lands, so such a backup says it can be restored while
-/// [`BackupEntry::restore_scope`] stays `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BackupStatus {
@@ -202,8 +197,8 @@ impl BackupStatus {
     }
 }
 
-/// How `restore_backup_set` takes a backup today: one package of an
-/// uninstall's set (`--package`), or a whole set.
+/// How `restore_backup_set` takes a backup: one package (`--package`) of
+/// an uninstall's set or of a set of earlier versions, or a whole set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RestoreScope {
@@ -253,8 +248,10 @@ pub struct BackupEntry {
     /// another file than it names, one outside every folder RABBIT installs
     /// into, or a second file for one place. By its original path, or its
     /// place in a set without a manifest; for a second file for one place,
-    /// by that place. Set only when it is why [`Self::restore_scope`] is
-    /// `None`. [`Self::refusal`] says why.
+    /// by that place. For an earlier version, also a file of the newer
+    /// version that going back would take into a backup it couldn't come
+    /// back from, by its path in RABBIT's records. Set only when it is why
+    /// [`Self::restore_scope`] is `None`. [`Self::refusal`] says why.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused_path: Option<PathBuf>,
     /// Whether this is the only copy of what it holds: uninstalled software
@@ -265,18 +262,19 @@ pub struct BackupEntry {
     /// they go together.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shares_set_with: Vec<BackupItem>,
-    /// How `rabbit restore-backup` takes this backup today, if it does.
+    /// How `rabbit restore-backup` takes this backup, if it does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore_scope: Option<RestoreScope>,
     /// Why a restore refuses this backup, the refusal a run gives for the
     /// same reason, where the overview can tell: a file it would refuse to
     /// put back (see [`Self::refused_path`]); the statuses a run refuses
     /// for (installed again, nothing in it, part missing, not complete,
-    /// another of its group installed, RABBIT's records unreadable, another
-    /// account's); and for a whole set, what refuses the set itself (being
-    /// deleted, a damaged manifest, an update's set, a copy of RABBIT's
-    /// records in it, a link in a set without a manifest, or a file from
-    /// outside the resource folder there). `None` for the other statuses,
+    /// version unknown, another of its group installed, RABBIT's records
+    /// unreadable, another account's); and for a whole set, what refuses the
+    /// set itself (being deleted, a damaged manifest, a copy of RABBIT's
+    /// records in it, a link in a set without a manifest, a file from
+    /// outside the resource folder there, or a set of earlier versions with
+    /// no package in it). `None` for the other statuses,
     /// which say on their own why the backup can't be restored, or that it
     /// can, and for the backup of RABBIT's records, which stands for many
     /// sets.
@@ -335,6 +333,13 @@ pub struct BackupSetOverview {
     pub links: Vec<PathBuf>,
     /// What couldn't be read, as `rabbit backups` says it.
     pub warning: Option<String>,
+    /// For a set of earlier versions: whether `rabbit restore-backup`
+    /// without `--package` takes it, putting each of its packages back to
+    /// its earlier version in turn. That is when every package of it with a
+    /// file in it can be restored on its own (see
+    /// [`BackupEntry::restore_scope`]). `false` for every other set, whose
+    /// whole-set restore its `Set` backup says.
+    pub swaps_whole: bool,
 }
 
 /// A set, or something in RABBIT's backup folders, the overview couldn't
@@ -393,6 +398,7 @@ impl BackupOverview {
                     size: set.size,
                     items: self.entries_in(set).cloned().collect(),
                     fingerprint: set.fingerprint.clone(),
+                    swaps_whole: set.swaps_whole,
                 }
             })
             .collect()
@@ -816,12 +822,17 @@ fn build_overview(
     let mut entries = Vec::new();
     let mut targets = BTreeMap::new();
     let mut records = Vec::new();
+    let mut swapped_whole = BTreeSet::new();
     for set in &sets {
         if set.kind == BackupSetKind::Records && !set.owned_by_another_account {
             records.push(set);
             continue;
         }
-        for entry in judge.entries_of(set) {
+        let of_set = judge.entries_of(set);
+        if swaps_whole(set, &of_set) {
+            swapped_whole.insert(set.path.clone());
+        }
+        for entry in of_set {
             let writes = judge.targets_of(set, &entry);
             if !writes.is_empty() {
                 targets.insert(entry.item.clone(), writes);
@@ -844,6 +855,9 @@ fn build_overview(
             )
         });
     }
+    for set in &mut sets {
+        set.swaps_whole = swapped_whole.contains(&set.path);
+    }
     link_entries_of_one_set(&mut entries);
     entries.sort_by(|left, right| {
         left.group
@@ -862,6 +876,28 @@ fn build_overview(
         receipt_error: receipt.err(),
         targets,
     }
+}
+
+/// Whether a restore of the whole `set`, a set of earlier versions whose
+/// backups are `entries`, would go ahead: it puts back each package with a
+/// file in it, and is refused when any of them is. So every earlier version
+/// of it is one a restore takes on its own, or one with nothing of it in
+/// the set, which the whole set leaves out, and at least one is taken.
+fn swaps_whole(set: &BackupSetOverview, entries: &[BackupEntry]) -> bool {
+    if !set.manifest.as_ref().is_some_and(takes_by_swap) {
+        return false;
+    }
+    let versions: Vec<&BackupEntry> = entries
+        .iter()
+        .filter(|entry| entry.group == BackupGroup::EarlierVersions)
+        .collect();
+    versions
+        .iter()
+        .any(|entry| entry.restore_scope == Some(RestoreScope::Package))
+        && versions.iter().all(|entry| {
+            entry.restore_scope == Some(RestoreScope::Package)
+                || entry.status == BackupStatus::NothingInIt
+        })
 }
 
 /// A key that sorts the newest first and those without a date last.
@@ -941,6 +977,7 @@ fn read_set(
             files: Vec::new(),
             links: Vec::new(),
             warning: Some(why.to_string()),
+            swaps_whole: false,
         };
     }
 
@@ -997,19 +1034,10 @@ fn read_set(
         size: walk.size,
     });
     let (receipt_copy, holds_receipt) = match &manifest {
-        Some(manifest) => {
-            let recorded = manifest.receipt_backup_path.clone().or_else(|| {
-                manifest
-                    .files
-                    .iter()
-                    .find(|entry| is_receipt_entry(resource_path, entry))
-                    .map(|entry| entry.backup_path.clone())
-            });
-            let copy = recorded
-                .and_then(|recorded| copy_in_set(&path, &recorded).ok())
-                .filter(|copy| is_real_file(copy));
-            (copy, manifest_holds_receipt(resource_path, manifest))
-        }
+        Some(manifest) => (
+            receipt_copy_of(resource_path, &path, manifest),
+            manifest_holds_receipt(resource_path, manifest),
+        ),
         None => {
             let relative = walk.files.iter().find(|relative| is_receipt(relative));
             (
@@ -1042,6 +1070,8 @@ fn read_set(
         files: walk.files,
         links: walk.links,
         warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
+        // Judged with the set's backups (see `build_overview`).
+        swaps_whole: false,
         id,
         path,
         kind,
@@ -1166,37 +1196,26 @@ impl Judge<'_> {
             }
             // Only an update's set, and a restore's set that recorded
             // what it replaced, hold earlier versions.
-            let mut packages: BTreeSet<&str> = BTreeSet::new();
-            if matches!(
-                set.kind,
-                BackupSetKind::Update | BackupSetKind::BeforeRestore
-            ) {
-                packages.extend(manifest.replaced.keys().map(String::as_str));
-                if set.kind == BackupSetKind::Update {
-                    packages.extend(
-                        manifest
-                            .files
-                            .iter()
-                            .filter(|entry| self.belongs_to_a_version(entry))
-                            .filter_map(|entry| entry.package_id.as_deref()),
-                    );
-                }
-                let copy = OnceCell::new();
-                for package_id in &packages {
-                    entries.push(self.earlier_version(set, manifest, package_id, &copy));
-                }
+            let packages = if takes_by_swap(manifest) {
+                swap_package_ids(self.resource_path, manifest)
+            } else {
+                BTreeSet::new()
+            };
+            let copy = OnceCell::new();
+            for package_id in &packages {
+                entries.push(self.earlier_version(set, manifest, package_id, &copy));
             }
-            // A file that comes back with no backup above still comes back
-            // with the whole set, so the set gets a backup of its own for
-            // it: listed, counted, and never restored through the key
-            // map's row.
+            // A file that comes back with no backup above gets a backup of
+            // its own: listed and counted, and never restored through the
+            // key map's row. A whole restore of a set of earlier versions
+            // leaves it out too.
             let held = |entry: &BackupManifestFile| {
                 is_keymap_entry(self.resource_path, entry)
                     || is_receipt_entry(self.resource_path, entry)
-                    || (self.belongs_to_a_version(entry)
+                    || (is_version_entry(self.resource_path, entry)
                         && entry
                             .package_id
-                            .as_deref()
+                            .as_ref()
                             .is_some_and(|package_id| packages.contains(package_id)))
             };
             if !entries.is_empty()
@@ -1212,13 +1231,6 @@ impl Judge<'_> {
             entries.push(self.whole_set(set));
         }
         entries
-    }
-
-    /// Whether `entry` of a set other than an uninstall's is a file of a
-    /// package's earlier version: not the key map, which is a backup of its
-    /// own, and not a copy of RABBIT's receipt.
-    fn belongs_to_a_version(&self, entry: &BackupManifestFile) -> bool {
-        !is_keymap_entry(self.resource_path, entry) && !is_receipt_entry(self.resource_path, entry)
     }
 
     /// One backup for the whole set: a set RABBIT can't take apart, the
@@ -1257,15 +1269,17 @@ impl Judge<'_> {
         }
     }
 
-    /// Whether `restore_backup_set` takes `set` as a whole today, as far as
-    /// the overview can tell without hashing. `Err` is the refusal a
-    /// restore of the whole set gives, in the order a restore refuses: an
-    /// unfinished deletion, a damaged manifest, an update's set, a set of
-    /// RABBIT's records, a copy of RABBIT's receipt in it, then the first
-    /// file it would refuse to put back (see [`Self::plan_targets`]).
-    /// `Ok(false)` when it can't be restored for another reason: another
-    /// account's, which its status says, what else couldn't be read of it,
-    /// or nothing to bring back.
+    /// Whether `restore_backup_set` takes `set` as a whole under a `Set` or
+    /// key map backup, as far as the overview can tell without hashing.
+    /// `Err` is the refusal a restore of the whole set gives, in the order a
+    /// restore refuses: an unfinished deletion, a damaged manifest, a set of
+    /// RABBIT's records, a set of earlier versions with no package in it, a
+    /// copy of RABBIT's receipt in it, then the first file it would refuse
+    /// to put back (see [`Self::plan_targets`]). `Ok(false)` when it can't
+    /// be restored for another reason: another account's, which its status
+    /// says, what else couldn't be read of it, nothing to bring back, or a
+    /// set of earlier versions, which comes back package by package, never
+    /// under such a backup (see [`BackupSetOverview::swaps_whole`]).
     fn restores_whole(&self, set: &BackupSetOverview) -> std::result::Result<bool, RestoreRefusal> {
         if set.owned_by_another_account {
             return Ok(false);
@@ -1280,17 +1294,28 @@ impl Judge<'_> {
             BackupSetKind::Damaged => {
                 return manifest_refusal(&set.id, &set.path).map_or(Ok(false), Err);
             }
-            BackupSetKind::Update => {
-                return Err(RestoreRefusal::EarlierVersionNotYet {
-                    backup_id: backup_id(),
-                });
-            }
             BackupSetKind::Records => {
                 return Err(RestoreRefusal::RecordsOnly {
                     backup_id: backup_id(),
                 });
             }
             _ => {}
+        }
+        if let Some(manifest) = set
+            .manifest
+            .as_ref()
+            .filter(|manifest| takes_by_swap(manifest))
+        {
+            // A whole restore of a set with no package in it has nothing to
+            // put back.
+            return if swap_package_ids(self.resource_path, manifest).is_empty() {
+                Err(RestoreRefusal::NothingOfItInSet {
+                    backup_id: backup_id(),
+                    package_ids: Vec::new(),
+                })
+            } else {
+                Ok(false)
+            };
         }
         if set.holds_receipt {
             return Err(RestoreRefusal::ReceiptInSet {
@@ -1526,8 +1551,9 @@ impl Judge<'_> {
         };
         // The command line restores a key map only with its whole set, so
         // only while the key map is all that comes back of the set: a
-        // restore of the set would put any other file back too. An
-        // update's set is refused whole.
+        // restore of the set would put any other file back too. A set of
+        // earlier versions comes back package by package, and never
+        // restores its key map under this row (see `restores_whole`).
         let alone = manifest
             .files
             .iter()
@@ -1574,18 +1600,16 @@ impl Judge<'_> {
             .files
             .iter()
             .filter(|entry| {
-                entry.package_id.as_deref() == Some(package_id) && self.belongs_to_a_version(entry)
+                entry.package_id.as_deref() == Some(package_id)
+                    && is_version_entry(self.resource_path, entry)
             })
             .collect();
         let replaced = manifest.replaced.get(package_id);
-        let earlier = match replaced {
-            Some(record) => EarlierEntry::Known(record.receipt.as_ref()),
-            None if set.kind == BackupSetKind::Update => {
-                match copy.get_or_init(|| read_receipt_copy(set)) {
-                    Some(copy) => EarlierEntry::Known(copy.packages.get(package_id)),
-                    None => EarlierEntry::Unknown,
-                }
-            }
+        let earlier = match earlier_entry_in(manifest, package_id, || {
+            copy.get_or_init(|| set.receipt_copy.as_deref().and_then(read_receipt_copy))
+                .as_ref()
+        }) {
+            Some(entry) => EarlierEntry::Known(entry),
             None => EarlierEntry::Unknown,
         };
         let (status, missing_path) =
@@ -1594,6 +1618,21 @@ impl Judge<'_> {
             set_id: set.id.clone(),
             package_id: package_id.to_string(),
         };
+        // A restore puts the version's files back, and moves the newer
+        // version's own files out of the way; it stops before anything
+        // changes at a place it would refuse for either.
+        let plan = match (status.can_restore(), &earlier) {
+            (true, EarlierEntry::Known(earlier)) => {
+                Some(self.plan_targets(set, &item).and_then(|written| {
+                    self.newer_files_can_move(set, package_id, *earlier, &written)
+                }))
+            }
+            _ => None,
+        };
+        let refused = plan.as_ref().and_then(|plan| plan.as_ref().err().cloned());
+        let refusal = refused
+            .clone()
+            .or_else(|| self.status_refusal(set, &item, status, missing_path.as_ref()));
         BackupEntry {
             size: files.iter().map(|entry| entry.size).sum(),
             version: match &earlier {
@@ -1601,11 +1640,10 @@ impl Judge<'_> {
                 _ => None,
             },
             replaced_by: replaced.and_then(|record| record.replaced_by.clone()),
-            refusal: self.status_refusal(set, &item, status, missing_path.as_ref()),
+            refusal,
             missing_path,
-            // `restore_backup_set` refuses earlier versions until the swap
-            // lands.
-            restore_scope: None,
+            restore_scope: matches!(plan, Some(Ok(()))).then_some(RestoreScope::Package),
+            refused_path: refused.as_ref().and_then(refused_path_of),
             ..new_entry(
                 item,
                 BackupGroup::EarlierVersions,
@@ -1614,6 +1652,42 @@ impl Judge<'_> {
                 status,
             )
         }
+    }
+
+    /// Whether each file of the package's current receipt entry that going
+    /// back to `earlier` takes into the before-restore set, given that the
+    /// restore writes `written`, sits at a place it could come back to from
+    /// there, judged from the text as a restore judges it before it changes
+    /// anything (see [`files_only_in_newer`]). `Err` is the refusal of the
+    /// first one that doesn't ([`RestoreRefusal::NewerFileRefused`]). A
+    /// link at a place, which the restore leaves where it is, can't be told
+    /// from the text, and passes.
+    fn newer_files_can_move(
+        &self,
+        set: &BackupSetOverview,
+        package_id: &str,
+        earlier: Option<&PackageReceipt>,
+        written: &[PathBuf],
+    ) -> std::result::Result<(), RestoreRefusal> {
+        let Ok(state) = self.receipt else {
+            return Ok(());
+        };
+        let Some(current) = state.packages.get(package_id) else {
+            return Ok(());
+        };
+        for file in files_only_in_newer(self.resource_path, current, earlier, written) {
+            receipt_place_by_text(self.resource_path, &file.path, package_id, || {
+                self.outside
+                    .get_or_init(|| (self.environment.outside_rules)(self.resource_path))
+            })
+            .map_err(|reason| RestoreRefusal::NewerFileRefused {
+                backup_id: set.id.clone(),
+                package_id: package_id.to_string(),
+                path: file.path.clone(),
+                reason: Box::new(reason),
+            })?;
+        }
+        Ok(())
     }
 
     /// Backup plan 3.4 for an earlier version, by the swap's rules (6.4):
@@ -1653,65 +1727,32 @@ impl Judge<'_> {
         {
             return (BackupStatus::OtherLanguagePack, None);
         }
+        // Checked before "already back", as the restore checks it: a
+        // version that isn't whole isn't back either. On disk by its size
+        // only; the restore hashes it.
+        let on_disk = |place: &Path, file: &crate::receipt::InstalledFileReceipt| {
+            place_metadata(place).is_some_and(|metadata| {
+                metadata.is_file() && file.size.is_none_or(|size| metadata.len() == size)
+            })
+        };
+        if let Some(missing) = earlier.and_then(|earlier| {
+            first_file_not_kept(
+                self.resource_path,
+                manifest,
+                package_id,
+                earlier,
+                state,
+                &on_disk,
+            )
+        }) {
+            return (BackupStatus::NotComplete, Some(missing));
+        }
         if same_entry_but_channel(state.packages.get(package_id), *earlier)
             && self.all_on_disk(&coming)
         {
             return (BackupStatus::AlreadyBack, None);
         }
-        if let Some(missing) =
-            earlier.and_then(|earlier| self.first_file_not_kept(manifest, earlier, state))
-        {
-            return (BackupStatus::NotComplete, Some(missing));
-        }
         (BackupStatus::CanRestore, None)
-    }
-
-    /// The first file of `earlier`, an earlier receipt entry, that would be
-    /// missing after a swap: neither in the set with its hash, nor recorded
-    /// on disk with it by RABBIT's current receipt and there with its size.
-    /// Files the receipt records without a hash, such as `reaper.ini`,
-    /// belong to the user and count as kept.
-    fn first_file_not_kept(
-        &self,
-        manifest: &BackupManifest,
-        earlier: &PackageReceipt,
-        state: &InstallState,
-    ) -> Option<PathBuf> {
-        let resource = self.resource_path;
-        earlier
-            .installed_files
-            .iter()
-            .find(|file| {
-                let Some(sha256) = &file.sha256 else {
-                    return false;
-                };
-                let place = same_place(&receipt_file_path(resource, &file.path));
-                let in_set = manifest.files.iter().any(|entry| {
-                    entry.state == BackupEntryState::Done
-                        && entry.sha256 == *sha256
-                        && entry_place(resource, entry)
-                            .is_some_and(|found| same_place(&found.path(resource)) == place)
-                });
-                // Only a place the current receipt records is looked at,
-                // by the path it records: never one only a set names.
-                let on_disk = || {
-                    state
-                        .packages
-                        .values()
-                        .flat_map(|entry| &entry.installed_files)
-                        .map(|current| (current, receipt_file_path(resource, &current.path)))
-                        .find(|(current, path)| {
-                            current.sha256.as_ref() == Some(sha256) && same_place(path) == place
-                        })
-                        .and_then(|(_, path)| place_metadata(&path))
-                        .is_some_and(|metadata| {
-                            metadata.is_file()
-                                && file.size.is_none_or(|size| metadata.len() == size)
-                        })
-                };
-                !in_set && !on_disk()
-            })
-            .map(|file| file.path.clone())
     }
 
     /// Whether every file in `entries` is where a restore would put it
@@ -1729,22 +1770,14 @@ impl Judge<'_> {
     }
 
     /// The other packages of `package_id`'s exclusive group that `state`
-    /// lists, whose install would remove this one's. Language packs were
-    /// such a group and no longer are: REAPER keeps every pack and uses the
-    /// one chosen. No package the manifests ship declares a group today.
+    /// lists, whose install would remove this one's (see
+    /// [`others_of_its_group_installed`]). Language packs were such a group
+    /// and no longer are: REAPER keeps every pack and uses the one chosen.
     fn others_of_its_group_installed(&self, package_id: &str, state: &InstallState) -> Vec<String> {
         let groups = self
             .groups
             .get_or_init(|| (self.environment.exclusive_groups)());
-        let Some(group) = groups.get(package_id) else {
-            return Vec::new();
-        };
-        state
-            .packages
-            .keys()
-            .filter(|other| *other != package_id && groups.get(*other) == Some(group))
-            .cloned()
-            .collect()
+        others_of_its_group_installed(groups, package_id, state)
     }
 
     /// The refusal a restore gives for what `status` says about `item`, a
@@ -1779,6 +1812,10 @@ impl Judge<'_> {
                 package_id: package_id?,
                 path: missing_path?.clone(),
             },
+            BackupStatus::VersionUnknown => RestoreRefusal::VersionUnknown {
+                backup_id,
+                package_id: package_id?,
+            },
             BackupStatus::OtherLanguagePack => {
                 let package_id = package_id?;
                 let installed = self
@@ -1799,7 +1836,6 @@ impl Judge<'_> {
             BackupStatus::CanRestore
             | BackupStatus::StoppedPartway
             | BackupStatus::AlreadyBack
-            | BackupStatus::VersionUnknown
             | BackupStatus::NotHere
             | BackupStatus::NotABackup => return None,
         })
@@ -1807,17 +1843,20 @@ impl Judge<'_> {
 }
 
 /// The file `refusal` names, for [`BackupEntry::refused_path`]: the one a
-/// restore would refuse to put back for where it goes. A file from outside
-/// the resource folder in a set without a manifest, and a link in such a
-/// set, are no such file: what refuses them is the set itself, which the
-/// set's kind and warning say.
+/// restore would refuse to put back for where it goes, or a file of the
+/// newer version that going back to an earlier one couldn't put back from
+/// the before-restore set (see [`RestoreRefusal::NewerFileRefused`]). A
+/// file from outside the resource folder in a set without a manifest, and a
+/// link in such a set, are no such file: what refuses them is the set
+/// itself, which the set's kind and warning say.
 fn refused_path_of(refusal: &RestoreRefusal) -> Option<PathBuf> {
     match refusal {
         RestoreRefusal::TargetRefused {
             reason: TargetRefusal::OutsideWithoutManifest,
             ..
         } => None,
-        RestoreRefusal::TargetRefused { path, .. } => Some(path.clone()),
+        RestoreRefusal::TargetRefused { path, .. }
+        | RestoreRefusal::NewerFileRefused { path, .. } => Some(path.clone()),
         _ => None,
     }
 }
@@ -1838,34 +1877,6 @@ fn same_entry_but_channel(
         }
         _ => false,
     }
-}
-
-/// A receipt's path for a file as a path on disk: relative ones are inside
-/// the resource folder.
-fn receipt_file_path(resource_path: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        resource_path.join(path)
-    }
-}
-
-/// The copy of RABBIT's receipt an older update set holds, read. `None`
-/// when it has none, or it can't be read.
-fn read_receipt_copy(set: &BackupSetOverview) -> Option<InstallState> {
-    let copy = set.receipt_copy.as_ref()?;
-    let content = fs::read_to_string(copy).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
-/// Whether `entry` is the key map: its original is the resource folder's
-/// `reaper-kb.ini`.
-fn is_keymap_entry(resource_path: &Path, entry: &BackupManifestFile) -> bool {
-    matches!(
-        entry_place(resource_path, entry),
-        Some(EntryPlace::Inside(relative))
-            if same_place(&relative) == same_place(Path::new(KEYMAP_FILE))
-    )
 }
 
 /// The metadata of the file at `path`, a place a restore would write or the
@@ -1904,8 +1915,7 @@ fn restores_entry(
         BackupItem::Package { package_id, .. } => {
             entry.package_id.as_deref() == Some(package_id.as_str())
                 && (manifest.reason == UNINSTALL_BACKUP_REASON
-                    || (!is_keymap_entry(resource_path, entry)
-                        && !is_receipt_entry(resource_path, entry)))
+                    || is_version_entry(resource_path, entry))
         }
         BackupItem::Keymap { .. } => is_keymap_entry(resource_path, entry),
         BackupItem::Set { .. } => true,
@@ -1932,8 +1942,9 @@ fn comes_back(set_path: &Path, entry: &BackupManifestFile) -> bool {
 
 /// The original path of the first finished entry among `entries` whose
 /// copy is gone from the set at `set_path`, or has another size than
-/// recorded: a restore would stop on it.
-fn first_copy_gone(set_path: &Path, entries: &[&BackupManifestFile]) -> Option<PathBuf> {
+/// recorded: a restore would stop on it. A restore of an earlier version
+/// checks this before the lock, as the overview judges it.
+pub(crate) fn first_copy_gone(set_path: &Path, entries: &[&BackupManifestFile]) -> Option<PathBuf> {
     entries
         .iter()
         .find(|entry| {

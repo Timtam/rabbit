@@ -17,8 +17,8 @@ use crate::rollback::{
     BEFORE_RESTORE_REASON, BackupEntryState, BackupEnvironment, BackupManifest, BackupManifestFile,
     BackupPackageRecord, BackupSetWriter, DELETING_DIR, KEYMAP_BACKUP_REASON, KeymapOrigin,
     OutsideRestoreRules, RECORDS_BACKUP_REASON, ReplacedPackageRecord, RestoreBackupOptions,
-    UPDATE_BACKUP_REASON, list_backup_sets, load_backup_manifest, restore_backup_set_within,
-    save_backup_manifest,
+    UPDATE_BACKUP_REASON, list_backup_sets, load_backup_manifest, restore_backup_set_with,
+    restore_backup_set_within, save_backup_manifest,
 };
 use crate::uninstall::execute::UNINSTALL_BACKUP_REASON;
 use crate::uninstall::paths::link_folder;
@@ -688,8 +688,11 @@ fn uninstalled_software_gets_the_status_its_case_calls_for() {
     agrees(&listed, "sws", "receipt-unreadable");
 }
 
-/// Earlier versions follow the swap's rules (backup plan 6.4), although
-/// restore doesn't take them yet: no command-line restore for any.
+/// Earlier versions follow the swap's rules (backup plan 6.4). Those that
+/// can be restored are restored by package, and a dry run of each agrees:
+/// it goes ahead where the row says it can, and otherwise refuses with the
+/// refusal the row carries. The whole set isn't offered while one of its
+/// packages is refused, and a dry run of it is refused the same way.
 #[test]
 fn earlier_versions_follow_the_swap_rules() {
     let dir = tempdir().unwrap();
@@ -770,8 +773,7 @@ fn earlier_versions_follow_the_swap_rules() {
         row("sws").missing_path.as_deref(),
         Some(Path::new(sws_helper))
     );
-    // The refusal a restore of an earlier version is to give (backup plan
-    // 1d), with the file that makes it so.
+    // The refusal a restore of it gives, with the file that makes it so.
     assert_eq!(
         row("sws").refusal,
         Some(RestoreRefusal::NotComplete {
@@ -787,9 +789,74 @@ fn earlier_versions_follow_the_swap_rules() {
     assert_eq!(row("jaws-scripts").status, NothingInIt);
     for entry in &listed.entries {
         assert_eq!(entry.group, BackupGroup::EarlierVersions);
-        assert_eq!(entry.restore_scope, None, "{entry:?}");
+        assert_eq!(
+            entry.restore_scope,
+            entry.status.can_restore().then_some(RestoreScope::Package),
+            "{entry:?}"
+        );
         assert!(!entry.only_copy);
     }
+    let dry_run = |environment: &BackupEnvironment<'_>, package_id: Option<&str>| {
+        restore_backup_set_with(
+            &resource,
+            id,
+            &RestoreBackupOptions {
+                dry_run: true,
+                allow_reaper_running: true,
+                package_id: package_id.map(ToString::to_string),
+            },
+            environment,
+            OutsideRestoreRules::default,
+        )
+    };
+    let agrees =
+        |listed: &BackupOverview, environment: &BackupEnvironment<'_>, package_id: &str| {
+            let row = find(listed, &package(id, package_id));
+            match dry_run(environment, Some(package_id)) {
+                Ok(report) => {
+                    assert_eq!(
+                        row.restore_scope,
+                        Some(RestoreScope::Package),
+                        "{package_id}"
+                    );
+                    assert_eq!(row.refusal, None, "{package_id}");
+                    let mut written: Vec<PathBuf> = report
+                        .actions
+                        .iter()
+                        .map(|action| action.target_path.clone())
+                        .collect();
+                    written.sort();
+                    assert!(!written.is_empty(), "{package_id}");
+                    assert_eq!(listed.restore_targets(&row.item), written, "{package_id}");
+                    assert_eq!(
+                        restore_targets_with(&resource, &row.item, environment).unwrap(),
+                        written,
+                        "{package_id}"
+                    );
+                }
+                Err(error) => {
+                    assert_eq!(row.restore_scope, None, "{package_id}");
+                    assert_eq!(row.refusal.as_ref(), Some(refusal(&error)), "{package_id}");
+                }
+            }
+        };
+    let as_user = BackupEnvironment::AS_USER;
+    for package_id in [
+        "reapack",
+        "sws",
+        "reakontrol",
+        "ffmpeg",
+        "langpack-de",
+        "jaws-scripts",
+    ] {
+        agrees(&listed, &as_user, package_id);
+    }
+    let set = listed.sets.iter().find(|set| set.id == id).unwrap();
+    assert!(!set.swaps_whole);
+    assert_eq!(
+        refusal(&dry_run(&as_user, None).unwrap_err()),
+        row("sws").refusal.as_ref().unwrap()
+    );
 
     // A package whose exclusive group has another member installed.
     let groups = || {
@@ -814,6 +881,8 @@ fn earlier_versions_follow_the_swap_rules() {
         })
     );
     assert_eq!(find(&listed, &package(id, "reapack")).status, CanRestore);
+    agrees(&listed, &grouped, "langpack-de");
+    agrees(&listed, &grouped, "reapack");
 
     // Unreadable records.
     write(&resource.join("RABBIT/install-state.json"), b"[");
@@ -826,6 +895,8 @@ fn earlier_versions_follow_the_swap_rules() {
         find(&listed, &package(id, "jaws-scripts")).status,
         NothingInIt
     );
+    agrees(&listed, &as_user, "reapack");
+    agrees(&listed, &as_user, "jaws-scripts");
 }
 
 /// An update's set from before records were kept: its earlier entries come

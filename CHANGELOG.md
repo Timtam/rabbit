@@ -87,6 +87,26 @@ from this file and posts it as the GitHub release body.
   they were already gone, has nothing to restore: `--package` says so, and
   the whole restore leaves it out and names it. A backup with nothing at all
   to bring back is refused the same way.
+- `rabbit restore-backup` can now go back to the version a package had
+  before an update, from the backup that update made: one package with
+  `--package <id>`, or every package of that backup in turn without it,
+  each all or nothing on its own. Only that package's entry in RABBIT's
+  records changes: it becomes the one from before the update, on the
+  channel the package is on now. Files of the newer version that the
+  earlier one doesn't have move into a new backup, with the files the
+  restore replaces, so restoring that backup goes forward again the same
+  way. A file of the newer version that was edited since stays where it
+  is, and the command says so. When RABBIT hadn't installed the copy the
+  update replaced, the package's entry goes, and the newer version's other
+  files stay where they are, with a copy of each in the new backup,
+  because RABBIT can't tell which of them that copy had too. Where the
+  package's uninstall needs its entry, as FFmpeg's does, the command says
+  that RABBIT can't uninstall it until it is installed again. RABBIT
+  refuses, and changes nothing, when part of the earlier version is
+  neither in the backup nor on disk, when it can't tell which version the
+  backup holds, when a file of the newer version is at a place it couldn't
+  put it back to from the new backup, or while another package whose
+  install removes this one is installed.
 - `rabbit components` says for each package whether RABBIT can uninstall it,
   and if not, why.
 - OSARA can be uninstalled too, from the wizard's **Uninstall** tab and with
@@ -237,11 +257,12 @@ from this file and posts it as the GitHub release body.
   uninstall Surge XT or REAPER.
 - Restoring a backup never copies RABBIT's records back over the current
   ones any more. That undid every change to them since the backup was made.
-  Restoring an uninstall's backup puts back each package's own entry. For
-  now, `rabbit restore-backup` can't restore a backup from an update, which
-  holds the files the update replaced, or a backup that holds only a copy of
-  RABBIT's records. It also refuses any other backup that holds a copy of
-  the records, such as one an older RABBIT made while restoring an update's
+  Restoring an uninstall's backup puts back each package's own entry, and
+  restoring an update's backup puts back each package's own entry from
+  before the update; a copy of the records an older update kept in it
+  stays there. `rabbit restore-backup` refuses a backup that holds only a
+  copy of RABBIT's records, and any other backup that holds a copy of the
+  records, such as one an older RABBIT made while restoring an update's
   backup, and says which folder the copy stays in. A refused restore changes
   nothing, says why in plain words, and then what to do on the command
   line, such as the command that uninstalls a package you installed again
@@ -300,12 +321,16 @@ from this file and posts it as the GitHub release body.
   map. It also says when each set was made, in your local time and in UTC,
   what made it, how big it is, and whether each backup can be restored,
   with the exact `rabbit restore-backup` command that does it, or why not.
-  It no longer lists every file. `--backup-id` shows one backup set with
-  each file in it, where it came from and whether its copy finished.
+  For an update's backup whose packages can all go back, it also gives the
+  command that restores them together. It no longer lists every file.
+  `--backup-id` shows one backup set with each file in it, where it came
+  from and whether its copy finished.
   `--json` keeps its fields and adds `kind`, `created_unix`, `size`,
   `items` (each backup with its status and, for one a restore would refuse,
-  the refusal by the code a restore gives) and `fingerprint`, and lists newest
-  first too. It also lists a deletion that didn't finish, with kind
+  the refusal by the code a restore gives), `fingerprint`, and
+  `swaps_whole` (true for an update's backup set whose packages can all go
+  back together, which `rabbit restore-backup` without `--package` takes),
+  and lists newest first too. It also lists a deletion that didn't finish, with kind
   `deleting`; its id can match a set's, and its `path` is in
   `RABBIT\backups-deleting`. `rabbit backups` and `rabbit restore-backup`
   now have help text.

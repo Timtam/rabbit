@@ -799,17 +799,49 @@ the command line, such as the command that uninstalls a package you
 installed again. It names one reason at a time; a dry run, without
 `--apply`, names every REAPER and program that is still open.
 
+To go back to the version a package had before an update, restore it from the
+backup set that update made, which `rabbit backups` lists as an update's backup
+of the earlier versions it replaced:
+
+```
+RABBIT restore-backup --resource-path "%APPDATA%\REAPER" \
+     --backup-id unix-1234567890 --package reapack --apply
+```
+
+The files the update replaced come back, and only ReaPack's entry in RABBIT's
+records changes: it becomes the one from before the update, on the channel
+ReaPack is on now, and if you had uninstalled or turned down ReaPack, it is no
+longer skipped. Files of the newer version that the earlier one doesn't have
+move into a new backup set, with the files the restore replaces. The command
+names that set, and restoring ReaPack from it goes forward again the same way.
+A file of the newer version that you edited since stays where it is, and the
+command says so. If the update replaced a copy RABBIT hadn't installed,
+ReaPack's entry goes instead, and the newer version's other files stay where
+they are, with a copy of each in the new backup set, because RABBIT can't tell
+which of them your copy had too; the command lists them. A package whose
+uninstall needs RABBIT's records, such as FFmpeg, then can't be uninstalled
+with RABBIT until you install it again, and the command says so. Without
+`--package`, every package of the set goes back in turn, each all or nothing on
+its own: if one fails, the others stay back, and the command exits with 1 and
+says which. RABBIT refuses, and changes nothing, when part of the earlier
+version is neither in the backup set nor on disk (an update deletes files the
+new version no longer has, without a backup), when the set doesn't say which
+version it holds, when a file of the newer version is somewhere RABBIT couldn't
+put it back to from the new backup set, or while another package whose install
+removes this one is installed.
+
 A restore never copies RABBIT's records (its receipt,
 `RABBIT\install-state.json`) back from a backup: that would undo every change
 to them since the backup was made, uninstalls included. Restoring an
-uninstall's backup puts back only each package's own entry, as above. So RABBIT
-doesn't restore a backup that holds a copy of its records, such as one an older
-version of RABBIT made when it restored an update's backup. The copy stays in
-the backup, and the message names its folder. Backups from updates, which hold
-the files an update replaced, can't be restored yet either, and neither can the
-backups that hold only a copy of RABBIT's records, which older versions made
-after vendor installers ran. Nothing changes, and each of these backups stays as
-it is. RABBIT no longer puts a copy of its records into any backup.
+uninstall's backup puts back only each package's own entry, and restoring an
+update's backup only each package's entry from before the update, as above; a
+copy of the records an older update kept in its backup stays there. RABBIT
+doesn't restore any other backup that holds a copy of its records, such as one
+an older version of RABBIT made when it restored an update's backup. The copy
+stays in the backup, and the message names its folder. Neither can it restore
+the backups that hold only a copy of RABBIT's records, which older versions
+made after vendor installers ran. Nothing changes, and each of these backups
+stays as it is. RABBIT no longer puts a copy of its records into any backup.
 
 A `restore-backup --apply` that gets past its checks saves a report in
 `RABBIT\logs`, also when it fails. When it replaced files, it also names the
@@ -852,13 +884,17 @@ update, OSARA's key map, a restore), and its size. Then it lists each backup in
 the set: the package and its version, or the key map, and whether it can be
 restored. For a backup that can be, the next line is the exact
 `rabbit restore-backup` command; otherwise it says why not in one line, such as
-"You have SWS Extension again" or "RABBIT can't restore earlier versions yet".
-Sizes are in whole KB and MB, and GB with one decimal. `--backup-id` shows one
+"You have SWS Extension again" or "Part of it isn't in this backup". For an
+update's backup set whose packages can all go back, a last line gives the
+command that restores them together. Sizes are in whole KB and MB, and GB with
+one decimal. `--backup-id` shows one
 set, with each file in it, where it came from and whether its copy finished,
 and where a copy of RABBIT's records is, if the set holds one. `--json` prints
 the list of sets with every detail, each backup's status included, and for a
 backup a restore would refuse, the refusal's code, the same one a restore
-gives (`reinstalled-since`, `part-missing` and so on). Listing
+gives (`reinstalled-since`, `part-missing` and so on). An update's set that
+`restore-backup` without `--package` takes whole has `swaps_whole` set to
+true. Listing
 changes nothing and hashes no file. It reads only the backup sets' manifests,
 RABBIT's records and file sizes, never a backed-up file, so it is quick even
 with FFmpeg's backups. A restore command is printed only for a set whose name

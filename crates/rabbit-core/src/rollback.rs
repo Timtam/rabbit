@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::backup_overview::SetFingerprint;
+use crate::backup_overview::{SetFingerprint, first_copy_gone};
 use crate::cancel::CancelToken;
 use crate::error::{IoPathContext, JsonPathContext, RabbitError, Result};
 use crate::hash::sha256_file;
@@ -21,8 +21,8 @@ use crate::preflight::{
 use crate::progress::{ProgressEvent, ProgressReporter};
 use crate::reaper_ini::{lang_pack_setting, restore_lang_pack_if_cleared};
 use crate::receipt::{
-    InstallState, PackageReceipt, RECEIPT_RELATIVE_PATH, load_install_state, merge_package_receipt,
-    save_install_state,
+    InstallState, InstalledFileReceipt, PackageReceipt, RECEIPT_RELATIVE_PATH, load_install_state,
+    merge_package_receipt, save_install_state,
 };
 use crate::report::{SavedReportPaths, default_report_path, save_new_json_and_text_reports};
 use crate::restore_refusal::{RestoreRefusal, TargetRefusal};
@@ -111,6 +111,11 @@ pub struct BackupSet {
     /// looked into.
     #[serde(default)]
     pub fingerprint: Option<crate::backup_overview::SetFingerprint>,
+    /// For a set of earlier versions: whether a restore of the whole set
+    /// would go ahead (see
+    /// [`crate::backup_overview::BackupSetOverview::swaps_whole`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub swaps_whole: bool,
 }
 
 /// A set's `backup-manifest.json`. Fields added since the first version
@@ -304,8 +309,9 @@ pub enum MoveFileError {
 pub struct RestoreBackupOptions {
     pub dry_run: bool,
     pub allow_reaper_running: bool,
-    /// Restore only this package, from a set an uninstall wrote. `None`
-    /// restores the whole set.
+    /// Restore only this package: from a set an uninstall wrote, or the
+    /// earlier version a set of earlier versions holds (see
+    /// [`takes_by_swap`]). `None` restores the whole set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_id: Option<String>,
 }
@@ -349,6 +355,16 @@ pub struct RestoreBackupReport {
     /// failed and put every file back, which leaves no set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_restore_set_id: Option<String>,
+    /// For one earlier version: what going back to it did to the package's
+    /// record and to the newer version's own files, or in a dry run would.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap: Option<SwappedPackage>,
+    /// For a whole set of earlier versions: each package it put back, one
+    /// after another, each all or nothing on its own and with its own
+    /// before-restore set. The fields above that describe one backup's
+    /// files are empty then, and `status` sums these up.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub swaps: Vec<RestoreReportItem>,
     /// Where the restore saved this report, when it saved it: a real
     /// restore that gets past its checks always tries, also when the backup
     /// wasn't restored; a dry run never does.
@@ -380,6 +396,11 @@ pub enum RestoreStatus {
     /// The user stopped the run before it got to this backup, which stays
     /// as it was.
     NotReached,
+    /// A whole set of earlier versions, whose packages go back one after
+    /// another, each all or nothing: some went back, and others didn't or
+    /// weren't reached. Each one's own status says which (see
+    /// [`RestoreReportItem::swaps`]). Never the status of one package.
+    PartlyRestored,
 }
 
 /// One backup for [`restore_backups`]: a set in `RABBIT/backups`, named by
@@ -493,6 +514,12 @@ pub struct RestoreReportItem {
     /// it wasn't restored and put every file back, which leaves no set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_restore_set_id: Option<String>,
+    /// See [`RestoreBackupReport::swap`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap: Option<SwappedPackage>,
+    /// See [`RestoreBackupReport::swaps`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub swaps: Vec<RestoreReportItem>,
     /// Why a check refused the backup before anything of it changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<RestoreRefusal>,
@@ -545,6 +572,106 @@ pub struct RestoredPackage {
     /// entry are back all the same.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub langpack_error: Option<String>,
+}
+
+/// What going back to an earlier version did to the package, besides
+/// putting the set's files back, or in a dry run would do (backup plan
+/// 6.4). Only the package's own receipt entry changes: it becomes the one
+/// the set recorded for that version, with the channel the package is on
+/// now, and the package comes off `declined_packages`. The entry it had
+/// goes into the before-restore set with the files, so the restore can be
+/// undone the same way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwappedPackage {
+    pub package_id: String,
+    /// The version the package goes back to, as the set recorded it.
+    /// `None` when that entry names none, or there is no entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<Version>,
+    /// The version it had, as RABBIT's records said before the restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_version: Option<Version>,
+    /// What happens to the package's entry in RABBIT's records.
+    pub entry: SwappedEntry,
+    /// The package's entry goes, and its uninstall needs that entry, as
+    /// FFmpeg's does: RABBIT can't uninstall it until it is installed
+    /// again.
+    #[serde(default)]
+    pub uninstall_needs_reinstall: bool,
+    /// The package was on `declined_packages`, and comes off it.
+    #[serde(default)]
+    pub undeclined: bool,
+    /// The newer version's files that the earlier one doesn't have, as
+    /// RABBIT's records listed them: they leave their place for the
+    /// before-restore set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub moved_out: Vec<MovedOutFile>,
+    /// The newer version's files that the earlier one doesn't have, and
+    /// that changed since they were installed, or that something other
+    /// than a file now stands in for, such as a symbolic link or junction.
+    /// They are not RABBIT's to move, so they stay where they are, and
+    /// nothing at their place is followed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_left: Vec<PathBuf>,
+    /// Going back to a copy RABBIT didn't install: the newer version's
+    /// other files, still as RABBIT's records list them. RABBIT can't tell
+    /// which of them that copy had too, so none moves: each stays where it
+    /// is, and a copy of it goes into the before-restore set, so restoring
+    /// that set finds the newer version whole.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_in_place: Vec<PathBuf>,
+}
+
+/// What going back to an earlier version does to the package's entry in
+/// RABBIT's records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SwappedEntry {
+    /// The entry it had becomes the one the set recorded.
+    Replaced,
+    /// It had no entry, and gets the one the set recorded.
+    Added,
+    /// RABBIT hadn't installed the copy the set holds, so the entry it had
+    /// goes.
+    Removed,
+    /// RABBIT hadn't installed the copy the set holds, and it had no entry,
+    /// so it still has none.
+    StillNone,
+}
+
+/// A file of the newer version that going back to an earlier one moves into
+/// the before-restore set, because the earlier version doesn't have it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MovedOutFile {
+    pub path: PathBuf,
+    /// Where it went in the before-restore set, or in a dry run would go.
+    /// `None` once it went back to its place, and when it never moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_path: Option<PathBuf>,
+    pub size: u64,
+    /// The hash RABBIT's records give it. The quick plan reads no file,
+    /// so it checks only the size there.
+    pub sha256: String,
+    pub action: MoveOutAction,
+    /// Why it couldn't move, or couldn't go back to its place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// What came of one [`MovedOutFile`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MoveOutAction {
+    WouldMoveOut,
+    MovedOut,
+    /// The restore failed, so the file went back to its place.
+    MovedBack,
+    /// The restore failed and the file couldn't go back to its place: it
+    /// is in the before-restore set, which stays, and nothing is at its
+    /// place.
+    StillInBackup,
+    /// The restore failed before it moved this file, which is where it was.
+    NotMoved,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1634,14 +1761,25 @@ fn system_runs_as_root() -> bool {
 /// Every refusal is a [`RabbitError::RestoreRefused`], whose code says why,
 /// and comes before anything changes. A restore never copies a receipt file
 /// over RABBIT's receipt: that would undo every change to it since the set
-/// was made, uninstalls included. So, in a dry run too, it refuses a set an
-/// update wrote ([`RestoreRefusal::EarlierVersionNotYet`]), a set that holds
-/// only a copy of the receipt ([`RestoreRefusal::RecordsOnly`]), and any
-/// other set that holds a copy of it ([`RestoreRefusal::ReceiptInSet`]). A
-/// set an uninstall wrote merges each package's own entry into the receipt
-/// instead, for every package with a file in the set. A package with none
-/// is left out of a restore of the whole set, and refused on its own
+/// was made, uninstalls included. So, in a dry run too, it refuses a set
+/// that holds only a copy of the receipt ([`RestoreRefusal::RecordsOnly`]),
+/// and any other set that holds a copy of it
+/// ([`RestoreRefusal::ReceiptInSet`]), unless it is a set of earlier
+/// versions, which never touches the copy. A set an uninstall wrote merges
+/// each package's own entry into the receipt instead, for every package
+/// with a file in the set. A package with none is left out of a restore of
+/// the whole set, and refused on its own
 /// ([`RestoreRefusal::NothingOfItInSet`]).
+///
+/// A set of earlier versions, an update's or the one a restore of an
+/// earlier version wrote (see [`takes_by_swap`]), puts a package back to
+/// the version it had before: only that package's receipt entry changes,
+/// and the newer version's files and entry go into a before-restore set of
+/// their own, so the restore can be undone the same way (see
+/// [`plan_swap`]). The whole set puts back each package with a file in it,
+/// one after another, each all or nothing on its own (see
+/// [`RestoreBackupReport::swaps`]); a refusal of any of them before the
+/// first changes anything refuses them all.
 ///
 /// Before the lock, and again under it, a restore checks what each restored
 /// package's own uninstall checks: the target's REAPER, every REAPER on the
@@ -1745,6 +1883,8 @@ pub(crate) fn restore_backup_set_with(
         packages: backup.packages,
         skipped_packages: backup.skipped_packages,
         before_restore_set_id: backup.before_restore_set_id,
+        swap: backup.swap,
+        swaps: backup.swaps,
         saved_report: None,
     };
     // The report names the set that can undo the restore, or says what
@@ -1903,6 +2043,8 @@ impl ItemOutcome {
             packages: Vec::new(),
             skipped_packages: Vec::new(),
             before_restore_set_id: None,
+            swap: None,
+            swaps: Vec::new(),
             refusal: None,
             error: None,
         };
@@ -2055,8 +2197,13 @@ fn run_restore(
                         item,
                         found,
                         &backup_options,
-                        &outside,
-                        check,
+                        &RunContext {
+                            outside: &outside,
+                            check,
+                            environment,
+                            cancel,
+                        },
+                        &mut stopped,
                     ),
                 }
             }
@@ -2091,13 +2238,23 @@ fn find_set_to_restore<'a>(
     refuse_changed_since_listed(backup_id, &backup_path, item.fingerprint.as_ref())?;
     let manifest = load_manifest_to_restore(backup_id, &backup_path)?;
     refuse_sets_a_restore_does_not_take(resource_path, backup_id, &backup_path, manifest.as_ref())?;
-    let packages = packages_to_restore(
-        backup_id,
-        &backup_path,
-        manifest.as_ref(),
-        package_id,
-        check,
-    )?;
+    let packages = match manifest.as_ref().filter(|manifest| takes_by_swap(manifest)) {
+        Some(manifest) => swaps_to_restore(
+            resource_path,
+            backup_id,
+            &backup_path,
+            manifest,
+            package_id,
+            check,
+        )?,
+        None => packages_to_restore(
+            backup_id,
+            &backup_path,
+            manifest.as_ref(),
+            package_id,
+            check,
+        )?,
+    };
     Ok(FoundSet {
         backup_id,
         package_id,
@@ -2127,31 +2284,123 @@ fn refuse_changed_since_listed(
     }
 }
 
+/// What a restore of one backup in a run reads besides the backup: where
+/// outside the resource folder it may write, how it reads the copies, the
+/// computer it runs on, and the user's stop.
+struct RunContext<'a> {
+    outside: &'a OutsideRestoreRules,
+    check: CopyCheck,
+    environment: &'a BackupEnvironment<'a>,
+    cancel: &'a CancelToken,
+}
+
 /// Check again, under the lock, and plan the backup `item` asked for, of
 /// the set `found`, then restore it, or in a dry run say what a restore
 /// would do (see [`plan_found_set`] and [`run_planned_restore`]).
+///
+/// A whole set of earlier versions goes back one package after another,
+/// each all or nothing on its own (see [`restore_swaps`]). A stop between
+/// them sets `stopped`.
 fn restore_found_set(
     resource_path: &Path,
     item: &RestoreItem,
     found: FoundSet<'_>,
     options: &RestoreBackupOptions,
-    outside: &OutsideRestoreRules,
-    check: CopyCheck,
+    context: &RunContext<'_>,
+    stopped: &mut bool,
 ) -> ItemOutcome {
     match plan_found_set(
         resource_path,
         item.fingerprint.as_ref(),
         found,
         options,
-        outside,
-        check,
+        context,
     ) {
-        Ok(planned) => ItemOutcome::Ran(Box::new(run_planned_restore(
+        Ok(Planned::One(planned)) => ItemOutcome::Ran(Box::new(run_planned_restore(
             resource_path,
-            planned,
+            *planned,
             options.dry_run,
         ))),
+        Ok(Planned::Swaps {
+            backup_id,
+            backup_path,
+            swaps,
+            skipped_packages,
+        }) => {
+            let swaps = restore_swaps(resource_path, swaps, options, context, stopped);
+            ItemOutcome::Ran(Box::new(RestoreReportItem {
+                backup_id,
+                package_id: None,
+                status: status_of_swaps(&swaps),
+                backup_path: Some(backup_path),
+                actions: Vec::new(),
+                skipped_targets: Vec::new(),
+                packages: Vec::new(),
+                skipped_packages,
+                before_restore_set_id: None,
+                swap: None,
+                swaps,
+                refusal: None,
+                error: None,
+            }))
+        }
         Err(error) => ItemOutcome::NotStarted(as_restore_refusal(error)),
+    }
+}
+
+/// Put each package of a whole set of earlier versions back in turn, as
+/// `swaps` planned them, each with a before-restore set of its own and all
+/// or nothing on its own, or in a dry run say what each would do. Between
+/// two of them, as between two backups of a run, the user's stop is read,
+/// and what runs is scanned again for the next package, which refuses only
+/// that package. A package after a stop is [`RestoreStatus::NotReached`].
+fn restore_swaps(
+    resource_path: &Path,
+    swaps: Vec<PlannedBackup>,
+    options: &RestoreBackupOptions,
+    context: &RunContext<'_>,
+    stopped: &mut bool,
+) -> Vec<RestoreReportItem> {
+    let mut done = Vec::with_capacity(swaps.len());
+    for (index, planned) in swaps.into_iter().enumerate() {
+        if index > 0 && (*stopped || context.cancel.is_cancelled()) {
+            *stopped = true;
+            done.push(planned.not_run(RestoreStatus::NotReached, None));
+            continue;
+        }
+        let blocked = if options.dry_run || index == 0 {
+            None
+        } else {
+            let package_ids: Vec<String> = planned.package_id.iter().cloned().collect();
+            let rules = restore_process_rules(resource_path, &package_ids, context.environment);
+            running_blockers(resource_path, &rules, context.environment).refusal(options)
+        };
+        done.push(match blocked {
+            Some(refusal) => planned.not_run(RestoreStatus::NotRestored, Some(refusal)),
+            None => run_planned_restore(resource_path, planned, options.dry_run),
+        });
+    }
+    done
+}
+
+/// The status of a whole set of earlier versions, from those of its
+/// packages: theirs when they all agree; files left when any left some;
+/// partly restored when any went back; otherwise not restored.
+fn status_of_swaps(swaps: &[RestoreReportItem]) -> RestoreStatus {
+    let mut statuses = swaps.iter().map(|swap| swap.status);
+    let Some(first) = statuses.next() else {
+        return RestoreStatus::NotRestored;
+    };
+    if statuses.all(|status| status == first) {
+        return first;
+    }
+    let any = |wanted: RestoreStatus| swaps.iter().any(|swap| swap.status == wanted);
+    if any(RestoreStatus::FilesLeft) {
+        RestoreStatus::FilesLeft
+    } else if any(RestoreStatus::Restored) {
+        RestoreStatus::PartlyRestored
+    } else {
+        RestoreStatus::NotRestored
     }
 }
 
@@ -2221,13 +2470,13 @@ pub(crate) fn manifest_refusal(backup_id: &str, backup_path: &Path) -> Option<Re
 }
 
 /// Refuse a set whose restore would put back an earlier copy of RABBIT's
-/// receipt, or files that only go with one:
-/// - a set an update wrote, whether or not it holds a receipt copy: its
-///   files belong to the receipt entry from before the update, which no
-///   restore puts back yet;
+/// receipt:
 /// - a set that holds only a copy of the receipt;
 /// - any other set that holds a copy of it, by its manifest or, without
-///   one, by its layout (see [`set_holds_receipt`]).
+///   one, by its layout (see [`set_holds_receipt`]), unless it is a set of
+///   earlier versions (see [`takes_by_swap`]). Such a set goes back one
+///   package at a time, changing only that package's entry, and never
+///   touches the copy an older update put in it.
 ///
 /// [`restore_target`] never puts a file back into RABBIT's folder anyway.
 /// This says why in plain words, and refuses the whole set before any file
@@ -2240,8 +2489,8 @@ fn refuse_sets_a_restore_does_not_take(
 ) -> Result<()> {
     let backup_id = backup_id.to_string();
     let refusal = match manifest.map(|manifest| manifest.reason.as_str()) {
-        Some(UPDATE_BACKUP_REASON) => RestoreRefusal::EarlierVersionNotYet { backup_id },
         Some(RECORDS_BACKUP_REASON) => RestoreRefusal::RecordsOnly { backup_id },
+        _ if manifest.is_some_and(takes_by_swap) => return Ok(()),
         _ if set_holds_receipt(resource_path, backup_path, manifest)? => {
             RestoreRefusal::ReceiptInSet {
                 backup_id,
@@ -2291,6 +2540,268 @@ pub(crate) fn is_receipt_entry(resource_path: &Path, entry: &BackupManifestFile)
         entry_place(resource_path, entry),
         Some(EntryPlace::Inside(relative)) if is_receipt(&relative)
     )
+}
+
+/// The key map's name in the resource folder. A set entry whose original
+/// is this file is a key map, whatever made the set.
+const KEYMAP_FILE: &str = "reaper-kb.ini";
+
+/// Whether `entry` is the key map: its original is the resource folder's
+/// `reaper-kb.ini`.
+pub(crate) fn is_keymap_entry(resource_path: &Path, entry: &BackupManifestFile) -> bool {
+    matches!(
+        entry_place(resource_path, entry),
+        Some(EntryPlace::Inside(relative))
+            if same_place(&relative) == same_place(Path::new(KEYMAP_FILE))
+    )
+}
+
+/// Whether a restore of the set `manifest` describes puts earlier versions
+/// back by the swap (backup plan 6.4): an update's set, and a restore's set
+/// that recorded what it replaced (see [`BackupSetWriter::record_replaced`]),
+/// as going back to an earlier version writes one. Each package goes back
+/// to the receipt entry the set recorded for it, one package at a time,
+/// and no other entry changes. Every other set restores as it always did.
+pub fn takes_by_swap(manifest: &BackupManifest) -> bool {
+    manifest.reason == UPDATE_BACKUP_REASON
+        || (manifest.reason == BEFORE_RESTORE_REASON && !manifest.replaced.is_empty())
+}
+
+/// Whether `entry`, in a set of earlier versions, is a file of a package's
+/// version: not the key map, which is a backup of its own, and not a copy
+/// of RABBIT's receipt.
+pub(crate) fn is_version_entry(resource_path: &Path, entry: &BackupManifestFile) -> bool {
+    !is_keymap_entry(resource_path, entry) && !is_receipt_entry(resource_path, entry)
+}
+
+/// The packages whose earlier version a set of earlier versions holds (see
+/// [`takes_by_swap`]): those it recorded in `replaced`, and in an update's
+/// set every package a file of a version belongs to, since older updates
+/// recorded none.
+pub(crate) fn swap_package_ids(
+    resource_path: &Path,
+    manifest: &BackupManifest,
+) -> BTreeSet<String> {
+    let mut packages: BTreeSet<String> = manifest.replaced.keys().cloned().collect();
+    if manifest.reason == UPDATE_BACKUP_REASON {
+        packages.extend(
+            manifest
+                .files
+                .iter()
+                .filter(|entry| is_version_entry(resource_path, entry))
+                .filter_map(|entry| entry.package_id.clone()),
+        );
+    }
+    packages
+}
+
+/// Where in the set at `set_path` its copy of RABBIT's receipt is, as older
+/// versions made one, when it is a regular file there, reached through no
+/// link: the manifest's `receipt_backup_path`, or else an entry whose
+/// original is the receipt.
+pub(crate) fn receipt_copy_of(
+    resource_path: &Path,
+    set_path: &Path,
+    manifest: &BackupManifest,
+) -> Option<PathBuf> {
+    let recorded = manifest.receipt_backup_path.clone().or_else(|| {
+        manifest
+            .files
+            .iter()
+            .find(|entry| is_receipt_entry(resource_path, entry))
+            .map(|entry| entry.backup_path.clone())
+    })?;
+    copy_in_set(set_path, &recorded)
+        .ok()
+        .filter(|copy| is_real_file(copy))
+}
+
+/// The copy of RABBIT's receipt at `copy`, read. `None` when it can't be
+/// read as one.
+pub(crate) fn read_receipt_copy(copy: &Path) -> Option<InstallState> {
+    let content = fs::read_to_string(copy).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+/// The receipt entry `package_id` had before the set of earlier versions
+/// `manifest` describes kept its files: `Some(None)` when RABBIT hadn't
+/// installed the copy replaced, and `None` when the set doesn't say. From
+/// the set's own record of the package; for an older update's set without
+/// one, from its copy of RABBIT's receipt, read by `copy` only then, where
+/// a package the copy doesn't list wasn't RABBIT's. The restore and the
+/// overview of the backups both read it this way.
+pub(crate) fn earlier_entry_in<'a>(
+    manifest: &'a BackupManifest,
+    package_id: &str,
+    copy: impl FnOnce() -> Option<&'a InstallState>,
+) -> Option<Option<&'a PackageReceipt>> {
+    if let Some(record) = manifest.replaced.get(package_id) {
+        return Some(record.receipt.as_ref());
+    }
+    if manifest.reason != UPDATE_BACKUP_REASON {
+        return None;
+    }
+    copy().map(|copy| copy.packages.get(package_id))
+}
+
+/// [`earlier_entry_in`] for the set at `set_path`, reading its copy of
+/// RABBIT's receipt, if it needs it, from the set (see
+/// [`receipt_copy_of`]).
+pub(crate) fn recorded_earlier_entry(
+    resource_path: &Path,
+    set_path: &Path,
+    manifest: &BackupManifest,
+    package_id: &str,
+) -> Option<Option<PackageReceipt>> {
+    let copy = std::cell::OnceCell::new();
+    earlier_entry_in(manifest, package_id, || {
+        copy.get_or_init(|| {
+            receipt_copy_of(resource_path, set_path, manifest)
+                .and_then(|copy| read_receipt_copy(&copy))
+        })
+        .as_ref()
+    })
+    .map(|entry| entry.cloned())
+}
+
+/// A receipt's path for a file as a path on disk: relative ones are inside
+/// the resource folder.
+pub(crate) fn receipt_file_path(resource_path: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        resource_path.join(path)
+    }
+}
+
+/// The other packages of `package_id`'s exclusive group, by `groups`, that
+/// RABBIT's records `state` list: packages whose install removes this one.
+/// Going back to an earlier version of it while one of them is installed
+/// would leave both. Language packs were such a group and no longer are;
+/// no package the manifests ship declares one today.
+pub(crate) fn others_of_its_group_installed(
+    groups: &BTreeMap<String, String>,
+    package_id: &str,
+    state: &InstallState,
+) -> Vec<String> {
+    let Some(group) = groups.get(package_id) else {
+        return Vec::new();
+    };
+    state
+        .packages
+        .keys()
+        .filter(|other| *other != package_id && groups.get(*other) == Some(group))
+        .cloned()
+        .collect()
+}
+
+/// The first file of `earlier`, the receipt entry `package_id` goes back
+/// to, that going back would leave missing, by its path in that entry:
+/// neither in the set `manifest` describes, as a finished file of the
+/// package's version with that hash and at the same place, which the
+/// restore puts back, nor on disk with it. A copy the restore doesn't put
+/// back, such as the key map's or another package's, doesn't count. A
+/// file counts as on disk only where RABBIT's current records `state` list
+/// a file with that hash at that place, and `on_disk` then finds it there,
+/// given the place as the current records spell it and the earlier entry's
+/// record of the file. Only such places are ever looked at, never one only
+/// a set names. Files the receipt records without a hash, such as
+/// `reaper.ini`, belong to the user and count as kept. The overview of the
+/// backups and the restore judge by it, each with its own `on_disk`.
+pub(crate) fn first_file_not_kept(
+    resource_path: &Path,
+    manifest: &BackupManifest,
+    package_id: &str,
+    earlier: &PackageReceipt,
+    state: &InstallState,
+    on_disk: &dyn Fn(&Path, &InstalledFileReceipt) -> bool,
+) -> Option<PathBuf> {
+    earlier
+        .installed_files
+        .iter()
+        .find(|file| {
+            let Some(sha256) = &file.sha256 else {
+                return false;
+            };
+            let place = same_place(&receipt_file_path(resource_path, &file.path));
+            let in_set = manifest.files.iter().any(|entry| {
+                entry.state == BackupEntryState::Done
+                    && entry.package_id.as_deref() == Some(package_id)
+                    && is_version_entry(resource_path, entry)
+                    && entry.sha256 == *sha256
+                    && entry_place(resource_path, entry)
+                        .is_some_and(|found| same_place(&found.path(resource_path)) == place)
+            });
+            let kept_on_disk = || {
+                state
+                    .packages
+                    .values()
+                    .flat_map(|entry| &entry.installed_files)
+                    .find_map(|current| {
+                        let path = receipt_file_path(resource_path, &current.path);
+                        (current.sha256.as_ref() == Some(sha256) && same_place(&path) == place)
+                            .then_some(path)
+                    })
+                    .is_some_and(|path| on_disk(&path, file))
+            };
+            !in_set && !kept_on_disk()
+        })
+        .map(|file| file.path.clone())
+}
+
+/// The files of `current`, a package's receipt entry now, that going back
+/// to `earlier` takes into the before-restore set: each one recorded with a
+/// hash, at a place `earlier` lists no file at, and none of `written`, the
+/// places the restore puts the set's files back to. A file recorded without
+/// a hash is the user's, and stays. With an earlier entry, each moves out
+/// of the way. With none, RABBIT can't tell which of them the copy it goes
+/// back to had too, so each stays where it is, and only a copy of it goes
+/// into the set (see [`SwappedPackage::left_in_place`]).
+pub(crate) fn files_only_in_newer<'a>(
+    resource_path: &Path,
+    current: &'a PackageReceipt,
+    earlier: Option<&PackageReceipt>,
+    written: &[PathBuf],
+) -> Vec<&'a InstalledFileReceipt> {
+    let mut kept: BTreeSet<Vec<String>> = written.iter().map(|path| same_place(path)).collect();
+    if let Some(earlier) = earlier {
+        kept.extend(
+            earlier
+                .installed_files
+                .iter()
+                .map(|file| same_place(&receipt_file_path(resource_path, &file.path))),
+        );
+    }
+    current
+        .installed_files
+        .iter()
+        .filter(|file| {
+            file.sha256.is_some()
+                && !kept.contains(&same_place(&receipt_file_path(resource_path, &file.path)))
+        })
+        .collect()
+}
+
+/// Where a file RABBIT's receipt records for `package_id` at `path` would
+/// go back to from a set, judged from the text alone as
+/// [`restore_place_by_text`] judges a set's entry, or the reason a restore
+/// refuses the place for. Going back to an earlier version moves such a
+/// file into a set only where it can come back from there.
+pub(crate) fn receipt_place_by_text<'a>(
+    resource_path: &Path,
+    path: &Path,
+    package_id: &str,
+    outside: impl FnOnce() -> &'a OutsideRestoreRules,
+) -> std::result::Result<PathBuf, TargetRefusal> {
+    let entry = BackupManifestFile {
+        package_id: Some(package_id.to_string()),
+        original_path: path.to_path_buf(),
+        backup_path: PathBuf::new(),
+        size: 0,
+        sha256: String::new(),
+        state: BackupEntryState::Done,
+    };
+    restore_place_by_text(resource_path, &entry, outside)
 }
 
 /// Where a set's entry came from, and where a restore puts it back: inside
@@ -2390,8 +2901,17 @@ struct FoundSet<'a> {
 
 impl FoundSet<'_> {
     /// The packages whose files the restore puts back (see
-    /// [`restored_package_ids`]), whose uninstall's checks it makes.
+    /// [`restored_package_ids`]), whose uninstall's checks it makes. For a
+    /// set of earlier versions, the packages it puts back.
     fn restored_package_ids(&self) -> Vec<String> {
+        if !self.packages.swap.is_empty() {
+            return self
+                .packages
+                .swap
+                .iter()
+                .map(|swap| swap.package_id.clone())
+                .collect();
+        }
         restored_package_ids(self.manifest.as_ref(), &self.packages, self.package_id)
     }
 }
@@ -2409,6 +2929,58 @@ struct PlannedBackup {
     actions: Vec<RestoreBackupAction>,
     skipped_targets: Vec<PathBuf>,
     before_restore_id: String,
+    /// For an earlier version: what the swap does besides the files.
+    swap: Option<PlannedSwap>,
+}
+
+impl PlannedBackup {
+    /// The report of this backup when the run never got to change any of
+    /// it: a stop before it, or `refusal` right before its turn.
+    fn not_run(self, status: RestoreStatus, refusal: Option<RestoreRefusal>) -> RestoreReportItem {
+        RestoreReportItem {
+            backup_id: self.backup_id,
+            package_id: self.package_id,
+            status,
+            backup_path: Some(self.backup_path),
+            actions: Vec::new(),
+            skipped_targets: Vec::new(),
+            packages: Vec::new(),
+            skipped_packages: Vec::new(),
+            before_restore_set_id: None,
+            swap: None,
+            swaps: Vec::new(),
+            refusal,
+            error: None,
+        }
+    }
+}
+
+/// What going back to one earlier version does besides putting the set's
+/// files back (see [`plan_swap`]).
+struct PlannedSwap {
+    package_id: String,
+    /// What the package's receipt entry becomes: the earlier one, with the
+    /// channel the package is on now. `None` removes the entry.
+    entry: Option<PackageReceipt>,
+    /// The entry it has now, which the before-restore set records.
+    current: Option<PackageReceipt>,
+    /// What the report says of it, the files to move out included.
+    report: SwappedPackage,
+}
+
+/// What [`plan_found_set`] planned.
+enum Planned {
+    /// One backup: a set as a whole, one package of an uninstall's set, or
+    /// one earlier version.
+    One(Box<PlannedBackup>),
+    /// A whole set of earlier versions: one backup per package, each
+    /// checked and planned before the first one changes anything.
+    Swaps {
+        backup_id: String,
+        backup_path: PathBuf,
+        swaps: Vec<PlannedBackup>,
+        skipped_packages: Vec<SkippedPackage>,
+    },
 }
 
 /// Check again and plan the restore of the set `found`, writing outside the
@@ -2424,14 +2996,24 @@ struct PlannedBackup {
 /// uninstall reset it. That is only for `packages.restore`: the packages
 /// in `packages.skipped` have no file in the set, and their records stay
 /// as they are. With `options.package_id`, only that package comes back.
+///
+/// A set of earlier versions goes back one package at a time instead (see
+/// [`plan_swap`]). For the whole set, every package is checked and planned
+/// here, against RABBIT's records as they are now, before the first one
+/// changes anything, so a refusal of any of them refuses them all.
 fn plan_found_set(
     resource_path: &Path,
     listed: Option<&SetFingerprint>,
     found: FoundSet<'_>,
     options: &RestoreBackupOptions,
-    outside: &OutsideRestoreRules,
-    check: CopyCheck,
-) -> Result<PlannedBackup> {
+    context: &RunContext<'_>,
+) -> Result<Planned> {
+    let RunContext {
+        outside,
+        check,
+        environment,
+        ..
+    } = *context;
     let FoundSet {
         backup_id,
         package_id,
@@ -2441,6 +3023,7 @@ fn plan_found_set(
             PackagesToRestore {
                 restore: packages,
                 skipped: skipped_packages,
+                swap,
             },
     } = found;
 
@@ -2464,6 +3047,49 @@ fn plan_found_set(
     // restore with nothing changed.
     if load_manifest_to_restore(backup_id, &backup_path)? != manifest {
         return Err(backup_changed_while_read(backup_id));
+    }
+
+    if let Some(manifest) = manifest.as_ref().filter(|_| !swap.is_empty()) {
+        // RABBIT's records as the backups before this one in the run left
+        // them, as for an uninstall's set below.
+        let state = load_install_state(resource_path)
+            .map_err(|error| RestoreRefusal::ReceiptUnreadable {
+                detail: error.to_string(),
+            })?
+            .unwrap_or_default();
+        let groups = (environment.exclusive_groups)();
+        let swaps = swap
+            .iter()
+            .map(|swap| {
+                plan_swap(
+                    resource_path,
+                    SwapSource {
+                        backup_id,
+                        backup_path: &backup_path,
+                        manifest,
+                    },
+                    swap,
+                    &state,
+                    &groups,
+                    context,
+                    options.dry_run,
+                )
+            })
+            .collect::<Result<Vec<PlannedBackup>>>()?;
+        return Ok(match package_id {
+            Some(_) => Planned::One(Box::new(
+                swaps
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| backup_changed_while_read(backup_id))?,
+            )),
+            None => Planned::Swaps {
+                backup_id: backup_id.to_string(),
+                backup_path,
+                swaps,
+                skipped_packages,
+            },
+        });
     }
 
     // A package installed again since its uninstall has a newer receipt
@@ -2526,7 +3152,10 @@ fn plan_found_set(
         resource_path,
         &backup_path,
         manifest.as_ref(),
-        package_id,
+        EntriesToPlan {
+            package_id,
+            takes: &|_| true,
+        },
         &restoring,
         outside,
         check,
@@ -2536,8 +3165,33 @@ fn plan_found_set(
     let before_restore_id = format!("{}-before-restore", restore_timestamp());
     let mut planned_backups =
         BackupSetWriter::planning(resource_path, &before_restore_id, BEFORE_RESTORE_REASON);
-    let mut actions = Vec::new();
-    for file in plan.files {
+    let actions = planned_actions(plan.files, &mut planned_backups, options.dry_run)?;
+
+    Ok(Planned::One(Box::new(PlannedBackup {
+        backup_id: backup_id.to_string(),
+        package_id: package_id.map(ToString::to_string),
+        backup_path,
+        packages,
+        skipped_packages,
+        state,
+        actions,
+        skipped_targets: plan.skipped_targets,
+        before_restore_id,
+        swap: None,
+    })))
+}
+
+/// The actions of a restore that puts `files` back, each with where the
+/// file it replaces goes in the before-restore set `planned_backups`
+/// plans, when there is a file to replace. A real restore marks each one
+/// as it goes; a dry run says it would restore it.
+fn planned_actions(
+    files: Vec<PlannedRestore>,
+    planned_backups: &mut BackupSetWriter,
+    dry_run: bool,
+) -> Result<Vec<RestoreBackupAction>> {
+    let mut actions = Vec::with_capacity(files.len());
+    for file in files {
         let current_backup_path = if is_real_file(&file.target_path) {
             Some(planned_backups.copy_file(file.package_id.as_deref(), &file.target_path)?)
         } else {
@@ -2548,8 +3202,7 @@ fn plan_found_set(
             source_path: file.source_path,
             target_path: file.target_path,
             current_backup_path,
-            // A real restore marks each file as it goes.
-            action: if options.dry_run {
+            action: if dry_run {
                 RestoreBackupActionKind::WouldRestore
             } else {
                 RestoreBackupActionKind::NotRestored
@@ -2559,18 +3212,306 @@ fn plan_found_set(
             error: None,
         });
     }
+    Ok(actions)
+}
 
+/// The set of earlier versions a swap takes a package from.
+#[derive(Clone, Copy)]
+struct SwapSource<'a> {
+    backup_id: &'a str,
+    backup_path: &'a Path,
+    manifest: &'a BackupManifest,
+}
+
+/// Check and plan going back to the earlier version of `swap.package_id`
+/// that `source` holds (backup plan 6.4), against RABBIT's records `state`
+/// as they are now, and change nothing. A real run holds the lock by now.
+///
+/// It is refused, before anything changes, while another package of its
+/// exclusive group is installed, by `groups`
+/// ([`RestoreRefusal::OtherLanguagePackInstalled`]); when a file the
+/// earlier entry lists is neither in the set with that entry's hash nor on
+/// disk with it ([`RestoreRefusal::NotComplete`], see
+/// [`first_file_not_kept`]); for a copy of the set or a place the restore
+/// refuses, as any restore is; and for a file of the current entry that
+/// would go into the before-restore set from a place it couldn't come back
+/// to from there ([`RestoreRefusal::NewerFileRefused`]). A real run hashes
+/// what it compares; the quick plan compares sizes, as the overview of the
+/// backups does.
+///
+/// The plan: the package's files in the set come back, those of no other
+/// package, and not the key map or a copy of RABBIT's receipt the set may
+/// hold. Each file of the current entry that the earlier one doesn't list
+/// and the set doesn't write moves out into the before-restore set, while
+/// it is still as the current entry recorded it; one that changed since,
+/// or a link at its place, stays and is reported. The entry becomes the
+/// earlier one, keeping the current entry's channel, or goes when there is
+/// no earlier one. Then RABBIT didn't install the copy it goes back to and
+/// can't tell which of those files that copy had too, so none of them
+/// moves: each stays, and a copy of it goes into the before-restore set, so
+/// going forward again finds them (see [`SwappedPackage::left_in_place`]).
+fn plan_swap(
+    resource_path: &Path,
+    source: SwapSource<'_>,
+    swap: &SwapPackage,
+    state: &InstallState,
+    groups: &BTreeMap<String, String>,
+    context: &RunContext<'_>,
+    dry_run: bool,
+) -> Result<PlannedBackup> {
+    let SwapSource {
+        backup_id,
+        backup_path,
+        manifest,
+    } = source;
+    let package_id = swap.package_id.as_str();
+    let installed = others_of_its_group_installed(groups, package_id, state);
+    if !installed.is_empty() {
+        return Err(RestoreRefusal::OtherLanguagePackInstalled {
+            backup_id: backup_id.to_string(),
+            package_id: package_id.to_string(),
+            installed,
+        }
+        .into());
+    }
+    if let Some(earlier) = &swap.earlier
+        && let Some(path) = first_file_not_kept(
+            resource_path,
+            manifest,
+            package_id,
+            earlier,
+            state,
+            &|place, file| {
+                matches!(
+                    recorded_file_on_disk(place, file, context.check),
+                    Ok(OnDisk::AsRecorded(_))
+                )
+            },
+        )
+    {
+        return Err(RestoreRefusal::NotComplete {
+            backup_id: backup_id.to_string(),
+            package_id: package_id.to_string(),
+            path,
+        }
+        .into());
+    }
+
+    let plan = plan_restore(
+        resource_path,
+        backup_path,
+        Some(manifest),
+        EntriesToPlan {
+            package_id: Some(package_id),
+            takes: &|entry| is_version_entry(resource_path, entry),
+        },
+        &[package_id],
+        context.outside,
+        context.check,
+    )?;
+    check_plan_matches_packages(backup_id, &plan, &[package_id], &[])?;
+
+    let current = state.packages.get(package_id).cloned();
+    let written: Vec<PathBuf> = plan
+        .files
+        .iter()
+        .map(|file| file.target_path.clone())
+        .collect();
+    let mut to_move = Vec::new();
+    let mut left_in_place = Vec::new();
+    let mut changed_left = Vec::new();
+    if let Some(current) = &current {
+        for file in files_only_in_newer(resource_path, current, swap.earlier.as_ref(), &written) {
+            let Some(place) = newer_file_place(
+                resource_path,
+                backup_id,
+                package_id,
+                &file.path,
+                context.outside,
+            )?
+            else {
+                changed_left.push(receipt_file_path(resource_path, &file.path));
+                continue;
+            };
+            match recorded_file_on_disk(&place, file, context.check)? {
+                OnDisk::AsRecorded(digest) if swap.earlier.is_some() => {
+                    to_move.push((place, digest));
+                }
+                OnDisk::AsRecorded(_) => left_in_place.push(place),
+                OnDisk::Changed => changed_left.push(place),
+                OnDisk::Gone => {}
+            }
+        }
+    }
+
+    // The copies of the files that stay go into the before-restore set
+    // first, then the files that move out, then the files the set's copies
+    // replace, in the order a real run writes them, so the places planned
+    // are the ones it uses.
+    let before_restore_id = format!("{}-before-restore", restore_timestamp());
+    let mut planned_backups =
+        BackupSetWriter::planning(resource_path, &before_restore_id, BEFORE_RESTORE_REASON);
+    for place in &left_in_place {
+        planned_backups.copy_file(Some(package_id), place)?;
+    }
+    let mut moved_out = Vec::with_capacity(to_move.len());
+    for (place, digest) in to_move {
+        let planned = planned_backups
+            .move_file(Some(package_id), &place, Some(digest.clone()), false)
+            .map_err(move_error)?;
+        moved_out.push(MovedOutFile {
+            path: place,
+            backup_path: Some(planned.backup_path),
+            size: digest.size,
+            sha256: digest.sha256,
+            action: if dry_run {
+                MoveOutAction::WouldMoveOut
+            } else {
+                MoveOutAction::NotMoved
+            },
+            error: None,
+        });
+    }
+    let actions = planned_actions(plan.files, &mut planned_backups, dry_run)?;
+
+    let entry = swap.earlier.clone().map(|mut entry| {
+        if let Some(current) = &current {
+            entry.channel.clone_from(&current.channel);
+        }
+        entry
+    });
+    let change = match (&current, &entry) {
+        (Some(_), Some(_)) => SwappedEntry::Replaced,
+        (None, Some(_)) => SwappedEntry::Added,
+        (Some(_), None) => SwappedEntry::Removed,
+        (None, None) => SwappedEntry::StillNone,
+    };
+    let report = SwappedPackage {
+        package_id: package_id.to_string(),
+        version: swap
+            .earlier
+            .as_ref()
+            .and_then(|entry| entry.version.clone()),
+        replaced_version: current.as_ref().and_then(|entry| entry.version.clone()),
+        entry: change,
+        uninstall_needs_reinstall: change == SwappedEntry::Removed
+            && uninstall_needs_receipt(package_id, context.environment),
+        undeclined: state.declined_packages.contains(package_id),
+        moved_out,
+        changed_left,
+        left_in_place,
+    };
     Ok(PlannedBackup {
         backup_id: backup_id.to_string(),
-        package_id: package_id.map(ToString::to_string),
-        backup_path,
-        packages,
-        skipped_packages,
-        state,
+        package_id: Some(package_id.to_string()),
+        backup_path: backup_path.to_path_buf(),
+        packages: Vec::new(),
+        skipped_packages: Vec::new(),
+        state: None,
         actions,
         skipped_targets: plan.skipped_targets,
         before_restore_id,
+        swap: Some(PlannedSwap {
+            package_id: package_id.to_string(),
+            entry,
+            current,
+            report,
+        }),
     })
+}
+
+/// Whether the uninstall of `package_id` on this platform needs its entry
+/// in RABBIT's records, as FFmpeg's does, by the package manifests.
+fn uninstall_needs_receipt(package_id: &str, environment: &BackupEnvironment<'_>) -> bool {
+    Platform::current().is_some_and(|platform| {
+        (environment.package_specs)(platform)
+            .iter()
+            .any(|spec| spec.id == package_id && spec.uninstall.requires_receipt)
+    })
+}
+
+/// Where `path`, a file of the newer version of `package_id` that going
+/// back to an earlier version takes into the before-restore set, is on
+/// disk: the place a restore of that set would put it back to (see
+/// [`restore_target`]). `None` when a symbolic link or junction stands at
+/// the place itself: it is no file of the version, and it stays, never
+/// followed. Any other place a restore refuses refuses going back
+/// ([`RestoreRefusal::NewerFileRefused`]), since the file couldn't come
+/// back from the set.
+fn newer_file_place(
+    resource_path: &Path,
+    backup_id: &str,
+    package_id: &str,
+    path: &Path,
+    outside: &OutsideRestoreRules,
+) -> Result<Option<PathBuf>> {
+    let reason = match restore_target(resource_path, path, None, Some(package_id), outside) {
+        Ok(place) => return Ok(Some(place)),
+        Err(RabbitError::RestoreRefused(RestoreRefusal::TargetRefused { reason, .. })) => reason,
+        Err(other) => return Err(other),
+    };
+    let place = same_place(&receipt_file_path(resource_path, path));
+    match reason {
+        TargetRefusal::PlaceIsLink => Ok(None),
+        TargetRefusal::ThroughLink { link } if same_place(&link) == place => Ok(None),
+        reason => Err(RestoreRefusal::NewerFileRefused {
+            backup_id: backup_id.to_string(),
+            package_id: package_id.to_string(),
+            path: path.to_path_buf(),
+            reason: Box::new(reason),
+        }
+        .into()),
+    }
+}
+
+/// What is at the place of a file a receipt entry records.
+enum OnDisk {
+    /// The file as recorded, with its size and hash.
+    AsRecorded(FileDigest),
+    /// Something else: the file changed since, or something other than a
+    /// file is there.
+    Changed,
+    /// Nothing is there.
+    Gone,
+}
+
+/// What is at `place`, the place of `file` of a receipt entry: the file as
+/// recorded, by its size and, unless `check` reads sizes only, its hash;
+/// something else; or nothing. Nothing at the place is followed. Going back
+/// to an earlier version reads the earlier version's files on disk this
+/// way, and the newer version's files that it moves out.
+fn recorded_file_on_disk(
+    place: &Path,
+    file: &InstalledFileReceipt,
+    check: CopyCheck,
+) -> Result<OnDisk> {
+    let metadata = match fs::symlink_metadata(place) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(OnDisk::Gone),
+        Err(error) => return Err(crate::error::io_error_at(place.to_path_buf(), error)),
+    };
+    let size = metadata.len();
+    if !metadata.is_file() || file.size.is_some_and(|recorded| recorded != size) {
+        return Ok(OnDisk::Changed);
+    }
+    let recorded = file.sha256.clone().unwrap_or_default();
+    let sha256 = match check {
+        CopyCheck::Size => recorded.clone(),
+        CopyCheck::Hash => sha256_file(place)?,
+    };
+    Ok(if sha256 == recorded {
+        OnDisk::AsRecorded(FileDigest { size, sha256 })
+    } else {
+        OnDisk::Changed
+    })
+}
+
+/// A [`MoveFileError`] as the error it is.
+fn move_error(error: MoveFileError) -> RabbitError {
+    match error {
+        MoveFileError::NotMoved(error) => error,
+        MoveFileError::InUse { path, source } => crate::error::io_error_at(path, source),
+    }
 }
 
 /// Put back what `planned` planned, then merge the restored packages'
@@ -2585,6 +3526,13 @@ fn plan_found_set(
 /// copy went back where it came from holds nothing anyone needs, and goes
 /// again; one that holds the only copy of a file that couldn't be put back
 /// stays, and the report names it.
+///
+/// Going back to an earlier version records the package's current entry
+/// in the before-restore set first, then copies in the newer version's
+/// files that stay, or moves its own files into it, then puts the set's
+/// files back, and only then makes the package's entry the earlier one
+/// (see [`plan_swap`]). When anything fails, the files that moved out go
+/// back too, after the others, and the entry stays as it was.
 fn run_planned_restore(
     resource_path: &Path,
     planned: PlannedBackup,
@@ -2600,6 +3548,7 @@ fn run_planned_restore(
         actions,
         skipped_targets,
         before_restore_id,
+        swap,
     } = planned;
     let mut report = RestoreReportItem {
         backup_id,
@@ -2611,6 +3560,8 @@ fn run_planned_restore(
         packages: Vec::new(),
         skipped_packages,
         before_restore_set_id: None,
+        swap: None,
+        swaps: Vec::new(),
         refusal: None,
         error: None,
     };
@@ -2619,6 +3570,7 @@ fn run_planned_restore(
             report.packages =
                 package_records_a_restore_would_restore(resource_path, &packages, &state);
         }
+        report.swap = swap.map(|swap| swap.report);
         return report;
     }
 
@@ -2628,7 +3580,20 @@ fn run_planned_restore(
         BackupSetWriter::new(resource_path, &before_restore_id, BEFORE_RESTORE_REASON);
     let mut steps: Vec<FileStep> = Vec::with_capacity(report.actions.len());
     let mut failure = None;
-    for action in &mut report.actions {
+    // Going back to an earlier version: the entry the package has now goes
+    // into the set before any file does, and the newer version's own files
+    // move out of the way before the set's files come back.
+    let mut swap = swap;
+    let mut moved: Vec<MovedFile> = Vec::new();
+    if let Some(swap) = &mut swap {
+        failure = move_newer_files_out(swap, &mut backups, &mut moved).err();
+    }
+    let actions = if failure.is_none() {
+        report.actions.as_mut_slice()
+    } else {
+        &mut []
+    };
+    for action in actions {
         let mut step = FileStep::default();
         let restored = restore_file(action, &mut backups, &mut step);
         steps.push(step);
@@ -2643,9 +3608,7 @@ fn run_planned_restore(
     // After the files, so the receipt never claims a file that isn't back.
     // The receipt is saved whole or not at all, so a failure here leaves it
     // as it was, and the files go back too.
-    if failure.is_none()
-        && let Some(state) = state
-    {
+    if failure.is_none() && (state.is_some() || swap.is_some()) {
         // Tests may fail the save here, as a full disk would.
         #[cfg(test)]
         let seam = {
@@ -2654,7 +3617,15 @@ fn run_planned_restore(
         };
         #[cfg(not(test))]
         let seam: Result<()> = Ok(());
-        match seam.and_then(|()| restore_package_records(resource_path, &packages, state)) {
+        let saved = seam.and_then(|()| match (&swap, state) {
+            (Some(swap), _) => {
+                swap_receipt_entry(resource_path, &swap.package_id, swap.entry.clone())
+                    .map(|()| Vec::new())
+            }
+            (None, Some(state)) => restore_package_records(resource_path, &packages, state),
+            (None, None) => Ok(Vec::new()),
+        });
+        match saved {
             Ok(restored) => report.packages = restored,
             Err(error) => failure = Some(error),
         }
@@ -2663,14 +3634,26 @@ fn run_planned_restore(
     match failure {
         None => {
             report.status = RestoreStatus::Restored;
-            // The writer makes the set with the first file it backs up, and
-            // may have named it `<id>-2`. A restore that replaced nothing
-            // made none.
-            report.before_restore_set_id = backups.is_started().then(|| backups.set_id());
+            if let Some(swap) = &swap {
+                // A set that got the entry and no file holds nothing to go
+                // back to, and goes again.
+                backups.forget_replaced_without_entry(&swap.package_id);
+            }
+            // The writer makes the set with the first file, or the first
+            // record of a swap, that goes in, and may have named it
+            // `<id>-2`. A restore that replaced nothing made none, and a
+            // swap that put no file in removed its set again just above, so
+            // the set is named only while it is there.
+            report.before_restore_set_id = (backups.is_started()
+                && fs::symlink_metadata(backups.path()).is_ok())
+            .then(|| backups.set_id());
         }
         Some(error) => {
             report.error = Some(error.to_string());
-            let all_back = put_back_what_changed(&mut report.actions, &steps, &backups);
+            let mut all_back = put_back_what_changed(&mut report.actions, &steps, &backups);
+            if let Some(swap) = &mut swap {
+                all_back &= move_newer_files_back(swap, &mut backups, &moved);
+            }
             report.status = if all_back {
                 RestoreStatus::NotRestored
             } else {
@@ -2691,7 +3674,130 @@ fn run_planned_restore(
                 (backups.is_started() && !discarded).then(|| backups.set_id());
         }
     }
+    report.swap = swap.map(|swap| swap.report);
     report
+}
+
+/// Record the entry `swap`'s package has now in the before-restore set
+/// `backups`, then copy each file of the newer version that stays where it
+/// is into it, and move each one that the earlier version doesn't have into
+/// it, noting each move in `moved`. The record comes first, so the set
+/// never holds a file of the package without it; a set that ends up with
+/// no file of it goes again (see
+/// [`BackupSetWriter::forget_replaced_without_entry`]). Stops at the first
+/// file that can't be copied or moved, which stays where it was; a copy
+/// already made goes with the set when the restore fails.
+fn move_newer_files_out(
+    swap: &mut PlannedSwap,
+    backups: &mut BackupSetWriter,
+    moved: &mut Vec<MovedFile>,
+) -> Result<()> {
+    backups.record_replaced(
+        &swap.package_id,
+        ReplacedPackageRecord {
+            receipt: swap.current.clone(),
+            replaced_by: swap.report.version.clone(),
+        },
+    )?;
+    for place in &swap.report.left_in_place {
+        #[cfg(test)]
+        restore_seam::at(restore_seam::Step::CopyingIn, place).with_path(place)?;
+        backups.copy_file(Some(&swap.package_id), place)?;
+    }
+    for file in &mut swap.report.moved_out {
+        // Tests may fail the move here, as a file held open would.
+        #[cfg(test)]
+        let seam = restore_seam::at(restore_seam::Step::MovingOut, &file.path)
+            .with_path(&file.path)
+            .map_err(MoveFileError::NotMoved);
+        #[cfg(not(test))]
+        let seam: std::result::Result<(), MoveFileError> = Ok(());
+        let digest = FileDigest {
+            size: file.size,
+            sha256: file.sha256.clone(),
+        };
+        let moved_now = seam.and_then(|()| {
+            backups.move_file(Some(&swap.package_id), &file.path, Some(digest), false)
+        });
+        match moved_now {
+            Ok(done) => {
+                file.backup_path = Some(done.backup_path.clone());
+                file.action = MoveOutAction::MovedOut;
+                moved.push(done);
+            }
+            Err(error) => {
+                file.backup_path = None;
+                file.error = Some(error.to_string());
+                return Err(move_error(error));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Move the files [`move_newer_files_out`] moved back to their places,
+/// newest first, after the restore of the earlier version failed, and mark
+/// how each ended up. Returns whether every one is back.
+fn move_newer_files_back(
+    swap: &mut PlannedSwap,
+    backups: &mut BackupSetWriter,
+    moved: &[MovedFile],
+) -> bool {
+    let mut all_back = true;
+    for done in moved.iter().rev() {
+        let Some(file) = swap
+            .report
+            .moved_out
+            .iter_mut()
+            .find(|file| file.backup_path.as_deref() == Some(done.backup_path.as_path()))
+        else {
+            continue;
+        };
+        #[cfg(test)]
+        let seam =
+            restore_seam::at(restore_seam::Step::MovingBack, &file.path).with_path(&file.path);
+        #[cfg(not(test))]
+        let seam: Result<()> = Ok(());
+        match seam.and_then(|()| backups.put_back(done)) {
+            Ok(()) => {
+                file.action = MoveOutAction::MovedBack;
+                file.backup_path = None;
+            }
+            Err(error) => {
+                file.action = MoveOutAction::StillInBackup;
+                file.error = Some(error.to_string());
+                all_back = false;
+            }
+        }
+    }
+    for file in &mut swap.report.moved_out {
+        if file.action == MoveOutAction::NotMoved {
+            file.backup_path = None;
+        }
+    }
+    all_back
+}
+
+/// Make `package_id`'s entry in RABBIT's records `entry`, or take it out
+/// with `None`, and take the package off `declined_packages`: going back
+/// to an earlier version is the user's yes to it. The records are read as
+/// they are now, and nothing else in them changes.
+fn swap_receipt_entry(
+    resource_path: &Path,
+    package_id: &str,
+    entry: Option<PackageReceipt>,
+) -> Result<()> {
+    let mut state = load_install_state(resource_path)?.unwrap_or_default();
+    match entry {
+        Some(entry) => {
+            state.packages.insert(package_id.to_string(), entry);
+        }
+        None => {
+            state.packages.remove(package_id);
+        }
+    }
+    state.declined_packages.remove(package_id);
+    save_install_state(resource_path, &state)
 }
 
 /// Save `report` as `RABBIT/logs/restore-backup-unix-<time>.json` and
@@ -3037,11 +4143,125 @@ fn failed_check_refusal(resource_path: &Path, report: &PreflightReport) -> Optio
 
 /// The packages of an uninstall set a restore brings back, with what the
 /// set recorded about each, and those it leaves out. See
-/// [`packages_to_restore`].
+/// [`packages_to_restore`]. For a set of earlier versions, the packages it
+/// puts back instead, in `swap`, and those it leaves out (see
+/// [`swaps_to_restore`]).
 #[derive(Debug, Default)]
 struct PackagesToRestore {
     restore: Vec<(String, BackupPackageRecord)>,
     skipped: Vec<SkippedPackage>,
+    swap: Vec<SwapPackage>,
+}
+
+/// A package whose earlier version a restore puts back: its id, and the
+/// receipt entry the set recorded for that version, `None` when RABBIT
+/// hadn't installed the copy the update replaced.
+#[derive(Debug, Clone)]
+struct SwapPackage {
+    package_id: String,
+    earlier: Option<PackageReceipt>,
+}
+
+/// The packages of a set of earlier versions (see [`takes_by_swap`]) this
+/// restore puts back, each with the receipt entry it goes back to: only
+/// `package_id`, or every one with a file in the set. The copies are read
+/// as `check` says.
+///
+/// A package is refused, before anything changes and in a dry run too, in
+/// the order the overview of the backups judges it: when a finished copy
+/// of its version is gone from the set or has another size than recorded
+/// ([`RestoreRefusal::PartMissing`]), when none of its files would come
+/// back ([`RestoreRefusal::NothingOfItInSet`]), and when the set doesn't
+/// say which entry it goes back to ([`RestoreRefusal::VersionUnknown`]). A
+/// restore of the whole set leaves out a package with none of its files in
+/// it, and names it, as for an uninstall's set; any other refusal of one of
+/// its packages refuses the whole set. RABBIT's current records are read
+/// under the lock (see [`plan_swap`]).
+fn swaps_to_restore(
+    resource_path: &Path,
+    backup_id: &str,
+    backup_path: &Path,
+    manifest: &BackupManifest,
+    package_id: Option<&str>,
+    check: CopyCheck,
+) -> Result<PackagesToRestore> {
+    let candidates = swap_package_ids(resource_path, manifest);
+    let nothing_of = |package_ids: Vec<String>| -> RabbitError {
+        RestoreRefusal::NothingOfItInSet {
+            backup_id: backup_id.to_string(),
+            package_ids,
+        }
+        .into()
+    };
+    let wanted: Vec<String> = match package_id {
+        Some(package_id) if candidates.contains(package_id) => vec![package_id.to_string()],
+        Some(package_id) if candidates.is_empty() => {
+            return Err(nothing_of(vec![package_id.to_string()]));
+        }
+        Some(package_id) => {
+            return Err(RestoreRefusal::PackageNotInSet {
+                backup_id: backup_id.to_string(),
+                package_id: package_id.to_string(),
+                packages: candidates.into_iter().collect(),
+            }
+            .into());
+        }
+        None => candidates.into_iter().collect(),
+    };
+
+    let mut packages = PackagesToRestore::default();
+    for id in wanted {
+        let files: Vec<&BackupManifestFile> = manifest
+            .files
+            .iter()
+            .filter(|entry| {
+                entry.package_id.as_deref() == Some(id.as_str())
+                    && is_version_entry(resource_path, entry)
+            })
+            .collect();
+        if let Some(path) = first_copy_gone(backup_path, &files) {
+            return Err(RestoreRefusal::PartMissing {
+                backup_id: backup_id.to_string(),
+                path,
+            }
+            .into());
+        }
+        if !files
+            .iter()
+            .any(|entry| entry_comes_back(backup_path, entry, check))
+        {
+            if package_id.is_some() {
+                return Err(nothing_of(vec![id]));
+            }
+            packages.skipped.push(SkippedPackage {
+                package_id: id,
+                reason: SkippedPackageReason::NothingOfItInSet,
+            });
+            continue;
+        }
+        let Some(earlier) = recorded_earlier_entry(resource_path, backup_path, manifest, &id)
+        else {
+            return Err(RestoreRefusal::VersionUnknown {
+                backup_id: backup_id.to_string(),
+                package_id: id,
+            }
+            .into());
+        };
+        packages.swap.push(SwapPackage {
+            package_id: id,
+            earlier,
+        });
+    }
+    if packages.swap.is_empty() {
+        return Err(nothing_of(
+            packages
+                .skipped
+                .into_iter()
+                .map(|skipped| skipped.package_id)
+                .collect(),
+        ));
+    }
+    Ok(packages)
 }
 
 /// The packages of an uninstall set this restore brings back, with what the
@@ -3115,7 +4335,7 @@ fn packages_to_restore(
         }
         return Ok(PackagesToRestore {
             restore: vec![(package_id.to_string(), record.clone())],
-            skipped: Vec::new(),
+            ..PackagesToRestore::default()
         });
     }
 
@@ -3323,16 +4543,33 @@ struct PlannedRestore {
     sha256: String,
 }
 
-/// `package_id` limits the plan to that package's files. Only a manifest
-/// records which package a file belongs to, and the caller has made sure
-/// there is one. `restoring` are the packages the restore brings back, the
-/// ones with a file in the set (see [`packages_to_restore`]). The copies
-/// are read as `check` says.
+/// Which entries of a set's manifest a restore plans: those of
+/// `package_id` when one is named, and of those, the ones `takes` accepts,
+/// such as a version's files without the key map. Only a manifest records
+/// which package a file belongs to.
+#[derive(Clone, Copy)]
+struct EntriesToPlan<'a> {
+    package_id: Option<&'a str>,
+    takes: &'a dyn Fn(&BackupManifestFile) -> bool,
+}
+
+impl EntriesToPlan<'_> {
+    fn includes(&self, entry: &BackupManifestFile) -> bool {
+        (self.package_id.is_none() || entry.package_id.as_deref() == self.package_id)
+            && (self.takes)(entry)
+    }
+}
+
+/// `entries` limits the plan to some of the manifest's entries; one package
+/// is only asked for where the caller has made sure there is a manifest.
+/// `restoring` are the packages the restore brings back, the ones with a
+/// file in the set (see [`packages_to_restore`]). The copies are read as
+/// `check` says.
 fn plan_restore(
     resource_path: &Path,
     backup_path: &Path,
     manifest: Option<&BackupManifest>,
-    package_id: Option<&str>,
+    entries: EntriesToPlan<'_>,
     restoring: &[&str],
     outside: &OutsideRestoreRules,
     check: CopyCheck,
@@ -3342,7 +4579,7 @@ fn plan_restore(
             resource_path,
             backup_path,
             manifest,
-            package_id,
+            entries,
             restoring,
             outside,
             check,
@@ -3390,16 +4627,18 @@ pub(crate) fn same_place(path: &Path) -> Vec<String> {
 
 /// Each entry goes back to the `original_path` it records. Older sets mix
 /// relative paths (the unattended key map and receipt backups) with
-/// absolute ones (install replacements), so both are read here.
+/// absolute ones (install replacements), so both are read here. Only
+/// `entries` are planned.
 fn plan_restore_from_manifest(
     resource_path: &Path,
     backup_path: &Path,
     manifest: &BackupManifest,
-    package_id: Option<&str>,
+    entries: EntriesToPlan<'_>,
     restoring: &[&str],
     outside: &OutsideRestoreRules,
     check: CopyCheck,
 ) -> Result<RestorePlan> {
+    let package_id = entries.package_id;
     let mut plan = RestorePlan {
         files: Vec::new(),
         skipped_targets: Vec::new(),
@@ -3407,7 +4646,7 @@ fn plan_restore_from_manifest(
     for entry in manifest
         .files
         .iter()
-        .filter(|entry| package_id.is_none() || entry.package_id.as_deref() == package_id)
+        .filter(|entry| entries.includes(entry))
     {
         let (original_path, recorded) = recorded_original(entry);
         let target = || {
@@ -4235,6 +5474,15 @@ pub(crate) mod restore_seam {
         /// Before RABBIT's records are saved, once every file is back. The
         /// place is the receipt's.
         SavingRecords,
+        /// Before a file of the newer version moves out of the way of an
+        /// earlier one, at its place.
+        MovingOut,
+        /// Before a copy of a file of the newer version that stays where
+        /// it is goes into the before-restore set, at its place.
+        CopyingIn,
+        /// Before a file of the newer version that moved out goes back to
+        /// its place, after the restore of the earlier version failed.
+        MovingBack,
     }
 
     type Hook = Box<dyn FnMut(Step, &Path) -> io::Result<()>>;
@@ -4802,6 +6050,7 @@ fn seconds_since_1970() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -4817,7 +6066,7 @@ mod tests {
         find_backup_set, is_receipt, is_windows_device_name, linked_backups_folder,
         list_backup_sets, load_backup_manifest, packages_to_restore, relative_within,
         restore_backup_set, restore_backup_set_with, restore_backup_set_within, restore_target,
-        save_backup_manifest,
+        save_backup_manifest, swap_package_ids,
     };
     use crate::error::RabbitError;
     use crate::hash::sha256_file;
@@ -4838,9 +6087,9 @@ mod tests {
 
     /// The reason of the sets the tests of paths and copies write. A
     /// restore reads every set it takes the same way. Older versions wrote
-    /// most of these paths into update sets, which it refuses for now
-    /// (`EarlierVersionNotYet`), so these use the other kind of set that
-    /// holds any package's files: the one a restore writes.
+    /// most of these paths into update sets, which a restore takes package
+    /// by package now, so these use the other kind of set that holds any
+    /// package's files as a whole: the one a restore writes.
     const RESTORABLE_REASON: &str = BEFORE_RESTORE_REASON;
 
     fn write(path: &Path, contents: &[u8]) {
@@ -5134,19 +6383,18 @@ mod tests {
         }
     }
 
-    /// The sets an update writes: the old copy of each file it replaced,
-    /// with a copy of the receipt from before, when there was one, as
-    /// earlier versions wrote them, or with each package's record, as this
-    /// one does. Restoring one whole, or one package of it, is refused in a
-    /// dry run and for real, and nothing changes, the receipt least of all.
+    /// An update's set that can't say which version it holds is refused,
+    /// whole and for one package, in a dry run and for real, and nothing
+    /// changes, the receipt least of all: one an older update wrote over a
+    /// file installed by hand, with neither a record of the package nor a
+    /// copy of RABBIT's records, and one whose copy can't be read. The
+    /// overview gives each backup the same refusal.
     #[test]
-    fn an_update_set_is_refused_until_earlier_versions_can_come_back() {
+    fn an_update_set_that_cant_say_its_version_is_refused() {
         let dir = tempdir().unwrap();
         let resource = dir.path().join("REAPER");
         let plugin = resource.join("UserPlugins/reaper_reapack-x64.dll");
         let receipt = resource.join("RABBIT/install-state.json");
-        // The first update over a file installed by hand found no receipt
-        // to copy.
         write(&plugin, b"reapack by hand");
         BackupSetWriter::new(&resource, "unix-0", UPDATE_BACKUP_REASON)
             .copy_file(Some("reapack"), &plugin)
@@ -5157,27 +6405,29 @@ mod tests {
             .copy_file(Some("reapack"), &plugin)
             .unwrap();
         add_receipt_copy(&resource, "unix-1", UPDATE_BACKUP_REASON);
-        let mut writer = BackupSetWriter::new(&resource, "unix-2", UPDATE_BACKUP_REASON);
-        writer
-            .record_replaced("reapack", reapack_replaced())
-            .unwrap();
-        writer.copy_file(Some("reapack"), &plugin).unwrap();
         fs::write(&plugin, b"reapack 1.2.5").unwrap();
-        fs::write(&receipt, b"records from after the update").unwrap();
+        save_install_state(&resource, &InstallState::default()).unwrap();
+        let records = fs::read(&receipt).unwrap();
+        let listed =
+            crate::backup_overview::overview_with(&resource, &BackupEnvironment::AS_USER).unwrap();
 
-        for id in ["unix-0", "unix-1", "unix-2"] {
+        for id in ["unix-0", "unix-1"] {
+            let unknown = RestoreRefusal::VersionUnknown {
+                backup_id: id.to_string(),
+                package_id: "reapack".to_string(),
+            };
             for package in [None, Some("reapack")] {
                 let error = refused_with(dir.path(), &resource, id, package);
-                assert!(
-                    matches!(refusal(&error), RestoreRefusal::EarlierVersionNotYet { backup_id } if backup_id == id),
-                    "{id} {package:?}: {error:?}"
-                );
+                assert_eq!(refusal(&error), &unknown, "{id} {package:?}");
             }
+            let row = listed
+                .entries
+                .iter()
+                .find(|entry| entry.item.set_id() == Some(id))
+                .unwrap();
+            assert_eq!(row.refusal.as_ref(), Some(&unknown), "{id}");
         }
-        assert_eq!(
-            fs::read(&receipt).unwrap(),
-            b"records from after the update"
-        );
+        assert_eq!(fs::read(&receipt).unwrap(), records);
         assert_eq!(fs::read(&plugin).unwrap(), b"reapack 1.2.5");
     }
 
@@ -5210,6 +6460,12 @@ mod tests {
         assert!(manifest.packages.is_empty());
         assert_eq!(manifest.replaced["reapack"], reapack_replaced());
         assert!(packages.restore.is_empty() && packages.skipped.is_empty());
+        // Going back to the earlier version finds its packages by the swap's
+        // rules, from the same manifest.
+        assert_eq!(
+            swap_package_ids(&resource, &manifest),
+            BTreeSet::from(["reapack".to_string()])
+        );
     }
 
     /// The set written after vendor installers ran, by earlier versions,
@@ -7335,9 +8591,8 @@ mod tests {
     /// made-up `CLAP/` folder with its absolute original path, as the
     /// update set `unix-1782841261` on the maintainer's machine does.
     /// Restore follows the original path, not the copy's place in the set.
-    /// This is tested on a before-restore set: an update set with these
-    /// paths is refused until earlier versions can come back (see
-    /// `RESTORABLE_REASON`).
+    /// This is tested on a before-restore set, since an update set goes
+    /// back package by package now (see `RESTORABLE_REASON`).
     #[test]
     fn restores_an_older_app2clap_backup_to_its_absolute_original_path() {
         let dir = tempdir().unwrap();
@@ -7364,8 +8619,8 @@ mod tests {
     /// Unattended sets record a path relative to the resource folder, and
     /// older versions' update sets an absolute one. Every set a restore
     /// takes reads both forms the same way, and both go back to the same
-    /// place. Update sets themselves are refused for now (see
-    /// `RESTORABLE_REASON`).
+    /// place. Update sets themselves go back package by package now, so a
+    /// before-restore set stands in for one (see `RESTORABLE_REASON`).
     #[test]
     fn restores_relative_and_absolute_original_paths() {
         let dir = tempdir().unwrap();
@@ -7513,8 +8768,8 @@ mod tests {
     /// resource folder. Such sets are on users' machines. Every set a
     /// restore takes reads these paths the same way, and restores again, to
     /// the right place, through a relative or an absolute path. Update sets
-    /// that hold them are refused for now (see `RESTORABLE_REASON`), so a
-    /// before-restore set stands in for one here.
+    /// that hold them go back package by package now (see
+    /// `RESTORABLE_REASON`), so a before-restore set stands in for one here.
     #[test]
     fn older_sets_with_relative_paths_restore_again() {
         let (_dir, base) = relative_tempdir();
@@ -9387,9 +10642,11 @@ mod tests {
     }
 
     /// Manifests written before these fields existed still load, with each
-    /// new field empty, and restore exactly as before: an uninstall's set
-    /// merges its package back, a key map set puts the key map back, and an
-    /// update's set is refused. Saved again, they gain none of the fields.
+    /// new field empty, and restore as before: an uninstall's set merges its
+    /// package back, and a key map set puts the key map back. An update's
+    /// set with neither a record nor a copy of RABBIT's records can't say
+    /// which version it holds, so it is refused. Saved again, they gain none
+    /// of the fields.
     #[test]
     fn older_manifests_without_the_new_fields_still_load_and_restore() {
         let dir = tempdir().unwrap();
@@ -9485,12 +10742,12 @@ mod tests {
         assert_eq!(state.packages.get("sws"), Some(&receipt_entry("sws")));
         assert!(state.declined_packages.is_empty());
         assert_eq!(fs::read(&keymap).unwrap(), b"own keymap");
-        assert!(
-            matches!(
-                refusal(&refused),
-                RestoreRefusal::EarlierVersionNotYet { .. }
-            ),
-            "{refused:?}"
+        assert_eq!(
+            refusal(&refused),
+            &RestoreRefusal::VersionUnknown {
+                backup_id: "unix-3".to_string(),
+                package_id: "reapack".to_string(),
+            }
         );
         assert_eq!(fs::read(&reapack).unwrap(), b"reapack 1.2.5");
     }
@@ -9963,3 +11220,7 @@ mod tests {
 #[cfg(test)]
 #[path = "restore_run_tests.rs"]
 mod restore_run_tests;
+
+#[cfg(test)]
+#[path = "swap_tests.rs"]
+mod swap_tests;

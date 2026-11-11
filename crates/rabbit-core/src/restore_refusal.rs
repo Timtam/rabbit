@@ -20,10 +20,6 @@ use serde::{Deserialize, Serialize};
 use crate::preflight::{CLOSE_REAPER_BEFORE_RESTORING, RunningProcess, process_list};
 
 /// Why a restore was refused, with nothing changed.
-///
-/// Codes marked as reserved belong to later steps of the backup plan and are
-/// not raised yet; the overview may already give them for a status that
-/// says the same thing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "code", rename_all = "kebab-case")]
 pub enum RestoreRefusal {
@@ -84,11 +80,12 @@ pub enum RestoreRefusal {
     },
 
     /// One package was asked for from a set that records no packages. Only
-    /// an uninstall's set records which receipt entry goes with a package,
-    /// and restoring one package's files from any other set would leave
+    /// an uninstall's set, an update's set and a restore's set that kept an
+    /// earlier version record which receipt entry goes with a package, and
+    /// restoring one package's files from any other set would leave
     /// RABBIT's records describing other files.
     #[error(
-        "Only a backup an uninstall made can restore one package, and {backup_id} isn't one, so RABBIT doesn't restore {package_id} from it alone. It can restore the backup as a whole"
+        "The backup {backup_id} records no packages, so RABBIT can't tell which of its records go with {package_id}, and doesn't restore it alone. It can restore the backup as a whole"
     )]
     NoPackageRecords {
         backup_id: String,
@@ -137,15 +134,6 @@ pub enum RestoreRefusal {
         backup_path: PathBuf,
     },
 
-    /// A set an update wrote, whole or for one package. Putting its files
-    /// back would leave RABBIT's receipt describing the newer version, so it
-    /// is refused until RABBIT can go back to an earlier version by
-    /// changing only that package's entry.
-    #[error(
-        "The backup {backup_id} holds files an update replaced, and RABBIT can't restore earlier versions yet. The backup stays as it is"
-    )]
-    EarlierVersionNotYet { backup_id: String },
-
     /// RABBIT's receipt has another entry for the package than the one the
     /// set recorded: it was installed again since. Putting the old files
     /// under the newer entry would leave a receipt wrong about both.
@@ -162,14 +150,13 @@ pub enum RestoreRefusal {
         other_packages: Vec<String>,
     },
 
-    /// Packages an uninstall's set records, but none of whose files are in
-    /// it: the uninstall found none to move, or stopped before any copy of
-    /// them finished. Putting back their records alone would make RABBIT
-    /// count them as installed with no files there.
-    #[error(
-        "None of the files of {} are in the backup {backup_id}, so there is nothing to restore. RABBIT's records stay as they are",
-        names_in_a_sentence(.package_ids)
-    )]
+    /// Packages a set records, an uninstall's or a set of earlier
+    /// versions, but none of whose files are in it: the uninstall found
+    /// none to move, or the run that wrote the set stopped before any copy
+    /// of them finished. Putting back their records alone would make RABBIT
+    /// count them as installed with no files there. `package_ids` is empty
+    /// when a set of earlier versions holds no file of any package.
+    #[error("{}", nothing_of_it_text(.backup_id, .package_ids))]
     NothingOfItInSet {
         backup_id: String,
         package_ids: Vec<String>,
@@ -186,8 +173,8 @@ pub enum RestoreRefusal {
 
     /// An earlier version a file of which is neither in the set nor on
     /// disk with that version's hash, by its path in RABBIT's records.
-    /// Reserved for restoring earlier versions (backup plan 1d); the
-    /// overview gives it already.
+    /// Going back to it would leave RABBIT's records claiming a file that
+    /// isn't there.
     #[error(
         "{package_id} in the backup {backup_id} isn't complete: {} is neither in the backup nor on disk as that version had it, so RABBIT doesn't restore it",
         .path.display()
@@ -198,10 +185,21 @@ pub enum RestoreRefusal {
         path: PathBuf,
     },
 
+    /// An earlier version whose receipt entry RABBIT doesn't know: the
+    /// update that made the set recorded none, and the set holds no copy
+    /// of RABBIT's records to read it from, or one that can't be read.
+    /// Without it, RABBIT can't tell which files that version had.
+    #[error(
+        "RABBIT can't tell which version of {package_id} the backup {backup_id} holds, so it doesn't restore it"
+    )]
+    VersionUnknown {
+        backup_id: String,
+        package_id: String,
+    },
+
     /// An earlier version of a package while another package of its
-    /// exclusive group is installed, whose install removed it. Reserved for
-    /// restoring earlier versions (backup plan 1d); the overview gives it
-    /// already.
+    /// exclusive group is installed, whose install removed it. Going back
+    /// to it would leave both installed.
     #[error(
         "RABBIT doesn't restore {package_id} from the backup {backup_id} while {} is installed: installing one of them removes the other",
         names_in_a_sentence(.installed)
@@ -225,6 +223,23 @@ pub enum RestoreRefusal {
         reason: TargetRefusal,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         other_packages: Vec<String>,
+    },
+
+    /// A file of the newer version of `package_id` that going back to the
+    /// earlier version the set holds would take into the backup of what
+    /// the restore replaces, at a place a restore of that backup couldn't
+    /// put it back to, for `reason`. `path` is the file as RABBIT's records
+    /// list it. The reason is boxed to keep every refusal, and so every
+    /// error, small.
+    #[error(
+        "RABBIT doesn't restore {package_id} from the backup {backup_id}, because it couldn't put {}, a file of the newer version, back from a backup: {reason}",
+        .path.display()
+    )]
+    NewerFileRefused {
+        backup_id: String,
+        package_id: String,
+        path: PathBuf,
+        reason: Box<TargetRefusal>,
     },
 
     /// RABBIT's receipt can't be read, so RABBIT can't tell whether the
@@ -331,13 +346,14 @@ impl RestoreRefusal {
             Self::DamagedManifest { .. } => "damaged-manifest",
             Self::RecordsOnly { .. } => "records-only",
             Self::ReceiptInSet { .. } => "receipt-in-set",
-            Self::EarlierVersionNotYet { .. } => "earlier-version-not-yet",
             Self::ReinstalledSince { .. } => "reinstalled-since",
             Self::NothingOfItInSet { .. } => "nothing-of-it-in-set",
             Self::PartMissing { .. } => "part-missing",
             Self::NotComplete { .. } => "not-complete",
+            Self::VersionUnknown { .. } => "version-unknown",
             Self::OtherLanguagePackInstalled { .. } => "other-language-pack-installed",
             Self::TargetRefused { .. } => "target-refused",
+            Self::NewerFileRefused { .. } => "newer-file-refused",
             Self::ReceiptUnreadable { .. } => "receipt-unreadable",
             Self::ReaperRunning { .. } => "reaper-running",
             Self::ProgramRunning { .. } => "program-running",
@@ -457,8 +473,26 @@ pub(crate) fn refusal(error: &crate::error::RabbitError) -> &RestoreRefusal {
     }
 }
 
+/// What [`RestoreRefusal::NothingOfItInSet`] says: the packages none of
+/// whose files are in the set, or, with none named, that nothing in it
+/// belongs to a package.
+fn nothing_of_it_text(backup_id: &str, package_ids: &[String]) -> String {
+    if package_ids.is_empty() {
+        format!(
+            "Nothing in the backup {backup_id} belongs to a package RABBIT can put back, so there \
+             is nothing to restore. RABBIT's records stay as they are"
+        )
+    } else {
+        format!(
+            "None of the files of {} are in the backup {backup_id}, so there is nothing to \
+             restore. RABBIT's records stay as they are",
+            names_in_a_sentence(package_ids)
+        )
+    }
+}
+
 /// Names as a sentence lists them: `a`, `a and b`, `a, b and c`.
-pub(crate) fn names_in_a_sentence(names: &[String]) -> String {
+pub fn names_in_a_sentence(names: &[String]) -> String {
     match names {
         [] => String::new(),
         [name] => name.clone(),
@@ -508,26 +542,27 @@ mod tests {
             RestoreRefusal::DamagedManifest { .. } => 9,
             RestoreRefusal::RecordsOnly { .. } => 10,
             RestoreRefusal::ReceiptInSet { .. } => 11,
-            RestoreRefusal::EarlierVersionNotYet { .. } => 12,
-            RestoreRefusal::ReinstalledSince { .. } => 13,
-            RestoreRefusal::NothingOfItInSet { .. } => 14,
-            RestoreRefusal::PartMissing { .. } => 15,
-            RestoreRefusal::NotComplete { .. } => 16,
+            RestoreRefusal::ReinstalledSince { .. } => 12,
+            RestoreRefusal::NothingOfItInSet { .. } => 13,
+            RestoreRefusal::PartMissing { .. } => 14,
+            RestoreRefusal::NotComplete { .. } => 15,
+            RestoreRefusal::VersionUnknown { .. } => 16,
             RestoreRefusal::OtherLanguagePackInstalled { .. } => 17,
             RestoreRefusal::TargetRefused { .. } => 18,
-            RestoreRefusal::ReceiptUnreadable { .. } => 19,
-            RestoreRefusal::ReaperRunning { .. } => 20,
-            RestoreRefusal::ProgramRunning { .. } => 21,
-            RestoreRefusal::NotWritable { .. } => 22,
-            RestoreRefusal::LockHeld { .. } => 23,
-            RestoreRefusal::AsRoot => 24,
-            RestoreRefusal::NotYours { .. } => 25,
-            RestoreRefusal::ChangedWhileRead { .. } => 26,
-            RestoreRefusal::ChangedSinceListed { .. } => 27,
+            RestoreRefusal::NewerFileRefused { .. } => 19,
+            RestoreRefusal::ReceiptUnreadable { .. } => 20,
+            RestoreRefusal::ReaperRunning { .. } => 21,
+            RestoreRefusal::ProgramRunning { .. } => 22,
+            RestoreRefusal::NotWritable { .. } => 23,
+            RestoreRefusal::LockHeld { .. } => 24,
+            RestoreRefusal::AsRoot => 25,
+            RestoreRefusal::NotYours { .. } => 26,
+            RestoreRefusal::ChangedWhileRead { .. } => 27,
+            RestoreRefusal::ChangedSinceListed { .. } => 28,
         }
     }
 
-    const VARIANTS: usize = 28;
+    const VARIANTS: usize = 29;
 
     /// The number of each reason, as [`variant_number`] numbers refusals.
     fn reason_number(reason: &TargetRefusal) -> usize {
@@ -633,7 +668,6 @@ mod tests {
                 backup_id: id(),
                 backup_path: path.clone(),
             },
-            RestoreRefusal::EarlierVersionNotYet { backup_id: id() },
             RestoreRefusal::ReinstalledSince {
                 backup_id: id(),
                 package_id: "sws".to_string(),
@@ -651,6 +685,10 @@ mod tests {
                 backup_id: id(),
                 package_id: "ffmpeg".to_string(),
                 path: path.clone(),
+            },
+            RestoreRefusal::VersionUnknown {
+                backup_id: id(),
+                package_id: "osara".to_string(),
             },
             RestoreRefusal::OtherLanguagePackInstalled {
                 backup_id: id(),
@@ -696,6 +734,12 @@ mod tests {
                 other_packages: vec!["ffmpeg".to_string()],
             });
         }
+        refusals.push(RestoreRefusal::NewerFileRefused {
+            backup_id: id(),
+            package_id: "sws".to_string(),
+            path: path.clone(),
+            reason: Box::new(TargetRefusal::RabbitFolder),
+        });
         refusals
     }
 
@@ -816,6 +860,13 @@ mod tests {
         assert!(
             text(&["ffmpeg", "reapack", "sws"])
                 .starts_with("None of the files of ffmpeg, reapack and sws are")
+        );
+        assert!(
+            text(&[]).starts_with(
+                "Nothing in the backup uninstall-unix-1 belongs to a package RABBIT can put back"
+            ),
+            "{}",
+            text(&[])
         );
         assert_eq!(names_in_a_sentence(&[]), "");
     }

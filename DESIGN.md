@@ -1603,8 +1603,8 @@ Extension files:
   Each manifest entry is saved, through a temp file and a rename,
   before its copy starts and marked done after, so an interrupted run
   still leaves a set whose manifest names every copy in it. A set an
-  update wrote isn't restored yet (see below). Every path a set records to
-  its copy is absolute, so a set written through a relative
+  update wrote comes back package by package (see below). Every path a
+  set records to its copy is absolute, so a set written through a relative
   `--resource-path` restores from any folder; older sets that recorded
   relative paths are read by their `RABBIT/backups/<id>` part. A file from
   outside the resource folder records its absolute original path, and a
@@ -1678,17 +1678,15 @@ Extension files:
   an old copy would undo every change to the receipt since, uninstalls
   included. Restore puts no file from a set back anywhere in `RABBIT/`,
   under any name Windows or macOS would open as it: in another case, and on
-  Windows with trailing dots or spaces, or a `:` stream. Only the merge
-  below changes the receipt. Before anything changes, in a dry run too, it
-  refuses a set an update wrote (`install-replacement`), whole or with
-  `--package`, because its files belong to the receipt entry from before the
-  update, until RABBIT can go back to an earlier version by changing only
-  that package's entry. It also refuses a set that holds only a receipt copy
+  Windows with trailing dots or spaces, or a `:` stream. Only the merge and
+  the swap below change the receipt. Before anything changes, in a dry run
+  too, it refuses a set that holds only a receipt copy
   (`unattended-receipt-update`), and any other set that holds a copy of the
   receipt, by its manifest or, without one, by its layout, such as the set a
-  restore of an update's set wrote in earlier versions. The copy stays in
-  the set for anyone who needs it by hand. No run copies the receipt into a
-  set any more.
+  restore of an update's set wrote in earlier versions, unless it is a set
+  of earlier versions (below), which never touches the copy. The copy stays
+  in the set for anyone who needs it by hand. No run copies the receipt into
+  a set any more.
 - What a set records besides its files, in fields that are optional in the
   manifest, so `schema_version` stays 1, older manifests load and restore as
   before, and older versions ignore the fields:
@@ -1718,22 +1716,67 @@ Extension files:
     actions, which still goes into a set) or `unknown` (no OSARA key map to
     compare with, or one of the two unreadable). A value a later version
     writes reads as `unknown`.
-  - A before-restore set: its files only.
+  - A before-restore set: its files, and when the restore went back to an
+    earlier version, `replaced` for that package, as an update's set has
+    it: the entry the package had, and the version that replaced it.
 - Restoring a set an uninstall wrote merges each package's recorded entry
   into the current receipt instead, the package comes off
   `declined_packages`, and the `langpack=` value its uninstall replaced goes
   back, but only while `reaper.ini` still says `<>`. `restore-backup
   --package` does this for one package of the set. A package installed
   again since its uninstall is refused, with nothing changed, because its
-  newer receipt entry describes newer files; so is `--package` for any other
-  set, which records no receipt entry in `packages`. An update's set keeps
-  its entries in `replaced` instead, which no restore merges: it is refused
-  whole and with `--package` (`EarlierVersionNotYet`). A receipt entry that is
+  newer receipt entry describes newer files; so is `--package` for any set
+  that records no package (`no-package-records`). A receipt entry that is
   still the very one the set recorded is no reinstall: the uninstall stopped
   before it reached the receipt (RABBIT was ended halfway through the
   package, or a failed package's files couldn't all go back), or an earlier
   restore from the set put the entry back. Its files are restored and the
   entry stays as it is.
+- A set of earlier versions, an update's set or a before-restore set with
+  `replaced` records, goes back by the swap (backup plan 6.4), package by
+  package, and never merges `packages`. For package P, E_old is its
+  `replaced` record, or in an older update's set without one, P's entry in
+  the set's receipt copy, none when the copy lacks P; with neither, P is
+  refused (`version-unknown`). E_cur is P's entry in the receipt now.
+  Before the lock, a finished copy of P's that is gone or has another size
+  refuses it (`part-missing`), and so does having no file of P's that
+  comes back (`nothing-of-it-in-set`). Under the lock, the receipt is read
+  (`receipt-unreadable`), another installed member of P's exclusive group
+  refuses it (`other-language-pack-installed`), and so does a file E_old
+  lists with a hash that is neither in the set, as a finished file of P's
+  version with that hash at that place, which the restore puts back, nor on
+  disk with it (`not-complete`): only a place the current receipt lists
+  with that hash is looked at, hashed in a real run and checked by size in
+  the quick plan. The plan takes P's files of the set, never the key map or
+  a receipt copy. Files E_cur lists with a hash that E_old doesn't list and
+  the set doesn't write move out: each place must be one a restore of the
+  before-restore set could write (`newer-file-refused` otherwise), and a
+  file still as E_cur recorded it moves, while one that changed, or isn't a
+  file, stays and is reported; a link or junction at the place stays and is
+  never followed. With no E_old, RABBIT can't tell which of those files the
+  copy it goes back to had too, so none moves: each stays where it is, and
+  a copy of it goes into the before-restore set (`left_in_place`), so the
+  swap can still be undone. The run records E_cur in the new
+  before-restore set first (`record_replaced`, with E_old's version as
+  what replaced it), copies or moves those files into it, puts the set's
+  files back, each file they replace copied into it first, and only then
+  makes P's entry exactly E_old, keeping E_cur's channel, or removes it
+  when there is no E_old, and takes P off `declined_packages`; nothing else
+  in the receipt changes. The report says what happened to the entry
+  (`replaced`, `added`, `removed`, `still-none`), whether P came off
+  `declined_packages`, and, for a removed entry, whether P's uninstall
+  needs it (`requires_receipt`, as FFmpeg's does), so that RABBIT can't
+  uninstall P until it is installed again. On any failure the files put
+  back go back as before, then the moved files go back to their places,
+  the copies go with the before-restore set, and the receipt is untouched;
+  a moved file that can't go back stays in the kept set (`still-in-backup`,
+  and the backup is `files-left`). The before-restore set lists as an
+  earlier version of P, so the swap is undone the same way.
+  A whole set plans every package before any changes, so any refusal
+  refuses them all, leaves out packages with nothing in the set, and then
+  runs them in turn, each all or nothing with a set of its own (`swaps` in
+  the report; `partly-restored` when some went back and others didn't),
+  reading the stop and scanning what runs between them.
 - An uninstall records each package before it moves anything, and keeps the
   record when it found none of the package's files to move, or stopped
   before any copy of them finished. A package has a file in the set when
@@ -1888,9 +1931,10 @@ Extension files:
   status (can restore, stopped partway, already back, installed again, not
   complete, nothing in it, version unknown, another of its exclusive group
   installed, part missing, records unreadable, not here, not yours, not a
-  backup), and earlier versions are judged by the rules of the swap that is
-  to restore them, although `restore-backup` refuses them for now. The
-  overview reads the manifests, the receipt once, an older update set's
+  backup), and earlier versions are judged by the rules of the swap that
+  restores them, each with the exact `--package` command, and an update's
+  set whose packages can all go back is marked `swaps_whole`, with the
+  command that restores it whole. The overview reads the manifests, the receipt once, an older update set's
   copy of the receipt, and sizes; it never hashes a file. "Not complete"
   and "already back" compare the hashes the manifests and the receipt
   recorded and the sizes on disk; the restore checks the files themselves.
@@ -1898,7 +1942,9 @@ Extension files:
   own rules, and only such a place is looked at: a path outside the
   resource folder and the folders RABBIT installs into, such as one on
   another computer, is never opened. A backup with a file a restore would
-  refuse names it, and gets no restore command. A key map is restored on
+  refuse names it, and gets no restore command; so does an earlier version
+  with a file of the newer version that couldn't come back from the
+  before-restore set. A key map is restored on
   the command line only with its whole set, so only while it is all that
   comes back of the set. On macOS a set whose owner differs
   from that of `RABBIT/backups` is another account's. Each set also gets a

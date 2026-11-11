@@ -7,8 +7,8 @@ use rabbit_core::artifact::{
     resolve_latest_artifacts_on,
 };
 use rabbit_core::backup_overview::{
-    BackupEntry, BackupGroup, BackupItem, BackupOverview, BackupSetKind, BackupSetOverview,
-    BackupSize, BackupStatus, RestoreScope, backup_overview, backup_overview_of,
+    BackupEntry, BackupItem, BackupOverview, BackupSetKind, BackupSetOverview, BackupSize,
+    BackupStatus, RestoreScope, backup_overview, backup_overview_of,
 };
 use rabbit_core::cancel::CancelToken;
 use rabbit_core::detection::{DiscoveryOptions, detect_components, discover_installations};
@@ -47,11 +47,12 @@ use rabbit_core::report::{
     save_new_json_and_text_reports,
 };
 use rabbit_core::resource::{ResourceInitActionKind, ResourceInitReport, initialize_resource_path};
-use rabbit_core::restore_refusal::RestoreRefusal;
+use rabbit_core::restore_refusal::{RestoreRefusal, names_in_a_sentence};
 use rabbit_core::rollback::{
-    BackupEntryState, KeymapOrigin, RestoreBackupActionKind, RestoreBackupOptions,
-    RestoreBackupReport, RestoreStatus, RestoredPackage, SkippedPackageReason, list_backup_sets,
-    restore_backup_set,
+    BackupEntryState, KeymapOrigin, MoveOutAction, RestoreBackupAction, RestoreBackupActionKind,
+    RestoreBackupOptions, RestoreBackupReport, RestoreReportItem, RestoreStatus, RestoredPackage,
+    SkippedPackage, SkippedPackageReason, SwappedEntry, SwappedPackage, list_backup_sets,
+    restore_backup_set, takes_by_swap,
 };
 use rabbit_core::self_update::{
     ApplySelfUpdateOptions, DEFAULT_SELF_UPDATE_MANIFEST_URL, SelfUpdateApplyReport,
@@ -247,9 +248,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Restore a backup set, or one package from an uninstall's backup set.
-    /// Without --apply it only shows what it would do. What a restore
-    /// replaces goes into a backup set of its own first.
+    /// Restore a backup set, or one package from an uninstall's or an
+    /// update's backup set. Without --apply it only shows what it would do.
+    /// What a restore replaces goes into a backup set of its own first.
     RestoreBackup {
         /// REAPER's resource folder — the one holding `reaper.ini`. Usually
         /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
@@ -261,13 +262,18 @@ enum Command {
         /// lower case included.
         #[arg(long)]
         backup_id: String,
-        /// Restore only this package, from a backup set an uninstall wrote.
-        /// Its files come back, its entry goes back into RABBIT's receipt,
+        /// Restore only this package. From a backup set an uninstall wrote,
+        /// its files come back, its entry goes back into RABBIT's receipt,
         /// it comes off the list of packages you uninstalled or turned
         /// down, and REAPER's language is set back if the uninstall reset it
         /// and no language was chosen since. Refused when the package was
         /// installed again after the uninstall. An uninstall that stopped
-        /// partway through a package restores too.
+        /// partway through a package restores too. From a backup set an
+        /// update wrote, the package goes back to the version it had before
+        /// that update: only its entry in RABBIT's receipt changes, and the
+        /// newer version goes into a backup set of its own, from which it
+        /// can come back the same way. Without --package, such a set puts
+        /// each of its packages back in turn.
         #[arg(long)]
         package: Option<String>,
         /// Actually make the changes. Without it the command is a dry run
@@ -1265,43 +1271,109 @@ fn run_restore_backup(command: Command) -> Result<(), Box<dyn std::error::Error>
 /// What `rabbit restore-backup` says on stderr when the backup wasn't
 /// restored after its checks passed, because a file or RABBIT's records
 /// failed partway: why, and how the files ended up. `None` for a backup
-/// that was restored, or in a dry run would be.
+/// that was restored, or in a dry run would be. For a whole set of earlier
+/// versions, which packages went back and which didn't.
 fn not_restored_text(report: &RestoreBackupReport) -> Option<String> {
-    let why = report.error.as_deref().map_or_else(String::new, |error| {
+    let first_error = report
+        .error
+        .as_deref()
+        .or_else(|| report.swaps.iter().find_map(|swap| swap.error.as_deref()));
+    let why = first_error.map_or_else(String::new, |error| {
         format!(": {}", error.trim_end_matches('.'))
     });
     let id = &report.backup_id;
+    let before_restore_sets: Vec<&String> = report
+        .before_restore_set_id
+        .iter()
+        .chain(
+            report
+                .swaps
+                .iter()
+                .filter(|swap| swap.status == RestoreStatus::FilesLeft)
+                .filter_map(|swap| swap.before_restore_set_id.as_ref()),
+        )
+        .collect();
     match report.status {
         RestoreStatus::Restored | RestoreStatus::WouldRestore => None,
         RestoreStatus::NotRestored | RestoreStatus::NotReached => Some(format!(
             "The backup {id} wasn't restored{why}. Every file the restore had changed is as it \
              was before, and so are RABBIT's records."
         )),
+        RestoreStatus::PartlyRestored => {
+            let packages = |restored: bool| -> Vec<String> {
+                report
+                    .swaps
+                    .iter()
+                    .filter(|swap| (swap.status == RestoreStatus::Restored) == restored)
+                    .filter_map(|swap| swap.package_id.clone())
+                    .collect()
+            };
+            let stayed = packages(false);
+            let as_it_was = if stayed.len() == 1 {
+                "it was"
+            } else {
+                "they were"
+            };
+            Some(format!(
+                "Only part of the backup {id} was restored: {} went back to the earlier version, \
+                 and {} didn't and stayed as {as_it_was}. The report says why.",
+                names_in_a_sentence(&packages(true)),
+                names_in_a_sentence(&stayed)
+            ))
+        }
         RestoreStatus::FilesLeft => {
-            let left = report
-                .actions
-                .iter()
-                .filter(|action| {
-                    matches!(
-                        action.action,
-                        RestoreBackupActionKind::Left | RestoreBackupActionKind::Missing
-                    )
-                })
-                .count();
+            let left = files_left(&report.actions, report.swap.as_ref())
+                + report
+                    .swaps
+                    .iter()
+                    .map(|swap| files_left(&swap.actions, swap.swap.as_ref()))
+                    .sum::<usize>();
             let files = if left == 1 { "file" } else { "files" };
+            let records = if report
+                .swaps
+                .iter()
+                .any(|swap| swap.status == RestoreStatus::Restored)
+            {
+                "RABBIT's records of the packages that didn't go back are as they were."
+            } else {
+                "RABBIT's records are as they were."
+            };
             let mut text = format!(
                 "The restore of the backup {id} failed partway{why}. {left} {files} couldn't be \
-                 put back as before; the report names each. RABBIT's records are as they were."
+                 put back as before; the report names each. {records}"
             );
-            if let Some(set_id) = &report.before_restore_set_id {
+            if !before_restore_sets.is_empty() {
+                let sets: Vec<String> = before_restore_sets.into_iter().cloned().collect();
                 let _ = write!(
                     text,
-                    " What the restore replaced is in the backup {set_id}."
+                    " What the restore replaced is in the backup {}.",
+                    names_in_a_sentence(&sets)
                 );
             }
             Some(text)
         }
     }
+}
+
+/// How many files of one backup a restore that failed partway couldn't put
+/// back as they were: those left as the backup had them or missing, and
+/// the newer version's files that stayed in the before-restore set.
+fn files_left(actions: &[RestoreBackupAction], swap: Option<&SwappedPackage>) -> usize {
+    actions
+        .iter()
+        .filter(|action| {
+            matches!(
+                action.action,
+                RestoreBackupActionKind::Left | RestoreBackupActionKind::Missing
+            )
+        })
+        .count()
+        + swap.map_or(0, |swap| {
+            swap.moved_out
+                .iter()
+                .filter(|file| file.action == MoveOutAction::StillInBackup)
+                .count()
+        })
 }
 
 /// What `rabbit restore-backup --apply` says when RABBIT runs as root on
@@ -2714,7 +2786,9 @@ fn write_backup_set_heading(out: &mut String, set: &BackupSetOverview) {
 }
 
 /// Each backup in `set`: what it is and its status, then the command that
-/// restores it, or why it can't be restored.
+/// restores it, or why it can't be restored. A set of earlier versions
+/// whose packages can all go back together, more than one of them, gets
+/// the command that restores them all last.
 fn write_backups_in_set(
     out: &mut String,
     overview: &BackupOverview,
@@ -2722,6 +2796,10 @@ fn write_backups_in_set(
     names: &std::collections::BTreeMap<String, String>,
 ) {
     let resource = overview.resource_path.display();
+    let by_package = overview
+        .entries_in(set)
+        .filter(|entry| entry.restore_scope == Some(RestoreScope::Package))
+        .count();
     for entry in overview.entries_in(set) {
         let _ = writeln!(
             out,
@@ -2749,6 +2827,16 @@ fn write_backups_in_set(
                 "rabbit restore-backup --resource-path \"{resource}\" --backup-id {id} --apply"
             ),
             (None, _) => backup_reason_text(entry, set, &overview.resource_path, names),
+        };
+        let _ = writeln!(out, "    {line}");
+    }
+    if set.swaps_whole && by_package > 1 {
+        out.push_str("  All of these earlier versions: can be restored together.\n");
+        let id = &set.id;
+        let line = if is_plain_name(id) {
+            format!("rabbit restore-backup --resource-path \"{resource}\" --backup-id {id} --apply")
+        } else {
+            "The backup set's name needs quotes in a command, so RABBIT prints none.".to_string()
         };
         let _ = writeln!(out, "    {line}");
     }
@@ -2885,16 +2973,11 @@ fn backup_label(entry: &BackupEntry, names: &std::collections::BTreeMap<String, 
 }
 
 /// A backup's status in words. One whose status says it can be restored
-/// while `restore-backup` doesn't take it yet, an earlier version, says so.
+/// while `restore-backup` doesn't take it, such as a key map that comes
+/// back only with the rest of its set, says it can't be.
 fn backup_status_text(entry: &BackupEntry) -> &'static str {
     match entry.status {
-        status if status.can_restore() && entry.restore_scope.is_none() => {
-            if entry.group == BackupGroup::EarlierVersions {
-                "can't be restored yet"
-            } else {
-                "can't be restored"
-            }
-        }
+        status if status.can_restore() && entry.restore_scope.is_none() => "can't be restored",
         BackupStatus::CanRestore => "can be restored",
         BackupStatus::StoppedPartway => {
             "the uninstall stopped partway, so some of its files are only in this backup; it can \
@@ -2937,22 +3020,24 @@ fn backup_reason_text(
             .unwrap_or_default()
     };
     if let Some(path) = &entry.refused_path {
-        return format!(
-            "RABBIT won't put back {}, so a restore would stop before changing anything.",
-            one_line(&path.display().to_string())
-        );
+        let path = one_line(&path.display().to_string());
+        return if matches!(entry.refusal, Some(RestoreRefusal::NewerFileRefused { .. })) {
+            format!(
+                "RABBIT couldn't put {path}, a file of the newer version, back from a backup, so \
+                 a restore would stop before changing anything."
+            )
+        } else {
+            format!(
+                "RABBIT won't put back {path}, so a restore would stop before changing anything."
+            )
+        };
     }
     let can_restore = entry.status.can_restore();
+    // A set of earlier versions comes back package by package, never under
+    // another of its backups, and never touches a copy of the records.
+    let by_package = set.manifest.as_ref().is_some_and(takes_by_swap);
     match entry.status {
-        // The overview judges earlier versions by the swap's rules, which
-        // restore doesn't follow yet.
-        _ if can_restore && entry.group == BackupGroup::EarlierVersions => {
-            "RABBIT can't restore earlier versions yet.".to_string()
-        }
-        _ if can_restore && set.kind == BackupSetKind::Update => {
-            "RABBIT doesn't restore an update's backup set yet.".to_string()
-        }
-        _ if can_restore && set.holds_receipt => {
+        _ if can_restore && set.holds_receipt && !by_package => {
             "Its backup set holds a copy of RABBIT's records, so RABBIT doesn't restore it."
                 .to_string()
         }
@@ -2999,15 +3084,20 @@ fn backup_reason_text(
             BackupSetKind::Deleting => {
                 "Its deletion started and didn't finish, so part of it may be gone.".to_string()
             }
+            _ if by_package
+                && matches!(entry.refusal, Some(RestoreRefusal::NothingOfItInSet { .. })) =>
+            {
+                "Nothing in it belongs to a package RABBIT can put back.".to_string()
+            }
+            _ if by_package => "RABBIT puts this backup set back package by package, and these \
+                                files belong to none of its packages."
+                .to_string(),
             _ if set.holds_receipt => {
                 "It holds a copy of RABBIT's records, which RABBIT never copies back.".to_string()
             }
             _ if set.warning.is_some() => "Part of it can't be read.".to_string(),
             BackupSetKind::NoManifest => {
                 "Without a manifest, RABBIT can't tell where all of its files go.".to_string()
-            }
-            BackupSetKind::Update => {
-                "RABBIT doesn't restore an update's backup set yet.".to_string()
             }
             _ => "RABBIT can't restore it.".to_string(),
         },
@@ -3065,7 +3155,8 @@ fn print_restore_backup_report(report: &RestoreBackupReport) {
 /// A restore's report as text: the set, the preflight, each file, the
 /// packages, then why the backup wasn't restored, if it wasn't, and last
 /// the backup of what the restore replaced, when it made one and kept it.
-/// Restoring that backup puts those files back.
+/// Restoring that backup puts those files back. A whole set of earlier
+/// versions says all of that for each package it put back, in turn.
 fn restore_backup_report_text(report: &RestoreBackupReport) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Resource path: {}", report.resource_path.display());
@@ -3073,7 +3164,42 @@ fn restore_backup_report_text(report: &RestoreBackupReport) -> String {
     let _ = writeln!(out, "Backup path: {}", report.backup_path.display());
     let _ = writeln!(out, "Dry run: {}", yes_no(report.dry_run));
     out.push_str(&preflight_report_text(&report.preflight));
-    for action in &report.actions {
+    write_restore_actions(&mut out, &report.actions, &report.skipped_targets);
+    if let Some(package_id) = &report.package_id {
+        let _ = writeln!(out, "Package: {package_id}");
+    }
+    for package in &report.packages {
+        write_restored_package(&mut out, package, report.dry_run);
+    }
+    if let Some(swap) = &report.swap {
+        write_swapped_package(&mut out, swap, report.status, report.dry_run);
+    }
+    for swap in &report.swaps {
+        write_swap_of_whole_set(&mut out, swap, report.dry_run);
+    }
+    write_skipped_packages(&mut out, &report.skipped_packages, report.dry_run);
+    let why = report.error.as_deref().map_or_else(String::new, |error| {
+        format!(" {}", error.trim_end_matches('.'))
+    });
+    if report.swaps.is_empty() {
+        write_restore_outcome(&mut out, report.status, &why, report.swap.is_some());
+    } else {
+        write_whole_set_outcome(&mut out, report.status);
+    }
+    if let Some(set_id) = &report.before_restore_set_id {
+        let _ = writeln!(out, "Backup of what this restore replaced: {set_id}");
+    }
+    out
+}
+
+/// Each file a restore put back, or would, and how it ended up, then the
+/// files it left out because their backup never finished.
+fn write_restore_actions(
+    out: &mut String,
+    actions: &[RestoreBackupAction],
+    skipped_targets: &[PathBuf],
+) {
+    for action in actions {
         let verb = match action.action {
             RestoreBackupActionKind::WouldRestore => "Would restore",
             RestoreBackupActionKind::Restored => "Restored",
@@ -3097,31 +3223,28 @@ fn restore_backup_report_text(report: &RestoreBackupReport) -> String {
         let _ = writeln!(out, "    Size: {}", action.size);
         let _ = writeln!(out, "    SHA-256: {}", action.sha256);
     }
-    for target in &report.skipped_targets {
+    for target in skipped_targets {
         let _ = writeln!(
             out,
             "  Skipped: {} (its backup never finished, so the file was never changed)",
             target.display()
         );
     }
-    if let Some(package_id) = &report.package_id {
-        let _ = writeln!(out, "Package: {package_id}");
-    }
-    for package in &report.packages {
-        write_restored_package(&mut out, package, report.dry_run);
-    }
-    for package in &report.skipped_packages {
+}
+
+/// The packages a restore of a whole set left out, and why.
+fn write_skipped_packages(out: &mut String, skipped: &[SkippedPackage], dry_run: bool) {
+    for package in skipped {
         let _ = writeln!(out, "{}", package.package_id);
-        let _ = writeln!(
-            out,
-            "  {}",
-            skipped_package_text(package.reason, report.dry_run)
-        );
+        let _ = writeln!(out, "  {}", skipped_package_text(package.reason, dry_run));
     }
-    let why = report.error.as_deref().map_or_else(String::new, |error| {
-        format!(" {}", error.trim_end_matches('.'))
-    });
-    match report.status {
+}
+
+/// Why a backup wasn't restored, when it wasn't: `why` is the error, with a
+/// space before it, or nothing. `swap` says the backup was an earlier
+/// version, whose newer version's own files are put back too.
+fn write_restore_outcome(out: &mut String, status: RestoreStatus, why: &str, swap: bool) {
+    match status {
         RestoreStatus::NotRestored | RestoreStatus::NotReached => {
             let _ = writeln!(
                 out,
@@ -3130,19 +3253,193 @@ fn restore_backup_report_text(report: &RestoreBackupReport) -> String {
             );
         }
         RestoreStatus::FilesLeft => {
+            let moved = if swap {
+                " A file marked as left in the new backup is there, and missing from its place."
+            } else {
+                ""
+            };
             let _ = writeln!(
                 out,
                 "Failed partway:{why}. The files marked left above couldn't be put back as they \
                  were: each is as the backup had it, or missing where it says so, and its current \
-                 file backup is the file it replaced. RABBIT's records stay as they are."
+                 file backup is the file it replaced.{moved} RABBIT's records stay as they are."
             );
         }
-        RestoreStatus::Restored | RestoreStatus::WouldRestore => {}
+        // Never one backup's status: a whole set of earlier versions says
+        // it (see `write_whole_set_outcome`).
+        RestoreStatus::PartlyRestored | RestoreStatus::Restored | RestoreStatus::WouldRestore => {}
     }
-    if let Some(set_id) = &report.before_restore_set_id {
-        let _ = writeln!(out, "Backup of what this restore replaced: {set_id}");
+}
+
+/// How a whole set of earlier versions ended, after each of its packages
+/// said how it did. Nothing when every package went back, or would.
+fn write_whole_set_outcome(out: &mut String, status: RestoreStatus) {
+    let text = match status {
+        RestoreStatus::Restored | RestoreStatus::WouldRestore => return,
+        RestoreStatus::NotRestored | RestoreStatus::NotReached => {
+            "Not restored: no package of this backup went back, and each is as it was."
+        }
+        RestoreStatus::PartlyRestored => {
+            "Partly restored: some packages went back to their earlier versions, and others \
+             didn't. Each one above says how it ended."
+        }
+        RestoreStatus::FilesLeft => {
+            "Failed partway: files of a package above couldn't all be put back as they were, and \
+             that package says which. RABBIT's records of the packages that didn't go back stay \
+             as they are."
+        }
+    };
+    let _ = writeln!(out, "{text}");
+}
+
+/// One package of a whole set of earlier versions: how it ended, its
+/// files, what changed of its records, and the backup of what its restore
+/// replaced, or why it wasn't restored.
+fn write_swap_of_whole_set(out: &mut String, swap: &RestoreReportItem, dry_run: bool) {
+    let package_id = swap.package_id.as_deref().unwrap_or_default();
+    let status = match swap.status {
+        RestoreStatus::Restored => "restored",
+        RestoreStatus::WouldRestore => "would be restored",
+        RestoreStatus::NotRestored => "not restored",
+        RestoreStatus::FilesLeft => "failed partway",
+        RestoreStatus::NotReached => "not reached, because the restore was stopped",
+        RestoreStatus::PartlyRestored => "partly restored",
+    };
+    let _ = writeln!(out, "Package: {package_id}, {status}");
+    write_restore_actions(out, &swap.actions, &swap.skipped_targets);
+    if let Some(details) = &swap.swap {
+        write_swapped_package(out, details, swap.status, dry_run);
     }
-    out
+    if let Some(refusal) = &swap.refusal {
+        let _ = writeln!(out, "  Why: {refusal}.");
+    }
+    if swap.refusal.is_none() && swap.status != RestoreStatus::NotReached {
+        let why = swap.error.as_deref().map_or_else(String::new, |error| {
+            format!(" {}", error.trim_end_matches('.'))
+        });
+        let mut outcome = String::new();
+        write_restore_outcome(&mut outcome, swap.status, &why, true);
+        if !outcome.is_empty() {
+            let _ = write!(out, "  {outcome}");
+        }
+    }
+    if let Some(set_id) = &swap.before_restore_set_id {
+        let _ = writeln!(out, "  Backup of what this restore replaced: {set_id}");
+    }
+}
+
+/// What going back to an earlier version did to the package besides the
+/// set's files, or in a dry run would do: the version it went back to and
+/// what that did to its entry in RABBIT's records, the newer version's own
+/// files that moved into the new backup or stayed because they changed,
+/// and, going back to a copy RABBIT didn't install, the newer version's
+/// files it left in place. Nothing of its records changed when the restore
+/// failed, which its status says.
+fn write_swapped_package(
+    out: &mut String,
+    swap: &SwappedPackage,
+    status: RestoreStatus,
+    dry_run: bool,
+) {
+    let done = matches!(
+        status,
+        RestoreStatus::Restored | RestoreStatus::WouldRestore
+    );
+    let (went, change, gain) = if dry_run {
+        ("Would go", "would change", "would get")
+    } else {
+        ("Went", "changed", "got")
+    };
+    let from = swap
+        .replaced_version
+        .as_ref()
+        .map_or_else(String::new, |version| format!(" from {version}"));
+    let version = swap
+        .version
+        .as_ref()
+        .map_or_else(|| "its earlier version".to_string(), ToString::to_string);
+    if done {
+        let text = match swap.entry {
+            SwappedEntry::Replaced => format!(
+                "{went} back{from} to {version}. Only its entry in RABBIT's records {change}."
+            ),
+            SwappedEntry::Added => format!(
+                "{went} back to {version}. RABBIT's records had no entry for it, and {gain} \
+                 that version's."
+            ),
+            SwappedEntry::Removed => {
+                let reinstall = if swap.uninstall_needs_reinstall {
+                    format!(
+                        " Its uninstall needs that entry, so RABBIT {} uninstall it until it is \
+                         installed again.",
+                        if dry_run { "couldn't" } else { "can't" }
+                    )
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{went} back{from} to the copy this backup holds. RABBIT didn't install that \
+                     copy, so its entry in RABBIT's records {}.{reinstall}",
+                    if dry_run { "would go" } else { "went" }
+                )
+            }
+            SwappedEntry::StillNone => format!(
+                "{went} back to the copy this backup holds. RABBIT didn't install that copy, and \
+                 its records have no entry for it."
+            ),
+        };
+        let _ = writeln!(out, "  {text}");
+        if swap.undeclined {
+            let _ = writeln!(
+                out,
+                "  It {} off the list of packages you uninstalled or turned down.",
+                if dry_run { "would come" } else { "came" }
+            );
+        }
+    }
+    for file in &swap.moved_out {
+        let verb = match file.action {
+            MoveOutAction::WouldMoveOut => {
+                "Would move into the new backup, as the earlier version \
+                                           doesn't have it"
+            }
+            MoveOutAction::MovedOut => {
+                "Moved into the new backup, as the earlier version doesn't have it"
+            }
+            MoveOutAction::MovedBack => "Moved back to its place",
+            MoveOutAction::StillInBackup => "Left in the new backup, so missing from its place",
+            MoveOutAction::NotMoved => "Not moved",
+        };
+        let _ = writeln!(out, "  {verb}: {}", file.path.display());
+        if let Some(backup_path) = &file.backup_path {
+            let _ = writeln!(out, "    In the backup: {}", backup_path.display());
+        }
+        if let Some(error) = &file.error {
+            let _ = writeln!(out, "    Why: {error}");
+        }
+    }
+    for path in &swap.changed_left {
+        let _ = writeln!(
+            out,
+            "  Left in place, as it changed since it was installed: {}",
+            path.display()
+        );
+    }
+    if done {
+        let (left, goes) = if dry_run {
+            ("Would stay in place", "would go")
+        } else {
+            ("Left in place", "went")
+        };
+        for path in &swap.left_in_place {
+            let _ = writeln!(
+                out,
+                "  {left}, as RABBIT can't tell whether the copy this backup holds had it too; \
+                 a copy of it {goes} into the new backup: {}",
+                path.display()
+            );
+        }
+    }
 }
 
 /// Why a restore of a whole set left a package out, or in a dry run would,
@@ -5018,8 +5315,9 @@ mod tests {
     }
 
     /// A backup holding a copy of RABBIT's records is refused, and the CLI
-    /// adds the folder the copy stays in. A backup an update wrote is
-    /// refused in the engine's own words. Neither changes the records.
+    /// adds the folder the copy stays in. A backup an update wrote that
+    /// can't say which version it holds is refused in the engine's own
+    /// words. Neither changes the records.
     #[test]
     fn restore_backup_refuses_copies_of_the_records_and_says_where_they_stay() {
         let dir = tempfile::tempdir().unwrap();
@@ -5036,23 +5334,15 @@ mod tests {
             b"old records",
         )
         .unwrap();
-        // An update's set, as RABBIT writes one now: ReaPack's record, the
-        // file the update replaced, and no copy of the records.
+        // An update's set as an older RABBIT wrote one over a copy installed
+        // by hand: the file the update replaced, no record of ReaPack, and
+        // no copy of the records.
         let plugin = resource.join("UserPlugins").join("reaper_reapack-x64.dll");
         std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
         std::fs::write(&plugin, b"reapack 1.2.4").unwrap();
-        let mut update =
-            rabbit_core::rollback::BackupSetWriter::new(&resource, "unix-2", "install-replacement");
-        update
-            .record_replaced(
-                "reapack",
-                rabbit_core::rollback::ReplacedPackageRecord {
-                    receipt: None,
-                    replaced_by: Some(rabbit_core::version::Version::parse("1.2.5").unwrap()),
-                },
-            )
+        rabbit_core::rollback::BackupSetWriter::new(&resource, "unix-2", "install-replacement")
+            .copy_file(Some("reapack"), &plugin)
             .unwrap();
-        update.copy_file(Some("reapack"), &plugin).unwrap();
 
         let restore = |backup_id: &str| {
             let args: Vec<std::ffi::OsString> = vec![
@@ -5077,10 +5367,460 @@ mod tests {
         );
         assert_eq!(
             restore("unix-2"),
-            "The backup unix-2 holds files an update replaced, and RABBIT can't restore \
-             earlier versions yet. The backup stays as it is"
+            "RABBIT can't tell which version of reapack the backup unix-2 holds, so it doesn't \
+             restore it"
         );
         assert_eq!(std::fs::read(&receipt).unwrap(), b"records");
+    }
+
+    /// An update's backup set, in the folder `resource`: ReaPack and SWS,
+    /// each recorded with the entry it had before the update and with the
+    /// plug-in the update replaced. Since the update, ReaPack 1.2.5 has a
+    /// file 1.2.4 didn't have, and another that was edited by hand. Returns
+    /// the receipt entries from before the update, by package.
+    fn updated_reapack_and_sws(
+        resource: &std::path::Path,
+    ) -> std::collections::BTreeMap<String, rabbit_core::receipt::PackageReceipt> {
+        use rabbit_core::receipt::{InstallState, InstalledFileReceipt, PackageReceipt};
+        use rabbit_core::rollback::{BackupSetWriter, ReplacedPackageRecord};
+
+        let plugins = resource.join("UserPlugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let file = |name: &str, contents: &[u8]| InstalledFileReceipt {
+            path: std::path::Path::new("UserPlugins").join(name),
+            sha256: Some(rabbit_core::hash::sha256_bytes(contents)),
+            size: Some(contents.len() as u64),
+        };
+        let entry = |id: &str, version: &str, files: Vec<InstalledFileReceipt>| PackageReceipt {
+            id: id.to_string(),
+            version: Some(rabbit_core::version::Version::parse(version).unwrap()),
+            source_url: None,
+            source_sha256: None,
+            variant: None,
+            channel: None,
+            installed_files: files,
+            installed_at: None,
+            rabbit_version: None,
+            architecture: None,
+            vendor_added_files: Vec::new(),
+        };
+        let reapack = "reaper_reapack-x64.dll";
+        let sws = "reaper_sws-x64.dll";
+        std::fs::write(plugins.join(reapack), b"reapack 1.2.4").unwrap();
+        std::fs::write(plugins.join(sws), b"sws 2.14").unwrap();
+        let mut before = std::collections::BTreeMap::new();
+        before.insert(
+            "reapack".to_string(),
+            entry("reapack", "1.2.4", vec![file(reapack, b"reapack 1.2.4")]),
+        );
+        before.insert(
+            "sws".to_string(),
+            entry("sws", "2.14", vec![file(sws, b"sws 2.14")]),
+        );
+        let mut writer = BackupSetWriter::new(resource, "unix-100", "install-replacement");
+        for (package_id, name, newer) in [("reapack", reapack, "1.2.5"), ("sws", sws, "2.15")] {
+            writer
+                .record_replaced(
+                    package_id,
+                    ReplacedPackageRecord {
+                        receipt: Some(before[package_id].clone()),
+                        replaced_by: Some(rabbit_core::version::Version::parse(newer).unwrap()),
+                    },
+                )
+                .unwrap();
+            writer
+                .copy_file(Some(package_id), &plugins.join(name))
+                .unwrap();
+        }
+        std::fs::write(plugins.join(reapack), b"reapack 1.2.5").unwrap();
+        std::fs::write(plugins.join("reapack_added.dll"), b"added in 1.2.5").unwrap();
+        std::fs::write(plugins.join("reapack_notes.dat"), b"edited by hand").unwrap();
+        std::fs::write(plugins.join(sws), b"sws 2.15").unwrap();
+        let mut state = InstallState::default();
+        state.packages.insert(
+            "reapack".to_string(),
+            entry(
+                "reapack",
+                "1.2.5",
+                vec![
+                    file(reapack, b"reapack 1.2.5"),
+                    file("reapack_added.dll", b"added in 1.2.5"),
+                    file("reapack_notes.dat", b"notes 1.2.5"),
+                ],
+            ),
+        );
+        state.packages.insert(
+            "sws".to_string(),
+            entry("sws", "2.15", vec![file(sws, b"sws 2.15")]),
+        );
+        rabbit_core::receipt::save_install_state(resource, &state).unwrap();
+        before
+    }
+
+    /// `restore-backup --package` on an update's backup set puts that
+    /// package back to the version it had before the update: its file, and
+    /// its entry in RABBIT's records, and nothing else of the records. The
+    /// text says which version it goes back to, which file of the newer
+    /// version moves into the new backup, and which stays because it was
+    /// edited since. `rabbit backups` prints the command for each package,
+    /// and for both together.
+    #[test]
+    fn restore_backup_puts_an_earlier_version_back_and_says_what_moved() {
+        use rabbit_core::rollback::RestoreBackupOptions;
+
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let before = updated_reapack_and_sws(&resource);
+        let plugins = resource.join("UserPlugins");
+        let quoted = format!("--resource-path \"{}\"", resource.display());
+
+        let listed =
+            super::backups_text(&rabbit_core::backup_overview::backup_overview(&resource).unwrap());
+        for expected in [
+            "  ReaPack 1.2.4, replaced by 1.2.5: can be restored.".to_string(),
+            format!(
+                "    rabbit restore-backup {quoted} --backup-id unix-100 --package reapack --apply"
+            ),
+            "  All of these earlier versions: can be restored together.".to_string(),
+            format!("    rabbit restore-backup {quoted} --backup-id unix-100 --apply"),
+        ] {
+            assert!(
+                listed.lines().any(|line| line == expected),
+                "{expected:?} missing from:\n{listed}"
+            );
+        }
+
+        let preview = rabbit_core::rollback::restore_backup_set(
+            &resource,
+            "unix-100",
+            &RestoreBackupOptions {
+                dry_run: true,
+                allow_reaper_running: true,
+                package_id: Some("reapack".to_string()),
+            },
+        )
+        .unwrap();
+        let text = super::restore_backup_report_text(&preview);
+        for expected in [
+            "  Would go back from 1.2.5 to 1.2.4. Only its entry in RABBIT's records would \
+             change."
+                .to_string(),
+            format!(
+                "  Would move into the new backup, as the earlier version doesn't have it: {}",
+                plugins.join("reapack_added.dll").display()
+            ),
+            format!(
+                "  Left in place, as it changed since it was installed: {}",
+                plugins.join("reapack_notes.dat").display()
+            ),
+        ] {
+            assert!(
+                text.lines().any(|line| line == expected),
+                "{expected:?} missing from:\n{text}"
+            );
+        }
+        // ReaPack was never turned down, so nothing says it comes off that
+        // list.
+        assert!(!text.contains("turned down"), "{text}");
+
+        let path = resource.to_string_lossy().into_owned();
+        let apply = Cli::try_parse_from([
+            "rabbit",
+            "restore-backup",
+            "--resource-path",
+            path.as_str(),
+            "--backup-id",
+            "unix-100",
+            "--package",
+            "reapack",
+            "--apply",
+            "--allow-reaper-running",
+        ])
+        .unwrap();
+        super::run_with(apply).unwrap();
+
+        assert_eq!(
+            std::fs::read(plugins.join("reaper_reapack-x64.dll")).unwrap(),
+            b"reapack 1.2.4"
+        );
+        assert!(!plugins.join("reapack_added.dll").exists());
+        assert_eq!(
+            std::fs::read(plugins.join("reapack_notes.dat")).unwrap(),
+            b"edited by hand"
+        );
+        assert_eq!(
+            std::fs::read(plugins.join("reaper_sws-x64.dll")).unwrap(),
+            b"sws 2.15"
+        );
+        let state = rabbit_core::receipt::load_install_state(&resource)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.packages.get("reapack"), before.get("reapack"));
+        assert_eq!(
+            state.packages["sws"].version,
+            Some(rabbit_core::version::Version::parse("2.15").unwrap())
+        );
+    }
+
+    /// A whole update's backup set goes back package by package. When one
+    /// package fails, here because another program holds SWS's plug-in
+    /// open with no sharing, the others stay restored, and the command
+    /// exits with 1 and says which went back and which didn't.
+    #[cfg(windows)]
+    #[test]
+    fn restore_backup_of_a_whole_update_set_says_which_packages_went_back() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        updated_reapack_and_sws(&resource);
+        let plugins = resource.join("UserPlugins");
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(plugins.join("reaper_sws-x64.dll"))
+            .unwrap();
+
+        let error = super::run_args(vec![
+            "rabbit".into(),
+            "restore-backup".into(),
+            "--resource-path".into(),
+            resource.clone().into_os_string(),
+            "--backup-id".into(),
+            "unix-100".into(),
+            "--allow-reaper-running".into(),
+            "--apply".into(),
+        ])
+        .unwrap_err();
+        drop(held);
+
+        assert_eq!(
+            error.to_string(),
+            "Only part of the backup unix-100 was restored: reapack went back to the earlier \
+             version, and sws didn't and stayed as it was. The report says why."
+        );
+        assert_eq!(
+            std::fs::read(plugins.join("reaper_reapack-x64.dll")).unwrap(),
+            b"reapack 1.2.4"
+        );
+        assert_eq!(
+            std::fs::read(plugins.join("reaper_sws-x64.dll")).unwrap(),
+            b"sws 2.15"
+        );
+        let state = rabbit_core::receipt::load_install_state(&resource)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.packages["sws"].version,
+            Some(rabbit_core::version::Version::parse("2.15").unwrap())
+        );
+    }
+
+    /// The text of a whole set of earlier versions names each package, how
+    /// it ended, and the backup of what its restore replaced. Going back to
+    /// a copy RABBIT didn't install says its entry goes.
+    #[test]
+    fn restore_backup_text_names_each_package_of_a_whole_set() {
+        use rabbit_core::rollback::{RestoreBackupOptions, RestoreStatus, SwappedEntry};
+
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        updated_reapack_and_sws(&resource);
+        let mut report = rabbit_core::rollback::restore_backup_set(
+            &resource,
+            "unix-100",
+            &RestoreBackupOptions {
+                dry_run: true,
+                allow_reaper_running: true,
+                package_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.status, RestoreStatus::WouldRestore);
+        assert_eq!(report.swaps.len(), 2);
+
+        let text = super::restore_backup_report_text(&report);
+        for expected in [
+            "Package: reapack, would be restored",
+            "Package: sws, would be restored",
+            "  Would go back from 2.15 to 2.14. Only its entry in RABBIT's records would change.",
+        ] {
+            assert!(
+                text.lines().any(|line| line == expected),
+                "{expected:?} missing from:\n{text}"
+            );
+        }
+
+        // As a real run that went back partly would report it.
+        report.dry_run = false;
+        report.status = RestoreStatus::PartlyRestored;
+        report.swaps[0].status = RestoreStatus::Restored;
+        report.swaps[0].before_restore_set_id = Some("restore-unix-1-before-restore".to_string());
+        report.swaps[1].status = RestoreStatus::NotRestored;
+        report.swaps[1].error = Some("the disk is full".to_string());
+        let swap = report.swaps[1].swap.as_mut().unwrap();
+        swap.entry = SwappedEntry::Removed;
+        swap.uninstall_needs_reinstall = true;
+        swap.undeclined = true;
+        swap.version = None;
+        let text = super::restore_backup_report_text(&report);
+        for expected in [
+            "Package: reapack, restored",
+            "  Backup of what this restore replaced: restore-unix-1-before-restore",
+            "Package: sws, not restored",
+            "  Not restored: the disk is full. Every file it had changed was put back as it was, \
+             and RABBIT's records stay as they are.",
+            "Partly restored: some packages went back to their earlier versions, and others \
+             didn't. Each one above says how it ended.",
+        ] {
+            assert!(
+                text.lines().any(|line| line == expected),
+                "{expected:?} missing from:\n{text}"
+            );
+        }
+        // The packages that went back and those that didn't, on stderr.
+        assert_eq!(
+            super::not_restored_text(&report).unwrap(),
+            "Only part of the backup unix-100 was restored: reapack went back to the earlier \
+             version, and sws didn't and stayed as it was. The report says why."
+        );
+        report.swaps[1].status = RestoreStatus::Restored;
+        report.status = RestoreStatus::Restored;
+        let text = super::restore_backup_report_text(&report);
+        for expected in [
+            "  Went back from 2.15 to the copy this backup holds. RABBIT didn't install that \
+             copy, so its entry in RABBIT's records went. Its uninstall needs that entry, so \
+             RABBIT can't uninstall it until it is installed again.",
+            "  It came off the list of packages you uninstalled or turned down.",
+        ] {
+            assert!(
+                text.lines().any(|line| line == expected),
+                "{expected:?} missing from:\n{text}"
+            );
+        }
+        assert_eq!(super::not_restored_text(&report), None);
+
+        // A package whose uninstall doesn't need the entry says nothing of
+        // uninstalling; one that had no entry says it still has none.
+        let swap = report.swaps[1].swap.as_mut().unwrap();
+        swap.uninstall_needs_reinstall = false;
+        swap.undeclined = false;
+        let text = super::restore_backup_report_text(&report);
+        assert!(
+            text.lines().any(|line| line
+                == "  Went back from 2.15 to the copy this backup holds. RABBIT didn't install \
+                    that copy, so its entry in RABBIT's records went."),
+            "{text}"
+        );
+        assert!(
+            !text.contains("uninstall it") && !text.contains("turned down"),
+            "{text}"
+        );
+        let swap = report.swaps[1].swap.as_mut().unwrap();
+        swap.entry = SwappedEntry::StillNone;
+        swap.replaced_version = None;
+        let text = super::restore_backup_report_text(&report);
+        assert!(
+            text.lines().any(|line| line
+                == "  Went back to the copy this backup holds. RABBIT didn't install that copy, \
+                    and its records have no entry for it."),
+            "{text}"
+        );
+        // Going back to an earlier version with no entry now, as going
+        // forward again after the entry went does, adds that version's.
+        let swap = report.swaps[1].swap.as_mut().unwrap();
+        swap.entry = SwappedEntry::Added;
+        swap.version = Some(rabbit_core::version::Version::parse("2.15").unwrap());
+        let text = super::restore_backup_report_text(&report);
+        assert!(
+            text.lines().any(|line| line
+                == "  Went back to 2.15. RABBIT's records had no entry for it, and got that \
+                    version's."),
+            "{text}"
+        );
+        // A file of the newer version that going back to a copy RABBIT
+        // didn't install leaves where it is.
+        let left = resource.join("UserPlugins").join("sws_extra.dll");
+        let swap = report.swaps[1].swap.as_mut().unwrap();
+        swap.entry = SwappedEntry::Removed;
+        swap.left_in_place = vec![left.clone()];
+        let text = super::restore_backup_report_text(&report);
+        let expected = format!(
+            "  Left in place, as RABBIT can't tell whether the copy this backup holds had it \
+             too; a copy of it went into the new backup: {}",
+            left.display()
+        );
+        assert!(text.lines().any(|line| line == expected), "{text}");
+    }
+
+    /// When files of a whole set of earlier versions couldn't all be put
+    /// back, stderr counts them across its packages, says that the records
+    /// of the packages that didn't go back are as they were, and names the
+    /// backup of each package that kept files.
+    #[test]
+    fn not_restored_text_of_a_whole_set_with_files_left() {
+        use rabbit_core::rollback::{
+            MoveOutAction, MovedOutFile, RestoreBackupActionKind, RestoreStatus,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        updated_reapack_and_sws(&resource);
+        let mut report = rabbit_core::rollback::restore_backup_set(
+            &resource,
+            "unix-100",
+            &rabbit_core::rollback::RestoreBackupOptions {
+                dry_run: true,
+                allow_reaper_running: true,
+                package_id: None,
+            },
+        )
+        .unwrap();
+        // As a real run would report it: ReaPack went back, and SWS failed
+        // with its plug-in left as the backup had it and a moved file of
+        // the newer version still in its backup.
+        report.dry_run = false;
+        report.status = RestoreStatus::FilesLeft;
+        report.swaps[0].status = RestoreStatus::Restored;
+        report.swaps[0].before_restore_set_id = Some("restore-unix-1-before-restore".to_string());
+        let sws = &mut report.swaps[1];
+        sws.status = RestoreStatus::FilesLeft;
+        sws.error = Some("the disk is full.".to_string());
+        sws.before_restore_set_id = Some("restore-unix-1-before-restore-2".to_string());
+        sws.actions[0].action = RestoreBackupActionKind::Left;
+        sws.swap.as_mut().unwrap().moved_out.push(MovedOutFile {
+            path: resource.join("UserPlugins").join("sws_new.dll"),
+            backup_path: Some(resource.join("RABBIT").join("backups").join("x")),
+            size: 1,
+            sha256: String::new(),
+            action: MoveOutAction::StillInBackup,
+            error: Some("access denied".to_string()),
+        });
+
+        assert_eq!(
+            super::not_restored_text(&report).unwrap(),
+            "The restore of the backup unix-100 failed partway: the disk is full. 2 files \
+             couldn't be put back as before; the report names each. RABBIT's records of the \
+             packages that didn't go back are as they were. What the restore replaced is in the \
+             backup restore-unix-1-before-restore-2."
+        );
+        let text = super::restore_backup_report_text(&report);
+        assert!(
+            text.lines().any(|line| line
+                == "Failed partway: files of a package above couldn't all be put back as they \
+                    were, and that package says which. RABBIT's records of the packages that \
+                    didn't go back stay as they are."),
+            "{text}"
+        );
+
+        // With no package back, the records are all as they were.
+        report.swaps[0].status = RestoreStatus::NotRestored;
+        report.swaps[0].before_restore_set_id = None;
+        let text = super::not_restored_text(&report).unwrap();
+        assert!(
+            text.contains("the report names each. RABBIT's records are as they were."),
+            "{text}"
+        );
     }
 
     /// A package an uninstall's backup records with none of its files is
@@ -8825,7 +9565,7 @@ mod tests {
     /// SWS (300), an update of ReaPack (200), the key map OSARA's replaced
     /// (100), and a set with a damaged manifest (`unix-50`). SWS can be
     /// restored by package and the key map as a whole set; ReaPack is an
-    /// earlier version, which restore doesn't take yet.
+    /// earlier version, which can be restored with `--package`.
     fn resource_with_backups(dir: &std::path::Path) -> PathBuf {
         use rabbit_core::rollback::{
             BackupManifest, BackupPackageRecord, BackupSetWriter, ReplacedPackageRecord,
@@ -8949,8 +9689,10 @@ mod tests {
                  --apply"
             ),
             "  Kind: an update's backup of the earlier versions it replaced",
-            "  ReaPack 1.2.4, replaced by 1.2.5: can't be restored yet.",
-            "    RABBIT can't restore earlier versions yet.",
+            "  ReaPack 1.2.4, replaced by 1.2.5: can be restored.",
+            &format!(
+                "    rabbit restore-backup {quoted} --backup-id unix-200 --package reapack --apply"
+            ),
             "  Your key map: can be restored.",
             &format!(
                 "    rabbit restore-backup {quoted} --backup-id unattended-unix-100-000000000 \
@@ -9048,6 +9790,13 @@ mod tests {
         assert_eq!(item["only_copy"], true);
         assert_eq!(item["restore_scope"], "package");
         assert!(item.get("refusal").is_none(), "{item:#}");
+        // Only a set of earlier versions that restore-backup takes whole,
+        // without --package, says so.
+        assert!(uninstall.get("swaps_whole").is_none(), "{uninstall:#}");
+        let update = &json[1];
+        assert_eq!(update["kind"], "update");
+        assert_eq!(update["swaps_whole"], true);
+        assert_eq!(update["items"][0]["restore_scope"], "package");
         let damaged = &json[3];
         assert_eq!(damaged["kind"], "damaged");
         assert!(damaged["manifest_path"].is_null() && damaged["reason"].is_null());
@@ -9379,8 +10128,8 @@ mod tests {
     }
 
     /// Every reason a backup can't be restored, in one line, by its status
-    /// and its set: earlier versions and the rest of an update's set aren't
-    /// restored yet, whatever else the set holds.
+    /// and its set. An update's set comes back package by package, whatever
+    /// else it holds, so its key map and its files of no package don't.
     #[test]
     fn backups_says_each_reason_in_one_line() {
         use rabbit_core::backup_overview::{
@@ -9405,6 +10154,7 @@ mod tests {
             files: Vec::new(),
             links: Vec::new(),
             warning: None,
+            swaps_whole: false,
         };
         let entry = |item: BackupItem, group: BackupGroup, status: BackupStatus| BackupEntry {
             item,
@@ -9448,16 +10198,29 @@ mod tests {
             warning: Some("unreadable".to_string()),
             ..set(kind)
         };
+        // An older update's set, with a copy of the records.
+        let update = BackupSetOverview {
+            manifest: Some(rabbit_core::rollback::BackupManifest {
+                schema_version: 1,
+                rabbit_version: "0.4.4".to_string(),
+                created_at: "unix-1".to_string(),
+                created_unix: None,
+                reason: "install-replacement".to_string(),
+                files: Vec::new(),
+                receipt_backup_path: None,
+                packages: Default::default(),
+                replaced: Default::default(),
+                keymap_origin: None,
+            }),
+            ..with_receipt(Kind::Update)
+        };
         let cases: Vec<(BackupEntry, BackupSetOverview, String)> = vec![
             (
-                entry(package("reapack"), EarlierVersions, CanRestore),
-                with_receipt(Kind::Update),
-                "RABBIT can't restore earlier versions yet.".to_string(),
-            ),
-            (
                 entry(keys.clone(), Keymaps, CanRestore),
-                set(Kind::Update),
-                "RABBIT doesn't restore an update's backup set yet.".to_string(),
+                update.clone(),
+                "RABBIT can't restore a key map on its own yet, and its backup set holds other \
+                 files too."
+                    .to_string(),
             ),
             (
                 entry(package("sws"), UninstalledSoftware, CanRestore),
@@ -9488,6 +10251,24 @@ mod tests {
                 set(Kind::Uninstall),
                 format!(
                     "RABBIT won't put back {}, so a restore would stop before changing anything.",
+                    missing.display()
+                ),
+            ),
+            (
+                BackupEntry {
+                    refused_path: Some(missing.clone()),
+                    refusal: Some(super::RestoreRefusal::NewerFileRefused {
+                        backup_id: "unix-1".to_string(),
+                        package_id: "sws".to_string(),
+                        path: missing.clone(),
+                        reason: Box::new(rabbit_core::restore_refusal::TargetRefusal::RabbitFolder),
+                    }),
+                    ..entry(package("sws"), EarlierVersions, CanRestore)
+                },
+                set(Kind::Update),
+                format!(
+                    "RABBIT couldn't put {}, a file of the newer version, back from a backup, so \
+                     a restore would stop before changing anything.",
                     missing.display()
                 ),
             ),
@@ -9584,8 +10365,21 @@ mod tests {
             ),
             (
                 entry(whole.clone(), Other, NotHere),
-                set(Kind::Update),
-                "RABBIT doesn't restore an update's backup set yet.".to_string(),
+                update.clone(),
+                "RABBIT puts this backup set back package by package, and these files belong to \
+                 none of its packages."
+                    .to_string(),
+            ),
+            (
+                BackupEntry {
+                    refusal: Some(super::RestoreRefusal::NothingOfItInSet {
+                        backup_id: "unix-1".to_string(),
+                        package_ids: Vec::new(),
+                    }),
+                    ..entry(whole.clone(), Other, NotHere)
+                },
+                update,
+                "Nothing in it belongs to a package RABBIT can put back.".to_string(),
             ),
             (
                 entry(whole.clone(), Other, NotHere),
