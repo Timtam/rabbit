@@ -1768,6 +1768,44 @@ Extension files:
   found and the set and package refusals, before the REAPER check, the
   install lock and any change. A dry run still works. The check comes
   through the restore's environment, so tests run it on every platform.
+- `rabbit backups` lists the sets through one overview in the core
+  (`backup_overview`), which the wizard's Backups tab is to share. It turns
+  sets into backups: one per package an uninstall recorded; one per package
+  of an update's set, from its file entries and its `replaced` records; one
+  key map, found by an entry whose original is the resource folder's
+  `reaper-kb.ini`, whatever made the set; one per package a restore's set
+  recorded as replaced; one for each other set, set without a manifest,
+  damaged set, unfinished deletion in `RABBIT/backups-deleting`, and link
+  or badly named folder; one for a set's files that no backup above holds;
+  and one for all sets that hold only a copy of the receipt. Backups are
+  grouped as uninstalled software, earlier versions,
+  key maps and other backups, newest first inside a group, those without a
+  date last and the records last of all. A set's date is its manifest's
+  `created_unix`, else the seconds in its `created_at`, else, without a
+  manifest, the seconds in its name; every id form counts, `-2` suffixes
+  included. Its size comes from a walk by each entry's own metadata, which
+  follows no link and counts files with no entry, so it is what deleting it
+  frees; a backup's size adds up its manifest entries. Each backup gets a
+  status (can restore, stopped partway, already back, installed again, not
+  complete, nothing in it, version unknown, another of its exclusive group
+  installed, part missing, records unreadable, not here, not yours, not a
+  backup), and earlier versions are judged by the rules of the swap that is
+  to restore them, although `restore-backup` refuses them for now. The
+  overview reads the manifests, the receipt once, an older update set's
+  copy of the receipt, and sizes; it never hashes a file. "Not complete"
+  and "already back" compare the hashes the manifests and the receipt
+  recorded and the sizes on disk; the restore checks the files themselves.
+  Where a file goes back is judged from the paths' text by the restore's
+  own rules, and only such a place is looked at: a path outside the
+  resource folder and the folders RABBIT installs into, such as one on
+  another computer, is never opened. A backup with a file a restore would
+  refuse names it, and gets no restore command. A key map is restored on
+  the command line only with its whole set, so only while it is all that
+  comes back of the set. On macOS a set whose owner differs
+  from that of `RABBIT/backups` is another account's. Each set also gets a
+  fingerprint, its manifest's length and modified time or, without one, its
+  file count and size, for a later run to compare under the lock. Local time
+  comes from the operating system on Windows and macOS, UTC elsewhere.
 - `rabbit install-extension --apply` takes the install lock across its
   download, install and receipt change, as the package operation does, so
   it never writes files, a backup set or the receipt while another RABBIT

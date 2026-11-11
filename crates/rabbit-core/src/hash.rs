@@ -15,6 +15,8 @@ pub fn sha256_file(path: &Path) -> Result<String> {
 /// For a file already held open, such as one locked against changes
 /// between its hash check and its start.
 pub fn sha256_reader(reader: &mut dyn Read) -> std::io::Result<String> {
+    #[cfg(test)]
+    HASHES_ON_THIS_THREAD.with(|count| count.set(count.get() + 1));
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
 
@@ -36,6 +38,19 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     to_hex(&hasher.finalize())
+}
+
+#[cfg(test)]
+thread_local! {
+    static HASHES_ON_THIS_THREAD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many files or readers this thread has hashed so far, through
+/// [`sha256_file`] or [`sha256_reader`]. Tests read it before and after
+/// something that must hash nothing, such as listing the backups.
+#[cfg(test)]
+pub(crate) fn hashes_on_this_thread() -> usize {
+    HASHES_ON_THIS_THREAD.with(std::cell::Cell::get)
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -77,6 +92,22 @@ mod tests {
         fs::write(&file, b"rabbit").unwrap();
 
         assert_eq!(sha256_bytes(b"rabbit"), sha256_file(&file).unwrap());
+    }
+
+    /// The count tests use to prove that something hashes nothing goes up
+    /// once per file or reader hashed, and not for bytes in memory.
+    #[test]
+    fn hashing_a_file_is_counted() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("sample.txt");
+        fs::write(&file, b"rabbit").unwrap();
+        let before = super::hashes_on_this_thread();
+
+        sha256_file(&file).unwrap();
+        sha256_reader(&mut &b"rabbit"[..]).unwrap();
+        sha256_bytes(b"rabbit");
+
+        assert_eq!(super::hashes_on_this_thread(), before + 2);
     }
 
     #[test]

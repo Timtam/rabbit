@@ -271,6 +271,19 @@ from this file and posts it as the GitHub release body.
   This holds for the wizard, `rabbit setup`, `rabbit apply-packages`,
   `rabbit install-extension --apply` and `rabbit init-resource`, and a dry
   run or `rabbit preflight` reports it too.
+- `rabbit backups` now lists backup sets newest first and says, for each
+  backup in a set, what it holds: the package and its version, or a key
+  map. It also says when each set was made, in your local time and in UTC,
+  what made it, how big it is, and whether each backup can be restored,
+  with the exact `rabbit restore-backup` command that does it, or why not.
+  It no longer lists every file. `--backup-id` shows one backup set with
+  each file in it, where it came from and whether its copy finished.
+  `--json` keeps its fields and adds `kind`, `created_unix`, `size`,
+  `items` (each backup with its status) and `fingerprint`, and lists newest
+  first too. It also lists a deletion that didn't finish, with kind
+  `deleting`; its id can match a set's, and its `path` is in
+  `RABBIT\backups-deleting`. `rabbit backups` and `rabbit restore-backup`
+  now have help text.
 
 ### Fixed
 

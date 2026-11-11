@@ -817,9 +817,27 @@ the resource folder or into `RABBIT`.
 
 ```
 RABBIT backups --resource-path "%APPDATA%\REAPER"          # list backup sets
+RABBIT backups --resource-path "%APPDATA%\REAPER" \
+     --backup-id uninstall-unix-1234567890                 # one set, file by file
 RABBIT restore-backup --resource-path "%APPDATA%\REAPER" \
      --backup-id uninstall-unix-1234567890 --apply         # restore one set
 ```
+
+`rabbit backups` lists the backup sets newest first. For each set it says its
+id, when it was made, in local time and in UTC, what made it (an uninstall, an
+update, OSARA's key map, a restore), and its size. Then it lists each backup in
+the set: the package and its version, or the key map, and whether it can be
+restored. For a backup that can be, the next line is the exact
+`rabbit restore-backup` command; otherwise it says why not in one line, such as
+"You have SWS Extension again" or "RABBIT can't restore earlier versions yet".
+Sizes are in whole KB and MB, and GB with one decimal. `--backup-id` shows one
+set, with each file in it, where it came from and whether its copy finished,
+and where a copy of RABBIT's records is, if the set holds one. `--json` prints
+the list of sets with every detail, each backup's status included. Listing
+changes nothing and hashes no file. It reads only the backup sets' manifests,
+RABBIT's records and file sizes, never a backed-up file, so it is quick even
+with FFmpeg's backups. A restore command is printed only for a set whose name
+needs no quotes, as RABBIT's own names don't.
 
 ### Update RABBIT itself
 

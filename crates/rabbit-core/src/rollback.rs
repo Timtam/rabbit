@@ -35,7 +35,7 @@ pub const ORIGIN_SIDECAR_SUFFIX: &str = ".rabbit-origin";
 const MANIFEST_STAGING_FILE: &str = "backup-manifest.json.rabbit-tmp";
 
 /// The reason recorded for the set that holds the files a restore replaced.
-const BEFORE_RESTORE_REASON: &str = "before-restore";
+pub(crate) const BEFORE_RESTORE_REASON: &str = "before-restore";
 
 /// The reason recorded for the set that holds the files an update replaced,
 /// with what it replaced of each package (see [`BackupManifest::replaced`]).
@@ -54,12 +54,17 @@ pub(crate) const KEYMAP_BACKUP_REASON: &str = "osara-keymap-replacement";
 
 /// The folder beside `RABBIT/backups` where delete (still to come) moves a
 /// set before it removes anything, so a restore never finds half a set.
-/// Restore only looks here, and never creates it.
-const DELETING_DIR: &str = "backups-deleting";
+/// Restore and the overview only look here, and never create it.
+pub(crate) const DELETING_DIR: &str = "backups-deleting";
 
+/// One backup set as `rabbit backups --json` prints it, built from the
+/// overview (see [`crate::backup_overview`]). The fields after `warning`
+/// came with the overview; the ones before keep their meaning.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupSet {
     pub id: String,
+    /// The set's folder: in `RABBIT/backups`, or in
+    /// `RABBIT/backups-deleting` for an unfinished deletion.
     pub path: PathBuf,
     pub created_at: Option<String>,
     pub reason: Option<String>,
@@ -72,6 +77,26 @@ pub struct BackupSet {
     /// refused, with the full error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// What made the set, as the overview reads it. Always there in what
+    /// this version prints; `None` only in JSON from earlier versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::backup_overview::BackupSetKind>,
+    /// When the set was made, in seconds since 1970 (UTC), when RABBIT can
+    /// tell: from the manifest, or from the set's name.
+    #[serde(default)]
+    pub created_unix: Option<u64>,
+    /// Bytes on disk, every file and link in the set counted, none
+    /// followed: what deleting it frees.
+    #[serde(default)]
+    pub size: u64,
+    /// The backups this set holds, as the overview lists them.
+    #[serde(default)]
+    pub items: Vec<crate::backup_overview::BackupEntry>,
+    /// What a later run compares to tell whether the set changed since it
+    /// was listed. `None` for an entry that is no backup, which is never
+    /// looked into.
+    #[serde(default)]
+    pub fingerprint: Option<crate::backup_overview::SetFingerprint>,
 }
 
 /// A set's `backup-manifest.json`. Fields added since the first version
@@ -1202,121 +1227,49 @@ fn remove_empty_dirs(folder: &Path) {
     let _ = fs::remove_dir(folder);
 }
 
-/// Every set in `RABBIT/backups`, by id.
+/// Every set in `RABBIT/backups`, and every unfinished deletion in
+/// `RABBIT/backups-deleting`, newest first, as the overview lists them
+/// (see [`crate::backup_overview::backup_overview`]).
 ///
-/// No symbolic link or junction is ever followed. When `RABBIT` or
-/// `RABBIT/backups` is one, nothing is listed and the error says why: the
-/// sets it leads to may belong to another REAPER, or to nobody, and an
-/// empty list would say there are none. A link directly in
-/// `RABBIT/backups` is listed with a warning that it isn't a backup RABBIT
-/// made, and a link inside a set is listed by name. Neither is looked into.
+/// No symbolic link or junction is ever followed. When `RABBIT`,
+/// `RABBIT/backups` or `RABBIT/backups-deleting` is one, nothing is listed
+/// and the error says why: the sets it leads to may belong to another
+/// REAPER, or to nobody, and an empty list would say there are none. A
+/// link directly in `RABBIT/backups` is listed with a warning that it isn't
+/// a backup RABBIT made, and a link inside a set is listed by name. Neither
+/// is looked into.
 ///
 /// A folder whose name restore would refuse (see
 /// [`backup_id_is_well_formed`]) is listed the same way as a link: with a
 /// warning, and never looked into. On Windows a path through `unix-1.`
 /// would open `unix-1`, so its listing would show another set's files.
 pub fn list_backup_sets(resource_path: &Path) -> Result<Vec<BackupSet>> {
-    let backups_root = backups_root(resource_path);
-    if !is_real_folder(&resource_path.join("RABBIT"))? || !is_real_folder(&backups_root)? {
-        return Ok(Vec::new());
-    }
-
-    let mut sets = Vec::new();
-    for entry in fs::read_dir(&backups_root).with_path(&backups_root)? {
-        let entry = entry.with_path(&backups_root)?;
-        let path = entry.path();
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        let Some(id) = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(ToString::to_string)
-        else {
-            continue;
-        };
-        // Why this entry is no set, if it isn't one.
-        let not_a_set = if kind.is_symlink() {
-            Some(
-                "this is a symbolic link or junction, not a backup RABBIT made, and RABBIT \
-                 never looks inside it",
-            )
-        } else if !kind.is_dir() {
-            continue;
-        } else if !backup_id_is_well_formed(&id) {
-            Some(
-                "its name is not one RABBIT gives a backup, so it is not a backup RABBIT made, \
-                 and RABBIT never looks inside it or restores it",
-            )
-        } else {
-            None
-        };
-        if let Some(why) = not_a_set {
-            sets.push(BackupSet {
-                id,
-                path,
-                created_at: None,
-                reason: None,
-                manifest_path: None,
-                files: Vec::new(),
-                warning: Some(why.to_string()),
-            });
-            continue;
-        }
-        // One damaged set must not hide all the others: a manifest that
-        // can't be read, or files that can't be listed, are reported on that
-        // set and the listing goes on.
-        let mut warnings = Vec::new();
-        let manifest = load_backup_manifest(&path).unwrap_or_else(|error| {
-            warnings.push(format!("the backup manifest could not be read: {error}"));
-            None
-        });
-        let mut files = Vec::new();
-        let mut links = Vec::new();
-        if let Err(error) = collect_relative_files(&path, &path, &mut files, &mut links) {
-            warnings.push(format!(
-                "not every file in this set could be listed: {error}"
-            ));
-        }
-        if !links.is_empty() {
-            links.sort();
-            let names: Vec<String> = links
-                .iter()
-                .map(|link| link.display().to_string())
-                .collect();
-            warnings.push(format!(
-                "these are symbolic links or junctions, which RABBIT never follows: {}",
-                names.join(", ")
-            ));
-            files.append(&mut links);
-        }
-        files.sort();
-        sets.push(BackupSet {
-            id,
-            manifest_path: manifest.as_ref().map(|_| path.join(BACKUP_MANIFEST_FILE)),
-            created_at: manifest
-                .as_ref()
-                .map(|manifest| manifest.created_at.clone()),
-            reason: manifest.as_ref().map(|manifest| manifest.reason.clone()),
-            path,
-            files,
-            warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
-        });
-    }
-
-    sets.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(sets)
+    Ok(crate::backup_overview::backup_overview(resource_path)?.backup_sets())
 }
 
-/// What a restore asks of the computer it runs on, beyond the backup set
-/// itself. [`restore_backup_set`] passes [`BackupEnvironment::system`], and
-/// tests pass their own answers.
+/// What a restore, and the overview of the backups, ask of the computer
+/// they run on, beyond the backup sets themselves. [`restore_backup_set`]
+/// and [`crate::backup_overview::backup_overview`] pass
+/// [`BackupEnvironment::system`], and tests pass their own answers.
 #[derive(Clone, Copy)]
 pub(crate) struct BackupEnvironment<'a> {
     /// Whether RABBIT itself runs as root, as it does under `sudo`. Only a
     /// Mac answers `true`: the rule about root is macOS's alone, as for
     /// uninstall.
     pub runs_as_root: &'a dyn Fn() -> bool,
+    /// The account that owns the file or folder at a path, by its own
+    /// metadata, never through a link: its user id on macOS. `None` when
+    /// that can't be read, and always on Windows, where a backup never
+    /// counts as another account's.
+    pub owner_of: &'a dyn Fn(&Path) -> Option<u32>,
+    /// Each package's exclusive group, by package id: packages whose
+    /// installs remove each other. From the embedded package manifests.
+    pub exclusive_groups: &'a dyn Fn() -> BTreeMap<String, String>,
+    /// Where outside the resource folder at a path a restore may put files
+    /// back. Only the overview asks this, the first time a set names such a
+    /// place; a restore is handed its own (see `restore_backup_set_with`)
+    /// once the set is one it may restore.
+    pub outside_rules: &'a dyn Fn(&Path) -> OutsideRestoreRules,
 }
 
 impl BackupEnvironment<'static> {
@@ -1324,14 +1277,56 @@ impl BackupEnvironment<'static> {
     pub(crate) fn system() -> Self {
         Self {
             runs_as_root: &system_runs_as_root,
+            owner_of: &system_owner_of,
+            exclusive_groups: &system_exclusive_groups,
+            outside_rules: &crate::install::outside_restore_rules,
         }
     }
 
-    /// A computer where RABBIT runs as the user, as it should.
+    /// A computer where RABBIT runs as the user, as it should. Owners are
+    /// read as on this computer. No place outside the resource folder takes
+    /// a file back, so tests never name the user's real CLAP or vendor
+    /// folders.
     #[cfg(test)]
     pub(crate) const AS_USER: Self = Self {
         runs_as_root: &|| false,
+        owner_of: &system_owner_of,
+        exclusive_groups: &system_exclusive_groups,
+        outside_rules: &no_outside_places,
     };
+}
+
+/// Rules that let no file back outside the resource folder, for tests.
+#[cfg(test)]
+fn no_outside_places(_resource_path: &Path) -> OutsideRestoreRules {
+    OutsideRestoreRules::default()
+}
+
+/// Each package's exclusive group, by package id, as the embedded package
+/// manifests declare them.
+fn system_exclusive_groups() -> BTreeMap<String, String> {
+    crate::package::embedded_package_manifest()
+        .packages
+        .into_iter()
+        .filter_map(|spec| Some((spec.id, spec.exclusive_group?)))
+        .collect()
+}
+
+/// The user id that owns `path`, from its own metadata: a link is never
+/// followed. Unix only; Windows has no single id to compare.
+fn system_owner_of(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        fs::symlink_metadata(path)
+            .ok()
+            .map(|metadata| metadata.uid())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// The root check uninstall makes, through the same
@@ -1461,21 +1456,80 @@ fn set_holds_receipt(
         collect_relative_files(backup_path, backup_path, &mut files, &mut links)?;
         return Ok(files.iter().any(|relative| is_receipt(relative)));
     };
-    Ok(manifest.receipt_backup_path.is_some()
-        || manifest.files.iter().any(|entry| {
-            let (original_path, recorded) = recorded_original(entry);
-            // A path this can't place is refused by `restore_target` too.
-            inside_resource_folder(
-                resource_path,
-                &original_path,
-                recorded
-                    .as_ref()
-                    .map(|recorded| recorded.resource.as_path()),
-            )
-            .ok()
-            .flatten()
-            .is_some_and(|relative| is_receipt(&relative))
-        }))
+    Ok(manifest_holds_receipt(resource_path, manifest))
+}
+
+/// Whether `manifest` names a copy of RABBIT's receipt: a
+/// `receipt_backup_path`, or an entry whose original is the receipt (see
+/// [`set_holds_receipt`]).
+pub(crate) fn manifest_holds_receipt(resource_path: &Path, manifest: &BackupManifest) -> bool {
+    manifest.receipt_backup_path.is_some()
+        || manifest
+            .files
+            .iter()
+            .any(|entry| is_receipt_entry(resource_path, entry))
+}
+
+/// Whether `entry`'s original, read the way [`restore_target`] reads it,
+/// is RABBIT's receipt. A path this can't place is refused by
+/// `restore_target` too.
+pub(crate) fn is_receipt_entry(resource_path: &Path, entry: &BackupManifestFile) -> bool {
+    matches!(
+        entry_place(resource_path, entry),
+        Some(EntryPlace::Inside(relative)) if is_receipt(&relative)
+    )
+}
+
+/// Where a set's entry came from, and where a restore puts it back: inside
+/// the resource folder, by its path there, or outside it, by its absolute
+/// path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EntryPlace {
+    Inside(PathBuf),
+    Outside(PathBuf),
+}
+
+impl EntryPlace {
+    /// The place as a path a restore would write: inside the resource
+    /// folder at `resource_path`, or the outside path as recorded.
+    pub(crate) fn path(&self, resource_path: &Path) -> PathBuf {
+        match self {
+            Self::Inside(relative) => resource_path.join(relative),
+            Self::Outside(absolute) => absolute.clone(),
+        }
+    }
+}
+
+/// Where `entry`'s file came from, read the way a restore reads it (see
+/// [`recorded_original`] and [`inside_resource_folder`]), also for sets an
+/// older RABBIT wrote while it had a relative resource path. `None` for a
+/// relative path that isn't a plain path, which a restore refuses. Nothing
+/// on disk is read.
+pub(crate) fn entry_place(resource_path: &Path, entry: &BackupManifestFile) -> Option<EntryPlace> {
+    let (original_path, recorded) = recorded_original(entry);
+    match inside_resource_folder(
+        resource_path,
+        &original_path,
+        recorded
+            .as_ref()
+            .map(|recorded| recorded.resource.as_path()),
+    ) {
+        Ok(Some(relative)) => Some(EntryPlace::Inside(relative)),
+        Ok(None) => Some(EntryPlace::Outside(original_path)),
+        Err(_) => None,
+    }
+}
+
+/// Where in the set at `set_path` the copy is that a manifest recorded at
+/// `recorded_backup_path`, found the way a restore finds it (see
+/// [`restore_source`]): always inside the set, and never through a
+/// symbolic link or junction there. Only metadata is read.
+pub(crate) fn copy_in_set(set_path: &Path, recorded_backup_path: &Path) -> Result<PathBuf> {
+    restore_source(
+        set_path,
+        recorded_backup_path,
+        recorded_set_location(recorded_backup_path).as_ref(),
+    )
 }
 
 /// Where outside the resource folder a restore may put a file back.
@@ -2026,7 +2080,7 @@ fn refuse_two_files_for_one_place(plan: &RestorePlan) -> Result<()> {
 /// `path` as the file system tells places apart: by its components, with
 /// upper and lower case alike on Windows and macOS, and `\\?\C:\` read as
 /// `C:\`.
-fn same_place(path: &Path) -> Vec<String> {
+pub(crate) fn same_place(path: &Path) -> Vec<String> {
     comparable_components(path)
         .unwrap_or_else(|| vec![path.to_string_lossy().into_owned()])
         .into_iter()
@@ -2315,6 +2369,60 @@ fn restore_target(
     ))
 }
 
+/// Where a restore would put `entry` back, judged by the rules of
+/// [`restore_target`] but from the paths' text alone: inside the resource
+/// folder and outside RABBIT's own, or below a folder `outside` allows for
+/// the entry's package, by names that open as written. `None` where a
+/// restore refuses the file. Nothing on disk is read, so a path on another
+/// computer, such as `\\host\share\x.dll`, is never opened. The overview of
+/// the backups judges with this, and only looks at the places it returns.
+/// `outside` is called only for a place outside the resource folder.
+pub(crate) fn restore_place_by_text<'a>(
+    resource_path: &Path,
+    entry: &BackupManifestFile,
+    outside: impl FnOnce() -> &'a OutsideRestoreRules,
+) -> Option<PathBuf> {
+    let original_path = match entry_place(resource_path, entry)? {
+        EntryPlace::Inside(relative) => return inside_place_by_text(resource_path, &relative),
+        EntryPlace::Outside(original_path) => original_path,
+    };
+    let outside = outside();
+    let open_as_written = |below: &Path| {
+        below
+            .components()
+            .all(|component| opens_as_written(component.as_os_str()))
+    };
+    let shared_root = outside.shared_roots.iter().find_map(|root| {
+        relative_within(&original_path, root)
+            .filter(|below| is_plain_relative(below))
+            .map(|below| (root, below))
+    });
+    if let Some((root, below)) = shared_root {
+        return open_as_written(&below).then(|| root.join(below));
+    }
+    let package_id = entry.package_id.as_deref()?;
+    let (_, pattern) = outside
+        .vendor_added
+        .iter()
+        .find(|(owner, pattern)| owner == package_id && pattern_matches(pattern, &original_path))?;
+    let guard_root = pattern.guard.root.as_deref().unwrap_or(&pattern.base);
+    let below =
+        relative_within(&original_path, guard_root).filter(|below| is_plain_relative(below))?;
+    open_as_written(&below).then(|| guard_root.join(below))
+}
+
+/// Where a restore would put back a file whose place in the resource folder
+/// at `resource_path` is `relative`, a plain path, judged from its text as
+/// [`restore_target`] judges it: `None` in RABBIT's own folder, or with a
+/// name that may open another file or folder than it names.
+pub(crate) fn inside_place_by_text(resource_path: &Path, relative: &Path) -> Option<PathBuf> {
+    let refused = is_in_rabbit_folder(relative)
+        || relative
+            .components()
+            .any(|component| !opens_as_written(component.as_os_str()));
+    (!refused).then(|| resource_path.join(relative))
+}
+
 /// Where `original_path`, as a set records it, lies inside the resource
 /// folder: a relative path as it is, and an absolute one when it lies
 /// inside `resource_path`, or inside `recorded_resource`, where the
@@ -2553,7 +2661,7 @@ fn recorded_set_location(backup_path: &Path) -> Option<RecordedSet> {
 
 /// Whether `path` is a regular file, by its own metadata: never through a
 /// symbolic link or junction.
-fn is_real_file(path: &Path) -> bool {
+pub(crate) fn is_real_file(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
 }
 
@@ -2628,6 +2736,15 @@ fn restore_file(action: &mut RestoreBackupAction, backups: &mut BackupSetWriter)
     }
 }
 
+/// Whether `relative`, a path inside a set, names one of the set's own
+/// files rather than a backed-up one: the manifest, its staging file, or an
+/// origin note.
+pub(crate) fn is_set_bookkeeping(relative: &Path) -> bool {
+    relative == Path::new(BACKUP_MANIFEST_FILE)
+        || relative == Path::new(MANIFEST_STAGING_FILE)
+        || relative.to_string_lossy().ends_with(ORIGIN_SIDECAR_SUFFIX)
+}
+
 /// The files of a set, relative to it, leaving out the manifest, its
 /// staging file and the origin notes, none of which are backed-up files.
 /// Symbolic links and junctions go into `links` instead, by their path in
@@ -2651,11 +2768,7 @@ fn collect_relative_files(
             links.push(relative.to_path_buf());
         } else if kind.is_dir() {
             collect_relative_files(root, &path, files, links)?;
-        } else if kind.is_file()
-            && relative != Path::new(BACKUP_MANIFEST_FILE)
-            && relative != Path::new(MANIFEST_STAGING_FILE)
-            && !relative.to_string_lossy().ends_with(ORIGIN_SIDECAR_SUFFIX)
-        {
+        } else if kind.is_file() && !is_set_bookkeeping(relative) {
             files.push(relative.to_path_buf());
         }
     }
@@ -2697,7 +2810,7 @@ pub fn save_backup_manifest(backup_set: &Path, manifest: &BackupManifest) -> Res
 
 /// A set's manifest, or `None` when it has none. A manifest that is a
 /// symbolic link or junction is refused, never read.
-fn load_backup_manifest(backup_set: &Path) -> Result<Option<BackupManifest>> {
+pub(crate) fn load_backup_manifest(backup_set: &Path) -> Result<Option<BackupManifest>> {
     let path = backup_set.join(BACKUP_MANIFEST_FILE);
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -2768,7 +2881,7 @@ pub(crate) fn find_backup_set(resource_path: &Path, backup_id: &str) -> Result<F
 /// set too ([`RabbitError::BackupIdEndsInDotOrSpace`]), and still doesn't
 /// restore it: the id was most likely copied with the period after it, and
 /// Windows would have opened the set without them.
-fn set_to_restore(resource_path: &Path, backup_id: &str) -> Result<PathBuf> {
+pub(crate) fn set_to_restore(resource_path: &Path, backup_id: &str) -> Result<PathBuf> {
     let found = match find_backup_set(resource_path, backup_id) {
         Ok(found) => found,
         Err(RabbitError::InvalidBackupId(id)) => {
@@ -2883,7 +2996,7 @@ pub(crate) fn linked_backups_folder(resource_path: &Path) -> Option<PathBuf> {
 /// nothing is there or something other than a folder is, and an error when
 /// it is a symbolic link or junction, which is never followed. Rust reports
 /// a junction as a link on Windows.
-fn is_real_folder(path: &Path) -> Result<bool> {
+pub(crate) fn is_real_folder(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(RabbitError::BackupPathIsLink {
             path: path.to_path_buf(),
@@ -2902,7 +3015,7 @@ fn is_real_folder(path: &Path) -> Result<bool> {
 /// mustn't end in a dot or a space, which Windows drops, so `unix-1.` would
 /// open `unix-1`, nor be a device name such as `CON`, which opens the
 /// device in any folder.
-fn backup_id_is_well_formed(backup_id: &str) -> bool {
+pub(crate) fn backup_id_is_well_formed(backup_id: &str) -> bool {
     let mut components = Path::new(backup_id).components();
     let one_name = matches!(
         (components.next(), components.next()),
@@ -2940,7 +3053,7 @@ fn is_windows_device_name(name: &str) -> bool {
         )
 }
 
-fn backups_root(resource_path: &Path) -> PathBuf {
+pub(crate) fn backups_root(resource_path: &Path) -> PathBuf {
     resource_path.join("RABBIT").join("backups")
 }
 
@@ -2992,6 +3105,13 @@ fn is_plain_relative(path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
+/// Whether `relative`, a file's path in a set without a manifest, lies in
+/// the set's `external` folder: a file from outside the resource folder,
+/// which only a manifest can place.
+pub(crate) fn is_outside_file_in_layout(relative: &Path) -> bool {
+    first_component_is(relative, EXTERNAL_DIR)
+}
+
 fn first_component_is(path: &Path, name: &str) -> bool {
     comparable_components(path)
         .and_then(|parts| parts.into_iter().next())
@@ -3001,7 +3121,7 @@ fn first_component_is(path: &Path, name: &str) -> bool {
 /// Whether `relative`, a plain path inside the resource folder, leads into
 /// RABBIT's own folder, by a first name the file system may open as
 /// `RABBIT` (see [`may_open_as`]).
-fn is_in_rabbit_folder(relative: &Path) -> bool {
+pub(crate) fn is_in_rabbit_folder(relative: &Path) -> bool {
     matches!(
         relative.components().next(),
         Some(Component::Normal(name)) if may_open_as(name, "RABBIT")
@@ -3011,7 +3131,7 @@ fn is_in_rabbit_folder(relative: &Path) -> bool {
 /// Whether `relative`, a path inside the resource folder or a set, names
 /// RABBIT's receipt, `RABBIT/install-state.json`, by names the file system
 /// may open as those (see [`may_open_as`]).
-fn is_receipt(relative: &Path) -> bool {
+pub(crate) fn is_receipt(relative: &Path) -> bool {
     let receipt: Vec<Component<'_>> = Path::new(RECEIPT_RELATIVE_PATH).components().collect();
     let names: Vec<Component<'_>> = relative.components().collect();
     names.len() == receipt.len()
@@ -4249,6 +4369,7 @@ mod tests {
         let (resource, keymap) = keymap_set(dir.path());
         let as_root = BackupEnvironment {
             runs_as_root: &|| true,
+            ..BackupEnvironment::AS_USER
         };
         let before = snapshot(dir.path());
 
@@ -6155,10 +6276,11 @@ mod tests {
     }
 
     /// Through a `\\?\` path, a folder named like a device can be made in
-    /// `RABBIT/backups`, as on Windows 11. It is listed as no backup and
-    /// never looked into, and its name is still refused as an id, so the
-    /// device is never opened in its place. Where the folder can't be made,
-    /// the id is refused all the same.
+    /// `RABBIT/backups`, as on Windows 11. It is listed as no backup, after
+    /// the sets, since it has no date, and never looked into, and its name
+    /// is still refused as an id, so the device is never opened in its
+    /// place. Where the folder can't be made, the id is refused all the
+    /// same.
     #[cfg(windows)]
     #[test]
     fn a_folder_named_like_a_device_is_never_restored() {
@@ -6170,14 +6292,14 @@ mod tests {
         if made {
             let sets = list_backup_sets(&resource).unwrap();
             let ids: Vec<&str> = sets.iter().map(|set| set.id.as_str()).collect();
-            assert_eq!(ids, ["CON", "unix-1"]);
-            assert!(sets[0].manifest_path.is_none() && sets[0].files.is_empty());
-            let warning = sets[0].warning.as_deref().unwrap();
+            assert_eq!(ids, ["unix-1", "CON"]);
+            assert!(sets[1].manifest_path.is_none() && sets[1].files.is_empty());
+            let warning = sets[1].warning.as_deref().unwrap();
             assert!(
                 warning.contains("not one RABBIT gives a backup"),
                 "{warning}"
             );
-            assert!(sets[1].warning.is_none() && sets[1].manifest_path.is_some());
+            assert!(sets[0].warning.is_none() && sets[0].manifest_path.is_some());
         }
         let error = refused(dir.path(), &resource, "CON");
 

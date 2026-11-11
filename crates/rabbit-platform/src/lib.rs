@@ -61,7 +61,7 @@ pub use fs_security::{
 pub use jaws::{JawsInstall, detect_jaws_install, detect_jaws_install_under, is_jaws_installed};
 pub use komplete_kontrol::is_komplete_kontrol_installed;
 pub use links::{remove_empty_dir, remove_junction, remove_regular_file};
-pub use local_time::local_utc_offset_seconds;
+pub use local_time::{CivilDateTime, civil_date, civil_date_time, local_utc_offset_seconds};
 pub use locale::os_default_locale;
 pub use object_facts::{
     ObjectFacts, TrashFolderFacts, effective_uid_is_root, object_facts, user_trash_folder,

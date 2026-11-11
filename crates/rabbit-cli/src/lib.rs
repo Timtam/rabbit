@@ -6,6 +6,10 @@ use rabbit_core::artifact::{
     ArtifactDescriptor, CachedArtifact, default_cache_dir, download_artifacts,
     resolve_latest_artifacts_on,
 };
+use rabbit_core::backup_overview::{
+    BackupEntry, BackupGroup, BackupItem, BackupOverview, BackupSetKind, BackupSetOverview,
+    BackupSize, BackupStatus, RestoreScope, backup_overview, backup_overview_of,
+};
 use rabbit_core::cancel::CancelToken;
 use rabbit_core::detection::{DiscoveryOptions, detect_components, discover_installations};
 use rabbit_core::install::{InstallOptions, InstallReport, install_cached_artifacts};
@@ -44,8 +48,9 @@ use rabbit_core::report::{
 };
 use rabbit_core::resource::{ResourceInitActionKind, ResourceInitReport, initialize_resource_path};
 use rabbit_core::rollback::{
-    BackupSet, RestoreBackupActionKind, RestoreBackupOptions, RestoreBackupReport, RestoredPackage,
-    SkippedPackageReason, list_backup_sets, restore_backup_set,
+    BackupEntryState, KeymapOrigin, RestoreBackupActionKind, RestoreBackupOptions,
+    RestoreBackupReport, RestoredPackage, SkippedPackageReason, list_backup_sets,
+    restore_backup_set,
 };
 use rabbit_core::self_update::{
     ApplySelfUpdateOptions, DEFAULT_SELF_UPDATE_MANIFEST_URL, SelfUpdateApplyReport,
@@ -221,6 +226,10 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// List the backups RABBIT kept for a REAPER, newest first: when each
+    /// backup set was made, what made it, its size, and for each backup in
+    /// it whether it can be restored, with the command that restores it or
+    /// why not. Changes nothing.
     Backups {
         /// REAPER's resource folder — the one holding `reaper.ini`. Usually
         /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
@@ -228,10 +237,18 @@ enum Command {
         /// folder itself.
         #[arg(long)]
         resource_path: PathBuf,
+        /// Show only this backup set, with each file in it: where it came
+        /// from and whether its copy finished. Give the id exactly as
+        /// `backups` lists it, upper and lower case included.
+        #[arg(long)]
+        backup_id: Option<String>,
         /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
     },
+    /// Restore a backup set, or one package from an uninstall's backup set.
+    /// Without --apply it only shows what it would do. What a restore
+    /// replaces goes into a backup set of its own first.
     RestoreBackup {
         /// REAPER's resource folder — the one holding `reaper.ini`. Usually
         /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
@@ -239,7 +256,8 @@ enum Command {
         /// folder itself.
         #[arg(long)]
         resource_path: PathBuf,
-        /// Which backup set to roll back to, as listed by `backups`.
+        /// Which backup set to restore, as listed by `backups`, upper and
+        /// lower case included.
         #[arg(long)]
         backup_id: String,
         /// Restore only this package, from a backup set an uninstall wrote.
@@ -1167,16 +1185,30 @@ fn run_init_resource(command: Command) -> Result<(), Box<dyn std::error::Error>>
 fn run_backups(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     let Command::Backups {
         resource_path,
+        backup_id,
         json,
     } = command
     else {
         unreachable!("dispatched as Command::Backups");
     };
-    let backup_sets = list_backup_sets(&resource_path)?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&backup_sets)?);
-    } else {
-        print_backup_sets(&backup_sets);
+    match backup_id {
+        None if json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&list_backup_sets(&resource_path)?)?
+            );
+        }
+        None => print!("{}", backups_text(&backup_overview(&resource_path)?)),
+        Some(backup_id) => {
+            // Found as a restore finds it, and refused in the same words.
+            let overview = backup_overview_of(&resource_path, &backup_id)
+                .map_err(|error| cli_restore_error(error, &resource_path))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&overview.backup_sets())?);
+            } else {
+                print!("{}", backup_set_details_text(&overview));
+            }
+        }
     }
     Ok(())
 }
@@ -2483,31 +2515,430 @@ fn print_resource_init_report(report: &ResourceInitReport) {
     }
 }
 
-fn print_backup_sets(backup_sets: &[BackupSet]) {
-    if backup_sets.is_empty() {
-        println!("No backup sets found.");
-        return;
+/// What `rabbit backups` prints: each backup set, newest first, with when
+/// it was made, what made it, its size and each backup in it, and then
+/// what couldn't be read and the size of them all.
+fn backups_text(overview: &BackupOverview) -> String {
+    let mut out = String::new();
+    if overview.sets.is_empty() {
+        out.push_str("No backup sets found.\n");
     }
+    let names = package_names();
+    for set in &overview.sets {
+        write_backup_set_heading(&mut out, set);
+        write_backups_in_set(&mut out, overview, set, &names);
+    }
+    write_backup_overview_footer(&mut out, overview);
+    out
+}
 
-    for backup_set in backup_sets {
-        println!("{}", backup_set.id);
-        println!("  Path: {}", backup_set.path.display());
-        if let Some(created_at) = &backup_set.created_at {
-            println!("  Created: {created_at}");
+/// What `rabbit backups --backup-id` prints: the set as `backups` lists
+/// it, then where it is, its manifest and any copy of RABBIT's records in
+/// it, and each file it holds with where it came from and whether its copy
+/// finished. A set that is also an unfinished deletion is listed twice.
+fn backup_set_details_text(overview: &BackupOverview) -> String {
+    let mut out = String::new();
+    let names = package_names();
+    for set in &overview.sets {
+        write_backup_set_heading(&mut out, set);
+        let _ = writeln!(out, "  Path: {}", set.path.display());
+        match &set.manifest_path {
+            Some(path) => {
+                let _ = writeln!(out, "  Manifest: {}", path.display());
+            }
+            None if set.kind == BackupSetKind::NoManifest => {
+                out.push_str("  Manifest: none\n");
+            }
+            None => {}
         }
-        if let Some(reason) = &backup_set.reason {
-            println!("  Reason: {reason}");
+        if let Some(copy) = &set.receipt_copy {
+            let _ = writeln!(out, "  Copy of RABBIT's records: {}", copy.display());
         }
-        if let Some(manifest_path) = &backup_set.manifest_path {
-            println!("  Manifest: {}", manifest_path.display());
+        write_backups_in_set(&mut out, overview, set, &names);
+        match &set.manifest {
+            Some(manifest) => {
+                let _ = writeln!(out, "  Files: {}", manifest.files.len());
+                for entry in &manifest.files {
+                    let package = entry
+                        .package_id
+                        .as_deref()
+                        .map_or_else(|| "no package".to_string(), one_line);
+                    let state = match entry.state {
+                        BackupEntryState::Done => "copy finished",
+                        BackupEntryState::Pending => "copy not finished",
+                    };
+                    let _ = writeln!(
+                        out,
+                        "    {}: {package}, {state}, {}",
+                        one_line(&entry.original_path.display().to_string()),
+                        size_text(entry.size)
+                    );
+                }
+            }
+            None if set.kind != BackupSetKind::NotABackup => {
+                let _ = writeln!(
+                    out,
+                    "  Files, by their place in the set: {}",
+                    set.files.len()
+                );
+                for file in &set.files {
+                    let _ = writeln!(out, "    {}", one_line(&file.display().to_string()));
+                }
+            }
+            None => {}
         }
-        if let Some(warning) = &backup_set.warning {
-            println!("  Warning: {warning}");
+        for link in &set.links {
+            let _ = writeln!(
+                out,
+                "    {}: a symbolic link or junction, which RABBIT never follows",
+                one_line(&link.display().to_string())
+            );
         }
-        println!("  Files: {}", backup_set.files.len());
-        for file in &backup_set.files {
-            println!("    {}", file.display());
+    }
+    write_backup_overview_footer(&mut out, overview);
+    out
+}
+
+/// A set's id, then when it was made, what made it, its size, and what
+/// couldn't be read of it.
+fn write_backup_set_heading(out: &mut String, set: &BackupSetOverview) {
+    let _ = writeln!(out, "{}", one_line(&set.id));
+    let _ = writeln!(out, "  Made: {}", backup_date_text(set.created_unix));
+    let _ = writeln!(out, "  Kind: {}", backup_set_kind_text(set));
+    let _ = writeln!(out, "  Size: {}", size_text(set.size));
+    if let Some(warning) = &set.warning {
+        let _ = writeln!(out, "  Warning: {warning}");
+    }
+}
+
+/// Each backup in `set`: what it is and its status, then the command that
+/// restores it, or why it can't be restored.
+fn write_backups_in_set(
+    out: &mut String,
+    overview: &BackupOverview,
+    set: &BackupSetOverview,
+    names: &std::collections::BTreeMap<String, String>,
+) {
+    let resource = overview.resource_path.display();
+    for entry in overview.entries_in(set) {
+        let _ = writeln!(
+            out,
+            "  {}: {}.",
+            backup_label(entry, names),
+            backup_status_text(entry)
+        );
+        let id = &set.id;
+        // A command goes into a shell as printed, so it is printed only
+        // with names RABBIT itself gives, which need no quotes.
+        let package_id = entry.item.package_id();
+        let line = match (entry.restore_scope, package_id) {
+            (Some(_), _) if !is_plain_name(id) => {
+                "The backup set's name needs quotes in a command, so RABBIT prints none."
+                    .to_string()
+            }
+            (Some(RestoreScope::Package), Some(package_id)) if !is_plain_name(package_id) => {
+                "The package's id needs quotes in a command, so RABBIT prints none.".to_string()
+            }
+            (Some(RestoreScope::Package), Some(package_id)) => format!(
+                "rabbit restore-backup --resource-path \"{resource}\" --backup-id {id} \
+                 --package {package_id} --apply"
+            ),
+            (Some(_), _) => format!(
+                "rabbit restore-backup --resource-path \"{resource}\" --backup-id {id} --apply"
+            ),
+            (None, _) => backup_reason_text(entry, set, &overview.resource_path, names),
+        };
+        let _ = writeln!(out, "    {line}");
+    }
+}
+
+/// Whether `name`, a set id or package id, is made only of what RABBIT
+/// itself puts in one: ASCII letters and digits, `-`, `_` and `.`. Such a
+/// name means the same in every shell without quotes.
+fn is_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// `text` on one line: a control character, such as a line break in a
+/// folder's name, reads as `?`, so it can't start a line of its own.
+fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
+/// What couldn't be read beyond the sets, then how big they all are.
+fn write_backup_overview_footer(out: &mut String, overview: &BackupOverview) {
+    let listed: Vec<&Path> = overview.sets.iter().map(|set| set.path.as_path()).collect();
+    for unreadable in &overview.unreadable {
+        if !listed.contains(&unreadable.path.as_path()) {
+            let _ = writeln!(
+                out,
+                "Not listed: {}: {}",
+                unreadable.path.display(),
+                unreadable.reason
+            );
         }
+    }
+    if let Some(error) = &overview.receipt_error {
+        let _ = writeln!(out, "RABBIT's records couldn't be read: {error}");
+    }
+    if !overview.sets.is_empty() {
+        let count = overview.sets.len();
+        let _ = writeln!(
+            out,
+            "In all: {count} backup {}, {}.",
+            if count == 1 { "set" } else { "sets" },
+            size_text(overview.total_size)
+        );
+    }
+}
+
+/// Each package's name, by its id, for the backups listing. A package
+/// RABBIT no longer knows is named by its id.
+fn package_names() -> std::collections::BTreeMap<String, String> {
+    rabbit_core::package::embedded_package_manifest()
+        .packages
+        .into_iter()
+        .map(|spec| (spec.id, spec.display_name))
+        .collect()
+}
+
+/// What made a set, in words.
+fn backup_set_kind_text(set: &BackupSetOverview) -> String {
+    match set.kind {
+        BackupSetKind::Uninstall => "an uninstall's backup of what it removed".to_string(),
+        BackupSetKind::Update => {
+            "an update's backup of the earlier versions it replaced".to_string()
+        }
+        BackupSetKind::Keymap => "the key map OSARA's key map replaced".to_string(),
+        BackupSetKind::BeforeRestore => "a restore's backup of the files it replaced".to_string(),
+        BackupSetKind::Records => {
+            "a copy of RABBIT's records, which older versions made after vendor installers ran"
+                .to_string()
+        }
+        BackupSetKind::Unknown => format!(
+            "made by another version of RABBIT, for a reason this one doesn't know ({})",
+            set.manifest
+                .as_ref()
+                .map_or("", |manifest| manifest.reason.as_str())
+        ),
+        BackupSetKind::NoManifest => "a backup set without a manifest".to_string(),
+        BackupSetKind::Damaged => "a backup set whose manifest can't be read".to_string(),
+        BackupSetKind::Deleting => {
+            "an unfinished deletion, in RABBIT's backups-deleting folder".to_string()
+        }
+        BackupSetKind::NotABackup => "not a backup RABBIT made".to_string(),
+    }
+}
+
+/// What a backup holds: the package and its version, the key map, or the
+/// whole set.
+fn backup_label(entry: &BackupEntry, names: &std::collections::BTreeMap<String, String>) -> String {
+    match &entry.item {
+        BackupItem::Package { package_id, .. } => {
+            let mut label = names
+                .get(package_id)
+                .cloned()
+                .unwrap_or_else(|| one_line(package_id));
+            if let Some(version) = &entry.version {
+                let _ = write!(label, " {version}");
+            }
+            if entry.with_settings == Some(true) {
+                label.push_str(" with its settings");
+            }
+            if let Some(newer) = &entry.replaced_by {
+                let _ = write!(label, ", replaced by {newer}");
+            }
+            label
+        }
+        BackupItem::Keymap { .. } => match entry.keymap_origin {
+            Some(KeymapOrigin::OwnKeymap) => "Your key map",
+            Some(KeymapOrigin::UnchangedOsara) => "OSARA's key map",
+            Some(KeymapOrigin::DefaultKeys) => "REAPER's default keys",
+            Some(KeymapOrigin::Unknown) | None => "Key map",
+        }
+        .to_string(),
+        // The set's kind and warning say already that it is no backup.
+        BackupItem::Set { .. } => "Everything in it".to_string(),
+        BackupItem::Deleting { .. } => "What is left of it".to_string(),
+        BackupItem::Records { .. } => "A copy of RABBIT's records".to_string(),
+    }
+}
+
+/// A backup's status in words. One whose status says it can be restored
+/// while `restore-backup` doesn't take it yet, an earlier version, says so.
+fn backup_status_text(entry: &BackupEntry) -> &'static str {
+    match entry.status {
+        status if status.can_restore() && entry.restore_scope.is_none() => {
+            if entry.group == BackupGroup::EarlierVersions {
+                "can't be restored yet"
+            } else {
+                "can't be restored"
+            }
+        }
+        BackupStatus::CanRestore => "can be restored",
+        BackupStatus::StoppedPartway => {
+            "the uninstall stopped partway, so some of its files are only in this backup; it can \
+             be restored"
+        }
+        BackupStatus::AlreadyBack => "already back; restoring puts its files back again",
+        BackupStatus::InstalledAgain => "installed again since",
+        BackupStatus::NotComplete => "not complete",
+        BackupStatus::NothingInIt => "nothing of it is in this backup",
+        BackupStatus::VersionUnknown => "version unknown",
+        BackupStatus::OtherLanguagePack => "another package that replaces it is installed",
+        BackupStatus::PartMissing => "part of it is missing",
+        BackupStatus::RecordsUnreadable => "RABBIT can't read its records",
+        BackupStatus::NotHere if entry.restore_scope.is_some() => {
+            "can be restored only as a whole set"
+        }
+        BackupStatus::NotHere => "can't be restored",
+        BackupStatus::NotYours => "belongs to another account",
+        BackupStatus::NotABackup => "can't be restored or deleted",
+    }
+}
+
+/// Why `rabbit restore-backup` doesn't restore a backup, in one line.
+fn backup_reason_text(
+    entry: &BackupEntry,
+    set: &BackupSetOverview,
+    resource_path: &Path,
+    names: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let package_id = entry.item.package_id().unwrap_or_default();
+    let name = names
+        .get(package_id)
+        .cloned()
+        .unwrap_or_else(|| one_line(package_id));
+    let missing = || {
+        entry
+            .missing_path
+            .as_ref()
+            .map(|path| one_line(&path.display().to_string()))
+            .unwrap_or_default()
+    };
+    if let Some(path) = &entry.refused_path {
+        return format!(
+            "RABBIT won't put back {}, so a restore would stop before changing anything.",
+            one_line(&path.display().to_string())
+        );
+    }
+    let can_restore = entry.status.can_restore();
+    match entry.status {
+        // The overview judges earlier versions by the swap's rules, which
+        // restore doesn't follow yet.
+        _ if can_restore && entry.group == BackupGroup::EarlierVersions => {
+            "RABBIT can't restore earlier versions yet.".to_string()
+        }
+        _ if can_restore && set.kind == BackupSetKind::Update => {
+            "RABBIT doesn't restore an update's backup set yet.".to_string()
+        }
+        _ if can_restore && set.holds_receipt => {
+            "Its backup set holds a copy of RABBIT's records, so RABBIT doesn't restore it."
+                .to_string()
+        }
+        _ if can_restore && set.warning.is_some() => {
+            "Part of its backup set can't be read.".to_string()
+        }
+        // A key map comes back only with its whole set so far.
+        _ if can_restore && matches!(entry.item, BackupItem::Keymap { .. }) => {
+            "RABBIT can't restore a key map on its own yet, and its backup set holds other files \
+             too."
+                .to_string()
+        }
+        _ if can_restore => "RABBIT can't restore it.".to_string(),
+        BackupStatus::InstalledAgain if is_plain_name(package_id) => format!(
+            "You have {name} again. To go back to this copy, uninstall that one first (rabbit \
+             uninstall --resource-path \"{}\" --package {package_id} --apply), then restore.",
+            resource_path.display()
+        ),
+        BackupStatus::InstalledAgain => format!(
+            "You have {name} again. To go back to this copy, uninstall that one first, then \
+             restore."
+        ),
+        BackupStatus::NotComplete => format!("Part of it isn't in this backup: {}.", missing()),
+        BackupStatus::NothingInIt => {
+            "None of its files are in this backup, so there is nothing to restore.".to_string()
+        }
+        BackupStatus::VersionUnknown => "RABBIT doesn't know which version this was.".to_string(),
+        BackupStatus::OtherLanguagePack => {
+            "Another package whose install removes this one is installed.".to_string()
+        }
+        BackupStatus::PartMissing => format!("A file is missing from the backup: {}.", missing()),
+        BackupStatus::RecordsUnreadable => {
+            "RABBIT can't read its records, so it can't tell whether this backup fits them."
+                .to_string()
+        }
+        BackupStatus::NotYours => {
+            "It belongs to another account, so RABBIT leaves it alone.".to_string()
+        }
+        BackupStatus::NotABackup => "RABBIT never looks inside it.".to_string(),
+        _ => match set.kind {
+            BackupSetKind::Records => "RABBIT never copies its records back.".to_string(),
+            BackupSetKind::Damaged => "Its manifest can't be read.".to_string(),
+            BackupSetKind::Deleting => {
+                "Its deletion started and didn't finish, so part of it may be gone.".to_string()
+            }
+            _ if set.holds_receipt => {
+                "It holds a copy of RABBIT's records, which RABBIT never copies back.".to_string()
+            }
+            _ if set.warning.is_some() => "Part of it can't be read.".to_string(),
+            BackupSetKind::NoManifest => {
+                "Without a manifest, RABBIT can't tell where all of its files go.".to_string()
+            }
+            BackupSetKind::Update => {
+                "RABBIT doesn't restore an update's backup set yet.".to_string()
+            }
+            _ => "RABBIT can't restore it.".to_string(),
+        },
+    }
+}
+
+/// When a set was made, in local time and in UTC, or "date unknown".
+fn backup_date_text(created_unix: Option<u64>) -> String {
+    let offset = created_unix
+        .and_then(|seconds| {
+            std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(seconds))
+        })
+        .and_then(|at| rabbit_platform::local_utc_offset_seconds(at).ok());
+    backup_date_text_with(created_unix, offset)
+}
+
+/// [`backup_date_text`], with local time `offset` seconds ahead of UTC, or
+/// UTC alone without one. An offset of 0 says UTC alone too.
+fn backup_date_text_with(created_unix: Option<u64>, offset: Option<i32>) -> String {
+    let plain = |at: rabbit_platform::CivilDateTime| {
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}",
+            at.year, at.month, at.day, at.hour, at.minute
+        )
+    };
+    let Some(seconds) = created_unix.and_then(|seconds| i64::try_from(seconds).ok()) else {
+        return "date unknown".to_string();
+    };
+    let Some(utc) = rabbit_platform::civil_date_time(seconds, 0) else {
+        return "date unknown".to_string();
+    };
+    match offset
+        .filter(|offset| *offset != 0)
+        .and_then(|offset| rabbit_platform::civil_date_time(seconds, offset))
+    {
+        Some(local) => format!("{} local time, {} UTC", plain(local), plain(utc)),
+        None => format!("{} UTC", plain(utc)),
+    }
+}
+
+/// A size in whole KB or MB, or GB with one decimal, in steps of 1024.
+fn size_text(bytes: u64) -> String {
+    match BackupSize::of(bytes) {
+        BackupSize::UnderOneKb => "under 1 KB".to_string(),
+        BackupSize::Kb(kb) => format!("{kb} KB"),
+        BackupSize::Mb(mb) => format!("{mb} MB"),
+        BackupSize::Gb { whole, tenth } => format!("{whole}.{tenth} GB"),
     }
 }
 
@@ -7993,5 +8424,784 @@ mod tests {
             super::package_operation_message(&other, Some(&german)),
             "The English text of the report"
         );
+    }
+
+    /// A resource folder `REAPER` in `dir` with one backup set of each
+    /// common kind, dated by hand so their order is known: an uninstall of
+    /// SWS (300), an update of ReaPack (200), the key map OSARA's replaced
+    /// (100), and a set with a damaged manifest (`unix-50`). SWS can be
+    /// restored by package and the key map as a whole set; ReaPack is an
+    /// earlier version, which restore doesn't take yet.
+    fn resource_with_backups(dir: &std::path::Path) -> PathBuf {
+        use rabbit_core::rollback::{
+            BackupManifest, BackupPackageRecord, BackupSetWriter, ReplacedPackageRecord,
+            save_backup_manifest,
+        };
+        let resource = dir.join("REAPER");
+        let plugins = resource.join("UserPlugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let sws = plugins.join("reaper_sws-x64.dll");
+        let reapack = plugins.join("reaper_reapack-x64.dll");
+        let keymap = resource.join("reaper-kb.ini");
+        std::fs::write(&sws, b"sws").unwrap();
+        std::fs::write(&reapack, b"reapack 1.2.4").unwrap();
+        std::fs::write(&keymap, b"own keys").unwrap();
+        let receipt = |id: &str, version: &str| rabbit_core::receipt::PackageReceipt {
+            id: id.to_string(),
+            version: Some(rabbit_core::version::Version::parse(version).unwrap()),
+            source_url: None,
+            source_sha256: None,
+            variant: None,
+            channel: None,
+            installed_files: Vec::new(),
+            installed_at: None,
+            rabbit_version: None,
+            architecture: None,
+            vendor_added_files: Vec::new(),
+        };
+
+        let mut uninstall = BackupSetWriter::new(&resource, "uninstall-unix-300", "uninstall");
+        uninstall
+            .record_package(
+                "sws",
+                BackupPackageRecord {
+                    receipt: Some(receipt("sws", "2.14.0.7")),
+                    langpack_before: None,
+                    with_settings: Some(true),
+                },
+            )
+            .unwrap();
+        uninstall.move_file(Some("sws"), &sws, None, false).unwrap();
+        let mut update = BackupSetWriter::new(&resource, "unix-200", "install-replacement");
+        update
+            .record_replaced(
+                "reapack",
+                ReplacedPackageRecord {
+                    receipt: Some(receipt("reapack", "1.2.4")),
+                    replaced_by: Some(rabbit_core::version::Version::parse("1.2.5").unwrap()),
+                },
+            )
+            .unwrap();
+        update.copy_file(Some("reapack"), &reapack).unwrap();
+        let mut keys = BackupSetWriter::new(
+            &resource,
+            "unattended-unix-100-000000000",
+            "osara-keymap-replacement",
+        );
+        keys.set_keymap_origin(rabbit_core::rollback::KeymapOrigin::OwnKeymap)
+            .unwrap();
+        keys.copy_file(Some("osara"), &keymap).unwrap();
+        for (set, seconds) in [
+            (uninstall.path(), 300),
+            (update.path(), 200),
+            (keys.path(), 100),
+        ] {
+            let file = set.join("backup-manifest.json");
+            let mut manifest: BackupManifest =
+                serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+            manifest.created_unix = Some(seconds);
+            save_backup_manifest(set, &manifest).unwrap();
+        }
+        let damaged = resource.join("RABBIT").join("backups").join("unix-50");
+        std::fs::create_dir_all(&damaged).unwrap();
+        std::fs::write(damaged.join("backup-manifest.json"), b"{ not json").unwrap();
+        std::fs::write(&reapack, b"reapack 1.2.5").unwrap();
+        resource
+    }
+
+    fn backups_args(resource: &std::path::Path, more: &[&str]) -> Vec<std::ffi::OsString> {
+        let mut args: Vec<std::ffi::OsString> = vec![
+            "rabbit".into(),
+            "backups".into(),
+            "--resource-path".into(),
+            resource.as_os_str().to_owned(),
+        ];
+        args.extend(more.iter().map(Into::into));
+        args
+    }
+
+    /// `rabbit backups` lists the sets newest first, each with when it was
+    /// made, what made it and its size, and each backup in it with its
+    /// package, version and status, then the exact command that restores
+    /// it, quoting the resource folder, or why it can't be restored.
+    #[test]
+    fn backups_lists_newest_first_and_says_how_each_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = resource_with_backups(dir.path());
+        let overview = rabbit_core::backup_overview::backup_overview(&resource).unwrap();
+
+        let text = super::backups_text(&overview);
+
+        let quoted = format!("--resource-path \"{}\"", resource.display());
+        let headings: Vec<&str> = text.lines().filter(|line| !line.starts_with(' ')).collect();
+        assert_eq!(
+            headings,
+            [
+                "uninstall-unix-300",
+                "unix-200",
+                "unattended-unix-100-000000000",
+                "unix-50",
+                &*format!(
+                    "In all: 4 backup sets, {}.",
+                    super::size_text(overview.total_size)
+                ),
+            ]
+        );
+        for expected in [
+            "  Kind: an uninstall's backup of what it removed",
+            "  SWS Extension 2.14.0.7 with its settings: can be restored.",
+            &format!(
+                "    rabbit restore-backup {quoted} --backup-id uninstall-unix-300 --package sws \
+                 --apply"
+            ),
+            "  Kind: an update's backup of the earlier versions it replaced",
+            "  ReaPack 1.2.4, replaced by 1.2.5: can't be restored yet.",
+            "    RABBIT can't restore earlier versions yet.",
+            "  Your key map: can be restored.",
+            &format!(
+                "    rabbit restore-backup {quoted} --backup-id unattended-unix-100-000000000 \
+                 --apply"
+            ),
+            "  Kind: a backup set whose manifest can't be read",
+            "  Everything in it: can't be restored.",
+            "    Its manifest can't be read.",
+            "  Size: under 1 KB",
+        ] {
+            assert!(
+                text.lines().any(|line| line == expected),
+                "{expected:?} missing from:\n{text}"
+            );
+        }
+        // Dates in local time, which differs from computer to computer, and
+        // in UTC.
+        let made: Vec<&str> = text
+            .lines()
+            .filter(|line| line.starts_with("  Made: "))
+            .collect();
+        assert_eq!(made.len(), 4, "{text}");
+        assert!(made[0].ends_with("1970-01-01 00:05 UTC"), "{text}");
+        assert!(made[3].ends_with("1970-01-01 00:00 UTC"), "{text}");
+        assert!(
+            text.contains("  Warning: the backup manifest could not be read"),
+            "{text}"
+        );
+
+        // The command itself runs, and so does an empty REAPER.
+        super::run_args(backups_args(&resource, &[])).unwrap();
+        let fresh = dir.path().join("Fresh");
+        std::fs::create_dir_all(&fresh).unwrap();
+        let empty = rabbit_core::backup_overview::backup_overview(&fresh).unwrap();
+        assert_eq!(super::backups_text(&empty), "No backup sets found.\n");
+        assert!(!fresh.join("RABBIT").exists());
+    }
+
+    /// `rabbit backups --json` keeps printing the list of sets with the
+    /// fields it always had, meaning what they always meant, and adds what
+    /// the overview knows, newest first.
+    #[test]
+    fn backups_json_keeps_its_fields_and_adds_the_new_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = resource_with_backups(dir.path());
+
+        let sets = rabbit_core::rollback::list_backup_sets(&resource).unwrap();
+        let json = serde_json::to_value(&sets).unwrap();
+
+        let ids: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|set| set["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "uninstall-unix-300",
+                "unix-200",
+                "unattended-unix-100-000000000",
+                "unix-50"
+            ]
+        );
+        let uninstall = &json[0];
+        let set = resource
+            .join("RABBIT")
+            .join("backups")
+            .join("uninstall-unix-300");
+        assert_eq!(uninstall["path"], serde_json::json!(set));
+        assert_eq!(uninstall["created_at"], "uninstall-unix-300");
+        assert_eq!(uninstall["reason"], "uninstall");
+        assert_eq!(
+            uninstall["manifest_path"],
+            serde_json::json!(set.join("backup-manifest.json"))
+        );
+        assert_eq!(
+            uninstall["files"],
+            serde_json::json!([PathBuf::from("UserPlugins").join("reaper_sws-x64.dll")])
+        );
+        assert!(uninstall.get("warning").is_none());
+        assert_eq!(uninstall["kind"], "uninstall");
+        assert_eq!(uninstall["created_unix"], 300);
+        assert!(uninstall["size"].as_u64().unwrap() > 3);
+        assert_eq!(uninstall["fingerprint"]["kind"], "manifest");
+        let item = &uninstall["items"][0];
+        assert_eq!(
+            item["item"],
+            serde_json::json!({"kind": "package", "set_id": "uninstall-unix-300", "package_id": "sws"})
+        );
+        assert_eq!(item["group"], "uninstalled-software");
+        assert_eq!(item["status"], "can-restore");
+        assert_eq!(item["version"], "2.14.0.7");
+        assert_eq!(item["with_settings"], true);
+        assert_eq!(item["only_copy"], true);
+        assert_eq!(item["restore_scope"], "package");
+        let damaged = &json[3];
+        assert_eq!(damaged["kind"], "damaged");
+        assert!(damaged["manifest_path"].is_null() && damaged["reason"].is_null());
+        assert!(damaged["warning"].as_str().unwrap().contains("manifest"));
+        assert_eq!(damaged["created_unix"], 50);
+
+        super::run_args(backups_args(&resource, &["--json"])).unwrap();
+        super::run_args(backups_args(
+            &resource,
+            &["--backup-id", "unix-200", "--json"],
+        ))
+        .unwrap();
+    }
+
+    /// `rabbit backups --backup-id` shows one set, found as a restore finds
+    /// it: its backups, and each file with where it came from and whether
+    /// its copy finished, and a copy of RABBIT's records if it holds one.
+    /// An id that names nothing says so as `restore-backup` does.
+    #[test]
+    fn backups_with_an_id_shows_one_set_and_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = resource_with_backups(dir.path());
+
+        let overview =
+            rabbit_core::backup_overview::backup_overview_of(&resource, "uninstall-unix-300")
+                .unwrap();
+        let text = super::backup_set_details_text(&overview);
+
+        let set = resource
+            .join("RABBIT")
+            .join("backups")
+            .join("uninstall-unix-300");
+        let original = PathBuf::from("UserPlugins").join("reaper_sws-x64.dll");
+        for expected in [
+            "uninstall-unix-300".to_string(),
+            format!("  Path: {}", set.display()),
+            format!("  Manifest: {}", set.join("backup-manifest.json").display()),
+            "  SWS Extension 2.14.0.7 with its settings: can be restored.".to_string(),
+            "  Files: 1".to_string(),
+            format!("    {}: sws, copy finished, under 1 KB", original.display()),
+        ] {
+            assert!(
+                text.lines().any(|line| line == expected),
+                "{expected:?} missing from:\n{text}"
+            );
+        }
+        assert!(!text.contains("unix-200"), "{text}");
+        assert!(!text.contains("records"), "{text}");
+
+        // A copy of RABBIT's records in the set is named.
+        let update = resource.join("RABBIT").join("backups").join("unix-200");
+        let copy = update.join("RABBIT").join("install-state.json");
+        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        std::fs::write(&copy, b"{\"schema_version\":1,\"packages\":{}}").unwrap();
+        let file = update.join("backup-manifest.json");
+        let mut manifest: rabbit_core::rollback::BackupManifest =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        manifest.receipt_backup_path = Some(copy.clone());
+        rabbit_core::rollback::save_backup_manifest(&update, &manifest).unwrap();
+        let overview =
+            rabbit_core::backup_overview::backup_overview_of(&resource, "unix-200").unwrap();
+        let text = super::backup_set_details_text(&overview);
+        assert!(
+            text.lines()
+                .any(|line| line == format!("  Copy of RABBIT's records: {}", copy.display())),
+            "{text}"
+        );
+
+        let error = super::run_args(backups_args(&resource, &["--backup-id", "unix-9"]))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            format!(
+                "The backup unix-9 was deleted or never existed. rabbit backups --resource-path \
+                 \"{}\" lists what is left.",
+                resource.display()
+            )
+        );
+        let error = super::run_args(backups_args(&resource, &["--backup-id", "UNIX-200"]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("there is one named unix-200"), "{error}");
+        super::run_args(backups_args(
+            &resource,
+            &["--backup-id", "uninstall-unix-300"],
+        ))
+        .unwrap();
+    }
+
+    /// A backup the restore can't take says why in one line: installed
+    /// again since, with the command that uninstalls the newer copy.
+    #[test]
+    fn backups_says_why_a_backup_cannot_be_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = resource_with_backups(dir.path());
+        let mut state = rabbit_core::receipt::InstallState::default();
+        state.packages.insert(
+            "sws".to_string(),
+            rabbit_core::receipt::PackageReceipt {
+                id: "sws".to_string(),
+                version: Some(rabbit_core::version::Version::parse("2.15").unwrap()),
+                source_url: None,
+                source_sha256: None,
+                variant: None,
+                channel: None,
+                installed_files: Vec::new(),
+                installed_at: None,
+                rabbit_version: None,
+                architecture: None,
+                vendor_added_files: Vec::new(),
+            },
+        );
+        rabbit_core::receipt::save_install_state(&resource, &state).unwrap();
+
+        let overview = rabbit_core::backup_overview::backup_overview(&resource).unwrap();
+        let text = super::backups_text(&overview);
+
+        let lines: Vec<&str> = text.lines().collect();
+        let row = lines
+            .iter()
+            .position(|line| {
+                *line == "  SWS Extension 2.14.0.7 with its settings: installed again since."
+            })
+            .unwrap_or_else(|| panic!("{text}"));
+        assert_eq!(
+            lines[row + 1],
+            format!(
+                "    You have SWS Extension again. To go back to this copy, uninstall that one first \
+                 (rabbit uninstall --resource-path \"{}\" --package sws --apply), then restore.",
+                resource.display()
+            )
+        );
+        assert!(!text.contains("--backup-id uninstall-unix-300"), "{text}");
+    }
+
+    #[test]
+    fn backup_dates_read_in_local_time_and_utc() {
+        use super::backup_date_text_with;
+        // 2024-02-29 12:00 UTC.
+        let leap_day = Some(1_709_208_000);
+        assert_eq!(
+            backup_date_text_with(leap_day, Some(3600)),
+            "2024-02-29 13:00 local time, 2024-02-29 12:00 UTC"
+        );
+        assert_eq!(
+            backup_date_text_with(leap_day, Some(-13 * 3600)),
+            "2024-02-28 23:00 local time, 2024-02-29 12:00 UTC"
+        );
+        assert_eq!(
+            backup_date_text_with(leap_day, Some(0)),
+            "2024-02-29 12:00 UTC"
+        );
+        assert_eq!(
+            backup_date_text_with(leap_day, None),
+            "2024-02-29 12:00 UTC"
+        );
+        assert_eq!(backup_date_text_with(None, Some(3600)), "date unknown");
+        assert_eq!(backup_date_text_with(Some(u64::MAX), None), "date unknown");
+        // This computer's own time zone gives some date for any moment.
+        assert!(super::backup_date_text(Some(2_208_988_800)).contains("2040-01-01"));
+    }
+
+    #[test]
+    fn backup_sizes_read_in_whole_kb_and_mb_and_gb_with_a_tenth() {
+        for (bytes, text) in [
+            (0, "under 1 KB"),
+            (1023, "under 1 KB"),
+            (38 * 1024, "38 KB"),
+            (250 * 1024 * 1024, "250 MB"),
+            (3 * 1024 * 1024 * 1024 / 2, "1.5 GB"),
+        ] {
+            assert_eq!(super::size_text(bytes), text, "{bytes}");
+        }
+    }
+
+    /// Both backup commands, and each of their options, have help text, and
+    /// `rabbit --help` names both.
+    #[test]
+    fn the_backup_commands_have_help_text() {
+        use clap::CommandFactory;
+        let mut cli = Cli::command();
+        let overview = cli.render_help().to_string();
+        assert!(
+            overview.contains("List the backups RABBIT kept for a REAPER"),
+            "{overview}"
+        );
+        assert!(
+            overview.contains("Restore a backup set, or one package"),
+            "{overview}"
+        );
+        for (name, texts) in [
+            (
+                "backups",
+                &[
+                    "newest first",
+                    "Show only this backup set",
+                    "REAPER's resource folder",
+                    "Print the result as JSON",
+                ][..],
+            ),
+            (
+                "restore-backup",
+                &[
+                    "What a restore replaces goes into a backup set of its own first",
+                    "Which backup set to restore, as listed by `backups`",
+                    "Restore only this package",
+                    "Actually make the changes",
+                ][..],
+            ),
+        ] {
+            let help = cli
+                .find_subcommand_mut(name)
+                .unwrap()
+                .render_long_help()
+                .to_string();
+            for text in texts {
+                assert!(
+                    help.contains(text),
+                    "{name}: {text:?} missing from:\n{help}"
+                );
+            }
+            assert!(!help.contains("roll back"), "{name}: {help}");
+        }
+
+        let parsed = Cli::try_parse_from([
+            "rabbit",
+            "backups",
+            "--resource-path",
+            "R",
+            "--backup-id",
+            "unix-1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Backups { backup_id: Some(ref id), json: false, .. } if id == "unix-1"
+        ));
+    }
+
+    /// The lines `backups_text` prints for the set `id`, up to the next
+    /// set or the total.
+    fn lines_of_set<'a>(text: &'a str, id: &str) -> Vec<&'a str> {
+        text.lines()
+            .skip_while(|line| *line != id)
+            .skip(1)
+            .take_while(|line| line.starts_with(' '))
+            .collect()
+    }
+
+    /// A set without a manifest, and a restore's backup of a key map and a
+    /// plug-in, come back only as whole sets, each with its command. The
+    /// key map in the second gets no command of its own, since restoring
+    /// its set would put the plug-in back too. A set whose name needs
+    /// quotes in a shell gets no command at all.
+    #[test]
+    fn backups_restores_whole_sets_and_a_key_map_only_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugins = resource.join("UserPlugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let keymap = resource.join("reaper-kb.ini");
+        let osara = plugins.join("reaper_osara64.dll");
+        std::fs::write(&keymap, b"keys").unwrap();
+        std::fs::write(&osara, b"osara").unwrap();
+        let mut both = rabbit_core::rollback::BackupSetWriter::new(
+            &resource,
+            "restore-unix-200-before-restore",
+            "before-restore",
+        );
+        both.copy_file(Some("osara"), &keymap).unwrap();
+        both.copy_file(Some("osara"), &osara).unwrap();
+        let backups = resource.join("RABBIT").join("backups");
+        for id in ["unix-100", "a b&c"] {
+            let set = backups.join(id).join("UserPlugins");
+            std::fs::create_dir_all(&set).unwrap();
+            std::fs::write(set.join("old.dll"), b"old").unwrap();
+        }
+
+        let overview = rabbit_core::backup_overview::backup_overview(&resource).unwrap();
+        let text = super::backups_text(&overview);
+
+        let quoted = format!("--resource-path \"{}\"", resource.display());
+        assert_eq!(
+            lines_of_set(&text, "restore-unix-200-before-restore")[3..],
+            [
+                "  Key map: can't be restored.",
+                "    RABBIT can't restore a key map on its own yet, and its backup set holds \
+                 other files too.",
+                "  Everything in it: can be restored only as a whole set.",
+                &format!(
+                    "    rabbit restore-backup {quoted} --backup-id \
+                     restore-unix-200-before-restore --apply"
+                ),
+            ],
+            "{text}"
+        );
+        assert_eq!(
+            lines_of_set(&text, "unix-100")[3..],
+            [
+                "  Everything in it: can be restored only as a whole set.",
+                &format!("    rabbit restore-backup {quoted} --backup-id unix-100 --apply"),
+            ],
+            "{text}"
+        );
+        assert_eq!(
+            lines_of_set(&text, "a b&c")[3..],
+            [
+                "  Everything in it: can be restored only as a whole set.",
+                "    The backup set's name needs quotes in a command, so RABBIT prints none.",
+            ],
+            "{text}"
+        );
+        assert!(!text.contains("--backup-id a b&c"), "{text}");
+    }
+
+    /// Every reason a backup can't be restored, in one line, by its status
+    /// and its set: earlier versions and the rest of an update's set aren't
+    /// restored yet, whatever else the set holds.
+    #[test]
+    fn backups_says_each_reason_in_one_line() {
+        use rabbit_core::backup_overview::{
+            BackupEntry, BackupGroup, BackupItem, BackupSetKind, BackupSetOverview, BackupStatus,
+        };
+        use std::path::Path;
+
+        let set = |kind: BackupSetKind| BackupSetOverview {
+            id: "unix-1".to_string(),
+            path: PathBuf::from("unix-1"),
+            kind,
+            created_unix: Some(1),
+            size: 0,
+            file_count: 0,
+            pending_entries: 0,
+            owned_by_another_account: false,
+            fingerprint: None,
+            manifest: None,
+            manifest_path: None,
+            receipt_copy: None,
+            holds_receipt: false,
+            files: Vec::new(),
+            links: Vec::new(),
+            warning: None,
+        };
+        let entry = |item: BackupItem, group: BackupGroup, status: BackupStatus| BackupEntry {
+            item,
+            group,
+            set_kind: BackupSetKind::Uninstall,
+            created_unix: None,
+            size: 0,
+            version: None,
+            replaced_by: None,
+            with_settings: None,
+            keymap_origin: None,
+            status,
+            missing_path: None,
+            refused_path: None,
+            only_copy: false,
+            shares_set_with: Vec::new(),
+            restore_scope: None,
+        };
+        let package = |package_id: &str| BackupItem::Package {
+            set_id: "unix-1".to_string(),
+            package_id: package_id.to_string(),
+        };
+        let keys = BackupItem::Keymap {
+            set_id: "unix-1".to_string(),
+        };
+        let whole = BackupItem::Set {
+            set_id: "unix-1".to_string(),
+        };
+        let missing = PathBuf::from("UserPlugins").join("x.dll");
+        let resource = Path::new("R");
+        use BackupGroup::{EarlierVersions, Keymaps, Other, UninstalledSoftware};
+        use BackupSetKind as Kind;
+        use BackupStatus::*;
+
+        let with_receipt = |kind| BackupSetOverview {
+            holds_receipt: true,
+            ..set(kind)
+        };
+        let with_warning = |kind| BackupSetOverview {
+            warning: Some("unreadable".to_string()),
+            ..set(kind)
+        };
+        let cases: Vec<(BackupEntry, BackupSetOverview, String)> = vec![
+            (
+                entry(package("reapack"), EarlierVersions, CanRestore),
+                with_receipt(Kind::Update),
+                "RABBIT can't restore earlier versions yet.".to_string(),
+            ),
+            (
+                entry(keys.clone(), Keymaps, CanRestore),
+                set(Kind::Update),
+                "RABBIT doesn't restore an update's backup set yet.".to_string(),
+            ),
+            (
+                entry(package("sws"), UninstalledSoftware, CanRestore),
+                with_receipt(Kind::Uninstall),
+                "Its backup set holds a copy of RABBIT's records, so RABBIT doesn't restore it."
+                    .to_string(),
+            ),
+            (
+                entry(keys.clone(), Keymaps, CanRestore),
+                with_warning(Kind::Keymap),
+                "Part of its backup set can't be read.".to_string(),
+            ),
+            (
+                BackupEntry {
+                    shares_set_with: vec![whole.clone()],
+                    ..entry(keys.clone(), Keymaps, CanRestore)
+                },
+                set(Kind::BeforeRestore),
+                "RABBIT can't restore a key map on its own yet, and its backup set holds other \
+                 files too."
+                    .to_string(),
+            ),
+            (
+                BackupEntry {
+                    refused_path: Some(missing.clone()),
+                    ..entry(package("sws"), UninstalledSoftware, StoppedPartway)
+                },
+                set(Kind::Uninstall),
+                format!(
+                    "RABBIT won't put back {}, so a restore would stop before changing anything.",
+                    missing.display()
+                ),
+            ),
+            (
+                entry(package("sws"), UninstalledSoftware, InstalledAgain),
+                set(Kind::Uninstall),
+                "You have sws again. To go back to this copy, uninstall that one first (rabbit \
+                 uninstall --resource-path \"R\" --package sws --apply), then restore."
+                    .to_string(),
+            ),
+            (
+                entry(package("odd id;"), UninstalledSoftware, InstalledAgain),
+                set(Kind::Uninstall),
+                "You have odd id; again. To go back to this copy, uninstall that one first, then \
+                 restore."
+                    .to_string(),
+            ),
+            (
+                BackupEntry {
+                    missing_path: Some(missing.clone()),
+                    ..entry(package("sws"), EarlierVersions, NotComplete)
+                },
+                set(Kind::Update),
+                format!("Part of it isn't in this backup: {}.", missing.display()),
+            ),
+            (
+                entry(package("sws"), UninstalledSoftware, NothingInIt),
+                set(Kind::Uninstall),
+                "None of its files are in this backup, so there is nothing to restore.".to_string(),
+            ),
+            (
+                entry(package("sws"), EarlierVersions, VersionUnknown),
+                set(Kind::Update),
+                "RABBIT doesn't know which version this was.".to_string(),
+            ),
+            (
+                entry(package("langpack-de"), EarlierVersions, OtherLanguagePack),
+                set(Kind::Update),
+                "Another package whose install removes this one is installed.".to_string(),
+            ),
+            (
+                BackupEntry {
+                    missing_path: Some(missing.clone()),
+                    ..entry(package("sws"), UninstalledSoftware, PartMissing)
+                },
+                set(Kind::Uninstall),
+                format!("A file is missing from the backup: {}.", missing.display()),
+            ),
+            (
+                entry(package("sws"), UninstalledSoftware, RecordsUnreadable),
+                set(Kind::Uninstall),
+                "RABBIT can't read its records, so it can't tell whether this backup fits them."
+                    .to_string(),
+            ),
+            (
+                entry(whole.clone(), Other, NotYours),
+                set(Kind::NoManifest),
+                "It belongs to another account, so RABBIT leaves it alone.".to_string(),
+            ),
+            (
+                entry(whole.clone(), Other, NotABackup),
+                set(Kind::NotABackup),
+                "RABBIT never looks inside it.".to_string(),
+            ),
+            (
+                entry(whole.clone(), Other, NotHere),
+                set(Kind::Records),
+                "RABBIT never copies its records back.".to_string(),
+            ),
+            (
+                entry(whole.clone(), Other, NotHere),
+                set(Kind::Damaged),
+                "Its manifest can't be read.".to_string(),
+            ),
+            (
+                entry(whole.clone(), Other, NotHere),
+                set(Kind::Deleting),
+                "Its deletion started and didn't finish, so part of it may be gone.".to_string(),
+            ),
+            (
+                entry(whole.clone(), Other, NotHere),
+                with_receipt(Kind::NoManifest),
+                "It holds a copy of RABBIT's records, which RABBIT never copies back.".to_string(),
+            ),
+            (
+                entry(whole.clone(), Other, NotHere),
+                with_warning(Kind::NoManifest),
+                "Part of it can't be read.".to_string(),
+            ),
+            (
+                entry(whole.clone(), Other, NotHere),
+                set(Kind::NoManifest),
+                "Without a manifest, RABBIT can't tell where all of its files go.".to_string(),
+            ),
+            (
+                entry(whole.clone(), Other, NotHere),
+                set(Kind::Update),
+                "RABBIT doesn't restore an update's backup set yet.".to_string(),
+            ),
+            (
+                entry(whole.clone(), Other, NotHere),
+                set(Kind::Unknown),
+                "RABBIT can't restore it.".to_string(),
+            ),
+        ];
+        let names = std::collections::BTreeMap::new();
+        for (entry, set, expected) in cases {
+            assert_eq!(
+                super::backup_reason_text(&entry, &set, resource, &names),
+                expected,
+                "{entry:?} in {:?}",
+                set.kind
+            );
+        }
+
+        // What is no backup says so once, in its set's kind and warning.
+        let link = entry(whole, Other, NotABackup);
+        assert_eq!(super::backup_label(&link, &names), "Everything in it");
+        assert_eq!(
+            super::backup_status_text(&link),
+            "can't be restored or deleted"
+        );
+        // A package id with a line break in it stays on one line.
+        let odd = entry(package("x\n    rabbit"), UninstalledSoftware, CanRestore);
+        assert_eq!(super::backup_label(&odd, &names), "x?    rabbit");
     }
 }
