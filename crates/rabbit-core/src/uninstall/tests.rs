@@ -2390,3 +2390,55 @@ fn programs_a_plan_names_block_while_running() {
     assert!(report.passed);
     assert_eq!(check_status(&report, PROGRAMS_RUNNING_CHECK), None);
 }
+
+/// A restore checks what a package's uninstall needs closed, read from the
+/// manifest alone (see `rollback::restore_preflight`). For every shipped
+/// package, on both platforms and both kinds of REAPER, that is what the
+/// uninstall plan says before detection has its say: every REAPER for a
+/// machine-wide package or one a vendor's uninstaller removes, and the
+/// programs the plan names.
+#[test]
+fn a_restore_reads_the_process_rules_the_plan_does() {
+    let fixture = Fixture::new();
+    for platform in [Platform::Windows, Platform::MacOs] {
+        let specs = builtin_package_specs(platform);
+        let mut roots = fixture.roots.clone();
+        if platform == Platform::MacOs {
+            roots.app_path = Some(fixture.resource.join("REAPER.app"));
+            roots.app_dir = Some(fixture.resource.clone());
+        } else {
+            roots.appdata = Some(fixture.dir.path().to_path_buf());
+        }
+        for target in [InstallationKind::Standard, InstallationKind::Portable] {
+            let plan = build_uninstall_plan(&UninstallPlanInput {
+                roots: &roots,
+                platform,
+                target,
+                specs: &specs,
+                detections: &[],
+                state: None,
+                remove_settings: false,
+                vendor_lookup: &NothingListed,
+                objects: &NoMacosObjects,
+            });
+            for (item, spec) in plan.items.iter().zip(&specs) {
+                assert_eq!(
+                    super::plan::uninstall_process_rules(spec, platform, target),
+                    (item.every_reaper_closed, item.blocking_programs.clone()),
+                    "{} on {platform:?}, {target:?}",
+                    spec.id
+                );
+            }
+        }
+    }
+    let rules = |id: &str, platform: Platform| {
+        let specs = builtin_package_specs(platform);
+        let spec = specs.iter().find(|spec| spec.id == id).unwrap();
+        super::plan::uninstall_process_rules(spec, platform, InstallationKind::Standard)
+    };
+    assert_eq!(rules("sws", Platform::Windows), (false, Vec::new()));
+    assert!(rules("app2clap", Platform::Windows).0);
+    assert!(rules("jaws-scripts", Platform::Windows).0);
+    let (every, programs) = rules("surge-xt", Platform::Windows);
+    assert!(every && !programs.is_empty(), "{programs:?}");
+}

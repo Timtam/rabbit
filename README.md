@@ -786,6 +786,19 @@ from there down to the file leads through a link or junction, the restore
 changes nothing and says why. If that stops the restore of a whole set,
 restore the set's other packages one at a time with `--package`.
 
+Before it changes anything, a restore checks what each package's own
+uninstall checks. REAPER must be closed. For a package that serves every
+REAPER on the computer, such as app2clap or the JAWS scripts, every REAPER
+must be closed, portable ones included. Any program a package's uninstall
+names must be closed too. `--allow-reaper-running` lets only the REAPER you
+restore into stay open, as before; it never lets a restore past the other
+checks. A dry run says what is running and goes on. A backup that belongs to
+another account, as one made with `sudo` on a Mac does, isn't restored. When
+RABBIT refuses a restore, it says why in plain words and adds what to do on
+the command line, such as the command that uninstalls a package you
+installed again. It names one reason at a time; a dry run, without
+`--apply`, names every REAPER and program that is still open.
+
 A restore never copies RABBIT's records (its receipt,
 `RABBIT\install-state.json`) back from a backup: that would undo every change
 to them since the backup was made, uninstalls included. Restoring an
@@ -833,7 +846,9 @@ restored. For a backup that can be, the next line is the exact
 Sizes are in whole KB and MB, and GB with one decimal. `--backup-id` shows one
 set, with each file in it, where it came from and whether its copy finished,
 and where a copy of RABBIT's records is, if the set holds one. `--json` prints
-the list of sets with every detail, each backup's status included. Listing
+the list of sets with every detail, each backup's status included, and for a
+backup a restore would refuse, the refusal's code, the same one a restore
+gives (`reinstalled-since`, `part-missing` and so on). Listing
 changes nothing and hashes no file. It reads only the backup sets' manifests,
 RABBIT's records and file sizes, never a backed-up file, so it is quick even
 with FFmpeg's backups. A restore command is printed only for a set whose name

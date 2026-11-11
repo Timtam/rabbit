@@ -47,6 +47,7 @@ use rabbit_core::report::{
     save_new_json_and_text_reports,
 };
 use rabbit_core::resource::{ResourceInitActionKind, ResourceInitReport, initialize_resource_path};
+use rabbit_core::restore_refusal::RestoreRefusal;
 use rabbit_core::rollback::{
     BackupEntryState, KeymapOrigin, RestoreBackupActionKind, RestoreBackupOptions,
     RestoreBackupReport, RestoredPackage, SkippedPackageReason, list_backup_sets,
@@ -273,8 +274,11 @@ enum Command {
         /// that only reports what it would do.
         #[arg(long)]
         apply: bool,
-        /// Run even though REAPER is open. Files REAPER holds open may fail
-        /// to be replaced, so prefer closing it first.
+        /// Restore even though this REAPER is open. Files REAPER holds open
+        /// may fail to be replaced, so prefer closing it first. It never
+        /// lets a restore past what a package's own uninstall needs closed:
+        /// every REAPER on the computer for a package such as app2clap, and
+        /// the programs its uninstall names.
         #[arg(long)]
         allow_reaper_running: bool,
         /// Write the JSON run report to exactly this path.
@@ -1259,27 +1263,78 @@ const RESTORE_AS_ROOT_TEXT: &str = "rabbit restore-backup --apply doesn't run as
      would under sudo: the files it puts back, the backup of the files they replace and RABBIT's \
      records would all be root's. Run it again as yourself, without sudo.";
 
-/// A restore's error as the CLI prints it. An id that names no backup set
-/// gets the command that lists the sets there are, which the engine leaves
-/// to the CLI. A set refused because it holds a copy of RABBIT's records
-/// gets the folder that copy stays in, for anyone who needs it by hand. The
-/// refusal to run as root is said in the CLI's own words. Anything else is
-/// printed as it is.
+/// What the CLI adds to a refusal of a whole set that names the set's other
+/// packages, which can still be restored on their own.
+const OTHER_PACKAGES_HINT: &str =
+    "The set's other packages can be restored one at a time with --package.";
+
+/// A restore's error as the CLI prints it: a refusal in the words of
+/// [`restore_refusal_text`], anything else as it is.
 fn cli_restore_error(
     error: rabbit_core::RabbitError,
     resource_path: &Path,
 ) -> Box<dyn std::error::Error> {
     match error {
-        rabbit_core::RabbitError::BackupSetNotFound { .. } => format!(
-            "{error}. rabbit backups --resource-path \"{}\" lists what is left.",
-            resource_path.display()
-        )
-        .into(),
-        rabbit_core::RabbitError::ReceiptInSet {
-            ref backup_path, ..
-        } => format!("{error}, in the folder \"{}\".", backup_path.display()).into(),
-        rabbit_core::RabbitError::RestoreAsRoot => RESTORE_AS_ROOT_TEXT.into(),
+        rabbit_core::RabbitError::RestoreRefused(refusal) => {
+            restore_refusal_text(&refusal, resource_path).into()
+        }
         other => other.into(),
+    }
+}
+
+/// A restore's refusal as the CLI prints it: the engine's English, which
+/// holds no command-line syntax, then what only the command line can say:
+/// - for an id that names no backup set, the command that lists the sets
+///   there are;
+/// - for a set holding a copy of RABBIT's records, the folder that copy
+///   stays in, for anyone who needs it by hand;
+/// - for a package installed again since, the command that uninstalls it,
+///   when its id needs no quotes;
+/// - for a refusal of a whole set that names its other packages, that
+///   `--package` restores them one at a time;
+/// - for the target's REAPER running, that `--allow-reaper-running`
+///   restores anyway, and for every REAPER a package needs closed, that it
+///   doesn't.
+///
+/// The refusal to run as root is said in the CLI's own words. Any other
+/// refusal is printed as it is.
+fn restore_refusal_text(refusal: &RestoreRefusal, resource_path: &Path) -> String {
+    let resource = resource_path.display();
+    match refusal {
+        RestoreRefusal::NotFound { .. } => {
+            format!("{refusal}. rabbit backups --resource-path \"{resource}\" lists what is left.")
+        }
+        RestoreRefusal::ReceiptInSet { backup_path, .. } => {
+            format!("{refusal}, in the folder \"{}\".", backup_path.display())
+        }
+        RestoreRefusal::AsRoot => RESTORE_AS_ROOT_TEXT.to_string(),
+        RestoreRefusal::ReinstalledSince {
+            package_id,
+            other_packages,
+            ..
+        } => {
+            let mut text = format!("{refusal}.");
+            if let Some(command) = uninstall_command(resource_path, package_id) {
+                let _ = write!(text, " To uninstall it: {command}.");
+            }
+            if !other_packages.is_empty() {
+                let _ = write!(text, " {OTHER_PACKAGES_HINT}");
+            }
+            text
+        }
+        RestoreRefusal::TargetRefused { other_packages, .. } if !other_packages.is_empty() => {
+            format!("{refusal}. {OTHER_PACKAGES_HINT}")
+        }
+        RestoreRefusal::ReaperRunning {
+            every_reaper_for, ..
+        } if every_reaper_for.is_empty() => format!(
+            "{refusal}. To restore while it runs, add --allow-reaper-running; files REAPER \
+             holds open may then fail to go back."
+        ),
+        RestoreRefusal::ReaperRunning { .. } => {
+            format!("{refusal}. --allow-reaper-running doesn't change this.")
+        }
+        other => other.to_string(),
     }
 }
 
@@ -2652,6 +2707,19 @@ fn write_backups_in_set(
     }
 }
 
+/// The command that uninstalls `package_id` from the REAPER at
+/// `resource_path`, for a backup of a package installed again since. A
+/// command goes into a shell as printed, so there is one only for an id
+/// RABBIT itself gives, which needs no quotes.
+fn uninstall_command(resource_path: &Path, package_id: &str) -> Option<String> {
+    is_plain_name(package_id).then(|| {
+        format!(
+            "rabbit uninstall --resource-path \"{}\" --package {package_id} --apply",
+            resource_path.display()
+        )
+    })
+}
+
 /// Whether `name`, a set id or package id, is made only of what RABBIT
 /// itself puts in one: ASCII letters and digits, `-`, `_` and `.`. Such a
 /// name means the same in every shell without quotes.
@@ -2851,15 +2919,16 @@ fn backup_reason_text(
                 .to_string()
         }
         _ if can_restore => "RABBIT can't restore it.".to_string(),
-        BackupStatus::InstalledAgain if is_plain_name(package_id) => format!(
-            "You have {name} again. To go back to this copy, uninstall that one first (rabbit \
-             uninstall --resource-path \"{}\" --package {package_id} --apply), then restore.",
-            resource_path.display()
-        ),
-        BackupStatus::InstalledAgain => format!(
-            "You have {name} again. To go back to this copy, uninstall that one first, then \
-             restore."
-        ),
+        BackupStatus::InstalledAgain => match uninstall_command(resource_path, package_id) {
+            Some(command) => format!(
+                "You have {name} again. To go back to this copy, uninstall that one first \
+                 ({command}), then restore."
+            ),
+            None => format!(
+                "You have {name} again. To go back to this copy, uninstall that one first, then \
+                 restore."
+            ),
+        },
         BackupStatus::NotComplete => format!("Part of it isn't in this backup: {}.", missing()),
         BackupStatus::NothingInIt => {
             "None of its files are in this backup, so there is nothing to restore.".to_string()
@@ -5190,12 +5259,106 @@ mod tests {
         }
     }
 
+    /// The CLI adds what only the command line can say after the engine's
+    /// English, which holds none of it: the command that uninstalls a
+    /// package installed again since, when its id needs no quotes; that
+    /// `--package` restores the set's other packages one at a time; and
+    /// what `--allow-reaper-running` does about a running REAPER. Any other
+    /// refusal is printed as the engine says it.
+    #[test]
+    fn restore_refusals_get_the_clis_hints_after_the_engines_words() {
+        use rabbit_core::{RestoreRefusal, TargetRefusal};
+
+        let resource = std::path::Path::new("R");
+        let text = |refusal: RestoreRefusal| super::restore_refusal_text(&refusal, resource);
+        let reinstalled =
+            |package_id: &str, other_packages: &[&str]| RestoreRefusal::ReinstalledSince {
+                backup_id: "uninstall-unix-1".to_string(),
+                package_id: package_id.to_string(),
+                other_packages: other_packages.iter().map(ToString::to_string).collect(),
+            };
+        let words = |refusal: &RestoreRefusal| refusal.to_string();
+
+        let sws = reinstalled("sws", &["ffmpeg"]);
+        assert_eq!(
+            text(sws.clone()),
+            format!(
+                "{}. To uninstall it: rabbit uninstall --resource-path \"R\" --package sws --apply. The set's other packages can be restored one at a time with --package.",
+                words(&sws)
+            )
+        );
+        let alone = reinstalled("sws", &[]);
+        assert_eq!(
+            text(alone.clone()),
+            format!(
+                "{}. To uninstall it: rabbit uninstall --resource-path \"R\" --package sws --apply.",
+                words(&alone)
+            )
+        );
+        let quoted = reinstalled("needs quotes", &[]);
+        assert_eq!(text(quoted.clone()), format!("{}.", words(&quoted)));
+
+        let refused = |other_packages: &[&str]| RestoreRefusal::TargetRefused {
+            path: std::path::PathBuf::from("RABBIT").join("x.json"),
+            reason: TargetRefusal::RabbitFolder,
+            other_packages: other_packages.iter().map(ToString::to_string).collect(),
+        };
+        assert_eq!(
+            text(refused(&["sws"])),
+            format!(
+                "{}. The set's other packages can be restored one at a time with --package.",
+                words(&refused(&["sws"]))
+            )
+        );
+        assert_eq!(text(refused(&[])), words(&refused(&[])));
+
+        let reaper = rabbit_core::preflight::RunningProcess {
+            pid: "7".to_string(),
+            name: "reaper.exe".to_string(),
+            executable_path: None,
+        };
+        let target = RestoreRefusal::ReaperRunning {
+            every_reaper_for: Vec::new(),
+            package_names: Vec::new(),
+            processes: vec![reaper.clone()],
+        };
+        assert_eq!(
+            text(target),
+            "Close REAPER before restoring a backup: reaper.exe (7). To restore while it runs, add --allow-reaper-running; files REAPER holds open may then fail to go back."
+        );
+        let every = RestoreRefusal::ReaperRunning {
+            every_reaper_for: vec!["app2clap".to_string()],
+            package_names: vec!["app2clap".to_string()],
+            processes: vec![reaper],
+        };
+        assert_eq!(
+            text(every.clone()),
+            format!(
+                "{}. --allow-reaper-running doesn't change this.",
+                words(&every)
+            )
+        );
+
+        let as_is = RestoreRefusal::PartMissing {
+            backup_id: "uninstall-unix-1".to_string(),
+            path: std::path::PathBuf::from("UserPlugins").join("reaper_sws-x64.dll"),
+        };
+        assert_eq!(text(as_is.clone()), words(&as_is));
+        // An error that is no refusal is printed as it is.
+        let other = rabbit_core::RabbitError::InvalidVersion("x".to_string());
+        let printed = other.to_string();
+        assert_eq!(
+            super::cli_restore_error(other, resource).to_string(),
+            printed
+        );
+    }
+
     /// Run as root on macOS, as under sudo, `restore-backup --apply`
     /// refuses in the CLI's own words, without suggesting sudo.
     #[test]
     fn restore_backup_under_sudo_refuses_in_the_clis_words() {
         let error = super::cli_restore_error(
-            rabbit_core::RabbitError::RestoreAsRoot,
+            rabbit_core::RestoreRefusal::AsRoot.into(),
             std::path::Path::new("REAPER"),
         );
         assert_eq!(error.to_string(), super::RESTORE_AS_ROOT_TEXT);
@@ -8653,6 +8816,7 @@ mod tests {
         assert_eq!(item["with_settings"], true);
         assert_eq!(item["only_copy"], true);
         assert_eq!(item["restore_scope"], "package");
+        assert!(item.get("refusal").is_none(), "{item:#}");
         let damaged = &json[3];
         assert_eq!(damaged["kind"], "damaged");
         assert!(damaged["manifest_path"].is_null() && damaged["reason"].is_null());
@@ -8787,6 +8951,20 @@ mod tests {
             )
         );
         assert!(!text.contains("--backup-id uninstall-unix-300"), "{text}");
+
+        // `--json` gives the refusal a restore gives, by its code.
+        let sets = rabbit_core::rollback::list_backup_sets(&resource).unwrap();
+        let json = serde_json::to_value(&sets).unwrap();
+        let item = &json[0]["items"][0];
+        assert_eq!(item["status"], "installed-again");
+        assert_eq!(
+            item["refusal"],
+            serde_json::json!({
+                "code": "reinstalled-since",
+                "backup_id": "uninstall-unix-300",
+                "package_id": "sws"
+            })
+        );
     }
 
     #[test]
@@ -9013,6 +9191,7 @@ mod tests {
             only_copy: false,
             shares_set_with: Vec::new(),
             restore_scope: None,
+            refusal: None,
         };
         let package = |package_id: &str| BackupItem::Package {
             set_id: "unix-1".to_string(),

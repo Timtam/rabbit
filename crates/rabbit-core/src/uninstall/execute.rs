@@ -267,24 +267,45 @@ fn target_of(
     target_app_path: Option<&Path>,
     target: Option<InstallationKind>,
 ) -> (InstallationKind, Option<PathBuf>) {
-    let standard = default_standard_installation(platform).filter(|installation| {
+    let target = target.unwrap_or_else(|| target_kind_of(platform, resource_path));
+    let app_path = target_app_path
+        .map(Path::to_path_buf)
+        .or_else(|| match target {
+            InstallationKind::Standard => standard_installation_at(platform, resource_path)
+                .map(|installation| installation.app_path),
+            InstallationKind::Portable => portable_target_app_path(resource_path, Some(platform)),
+        });
+    (target, app_path)
+}
+
+/// Whether `resource_path` is the standard REAPER's resource folder on
+/// `platform`, whatever its spelling, or a portable REAPER's. Only paths are
+/// compared; the standard REAPER's app isn't looked at. A restore reads the
+/// uninstall plan for this kind of REAPER (see
+/// `rollback::restore_process_rules`).
+pub(crate) fn target_kind_of(platform: Platform, resource_path: &Path) -> InstallationKind {
+    let standard = crate::preflight::standard_resource_path(Some(platform));
+    if standard
+        .is_some_and(|standard| same_ignoring_case(&absolute(&standard), &absolute(resource_path)))
+    {
+        InstallationKind::Standard
+    } else {
+        InstallationKind::Portable
+    }
+}
+
+/// The standard REAPER on `platform`, when `resource_path` is its resource
+/// folder.
+fn standard_installation_at(
+    platform: Platform,
+    resource_path: &Path,
+) -> Option<crate::model::Installation> {
+    default_standard_installation(platform).filter(|installation| {
         same_ignoring_case(
             &absolute(&installation.resource_path),
             &absolute(resource_path),
         )
-    });
-    let target = target.unwrap_or(if standard.is_some() {
-        InstallationKind::Standard
-    } else {
-        InstallationKind::Portable
-    });
-    let app_path = target_app_path
-        .map(Path::to_path_buf)
-        .or_else(|| match target {
-            InstallationKind::Standard => standard.map(|installation| installation.app_path),
-            InstallationKind::Portable => portable_target_app_path(resource_path, Some(platform)),
-        });
-    (target, app_path)
+    })
 }
 
 pub(crate) fn execute_uninstall_in(

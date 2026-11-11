@@ -30,6 +30,7 @@ pub mod reaper_ini;
 pub mod receipt;
 pub mod report;
 pub mod resource;
+pub mod restore_refusal;
 pub mod rollback;
 pub mod self_update;
 pub mod setup;
@@ -40,3 +41,4 @@ pub mod upstream;
 pub mod version;
 
 pub use error::{RabbitError, Result};
+pub use restore_refusal::{RestoreRefusal, TargetRefusal};

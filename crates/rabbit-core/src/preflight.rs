@@ -83,6 +83,11 @@ pub(crate) fn running_reaper_for_target_with_processes(
     target_app_path: Option<&Path>,
     running_processes: &[RunningProcess],
 ) -> Vec<RunningProcess> {
+    // With no REAPER running, none is the target's, and the target's app
+    // needn't be looked for.
+    if running_processes.is_empty() {
+        return Vec::new();
+    }
     let target_app_path = effective_target_app_path(resource_path, target_app_path);
     relevant_running_processes(resource_path, running_processes, target_app_path.as_deref())
 }
@@ -101,7 +106,11 @@ pub fn ensure_reaper_closed_with_processes(
 ) -> Result<()> {
     let relevant_processes =
         running_reaper_for_target_with_processes(resource_path, target_app_path, running_processes);
-    let check = reaper_process_check(&relevant_processes, allow_reaper_running);
+    let check = reaper_process_check(
+        &relevant_processes,
+        allow_reaper_running,
+        CLOSE_REAPER_BEFORE_INSTALLING,
+    );
     if check.status == PreflightStatus::Fail {
         return Err(RabbitError::PreflightFailed {
             message: format!("{}: {}", check.name, check.message),
@@ -128,10 +137,52 @@ pub fn run_install_preflight_with_processes(
         options.target_app_path.as_deref(),
         running_processes,
     );
+    preflight_with_target_reapers(
+        resource_path,
+        options,
+        &relevant_processes,
+        CLOSE_REAPER_BEFORE_INSTALLING,
+    )
+}
+
+/// The install preflight's checks for a restore, given the target's running
+/// REAPER processes, already found among every running REAPER (see
+/// [`running_reaper_for_target_with_processes`]). Its REAPER check says to
+/// close REAPER before restoring rather than before installing. A restore
+/// checks what each package's own uninstall needs closed besides (see
+/// `rollback::restore_preflight`).
+pub(crate) fn run_restore_preflight_with_processes(
+    resource_path: &Path,
+    options: &PreflightOptions,
+    target_reapers: &[RunningProcess],
+) -> PreflightReport {
+    preflight_with_target_reapers(
+        resource_path,
+        options,
+        target_reapers,
+        CLOSE_REAPER_BEFORE_RESTORING,
+    )
+}
+
+/// What the REAPER check of the install preflight asks before an install.
+const CLOSE_REAPER_BEFORE_INSTALLING: &str = "Close REAPER before installing extensions";
+/// What the same check asks before a restore. A restore's refusal says the
+/// same (see [`crate::restore_refusal::RestoreRefusal::ReaperRunning`]).
+pub(crate) const CLOSE_REAPER_BEFORE_RESTORING: &str = "Close REAPER before restoring a backup";
+
+/// The install preflight with the target's running REAPER processes given,
+/// its REAPER check failing with `close_reaper` and the processes.
+fn preflight_with_target_reapers(
+    resource_path: &Path,
+    options: &PreflightOptions,
+    relevant_processes: &[RunningProcess],
+    close_reaper: &str,
+) -> PreflightReport {
     let mut checks = vec![resource_path_check(resource_path, options.dry_run)];
     checks.push(reaper_process_check(
-        &relevant_processes,
+        relevant_processes,
         options.allow_reaper_running || options.dry_run,
+        close_reaper,
     ));
     // Nothing allows a linked backups folder, so a dry run fails on it too
     // and says what a real run would.
@@ -211,7 +262,25 @@ pub fn running_processes_named(names: &[String]) -> Vec<RunningProcess> {
     if names.is_empty() {
         return Vec::new();
     }
-    running_processes_where(|name| names.iter().any(|wanted| wanted.eq_ignore_ascii_case(name)))
+    running_processes_where(|name| is_one_of(name, names))
+}
+
+/// Whether a process named `name` is one of the programs `names`, ignoring
+/// case, as every check of the programs a package names compares them.
+pub(crate) fn is_one_of(name: &str, names: &[impl AsRef<str>]) -> bool {
+    names
+        .iter()
+        .any(|wanted| wanted.as_ref().eq_ignore_ascii_case(name))
+}
+
+/// Running processes as the checks list them: `reaper.exe (12), reaper.exe
+/// (34)`.
+pub(crate) fn process_list(processes: &[RunningProcess]) -> String {
+    processes
+        .iter()
+        .map(|process| format!("{} ({})", process.name, process.pid))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn running_processes_where(matches: impl Fn(&str) -> bool) -> Vec<RunningProcess> {
@@ -374,7 +443,7 @@ fn is_distinct_portable_like_resource_path(resource_path: &Path) -> bool {
     !same_path(resource_path, &standard_resource_path)
 }
 
-fn standard_resource_path(platform: Option<Platform>) -> Option<PathBuf> {
+pub(crate) fn standard_resource_path(platform: Option<Platform>) -> Option<PathBuf> {
     match platform {
         Some(Platform::Windows) => {
             rabbit_platform::user_appdata_dir().map(|path| path.join("REAPER"))
@@ -437,6 +506,7 @@ pub(crate) fn resource_path_check(resource_path: &Path, dry_run: bool) -> Prefli
 fn reaper_process_check(
     running_processes: &[RunningProcess],
     allow_reaper_running: bool,
+    close_reaper: &str,
 ) -> PreflightCheck {
     if running_processes.is_empty() {
         return PreflightCheck {
@@ -446,23 +516,19 @@ fn reaper_process_check(
         };
     }
 
-    let process_list = running_processes
-        .iter()
-        .map(|process| format!("{} ({})", process.name, process.pid))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let listed = process_list(running_processes);
 
     if allow_reaper_running {
         PreflightCheck {
             name: REAPER_PROCESS_CHECK.to_string(),
             status: PreflightStatus::Warn,
-            message: format!("REAPER appears to be running: {process_list}."),
+            message: format!("REAPER appears to be running: {listed}."),
         }
     } else {
         PreflightCheck {
             name: REAPER_PROCESS_CHECK.to_string(),
             status: PreflightStatus::Fail,
-            message: format!("Close REAPER before installing extensions: {process_list}."),
+            message: format!("{close_reaper}: {listed}."),
         }
     }
 }
@@ -643,7 +709,7 @@ mod tests {
 
     use super::{
         PreflightOptions, PreflightStatus, RunningProcess, is_reaper_process_name,
-        run_install_preflight_with_processes,
+        run_install_preflight_with_processes, run_restore_preflight_with_processes,
     };
 
     /// Status of the `reaper-process` check in a report, for terse assertions.
@@ -750,6 +816,52 @@ mod tests {
                 .unwrap()
                 .status,
             PreflightStatus::Fail
+        );
+    }
+
+    /// A restore's REAPER check is the install's, given the target's
+    /// processes, and says to close REAPER before restoring, not before
+    /// installing. A dry run, or `allow_reaper_running`, only warns.
+    #[test]
+    fn the_restore_preflight_says_restore() {
+        let dir = tempdir().unwrap();
+        let target = [running("123", "reaper.exe", Some(r"C:\REAPER\reaper.exe"))];
+        let check = |dry_run: bool, allow_reaper_running: bool| {
+            let report = run_restore_preflight_with_processes(
+                dir.path(),
+                &PreflightOptions {
+                    dry_run,
+                    allow_reaper_running,
+                    target_app_path: None,
+                },
+                &target,
+            );
+            report
+                .checks
+                .into_iter()
+                .find(|check| check.name == "reaper-process")
+                .unwrap()
+        };
+
+        let refused = check(false, false);
+        assert_eq!(refused.status, PreflightStatus::Fail);
+        assert_eq!(
+            refused.message,
+            "Close REAPER before restoring a backup: reaper.exe (123)."
+        );
+        assert_eq!(check(true, false).status, PreflightStatus::Warn);
+        assert_eq!(check(false, true).status, PreflightStatus::Warn);
+        let install = run_install_preflight_with_processes(
+            dir.path(),
+            &options_for_target(Some(r"C:\REAPER\reaper.exe"), false),
+            &target,
+        );
+        assert!(
+            install
+                .failure_message()
+                .contains("Close REAPER before installing extensions: reaper.exe (123)."),
+            "{}",
+            install.failure_message()
         );
     }
 

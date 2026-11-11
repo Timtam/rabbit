@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{IoPathContext, RabbitError, Result};
 use crate::receipt::{InstallState, PackageReceipt, load_install_state};
+use crate::restore_refusal::{RestoreRefusal, TargetRefusal};
 use crate::rollback::{
     BACKUP_MANIFEST_FILE, BEFORE_RESTORE_REASON, BackupEntryState, BackupEnvironment,
     BackupManifest, BackupManifestFile, BackupSet, DELETING_DIR, EntryPlace, KEYMAP_BACKUP_REASON,
@@ -39,7 +40,7 @@ use crate::rollback::{
     backup_id_is_well_formed, backups_root, copy_in_set, entry_place, find_backup_set,
     inside_place_by_text, is_outside_file_in_layout, is_real_file, is_real_folder, is_receipt,
     is_receipt_entry, is_set_bookkeeping, load_backup_manifest, manifest_holds_receipt,
-    restore_place_by_text, same_place, set_to_restore,
+    manifest_refusal, restore_place_by_text, same_place, set_to_restore,
 };
 use crate::uninstall::execute::UNINSTALL_BACKUP_REASON;
 use crate::version::Version;
@@ -251,8 +252,9 @@ pub struct BackupEntry {
     /// restore: one in RABBIT's own folder, one by a name that may open
     /// another file than it names, one outside every folder RABBIT installs
     /// into, or a second file for one place. By its original path, or its
-    /// place in a set without a manifest. Set only when it is why
-    /// [`Self::restore_scope`] is `None`.
+    /// place in a set without a manifest; for a second file for one place,
+    /// by that place. Set only when it is why [`Self::restore_scope`] is
+    /// `None`. [`Self::refusal`] says why.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused_path: Option<PathBuf>,
     /// Whether this is the only copy of what it holds: uninstalled software
@@ -266,6 +268,20 @@ pub struct BackupEntry {
     /// How `rabbit restore-backup` takes this backup today, if it does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore_scope: Option<RestoreScope>,
+    /// Why a restore refuses this backup, the refusal a run gives for the
+    /// same reason, where the overview can tell: a file it would refuse to
+    /// put back (see [`Self::refused_path`]); the statuses a run refuses
+    /// for (installed again, nothing in it, part missing, not complete,
+    /// another of its group installed, RABBIT's records unreadable, another
+    /// account's); and for a whole set, what refuses the set itself (being
+    /// deleted, a damaged manifest, an update's set, a copy of RABBIT's
+    /// records in it, a link in a set without a manifest, or a file from
+    /// outside the resource folder there). `None` for the other statuses,
+    /// which say on their own why the backup can't be restored, or that it
+    /// can, and for the backup of RABBIT's records, which stands for many
+    /// sets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<RestoreRefusal>,
 }
 
 /// What a later run compares to tell whether a set changed since it was
@@ -445,7 +461,9 @@ pub(crate) fn overview_of_with(
 ) -> Result<BackupOverview> {
     let found = match find_backup_set(resource_path, backup_id) {
         Ok(found) => found,
-        Err(RabbitError::InvalidBackupId(_)) => return Err(lookup_error(resource_path, backup_id)),
+        Err(RabbitError::RestoreRefused(RestoreRefusal::InvalidId { .. })) => {
+            return Err(lookup_error(resource_path, backup_id));
+        }
         Err(error) => return Err(error),
     };
     let mut folders = Vec::new();
@@ -476,9 +494,10 @@ pub(crate) fn overview_of_with(
 fn lookup_error(resource_path: &Path, backup_id: &str) -> RabbitError {
     match set_to_restore(resource_path, backup_id) {
         Err(error) => error,
-        Ok(_) => RabbitError::BackupSetNotFound {
+        Ok(_) => RestoreRefusal::NotFound {
             backup_id: backup_id.to_string(),
-        },
+        }
+        .into(),
     }
 }
 
@@ -1062,6 +1081,7 @@ fn new_entry(
         ),
         shares_set_with: Vec::new(),
         restore_scope: None,
+        refusal: None,
     }
 }
 
@@ -1086,9 +1106,12 @@ struct Judge<'a> {
 }
 
 impl Judge<'_> {
-    /// Where a restore would put `entry` back, from the paths' text alone;
-    /// `None` where it refuses the file (see [`restore_place_by_text`]).
-    fn restore_place(&self, entry: &BackupManifestFile) -> Option<PathBuf> {
+    /// Where a restore would put `entry` back, from the paths' text alone,
+    /// or why it refuses the file (see [`restore_place_by_text`]).
+    fn restore_place(
+        &self,
+        entry: &BackupManifestFile,
+    ) -> std::result::Result<PathBuf, TargetRefusal> {
         restore_place_by_text(self.resource_path, entry, || {
             self.outside
                 .get_or_init(|| (self.environment.outside_rules)(self.resource_path))
@@ -1201,33 +1224,71 @@ impl Judge<'_> {
             BackupStatus::NotHere
         };
         let whole = (status == BackupStatus::NotHere).then(|| self.restores_whole(set));
+        let refused = whole
+            .as_ref()
+            .and_then(|whole| whole.as_ref().err().cloned());
+        let refusal = refused
+            .clone()
+            .or_else(|| self.status_refusal(set, &item, status, None));
         BackupEntry {
             size: set.size,
             restore_scope: matches!(whole, Some(Ok(true))).then_some(RestoreScope::WholeSet),
-            refused_path: whole.and_then(std::result::Result::err),
+            refused_path: refused.as_ref().and_then(refused_path_of),
+            refusal,
             ..new_entry(item, BackupGroup::Other, set.kind, set.created_unix, status)
         }
     }
 
     /// Whether `restore_backup_set` takes `set` as a whole today, as far as
-    /// the overview can tell without hashing. `Ok(false)` when it refuses
-    /// the set for its kind, for a copy of RABBIT's receipt in it, for what
-    /// couldn't be read of it, or for having nothing to bring back; without
-    /// a manifest, also for a file from outside the resource folder, which
-    /// only a manifest could place. `Err` names the first file a restore
-    /// would refuse to put back, which refuses the whole set too.
-    fn restores_whole(&self, set: &BackupSetOverview) -> std::result::Result<bool, PathBuf> {
-        if set.holds_receipt || set.warning.is_some() || set.owned_by_another_account {
+    /// the overview can tell without hashing. `Err` is the refusal a
+    /// restore of the whole set gives, in the order a restore refuses: an
+    /// unfinished deletion, a damaged manifest, an update's set, a set of
+    /// RABBIT's records, a copy of RABBIT's receipt in it, then the first
+    /// file it would refuse to put back (see [`Self::plan_targets`]).
+    /// `Ok(false)` when it can't be restored for another reason: another
+    /// account's, which its status says, what else couldn't be read of it,
+    /// or nothing to bring back.
+    fn restores_whole(&self, set: &BackupSetOverview) -> std::result::Result<bool, RestoreRefusal> {
+        if set.owned_by_another_account {
+            return Ok(false);
+        }
+        let backup_id = || set.id.clone();
+        match set.kind {
+            BackupSetKind::Deleting => {
+                return Err(RestoreRefusal::BeingDeleted {
+                    backup_id: backup_id(),
+                });
+            }
+            BackupSetKind::Damaged => {
+                return manifest_refusal(&set.id, &set.path).map_or(Ok(false), Err);
+            }
+            BackupSetKind::Update => {
+                return Err(RestoreRefusal::EarlierVersionNotYet {
+                    backup_id: backup_id(),
+                });
+            }
+            BackupSetKind::Records => {
+                return Err(RestoreRefusal::RecordsOnly {
+                    backup_id: backup_id(),
+                });
+            }
+            _ => {}
+        }
+        if set.holds_receipt {
+            return Err(RestoreRefusal::ReceiptInSet {
+                backup_id: backup_id(),
+                backup_path: set.path.clone(),
+            });
+        }
+        // A link in a set without a manifest refuses it as a restore does,
+        // in `plan_targets`. Anything else that couldn't be read of a set
+        // stops a restore too, but with no refusal of its own.
+        let only_links_unread = set.manifest.is_none() && !set.links.is_empty();
+        if set.warning.is_some() && !only_links_unread {
             return Ok(false);
         }
         let brings_back = match (set.kind, &set.manifest) {
-            (BackupSetKind::NoManifest, None) => {
-                !set.files.is_empty()
-                    && !set
-                        .files
-                        .iter()
-                        .any(|relative| is_outside_file_in_layout(relative))
-            }
+            (BackupSetKind::NoManifest, None) => !set.files.is_empty() || !set.links.is_empty(),
             (
                 BackupSetKind::Uninstall
                 | BackupSetKind::Keymap
@@ -1250,17 +1311,21 @@ impl Judge<'_> {
     }
 
     /// The files a restore of `item` from `set` writes, sorted, or the
-    /// first file the restore would refuse to put back, which stops it
-    /// whole: in RABBIT's own folder, by a name that may open another file,
-    /// outside every folder RABBIT installs into, a second file for one
-    /// place, or without a manifest a link or a file from outside the
-    /// resource folder. Only what comes back counts, as for the restore.
-    /// Nothing is hashed, and nothing outside the set is looked at.
+    /// refusal of the first file the restore would refuse to put back,
+    /// which stops it whole, for the reason the restore gives: in RABBIT's
+    /// own folder, by a name that may open another file, outside every
+    /// folder RABBIT installs into, a second file for one place, or without
+    /// a manifest a link or a file from outside the resource folder. The
+    /// refused file is named by its original path, or its place in a set
+    /// without a manifest; a second file for one place by that place, and a
+    /// link by its path in `RABBIT/backups`, as a restore names them. Only
+    /// what comes back counts, as for the restore. Nothing is hashed, and
+    /// nothing outside the set is looked at.
     fn plan_targets(
         &self,
         set: &BackupSetOverview,
         item: &BackupItem,
-    ) -> std::result::Result<Vec<PathBuf>, PathBuf> {
+    ) -> std::result::Result<Vec<PathBuf>, RestoreRefusal> {
         let mut planned: Vec<(PathBuf, PathBuf)> = Vec::new();
         match &set.manifest {
             // Without a manifest only the whole set restores, by its layout.
@@ -1269,13 +1334,17 @@ impl Judge<'_> {
                     return Ok(Vec::new());
                 }
                 if let Some(link) = set.links.first() {
-                    return Err(link.clone());
+                    return Err(RestoreRefusal::IsLink {
+                        path: set.path.join(link),
+                    });
                 }
                 for relative in &set.files {
-                    let place = (!is_outside_file_in_layout(relative))
-                        .then(|| inside_place_by_text(self.resource_path, relative))
-                        .flatten()
-                        .ok_or_else(|| relative.clone())?;
+                    let place = if is_outside_file_in_layout(relative) {
+                        Err(TargetRefusal::OutsideWithoutManifest)
+                    } else {
+                        inside_place_by_text(self.resource_path, relative)
+                    }
+                    .map_err(|reason| reason.refuse(relative))?;
                     planned.push((place, relative.clone()));
                 }
             }
@@ -1286,17 +1355,18 @@ impl Judge<'_> {
                 }) {
                     let place = self
                         .restore_place(entry)
-                        .ok_or_else(|| entry.original_path.clone())?;
+                        .map_err(|reason| reason.refuse(&entry.original_path))?;
                     planned.push((place, entry.original_path.clone()));
                 }
             }
         }
         let mut places = BTreeSet::new();
-        if let Some((_, original)) = planned
+        if let Some(place) = planned
             .iter()
-            .find(|(place, _)| !places.insert(same_place(place)))
+            .map(|(place, _)| place)
+            .find(|place| !places.insert(same_place(place)))
         {
-            return Err(original.clone());
+            return Err(TargetRefusal::TwoFilesForOnePlace.refuse(place));
         }
         let mut targets: Vec<PathBuf> = planned.into_iter().map(|(place, _)| place).collect();
         targets.sort();
@@ -1343,6 +1413,18 @@ impl Judge<'_> {
         };
         let plan =
             (status.can_restore() && !set.holds_receipt).then(|| self.plan_targets(set, &item));
+        let refused = plan.as_ref().and_then(|plan| plan.as_ref().err().cloned());
+        // A restore refuses a set holding a copy of RABBIT's receipt before
+        // it looks at any package of it.
+        let receipt_in_set = (set.holds_receipt && status != BackupStatus::NotYours).then(|| {
+            RestoreRefusal::ReceiptInSet {
+                backup_id: set.id.clone(),
+                backup_path: set.path.clone(),
+            }
+        });
+        let refusal = receipt_in_set
+            .or_else(|| refused.clone())
+            .or_else(|| self.status_refusal(set, &item, status, missing_path.as_ref()));
         BackupEntry {
             size: files.iter().map(|entry| entry.size).sum(),
             version: record
@@ -1350,9 +1432,10 @@ impl Judge<'_> {
                 .as_ref()
                 .and_then(|entry| entry.version.clone()),
             with_settings: record.with_settings,
-            missing_path,
             restore_scope: matches!(plan, Some(Ok(_))).then_some(RestoreScope::Package),
-            refused_path: plan.and_then(std::result::Result::err),
+            refused_path: refused.as_ref().and_then(refused_path_of),
+            refusal,
+            missing_path,
             // Files already back are on disk too: deleting loses nothing.
             only_copy: status != BackupStatus::AlreadyBack,
             ..new_entry(
@@ -1433,16 +1516,24 @@ impl Judge<'_> {
             .filter(|entry| comes_back(&set.path, entry))
             .all(|entry| is_keymap_entry(self.resource_path, entry));
         let whole = (status == BackupStatus::CanRestore && alone).then(|| self.restores_whole(set));
+        let refused = whole
+            .as_ref()
+            .and_then(|whole| whole.as_ref().err().cloned());
+        let item = BackupItem::Keymap {
+            set_id: set.id.clone(),
+        };
+        let refusal = refused
+            .clone()
+            .or_else(|| self.status_refusal(set, &item, status, missing_path.as_ref()));
         BackupEntry {
             size: keymap.iter().map(|entry| entry.size).sum(),
             keymap_origin: manifest.keymap_origin,
-            missing_path,
             restore_scope: matches!(whole, Some(Ok(true))).then_some(RestoreScope::WholeSet),
-            refused_path: whole.and_then(std::result::Result::err),
+            refused_path: refused.as_ref().and_then(refused_path_of),
+            refusal,
+            missing_path,
             ..new_entry(
-                BackupItem::Keymap {
-                    set_id: set.id.clone(),
-                },
+                item,
                 BackupGroup::Keymaps,
                 set.kind,
                 set.created_unix,
@@ -1481,6 +1572,10 @@ impl Judge<'_> {
         };
         let (status, missing_path) =
             self.earlier_version_status(set, manifest, package_id, &earlier, &files);
+        let item = BackupItem::Package {
+            set_id: set.id.clone(),
+            package_id: package_id.to_string(),
+        };
         BackupEntry {
             size: files.iter().map(|entry| entry.size).sum(),
             version: match &earlier {
@@ -1488,15 +1583,13 @@ impl Judge<'_> {
                 _ => None,
             },
             replaced_by: replaced.and_then(|record| record.replaced_by.clone()),
+            refusal: self.status_refusal(set, &item, status, missing_path.as_ref()),
             missing_path,
             // `restore_backup_set` refuses earlier versions until the swap
             // lands.
             restore_scope: None,
             ..new_entry(
-                BackupItem::Package {
-                    set_id: set.id.clone(),
-                    package_id: package_id.to_string(),
-                },
+                item,
                 BackupGroup::EarlierVersions,
                 set.kind,
                 set.created_unix,
@@ -1536,7 +1629,10 @@ impl Judge<'_> {
         let Ok(state) = self.receipt else {
             return (BackupStatus::RecordsUnreadable, None);
         };
-        if self.another_of_its_group_installed(package_id, state) {
+        if !self
+            .others_of_its_group_installed(package_id, state)
+            .is_empty()
+        {
             return (BackupStatus::OtherLanguagePack, None);
         }
         if same_entry_but_channel(state.packages.get(package_id), *earlier)
@@ -1608,26 +1704,103 @@ impl Judge<'_> {
     fn all_on_disk(&self, entries: &[&BackupManifestFile]) -> bool {
         entries.iter().all(|entry| {
             self.restore_place(entry)
+                .ok()
                 .and_then(|place| place_metadata(&place))
                 .is_some_and(|metadata| metadata.is_file() && metadata.len() == entry.size)
         })
     }
 
-    /// Whether `state` lists another package of `package_id`'s exclusive
-    /// group, whose install would remove this one's. Language packs were
+    /// The other packages of `package_id`'s exclusive group that `state`
+    /// lists, whose install would remove this one's. Language packs were
     /// such a group and no longer are: REAPER keeps every pack and uses the
     /// one chosen. No package the manifests ship declares a group today.
-    fn another_of_its_group_installed(&self, package_id: &str, state: &InstallState) -> bool {
+    fn others_of_its_group_installed(&self, package_id: &str, state: &InstallState) -> Vec<String> {
         let groups = self
             .groups
             .get_or_init(|| (self.environment.exclusive_groups)());
         let Some(group) = groups.get(package_id) else {
-            return false;
+            return Vec::new();
         };
         state
             .packages
             .keys()
-            .any(|other| other != package_id && groups.get(other) == Some(group))
+            .filter(|other| *other != package_id && groups.get(*other) == Some(group))
+            .cloned()
+            .collect()
+    }
+
+    /// The refusal a restore gives for what `status` says about `item`, a
+    /// backup of `set`, when the status is a reason a restore refuses for,
+    /// in the same code (see [`BackupEntry::refusal`]). `missing_path` is
+    /// the entry's own.
+    fn status_refusal(
+        &self,
+        set: &BackupSetOverview,
+        item: &BackupItem,
+        status: BackupStatus,
+        missing_path: Option<&PathBuf>,
+    ) -> Option<RestoreRefusal> {
+        let backup_id = set.id.clone();
+        let package_id = item.package_id().map(ToString::to_string);
+        Some(match status {
+            BackupStatus::InstalledAgain => RestoreRefusal::ReinstalledSince {
+                backup_id,
+                package_id: package_id?,
+                other_packages: Vec::new(),
+            },
+            BackupStatus::NothingInIt => RestoreRefusal::NothingOfItInSet {
+                backup_id,
+                package_ids: vec![package_id?],
+            },
+            BackupStatus::PartMissing => RestoreRefusal::PartMissing {
+                backup_id,
+                path: missing_path?.clone(),
+            },
+            BackupStatus::NotComplete => RestoreRefusal::NotComplete {
+                backup_id,
+                package_id: package_id?,
+                path: missing_path?.clone(),
+            },
+            BackupStatus::OtherLanguagePack => {
+                let package_id = package_id?;
+                let installed = self
+                    .receipt
+                    .as_ref()
+                    .map(|state| self.others_of_its_group_installed(&package_id, state))
+                    .unwrap_or_default();
+                RestoreRefusal::OtherLanguagePackInstalled {
+                    backup_id,
+                    package_id,
+                    installed,
+                }
+            }
+            BackupStatus::RecordsUnreadable => RestoreRefusal::ReceiptUnreadable {
+                detail: self.receipt.as_ref().err()?.clone(),
+            },
+            BackupStatus::NotYours => RestoreRefusal::NotYours { backup_id },
+            BackupStatus::CanRestore
+            | BackupStatus::StoppedPartway
+            | BackupStatus::AlreadyBack
+            | BackupStatus::VersionUnknown
+            | BackupStatus::NotHere
+            | BackupStatus::NotABackup => return None,
+        })
+    }
+}
+
+/// The file `refusal` names, for [`BackupEntry::refused_path`]: the one a
+/// restore would refuse to put back for where it goes. A file from outside
+/// the resource folder in a set without a manifest, and a link in such a
+/// set, are no such file: what refuses them is the set itself, which the
+/// set's kind and warning say.
+fn refused_path_of(refusal: &RestoreRefusal) -> Option<PathBuf> {
+    match refusal {
+        RestoreRefusal::TargetRefused {
+            reason: TargetRefusal::OutsideWithoutManifest,
+            ..
+        } => None,
+        RestoreRefusal::TargetRefused { path, .. } => Some(path.clone()),
+        _ => None,
     }
 }
 

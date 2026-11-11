@@ -1,0 +1,821 @@
+//! Why a restore of a backup is refused, as codes.
+//!
+//! Every refusal a restore makes before it changes anything is one
+//! [`RestoreRefusal`]. Each has a stable code, its serde tag in kebab-case,
+//! which the wizard maps to a Fluent key of its own; fields that name what
+//! it is about, such as set ids, package ids, paths and programs; and an
+//! English text for the command line. That text never holds command-line
+//! syntax: the CLI adds its own hints after it, such as the command that
+//! lists the backups there are.
+//!
+//! The overview of the backups gives the same refusal where a backup's
+//! status, or a file a restore would refuse, says the same thing (see
+//! [`crate::backup_overview::BackupEntry::refusal`]), so a row in the
+//! wizard and a run agree.
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::preflight::{CLOSE_REAPER_BEFORE_RESTORING, RunningProcess, process_list};
+
+/// Why a restore was refused, with nothing changed.
+///
+/// Codes marked as reserved belong to later steps of the backup plan and are
+/// not raised yet; the overview may already give them for a status that
+/// says the same thing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(tag = "code", rename_all = "kebab-case")]
+pub enum RestoreRefusal {
+    /// An id that can't name a set at all: not exactly one plain folder
+    /// name, or one Windows would read as a drive, a stream or a device.
+    /// Refused before anything is read.
+    #[error(
+        "\"{backup_id}\" can't be a backup id: an id is the name of one backup in RABBIT's backups folder, and RABBIT never names a backup like that"
+    )]
+    InvalidId { backup_id: String },
+
+    /// A well-formed id that names no folder in RABBIT's backups folder,
+    /// nor in its folder of unfinished deletions.
+    #[error("The backup {backup_id} was deleted or never existed")]
+    NotFound { backup_id: String },
+
+    /// An id that names no set exactly, while a set whose name differs only
+    /// in upper and lower case is there. Only exact names count, so it isn't
+    /// restored, but it isn't gone either.
+    #[error(
+        "There is no backup named {backup_id}. Backup names must match exactly, upper and lower case included; there is one named {existing}"
+    )]
+    DiffersInCase { backup_id: String, existing: String },
+
+    /// An id that names no set only because of the dots or spaces at its
+    /// end, while the id without them names a set exactly: it was copied
+    /// with the period after it, for example. On Windows such an id isn't
+    /// even well-formed, since Windows drops those characters.
+    #[error(
+        "\"{backup_id}\" names no backup: RABBIT never ends a backup's name in a dot or a space. There is one named {existing}"
+    )]
+    EndsInDotOrSpace { backup_id: String, existing: String },
+
+    /// An id that names only a set whose deletion started and didn't
+    /// finish. Part of it may be gone already.
+    #[error(
+        "The backup {backup_id} is being deleted: a deletion of it started and didn't finish, so RABBIT doesn't restore it"
+    )]
+    BeingDeleted { backup_id: String },
+
+    /// RABBIT's folder, its backups folder, the set, or something in the
+    /// set is a symbolic link or junction. RABBIT never follows one there,
+    /// wherever it leads.
+    #[error(
+        "RABBIT doesn't use {}: it is a symbolic link or junction, and RABBIT never follows one in its backups",
+        .path.display()
+    )]
+    IsLink { path: PathBuf },
+
+    /// One package was asked for from a set without a manifest: only a
+    /// manifest says which package a file belongs to.
+    #[error(
+        "The backup {backup_id} has no manifest, so RABBIT can't tell which of its files belong to {package_id}. It can restore the backup only as a whole"
+    )]
+    NoManifest {
+        backup_id: String,
+        package_id: String,
+    },
+
+    /// One package was asked for from a set that records no packages. Only
+    /// an uninstall's set records which receipt entry goes with a package,
+    /// and restoring one package's files from any other set would leave
+    /// RABBIT's records describing other files.
+    #[error(
+        "Only a backup an uninstall made can restore one package, and {backup_id} isn't one, so RABBIT doesn't restore {package_id} from it alone. It can restore the backup as a whole"
+    )]
+    NoPackageRecords {
+        backup_id: String,
+        package_id: String,
+    },
+
+    /// One package was asked for that the set doesn't record. `packages`
+    /// are the ones it does.
+    #[error(
+        "The backup {backup_id} holds no record of {package_id}; it holds {}",
+        names_in_a_sentence(.packages)
+    )]
+    PackageNotInSet {
+        backup_id: String,
+        package_id: String,
+        packages: Vec<String>,
+    },
+
+    /// The set's manifest at `path` can't be read as one. `detail` is what
+    /// the reader said.
+    #[error(
+        "The manifest of the backup {backup_id} can't be read ({detail}), so RABBIT doesn't restore it"
+    )]
+    DamagedManifest {
+        backup_id: String,
+        path: PathBuf,
+        detail: String,
+    },
+
+    /// A set that holds only a copy of RABBIT's receipt, made after vendor
+    /// installers ran. Nothing in it goes back.
+    #[error(
+        "The backup {backup_id} holds only a copy of RABBIT's records, so there is nothing in it to restore"
+    )]
+    RecordsOnly { backup_id: String },
+
+    /// A set that holds a copy of RABBIT's receipt, such as one a restore
+    /// of an update's set wrote. Copying it back would undo every change to
+    /// the receipt since, uninstalls included. `backup_path` is the set's
+    /// folder, where the copy stays.
+    #[error(
+        "The backup {backup_id} holds a copy of RABBIT's records, so RABBIT doesn't restore it: copying the records back would undo every change to them since the backup was made. The copy stays in the backup"
+    )]
+    ReceiptInSet {
+        backup_id: String,
+        backup_path: PathBuf,
+    },
+
+    /// A set an update wrote, whole or for one package. Putting its files
+    /// back would leave RABBIT's receipt describing the newer version, so it
+    /// is refused until RABBIT can go back to an earlier version by
+    /// changing only that package's entry.
+    #[error(
+        "The backup {backup_id} holds files an update replaced, and RABBIT can't restore earlier versions yet. The backup stays as it is"
+    )]
+    EarlierVersionNotYet { backup_id: String },
+
+    /// RABBIT's receipt has another entry for the package than the one the
+    /// set recorded: it was installed again since. Putting the old files
+    /// under the newer entry would leave a receipt wrong about both.
+    /// `other_packages` are the set's other packages with a file in it,
+    /// when the whole set was asked for: each can still be restored on its
+    /// own.
+    #[error(
+        "Can't restore {package_id} from the backup {backup_id}: RABBIT's records describe another copy of it, installed after this backup was made, and a restore would mix the two. To go back to this copy, uninstall that one first, then restore again"
+    )]
+    ReinstalledSince {
+        backup_id: String,
+        package_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        other_packages: Vec<String>,
+    },
+
+    /// Packages an uninstall's set records, but none of whose files are in
+    /// it: the uninstall found none to move, or stopped before any copy of
+    /// them finished. Putting back their records alone would make RABBIT
+    /// count them as installed with no files there.
+    #[error(
+        "None of the files of {} are in the backup {backup_id}, so there is nothing to restore. RABBIT's records stay as they are",
+        names_in_a_sentence(.package_ids)
+    )]
+    NothingOfItInSet {
+        backup_id: String,
+        package_ids: Vec<String>,
+    },
+
+    /// A finished copy the manifest names is gone from the set, or isn't
+    /// the file it recorded. Restoring the rest would mix old and new
+    /// files. `path` is where the file came from, as the set records it.
+    #[error(
+        "Part of the backup {backup_id} is missing: its copy of {} is gone, or isn't the file it recorded, so RABBIT doesn't restore it",
+        .path.display()
+    )]
+    PartMissing { backup_id: String, path: PathBuf },
+
+    /// An earlier version a file of which is neither in the set nor on
+    /// disk with that version's hash, by its path in RABBIT's records.
+    /// Reserved for restoring earlier versions (backup plan 1d); the
+    /// overview gives it already.
+    #[error(
+        "{package_id} in the backup {backup_id} isn't complete: {} is neither in the backup nor on disk as that version had it, so RABBIT doesn't restore it",
+        .path.display()
+    )]
+    NotComplete {
+        backup_id: String,
+        package_id: String,
+        path: PathBuf,
+    },
+
+    /// An earlier version of a package while another package of its
+    /// exclusive group is installed, whose install removed it. Reserved for
+    /// restoring earlier versions (backup plan 1d); the overview gives it
+    /// already.
+    #[error(
+        "RABBIT doesn't restore {package_id} from the backup {backup_id} while {} is installed: installing one of them removes the other",
+        names_in_a_sentence(.installed)
+    )]
+    OtherLanguagePackInstalled {
+        backup_id: String,
+        package_id: String,
+        installed: Vec<String>,
+    },
+
+    /// A file the set would put back at a place RABBIT never writes, for
+    /// `reason`. `path` is where the file came from, as the set records it,
+    /// or its place in a set without a manifest; for two files for one
+    /// place, the place they would both go back to. `other_packages` are the
+    /// set's other packages with a file in it, when the whole set was asked
+    /// for and the file is one package's: each can still be restored on its
+    /// own.
+    #[error("RABBIT doesn't put back {}: {reason}", .path.display())]
+    TargetRefused {
+        path: PathBuf,
+        reason: TargetRefusal,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        other_packages: Vec<String>,
+    },
+
+    /// RABBIT's receipt can't be read, so RABBIT can't tell whether the
+    /// set's records fit it. `detail` is what the reader said.
+    #[error(
+        "RABBIT can't read its records ({detail}), so it can't tell whether the backup fits them, and doesn't restore it"
+    )]
+    ReceiptUnreadable { detail: String },
+
+    /// A REAPER that must be closed is running: the target's, or, when
+    /// `every_reaper_for` names packages whose uninstall needs that, any
+    /// REAPER on the computer. `package_names` are those packages by the
+    /// names RABBIT shows, for the English. `processes` are the REAPERs
+    /// running.
+    #[error("{}", reaper_running_text(.package_names, .processes))]
+    ReaperRunning {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        every_reaper_for: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        package_names: Vec<String>,
+        processes: Vec<RunningProcess>,
+    },
+
+    /// Programs the uninstall plans of `package_ids` name as blocking are
+    /// running. `package_names` are those packages by the names RABBIT
+    /// shows, for the English. `programs` are the programs' names, as they
+    /// run.
+    #[error(
+        "Close these programs before restoring {}: {}",
+        names_in_a_sentence(.package_names),
+        .programs.join(", ")
+    )]
+    ProgramRunning {
+        package_ids: Vec<String>,
+        package_names: Vec<String>,
+        programs: Vec<String>,
+    },
+
+    /// RABBIT can't write where the restore puts files back, in the
+    /// resource folder at `path` or, on macOS, its plug-ins folder. `check`
+    /// is the name of the preflight check that failed, such as
+    /// `resource-path`, and `detail` what it found, in English.
+    #[error(
+        "RABBIT can't write where the restore puts files back, in {}: {detail}",
+        .path.display()
+    )]
+    NotWritable {
+        path: PathBuf,
+        check: String,
+        detail: String,
+    },
+
+    /// Another RABBIT holds this REAPER's install lock: it is installing,
+    /// uninstalling or restoring there.
+    #[error(
+        "Another RABBIT is working on this REAPER (lock {}, PID {pid}), so RABBIT doesn't restore anything until it has finished",
+        .lock_path.display()
+    )]
+    LockHeld { lock_path: PathBuf, pid: u32 },
+
+    /// A real restore was started on macOS with RABBIT itself running as
+    /// root, as under `sudo`: the files it puts back, the backup of the
+    /// files they replace and RABBIT's records would all be root's.
+    #[error(
+        "RABBIT is running as root, as it does under sudo, and doesn't restore backups like that: the files it puts back, the backup of the files they replace and RABBIT's records would all be root's. Run RABBIT as yourself, not with sudo"
+    )]
+    AsRoot,
+
+    /// The set belongs to another account than RABBIT's backups folder, as
+    /// one made under `sudo` does on a Mac.
+    #[error("The backup {backup_id} belongs to another account, so RABBIT doesn't restore it")]
+    NotYours { backup_id: String },
+
+    /// The set changed between the reads before the lock and those under
+    /// it, as when another RABBIT was still writing it.
+    #[error(
+        "The backup {backup_id} changed while RABBIT read it, as when another RABBIT was still writing it. Nothing changed; restore it again"
+    )]
+    ChangedWhileRead { backup_id: String },
+
+    /// The set changed since it was listed. Reserved for restoring several
+    /// backups at once (backup plan 1b2).
+    #[error(
+        "The backup {backup_id} changed since RABBIT listed it. Nothing changed; look at the backups again, then restore"
+    )]
+    ChangedSinceListed { backup_id: String },
+}
+
+impl RestoreRefusal {
+    /// The refusal's stable code, the same as its serde tag: what the
+    /// wizard maps to a Fluent key, and what scripts can rely on.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidId { .. } => "invalid-id",
+            Self::NotFound { .. } => "not-found",
+            Self::DiffersInCase { .. } => "differs-in-case",
+            Self::EndsInDotOrSpace { .. } => "ends-in-dot-or-space",
+            Self::BeingDeleted { .. } => "being-deleted",
+            Self::IsLink { .. } => "is-link",
+            Self::NoManifest { .. } => "no-manifest",
+            Self::NoPackageRecords { .. } => "no-package-records",
+            Self::PackageNotInSet { .. } => "package-not-in-set",
+            Self::DamagedManifest { .. } => "damaged-manifest",
+            Self::RecordsOnly { .. } => "records-only",
+            Self::ReceiptInSet { .. } => "receipt-in-set",
+            Self::EarlierVersionNotYet { .. } => "earlier-version-not-yet",
+            Self::ReinstalledSince { .. } => "reinstalled-since",
+            Self::NothingOfItInSet { .. } => "nothing-of-it-in-set",
+            Self::PartMissing { .. } => "part-missing",
+            Self::NotComplete { .. } => "not-complete",
+            Self::OtherLanguagePackInstalled { .. } => "other-language-pack-installed",
+            Self::TargetRefused { .. } => "target-refused",
+            Self::ReceiptUnreadable { .. } => "receipt-unreadable",
+            Self::ReaperRunning { .. } => "reaper-running",
+            Self::ProgramRunning { .. } => "program-running",
+            Self::NotWritable { .. } => "not-writable",
+            Self::LockHeld { .. } => "lock-held",
+            Self::AsRoot => "as-root",
+            Self::NotYours { .. } => "not-yours",
+            Self::ChangedWhileRead { .. } => "changed-while-read",
+            Self::ChangedSinceListed { .. } => "changed-since-listed",
+        }
+    }
+}
+
+/// Why a restore won't put a file back at a place, for
+/// [`RestoreRefusal::TargetRefused`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum TargetRefusal {
+    /// The place is in RABBIT's own folder, the receipt included.
+    #[error("a restore never puts a file back into RABBIT's own folder")]
+    RabbitFolder,
+    /// The way to the place leads into RABBIT's own folder through a link.
+    #[error("the way to it leads into RABBIT's own folder")]
+    LeadsIntoRabbitFolder,
+    /// A name on the way to the place may open another file or folder than
+    /// it names: one with a `:`, on Windows one ending in a dot or space, or
+    /// a device name.
+    #[error("the name \"{name}\" on the way to it may open another file or folder than it names")]
+    NameNotAsWritten { name: String },
+    /// The place itself is a symbolic link or junction.
+    #[error("it is a symbolic link or junction, which RABBIT never replaces")]
+    PlaceIsLink,
+    /// The way to the place, below a folder RABBIT installs into, leads
+    /// through a symbolic link or junction.
+    #[error(
+        "the way to it leads through {}, a symbolic link or junction, which RABBIT never follows",
+        .link.display()
+    )]
+    ThroughLink { link: PathBuf },
+    /// The way to the place leads out of the resource folder.
+    #[error("the way to it leads outside the resource folder, {}", .folder.display())]
+    LeadsOutsideResourceFolder { folder: PathBuf },
+    /// The way to the place leads out of the folder a package's own files
+    /// go back into.
+    #[error("the way to it leads outside {}", .folder.display())]
+    LeadsOutside { folder: PathBuf },
+    /// The place is outside the resource folder and every other folder
+    /// RABBIT installs into.
+    #[error(
+        "the path is outside the REAPER resource folder and every other folder RABBIT installs into"
+    )]
+    OutsideAllowedFolders,
+    /// A relative path with `.`, `..` or a root in it.
+    #[error("the path is not a plain path inside the resource folder")]
+    NotPlainPath,
+    /// The folder a package's own files go back into is gone.
+    #[error("the folder it goes back into, {}, is gone", .folder.display())]
+    GuardFolderGone { folder: PathBuf },
+    /// Something on the way couldn't be checked.
+    #[error("RABBIT couldn't check {}: {detail}", .path.display())]
+    CouldNotCheck { path: PathBuf, detail: String },
+    /// The set holds more than one file for this place.
+    #[error(
+        "the backup holds more than one file for this place, so RABBIT can't tell which one belongs there"
+    )]
+    TwoFilesForOnePlace,
+    /// A file from outside the resource folder in a set without a manifest:
+    /// only a manifest could say where it belongs.
+    #[error(
+        "the set has no manifest, so RABBIT can't tell where this file from outside the resource folder belongs"
+    )]
+    OutsideWithoutManifest,
+    /// The manifest names the file's copy outside the set. `path` of the
+    /// refusal is that copy's recorded path.
+    #[error("the manifest names its copy outside the backup set")]
+    CopyOutsideSet,
+}
+
+impl TargetRefusal {
+    /// The reason's stable code, the same as its serde tag.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::RabbitFolder => "rabbit-folder",
+            Self::LeadsIntoRabbitFolder => "leads-into-rabbit-folder",
+            Self::NameNotAsWritten { .. } => "name-not-as-written",
+            Self::PlaceIsLink => "place-is-link",
+            Self::ThroughLink { .. } => "through-link",
+            Self::LeadsOutsideResourceFolder { .. } => "leads-outside-resource-folder",
+            Self::LeadsOutside { .. } => "leads-outside",
+            Self::OutsideAllowedFolders => "outside-allowed-folders",
+            Self::NotPlainPath => "not-plain-path",
+            Self::GuardFolderGone { .. } => "guard-folder-gone",
+            Self::CouldNotCheck { .. } => "could-not-check",
+            Self::TwoFilesForOnePlace => "two-files-for-one-place",
+            Self::OutsideWithoutManifest => "outside-without-manifest",
+            Self::CopyOutsideSet => "copy-outside-set",
+        }
+    }
+
+    /// The refusal of the file from `path` for this reason.
+    pub(crate) fn refuse(self, path: &Path) -> RestoreRefusal {
+        RestoreRefusal::TargetRefused {
+            path: path.to_path_buf(),
+            reason: self,
+            other_packages: Vec::new(),
+        }
+    }
+}
+
+/// The refusal `error` is, for tests that check a refusal's code. Panics,
+/// naming the error, when it is no refusal.
+#[cfg(test)]
+pub(crate) fn refusal(error: &crate::error::RabbitError) -> &RestoreRefusal {
+    match error {
+        crate::error::RabbitError::RestoreRefused(refusal) => refusal,
+        other => panic!("not a refusal: {other:?}"),
+    }
+}
+
+/// Names as a sentence lists them: `a`, `a and b`, `a, b and c`.
+pub(crate) fn names_in_a_sentence(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [name] => name.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// What [`RestoreRefusal::ReaperRunning`] says: close the target's REAPER,
+/// as the install preflight's check says it for a restore, or every REAPER
+/// for the packages named `package_names`, which need that.
+fn reaper_running_text(package_names: &[String], processes: &[RunningProcess]) -> String {
+    if package_names.is_empty() {
+        format!(
+            "{CLOSE_REAPER_BEFORE_RESTORING}: {}",
+            process_list(processes)
+        )
+    } else {
+        format!(
+            "Close every REAPER on this computer, portable ones included, before restoring {}: {}",
+            names_in_a_sentence(package_names),
+            process_list(processes)
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+
+    use super::{RestoreRefusal, TargetRefusal, names_in_a_sentence};
+    use crate::preflight::RunningProcess;
+
+    /// The number of each variant, so a new one fails to compile here until
+    /// [`every_refusal`] lists it.
+    fn variant_number(refusal: &RestoreRefusal) -> usize {
+        match refusal {
+            RestoreRefusal::InvalidId { .. } => 0,
+            RestoreRefusal::NotFound { .. } => 1,
+            RestoreRefusal::DiffersInCase { .. } => 2,
+            RestoreRefusal::EndsInDotOrSpace { .. } => 3,
+            RestoreRefusal::BeingDeleted { .. } => 4,
+            RestoreRefusal::IsLink { .. } => 5,
+            RestoreRefusal::NoManifest { .. } => 6,
+            RestoreRefusal::NoPackageRecords { .. } => 7,
+            RestoreRefusal::PackageNotInSet { .. } => 8,
+            RestoreRefusal::DamagedManifest { .. } => 9,
+            RestoreRefusal::RecordsOnly { .. } => 10,
+            RestoreRefusal::ReceiptInSet { .. } => 11,
+            RestoreRefusal::EarlierVersionNotYet { .. } => 12,
+            RestoreRefusal::ReinstalledSince { .. } => 13,
+            RestoreRefusal::NothingOfItInSet { .. } => 14,
+            RestoreRefusal::PartMissing { .. } => 15,
+            RestoreRefusal::NotComplete { .. } => 16,
+            RestoreRefusal::OtherLanguagePackInstalled { .. } => 17,
+            RestoreRefusal::TargetRefused { .. } => 18,
+            RestoreRefusal::ReceiptUnreadable { .. } => 19,
+            RestoreRefusal::ReaperRunning { .. } => 20,
+            RestoreRefusal::ProgramRunning { .. } => 21,
+            RestoreRefusal::NotWritable { .. } => 22,
+            RestoreRefusal::LockHeld { .. } => 23,
+            RestoreRefusal::AsRoot => 24,
+            RestoreRefusal::NotYours { .. } => 25,
+            RestoreRefusal::ChangedWhileRead { .. } => 26,
+            RestoreRefusal::ChangedSinceListed { .. } => 27,
+        }
+    }
+
+    const VARIANTS: usize = 28;
+
+    /// The number of each reason, as [`variant_number`] numbers refusals.
+    fn reason_number(reason: &TargetRefusal) -> usize {
+        match reason {
+            TargetRefusal::RabbitFolder => 0,
+            TargetRefusal::LeadsIntoRabbitFolder => 1,
+            TargetRefusal::NameNotAsWritten { .. } => 2,
+            TargetRefusal::PlaceIsLink => 3,
+            TargetRefusal::ThroughLink { .. } => 4,
+            TargetRefusal::LeadsOutsideResourceFolder { .. } => 5,
+            TargetRefusal::LeadsOutside { .. } => 6,
+            TargetRefusal::OutsideAllowedFolders => 7,
+            TargetRefusal::NotPlainPath => 8,
+            TargetRefusal::GuardFolderGone { .. } => 9,
+            TargetRefusal::CouldNotCheck { .. } => 10,
+            TargetRefusal::TwoFilesForOnePlace => 11,
+            TargetRefusal::OutsideWithoutManifest => 12,
+            TargetRefusal::CopyOutsideSet => 13,
+        }
+    }
+
+    const REASONS: usize = 14;
+
+    fn every_reason() -> Vec<TargetRefusal> {
+        let folder = PathBuf::from("REAPER").join("UserPlugins");
+        vec![
+            TargetRefusal::RabbitFolder,
+            TargetRefusal::LeadsIntoRabbitFolder,
+            TargetRefusal::NameNotAsWritten {
+                name: "Vendor.".to_string(),
+            },
+            TargetRefusal::PlaceIsLink,
+            TargetRefusal::ThroughLink {
+                link: folder.join("linked"),
+            },
+            TargetRefusal::LeadsOutsideResourceFolder {
+                folder: folder.clone(),
+            },
+            TargetRefusal::LeadsOutside {
+                folder: folder.clone(),
+            },
+            TargetRefusal::OutsideAllowedFolders,
+            TargetRefusal::NotPlainPath,
+            TargetRefusal::GuardFolderGone {
+                folder: folder.clone(),
+            },
+            TargetRefusal::CouldNotCheck {
+                path: folder,
+                detail: "access denied".to_string(),
+            },
+            TargetRefusal::TwoFilesForOnePlace,
+            TargetRefusal::OutsideWithoutManifest,
+            TargetRefusal::CopyOutsideSet,
+        ]
+    }
+
+    /// One refusal of every kind, each reason of a refused place included,
+    /// with lists of more than one so their sentences are read too.
+    fn every_refusal() -> Vec<RestoreRefusal> {
+        let id = || "uninstall-unix-1".to_string();
+        let path = PathBuf::from("UserPlugins").join("reaper_sws-x64.dll");
+        let reaper = RunningProcess {
+            pid: "1234".to_string(),
+            name: "reaper.exe".to_string(),
+            executable_path: None,
+        };
+        let packages = || vec!["ffmpeg".to_string(), "sws".to_string()];
+        let mut refusals = vec![
+            RestoreRefusal::InvalidId {
+                backup_id: "D:".to_string(),
+            },
+            RestoreRefusal::NotFound { backup_id: id() },
+            RestoreRefusal::DiffersInCase {
+                backup_id: "Unix-1".to_string(),
+                existing: "unix-1".to_string(),
+            },
+            RestoreRefusal::EndsInDotOrSpace {
+                backup_id: "unix-1.".to_string(),
+                existing: "unix-1".to_string(),
+            },
+            RestoreRefusal::BeingDeleted { backup_id: id() },
+            RestoreRefusal::IsLink { path: path.clone() },
+            RestoreRefusal::NoManifest {
+                backup_id: id(),
+                package_id: "sws".to_string(),
+            },
+            RestoreRefusal::NoPackageRecords {
+                backup_id: id(),
+                package_id: "sws".to_string(),
+            },
+            RestoreRefusal::PackageNotInSet {
+                backup_id: id(),
+                package_id: "osara".to_string(),
+                packages: packages(),
+            },
+            RestoreRefusal::DamagedManifest {
+                backup_id: id(),
+                path: path.clone(),
+                detail: "expected value at line 1 column 1".to_string(),
+            },
+            RestoreRefusal::RecordsOnly { backup_id: id() },
+            RestoreRefusal::ReceiptInSet {
+                backup_id: id(),
+                backup_path: path.clone(),
+            },
+            RestoreRefusal::EarlierVersionNotYet { backup_id: id() },
+            RestoreRefusal::ReinstalledSince {
+                backup_id: id(),
+                package_id: "sws".to_string(),
+                other_packages: vec!["ffmpeg".to_string()],
+            },
+            RestoreRefusal::NothingOfItInSet {
+                backup_id: id(),
+                package_ids: packages(),
+            },
+            RestoreRefusal::PartMissing {
+                backup_id: id(),
+                path: path.clone(),
+            },
+            RestoreRefusal::NotComplete {
+                backup_id: id(),
+                package_id: "ffmpeg".to_string(),
+                path: path.clone(),
+            },
+            RestoreRefusal::OtherLanguagePackInstalled {
+                backup_id: id(),
+                package_id: "langpack-de".to_string(),
+                installed: vec!["langpack-fr".to_string()],
+            },
+            RestoreRefusal::ReceiptUnreadable {
+                detail: "expected value at line 1 column 1".to_string(),
+            },
+            RestoreRefusal::ReaperRunning {
+                every_reaper_for: Vec::new(),
+                package_names: Vec::new(),
+                processes: vec![reaper.clone()],
+            },
+            RestoreRefusal::ReaperRunning {
+                every_reaper_for: vec!["app2clap".to_string(), "jaws-scripts".to_string()],
+                package_names: vec!["app2clap".to_string(), "JAWS scripts".to_string()],
+                processes: vec![reaper],
+            },
+            RestoreRefusal::ProgramRunning {
+                package_ids: vec!["surge-xt".to_string()],
+                package_names: vec!["Surge XT".to_string()],
+                programs: vec!["Surge XT.exe".to_string()],
+            },
+            RestoreRefusal::NotWritable {
+                path: PathBuf::from("REAPER"),
+                check: "resource-path".to_string(),
+                detail: "REAPER is read-only".to_string(),
+            },
+            RestoreRefusal::LockHeld {
+                lock_path: PathBuf::from("RABBIT").join("package-install.lock"),
+                pid: 42,
+            },
+            RestoreRefusal::AsRoot,
+            RestoreRefusal::NotYours { backup_id: id() },
+            RestoreRefusal::ChangedWhileRead { backup_id: id() },
+            RestoreRefusal::ChangedSinceListed { backup_id: id() },
+        ];
+        for reason in every_reason() {
+            refusals.push(RestoreRefusal::TargetRefused {
+                path: path.clone(),
+                reason,
+                other_packages: vec!["ffmpeg".to_string()],
+            });
+        }
+        refusals
+    }
+
+    /// The lists above hold every variant, so the tests below read them all.
+    #[test]
+    fn the_samples_hold_every_refusal_and_every_reason() {
+        let refusals: BTreeSet<usize> = every_refusal().iter().map(variant_number).collect();
+        assert_eq!(refusals, (0..VARIANTS).collect());
+        let reasons: BTreeSet<usize> = every_reason().iter().map(reason_number).collect();
+        assert_eq!(reasons, (0..REASONS).collect());
+    }
+
+    /// No refusal's text holds command-line syntax: the CLI adds its own
+    /// hints, and the wizard shows its own words.
+    #[test]
+    fn no_refusal_text_holds_command_line_syntax() {
+        for refusal in every_refusal() {
+            let text = refusal.to_string();
+            assert!(!text.contains("--"), "{text}");
+            assert!(!text.contains("rabbit "), "{text}");
+            assert!(!text.trim().is_empty(), "{refusal:?}");
+        }
+    }
+
+    /// Each refusal's code is its serde tag, unique, and kebab-case, so the
+    /// wizard's Fluent keys and scripts can rely on it. The same holds for
+    /// the reasons a place is refused, and both read back as written.
+    #[test]
+    fn codes_are_the_serde_tags_and_unique() {
+        let mut codes = BTreeSet::new();
+        for refusal in every_refusal() {
+            let json = serde_json::to_value(&refusal).unwrap();
+            assert_eq!(json["code"], refusal.code(), "{refusal:?}");
+            let code = refusal.code();
+            assert!(
+                code.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "{code}"
+            );
+            if let RestoreRefusal::TargetRefused { reason, .. } = &refusal {
+                assert_eq!(json["reason"]["kind"], reason.code(), "{reason:?}");
+            }
+            let back: RestoreRefusal = serde_json::from_value(json).unwrap();
+            assert_eq!(back, refusal);
+            codes.insert((variant_number(&refusal), code));
+        }
+        let distinct: BTreeSet<&str> = codes.iter().map(|(_, code)| *code).collect();
+        assert_eq!(distinct.len(), VARIANTS);
+        let reasons: BTreeSet<&str> = every_reason().iter().map(TargetRefusal::code).collect();
+        assert_eq!(reasons.len(), REASONS);
+    }
+
+    /// A backup that names no set keeps the words Phase 0 gave it. A
+    /// running REAPER is said in new words on purpose: before, a restore
+    /// said to close REAPER before installing extensions. The packages that
+    /// need every REAPER closed, and those that name programs, are said by
+    /// the names RABBIT shows, as an uninstall says them.
+    #[test]
+    fn not_found_keeps_its_words_and_a_running_reaper_says_restore() {
+        assert_eq!(
+            RestoreRefusal::NotFound {
+                backup_id: "unix-1".to_string()
+            }
+            .to_string(),
+            "The backup unix-1 was deleted or never existed"
+        );
+        let reaper = RunningProcess {
+            pid: "7".to_string(),
+            name: "reaper.exe".to_string(),
+            executable_path: None,
+        };
+        assert_eq!(
+            RestoreRefusal::ReaperRunning {
+                every_reaper_for: Vec::new(),
+                package_names: Vec::new(),
+                processes: vec![reaper.clone()],
+            }
+            .to_string(),
+            "Close REAPER before restoring a backup: reaper.exe (7)"
+        );
+        assert_eq!(
+            RestoreRefusal::ReaperRunning {
+                every_reaper_for: vec!["jaws-scripts".to_string()],
+                package_names: vec!["JAWS scripts".to_string()],
+                processes: vec![reaper],
+            }
+            .to_string(),
+            "Close every REAPER on this computer, portable ones included, before restoring JAWS \
+             scripts: reaper.exe (7)"
+        );
+        assert_eq!(
+            RestoreRefusal::ProgramRunning {
+                package_ids: vec!["surge-xt".to_string()],
+                package_names: vec!["Surge XT".to_string()],
+                programs: vec!["Surge XT.exe".to_string()],
+            }
+            .to_string(),
+            "Close these programs before restoring Surge XT: Surge XT.exe"
+        );
+    }
+
+    /// A refusal of packages names them as a sentence lists them.
+    #[test]
+    fn package_names_read_as_a_sentence() {
+        let text = |ids: &[&str]| {
+            RestoreRefusal::NothingOfItInSet {
+                backup_id: "uninstall-unix-1".to_string(),
+                package_ids: ids.iter().map(ToString::to_string).collect(),
+            }
+            .to_string()
+        };
+
+        assert!(
+            text(&["sws"]).starts_with("None of the files of sws are in the backup"),
+            "{}",
+            text(&["sws"])
+        );
+        assert!(text(&["ffmpeg", "sws"]).starts_with("None of the files of ffmpeg and sws are"));
+        assert!(
+            text(&["ffmpeg", "reapack", "sws"])
+                .starts_with("None of the files of ffmpeg, reapack and sws are")
+        );
+        assert_eq!(names_in_a_sentence(&[]), "");
+    }
+}

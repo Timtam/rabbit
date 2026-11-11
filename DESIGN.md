@@ -1571,7 +1571,9 @@ Extension files:
 ## Safety Behavior
 
 - If REAPER is running, stop before changing extension files and ask the user to
-  close it.
+  close it. An uninstall, and a restore of a package's files, are also
+  refused while any REAPER on the computer runs, or a program the package's
+  uninstall plan names, where the package needs that (see below).
 - When OSARA is selected, back up `reaper-kb.ini` and replace it with the OSARA
   key map by default only when OSARA is new or `reaper-kb.ini` still matches the
   installed OSARA key map; otherwise keep it, and point at OSARA's "Merge OSARA
@@ -1635,10 +1637,11 @@ Extension files:
   writes first is made new, so a link at its name stops the restore, and
   only a regular file at the target is backed up. A path refused stops the
   restore before anything changes, with the reason, such as that JAWS's
-  folder is gone; in a whole set, the message adds that the set's other
-  packages can be restored one at a time with `--package` when another
-  package has a file in the set. An entry whose copy doesn't come back is
-  left out and never refused, since nothing is written for it.
+  folder is gone (`target-refused` and a reason of its own, see below); in
+  a whole set, the refusal names the set's other packages that have a file
+  in it, and the CLI adds that `--package` restores them one at a time. An
+  entry whose copy doesn't come back is left out and never refused, since
+  nothing is written for it.
 - Restore uses a set id only when it is one plain name, with no `:`,
   slash or NUL, and on Windows no trailing dot or space and no device name
   such as `CON`. It must also equal, byte for byte, a folder `read_dir`
@@ -1768,6 +1771,54 @@ Extension files:
   found and the set and package refusals, before the REAPER check, the
   install lock and any change. A dry run still works. The check comes
   through the restore's environment, so tests run it on every platform.
+- Every refusal a restore makes before anything changes is a
+  `RestoreRefusal` (`restore_refusal.rs`): a stable kebab-case code, its
+  serde tag, which the wizard is to map to a Fluent key; fields that name
+  the set, the packages, the paths or the programs; and English for the
+  CLI with no command-line syntax in it. The CLI adds its own hints after
+  that English: the command that lists the backups, the folder a receipt
+  copy stays in, the command that uninstalls a package installed again,
+  that `--package` restores a set's other packages one at a time, and what
+  `--allow-reaper-running` does. A file refused at its place carries a
+  reason of its own (`TargetRefusal`): RABBIT's folder, a way that leads
+  into it or out of the resource folder or a package's folder, a link, a
+  name that may open another, a folder that is gone, two files for one
+  place, and so on. A damaged manifest is `damaged-manifest`, a receipt
+  that can't be read `receipt-unreadable`, a finished copy that is gone or
+  isn't the file it recorded `part-missing`, and a set that changed
+  between the reads before and under the lock `changed-while-read`. The
+  errors a restore shares with RABBIT's other runs become refusals at the
+  restore's edge, and only for what goes wrong before the first change: a
+  link where RABBIT keeps its backups (`is-link`) and the install lock
+  another RABBIT holds (`lock-held`); writers and the listing still say
+  them as `BackupPathIsLink` and the lock error, and so does a restore
+  that finds such a link once files are back. The overview gives each
+  backup the refusal a restore gives for what its status or a refused file
+  says (`refusal`), and a whole set's row what refuses the set itself, such
+  as a damaged manifest or a copy of the receipt in it, so a row and a run
+  agree.
+- Before the lock, a restore checks REAPER and programs as each restored
+  package's own uninstall would, from the package manifests for this
+  platform and kind of REAPER (`uninstall_process_rules`, which the
+  uninstall plan uses too): the target's REAPER, through the install
+  preflight with a restore wording; every REAPER on the computer when the
+  package serves every REAPER (`requires_standard_install`) or a vendor's
+  uninstaller removes it; and the programs its uninstall plan names. The
+  packages are those whose files come back, by the manifest; a set without
+  one checks only the target's REAPER. `--allow-reaper-running` lets only
+  the target's REAPER run. A real restore is refused (`reaper-running`,
+  `program-running`) with nothing changed, and the process checks run
+  again under the lock, as an uninstall's do before each package. A
+  refusal names one reason: what `--allow-reaper-running` never lets
+  through first, then a place it can't write to (`not-writable`), and the
+  target's REAPER last, so the CLI's hint to add that flag comes only when
+  nothing else stands in the way. A dry run makes the same checks and
+  reports what runs as warnings, refusing nothing for it, as the install
+  preflight's dry run does, so its report names everything that must be
+  closed. The scans and the package manifests come through the restore's
+  environment, so tests give their own. Any restore, a dry run too,
+  refuses a set that belongs to another account than `RABBIT/backups`
+  (`not-yours`), as the overview lists it.
 - `rabbit backups` lists the sets through one overview in the core
   (`backup_overview`), which the wizard's Backups tab is to share. It turns
   sets into backups: one per package an uninstall recorded; one per package

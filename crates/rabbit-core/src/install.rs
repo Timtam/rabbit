@@ -779,6 +779,7 @@ mod tests {
     use crate::receipt::{
         InstallState, InstalledFileReceipt, PackageReceipt, load_install_state, save_install_state,
     };
+    use crate::restore_refusal::{RestoreRefusal, refusal};
     use crate::rollback::{
         BackupManifest, BackupSetWriter, ReplacedPackageRecord, UPDATE_BACKUP_REASON,
     };
@@ -1142,7 +1143,7 @@ mod tests {
             .unwrap_err();
 
             assert!(
-                matches!(&error, RabbitError::EarlierVersionNotYet { backup_id } if backup_id == set_id),
+                matches!(refusal(&error), RestoreRefusal::EarlierVersionNotYet { backup_id } if backup_id == set_id),
                 "{dry_run} {package_id:?}: {error:?}"
             );
             assert_eq!(fs::read(&plugin).unwrap(), b"new");

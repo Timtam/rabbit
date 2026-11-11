@@ -12,6 +12,7 @@ use super::{
 use crate::error::RabbitError;
 use crate::hash::{hashes_on_this_thread, sha256_bytes};
 use crate::receipt::{InstallState, InstalledFileReceipt, PackageReceipt, save_install_state};
+use crate::restore_refusal::{RestoreRefusal, TargetRefusal, refusal};
 use crate::rollback::{
     BEFORE_RESTORE_REASON, BackupEntryState, BackupEnvironment, BackupManifest, BackupManifestFile,
     BackupPackageRecord, BackupSetWriter, DELETING_DIR, KEYMAP_BACKUP_REASON, KeymapOrigin,
@@ -645,8 +646,10 @@ fn uninstalled_software_gets_the_status_its_case_calls_for() {
     assert!(!sws_row.shares_set_with.contains(&package(id, "sws")));
     assert!(listed.receipt_error.is_none());
 
-    // Whatever the overview says can be restored, a dry run restores.
-    for package_id in ["sws", "ffmpeg", "reakontrol"] {
+    // Whatever the overview says can be restored, a dry run restores, and
+    // what it says can't be, a dry run refuses with the refusal the row
+    // carries, code and all.
+    let dry_run = |package_id: &str| {
         restore_backup_set_within(
             &resource,
             id,
@@ -657,8 +660,20 @@ fn uninstalled_software_gets_the_status_its_case_calls_for() {
             },
             &OutsideRestoreRules::default(),
         )
-        .unwrap();
+    };
+    for package_id in ["sws", "ffmpeg", "reakontrol"] {
+        dry_run(package_id).unwrap();
+        assert_eq!(find(&listed, &package(id, package_id)).refusal, None);
     }
+    let agrees = |listed: &BackupOverview, package_id: &str, code: &str| {
+        let row = find(listed, &package(id, package_id));
+        let error = dry_run(package_id).unwrap_err();
+        assert_eq!(refusal(&error).code(), code, "{package_id}: {error:?}");
+        assert_eq!(row.refusal.as_ref(), Some(refusal(&error)), "{package_id}");
+    };
+    agrees(&listed, "reapack", "reinstalled-since");
+    agrees(&listed, "langpack-de", "nothing-of-it-in-set");
+    agrees(&listed, "osara", "part-missing");
 
     // Unreadable records: only what the set alone settles stays.
     write(&resource.join("RABBIT/install-state.json"), b"{ not json");
@@ -670,6 +685,7 @@ fn uninstalled_software_gets_the_status_its_case_calls_for() {
     assert_eq!(unreadable("langpack-de"), NothingInIt);
     assert_eq!(unreadable("osara"), PartMissing);
     assert!(listed.receipt_error.is_some());
+    agrees(&listed, "sws", "receipt-unreadable");
 }
 
 /// Earlier versions follow the swap's rules (backup plan 6.4), although
@@ -754,6 +770,16 @@ fn earlier_versions_follow_the_swap_rules() {
         row("sws").missing_path.as_deref(),
         Some(Path::new(sws_helper))
     );
+    // The refusal a restore of an earlier version is to give (backup plan
+    // 1d), with the file that makes it so.
+    assert_eq!(
+        row("sws").refusal,
+        Some(RestoreRefusal::NotComplete {
+            backup_id: id.to_string(),
+            package_id: "sws".to_string(),
+            path: PathBuf::from(sws_helper),
+        })
+    );
     assert_eq!(row("reakontrol").status, CanRestore);
     assert_eq!(row("ffmpeg").status, AlreadyBack);
     // Language packs coexist: another one installed stops nothing.
@@ -777,9 +803,15 @@ fn earlier_versions_follow_the_swap_rules() {
         ..BackupEnvironment::AS_USER
     };
     let listed = overview_with(&resource, &grouped).unwrap();
+    let german = find(&listed, &package(id, "langpack-de"));
+    assert_eq!(german.status, OtherLanguagePack);
     assert_eq!(
-        find(&listed, &package(id, "langpack-de")).status,
-        OtherLanguagePack
+        german.refusal,
+        Some(RestoreRefusal::OtherLanguagePackInstalled {
+            backup_id: id.to_string(),
+            package_id: "langpack-de".to_string(),
+            installed: vec!["langpack-es".to_string()],
+        })
     );
     assert_eq!(find(&listed, &package(id, "reapack")).status, CanRestore);
 
@@ -941,6 +973,32 @@ fn another_accounts_sets_and_links_are_never_restored() {
     );
     assert!(listed.sets.iter().all(|set| set.owned_by_another_account
         == matches!(set.id.as_str(), "uninstall-unix-100" | "unix-300")));
+
+    // A restore refuses another account's set as the row says, in a dry
+    // run too, before anything is read of it.
+    for (item, package_id) in [
+        (package("uninstall-unix-100", "sws"), Some("sws")),
+        (whole("unix-300"), None),
+    ] {
+        let error = crate::rollback::restore_backup_set_with(
+            &resource,
+            item.set_id().unwrap(),
+            &RestoreBackupOptions {
+                dry_run: true,
+                allow_reaper_running: true,
+                package_id: package_id.map(ToString::to_string),
+            },
+            &under_sudo,
+            OutsideRestoreRules::default,
+        )
+        .unwrap_err();
+        assert_eq!(refusal(&error).code(), "not-yours", "{item:?}");
+        assert_eq!(
+            find(&listed, &item).refusal.as_ref(),
+            Some(refusal(&error)),
+            "{item:?}"
+        );
+    }
 
     // As this computer reads owners, every set is the user's own.
     let listed = overview(&resource);
@@ -1205,10 +1263,8 @@ fn restore_targets_are_what_a_restore_writes() {
             .unwrap()
             .is_empty()
     );
-    assert!(matches!(
-        backup_restore_targets(&resource, &package("unix-9", "sws")).unwrap_err(),
-        RabbitError::BackupSetNotFound { .. }
-    ));
+    let error = backup_restore_targets(&resource, &package("unix-9", "sws")).unwrap_err();
+    assert_eq!(refusal(&error).code(), "not-found", "{error:?}");
 }
 
 /// Every set that holds only a copy of RABBIT's records is part of one
@@ -1379,23 +1435,16 @@ fn unfinished_deletions_are_listed_and_a_set_is_looked_up_strictly() {
     assert_eq!(two.sets[0].kind, BackupSetKind::Deleting);
     assert_eq!(two.sets[0].path, deleting.join("unix-2"));
 
-    let refused =
-        |id: &str| overview_of_with(&resource, id, &BackupEnvironment::AS_USER).unwrap_err();
-    assert!(matches!(
-        refused("unix-3"),
-        RabbitError::BackupSetNotFound { .. }
-    ));
-    assert!(matches!(
-        refused("UNIX-1"),
-        RabbitError::BackupIdDiffersInCase { .. }
-    ));
-    assert!(matches!(refused("a/b"), RabbitError::InvalidBackupId(_)));
-    assert!(matches!(refused(".."), RabbitError::InvalidBackupId(_)));
+    let refused = |id: &str| {
+        let error = overview_of_with(&resource, id, &BackupEnvironment::AS_USER).unwrap_err();
+        refusal(&error).code()
+    };
+    assert_eq!(refused("unix-3"), "not-found");
+    assert_eq!(refused("UNIX-1"), "differs-in-case");
+    assert_eq!(refused("a/b"), "invalid-id");
+    assert_eq!(refused(".."), "invalid-id");
     #[cfg(windows)]
-    assert!(matches!(
-        refused("unix-1."),
-        RabbitError::BackupIdEndsInDotOrSpace { .. }
-    ));
+    assert_eq!(refused("unix-1."), "ends-in-dot-or-space");
 }
 
 /// A key map is found by what it holds, whatever made its set: an older
@@ -1517,8 +1566,10 @@ fn sizes_read_in_whole_kb_and_mb_and_gb_with_a_tenth() {
 /// The command line restores a set without a manifest, or a restore's own
 /// backup, as a whole only when a restore would take it: never one holding
 /// RABBIT's receipt, a file from outside the resource folder without a
-/// manifest to place it, or a file a restore never puts back, which the
-/// backup names. A dry run of each restore agrees.
+/// manifest to place it, a file a restore never puts back, which the
+/// backup names, a damaged manifest, or two files for one place, which the
+/// backup names by that place. A dry run of each restore agrees, and
+/// refuses with the refusal the row carries, code, fields and all.
 #[test]
 fn whole_sets_restore_only_as_a_restore_would_take_them() {
     let dir = tempdir().unwrap();
@@ -1551,19 +1602,56 @@ fn whole_sets_restore_only_as_a_restore_would_take_them() {
     BackupSetWriter::new(&resource, "unix-600", BEFORE_RESTORE_REASON)
         .copy_file(None, &resource.join(plugin))
         .unwrap();
+    layout_set(
+        &resource,
+        "unix-700",
+        &[("backup-manifest.json", b"{ not json")],
+    );
+    // A restore's backup whose manifest names one file twice.
+    let mut writer = BackupSetWriter::new(&resource, "unix-800", BEFORE_RESTORE_REASON);
+    writer.copy_file(None, &resource.join(plugin)).unwrap();
+    edit_manifest(writer.path(), |manifest| {
+        let again = manifest.files[0].clone();
+        manifest.files.push(again);
+    });
 
     let listed = overview(&resource);
 
     let logs = |name: &str| Path::new("RABBIT").join("logs").join(name);
-    let cases: [(&str, Option<RestoreScope>, Option<PathBuf>); 6] = [
-        ("unix-100", Some(RestoreScope::WholeSet), None),
-        ("unix-200", None, None),
-        ("unix-300", None, None),
-        ("unix-400", None, Some(logs("old.json"))),
-        ("unix-500", None, Some(logs("new.json"))),
-        ("unix-600", Some(RestoreScope::WholeSet), None),
+    // The set, how a restore takes it, the file the row names, and the
+    // code of the refusal.
+    type Case<'a> = (
+        &'a str,
+        Option<RestoreScope>,
+        Option<PathBuf>,
+        Option<&'a str>,
+    );
+    let cases: [Case<'_>; 8] = [
+        ("unix-100", Some(RestoreScope::WholeSet), None, None),
+        ("unix-200", None, None, Some("receipt-in-set")),
+        ("unix-300", None, None, Some("target-refused")),
+        (
+            "unix-400",
+            None,
+            Some(logs("old.json")),
+            Some("target-refused"),
+        ),
+        (
+            "unix-500",
+            None,
+            Some(logs("new.json")),
+            Some("target-refused"),
+        ),
+        ("unix-600", Some(RestoreScope::WholeSet), None, None),
+        ("unix-700", None, None, Some("damaged-manifest")),
+        (
+            "unix-800",
+            None,
+            Some(PathBuf::from(plugin)),
+            Some("target-refused"),
+        ),
     ];
-    for (id, scope, refused) in cases {
+    for (id, scope, refused, code) in cases {
         let row = find(&listed, &whole(id));
         assert_eq!(row.status, BackupStatus::NotHere, "{id}");
         assert_eq!(row.restore_scope, scope, "{id}");
@@ -1589,7 +1677,18 @@ fn whole_sets_restore_only_as_a_restore_would_take_them() {
             &OutsideRestoreRules::default(),
         );
         assert_eq!(dry_run.is_ok(), scope.is_some(), "{id}: {dry_run:?}");
+        let run_refusal = dry_run.as_ref().err().map(refusal);
+        assert_eq!(run_refusal.map(RestoreRefusal::code), code, "{id}");
+        assert_eq!(row.refusal.as_ref(), run_refusal, "{id}");
     }
+    let reason = |id: &str| match &find(&listed, &whole(id)).refusal {
+        Some(RestoreRefusal::TargetRefused { reason, .. }) => reason.clone(),
+        other => panic!("{id}: {other:?}"),
+    };
+    assert_eq!(reason("unix-300"), TargetRefusal::OutsideWithoutManifest);
+    assert_eq!(reason("unix-400"), TargetRefusal::RabbitFolder);
+    assert_eq!(reason("unix-500"), TargetRefusal::RabbitFolder);
+    assert_eq!(reason("unix-800"), TargetRefusal::TwoFilesForOnePlace);
     assert_eq!(
         listed.restore_targets(&whole("unix-100")),
         [resource.join(plugin)]
@@ -1766,8 +1865,18 @@ fn places_outside_are_looked_at_only_where_a_restore_writes() {
         .map(|action| action.target_path.as_path())
         .collect();
     assert_eq!(written, [plugin.as_path()]);
-    assert!(matches!(
-        dry_run("stray").unwrap_err(),
-        RabbitError::BackupRestoreRefused { .. }
-    ));
+    // The row says why in the code the run gives.
+    let error = dry_run("stray").unwrap_err();
+    assert!(
+        matches!(
+            refusal(&error),
+            RestoreRefusal::TargetRefused {
+                reason: TargetRefusal::OutsideAllowedFolders,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    let row = find(&listed, &package(id, "stray"));
+    assert_eq!(row.refusal.as_ref(), Some(refusal(&error)));
 }

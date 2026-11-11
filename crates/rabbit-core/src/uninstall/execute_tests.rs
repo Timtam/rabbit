@@ -30,7 +30,6 @@ use super::{
 #[cfg(windows)]
 use super::{RegistryEntryAction, RegistryEntryOutcome};
 use crate::cancel::CancelToken;
-use crate::error::RabbitError;
 use crate::hash::{sha256_bytes, sha256_file};
 use crate::model::{ComponentDetection, InstallationKind, Platform};
 use crate::package::{
@@ -43,6 +42,7 @@ use crate::receipt::{
     InstallState, InstalledFileReceipt, PackageReceipt, VendorAddedFile, load_install_state,
     save_install_state,
 };
+use crate::restore_refusal::{RestoreRefusal, refusal};
 use crate::rollback::{
     BACKUP_MANIFEST_FILE, BackupEntryState, BackupManifest, FileDigest, RestoreBackupOptions,
     RestoreBackupReport, restore_backup_set,
@@ -1516,17 +1516,12 @@ fn restoring_one_package_merges_its_receipt_entry_back() {
     save_install_state(&fixture.resource, &reinstalled).unwrap();
     let refused = restore_package(&fixture, &set_id, "demo", true).unwrap_err();
     assert!(
-        matches!(&refused, RabbitError::PackageRestoreRefused { package_id, .. } if package_id == "demo"),
-        "{refused}"
+        matches!(refusal(&refused), RestoreRefusal::ReinstalledSince { package_id, other_packages, .. }
+            if package_id == "demo" && other_packages.is_empty()),
+        "{refused:?}"
     );
-    assert!(
-        refused
-            .to_string()
-            .contains("rabbit uninstall --package demo --apply"),
-        "{refused}"
-    );
-    // So would the whole set, which holds demo too; it says how to restore
-    // the rest, and restores nothing.
+    // So would the whole set, which holds demo too; it names the rest,
+    // which can be restored one at a time, and restores nothing.
     let whole = restore_backup_set(
         &fixture.resource,
         &set_id,
@@ -1537,11 +1532,19 @@ fn restoring_one_package_merges_its_receipt_entry_back() {
         },
     )
     .unwrap_err();
-    assert!(whole.to_string().contains("--package"), "{whole}");
+    assert!(
+        matches!(refusal(&whole), RestoreRefusal::ReinstalledSince { package_id, other_packages, .. }
+            if package_id == "demo" && other_packages == &["other"]),
+        "{whole:?}"
+    );
     assert!(!other.exists());
     // A package the set doesn't hold is refused, naming the ones it does.
     let unknown = restore_package(&fixture, &set_id, "nosuch", true).unwrap_err();
-    assert!(unknown.to_string().contains("demo, other"), "{unknown}");
+    assert!(
+        matches!(refusal(&unknown), RestoreRefusal::PackageNotInSet { package_id, packages, .. }
+            if package_id == "nosuch" && packages == &["demo", "other"]),
+        "{unknown:?}"
+    );
 
     restore_package(&fixture, &set_id, "other", false).unwrap();
     assert!(other.is_file());

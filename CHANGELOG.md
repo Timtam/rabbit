@@ -243,12 +243,25 @@ from this file and posts it as the GitHub release body.
   RABBIT's records. It also refuses any other backup that holds a copy of
   the records, such as one an older RABBIT made while restoring an update's
   backup, and says which folder the copy stays in. A refused restore changes
-  nothing.
+  nothing, says why in plain words, and then what to do on the command
+  line, such as the command that uninstalls a package you installed again
+  since.
 - On a Mac, `rabbit restore-backup --apply` no longer runs as root, as with
   `sudo`, just as `rabbit uninstall --apply` doesn't: the files it puts
   back, the backup of the files they replace and RABBIT's records would all
   be root's. It changes nothing and says to run it as yourself. A dry run
-  still works.
+  still works. A backup that belongs to another account, as one made with
+  `sudo` does, is no longer restored, not even in a dry run.
+- `rabbit restore-backup` now checks, for each package it brings back, what
+  that package's own uninstall checks. Before, it checked only that the
+  REAPER it restores into was closed. Now a restore of a package that
+  serves every REAPER on the computer, such as app2clap or the JAWS
+  scripts, is refused, and changes nothing, while any REAPER is open,
+  portable ones included. Any program a package's uninstall names must be
+  closed too. `--allow-reaper-running` still lets only the REAPER you
+  restore into stay open. A dry run says what is running and goes on, as
+  before. The message says to close REAPER before restoring, not before
+  installing extensions.
 - `rabbit restore-backup --apply` now saves a report in `RABBIT\logs` every
   time it finishes, like `rabbit uninstall --apply`:
   `restore-backup-unix-<time>.json` and `.txt`. `--save-report` still saves
@@ -279,7 +292,8 @@ from this file and posts it as the GitHub release body.
   It no longer lists every file. `--backup-id` shows one backup set with
   each file in it, where it came from and whether its copy finished.
   `--json` keeps its fields and adds `kind`, `created_unix`, `size`,
-  `items` (each backup with its status) and `fingerprint`, and lists newest
+  `items` (each backup with its status and, for one a restore would refuse,
+  the refusal by the code a restore gives) and `fingerprint`, and lists newest
   first too. It also lists a deletion that didn't finish, with kind
   `deleting`; its id can match a set's, and its `path` is in
   `RABBIT\backups-deleting`. `rabbit backups` and `rabbit restore-backup`
