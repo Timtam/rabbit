@@ -107,6 +107,22 @@ from this file and posts it as the GitHub release body.
   backup holds, when a file of the newer version is at a place it couldn't
   put it back to from the new backup, or while another package whose
   install removes this one is installed.
+- Restoring a key map from a backup now puts your old key map back and
+  keeps the scripts ReaPack registered since in REAPER's Actions list: the
+  script lines of the key map it replaces that the old one doesn't have go
+  into it, each once, as when OSARA's key map replaces yours. Before, those
+  scripts dropped out of the Actions list until you ran "ReaPack:
+  Synchronize packages". `rabbit restore-backup --key-map` restores only the
+  key map a backup set holds, whatever else the set holds, and changes
+  nothing in RABBIT's records; `rabbit backups` prints that command for each
+  key map. Restoring a whole set that holds a key map keeps the scripts the
+  same way, and the command says how many script lines it added. The key map
+  the restore replaces goes into a backup set of its own, which `rabbit
+  backups` lists as a key map, so restoring that undoes the restore the
+  same way, again keeping the scripts. REAPER must be closed:
+  `--allow-reaper-running` is refused for a restore that puts a key map
+  back, because REAPER may save its own key map when it quits, over the one
+  restored.
 - `rabbit components` says for each package whether RABBIT can uninstall it,
   and if not, why.
 - OSARA can be uninstalled too, from the wizard's **Uninstall** tab and with

@@ -50,9 +50,9 @@ use rabbit_core::resource::{ResourceInitActionKind, ResourceInitReport, initiali
 use rabbit_core::restore_refusal::{RestoreRefusal, names_in_a_sentence};
 use rabbit_core::rollback::{
     BackupEntryState, KeymapOrigin, MoveOutAction, RestoreBackupAction, RestoreBackupActionKind,
-    RestoreBackupOptions, RestoreBackupReport, RestoreReportItem, RestoreStatus, RestoredPackage,
-    SkippedPackage, SkippedPackageReason, SwappedEntry, SwappedPackage, list_backup_sets,
-    restore_backup_set, takes_by_swap,
+    RestoreBackupReport, RestoreItem, RestoreReportItem, RestoreRunOptions, RestoreStatus,
+    RestoredKeymap, RestoredPackage, SkippedPackage, SkippedPackageReason, SwappedEntry,
+    SwappedPackage, list_backup_sets, restore_backup_item, takes_by_swap,
 };
 use rabbit_core::self_update::{
     ApplySelfUpdateOptions, DEFAULT_SELF_UPDATE_MANIFEST_URL, SelfUpdateApplyReport,
@@ -249,8 +249,9 @@ enum Command {
         json: bool,
     },
     /// Restore a backup set, or one package from an uninstall's or an
-    /// update's backup set. Without --apply it only shows what it would do.
-    /// What a restore replaces goes into a backup set of its own first.
+    /// update's backup set, or only the key map a backup set holds. Without
+    /// --apply it only shows what it would do. What a restore replaces goes
+    /// into a backup set of its own first.
     RestoreBackup {
         /// REAPER's resource folder — the one holding `reaper.ini`. Usually
         /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
@@ -274,8 +275,14 @@ enum Command {
         /// newer version goes into a backup set of its own, from which it
         /// can come back the same way. Without --package, such a set puts
         /// each of its packages back in turn.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "key_map")]
         package: Option<String>,
+        /// Restore only the key map this backup set holds (reaper-kb.ini).
+        /// The set's other files stay in it, and RABBIT's records don't
+        /// change. Scripts ReaPack installed since stay in REAPER's Actions
+        /// list.
+        #[arg(long)]
+        key_map: bool,
         /// Actually make the changes. Without it the command is a dry run
         /// that only reports what it would do.
         #[arg(long)]
@@ -284,7 +291,9 @@ enum Command {
         /// may fail to be replaced, so prefer closing it first. It never
         /// lets a restore past what a package's own uninstall needs closed:
         /// every REAPER on the computer for a package such as app2clap, and
-        /// the programs its uninstall names.
+        /// the programs its uninstall names. A restore that puts a key map
+        /// back is refused with it, since REAPER may save its own key map
+        /// when it quits.
         #[arg(long)]
         allow_reaper_running: bool,
         /// Write the JSON run report to exactly this path.
@@ -1228,6 +1237,7 @@ fn run_restore_backup(command: Command) -> Result<(), Box<dyn std::error::Error>
         resource_path,
         backup_id,
         package,
+        key_map,
         apply,
         allow_reaper_running,
         report_path,
@@ -1237,13 +1247,18 @@ fn run_restore_backup(command: Command) -> Result<(), Box<dyn std::error::Error>
     else {
         unreachable!("dispatched as Command::RestoreBackup");
     };
-    let report = restore_backup_set(
+    let item = if key_map {
+        RestoreItem::keymap(&backup_id)
+    } else {
+        RestoreItem::new(&backup_id, package.as_deref().map(str::trim))
+    };
+    let report = restore_backup_item(
         &resource_path,
-        &backup_id,
-        &RestoreBackupOptions {
+        &item,
+        &RestoreRunOptions {
             dry_run: !apply,
+            quick: false,
             allow_reaper_running,
-            package_id: package.map(|id| id.trim().to_string()),
         },
     )
     .map_err(|error| cli_restore_error(error, &resource_path))?;
@@ -1413,7 +1428,9 @@ fn cli_restore_error(
 ///   `--package` restores them one at a time;
 /// - for the target's REAPER running, that `--allow-reaper-running`
 ///   restores anyway, and for every REAPER a package needs closed, that it
-///   doesn't.
+///   doesn't;
+/// - for a key map refused with `--allow-reaper-running`, to close REAPER
+///   and run the command again without it.
 ///
 /// The refusal to run as root is said in the CLI's own words. Any other
 /// refusal is printed as it is.
@@ -1453,6 +1470,10 @@ fn restore_refusal_text(refusal: &RestoreRefusal, resource_path: &Path) -> Strin
         RestoreRefusal::ReaperRunning { .. } => {
             format!("{refusal}. --allow-reaper-running doesn't change this.")
         }
+        RestoreRefusal::KeymapNeedsReaperClosed { .. } => format!(
+            "{refusal}. Close REAPER, then run the command again without \
+             --allow-reaper-running."
+        ),
         other => other.to_string(),
     }
 }
@@ -2823,6 +2844,10 @@ fn write_backups_in_set(
                 "rabbit restore-backup --resource-path \"{resource}\" --backup-id {id} \
                  --package {package_id} --apply"
             ),
+            (Some(RestoreScope::Keymap), _) => format!(
+                "rabbit restore-backup --resource-path \"{resource}\" --backup-id {id} \
+                 --key-map --apply"
+            ),
             (Some(_), _) => format!(
                 "rabbit restore-backup --resource-path \"{resource}\" --backup-id {id} --apply"
             ),
@@ -2973,8 +2998,8 @@ fn backup_label(entry: &BackupEntry, names: &std::collections::BTreeMap<String, 
 }
 
 /// A backup's status in words. One whose status says it can be restored
-/// while `restore-backup` doesn't take it, such as a key map that comes
-/// back only with the rest of its set, says it can't be.
+/// while `restore-backup` doesn't take it, such as one with a file a
+/// restore would refuse to put back, says it can't be.
 fn backup_status_text(entry: &BackupEntry) -> &'static str {
     match entry.status {
         status if status.can_restore() && entry.restore_scope.is_none() => "can't be restored",
@@ -3043,12 +3068,6 @@ fn backup_reason_text(
         }
         _ if can_restore && set.warning.is_some() => {
             "Part of its backup set can't be read.".to_string()
-        }
-        // A key map comes back only with its whole set so far.
-        _ if can_restore && matches!(entry.item, BackupItem::Keymap { .. }) => {
-            "RABBIT can't restore a key map on its own yet, and its backup set holds other files \
-             too."
-                .to_string()
         }
         _ if can_restore => "RABBIT can't restore it.".to_string(),
         BackupStatus::InstalledAgain => match uninstall_command(resource_path, package_id) {
@@ -3153,10 +3172,11 @@ fn print_restore_backup_report(report: &RestoreBackupReport) {
 }
 
 /// A restore's report as text: the set, the preflight, each file, the
-/// packages, then why the backup wasn't restored, if it wasn't, and last
-/// the backup of what the restore replaced, when it made one and kept it.
-/// Restoring that backup puts those files back. A whole set of earlier
-/// versions says all of that for each package it put back, in turn.
+/// packages or the key map, then why the backup wasn't restored, if it
+/// wasn't, and last the backup of what the restore replaced, when it made
+/// one and kept it. Restoring that backup puts those files back. A whole
+/// set of earlier versions says all of that for each package it put back,
+/// in turn.
 fn restore_backup_report_text(report: &RestoreBackupReport) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Resource path: {}", report.resource_path.display());
@@ -3167,6 +3187,12 @@ fn restore_backup_report_text(report: &RestoreBackupReport) -> String {
     write_restore_actions(&mut out, &report.actions, &report.skipped_targets);
     if let Some(package_id) = &report.package_id {
         let _ = writeln!(out, "Package: {package_id}");
+    }
+    if report.keymap_only {
+        out.push_str("Only the key map, whatever else the backup set holds.\n");
+    }
+    if let Some(keymap) = &report.keymap {
+        write_restored_keymap(&mut out, keymap, report.dry_run);
     }
     for package in &report.packages {
         write_restored_package(&mut out, package, report.dry_run);
@@ -3455,6 +3481,50 @@ fn skipped_package_text(reason: SkippedPackageReason, dry_run: bool) -> &'static
              they are."
         }
     }
+}
+
+/// What putting the key map back did to keep the scripts registered since,
+/// or in a dry run would do: how many script lines of the key map it
+/// replaced went into the one that came back, or that there was no key map
+/// to keep them from. Nothing when the restore failed, which put the key
+/// map it replaced back.
+fn write_restored_keymap(out: &mut String, keymap: &RestoredKeymap, dry_run: bool) {
+    let Some(added) = keymap.scripts_added else {
+        return;
+    };
+    let kept = if dry_run {
+        "would be kept"
+    } else {
+        "were kept"
+    };
+    let added_verb = match (dry_run, added) {
+        (true, _) => "would be added",
+        (false, 0 | 1) => "was added",
+        (false, _) => "were added",
+    };
+    let text = match (keymap.replaced, added, dry_run) {
+        (false, _, true) => {
+            "Key map: there is no key map now, so no script line would be added.".to_string()
+        }
+        (false, _, false) => {
+            "Key map: there was no key map before, so no script line was added.".to_string()
+        }
+        (true, 0, true) => "Key map: it already registers every script the key map it would \
+                            replace does, so no script line would be added."
+            .to_string(),
+        (true, 0, false) => "Key map: it already registers every script the key map it replaced \
+                             did, so no script line was added."
+            .to_string(),
+        (true, 1, _) => format!(
+            "Key map: the scripts registered since {kept} in REAPER's Actions list: 1 script \
+             line {added_verb}."
+        ),
+        (true, lines, _) => format!(
+            "Key map: the scripts registered since {kept} in REAPER's Actions list: {lines} \
+             script lines {added_verb}."
+        ),
+    };
+    let _ = writeln!(out, "{text}");
 }
 
 /// What a restore did for a package from an uninstall set, besides putting
@@ -6233,9 +6303,10 @@ mod tests {
     /// The CLI adds what only the command line can say after the engine's
     /// English, which holds none of it: the command that uninstalls a
     /// package installed again since, when its id needs no quotes; that
-    /// `--package` restores the set's other packages one at a time; and
-    /// what `--allow-reaper-running` does about a running REAPER. Any other
-    /// refusal is printed as the engine says it.
+    /// `--package` restores the set's other packages one at a time; what
+    /// `--allow-reaper-running` does about a running REAPER; and that a key
+    /// map comes back only without it. Any other refusal is printed as the
+    /// engine says it.
     #[test]
     fn restore_refusals_get_the_clis_hints_after_the_engines_words() {
         use rabbit_core::{RestoreRefusal, TargetRefusal};
@@ -6309,6 +6380,20 @@ mod tests {
                 words(&every)
             )
         );
+        let keymap = RestoreRefusal::KeymapNeedsReaperClosed {
+            backup_id: "unattended-unix-1-000000000".to_string(),
+        };
+        assert_eq!(
+            text(keymap.clone()),
+            format!(
+                "{}. Close REAPER, then run the command again without --allow-reaper-running.",
+                words(&keymap)
+            )
+        );
+        let no_keymap = RestoreRefusal::NoKeymapInSet {
+            backup_id: "uninstall-unix-1".to_string(),
+        };
+        assert_eq!(text(no_keymap.clone()), words(&no_keymap));
 
         let as_is = RestoreRefusal::PartMissing {
             backup_id: "uninstall-unix-1".to_string(),
@@ -7266,13 +7351,245 @@ mod tests {
         .unwrap();
         match cli.command {
             Command::RestoreBackup {
-                backup_id, package, ..
+                backup_id,
+                package,
+                key_map,
+                ..
             } => {
                 assert_eq!(backup_id, "uninstall-unix-1");
                 assert_eq!(package.as_deref(), Some("sws"));
+                assert!(!key_map);
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    /// `--key-map` asks for a set's key map alone, and never with
+    /// `--package`.
+    #[test]
+    fn restore_backup_parses_key_map_and_never_with_a_package() {
+        let args = |more: &[&'static str]| {
+            let mut args = vec![
+                "rabbit",
+                "restore-backup",
+                "--resource-path",
+                "R",
+                "--backup-id",
+                "unattended-unix-1-000000000",
+                "--key-map",
+            ];
+            args.extend_from_slice(more);
+            args
+        };
+        match Cli::try_parse_from(args(&[])).unwrap().command {
+            Command::RestoreBackup {
+                key_map, package, ..
+            } => assert!(key_map && package.is_none()),
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(Cli::try_parse_from(args(&["--package", "osara"])).is_err());
+    }
+
+    /// A key map set as OSARA's key map replacement leaves it: `reaper-kb.ini`
+    /// in `dir`'s `REAPER` is OSARA's, with a script registered since, and
+    /// the set `unattended-unix-100-000000000` holds the user's own key map.
+    fn resource_with_a_replaced_key_map(dir: &std::path::Path) -> PathBuf {
+        let resource = dir.join("REAPER");
+        let keymap = resource.join("reaper-kb.ini");
+        std::fs::create_dir_all(&resource).unwrap();
+        std::fs::write(&keymap, b"KEY 1 65 40044 0\r\n").unwrap();
+        let mut keys = rabbit_core::rollback::BackupSetWriter::new(
+            &resource,
+            "unattended-unix-100-000000000",
+            "osara-keymap-replacement",
+        );
+        keys.set_keymap_origin(super::KeymapOrigin::OwnKeymap)
+            .unwrap();
+        keys.copy_file(Some("osara"), &keymap).unwrap();
+        std::fs::write(
+            &keymap,
+            b"KEY 1 65 40001 0\r\nSCR 4 0 RSnew \"Custom: new.lua\" new.lua\r\n",
+        )
+        .unwrap();
+        resource
+    }
+
+    /// `restore-backup --key-map` restores only the key map, and its text
+    /// says so, and that the scripts registered since are kept, with how
+    /// many script lines that adds, or that there was no key map to keep
+    /// them from. A dry run changes nothing. From a set that holds other
+    /// files too, only the key map would come back. A set with no key map,
+    /// which a restore of the whole set takes, and `--allow-reaper-running`
+    /// are refused, the second with the CLI's hint.
+    #[test]
+    fn restore_backup_key_map_says_which_scripts_it_keeps() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = resource_with_a_replaced_key_map(dir.path());
+        let keymap = resource.join("reaper-kb.ini");
+        let now = std::fs::read(&keymap).unwrap();
+        let id = "unattended-unix-100-000000000";
+
+        let mut report = super::restore_backup_item(
+            &resource,
+            &super::RestoreItem::keymap(id),
+            &super::RestoreRunOptions {
+                dry_run: true,
+                quick: false,
+                allow_reaper_running: false,
+            },
+        )
+        .unwrap();
+
+        let text = super::restore_backup_report_text(&report);
+        for expected in [
+            "Only the key map, whatever else the backup set holds.",
+            "Key map: the scripts registered since would be kept in REAPER's Actions list: 1 \
+             script line would be added.",
+        ] {
+            assert!(
+                text.lines().any(|line| line == expected),
+                "{expected:?} missing from:\n{text}"
+            );
+        }
+        assert_eq!(std::fs::read(&keymap).unwrap(), now);
+
+        // As a real run reports it, and a dry run with nothing to add.
+        for (dry_run, replaced, added, expected) in [
+            (
+                false,
+                true,
+                Some(2),
+                Some(
+                    "Key map: the scripts registered since were kept in REAPER's Actions list: 2 \
+                     script lines were added.",
+                ),
+            ),
+            (
+                false,
+                true,
+                Some(0),
+                Some(
+                    "Key map: it already registers every script the key map it replaced did, so \
+                     no script line was added.",
+                ),
+            ),
+            (
+                true,
+                true,
+                Some(0),
+                Some(
+                    "Key map: it already registers every script the key map it would replace \
+                     does, so no script line would be added.",
+                ),
+            ),
+            (
+                false,
+                false,
+                Some(0),
+                Some("Key map: there was no key map before, so no script line was added."),
+            ),
+            (
+                true,
+                false,
+                Some(0),
+                Some("Key map: there is no key map now, so no script line would be added."),
+            ),
+            (false, true, None, None),
+        ] {
+            report.dry_run = dry_run;
+            report.keymap = Some(super::RestoredKeymap {
+                path: keymap.clone(),
+                replaced,
+                scripts_added: added,
+            });
+            let text = super::restore_backup_report_text(&report);
+            let line = text.lines().find(|line| line.starts_with("Key map: "));
+            assert_eq!(line, expected, "{text}");
+        }
+
+        let restore = |more: &[&str]| {
+            let mut args: Vec<std::ffi::OsString> = vec![
+                "rabbit".into(),
+                "restore-backup".into(),
+                "--resource-path".into(),
+                resource.as_os_str().to_owned(),
+                "--backup-id".into(),
+                id.into(),
+                "--key-map".into(),
+            ];
+            args.extend(more.iter().map(Into::into));
+            super::run_args(args)
+        };
+        restore(&[]).unwrap();
+        let refused = restore(&["--allow-reaper-running", "--apply"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.ends_with(
+                "Close REAPER, then run the command again without --allow-reaper-running."
+            ),
+            "{refused}"
+        );
+        assert_eq!(std::fs::read(&keymap).unwrap(), now);
+
+        // From a set that holds a plug-in too, only the key map would come
+        // back.
+        let plugin = resource.join("UserPlugins").join("reaper_sws-x64.dll");
+        std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        std::fs::write(&plugin, b"sws").unwrap();
+        let both = "restore-unix-300-before-restore";
+        let mut writer =
+            rabbit_core::rollback::BackupSetWriter::new(&resource, both, "before-restore");
+        writer.copy_file(Some("osara"), &keymap).unwrap();
+        writer.copy_file(Some("sws"), &plugin).unwrap();
+        let report_path = dir.path().join("report.json");
+        super::run_args(vec![
+            std::ffi::OsString::from("rabbit"),
+            "restore-backup".into(),
+            "--resource-path".into(),
+            resource.as_os_str().to_owned(),
+            "--backup-id".into(),
+            both.into(),
+            "--key-map".into(),
+            "--report-path".into(),
+            report_path.as_os_str().to_owned(),
+        ])
+        .unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+        let planned = &saved["report"];
+        assert_eq!(planned["keymap_only"], true, "{planned}");
+        let targets: Vec<&str> = planned["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|action| action["target_path"].as_str().unwrap())
+            .collect();
+        assert_eq!(targets, [keymap.to_str().unwrap()], "{planned}");
+
+        // A set with no key map is refused for the key map alone, though a
+        // restore of the whole set would take it.
+        rabbit_core::rollback::BackupSetWriter::new(&resource, "unix-200", "before-restore")
+            .copy_file(Some("sws"), &plugin)
+            .unwrap();
+        let in_set = |more: &[&str]| {
+            let mut args: Vec<std::ffi::OsString> = vec![
+                "rabbit".into(),
+                "restore-backup".into(),
+                "--resource-path".into(),
+                resource.as_os_str().to_owned(),
+                "--backup-id".into(),
+                "unix-200".into(),
+            ];
+            args.extend(more.iter().map(Into::into));
+            super::run_args(args)
+        };
+        let none = in_set(&["--key-map"]).unwrap_err().to_string();
+        assert_eq!(none, "The backup unix-200 holds no key map to restore");
+        in_set(&[]).unwrap();
+        assert_eq!(std::fs::read(&keymap).unwrap(), now);
+        assert_eq!(std::fs::read(&plugin).unwrap(), b"sws");
+        assert!(!resource.join("RABBIT").join("logs").exists());
     }
 
     /// A typo must not pass for "nothing to remove": an id no package on
@@ -9564,7 +9881,7 @@ mod tests {
     /// common kind, dated by hand so their order is known: an uninstall of
     /// SWS (300), an update of ReaPack (200), the key map OSARA's replaced
     /// (100), and a set with a damaged manifest (`unix-50`). SWS can be
-    /// restored by package and the key map as a whole set; ReaPack is an
+    /// restored by package and the key map with `--key-map`; ReaPack is an
     /// earlier version, which can be restored with `--package`.
     fn resource_with_backups(dir: &std::path::Path) -> PathBuf {
         use rabbit_core::rollback::{
@@ -9696,7 +10013,7 @@ mod tests {
             "  Your key map: can be restored.",
             &format!(
                 "    rabbit restore-backup {quoted} --backup-id unattended-unix-100-000000000 \
-                 --apply"
+                 --key-map --apply"
             ),
             "  Kind: a backup set whose manifest can't be read",
             "  Everything in it: can't be restored.",
@@ -10018,6 +10335,7 @@ mod tests {
                     "What a restore replaces goes into a backup set of its own first",
                     "Which backup set to restore, as listed by `backups`",
                     "Restore only this package",
+                    "Restore only the key map this backup set holds",
                     "Actually make the changes",
                 ][..],
             ),
@@ -10062,12 +10380,12 @@ mod tests {
     }
 
     /// A set without a manifest, and a restore's backup of a key map and a
-    /// plug-in, come back only as whole sets, each with its command. The
-    /// key map in the second gets no command of its own, since restoring
-    /// its set would put the plug-in back too. A set whose name needs
-    /// quotes in a shell gets no command at all.
+    /// plug-in, come back as whole sets, each with its command. The key map
+    /// in the second gets a command of its own too, which restores it
+    /// alone. A set whose name needs quotes in a shell gets no command at
+    /// all.
     #[test]
-    fn backups_restores_whole_sets_and_a_key_map_only_alone() {
+    fn backups_restores_whole_sets_and_a_key_map_alone() {
         let dir = tempfile::tempdir().unwrap();
         let resource = dir.path().join("REAPER");
         let plugins = resource.join("UserPlugins");
@@ -10097,9 +10415,11 @@ mod tests {
         assert_eq!(
             lines_of_set(&text, "restore-unix-200-before-restore")[3..],
             [
-                "  Key map: can't be restored.",
-                "    RABBIT can't restore a key map on its own yet, and its backup set holds \
-                 other files too.",
+                "  Key map: can be restored.",
+                &format!(
+                    "    rabbit restore-backup {quoted} --backup-id \
+                     restore-unix-200-before-restore --key-map --apply"
+                ),
                 "  Everything in it: can be restored only as a whole set.",
                 &format!(
                     "    rabbit restore-backup {quoted} --backup-id \
@@ -10129,7 +10449,7 @@ mod tests {
 
     /// Every reason a backup can't be restored, in one line, by its status
     /// and its set. An update's set comes back package by package, whatever
-    /// else it holds, so its key map and its files of no package don't.
+    /// else it holds, so its files of no package don't.
     #[test]
     fn backups_says_each_reason_in_one_line() {
         use rabbit_core::backup_overview::{
@@ -10216,13 +10536,6 @@ mod tests {
         };
         let cases: Vec<(BackupEntry, BackupSetOverview, String)> = vec![
             (
-                entry(keys.clone(), Keymaps, CanRestore),
-                update.clone(),
-                "RABBIT can't restore a key map on its own yet, and its backup set holds other \
-                 files too."
-                    .to_string(),
-            ),
-            (
                 entry(package("sws"), UninstalledSoftware, CanRestore),
                 with_receipt(Kind::Uninstall),
                 "Its backup set holds a copy of RABBIT's records, so RABBIT doesn't restore it."
@@ -10234,14 +10547,9 @@ mod tests {
                 "Part of its backup set can't be read.".to_string(),
             ),
             (
-                BackupEntry {
-                    shares_set_with: vec![whole.clone()],
-                    ..entry(keys.clone(), Keymaps, CanRestore)
-                },
-                set(Kind::BeforeRestore),
-                "RABBIT can't restore a key map on its own yet, and its backup set holds other \
-                 files too."
-                    .to_string(),
+                entry(keys.clone(), Keymaps, NothingInIt),
+                set(Kind::Keymap),
+                "None of its files are in this backup, so there is nothing to restore.".to_string(),
             ),
             (
                 BackupEntry {

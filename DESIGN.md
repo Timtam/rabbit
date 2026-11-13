@@ -1777,6 +1777,36 @@ Extension files:
   runs them in turn, each all or nothing with a set of its own (`swaps` in
   the report; `partly-restored` when some went back and others didn't),
   reading the stop and scanning what runs between them.
+- A key map is a backup of its own (backup plan 6.5): a set entry whose
+  original is the resource folder's `reaper-kb.ini`, whatever made the set.
+  `restore-backup --key-map` (`RestorePart::Keymap`) plans only those
+  entries, whatever else the set holds, a receipt copy included, and
+  changes no receipt entry. A set with no such entry, none whose copy comes
+  back, or no manifest is refused (`no-keymap-in-set`); a finished copy that
+  is gone refuses it (`part-missing`), as the overview judges it. Every
+  restore that puts `reaper-kb.ini` back, of the key map alone or of a
+  whole set, keeps the scripts registered since: once every file is back,
+  and before the receipt is saved, the key map gets the `SCR` lines of the
+  key map it replaced, read from its copy in the before-restore set, that
+  it doesn't register by section and id, each once, ending as its own lines
+  end and in its own encoding. OSARA's key map replacement keeps them
+  through the same helper (`keymap_scripts`). The key map with the lines is
+  written to a new temporary file that then takes its place, as every file
+  a restore writes, so it is never part of a file. When that fails, or the
+  receipt after it, the key map goes back from the before-restore set with
+  the other files. The before-restore set holds the replaced key map, so
+  the overview lists it as a key map, and restoring it undoes the restore
+  the same way, again keeping the scripts: a script the older key map
+  registers that the replaced one doesn't stays. A dry run counts the lines
+  it would add (`keymap.scripts_added`, with `keymap.replaced` false when
+  there is no key map to keep them from); the quick plan reads no key map.
+  Under the lock, a planned file is the key map by its entry, or by its
+  real place, so a way to it through a link folder inside the resource
+  folder counts too. A restore that puts a key map back is refused with
+  `allow_reaper_running` (`keymap-needs-reaper-closed`), before the lock and
+  again under it, in a dry run too, since REAPER may save its own key map
+  when it quits; without it, the target's REAPER is checked as for every
+  restore.
 - An uninstall records each package before it moves anything, and keeps the
   record when it found none of the package's files to move, or stopped
   before any copy of them finished. A package has a file in the set when
@@ -1831,12 +1861,12 @@ Extension files:
   Tests fail single steps through a test-only hook (`restore_seam`).
 - `restore_backups` restores several backups in the order given, under one
   lock, each with its own before-restore set; `restore_backup_set` is the
-  same for one. An item (`RestoreItem`) names a set by its exact id, a
-  package or the whole set, and optionally the fingerprint the caller
-  listed. Refusals of the whole run are an error, before anything changes:
-  the lock, root on macOS, a place RABBIT can't write to, and REAPER or
-  programs that the restored packages need closed, checked for all of them
-  together. A refusal of one backup's own, such as its set, its package, a
+  same for one. An item (`RestoreItem`) names a set by its exact id, what
+  of it comes back (`RestorePart`: the whole set, one package, or its key
+  map), and optionally the fingerprint the caller listed. Refusals of the
+  whole run are an error, before anything changes: the lock, root on macOS,
+  a place RABBIT can't write to, and REAPER or programs that the restored
+  packages need closed, checked for all of them together. A refusal of one backup's own, such as its set, its package, a
   file, a reinstall, or a fingerprint that differs from the one listed
   (`changed-since-listed`, compared before the lock and again right before
   the backup's turn), leaves it `not-restored` with that refusal, and the
@@ -1932,10 +1962,11 @@ Extension files:
   complete, nothing in it, version unknown, another of its exclusive group
   installed, part missing, records unreadable, not here, not yours, not a
   backup), and earlier versions are judged by the rules of the swap that
-  restores them, each with the exact `--package` command, and an update's
-  set whose packages can all go back is marked `swaps_whole`, with the
-  command that restores it whole. The overview reads the manifests, the receipt once, an older update set's
-  copy of the receipt, and sizes; it never hashes a file. "Not complete"
+  restores them, each with the exact `--package` command, and key maps
+  each with the exact `--key-map` command; an update's set whose packages
+  can all go back is marked `swaps_whole`, with the command that restores
+  it whole. The overview reads the manifests, the receipt once, an older
+  update set's copy of the receipt, and sizes; it never hashes a file. "Not complete"
   and "already back" compare the hashes the manifests and the receipt
   recorded and the sizes on disk; the restore checks the files themselves.
   Where a file goes back is judged from the paths' text by the restore's
@@ -1944,10 +1975,9 @@ Extension files:
   another computer, is never opened. A backup with a file a restore would
   refuse names it, and gets no restore command; so does an earlier version
   with a file of the newer version that couldn't come back from the
-  before-restore set. A key map is restored on
-  the command line only with its whole set, so only while it is all that
-  comes back of the set. On macOS a set whose owner differs
-  from that of `RABBIT/backups` is another account's. Each set also gets a
+  before-restore set. A key map is a backup of its own: its row gets the
+  `--key-map` command whatever else its set holds. On macOS a set whose
+  owner differs from that of `RABBIT/backups` is another account's. Each set also gets a
   fingerprint, its manifest's length and modified time or, without one, its
   file count and size, for a later run to compare under the lock. Local time
   comes from the operating system on Windows and macOS, UTC elsewhere.

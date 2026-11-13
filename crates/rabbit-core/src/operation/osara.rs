@@ -4,12 +4,11 @@ use rabbit_platform::{HkcuUninstallRoot, UninstallEntry};
 
 use crate::artifact::ArtifactKind;
 use crate::error::{IoPathContext, RabbitError, Result};
+use crate::keymap_scripts::{append_lines_preserving_newline, scripts_to_keep};
 use crate::model::Platform;
-use crate::osara_keymap::script_key;
 use crate::package::PACKAGE_OSARA;
-use crate::reapack::extract_scr_lines;
 use crate::rollback::{BackupSetWriter, KEYMAP_BACKUP_REASON, KeymapOrigin};
-use crate::text_file::{read_text_file_lossless, write_text_file_lossless};
+use crate::text_file::read_text_file_lossless;
 
 use super::{
     PackageAutomationSupport, PlannedAutomationKind, PlannedExecutionKind,
@@ -439,18 +438,10 @@ pub(super) fn apply_osara_keymap_replacement(
         // with it. Re-adding the old copies too would leave one more of each
         // after every replacement, so keep only scripts the new key map
         // doesn't register, each once (per section: one script can be
-        // registered in several).
-        let owned_key = |(section, id): (&str, &str)| (section.to_string(), id.to_string());
-        let mut registered = read_text_file_lossless(&replacement_source)?
-            .text
-            .lines()
-            .filter_map(script_key)
-            .map(owned_key)
-            .collect::<std::collections::HashSet<_>>();
-        preserved_scr_lines = extract_scr_lines(&existing)
-            .into_iter()
-            .filter(|line| script_key(line).is_none_or(|key| registered.insert(owned_key(key))))
-            .collect();
+        // registered in several). A restore of a key map keeps them the
+        // same way.
+        let replacement = read_text_file_lossless(&replacement_source)?.text;
+        preserved_scr_lines = scripts_to_keep(&existing, &replacement);
 
         // The origin is noted before the copy, so the set never holds the
         // key map without it.
@@ -471,31 +462,6 @@ pub(super) fn apply_osara_keymap_replacement(
     }
 
     Ok(report)
-}
-
-fn append_lines_preserving_newline(target_path: &Path, lines: &[String]) -> Result<()> {
-    // Encoding-tolerant read/write: the target is the freshly written OSARA
-    // key map (ASCII in practice, so it decodes as UTF-8), but don't assume.
-    // Appended SCR lines are usually ASCII too; when they carry non-ASCII
-    // decoded from an ANSI-encoded old key map, they're re-encoded in the
-    // target's encoding — those bytes were code-page-ambiguous to begin with,
-    // and modern REAPER reads UTF-8, so this is the least-wrong rendering.
-    let decoded = read_text_file_lossless(target_path)?;
-    let existing = decoded.text;
-    let newline = if existing.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
-    };
-    let mut out = existing;
-    if !out.is_empty() && !out.ends_with(newline) {
-        out.push_str(newline);
-    }
-    for line in lines {
-        out.push_str(line);
-        out.push_str(newline);
-    }
-    write_text_file_lossless(target_path, &out, decoded.encoding)
 }
 
 #[cfg(test)]

@@ -197,13 +197,16 @@ impl BackupStatus {
     }
 }
 
-/// How `restore_backup_set` takes a backup: one package (`--package`) of
-/// an uninstall's set or of a set of earlier versions, or a whole set.
+/// How `rabbit restore-backup` takes a backup, as
+/// [`crate::rollback::RestorePart`] names it: one package (`--package`) of
+/// an uninstall's set or of a set of earlier versions, a whole set, or a
+/// set's key map alone (`--key-map`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RestoreScope {
     Package,
     WholeSet,
+    Keymap,
 }
 
 /// One backup in the overview.
@@ -1269,8 +1272,8 @@ impl Judge<'_> {
         }
     }
 
-    /// Whether `restore_backup_set` takes `set` as a whole under a `Set` or
-    /// key map backup, as far as the overview can tell without hashing.
+    /// Whether `restore_backup_set` takes `set` as a whole under its `Set`
+    /// backup, as far as the overview can tell without hashing.
     /// `Err` is the refusal a restore of the whole set gives, in the order a
     /// restore refuses: an unfinished deletion, a damaged manifest, a set of
     /// RABBIT's records, a set of earlier versions with no package in it, a
@@ -1533,7 +1536,13 @@ impl Judge<'_> {
         (status, None)
     }
 
-    /// The key map `set` holds, in `keymap`'s entries.
+    /// The key map `set` holds, in `keymap`'s entries. It is a backup of
+    /// its own: a restore of it alone puts back only the key map, whatever
+    /// else the set holds, a copy of RABBIT's records included, and keeps
+    /// the scripts registered since (backup plan 6.5). It is refused, in
+    /// the order a restore refuses it, when the set is another account's,
+    /// when a finished copy of it is gone, when no copy of it comes back,
+    /// and for a place the restore wouldn't put it back to.
     fn keymap(
         &self,
         set: &BackupSetOverview,
@@ -1549,30 +1558,18 @@ impl Judge<'_> {
         } else {
             (BackupStatus::CanRestore, None)
         };
-        // The command line restores a key map only with its whole set, so
-        // only while the key map is all that comes back of the set: a
-        // restore of the set would put any other file back too. A set of
-        // earlier versions comes back package by package, and never
-        // restores its key map under this row (see `restores_whole`).
-        let alone = manifest
-            .files
-            .iter()
-            .filter(|entry| comes_back(&set.path, entry))
-            .all(|entry| is_keymap_entry(self.resource_path, entry));
-        let whole = (status == BackupStatus::CanRestore && alone).then(|| self.restores_whole(set));
-        let refused = whole
-            .as_ref()
-            .and_then(|whole| whole.as_ref().err().cloned());
         let item = BackupItem::Keymap {
             set_id: set.id.clone(),
         };
+        let plan = (status == BackupStatus::CanRestore).then(|| self.plan_targets(set, &item));
+        let refused = plan.as_ref().and_then(|plan| plan.as_ref().err().cloned());
         let refusal = refused
             .clone()
             .or_else(|| self.status_refusal(set, &item, status, missing_path.as_ref()));
         BackupEntry {
             size: keymap.iter().map(|entry| entry.size).sum(),
             keymap_origin: manifest.keymap_origin,
-            restore_scope: matches!(whole, Some(Ok(true))).then_some(RestoreScope::WholeSet),
+            restore_scope: matches!(plan, Some(Ok(_))).then_some(RestoreScope::Keymap),
             refused_path: refused.as_ref().and_then(refused_path_of),
             refusal,
             missing_path,
@@ -1799,6 +1796,11 @@ impl Judge<'_> {
                 package_id: package_id?,
                 other_packages: Vec::new(),
             },
+            // A key map whose copy never finished is no key map a restore
+            // of it alone finds.
+            BackupStatus::NothingInIt if matches!(item, BackupItem::Keymap { .. }) => {
+                RestoreRefusal::NoKeymapInSet { backup_id }
+            }
             BackupStatus::NothingInIt => RestoreRefusal::NothingOfItInSet {
                 backup_id,
                 package_ids: vec![package_id?],

@@ -33,9 +33,9 @@ use crate::restore_refusal::{RestoreRefusal, TargetRefusal, refusal};
 use crate::uninstall::paths::link_folder;
 use crate::version::Version;
 
-const PLUGIN: &str = "UserPlugins/reaper_reapack-x64.dll";
-const SHARED: &str = "UserPlugins/reapack_shared.dat";
-const NEW_ONLY: &str = "UserPlugins/reapack_new.dll";
+pub(super) const PLUGIN: &str = "UserPlugins/reaper_reapack-x64.dll";
+pub(super) const SHARED: &str = "UserPlugins/reapack_shared.dat";
+pub(super) const NEW_ONLY: &str = "UserPlugins/reapack_new.dll";
 const SET: &str = "unix-100";
 
 fn write(path: &Path, contents: &[u8]) {
@@ -73,7 +73,7 @@ fn entry(id: &str, at: &str, files: &[(&str, &[u8])]) -> PackageReceipt {
 }
 
 /// ReaPack 1.2.4 as RABBIT installed it: its plug-in and a data file.
-fn reapack_old() -> PackageReceipt {
+pub(super) fn reapack_old() -> PackageReceipt {
     entry(
         "reapack",
         "1.2.4",
@@ -83,7 +83,7 @@ fn reapack_old() -> PackageReceipt {
 
 /// ReaPack 1.2.5, from the dev channel: a new plug-in, the same data file,
 /// and a file 1.2.4 didn't have.
-fn reapack_new() -> PackageReceipt {
+pub(super) fn reapack_new() -> PackageReceipt {
     let mut new = entry(
         "reapack",
         "1.2.5",
@@ -99,7 +99,7 @@ fn reapack_new() -> PackageReceipt {
 
 /// RABBIT's records besides ReaPack's entry: another package, two
 /// packages declined, ReaPack among them, and a configuration step.
-fn records_with(reapack: Option<PackageReceipt>) -> InstallState {
+pub(super) fn records_with(reapack: Option<PackageReceipt>) -> InstallState {
     let mut state = InstallState::default();
     state
         .packages
@@ -178,11 +178,7 @@ fn restore(
 fn quick_plan(resource: &Path, package_id: Option<&str>) -> RestoreReportItem {
     let mut report = restore_backups_with(
         resource,
-        &[RestoreItem {
-            set_id: SET.to_string(),
-            package_id: package_id.map(ToString::to_string),
-            fingerprint: None,
-        }],
+        &[RestoreItem::new(SET, package_id)],
         &RestoreRunOptions {
             dry_run: true,
             quick: true,
@@ -423,11 +419,7 @@ fn a_dry_run_and_the_quick_plan_change_nothing_and_hash_nothing() {
     assert_eq!(swap.moved_out[0].action, MoveOutAction::WouldMoveOut);
     assert!(swap.moved_out[0].backup_path.is_some());
 
-    let item = |package_id: Option<&str>| RestoreItem {
-        set_id: SET.to_string(),
-        package_id: package_id.map(ToString::to_string),
-        fingerprint: None,
-    };
+    let item = |package_id: Option<&str>| RestoreItem::new(SET, package_id);
     let hashed = crate::hash::hashes_on_this_thread();
     let quick = restore_backups_with(
         &resource,
@@ -1402,11 +1394,7 @@ fn a_stop_between_packages_of_a_whole_set_leaves_the_rest_as_they_were() {
 
     let report = restore_backups_with(
         &resource,
-        &[RestoreItem {
-            set_id: SET.to_string(),
-            package_id: None,
-            fingerprint: None,
-        }],
+        &[RestoreItem::whole_set(SET)],
         &RestoreRunOptions {
             dry_run: false,
             quick: false,

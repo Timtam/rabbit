@@ -1030,7 +1030,7 @@ fn another_accounts_sets_and_links_are_never_restored() {
     );
     let keys = find(&listed, &keymap("unattended-unix-200-000000000"));
     assert_eq!(keys.status, BackupStatus::CanRestore);
-    assert_eq!(keys.restore_scope, Some(RestoreScope::WholeSet));
+    assert_eq!(keys.restore_scope, Some(RestoreScope::Keymap));
     let link = find(&listed, &whole("unix-400"));
     assert_eq!(link.status, BackupStatus::NotABackup);
     assert_eq!((link.size, link.restore_scope), (0, None));
@@ -1519,7 +1519,7 @@ fn unfinished_deletions_are_listed_and_a_set_is_looked_up_strictly() {
 }
 
 /// A key map is found by what it holds, whatever made its set: an older
-/// restore's backup of the key map lists as a key map, restored whole.
+/// restore's backup of the key map lists as a key map, restored on its own.
 #[test]
 fn a_key_map_is_found_by_its_content() {
     let dir = tempdir().unwrap();
@@ -1549,7 +1549,7 @@ fn a_key_map_is_found_by_its_content() {
 
     let row = find(&listed, &keymap("restore-unix-100-before-restore"));
     assert_eq!(row.group, BackupGroup::Keymaps);
-    assert_eq!(row.restore_scope, Some(RestoreScope::WholeSet));
+    assert_eq!(row.restore_scope, Some(RestoreScope::Keymap));
     assert_eq!(row.size, 4);
     assert_eq!(listed.entries.len(), 1);
     assert_eq!(listed.restore_targets(&row.item), [resource.join(kb)]);
@@ -1766,12 +1766,14 @@ fn whole_sets_restore_only_as_a_restore_would_take_them() {
     );
 }
 
-/// A key map's backup set that holds other files too gives no whole-set
-/// restore under the key map, whose size and targets are its own: a
-/// restore of the set would put the other files back too. The set gets a
-/// backup of its own for everything in it, which can be restored whole.
+/// A key map is a backup of its own, restored alone whatever else its set
+/// holds, with its own size and targets. A set that holds other files too
+/// gets a backup of its own for everything in it, which can be restored
+/// whole. A copy of RABBIT's records in the set, which RABBIT never copies
+/// back, refuses nothing of the key map. A set that holds only the key map
+/// has only the key map's backup.
 #[test]
-fn a_key_map_with_other_files_is_restored_only_with_its_set() {
+fn a_key_map_is_restored_alone_whatever_else_its_set_holds() {
     let dir = tempdir().unwrap();
     let resource = dir.path().join("REAPER");
     let kb = "reaper-kb.ini";
@@ -1788,17 +1790,27 @@ fn a_key_map_with_other_files_is_restored_only_with_its_set() {
     BackupSetWriter::new(&resource, alone, BEFORE_RESTORE_REASON)
         .copy_file(Some("osara"), &resource.join(kb))
         .unwrap();
+    let with_records = "restore-unix-300-before-restore";
+    let receipt = resource.join("RABBIT").join("install-state.json");
+    write(&receipt, b"{}");
+    let mut writer = BackupSetWriter::new(&resource, with_records, BEFORE_RESTORE_REASON);
+    writer.copy_file(None, &resource.join(kb)).unwrap();
+    writer.copy_file(None, &receipt).unwrap();
 
     let listed = overview(&resource);
 
     let keys = find(&listed, &keymap(id));
     assert_eq!(keys.status, BackupStatus::CanRestore);
     assert_eq!(
-        (keys.restore_scope, keys.refused_path.as_ref()),
-        (None, None)
+        (keys.restore_scope, keys.refusal.as_ref()),
+        (Some(RestoreScope::Keymap), None)
     );
     assert_eq!(keys.size, 8);
     assert_eq!(listed.restore_targets(&keys.item), [resource.join(kb)]);
+    assert_eq!(
+        backup_restore_targets(&resource, &keys.item).unwrap(),
+        [resource.join(kb)]
+    );
     let everything = find(&listed, &whole(id));
     assert_eq!(everything.group, BackupGroup::Other);
     assert_eq!(everything.restore_scope, Some(RestoreScope::WholeSet));
@@ -1806,16 +1818,26 @@ fn a_key_map_with_other_files_is_restored_only_with_its_set() {
     both.sort();
     assert_eq!(listed.restore_targets(&everything.item), both);
     assert_eq!(keys.shares_set_with, [whole(id)]);
-    // A set that holds only the key map is restored whole under it.
     assert_eq!(
         find(&listed, &keymap(alone)).restore_scope,
-        Some(RestoreScope::WholeSet)
+        Some(RestoreScope::Keymap)
     );
     assert!(
         !listed
             .entries
             .iter()
             .any(|entry| entry.item == whole(alone))
+    );
+    let records_keys = find(&listed, &keymap(with_records));
+    assert_eq!(
+        (records_keys.restore_scope, records_keys.refusal.as_ref()),
+        (Some(RestoreScope::Keymap), None)
+    );
+    assert!(
+        !listed
+            .entries
+            .iter()
+            .any(|entry| entry.item == whole(with_records))
     );
 }
 

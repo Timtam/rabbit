@@ -830,6 +830,28 @@ version it holds, when a file of the newer version is somewhere RABBIT couldn't
 put it back to from the new backup set, or while another package whose install
 removes this one is installed.
 
+To get back the key map you had before OSARA's key map replaced it, restore
+only the key map from the backup set `rabbit backups` lists it in:
+
+```
+RABBIT restore-backup --resource-path "%APPDATA%\REAPER" \
+     --backup-id unattended-unix-1234567890-123456789 --key-map --apply
+```
+
+`reaper-kb.ini` comes back as the backup has it, and the scripts registered
+since stay in REAPER's Actions list: every script line of the key map it
+replaces that the old one doesn't have goes into it, each once, as when OSARA's
+key map replaced yours, so the scripts ReaPack installed since don't vanish.
+The command says how many script lines it added. `--key-map` takes only the
+key map, whatever else the set holds: the set's other files stay in it, and
+RABBIT's records don't change. Restoring a whole set that holds a key map keeps
+the scripts the same way. The key map the restore replaces goes into a backup
+set of its own, which `rabbit backups` lists as a key map; restoring the key
+map from that set undoes the restore the same way, again keeping the scripts
+registered since. REAPER must be closed: `--allow-reaper-running` is refused
+for a restore that puts a key map back, because REAPER may save its own key map
+when it quits, over the one restored.
+
 A restore never copies RABBIT's records (its receipt,
 `RABBIT\install-state.json`) back from a backup: that would undo every change
 to them since the backup was made, uninstalls included. Restoring an
@@ -883,7 +905,8 @@ id, when it was made, in local time and in UTC, what made it (an uninstall, an
 update, OSARA's key map, a restore), and its size. Then it lists each backup in
 the set: the package and its version, or the key map, and whether it can be
 restored. For a backup that can be, the next line is the exact
-`rabbit restore-backup` command; otherwise it says why not in one line, such as
+`rabbit restore-backup` command, with `--package` for a package and
+`--key-map` for a key map; otherwise it says why not in one line, such as
 "You have SWS Extension again" or "Part of it isn't in this backup". For an
 update's backup set whose packages can all go back, a last line gives the
 command that restores them together. Sizes are in whole KB and MB, and GB with

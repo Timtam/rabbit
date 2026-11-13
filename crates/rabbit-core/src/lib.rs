@@ -13,6 +13,7 @@ pub mod hash;
 pub mod hfs;
 pub mod http;
 pub mod install;
+pub mod keymap_scripts;
 pub mod latest;
 pub mod localization;
 pub mod lock;

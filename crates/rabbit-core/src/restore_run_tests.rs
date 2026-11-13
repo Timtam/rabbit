@@ -95,11 +95,7 @@ fn uninstalled_with(
 
 /// One package of the set `set_id`, with no fingerprint to compare.
 fn item(set_id: &str, package_id: &str) -> RestoreItem {
-    RestoreItem {
-        set_id: set_id.to_string(),
-        package_id: Some(package_id.to_string()),
-        fingerprint: None,
-    }
+    RestoreItem::package(set_id, package_id)
 }
 
 /// Every event `run` reports, and the reporter that collects them.
@@ -729,11 +725,7 @@ fn the_quick_plan_hashes_nothing_and_agrees_with_a_full_dry_run() {
     // ReaPack's backup is missing a copy it says it finished.
     fs::remove_file(resource.join("RABBIT/backups/uninstall-unix-2/UserPlugins/reapack_third.dll"))
         .unwrap();
-    let whole = |set_id: &str| RestoreItem {
-        set_id: set_id.to_string(),
-        package_id: None,
-        fingerprint: None,
-    };
+    let whole = RestoreItem::whole_set;
     let items = [
         item("uninstall-unix-1", "sws"),
         item("uninstall-unix-2", "reapack"),

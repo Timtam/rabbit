@@ -104,6 +104,13 @@ pub enum RestoreRefusal {
         packages: Vec<String>,
     },
 
+    /// Only the set's key map was asked for, and the set holds none that a
+    /// restore puts back: no entry whose original is the resource folder's
+    /// `reaper-kb.ini`, only ones whose copy never finished, or no manifest
+    /// to say where its files came from.
+    #[error("The backup {backup_id} holds no key map to restore")]
+    NoKeymapInSet { backup_id: String },
+
     /// The set's manifest at `path` can't be read as one. `detail` is what
     /// the reader said.
     #[error(
@@ -263,6 +270,15 @@ pub enum RestoreRefusal {
         processes: Vec<RunningProcess>,
     },
 
+    /// The restore puts REAPER's key map back, and was told the target's
+    /// REAPER may run. REAPER may save its own key map when it quits, over
+    /// the one restored, so a key map comes back only with REAPER closed,
+    /// which the restore then checks as every restore does.
+    #[error(
+        "The backup {backup_id} puts back REAPER's key map, which RABBIT does only while REAPER is closed: REAPER may save its own key map when it quits, over the one restored"
+    )]
+    KeymapNeedsReaperClosed { backup_id: String },
+
     /// Programs the uninstall plans of `package_ids` name as blocking are
     /// running. `package_names` are those packages by the names RABBIT
     /// shows, for the English. `programs` are the programs' names, as they
@@ -343,6 +359,7 @@ impl RestoreRefusal {
             Self::NoManifest { .. } => "no-manifest",
             Self::NoPackageRecords { .. } => "no-package-records",
             Self::PackageNotInSet { .. } => "package-not-in-set",
+            Self::NoKeymapInSet { .. } => "no-keymap-in-set",
             Self::DamagedManifest { .. } => "damaged-manifest",
             Self::RecordsOnly { .. } => "records-only",
             Self::ReceiptInSet { .. } => "receipt-in-set",
@@ -356,6 +373,7 @@ impl RestoreRefusal {
             Self::NewerFileRefused { .. } => "newer-file-refused",
             Self::ReceiptUnreadable { .. } => "receipt-unreadable",
             Self::ReaperRunning { .. } => "reaper-running",
+            Self::KeymapNeedsReaperClosed { .. } => "keymap-needs-reaper-closed",
             Self::ProgramRunning { .. } => "program-running",
             Self::NotWritable { .. } => "not-writable",
             Self::LockHeld { .. } => "lock-held",
@@ -559,10 +577,12 @@ mod tests {
             RestoreRefusal::NotYours { .. } => 26,
             RestoreRefusal::ChangedWhileRead { .. } => 27,
             RestoreRefusal::ChangedSinceListed { .. } => 28,
+            RestoreRefusal::NoKeymapInSet { .. } => 29,
+            RestoreRefusal::KeymapNeedsReaperClosed { .. } => 30,
         }
     }
 
-    const VARIANTS: usize = 29;
+    const VARIANTS: usize = 31;
 
     /// The number of each reason, as [`variant_number`] numbers refusals.
     fn reason_number(reason: &TargetRefusal) -> usize {
@@ -726,6 +746,8 @@ mod tests {
             RestoreRefusal::NotYours { backup_id: id() },
             RestoreRefusal::ChangedWhileRead { backup_id: id() },
             RestoreRefusal::ChangedSinceListed { backup_id: id() },
+            RestoreRefusal::NoKeymapInSet { backup_id: id() },
+            RestoreRefusal::KeymapNeedsReaperClosed { backup_id: id() },
         ];
         for reason in every_reason() {
             refusals.push(RestoreRefusal::TargetRefused {

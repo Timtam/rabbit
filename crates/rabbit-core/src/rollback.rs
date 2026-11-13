@@ -11,6 +11,7 @@ use crate::backup_overview::{SetFingerprint, first_copy_gone};
 use crate::cancel::CancelToken;
 use crate::error::{IoPathContext, JsonPathContext, RabbitError, Result};
 use crate::hash::sha256_file;
+use crate::keymap_scripts::{keymap_with_scripts_kept, scripts_to_keep};
 use crate::model::{InstallationKind, Platform};
 use crate::package::PackageSpec;
 use crate::preflight::{
@@ -26,6 +27,7 @@ use crate::receipt::{
 };
 use crate::report::{SavedReportPaths, default_report_path, save_new_json_and_text_reports};
 use crate::restore_refusal::{RestoreRefusal, TargetRefusal};
+use crate::text_file::read_text_file_lossless;
 use crate::uninstall::paths::{ResolvedPattern, pattern_matches};
 use crate::uninstall::preflight::{
     ANY_REAPER_PROCESS_CHECK, NO_REAPER_ANYWHERE, PROGRAMS_RUNNING_CHECK,
@@ -340,6 +342,10 @@ pub struct RestoreBackupReport {
     /// The one package restored, when the restore asked for one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_id: Option<String>,
+    /// The restore asked for the set's key map alone (see
+    /// [`RestorePart::Keymap`]): the set's other files stay in it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keymap_only: bool,
     /// For a set an uninstall wrote: what the restore did for each package
     /// besides putting its files back, or in a dry run would do.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -365,6 +371,11 @@ pub struct RestoreBackupReport {
     /// files are empty then, and `status` sums these up.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub swaps: Vec<RestoreReportItem>,
+    /// When the restore puts REAPER's key map back, alone or with other
+    /// files: the scripts it kept in REAPER's Actions list, or in a dry run
+    /// would keep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keymap: Option<RestoredKeymap>,
     /// Where the restore saved this report, when it saved it: a real
     /// restore that gets past its checks always tries, also when the backup
     /// wasn't restored; a dry run never does.
@@ -404,15 +415,15 @@ pub enum RestoreStatus {
 }
 
 /// One backup for [`restore_backups`]: a set in `RABBIT/backups`, named by
-/// its id exactly as listed, upper and lower case included, as a whole or
-/// one package of it.
+/// its id exactly as listed, upper and lower case included, as a whole, one
+/// package of it, or its key map.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestoreItem {
     pub set_id: String,
-    /// Only this package of the set, as `restore-backup --package` restores
-    /// it. `None` restores the whole set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub package_id: Option<String>,
+    /// What of the set comes back. Never left out: an item without it,
+    /// such as one that names only a `package_id`, is an error rather than
+    /// the whole set.
+    pub part: RestorePart,
     /// The set's fingerprint as the caller listed it (see
     /// [`crate::backup_overview::BackupSetOverview::fingerprint`]). A set
     /// that changed since is refused, with
@@ -420,6 +431,106 @@ pub struct RestoreItem {
     /// changes. `None` checks nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<SetFingerprint>,
+}
+
+impl RestoreItem {
+    /// The whole set `set_id`, or only `package_id` of it when one is
+    /// given, as [`restore_backup_set`] takes them, with no fingerprint to
+    /// compare.
+    pub fn new(set_id: &str, package_id: Option<&str>) -> Self {
+        match package_id {
+            Some(package_id) => Self::package(set_id, package_id),
+            None => Self::whole_set(set_id),
+        }
+    }
+
+    /// The whole set `set_id`, with no fingerprint to compare.
+    pub fn whole_set(set_id: &str) -> Self {
+        Self::of(set_id, RestorePart::WholeSet)
+    }
+
+    /// Only `package_id` of the set `set_id`, with no fingerprint to
+    /// compare.
+    pub fn package(set_id: &str, package_id: &str) -> Self {
+        Self::of(
+            set_id,
+            RestorePart::Package {
+                package_id: package_id.to_string(),
+            },
+        )
+    }
+
+    /// Only the key map of the set `set_id`, with no fingerprint to compare.
+    pub fn keymap(set_id: &str) -> Self {
+        Self::of(set_id, RestorePart::Keymap)
+    }
+
+    fn of(set_id: &str, part: RestorePart) -> Self {
+        Self {
+            set_id: set_id.to_string(),
+            part,
+            fingerprint: None,
+        }
+    }
+
+    /// The one package asked for, if one was.
+    pub fn package_id(&self) -> Option<&str> {
+        self.part.package_id()
+    }
+}
+
+/// What of a set a restore puts back. There is no default: a restore
+/// always says which, so nothing ever widens to the whole set unasked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RestorePart {
+    /// The whole set, as `restore-backup` without `--package` or
+    /// `--key-map` restores it.
+    WholeSet,
+    /// Only this package: from a set an uninstall wrote, or the earlier
+    /// version a set of earlier versions holds (see [`takes_by_swap`]), as
+    /// `restore-backup --package` restores it.
+    Package { package_id: String },
+    /// Only the set's key map, the resource folder's `reaper-kb.ini`,
+    /// whatever else the set holds, a copy of RABBIT's records included, as
+    /// `restore-backup --key-map` restores it. A key map is a backup of its
+    /// own (backup plan 6.5): RABBIT's records don't change, and no other
+    /// file of the set comes back.
+    Keymap,
+}
+
+impl RestorePart {
+    /// The one package asked for, if one was.
+    pub fn package_id(&self) -> Option<&str> {
+        match self {
+            Self::Package { package_id } => Some(package_id),
+            Self::WholeSet | Self::Keymap => None,
+        }
+    }
+}
+
+/// What a restore that puts REAPER's key map back did to keep the scripts
+/// registered since, or in a dry run would do (backup plan 6.5). The key
+/// map comes back as the backup has it, then gets the script lines (`SCR`)
+/// of the key map it replaced that it doesn't register, each once (see
+/// [`crate::keymap_scripts::scripts_to_keep`]), so the scripts ReaPack
+/// installed since stay in REAPER's Actions list. Every restore that puts
+/// the key map back does this, of the key map alone or of a whole set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoredKeymap {
+    /// The key map: the resource folder's `reaper-kb.ini`.
+    pub path: PathBuf,
+    /// Whether there was a key map for the restore to replace, whose
+    /// scripts it keeps. In a dry run, whether there is one now. Without
+    /// one, no script line is added.
+    #[serde(default)]
+    pub replaced: bool,
+    /// How many script lines the restore added to the key map it put back.
+    /// In a dry run, how many it would add, as the key map is now. `None`
+    /// in the quick plan, which reads no file, and when the restore of the
+    /// backup failed, which put the key map it replaced back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scripts_added: Option<usize>,
 }
 
 /// How [`restore_backups`] runs.
@@ -491,6 +602,9 @@ pub struct RestoreReportItem {
     pub backup_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_id: Option<String>,
+    /// See [`RestoreBackupReport::keymap_only`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keymap_only: bool,
     pub status: RestoreStatus,
     /// The set's folder in `RABBIT/backups`, once the restore found it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -520,6 +634,9 @@ pub struct RestoreReportItem {
     /// See [`RestoreBackupReport::swaps`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub swaps: Vec<RestoreReportItem>,
+    /// See [`RestoreBackupReport::keymap`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keymap: Option<RestoredKeymap>,
     /// Why a check refused the backup before anything of it changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<RestoreRefusal>,
@@ -1781,6 +1898,15 @@ fn system_runs_as_root() -> bool {
 /// [`RestoreBackupReport::swaps`]); a refusal of any of them before the
 /// first changes anything refuses them all.
 ///
+/// A restore that puts REAPER's key map back keeps the scripts registered
+/// since in REAPER's Actions list: the key map comes back as the set holds
+/// it, then gets the script lines of the key map it replaced that it
+/// doesn't register, each once, as OSARA's key map replacement keeps them
+/// (see [`RestoredKeymap`]). It is refused with
+/// `options.allow_reaper_running` ([`RestoreRefusal::KeymapNeedsReaperClosed`]),
+/// since REAPER may save its own key map when it quits.
+/// [`restore_backup_item`] restores a set's key map alone.
+///
 /// Before the lock, and again under it, a restore checks what each restored
 /// package's own uninstall checks: the target's REAPER, every REAPER on the
 /// computer when the package's uninstall needs that, and the programs its
@@ -1823,8 +1949,10 @@ pub fn restore_backup_set(
 /// folders instead of the user's real CLAP and vendor folders.
 ///
 /// The set is found, and refused if it is another account's or one a
-/// restore never takes, before anything else is read. The package refusals
-/// come next (see [`packages_to_restore`]), then the refusal of a real
+/// restore never takes, before anything else is read. The package or key
+/// map refusals come next (see [`packages_to_restore`] and
+/// [`keymap_to_restore`]), then the refusal of a restore that puts the key
+/// map back with `options.allow_reaper_running`, then the refusal of a real
 /// restore as root. All of them come before `outside` is called, before the
 /// REAPER and program checks, the lock and any change, so `outside` is only
 /// called once the id named a set that may be restored. A refused restore
@@ -1836,16 +1964,44 @@ pub(crate) fn restore_backup_set_with(
     environment: &BackupEnvironment<'_>,
     outside: impl FnOnce() -> OutsideRestoreRules,
 ) -> Result<RestoreBackupReport> {
-    let item = RestoreItem {
-        set_id: backup_id.to_string(),
-        package_id: options.package_id.clone(),
-        fingerprint: None,
-    };
+    let item = RestoreItem::new(backup_id, options.package_id.as_deref());
     let run_options = RestoreRunOptions {
         dry_run: options.dry_run,
         quick: false,
         allow_reaper_running: options.allow_reaper_running,
     };
+    restore_backup_item_with(resource_path, &item, &run_options, environment, outside)
+}
+
+/// Restore the backup `item` names, or with `options.dry_run` say what a
+/// restore would do: [`restore_backup_set`] for any part of a set, its key
+/// map alone included (see [`RestorePart::Keymap`]), as `restore-backup
+/// --key-map` restores it. The item's fingerprint, if it has one, is
+/// compared as [`restore_backups`] compares it.
+pub fn restore_backup_item(
+    resource_path: &Path,
+    item: &RestoreItem,
+    options: &RestoreRunOptions,
+) -> Result<RestoreBackupReport> {
+    restore_backup_item_with(
+        resource_path,
+        item,
+        options,
+        &BackupEnvironment::system(),
+        || crate::install::outside_restore_rules(resource_path),
+    )
+}
+
+/// [`restore_backup_item`], asking `environment` about the computer, with
+/// the places outside the resource folder that a restore may write to
+/// coming from `outside`, as for [`restore_backup_set_with`].
+pub(crate) fn restore_backup_item_with(
+    resource_path: &Path,
+    item: &RestoreItem,
+    options: &RestoreRunOptions,
+    environment: &BackupEnvironment<'_>,
+    outside: impl FnOnce() -> OutsideRestoreRules,
+) -> Result<RestoreBackupReport> {
     let RestoreRun {
         preflight,
         mut outcomes,
@@ -1854,8 +2010,8 @@ pub(crate) fn restore_backup_set_with(
         ..
     } = run_restore(
         resource_path,
-        std::slice::from_ref(&item),
-        run_options,
+        std::slice::from_ref(item),
+        *options,
         environment,
         outside,
         &ProgressReporter::noop(),
@@ -1879,12 +2035,14 @@ pub(crate) fn restore_backup_set_with(
         error: backup.error,
         actions: backup.actions,
         skipped_targets: backup.skipped_targets,
-        package_id: options.package_id.clone(),
+        package_id: item.package_id().map(ToString::to_string),
+        keymap_only: backup.keymap_only,
         packages: backup.packages,
         skipped_packages: backup.skipped_packages,
         before_restore_set_id: backup.before_restore_set_id,
         swap: backup.swap,
         swaps: backup.swaps,
+        keymap: backup.keymap,
         saved_report: None,
     };
     // The report names the set that can undo the restore, or says what
@@ -1917,7 +2075,10 @@ pub(crate) fn restore_backup_set_with(
 /// what runs is scanned again for that backup's packages, since a REAPER
 /// may have started while the backups before it were restored. Each
 /// backup is checked against RABBIT's records as the backups before it in
-/// the run left them.
+/// the run left them. A backup that puts REAPER's key map back is refused
+/// with `options.allow_reaper_running`
+/// ([`RestoreRefusal::KeymapNeedsReaperClosed`]), as [`restore_backup_set`]
+/// says.
 ///
 /// `cancel` is read before each backup. The one being restored always
 /// finishes; those after it are [`RestoreStatus::NotReached`], and the
@@ -2035,7 +2196,8 @@ impl ItemOutcome {
     fn into_report_item(self, item: &RestoreItem) -> RestoreReportItem {
         let empty = |status: RestoreStatus| RestoreReportItem {
             backup_id: item.set_id.clone(),
-            package_id: item.package_id.clone(),
+            package_id: item.package_id().map(ToString::to_string),
+            keymap_only: item.part == RestorePart::Keymap,
             status,
             backup_path: None,
             actions: Vec::new(),
@@ -2045,6 +2207,7 @@ impl ItemOutcome {
             before_restore_set_id: None,
             swap: None,
             swaps: Vec::new(),
+            keymap: None,
             refusal: None,
             error: None,
         };
@@ -2069,9 +2232,10 @@ impl ItemOutcome {
 ///
 /// Each backup's own checks come first, before the lock: the set is found
 /// and refused if it is another account's, changed since it was listed, or
-/// one a restore never takes, then the package refusals (see
-/// [`packages_to_restore`]). A real run as root is refused next, once a
-/// backup passed them, then `outside` is called, once, and the REAPER and
+/// one a restore never takes, then the package or key map refusals (see
+/// [`packages_to_restore`] and [`keymap_to_restore`]), then a key map with
+/// `options.allow_reaper_running`. A real run as root is refused next, once
+/// a backup passed them, then `outside` is called, once, and the REAPER and
 /// program checks of every package the run brings back are made together.
 /// Under the lock, what runs is scanned again, and then each backup in turn
 /// is found again, checked again and planned right before it is restored,
@@ -2095,7 +2259,8 @@ fn run_restore(
     let found: Vec<Result<FoundSet<'_>>> = items
         .iter()
         .map(|item| {
-            find_set_to_restore(resource_path, item, check, environment).map_err(as_restore_refusal)
+            find_set_to_restore(resource_path, item, options, environment)
+                .map_err(as_restore_refusal)
         })
         .collect();
     let run_options = options.for_backup(None);
@@ -2168,9 +2333,9 @@ fn run_restore(
         }
         progress.report(ProgressEvent::RestoreStarted {
             set_id: item.set_id.clone(),
-            package_id: item.package_id.clone(),
+            package_id: item.package_id().map(ToString::to_string),
         });
-        let backup_options = options.for_backup(item.package_id.as_deref());
+        let backup_options = options.for_backup(item.package_id());
         let outcome = match found {
             Err(error) => ItemOutcome::NotStarted(error),
             Ok(found) => {
@@ -2210,7 +2375,7 @@ fn run_restore(
         };
         progress.report(ProgressEvent::RestoreCompleted {
             set_id: item.set_id.clone(),
-            package_id: item.package_id.clone(),
+            package_id: item.package_id().map(ToString::to_string),
             status: outcome.status(),
         });
         outcomes.push(outcome);
@@ -2228,40 +2393,131 @@ fn run_restore(
 fn find_set_to_restore<'a>(
     resource_path: &Path,
     item: &'a RestoreItem,
-    check: CopyCheck,
+    options: RestoreRunOptions,
     environment: &BackupEnvironment<'_>,
 ) -> Result<FoundSet<'a>> {
+    let check = options.copy_check();
     let backup_id = item.set_id.as_str();
-    let package_id = item.package_id.as_deref();
+    let package_id = item.package_id();
     let backup_path = set_to_restore(resource_path, backup_id)?;
     refuse_another_accounts_set(resource_path, backup_id, &backup_path, environment)?;
     refuse_changed_since_listed(backup_id, &backup_path, item.fingerprint.as_ref())?;
     let manifest = load_manifest_to_restore(backup_id, &backup_path)?;
-    refuse_sets_a_restore_does_not_take(resource_path, backup_id, &backup_path, manifest.as_ref())?;
-    let packages = match manifest.as_ref().filter(|manifest| takes_by_swap(manifest)) {
-        Some(manifest) => swaps_to_restore(
+    let (packages, keymap_packages) = if item.part == RestorePart::Keymap {
+        // A key map is a backup of its own: whatever else the set holds,
+        // a copy of RABBIT's records included, stays in the set, and no
+        // package's records change.
+        let keymap_packages = keymap_to_restore(
             resource_path,
             backup_id,
             &backup_path,
-            manifest,
-            package_id,
+            manifest.as_ref(),
             check,
-        )?,
-        None => packages_to_restore(
+        )?;
+        (PackagesToRestore::default(), keymap_packages)
+    } else {
+        refuse_sets_a_restore_does_not_take(
+            resource_path,
             backup_id,
             &backup_path,
             manifest.as_ref(),
-            package_id,
-            check,
-        )?,
+        )?;
+        let packages = match manifest.as_ref().filter(|manifest| takes_by_swap(manifest)) {
+            Some(manifest) => swaps_to_restore(
+                resource_path,
+                backup_id,
+                &backup_path,
+                manifest,
+                package_id,
+                check,
+            )?,
+            None => packages_to_restore(
+                backup_id,
+                &backup_path,
+                manifest.as_ref(),
+                package_id,
+                check,
+            )?,
+        };
+        (packages, Vec::new())
     };
-    Ok(FoundSet {
+    let found = FoundSet {
         backup_id,
-        package_id,
+        part: &item.part,
         backup_path,
         manifest,
         packages,
-    })
+        keymap_packages,
+    };
+    if options.allow_reaper_running && found.puts_keymap_back(resource_path, check)? {
+        return Err(keymap_needs_reaper_closed(backup_id));
+    }
+    Ok(found)
+}
+
+/// Check, before anything changes, that the set `backup_id` at
+/// `backup_path` holds a key map a restore of its key map alone puts back,
+/// its copies read as `check` says, in the order the overview of the
+/// backups judges a key map: an entry whose original is the resource
+/// folder's `reaper-kb.ini` ([`RestoreRefusal::NoKeymapInSet`]), each
+/// finished copy of it there with the size recorded
+/// ([`RestoreRefusal::PartMissing`]), and one that comes back
+/// ([`RestoreRefusal::NoKeymapInSet`] when its copy never finished). A set
+/// without a manifest names no key map. Returns the packages the key map's
+/// entries name, whose uninstall's checks the restore makes, as a restore of
+/// a whole set that holds only the key map makes them.
+fn keymap_to_restore(
+    resource_path: &Path,
+    backup_id: &str,
+    backup_path: &Path,
+    manifest: Option<&BackupManifest>,
+    check: CopyCheck,
+) -> Result<Vec<String>> {
+    let no_keymap = || -> RabbitError {
+        RestoreRefusal::NoKeymapInSet {
+            backup_id: backup_id.to_string(),
+        }
+        .into()
+    };
+    let keymap: Vec<&BackupManifestFile> = manifest
+        .map(|manifest| {
+            manifest
+                .files
+                .iter()
+                .filter(|entry| is_keymap_entry(resource_path, entry))
+                .collect()
+        })
+        .unwrap_or_default();
+    if keymap.is_empty() {
+        return Err(no_keymap());
+    }
+    if let Some(path) = first_copy_gone(backup_path, &keymap) {
+        return Err(RestoreRefusal::PartMissing {
+            backup_id: backup_id.to_string(),
+            path,
+        }
+        .into());
+    }
+    if !keymap
+        .iter()
+        .any(|entry| entry_comes_back(backup_path, entry, check))
+    {
+        return Err(no_keymap());
+    }
+    let packages: BTreeSet<String> = keymap
+        .iter()
+        .filter_map(|entry| entry.package_id.clone())
+        .collect();
+    Ok(packages.into_iter().collect())
+}
+
+/// The refusal of a restore of the set `backup_id` that puts REAPER's key
+/// map back while it may let REAPER run.
+fn keymap_needs_reaper_closed(backup_id: &str) -> RabbitError {
+    RestoreRefusal::KeymapNeedsReaperClosed {
+        backup_id: backup_id.to_string(),
+    }
+    .into()
 }
 
 /// Refuse the set `backup_id` at `backup_path` when its fingerprint now
@@ -2331,6 +2587,7 @@ fn restore_found_set(
             ItemOutcome::Ran(Box::new(RestoreReportItem {
                 backup_id,
                 package_id: None,
+                keymap_only: false,
                 status: status_of_swaps(&swaps),
                 backup_path: Some(backup_path),
                 actions: Vec::new(),
@@ -2340,6 +2597,7 @@ fn restore_found_set(
                 before_restore_set_id: None,
                 swap: None,
                 swaps,
+                keymap: None,
                 refusal: None,
                 error: None,
             }))
@@ -2551,9 +2809,14 @@ const KEYMAP_FILE: &str = "reaper-kb.ini";
 pub(crate) fn is_keymap_entry(resource_path: &Path, entry: &BackupManifestFile) -> bool {
     matches!(
         entry_place(resource_path, entry),
-        Some(EntryPlace::Inside(relative))
-            if same_place(&relative) == same_place(Path::new(KEYMAP_FILE))
+        Some(EntryPlace::Inside(relative)) if is_keymap_place(&relative)
     )
+}
+
+/// Whether `relative`, a place inside the resource folder, is the key map's,
+/// by a name the file system reads as `reaper-kb.ini`.
+fn is_keymap_place(relative: &Path) -> bool {
+    same_place(relative) == same_place(Path::new(KEYMAP_FILE))
 }
 
 /// Whether a restore of the set `manifest` describes puts earlier versions
@@ -2888,21 +3151,30 @@ pub(crate) fn restore_backup_set_within(
     )
 }
 
-/// A set a restore found and read, and did not refuse: its id, the package
-/// asked for, if one was, its folder in `RABBIT/backups`, its manifest, and
-/// the packages it brings back.
+/// A set a restore found and read, and did not refuse: its id, what of it
+/// was asked for, its folder in `RABBIT/backups`, its manifest, and the
+/// packages it brings back.
 struct FoundSet<'a> {
     backup_id: &'a str,
-    package_id: Option<&'a str>,
+    part: &'a RestorePart,
     backup_path: PathBuf,
     manifest: Option<BackupManifest>,
     packages: PackagesToRestore,
+    /// For the key map alone: the packages its entries name.
+    keymap_packages: Vec<String>,
 }
 
 impl FoundSet<'_> {
+    /// The one package asked for, if one was.
+    fn package_id(&self) -> Option<&str> {
+        self.part.package_id()
+    }
+
     /// The packages whose files the restore puts back (see
     /// [`restored_package_ids`]), whose uninstall's checks it makes. For a
-    /// set of earlier versions, the packages it puts back.
+    /// set of earlier versions, the packages it puts back. For the key map
+    /// alone, the packages its entries name, as for a whole set that holds
+    /// only the key map.
     fn restored_package_ids(&self) -> Vec<String> {
         if !self.packages.swap.is_empty() {
             return self
@@ -2912,7 +3184,39 @@ impl FoundSet<'_> {
                 .map(|swap| swap.package_id.clone())
                 .collect();
         }
-        restored_package_ids(self.manifest.as_ref(), &self.packages, self.package_id)
+        if *self.part == RestorePart::Keymap {
+            return self.keymap_packages.clone();
+        }
+        restored_package_ids(self.manifest.as_ref(), &self.packages, self.package_id())
+    }
+
+    /// Whether the restore puts REAPER's key map back, by the set's
+    /// manifest, or without one by its layout, as its plan takes the set's
+    /// files (see [`plan_found_set`]): the key map alone, or the key map
+    /// among the files of a whole set or of one package of an uninstall's
+    /// set, when its copy comes back, read as `check` says. A set of
+    /// earlier versions puts back only its versions' files, never its key
+    /// map, unless the key map alone is asked for.
+    fn puts_keymap_back(&self, resource_path: &Path, check: CopyCheck) -> Result<bool> {
+        if *self.part == RestorePart::Keymap {
+            return Ok(true);
+        }
+        let Some(manifest) = &self.manifest else {
+            // Only a whole set restores without a manifest, by its layout.
+            let mut files = Vec::new();
+            let mut links = Vec::new();
+            collect_relative_files(&self.backup_path, &self.backup_path, &mut files, &mut links)?;
+            return Ok(files.iter().any(|relative| is_keymap_place(relative)));
+        };
+        if takes_by_swap(manifest) {
+            return Ok(false);
+        }
+        let package_id = self.package_id();
+        Ok(manifest.files.iter().any(|entry| {
+            is_keymap_entry(resource_path, entry)
+                && package_id.is_none_or(|wanted| entry.package_id.as_deref() == Some(wanted))
+                && entry_comes_back(&self.backup_path, entry, check)
+        }))
     }
 }
 
@@ -2921,6 +3225,8 @@ impl FoundSet<'_> {
 struct PlannedBackup {
     backup_id: String,
     package_id: Option<String>,
+    /// Only the set's key map was asked for.
+    keymap_only: bool,
     backup_path: PathBuf,
     packages: Vec<(String, BackupPackageRecord)>,
     skipped_packages: Vec<SkippedPackage>,
@@ -2931,6 +3237,8 @@ struct PlannedBackup {
     before_restore_id: String,
     /// For an earlier version: what the swap does besides the files.
     swap: Option<PlannedSwap>,
+    /// When the restore puts REAPER's key map back: which file it is.
+    keymap: Option<PlannedKeymap>,
 }
 
 impl PlannedBackup {
@@ -2940,6 +3248,7 @@ impl PlannedBackup {
         RestoreReportItem {
             backup_id: self.backup_id,
             package_id: self.package_id,
+            keymap_only: self.keymap_only,
             status,
             backup_path: Some(self.backup_path),
             actions: Vec::new(),
@@ -2949,10 +3258,22 @@ impl PlannedBackup {
             before_restore_set_id: None,
             swap: None,
             swaps: Vec::new(),
+            keymap: None,
             refusal,
             error: None,
         }
     }
+}
+
+/// The key map among the files a restore puts back, whose scripts
+/// registered since it keeps (see [`RestoredKeymap`]).
+struct PlannedKeymap {
+    /// Its place among the backup's actions.
+    action: usize,
+    /// In a full dry run, how many script lines the restore would add, by
+    /// the key map there now. `None` otherwise: a real run counts them
+    /// when it adds them, and the quick plan reads no file.
+    scripts_added: Option<usize>,
 }
 
 /// What going back to one earlier version does besides putting the set's
@@ -3001,6 +3322,13 @@ enum Planned {
 /// [`plan_swap`]). For the whole set, every package is checked and planned
 /// here, against RABBIT's records as they are now, before the first one
 /// changes anything, so a refusal of any of them refuses them all.
+///
+/// The key map alone ([`RestorePart::Keymap`]) plans only the set's key map
+/// entries, and no package's records. Any plan that puts the key map back
+/// is refused with `options.allow_reaper_running`
+/// ([`RestoreRefusal::KeymapNeedsReaperClosed`]), as before the lock, and a
+/// dry run counts the script lines the restore would keep (see
+/// [`PlannedKeymap`]).
 fn plan_found_set(
     resource_path: &Path,
     listed: Option<&SetFingerprint>,
@@ -3016,7 +3344,7 @@ fn plan_found_set(
     } = *context;
     let FoundSet {
         backup_id,
-        package_id,
+        part,
         backup_path,
         manifest,
         packages:
@@ -3025,7 +3353,10 @@ fn plan_found_set(
                 skipped: skipped_packages,
                 swap,
             },
+        keymap_packages: _,
     } = found;
+    let package_id = part.package_id();
+    let keymap_only = *part == RestorePart::Keymap;
 
     // The set may have changed since the checks before the lock, as when a
     // backup before it in the run took long. So it is found again here, as
@@ -3142,19 +3473,32 @@ fn plan_found_set(
         Some(state)
     };
 
+    // Only a manifest names a key map (see `keymap_to_restore`). Without
+    // one, a plan would take the set's whole layout. This can't happen
+    // after the manifest was compared above, as the key map alone needs one
+    // before the lock, but the whole layout must never come back for it.
+    if keymap_only && manifest.is_none() {
+        return Err(backup_changed_while_read(backup_id));
+    }
+
     // Every file is checked before the first one is touched, so a refused
     // or damaged entry stops the restore with nothing changed.
     let restoring: Vec<&str> = packages
         .iter()
         .map(|(package_id, _)| package_id.as_str())
         .collect();
+    let keymap_entries = |entry: &BackupManifestFile| is_keymap_entry(resource_path, entry);
     let plan = plan_restore(
         resource_path,
         &backup_path,
         manifest.as_ref(),
         EntriesToPlan {
             package_id,
-            takes: &|_| true,
+            takes: if keymap_only {
+                &keymap_entries
+            } else {
+                &|_| true
+            },
         },
         &restoring,
         outside,
@@ -3162,14 +3506,46 @@ fn plan_found_set(
     )?;
     check_plan_matches_packages(backup_id, &plan, &restoring, &skipped_packages)?;
 
+    // The key map's place among the files, if the plan puts it back. The
+    // key map alone must still have a copy that comes back, as before the
+    // lock.
+    let keymap_place = KeymapPlace::of(resource_path);
+    let keymap_action = plan
+        .files
+        .iter()
+        .position(|file| keymap_place.is_put_back_by(file));
+    match keymap_action {
+        None if keymap_only => return Err(backup_changed_while_read(backup_id)),
+        Some(_) if options.allow_reaper_running => {
+            return Err(keymap_needs_reaper_closed(backup_id));
+        }
+        _ => {}
+    }
+
     let before_restore_id = format!("{}-before-restore", restore_timestamp());
     let mut planned_backups =
         BackupSetWriter::planning(resource_path, &before_restore_id, BEFORE_RESTORE_REASON);
     let actions = planned_actions(plan.files, &mut planned_backups, options.dry_run)?;
+    let keymap = keymap_action
+        .map(|action| -> Result<PlannedKeymap> {
+            // A dry run reads both key maps, as a restore would; the quick
+            // plan reads no file's content.
+            let scripts_added = if options.dry_run && check == CopyCheck::Hash {
+                Some(scripts_a_restore_keeps(&actions[action])?)
+            } else {
+                None
+            };
+            Ok(PlannedKeymap {
+                action,
+                scripts_added,
+            })
+        })
+        .transpose()?;
 
     Ok(Planned::One(Box::new(PlannedBackup {
         backup_id: backup_id.to_string(),
         package_id: package_id.map(ToString::to_string),
+        keymap_only,
         backup_path,
         packages,
         skipped_packages,
@@ -3178,7 +3554,129 @@ fn plan_found_set(
         skipped_targets: plan.skipped_targets,
         before_restore_id,
         swap: None,
+        keymap,
     })))
+}
+
+/// The real place of the key map of a REAPER, to tell whether a file a
+/// restore planned puts it back.
+struct KeymapPlace {
+    /// The real path of the key map, when there is one.
+    keymap: Option<PathBuf>,
+    /// The real path of the resource folder, when it is there.
+    resource: Option<PathBuf>,
+}
+
+impl KeymapPlace {
+    /// The key map's place in the REAPER at `resource_path`.
+    fn of(resource_path: &Path) -> Self {
+        Self {
+            keymap: fs::canonicalize(resource_path.join(KEYMAP_FILE)).ok(),
+            resource: fs::canonicalize(resource_path).ok(),
+        }
+    }
+
+    /// Whether `file` puts the key map back: by its entry, or without a
+    /// manifest by the set's layout (see [`PlannedRestore::is_keymap`]), or
+    /// by its real place, however its target is spelt or reached. A target
+    /// may lead to the key map through a link folder inside the resource
+    /// folder, which the restore's checks allow, or by a short name on
+    /// Windows, and is the key map all the same.
+    fn is_put_back_by(&self, file: &PlannedRestore) -> bool {
+        if file.is_keymap {
+            return true;
+        }
+        let target = &file.target_path;
+        if let Some(keymap) = &self.keymap {
+            return fs::canonicalize(target).is_ok_and(|real| real == *keymap);
+        }
+        // With no key map there, the target's folder must be the resource
+        // folder, by its real path, and its name the key map's.
+        let (Some(folder), Some(name)) = (target.parent(), target.file_name()) else {
+            return false;
+        };
+        is_keymap_place(Path::new(name))
+            && self.resource.as_ref().is_some_and(|resource| {
+                fs::canonicalize(folder).is_ok_and(|real| real == *resource)
+            })
+    }
+}
+
+/// How many script lines a restore that puts `action`'s copy of the key
+/// map back would add to it, by the key map there now: those it registers
+/// that the copy doesn't, each once (see [`scripts_to_keep`]). 0 when
+/// there is no key map now. Both files are read, and nothing is written.
+fn scripts_a_restore_keeps(action: &RestoreBackupAction) -> Result<usize> {
+    if !is_real_file(&action.target_path) {
+        return Ok(0);
+    }
+    let current = read_text_file_lossless(&action.target_path)?.text;
+    let restored = read_text_file_lossless(&action.source_path)?.text;
+    Ok(scripts_to_keep(&current, &restored).len())
+}
+
+/// Keep the scripts registered in the key map a restore just replaced: add
+/// to the key map `action` put back the script lines of the one it
+/// replaced, read from its copy in the before-restore set, that the key map
+/// put back doesn't register, each once (see [`keymap_with_scripts_kept`]).
+/// Returns how many it added: none when there was no key map to replace.
+/// The lines go in as OSARA's key map replacement adds them, ending as the
+/// key map's own lines end and in its encoding.
+///
+/// The key map with the lines is written as a restore writes every file:
+/// to a new temporary file beside it, which then takes its place. So the
+/// key map is always whole, the one put back or the one with the lines,
+/// and a failure leaves the one put back for the restore to put back as
+/// it was.
+fn keep_scripts_registered_since(action: &RestoreBackupAction) -> Result<usize> {
+    let target = &action.target_path;
+    // Tests may fail the step here, as a full disk would.
+    #[cfg(test)]
+    restore_seam::at(restore_seam::Step::KeepingScripts, target).with_path(target)?;
+    let Some(replaced) = &action.current_backup_path else {
+        return Ok(0);
+    };
+    let replaced = read_text_file_lossless(replaced)?.text;
+    let Some((merged, added)) = keymap_with_scripts_kept(target, &replaced)? else {
+        return Ok(0);
+    };
+    replace_with_bytes(target, &merged)?;
+    Ok(added)
+}
+
+/// Write `bytes` over the regular file at `target` the way a restore
+/// writes a file (see [`restore_file`]): into a new temporary file beside
+/// it, made new so a link there stops this instead of being written
+/// through, which then takes its place. A temporary file an earlier
+/// restore left behind goes first. On an error the temporary file is gone
+/// again and `target` is as it was.
+fn replace_with_bytes(target: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let temp_path = temporary_restore_path(target);
+    if is_real_file(&temp_path) {
+        fs::remove_file(&temp_path).with_path(&temp_path)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .with_path(&temp_path)?;
+    let give_up = |error: RabbitError| {
+        let _ = fs::remove_file(&temp_path);
+        error
+    };
+    // Closed before anything else, so it can go on an error.
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    written.with_path(&temp_path).map_err(give_up)?;
+    #[cfg(test)]
+    restore_seam::at(restore_seam::Step::ReplacingWithScripts, target)
+        .with_path(target)
+        .map_err(give_up)?;
+    fs::rename(&temp_path, target)
+        .with_path(target)
+        .map_err(give_up)
 }
 
 /// The actions of a restore that puts `files` back, each with where the
@@ -3404,6 +3902,7 @@ fn plan_swap(
     Ok(PlannedBackup {
         backup_id: backup_id.to_string(),
         package_id: Some(package_id.to_string()),
+        keymap_only: false,
         backup_path: backup_path.to_path_buf(),
         packages: Vec::new(),
         skipped_packages: Vec::new(),
@@ -3417,6 +3916,8 @@ fn plan_swap(
             current,
             report,
         }),
+        // A version's files never include the key map.
+        keymap: None,
     })
 }
 
@@ -3533,6 +4034,12 @@ fn move_error(error: MoveFileError) -> RabbitError {
 /// files back, and only then makes the package's entry the earlier one
 /// (see [`plan_swap`]). When anything fails, the files that moved out go
 /// back too, after the others, and the entry stays as it was.
+///
+/// Putting REAPER's key map back keeps the scripts registered since, once
+/// every file is back and before the records are saved (see
+/// [`keep_scripts_registered_since`]). The key map it replaced is in the
+/// before-restore set by then, so when that, or the records after it,
+/// fails, the key map goes back as it was with the other files.
 fn run_planned_restore(
     resource_path: &Path,
     planned: PlannedBackup,
@@ -3541,6 +4048,7 @@ fn run_planned_restore(
     let PlannedBackup {
         backup_id,
         package_id,
+        keymap_only,
         backup_path,
         packages,
         skipped_packages,
@@ -3549,10 +4057,17 @@ fn run_planned_restore(
         skipped_targets,
         before_restore_id,
         swap,
+        keymap,
     } = planned;
+    let restored_keymap = keymap.as_ref().map(|keymap| RestoredKeymap {
+        path: actions[keymap.action].target_path.clone(),
+        replaced: actions[keymap.action].current_backup_path.is_some(),
+        scripts_added: keymap.scripts_added,
+    });
     let mut report = RestoreReportItem {
         backup_id,
         package_id,
+        keymap_only,
         status: RestoreStatus::WouldRestore,
         backup_path: Some(backup_path),
         actions,
@@ -3562,6 +4077,7 @@ fn run_planned_restore(
         before_restore_set_id: None,
         swap: None,
         swaps: Vec::new(),
+        keymap: restored_keymap,
         refusal: None,
         error: None,
     };
@@ -3603,6 +4119,25 @@ fn run_planned_restore(
                 failure = Some(error);
                 break;
             }
+        }
+    }
+    // The key map is back as the set holds it, and the one it replaced is
+    // in the before-restore set: the scripts registered since stay.
+    if failure.is_none()
+        && let Some(keymap) = &keymap
+    {
+        let action = &report.actions[keymap.action];
+        match keep_scripts_registered_since(action) {
+            Ok(added) => {
+                // The restore may have found another file there than the
+                // plan did, so it says what it really replaced.
+                let replaced = action.current_backup_path.is_some();
+                if let Some(restored) = &mut report.keymap {
+                    restored.replaced = replaced;
+                    restored.scripts_added = Some(added);
+                }
+            }
+            Err(error) => failure = Some(error),
         }
     }
     // After the files, so the receipt never claims a file that isn't back.
@@ -3650,6 +4185,11 @@ fn run_planned_restore(
         }
         Some(error) => {
             report.error = Some(error.to_string());
+            // The key map goes back as it was with the other files, and
+            // keeps no script of its own.
+            if let Some(restored) = &mut report.keymap {
+                restored.scripts_added = None;
+            }
             let mut all_back = put_back_what_changed(&mut report.actions, &steps, &backups);
             if let Some(swap) = &mut swap {
                 all_back &= move_newer_files_back(swap, &mut backups, &moved);
@@ -4541,6 +5081,10 @@ struct PlannedRestore {
     target_path: PathBuf,
     size: u64,
     sha256: String,
+    /// The file is the key map: its entry's original is the resource
+    /// folder's `reaper-kb.ini` (see [`is_keymap_entry`]), or without a
+    /// manifest, the set's layout puts it there.
+    is_keymap: bool,
 }
 
 /// Which entries of a set's manifest a restore plans: those of
@@ -4699,6 +5243,7 @@ fn plan_restore_from_manifest(
             source_path,
             target_path,
             sha256,
+            is_keymap: is_keymap_entry(resource_path, entry),
         });
     }
     Ok(plan)
@@ -4812,6 +5357,7 @@ fn plan_restore_from_layout(
                 CopyCheck::Hash => sha256_file(&source_path)?,
                 CopyCheck::Size => String::new(),
             },
+            is_keymap: is_keymap_place(&relative_path),
             source_path,
             target_path,
         });
@@ -5471,6 +6017,12 @@ pub(crate) mod restore_seam {
         /// Before the file is put back as it was, after it, a later file or
         /// the records failed.
         PuttingBack,
+        /// Before the key map a restore put back gets the script lines of
+        /// the one it replaced, once every file is back, at its place.
+        KeepingScripts,
+        /// Right before the key map with those script lines takes the
+        /// place of the one put back, once its temporary file is written.
+        ReplacingWithScripts,
         /// Before RABBIT's records are saved, once every file is back. The
         /// place is the receipt's.
         SavingRecords,
@@ -6085,6 +6637,15 @@ mod tests {
         package_id: None,
     };
 
+    /// A real run that doesn't let REAPER run, as a restore that puts the
+    /// key map back never does (`keymap-needs-reaper-closed`). The tests
+    /// that use it restore as the user ([`BackupEnvironment::AS_USER`]),
+    /// where no REAPER runs.
+    const APPLY_REAPER_CLOSED: RestoreBackupOptions = RestoreBackupOptions {
+        allow_reaper_running: false,
+        ..APPLY
+    };
+
     /// The reason of the sets the tests of paths and copies write. A
     /// restore reads every set it takes the same way. Older versions wrote
     /// most of these paths into update sets, which a restore takes package
@@ -6642,8 +7203,13 @@ mod tests {
         let receipt = resource.join("RABBIT/install-state.json");
         write(&receipt, b"records");
 
-        restore_backup_set_within(&resource, "unix-1", &APPLY, &OutsideRestoreRules::default())
-            .unwrap();
+        restore_backup_set_within(
+            &resource,
+            "unix-1",
+            &APPLY_REAPER_CLOSED,
+            &OutsideRestoreRules::default(),
+        )
+        .unwrap();
 
         assert_eq!(fs::read(&keymap).unwrap(), b"own keymap");
         assert_eq!(fs::read(&receipt).unwrap(), b"records");
@@ -6971,7 +7537,7 @@ mod tests {
         let report = restore_backup_set_within(
             &resource,
             "uninstall-unix-2",
-            &APPLY,
+            &APPLY_REAPER_CLOSED,
             &OutsideRestoreRules::default(),
         )
         .unwrap();
@@ -7051,9 +7617,13 @@ mod tests {
         drop(writer);
         fs::write(&keymap, b"osara keymap").unwrap();
 
-        let report =
-            restore_backup_set_within(&resource, id, &APPLY, &OutsideRestoreRules::default())
-                .unwrap();
+        let report = restore_backup_set_within(
+            &resource,
+            id,
+            &APPLY_REAPER_CLOSED,
+            &OutsideRestoreRules::default(),
+        )
+        .unwrap();
 
         assert_eq!(fs::read(&keymap).unwrap(), b"own keymap");
         assert!(report.packages.is_empty());
@@ -7134,6 +7704,7 @@ mod tests {
                     target_path: PathBuf::from("file"),
                     size: 0,
                     sha256: String::new(),
+                    is_keymap: false,
                 })
                 .collect(),
             skipped_targets: Vec::new(),
@@ -7184,10 +7755,11 @@ mod tests {
         };
         let before = snapshot(dir.path());
 
-        let error = restore_backup_set_with(&resource, "unix-1", &APPLY, &as_root, || {
-            panic!("a restore as root looked up where outside files go")
-        })
-        .unwrap_err();
+        let error =
+            restore_backup_set_with(&resource, "unix-1", &APPLY_REAPER_CLOSED, &as_root, || {
+                panic!("a restore as root looked up where outside files go")
+            })
+            .unwrap_err();
 
         assert!(
             matches!(refusal(&error), RestoreRefusal::AsRoot),
@@ -7203,7 +7775,7 @@ mod tests {
 
         let dry_run = RestoreBackupOptions {
             dry_run: true,
-            ..APPLY
+            ..APPLY_REAPER_CLOSED
         };
         let report = restore_backup_set_with(
             &resource,
@@ -7222,7 +7794,7 @@ mod tests {
         restore_backup_set_with(
             &resource,
             "unix-1",
-            &APPLY,
+            &APPLY_REAPER_CLOSED,
             &BackupEnvironment::AS_USER,
             OutsideRestoreRules::default,
         )
@@ -7259,7 +7831,7 @@ mod tests {
     /// of a restore there: its `reaper.exe` on Windows, its app on macOS.
     /// The app is made, so the target is found in the resource folder and
     /// the computer's own REAPER is never looked for.
-    fn targets_reaper(resource: &Path) -> RunningProcess {
+    pub(super) fn targets_reaper(resource: &Path) -> RunningProcess {
         #[cfg(windows)]
         let (name, app) = ("reaper.exe", resource.join("reaper.exe"));
         #[cfg(not(windows))]
@@ -7301,7 +7873,10 @@ mod tests {
     }
 
     /// The check named `name` in a restore's report.
-    fn check_named<'a>(report: &'a super::RestoreBackupReport, name: &str) -> &'a PreflightCheck {
+    pub(super) fn check_named<'a>(
+        report: &'a super::RestoreBackupReport,
+        name: &str,
+    ) -> &'a PreflightCheck {
         report
             .preflight
             .checks
@@ -8643,9 +9218,13 @@ mod tests {
             ],
         );
 
-        let report =
-            restore_backup_set_within(&resource, "unix-1", &APPLY, &OutsideRestoreRules::default())
-                .unwrap();
+        let report = restore_backup_set_within(
+            &resource,
+            "unix-1",
+            &APPLY_REAPER_CLOSED,
+            &OutsideRestoreRules::default(),
+        )
+        .unwrap();
 
         assert_eq!(fs::read(&keymap).unwrap(), b"own keymap");
         assert_eq!(fs::read(&plugin).unwrap(), b"old kontrol");
@@ -8681,8 +9260,13 @@ mod tests {
         let resource = dir.path().join("NewREAPER");
         fs::rename(&old_resource, &resource).unwrap();
 
-        restore_backup_set_within(&resource, "unix-1", &APPLY, &OutsideRestoreRules::default())
-            .unwrap();
+        restore_backup_set_within(
+            &resource,
+            "unix-1",
+            &APPLY_REAPER_CLOSED,
+            &OutsideRestoreRules::default(),
+        )
+        .unwrap();
 
         assert_eq!(
             fs::read(resource.join("reaper-kb.ini")).unwrap(),
@@ -8816,7 +9400,7 @@ mod tests {
             let report = restore_backup_set_within(
                 &restore_through,
                 id,
-                &APPLY,
+                &APPLY_REAPER_CLOSED,
                 &OutsideRestoreRules::default(),
             )
             .unwrap_or_else(|error| panic!("{id}: {error}"));
@@ -9414,9 +9998,13 @@ mod tests {
         fs::write(&plugin_copy, b"bit rot").unwrap();
         fs::write(&keymap, b"newer keymap").unwrap();
 
-        let error =
-            restore_backup_set_within(&resource, "unix-1", &APPLY, &OutsideRestoreRules::default())
-                .unwrap_err();
+        let error = restore_backup_set_within(
+            &resource,
+            "unix-1",
+            &APPLY_REAPER_CLOSED,
+            &OutsideRestoreRules::default(),
+        )
+        .unwrap_err();
 
         assert!(
             matches!(refusal(&error), RestoreRefusal::PartMissing { backup_id, path }
@@ -9613,7 +10201,14 @@ mod tests {
         fs::write(&keymap, b"osara keymap").unwrap();
         let _install = crate::lock::acquire_package_install_lock(resource).unwrap();
 
-        let error = restore_backup_set(resource, "unix-1", &APPLY).unwrap_err();
+        let error = restore_backup_set_with(
+            resource,
+            "unix-1",
+            &APPLY_REAPER_CLOSED,
+            &BackupEnvironment::AS_USER,
+            OutsideRestoreRules::default,
+        )
+        .unwrap_err();
 
         assert!(
             matches!(refusal(&error), RestoreRefusal::LockHeld { pid, .. }
@@ -9623,7 +10218,7 @@ mod tests {
         assert_eq!(fs::read(&keymap).unwrap(), b"osara keymap");
         let dry_run = RestoreBackupOptions {
             dry_run: true,
-            ..APPLY
+            ..APPLY_REAPER_CLOSED
         };
         assert!(restore_backup_set(resource, "unix-1", &dry_run).is_ok());
     }
@@ -9763,9 +10358,13 @@ mod tests {
     /// and check that no file or link below `dir` changed.
     fn refused(dir: &Path, resource: &Path, backup_id: &str) -> RabbitError {
         let before = snapshot(dir);
-        let error =
-            restore_backup_set_within(resource, backup_id, &APPLY, &OutsideRestoreRules::default())
-                .unwrap_err();
+        let error = restore_backup_set_within(
+            resource,
+            backup_id,
+            &APPLY_REAPER_CLOSED,
+            &OutsideRestoreRules::default(),
+        )
+        .unwrap_err();
         assert_eq!(snapshot(dir), before, "{backup_id:?} changed something");
         error
     }
@@ -10103,9 +10702,13 @@ mod tests {
         );
         let unfinished = snapshot(&deleting);
 
-        let report =
-            restore_backup_set_within(&resource, "unix-1", &APPLY, &OutsideRestoreRules::default())
-                .unwrap();
+        let report = restore_backup_set_within(
+            &resource,
+            "unix-1",
+            &APPLY_REAPER_CLOSED,
+            &OutsideRestoreRules::default(),
+        )
+        .unwrap();
 
         assert_eq!(report.backup_path, set);
         assert_eq!(fs::read(&keymap).unwrap(), b"own keymap");
@@ -10119,9 +10722,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let (resource, keymap) = keymap_set(dir.path());
 
-        let report =
-            restore_backup_set_within(&resource, "unix-1", &APPLY, &OutsideRestoreRules::default())
-                .unwrap();
+        let report = restore_backup_set_within(
+            &resource,
+            "unix-1",
+            &APPLY_REAPER_CLOSED,
+            &OutsideRestoreRules::default(),
+        )
+        .unwrap();
 
         assert_eq!(
             report.backup_path,
@@ -10734,7 +11341,13 @@ mod tests {
         let report =
             restore_backup_set_within(&resource, "uninstall-unix-1", &APPLY, &rules).unwrap();
         assert!(report.packages[0].receipt_merged);
-        restore_backup_set_within(&resource, "unattended-unix-2-0", &APPLY, &rules).unwrap();
+        restore_backup_set_within(
+            &resource,
+            "unattended-unix-2-0",
+            &APPLY_REAPER_CLOSED,
+            &rules,
+        )
+        .unwrap();
         let refused = refused_with(dir.path(), &resource, "unix-3", None);
 
         assert_eq!(fs::read(&plugin).unwrap(), b"sws");
@@ -11055,9 +11668,13 @@ mod tests {
         let temporary = resource.join("reaper-kb.ini.rabbit-restore-tmp");
         std::os::unix::fs::symlink(&elsewhere, &temporary).unwrap();
 
-        let report =
-            restore_backup_set_within(&resource, "unix-1", &APPLY, &OutsideRestoreRules::default())
-                .unwrap();
+        let report = restore_backup_set_within(
+            &resource,
+            "unix-1",
+            &APPLY_REAPER_CLOSED,
+            &OutsideRestoreRules::default(),
+        )
+        .unwrap();
 
         assert_eq!(report.status, super::RestoreStatus::NotRestored);
         let error = report.error.as_deref().unwrap_or_default();
@@ -11224,3 +11841,7 @@ mod restore_run_tests;
 #[cfg(test)]
 #[path = "swap_tests.rs"]
 mod swap_tests;
+
+#[cfg(test)]
+#[path = "keymap_restore_tests.rs"]
+mod keymap_restore_tests;
