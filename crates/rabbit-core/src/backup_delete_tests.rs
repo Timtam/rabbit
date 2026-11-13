@@ -19,7 +19,7 @@ use crate::cancel::CancelToken;
 use crate::progress::{ProgressEvent, ProgressReporter};
 use crate::receipt::PackageReceipt;
 use crate::restore_refusal::{RestoreRefusal, refusal};
-use crate::rollback::restore_run_tests::snapshot;
+use crate::rollback::restore_run_tests::{Node, snapshot, snapshot_but_lock_folder};
 use crate::rollback::{
     BackupEnvironment, BackupManifest, BackupPackageRecord, BackupSetWriter, DELETING_DIR,
     KEYMAP_BACKUP_REASON, RECORDS_BACKUP_REASON, save_backup_manifest, set_to_restore,
@@ -132,8 +132,10 @@ fn records_set(resource: &Path, id: &str) -> PathBuf {
 fn file_bytes(root: &Path) -> u64 {
     snapshot(root)
         .iter()
-        .filter_map(|(_, contents)| contents.as_ref())
-        .map(|contents| contents.len() as u64)
+        .filter_map(|(_, node)| match node {
+            Node::File(contents) => Some(contents.len() as u64),
+            _ => None,
+        })
         .sum()
 }
 
@@ -188,14 +190,16 @@ fn saved(report: &DeleteReport) -> serde_json::Value {
     envelope.report
 }
 
-/// Every file and link below `root` except those in RABBIT's two backup
-/// folders and its logs, which hold the report a real run saves.
-fn everything_else(resource: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+/// Every file, folder and link below `root` except those in RABBIT's two
+/// backup folders, its logs, which hold the report a real run saves, and
+/// its locks, whose folder the lock a real run takes leaves behind.
+fn everything_else(resource: &Path) -> Vec<(PathBuf, Node)> {
     let rabbit = resource.join("RABBIT");
     let ours = [
         rabbit.join("backups"),
         rabbit.join(DELETING_DIR),
         rabbit.join("logs"),
+        rabbit.join("locks"),
     ];
     snapshot(resource)
         .into_iter()
@@ -203,9 +207,9 @@ fn everything_else(resource: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
         .collect()
 }
 
-/// Every file and link below `root`, by its path below it, with what each
-/// file holds.
-fn relative_snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+/// Every file, folder and link below `root`, by its path below it, with
+/// what each file holds.
+fn relative_snapshot(root: &Path) -> Vec<(PathBuf, Node)> {
     snapshot(root)
         .into_iter()
         .map(|(path, contents)| (path.strip_prefix(root).unwrap().to_path_buf(), contents))
@@ -215,7 +219,7 @@ fn relative_snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
 /// What a test saw right after a set's rename: where the set went, what it
 /// held there, whether it was still in `RABBIT/backups`, and the code a
 /// restore of it gave.
-type SeenAfterRename = (PathBuf, Vec<(PathBuf, Option<Vec<u8>>)>, bool, String);
+type SeenAfterRename = (PathBuf, Vec<(PathBuf, Node)>, bool, String);
 
 /// A delete moves the set into `RABBIT/backups-deleting` first, whole, so
 /// no restore finds it any more, and only then walks it, removing every
@@ -354,7 +358,11 @@ fn links_are_removed_as_links_and_their_targets_stay() {
     assert_eq!(report.sets[0].bytes_freed, 1);
     assert!(!set.exists());
     assert!(!deleting_path(&resource, "unix-1").exists());
-    assert_eq!(snapshot(&elsewhere), outside);
+    let outside_after: Vec<_> = snapshot(dir.path())
+        .into_iter()
+        .filter(|(path, _)| path.starts_with(&elsewhere))
+        .collect();
+    assert_eq!(outside_after, outside);
     assert!(!file_link_made || fs::symlink_metadata(&file_link).is_err());
 }
 
@@ -414,8 +422,10 @@ fn a_linked_backups_folder_refuses_everything() {
         "{report:#?}"
     );
     assert_eq!(snapshot(dir.path()), before);
+    assert!(!resource.join("RABBIT/locks").exists());
 
-    // A linked RABBIT the same.
+    // A linked RABBIT the same, and nothing is written through it, not even
+    // the lock, whose empty folder would stay.
     let other = dir.path().join("Other");
     let rabbit_elsewhere = dir.path().join("RabbitElsewhere");
     write(&rabbit_elsewhere.join("backups/unix-1/a.dll"), b"a");
@@ -427,6 +437,9 @@ fn a_linked_backups_folder_refuses_everything() {
 
     assert_eq!(statuses(&report), [DeleteStatus::Refused]);
     assert_eq!(snapshot(dir.path()), before);
+    for folder in ["locks", "logs", DELETING_DIR] {
+        assert!(!rabbit_elsewhere.join(folder).exists(), "{folder}");
+    }
 }
 
 /// A copy keeps a file's read-only attribute on Windows, and a folder can
@@ -699,6 +712,60 @@ fn an_id_in_both_folders_finishes_the_earlier_deletion_then_deletes_the_set() {
     assert!(!set.exists() && !left.exists());
 }
 
+/// An id that names a set and an unfinished deletion is fingerprinted by
+/// its set, which a caller listing both rows must know: the fingerprint of
+/// the unfinished deletion's row is refused as changed since listed, with
+/// nothing changed, while the set's deletes both, whatever changed inside
+/// the unfinished deletion alone since.
+#[test]
+fn an_id_in_both_folders_is_fingerprinted_by_its_set() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    let set = keymap_set(&resource, "unix-1");
+    let left = deleting_path(&resource, "unix-1");
+    write(&left.join("left.dll"), b"left");
+    let listed = overview_with(&resource, &BackupEnvironment::AS_USER).unwrap();
+    let fingerprint = |deleting: bool| {
+        listed
+            .sets
+            .iter()
+            .find(|row| row.id == "unix-1" && (row.kind == BackupSetKind::Deleting) == deleting)
+            .and_then(|row| row.fingerprint.clone())
+            .unwrap()
+    };
+    let (of_set, of_deletion) = (fingerprint(false), fingerprint(true));
+    assert_ne!(of_set, of_deletion);
+    let before = snapshot(dir.path());
+    let delete = |fingerprint| {
+        run_with(
+            &resource,
+            &[DeleteItem::listed("unix-1", fingerprint)],
+            &APPLY,
+            &BackupEnvironment::AS_USER,
+            &ProgressReporter::noop(),
+            &CancelToken::new(),
+        )
+    };
+
+    let report = delete(of_deletion);
+
+    assert!(report.refused);
+    assert_eq!(statuses(&report), [DeleteStatus::Refused]);
+    assert_eq!(
+        report.sets[0].refusal.as_ref().unwrap().code(),
+        "changed-since-listed"
+    );
+    assert!(report.saved_report.is_none());
+    assert_eq!(snapshot(dir.path()), before);
+
+    write(&left.join("more.dll"), b"more");
+    let report = delete(of_set);
+
+    assert_eq!(statuses(&report), [DeleteStatus::Deleted], "{report:#?}");
+    assert!(report.sets[0].finished_earlier_deletion);
+    assert!(!set.exists() && !left.exists());
+}
+
 /// When the unfinished deletion beside a set can't be finished, the set
 /// stays exactly as it was in `RABBIT/backups`: it has no free name to
 /// move to, and two folders are never merged. On Windows a file of the
@@ -881,21 +948,25 @@ fn a_file_with_the_sets_name_among_the_deletions_is_left_alone() {
     );
     assert!(set.is_dir());
     assert_eq!(fs::read(&in_the_way).unwrap(), b"not a set");
-    let after: Vec<_> = snapshot(dir.path())
+    let after: Vec<_> = snapshot_but_lock_folder(dir.path(), &resource)
         .into_iter()
         .filter(|(path, _)| !path.starts_with(resource.join("RABBIT/logs")))
         .collect();
     assert_eq!(after, before);
 }
 
-/// Windows counts names that differ only in case as the same. An
-/// unfinished deletion named so takes the name a set would get, so the set
-/// isn't deleted, and the report names that deletion, which the id never
-/// names, instead of asking for another run of the same id.
-#[cfg(windows)]
+/// Windows, and a Mac's volume unless it was made case-sensitive, count
+/// names that differ only in case as the same. An unfinished deletion
+/// named so takes the name a set would get, so the set isn't deleted, and
+/// the report names that deletion, which the id never names, instead of
+/// asking for another run of the same id.
+#[cfg(any(windows, target_os = "macos"))]
 #[test]
 fn an_unfinished_deletion_in_another_case_leaves_the_set_alone() {
     let dir = tempdir().unwrap();
+    if !crate::rollback::restore_run_tests::names_in_another_case_are_one(dir.path()) {
+        return;
+    }
     let resource = dir.path().join("REAPER");
     let set = layout_set(&resource, "unix-1", &[("a.dll", b"a")]);
     let other_case = deleting_path(&resource, "UNIX-1");
@@ -1352,7 +1423,7 @@ fn nothing_outside_the_two_folders_changes() {
     write(&resource.join("UserPlugins/reaper_osara64.dll"), b"osara");
     write(&resource.join("RABBIT/install-state.json"), b"{}");
     write(&resource.join("RABBIT/logs/uninstall-unix-1.json"), b"{}");
-    // The snapshots list files only, so empty folders are checked apart.
+    // The snapshots list folders too; these are checked apart all the same.
     let empty_folders = [resource.join("Effects"), resource.join("RABBIT/cache")];
     for folder in &empty_folders {
         fs::create_dir_all(folder).unwrap();

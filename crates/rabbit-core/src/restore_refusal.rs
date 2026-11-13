@@ -230,7 +230,9 @@ pub enum RestoreRefusal {
     /// place, the place they would both go back to. `other_packages` are the
     /// set's other packages with a file in it, when the whole set was asked
     /// for and the file is one package's: each can still be restored on its
-    /// own.
+    /// own. For a file of an earlier version that is the key map by its
+    /// real place, `path` is that place
+    /// ([`TargetRefusal::KeymapAmongVersionFiles`]).
     #[error("RABBIT doesn't put back {}: {reason}", .path.display())]
     TargetRefused {
         path: PathBuf,
@@ -256,6 +258,22 @@ pub enum RestoreRefusal {
         reason: Box<TargetRefusal>,
     },
 
+    /// An earlier version of `package_id` whose receipt entry, as the set
+    /// recorded it, lists `path`, a file at a place RABBIT never installs
+    /// to, for `reason`. Going back would put that entry into RABBIT's
+    /// records, which RABBIT never writes such a place into. The reason is
+    /// boxed to keep every refusal, and so every error, small.
+    #[error(
+        "RABBIT doesn't restore {package_id} from the backup {backup_id}, because the backup's record of that version lists {}, a place RABBIT never installs to: {reason}",
+        .path.display()
+    )]
+    EarlierFileRefused {
+        backup_id: String,
+        package_id: String,
+        path: PathBuf,
+        reason: Box<TargetRefusal>,
+    },
+
     /// RABBIT's receipt can't be read, so RABBIT can't tell whether the
     /// set's records fit it. `detail` is what the reader said.
     #[error(
@@ -267,7 +285,11 @@ pub enum RestoreRefusal {
     /// `every_reaper_for` names packages whose uninstall needs that, any
     /// REAPER on the computer. `package_names` are those packages by the
     /// names RABBIT shows, for the English. `processes` are the REAPERs
-    /// running.
+    /// running. `puts_keymap_back` says that the restore puts REAPER's key
+    /// map back, which it does only with the target's REAPER closed, even
+    /// when told REAPER may run (see
+    /// [`RestoreRefusal::KeymapNeedsReaperClosed`]); so for the target's
+    /// REAPER, closing it is the only way on.
     #[error("{}", reaper_running_text(.package_names, .processes))]
     ReaperRunning {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -275,6 +297,8 @@ pub enum RestoreRefusal {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         package_names: Vec<String>,
         processes: Vec<RunningProcess>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        puts_keymap_back: bool,
     },
 
     /// The restore puts REAPER's key map back, and was told the target's
@@ -378,6 +402,7 @@ impl RestoreRefusal {
             Self::OtherLanguagePackInstalled { .. } => "other-language-pack-installed",
             Self::TargetRefused { .. } => "target-refused",
             Self::NewerFileRefused { .. } => "newer-file-refused",
+            Self::EarlierFileRefused { .. } => "earlier-file-refused",
             Self::ReceiptUnreadable { .. } => "receipt-unreadable",
             Self::ReaperRunning { .. } => "reaper-running",
             Self::KeymapNeedsReaperClosed { .. } => "keymap-needs-reaper-closed",
@@ -483,6 +508,16 @@ pub enum TargetRefusal {
     /// refusal is that copy's recorded path.
     #[error("the manifest names its copy outside the backup set")]
     CopyOutsideSet,
+    /// A file of an earlier version that would go back over REAPER's key
+    /// map, reached under another name, such as a short name on Windows,
+    /// or through a link folder inside the resource folder. A version's
+    /// files never include the key map: only a restore of the key map puts
+    /// it back, keeping the scripts registered since, and never while
+    /// REAPER may run. `path` of the refusal is the place.
+    #[error(
+        "it is REAPER's key map, which RABBIT puts back only as a key map of its own, never among a version's files"
+    )]
+    KeymapAmongVersionFiles,
 }
 
 impl TargetRefusal {
@@ -503,6 +538,7 @@ impl TargetRefusal {
             Self::TwoFilesForOnePlace => "two-files-for-one-place",
             Self::OutsideWithoutManifest => "outside-without-manifest",
             Self::CopyOutsideSet => "copy-outside-set",
+            Self::KeymapAmongVersionFiles => "keymap-among-version-files",
         }
     }
 
@@ -614,10 +650,11 @@ mod tests {
             RestoreRefusal::ChangedSinceListed { .. } => 28,
             RestoreRefusal::NoKeymapInSet { .. } => 29,
             RestoreRefusal::KeymapNeedsReaperClosed { .. } => 30,
+            RestoreRefusal::EarlierFileRefused { .. } => 31,
         }
     }
 
-    const VARIANTS: usize = 31;
+    const VARIANTS: usize = 32;
 
     /// The number of each reason, as [`variant_number`] numbers refusals.
     fn reason_number(reason: &TargetRefusal) -> usize {
@@ -636,10 +673,11 @@ mod tests {
             TargetRefusal::TwoFilesForOnePlace => 11,
             TargetRefusal::OutsideWithoutManifest => 12,
             TargetRefusal::CopyOutsideSet => 13,
+            TargetRefusal::KeymapAmongVersionFiles => 14,
         }
     }
 
-    const REASONS: usize = 14;
+    const REASONS: usize = 15;
 
     fn every_reason() -> Vec<TargetRefusal> {
         let folder = PathBuf::from("REAPER").join("UserPlugins");
@@ -671,6 +709,7 @@ mod tests {
             TargetRefusal::TwoFilesForOnePlace,
             TargetRefusal::OutsideWithoutManifest,
             TargetRefusal::CopyOutsideSet,
+            TargetRefusal::KeymapAmongVersionFiles,
         ]
     }
 
@@ -757,11 +796,19 @@ mod tests {
                 every_reaper_for: Vec::new(),
                 package_names: Vec::new(),
                 processes: vec![reaper.clone()],
+                puts_keymap_back: false,
+            },
+            RestoreRefusal::ReaperRunning {
+                every_reaper_for: Vec::new(),
+                package_names: Vec::new(),
+                processes: vec![reaper.clone()],
+                puts_keymap_back: true,
             },
             RestoreRefusal::ReaperRunning {
                 every_reaper_for: vec!["app2clap".to_string(), "jaws-scripts".to_string()],
                 package_names: vec!["app2clap".to_string(), "JAWS scripts".to_string()],
                 processes: vec![reaper],
+                puts_keymap_back: false,
             },
             RestoreRefusal::ProgramRunning {
                 package_ids: vec!["surge-xt".to_string()],
@@ -796,6 +843,12 @@ mod tests {
             package_id: "sws".to_string(),
             path: path.clone(),
             reason: Box::new(TargetRefusal::RabbitFolder),
+        });
+        refusals.push(RestoreRefusal::EarlierFileRefused {
+            backup_id: id(),
+            package_id: "sws".to_string(),
+            path: path.clone(),
+            reason: Box::new(TargetRefusal::OutsideAllowedFolders),
         });
         refusals
     }
@@ -914,6 +967,7 @@ mod tests {
                 every_reaper_for: Vec::new(),
                 package_names: Vec::new(),
                 processes: vec![reaper.clone()],
+                puts_keymap_back: false,
             }
             .to_string(),
             "Close REAPER before restoring a backup: reaper.exe (7)"
@@ -923,6 +977,7 @@ mod tests {
                 every_reaper_for: vec!["jaws-scripts".to_string()],
                 package_names: vec!["JAWS scripts".to_string()],
                 processes: vec![reaper],
+                puts_keymap_back: false,
             }
             .to_string(),
             "Close every REAPER on this computer, portable ones included, before restoring JAWS \

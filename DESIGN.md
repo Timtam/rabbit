@@ -1671,9 +1671,10 @@ Extension files:
   `reaper-kb.ini` as it is, while OSARA itself is installed: its item says
   only that OSARA was installed, not that the key map was replaced, and
   the receipt doesn't list `reaper-kb.ini` among OSARA's files. A restore
-  stops at the first file it would back up, with the files before it
-  restored, as on any failed copy. An uninstall's package fails, and what
-  of it already moved goes back where it can.
+  stops at the first file it would back up and puts back the files before
+  it, as for any file that fails (see the all-or-nothing rule below). An
+  uninstall's package fails, and what of it already moved goes back where
+  it can.
 - A restore never copies a receipt file over `RABBIT/install-state.json`:
   an old copy would undo every change to the receipt since, uninstalls
   included. Restore puts no file from a set back anywhere in `RABBIT/`,
@@ -1725,19 +1726,25 @@ Extension files:
   back, but only while `reaper.ini` still says `<>`. `restore-backup
   --package` does this for one package of the set. A package installed
   again since its uninstall is refused, with nothing changed, because its
-  newer receipt entry describes newer files; so is `--package` for any set
-  that records no package (`no-package-records`). A receipt entry that is
-  still the very one the set recorded is no reinstall: the uninstall stopped
-  before it reached the receipt (RABBIT was ended halfway through the
+  newer receipt entry describes newer files; so is `--package` for any
+  other set that records no package and isn't a set of earlier versions
+  (below): `no-package-records`, or `no-manifest` for a set without a
+  manifest. A finished copy of a package's that is gone from the set, or
+  has another size, refuses the package before the lock (`part-missing`),
+  and for a whole set any package's, as the overview judges it before the
+  receipt; so the refusal is never a reinstall that uninstalling wouldn't
+  get round. A receipt entry that is still the very one the set recorded
+  is no reinstall: the uninstall stopped before it reached the receipt (RABBIT was ended halfway through the
   package, or a failed package's files couldn't all go back), or an earlier
   restore from the set put the entry back. Its files are restored and the
   entry stays as it is.
 - A set of earlier versions, an update's set or a before-restore set with
-  `replaced` records, goes back by the swap (backup plan 6.4), package by
-  package, and never merges `packages`. For package P, E_old is its
-  `replaced` record, or in an older update's set without one, P's entry in
-  the set's receipt copy, none when the copy lacks P; with neither, P is
-  refused (`version-unknown`). E_cur is P's entry in the receipt now.
+  `replaced` records, goes back by the swap, package by package, and never
+  merges `packages`. For package P, E_old is its `replaced` record, or in
+  an older update's set without one, P's entry in the set's receipt copy,
+  none when the copy lacks P; with neither, or with an entry whose `id`
+  isn't P, P is refused (`version-unknown`). E_cur is P's entry in the
+  receipt now.
   Before the lock, a finished copy of P's that is gone or has another size
   refuses it (`part-missing`), and so does having no file of P's that
   comes back (`nothing-of-it-in-set`). Under the lock, the receipt is read
@@ -1748,12 +1755,18 @@ Extension files:
   disk with it (`not-complete`): only a place the current receipt lists
   with that hash is looked at, hashed in a real run and checked by size in
   the quick plan. The plan takes P's files of the set, never the key map or
-  a receipt copy. Files E_cur lists with a hash that E_old doesn't list and
+  a receipt copy; a file of P's that is the key map by its real place all
+  the same, reached through a link folder or a short name, refuses P
+  (`target-refused`, `keymap-among-version-files`). Files E_cur lists with a hash that E_old doesn't list and
   the set doesn't write move out: each place must be one a restore of the
   before-restore set could write (`newer-file-refused` otherwise), and a
   file still as E_cur recorded it moves, while one that changed, or isn't a
   file, stays and is reported; a link or junction at the place stays and is
-  never followed. With no E_old, RABBIT can't tell which of those files the
+  never followed. E_old goes into the receipt as it is, so each file it
+  lists, with a hash or without, must be at a place a restore of P would
+  write, judged from the text (`earlier-file-refused` otherwise; `.`, the
+  resource folder itself, passes): a hand-made set can't make RABBIT look
+  at, or later remove, a place it never installs to. With no E_old, RABBIT can't tell which of those files the
   copy it goes back to had too, so none moves: each stays where it is, and
   a copy of it goes into the before-restore set (`left_in_place`), so the
   swap can still be undone. The run records E_cur in the new
@@ -1777,7 +1790,7 @@ Extension files:
   runs them in turn, each all or nothing with a set of its own (`swaps` in
   the report; `partly-restored` when some went back and others didn't),
   reading the stop and scanning what runs between them.
-- A key map is a backup of its own (backup plan 6.5): a set entry whose
+- A key map is a backup of its own: a set entry whose
   original is the resource folder's `reaper-kb.ini`, whatever made the set.
   `restore-backup --key-map` (`RestorePart::Keymap`) plans only those
   entries, whatever else the set holds, a receipt copy included, and
@@ -1827,9 +1840,12 @@ Extension files:
 - A real restore first copies each file it replaces into a set of its own,
   `restore-unix-<s>-before-restore` (or `-2` and so on), written like any
   other, and its report names that set as `before_restore_set_id`.
-  Restoring it puts those files back; files the restore added, the
-  receipt and REAPER's language stay as they are. A restore that replaced
-  nothing writes no set and names none, and neither does a dry run. Every
+  Restoring it puts those files back. After a merge, files the restore
+  added, the receipt and REAPER's language stay as they are. A swap's set
+  also holds the newer version's files and records the entry it replaced,
+  so restoring it swaps back (above), and a key map's keeps the scripts
+  registered since (above). A restore that replaced nothing writes no set
+  and names none, and neither does a dry run. Every
   real restore that gets past its checks saves its report as
   `RABBIT/logs/restore-backup-unix-<s>.json` and `.txt` (or `-2` and so on,
   never over another report), still under the install lock, as every real
@@ -1860,10 +1876,12 @@ Extension files:
   while `RABBIT`, `RABBIT/backups`, the set or a folder in it is a link.
   Tests fail single steps through a test-only hook (`restore_seam`).
 - `restore_backups` restores several backups in the order given, under one
-  lock, each with its own before-restore set; `restore_backup_set` is the
-  same for one. An item (`RestoreItem`) names a set by its exact id, what
-  of it comes back (`RestorePart`: the whole set, one package, or its key
-  map), and optionally the fingerprint the caller listed. Refusals of the
+  lock, each with its own before-restore set, or a whole set of earlier
+  versions one per package (`swaps`); `restore_backup_item` is the same for
+  one item, as `rabbit restore-backup` uses it, and `restore_backup_set`
+  for one set or one package of it. An item (`RestoreItem`) names a set by
+  its exact id, what of it comes back (`RestorePart`: the whole set, one
+  package, or its key map), and optionally the fingerprint the caller listed. Refusals of the
   whole run are an error, before anything changes: the lock, root on macOS,
   a place RABBIT can't write to, and REAPER or programs that the restored
   packages need closed, checked for all of them together. A refusal of one backup's own, such as its set, its package, a
@@ -1881,7 +1899,7 @@ Extension files:
   before each backup: the one running finishes, the rest are
   `not-reached`, and the report says the run was stopped. Each backup the
   run reaches sends `RestoreStarted` and `RestoreCompleted` with its
-  status; the wizard ignores them until it restores (backup plan Phase 2).
+  status; the wizard ignores them until its Backups tab restores.
   The quick plan, a dry run with `quick`, reads and hashes no file: a copy
   counts by the size its entry recorded, as in the overview, so only a
   copy changed at the same size goes unnoticed, and a set without a
@@ -1933,7 +1951,9 @@ Extension files:
   refusal names one reason: what `--allow-reaper-running` never lets
   through first, then a place it can't write to (`not-writable`), and the
   target's REAPER last, so the CLI's hint to add that flag comes only when
-  nothing else stands in the way. A dry run makes the same checks and
+  nothing else stands in the way, and never for a run that puts the key map
+  back, which that flag can't let through either: such a refusal says so
+  (`puts_keymap_back`), and the CLI says only to close REAPER. A dry run makes the same checks and
   reports what runs as warnings, refusing nothing for it, as the install
   preflight's dry run does, so its report names everything that must be
   closed. The scans and the package manifests come through the restore's
@@ -1964,9 +1984,10 @@ Extension files:
   backup), and earlier versions are judged by the rules of the swap that
   restores them, each with the exact `--package` command, and key maps
   each with the exact `--key-map` command; an update's set whose packages
-  can all go back is marked `swaps_whole`, with the command that restores
-  it whole. The overview reads the manifests, the receipt once, an older
-  update set's copy of the receipt, and sizes; it never hashes a file. "Not complete"
+  can all go back is marked `swaps_whole`; `rabbit backups` adds the
+  command that restores it whole when it holds more than one package. The
+  overview reads the manifests, the receipt once, an older update set's
+  copy of the receipt, and sizes; it never hashes a file. "Not complete"
   and "already back" compare the hashes the manifests and the receipt
   recorded and the sizes on disk; the restore checks the files themselves.
   Where a file goes back is judged from the paths' text by the restore's
@@ -1978,8 +1999,10 @@ Extension files:
   before-restore set. A key map is a backup of its own: its row gets the
   `--key-map` command whatever else its set holds. On macOS a set whose
   owner differs from that of `RABBIT/backups` is another account's. Each set also gets a
-  fingerprint, its manifest's length and modified time or, without one, its
-  file count and size, for a later run to compare under the lock. Local time
+  fingerprint, its manifest's length and modified time (seconds since 1970,
+  negative before it, and nanoseconds, so a time before 1970 still lists as
+  JSON) or, without one, its file count and size, for a later run to
+  compare under the lock. Local time
   comes from the operating system on Windows and macOS, UTC elsewhere.
 - `delete_backups` (`backup_delete.rs`) deletes whole backup sets for good,
   in the order given; it is behind `rabbit delete-backup`, and later the
@@ -2051,8 +2074,8 @@ Extension files:
   nothing changed; that error counts as in use when RABBIT may open the
   set's folder with delete access, and as permission otherwise. The cancel
   token is read between sets; each set sends `DeleteStarted` and
-  `DeleteCompleted`, which the wizard ignores until Phase 2. A real run that
-  gets past its checks saves `delete-backup-unix-<s>` in `RABBIT/logs`, also
+  `DeleteCompleted`, which the wizard ignores until its Backups tab
+  deletes. A real run that gets past its checks saves `delete-backup-unix-<s>` in `RABBIT/logs`, also
   when every id was already gone; a dry run and a refused run save none,
   and neither does a run in a resource folder with no `RABBIT` folder,
   which takes no lock either, so it never makes one. Nothing outside

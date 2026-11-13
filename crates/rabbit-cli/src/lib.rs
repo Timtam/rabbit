@@ -304,7 +304,8 @@ enum Command {
         #[arg(long)]
         report_path: Option<PathBuf>,
         /// Save a JSON run report under the resource folder's `RABBIT`
-        /// directory. A run with --apply always saves one there.
+        /// directory. A run with --apply that gets past its checks always
+        /// saves one there.
         #[arg(long)]
         save_report: bool,
         /// Print the result as JSON instead of human-readable text.
@@ -1490,14 +1491,22 @@ fn cli_restore_error(
 /// - for a refusal of a whole set that names its other packages, that
 ///   `--package` restores them one at a time;
 /// - for the target's REAPER running, that `--allow-reaper-running`
-///   restores anyway, and for every REAPER a package needs closed, that it
-///   doesn't;
+///   restores anyway, unless the restore puts the key map back, which needs
+///   REAPER closed whatever the command says, and for every REAPER a
+///   package needs closed, that it doesn't;
 /// - for a key map refused with `--allow-reaper-running`, to close REAPER
 ///   and run the command again without it.
 ///
 /// The refusal to run as root is said in the CLI's own words. Any other
-/// refusal is printed as it is.
+/// refusal is printed as it is. The text is one line: paths and names in it
+/// come from a set's manifest, and a line break in one must not start a
+/// line that reads as RABBIT's own (see [`one_line`]).
 fn restore_refusal_text(refusal: &RestoreRefusal, resource_path: &Path) -> String {
+    one_line(&restore_refusal_words(refusal, resource_path))
+}
+
+/// What [`restore_refusal_text`] says, before it is put on one line.
+fn restore_refusal_words(refusal: &RestoreRefusal, resource_path: &Path) -> String {
     let resource = resource_path.display();
     match refusal {
         RestoreRefusal::NotFound { .. } => {
@@ -1524,6 +1533,14 @@ fn restore_refusal_text(refusal: &RestoreRefusal, resource_path: &Path) -> Strin
         RestoreRefusal::TargetRefused { other_packages, .. } if !other_packages.is_empty() => {
             format!("{refusal}. {OTHER_PACKAGES_HINT}")
         }
+        RestoreRefusal::ReaperRunning {
+            every_reaper_for,
+            puts_keymap_back: true,
+            ..
+        } if every_reaper_for.is_empty() => format!(
+            "{refusal}. This restore puts REAPER's key map back, which RABBIT does only while \
+             REAPER is closed, so --allow-reaper-running doesn't change this."
+        ),
         RestoreRefusal::ReaperRunning {
             every_reaper_for, ..
         } if every_reaper_for.is_empty() => format!(
@@ -1681,8 +1698,18 @@ fn cli_delete_error(
 ///   `RABBIT/backups-deleting` when `in_deleting` says the folder is an
 ///   unfinished deletion, otherwise from `RABBIT/backups`.
 ///
-/// The refusal to run as root is said in the CLI's own words.
+/// The refusal to run as root is said in the CLI's own words. The text is
+/// one line, as a restore's refusal is (see [`restore_refusal_text`]).
 fn delete_refusal_text(
+    refusal: &RestoreRefusal,
+    resource_path: &Path,
+    in_deleting: bool,
+) -> String {
+    one_line(&delete_refusal_words(refusal, resource_path, in_deleting))
+}
+
+/// What [`delete_refusal_text`] says, before it is put on one line.
+fn delete_refusal_words(
     refusal: &RestoreRefusal,
     resource_path: &Path,
     in_deleting: bool,
@@ -3222,8 +3249,10 @@ fn write_backup_set_heading(out: &mut String, set: &BackupSetOverview) {
     let _ = writeln!(out, "  Made: {}", backup_date_text(set.created_unix));
     let _ = writeln!(out, "  Kind: {}", backup_set_kind_text(set));
     let _ = writeln!(out, "  Size: {}", size_text(set.size));
+    // The warning names links in the set, whose names may hold a line
+    // break on a Mac.
     if let Some(warning) = &set.warning {
-        let _ = writeln!(out, "  Warning: {warning}");
+        let _ = writeln!(out, "  Warning: {}", one_line(warning));
     }
 }
 
@@ -3272,7 +3301,13 @@ fn write_backups_in_set(
             (Some(_), _) => format!(
                 "rabbit restore-backup --resource-path \"{resource}\" --backup-id {id} --apply"
             ),
-            (None, _) => backup_reason_text(entry, set, &overview.resource_path, names),
+            (None, _) => {
+                let set_of_same_id = overview
+                    .sets
+                    .iter()
+                    .any(|other| other.id == set.id && other.kind != BackupSetKind::Deleting);
+                backup_reason_text(entry, set, set_of_same_id, &overview.resource_path, names)
+            }
         };
         let _ = writeln!(out, "    {line}");
     }
@@ -3378,9 +3413,11 @@ fn backup_set_kind_text(set: &BackupSetOverview) -> String {
         }
         BackupSetKind::Unknown => format!(
             "made by another version of RABBIT, for a reason this one doesn't know ({})",
-            set.manifest
-                .as_ref()
-                .map_or("", |manifest| manifest.reason.as_str())
+            one_line(
+                set.manifest
+                    .as_ref()
+                    .map_or("", |manifest| manifest.reason.as_str())
+            )
         ),
         BackupSetKind::NoManifest => "a backup set without a manifest".to_string(),
         BackupSetKind::Damaged => "a backup set whose manifest can't be read".to_string(),
@@ -3400,14 +3437,16 @@ fn backup_label(entry: &BackupEntry, names: &std::collections::BTreeMap<String, 
                 .get(package_id)
                 .cloned()
                 .unwrap_or_else(|| one_line(package_id));
+            // A version is text from the set's manifest, so it stays on its
+            // line, as names do.
             if let Some(version) = &entry.version {
-                let _ = write!(label, " {version}");
+                let _ = write!(label, " {}", one_line(&version.to_string()));
             }
             if entry.with_settings == Some(true) {
                 label.push_str(" with its settings");
             }
             if let Some(newer) = &entry.replaced_by {
-                let _ = write!(label, ", replaced by {newer}");
+                let _ = write!(label, ", replaced by {}", one_line(&newer.to_string()));
             }
             label
         }
@@ -3454,9 +3493,13 @@ fn backup_status_text(entry: &BackupEntry) -> &'static str {
 }
 
 /// Why `rabbit restore-backup` doesn't restore a backup, in one line.
+/// `set_of_same_id` says that a backup set of `set`'s id is listed besides
+/// it: for an unfinished deletion, deleting that id deletes the set too, so
+/// the command printed then is the dry run, which says so.
 fn backup_reason_text(
     entry: &BackupEntry,
     set: &BackupSetOverview,
+    set_of_same_id: bool,
     resource_path: &Path,
     names: &std::collections::BTreeMap<String, String>,
 ) -> String {
@@ -3478,6 +3521,14 @@ fn backup_reason_text(
             format!(
                 "RABBIT couldn't put {path}, a file of the newer version, back from a backup, so \
                  a restore would stop before changing anything."
+            )
+        } else if matches!(
+            entry.refusal,
+            Some(RestoreRefusal::EarlierFileRefused { .. })
+        ) {
+            format!(
+                "The backup's record of this version lists {path}, a place RABBIT never installs \
+                 to, so a restore would stop before changing anything."
             )
         } else {
             format!(
@@ -3528,6 +3579,17 @@ fn backup_reason_text(
         _ => match set.kind {
             BackupSetKind::Records => "RABBIT never copies its records back.".to_string(),
             BackupSetKind::Damaged => "Its manifest can't be read.".to_string(),
+            // Deleting the id finishes the deletion, then deletes the set of
+            // that id, which may hold the only copy of something; only the
+            // dry run says so before anything goes.
+            BackupSetKind::Deleting if is_plain_name(&set.id) && set_of_same_id => format!(
+                "Its deletion started and didn't finish, so part of it may be gone. The backup \
+                 set {id} listed besides it has the same name, and deleting that name finishes \
+                 this deletion and deletes that set too. rabbit delete-backup --resource-path \
+                 \"{}\" --backup-id {id} shows what would go.",
+                resource_path.display(),
+                id = set.id
+            ),
             BackupSetKind::Deleting if is_plain_name(&set.id) => format!(
                 "Its deletion started and didn't finish, so part of it may be gone. rabbit \
                  delete-backup --resource-path \"{}\" --backup-id {} --apply finishes it.",
@@ -6797,15 +6859,29 @@ mod tests {
             every_reaper_for: Vec::new(),
             package_names: Vec::new(),
             processes: vec![reaper.clone()],
+            puts_keymap_back: false,
         };
         assert_eq!(
             text(target),
             "Close REAPER before restoring a backup: reaper.exe (7). To restore while it runs, add --allow-reaper-running; files REAPER holds open may then fail to go back."
         );
+        // A restore that puts the key map back is refused with
+        // --allow-reaper-running, so it never suggests the option.
+        let keymap_back = RestoreRefusal::ReaperRunning {
+            every_reaper_for: Vec::new(),
+            package_names: Vec::new(),
+            processes: vec![reaper.clone()],
+            puts_keymap_back: true,
+        };
+        assert_eq!(
+            text(keymap_back),
+            "Close REAPER before restoring a backup: reaper.exe (7). This restore puts REAPER's key map back, which RABBIT does only while REAPER is closed, so --allow-reaper-running doesn't change this."
+        );
         let every = RestoreRefusal::ReaperRunning {
             every_reaper_for: vec!["app2clap".to_string()],
             package_names: vec!["app2clap".to_string()],
             processes: vec![reaper],
+            puts_keymap_back: true,
         };
         assert_eq!(
             text(every.clone()),
@@ -10894,6 +10970,49 @@ mod tests {
         assert!(!text.contains("--backup-id a b&c"), "{text}");
     }
 
+    /// An unfinished deletion whose id names a backup set too gets no
+    /// command with --apply, since deleting that id deletes the set as
+    /// well, which may hold the only copy of something: it gets the dry
+    /// run, which says so. One without such a set gets the command that
+    /// finishes it.
+    #[test]
+    fn backups_never_prints_a_finishing_command_that_deletes_a_set_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let rabbit = resource.join("RABBIT");
+        for folder in [
+            rabbit.join("backups").join("unix-1"),
+            rabbit.join("backups-deleting").join("unix-1"),
+            rabbit.join("backups-deleting").join("unix-2"),
+        ] {
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("left.dll"), b"left").unwrap();
+        }
+
+        let overview = rabbit_core::backup_overview::backup_overview(&resource).unwrap();
+        let text = super::backups_text(&overview);
+
+        let quoted = format!("--resource-path \"{}\"", resource.display());
+        let both = format!(
+            "    Its deletion started and didn't finish, so part of it may be gone. The backup \
+             set unix-1 listed besides it has the same name, and deleting that name finishes \
+             this deletion and deletes that set too. rabbit delete-backup {quoted} --backup-id \
+             unix-1 shows what would go."
+        );
+        assert!(text.lines().any(|line| line == both), "{text}");
+        assert!(
+            !text.contains(&format!(
+                "delete-backup {quoted} --backup-id unix-1 --apply"
+            )),
+            "{text}"
+        );
+        let alone = format!(
+            "    Its deletion started and didn't finish, so part of it may be gone. rabbit \
+             delete-backup {quoted} --backup-id unix-2 --apply finishes it."
+        );
+        assert!(text.lines().any(|line| line == alone), "{text}");
+    }
+
     /// Every reason a backup can't be restored, in one line, by its status
     /// and its set. An update's set comes back package by package, whatever
     /// else it holds, so its files of no package don't.
@@ -11155,12 +11274,63 @@ mod tests {
         let names = std::collections::BTreeMap::new();
         for (entry, set, expected) in cases {
             assert_eq!(
-                super::backup_reason_text(&entry, &set, resource, &names),
+                super::backup_reason_text(&entry, &set, false, resource, &names),
                 expected,
                 "{entry:?} in {:?}",
                 set.kind
             );
         }
+        // An earlier version whose record lists a place RABBIT never
+        // installs to says so.
+        let earlier = BackupEntry {
+            refused_path: Some(missing.clone()),
+            refusal: Some(super::RestoreRefusal::EarlierFileRefused {
+                backup_id: "unix-1".to_string(),
+                package_id: "sws".to_string(),
+                path: missing.clone(),
+                reason: Box::new(
+                    rabbit_core::restore_refusal::TargetRefusal::OutsideAllowedFolders,
+                ),
+            }),
+            ..entry(package("sws"), EarlierVersions, CanRestore)
+        };
+        assert_eq!(
+            super::backup_reason_text(&earlier, &set(Kind::Update), false, resource, &names),
+            format!(
+                "The backup's record of this version lists {}, a place RABBIT never installs \
+                 to, so a restore would stop before changing anything.",
+                missing.display()
+            )
+        );
+        // With a set of the same id listed besides it, an unfinished
+        // deletion gets the dry run, since deleting the id deletes the set
+        // too; one whose id needs quotes still gets no command.
+        assert_eq!(
+            super::backup_reason_text(
+                &entry(whole.clone(), Other, NotHere),
+                &set(Kind::Deleting),
+                true,
+                resource,
+                &names
+            ),
+            "Its deletion started and didn't finish, so part of it may be gone. The backup set \
+             unix-1 listed besides it has the same name, and deleting that name finishes this \
+             deletion and deletes that set too. rabbit delete-backup --resource-path \"R\" \
+             --backup-id unix-1 shows what would go."
+        );
+        assert_eq!(
+            super::backup_reason_text(
+                &entry(whole.clone(), Other, NotHere),
+                &BackupSetOverview {
+                    id: "unix 1".to_string(),
+                    ..set(Kind::Deleting)
+                },
+                true,
+                resource,
+                &names
+            ),
+            "Its deletion started and didn't finish, so part of it may be gone."
+        );
 
         // What is no backup says so once, in its set's kind and warning.
         let link = entry(whole, Other, NotABackup);
@@ -11172,6 +11342,55 @@ mod tests {
         // A package id with a line break in it stays on one line.
         let odd = entry(package("x\n    rabbit"), UninstalledSoftware, CanRestore);
         assert_eq!(super::backup_label(&odd, &names), "x?    rabbit");
+        // So do the versions, the reason a set was made, the warning about
+        // it, and a refusal naming a path: text from the set's manifest or
+        // its file names, which must never start a line of its own that
+        // reads as one of RABBIT's commands.
+        let fake = "\n    rabbit restore-backup --backup-id unix-1 --apply";
+        let versions = BackupEntry {
+            version: Some(rabbit_core::version::Version::parse(format!("1.0{fake}")).unwrap()),
+            replaced_by: Some(rabbit_core::version::Version::parse(format!("2.0{fake}")).unwrap()),
+            ..entry(package("sws"), EarlierVersions, CanRestore)
+        };
+        let label = super::backup_label(&versions, &names);
+        assert!(!label.contains('\n'), "{label:?}");
+        assert!(label.starts_with("sws 1.0?    rabbit"), "{label:?}");
+        let unknown = BackupSetOverview {
+            manifest: Some(rabbit_core::rollback::BackupManifest {
+                schema_version: 1,
+                rabbit_version: "9.0.0".to_string(),
+                created_at: "unix-1".to_string(),
+                created_unix: None,
+                reason: format!("odd{fake}"),
+                files: Vec::new(),
+                receipt_backup_path: None,
+                packages: Default::default(),
+                replaced: Default::default(),
+                keymap_origin: None,
+            }),
+            warning: Some(format!("a link{fake}")),
+            ..set(Kind::Unknown)
+        };
+        assert!(!super::backup_set_kind_text(&unknown).contains('\n'));
+        let mut heading = String::new();
+        super::write_backup_set_heading(&mut heading, &unknown);
+        assert_eq!(heading.lines().count(), 5, "{heading}");
+        assert!(
+            heading.contains("  Warning: a link?    rabbit"),
+            "{heading}"
+        );
+        let refused = super::RestoreRefusal::TargetRefused {
+            path: PathBuf::from(format!("UserPlugins/x.dll{fake}")),
+            reason: rabbit_core::restore_refusal::TargetRefusal::RabbitFolder,
+            other_packages: vec!["ffmpeg".to_string()],
+        };
+        for text in [
+            super::restore_refusal_text(&refused, resource),
+            super::delete_refusal_text(&refused, resource, false),
+        ] {
+            assert!(!text.contains('\n'), "{text:?}");
+            assert!(text.contains("x.dll?    rabbit"), "{text:?}");
+        }
     }
 
     /// `delete-backup`, parsed from its arguments for `resource` and `more`.

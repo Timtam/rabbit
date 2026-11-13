@@ -157,9 +157,20 @@ fn saved(report: &RestoreRunReport) -> serde_json::Value {
     envelope.report
 }
 
-/// Every file and link below `root`, each file with what it holds, found
-/// without following any link.
-pub(crate) fn snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+/// What a [`snapshot`] found at a path: a file with what it holds, a
+/// folder, or a symbolic link or junction with where it leads.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Node {
+    File(Vec<u8>),
+    Folder,
+    Link(PathBuf),
+}
+
+/// Every file, folder and link below `root`, each file with what it holds
+/// and each link with where it leads, found without following any link. A
+/// folder made or removed, even an empty one, and a link pointed elsewhere
+/// all show.
+pub(crate) fn snapshot(root: &Path) -> Vec<(PathBuf, Node)> {
     let mut found = Vec::new();
     let mut folders = vec![root.to_path_buf()];
     while let Some(folder) = folders.pop() {
@@ -168,16 +179,56 @@ pub(crate) fn snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
             let path = entry.path();
             let kind = entry.file_type().unwrap();
             if kind.is_symlink() {
-                found.push((path, None));
+                let target = link_target(&path);
+                found.push((path, Node::Link(target)));
             } else if kind.is_dir() {
+                found.push((path.clone(), Node::Folder));
                 folders.push(path);
             } else {
-                found.push((path.clone(), Some(fs::read(&path).unwrap())));
+                found.push((path.clone(), Node::File(fs::read(&path).unwrap())));
             }
         }
     }
     found.sort();
     found
+}
+
+/// Where the link at `path` leads. A link whose name Windows reads as
+/// another, such as one ending in a dot, is read by its verbatim path; one
+/// that can't be read at all counts as leading nowhere.
+fn link_target(path: &Path) -> PathBuf {
+    fs::read_link(path)
+        .or_else(|error| {
+            if cfg!(windows) && path.is_absolute() {
+                fs::read_link(format!(r"\\?\{}", path.display()))
+            } else {
+                Err(error)
+            }
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the file system `dir` is on counts names that differ only in
+/// case as one, as Windows does and a Mac's volume does unless it was made
+/// case-sensitive: a folder made as `probe` is found as `PROBE`.
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn names_in_another_case_are_one(dir: &Path) -> bool {
+    let probe = dir.join("case-probe");
+    fs::create_dir_all(&probe).unwrap();
+    let one = dir.join("CASE-PROBE").is_dir();
+    fs::remove_dir(&probe).unwrap();
+    one
+}
+
+/// [`snapshot`] without `resource`'s `RABBIT/locks` folder, which a run
+/// that took the install lock leaves behind, empty: for a restore or a
+/// delete refused under the lock, which changes nothing else.
+pub(crate) fn snapshot_but_lock_folder(root: &Path, resource: &Path) -> Vec<(PathBuf, Node)> {
+    let locks = resource.join("RABBIT").join("locks");
+    snapshot(root)
+        .into_iter()
+        .filter(|(path, _)| !path.starts_with(&locks))
+        .collect()
 }
 
 /// Three uninstall sets in `resource`: SWS, then ReaPack with three files,
@@ -229,6 +280,9 @@ fn a_backup_that_fails_partway_is_put_back_and_the_run_goes_on() {
     let dir = tempdir().unwrap();
     let resource = dir.path().join("REAPER");
     three_uninstalls(&resource);
+    // A folder that was there before, empty, stays: only the folders the
+    // restore made go again.
+    fs::create_dir_all(resource.join("Data")).unwrap();
     let reapack_set = resource.join("RABBIT/backups/uninstall-unix-2");
     let reapack_manifest = fs::read(reapack_set.join("backup-manifest.json")).unwrap();
     let third = resource.join("UserPlugins/reapack_third.dll");
@@ -294,7 +348,8 @@ fn a_backup_that_fails_partway_is_put_back_and_the_run_goes_on() {
         b"newer reapack"
     );
     assert_eq!(fs::read(&third).unwrap(), b"newer third");
-    assert!(!resource.join("Data").exists());
+    assert!(resource.join("Data").is_dir());
+    assert_eq!(fs::read_dir(resource.join("Data")).unwrap().count(), 0);
     assert!(
         reapack
             .actions
@@ -609,6 +664,87 @@ fn a_stop_between_backups_leaves_the_rest_as_they_were() {
     saved(&report);
 }
 
+/// Two backups of one set in one run, as when two rows of one uninstall's
+/// set are ticked: each is found again under the lock with the fingerprint
+/// listed, comes back with a before-restore set of its own, and puts its
+/// own entry into RABBIT's records, the first one's still there when the
+/// second is checked. The set itself doesn't change.
+#[test]
+fn two_backups_of_one_set_come_back_in_one_run() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    let id = "uninstall-unix-1";
+    let mut writer = BackupSetWriter::new(&resource, id, "uninstall");
+    for (package_id, place) in [
+        ("sws", "UserPlugins/reaper_sws.dll"),
+        ("ffmpeg", "UserPlugins/avcodec.dll"),
+    ] {
+        writer
+            .record_package(
+                package_id,
+                BackupPackageRecord {
+                    receipt: Some(receipt_entry(package_id)),
+                    langpack_before: None,
+                    with_settings: None,
+                },
+            )
+            .unwrap();
+        let place = resource.join(place);
+        write(&place, package_id.as_bytes());
+        writer
+            .move_file(Some(package_id), &place, None, false)
+            .unwrap();
+        // Something else is at its place now, which the restore replaces.
+        write(&place, b"something else");
+    }
+    drop(writer);
+    let set = resource.join("RABBIT/backups").join(id);
+    let set_before = snapshot(&set);
+    let overview = overview_with(&resource, &BackupEnvironment::AS_USER).unwrap();
+    let fingerprint = overview
+        .sets
+        .iter()
+        .find(|listed| listed.id == id)
+        .and_then(|listed| listed.fingerprint.clone());
+    assert!(fingerprint.is_some());
+    let listed = |package_id: &str| RestoreItem {
+        fingerprint: fingerprint.clone(),
+        ..item(id, package_id)
+    };
+
+    let report = run(
+        &resource,
+        &[listed("sws"), listed("ffmpeg")],
+        &APPLY,
+        &ProgressReporter::noop(),
+        &CancelToken::new(),
+    );
+
+    assert_eq!(
+        statuses(&report),
+        [RestoreStatus::Restored, RestoreStatus::Restored],
+        "{report:#?}"
+    );
+    let before_restore: Vec<&str> = report
+        .backups
+        .iter()
+        .map(|backup| backup.before_restore_set_id.as_deref().unwrap())
+        .collect();
+    assert_ne!(before_restore[0], before_restore[1]);
+    assert_eq!(
+        fs::read(resource.join("UserPlugins/reaper_sws.dll")).unwrap(),
+        b"sws"
+    );
+    assert_eq!(
+        fs::read(resource.join("UserPlugins/avcodec.dll")).unwrap(),
+        b"ffmpeg"
+    );
+    let state = load_install_state(&resource).unwrap().unwrap();
+    assert_eq!(state.packages["sws"], receipt_entry("sws"));
+    assert_eq!(state.packages["ffmpeg"], receipt_entry("ffmpeg"));
+    assert_eq!(snapshot(&set), set_before);
+}
+
 /// A set whose fingerprint differs from the one its item names is refused
 /// alone, before anything of it changes, and the other backups come back:
 /// one changed before the run, and one changed while the backup before it
@@ -921,7 +1057,11 @@ fn a_whole_run_refusal_changes_nothing_and_saves_nothing() {
     ));
 
     // A linked RABBIT refuses every backup, as a link, and nothing is
-    // written through it.
+    // written through it, not even the lock, whose empty folder would stay:
+    // so in a fresh REAPER, where no run took the lock yet.
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    three_uninstalls(&resource);
     let rabbit = resource.join("RABBIT");
     let moved = dir.path().join("moved-rabbit");
     fs::rename(&rabbit, &moved).unwrap();
@@ -944,6 +1084,7 @@ fn a_whole_run_refusal_changes_nothing_and_saves_nothing() {
     assert_eq!(report.saved_report, None);
     assert_eq!(snapshot(&moved), before);
     assert!(!moved.join("logs").exists());
+    assert!(!moved.join("locks").exists());
 }
 
 /// On Windows, a file another program holds open with no sharing fails
@@ -1504,7 +1645,13 @@ fn a_program_one_backup_needs_closed_refuses_the_whole_run() {
             "{found_before_the_lock}: {error:?}"
         );
         assert_eq!(scans.get(), if found_before_the_lock { 1 } else { 2 });
-        assert_eq!(snapshot(dir.path()), before);
+        // Refused under the lock, the run leaves only the lock's empty
+        // folder; refused before it, not even that.
+        if found_before_the_lock {
+            assert_eq!(snapshot(dir.path()), before);
+        } else {
+            assert_eq!(snapshot_but_lock_folder(dir.path(), &resource), before);
+        }
         assert!(!resource.join("RABBIT/logs").exists());
     }
 }

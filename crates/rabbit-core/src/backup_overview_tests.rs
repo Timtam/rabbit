@@ -686,6 +686,69 @@ fn uninstalled_software_gets_the_status_its_case_calls_for() {
     assert_eq!(unreadable("osara"), PartMissing);
     assert!(listed.receipt_error.is_some());
     agrees(&listed, "sws", "receipt-unreadable");
+    // A gone copy is judged before the records, by the run as by the row.
+    agrees(&listed, "osara", "part-missing");
+}
+
+/// A package of an uninstall's set whose finished copy is gone from the set
+/// while it was installed again since is refused for the gone copy, as its
+/// row says, by a dry run and a real run, alone and in the whole set:
+/// uninstalling the copy installed since wouldn't get round it. Nothing
+/// changes.
+#[test]
+fn a_gone_copy_is_refused_before_a_reinstall() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    let plugin = "UserPlugins/reaper_sws-x64.dll";
+    let settings = "S&M.ini";
+    write(&resource.join(plugin), b"sws 2.14");
+    write(&resource.join(settings), b"settings");
+    let id = "uninstall-unix-100";
+    let set = uninstall_set(
+        &resource,
+        id,
+        &[(
+            "sws",
+            Some(entry("sws", "2.14.0.7", &[(plugin, b"sws 2.14")])),
+            &[plugin, settings],
+        )],
+    );
+    fs::remove_file(set.join(settings)).unwrap();
+    write(&resource.join(plugin), b"sws 2.15");
+    save_receipt(
+        &resource,
+        vec![entry("sws", "2.15.0.1", &[(plugin, b"sws 2.15")])],
+    );
+    let before = crate::rollback::restore_run_tests::snapshot(dir.path());
+
+    let listed = overview(&resource);
+    let row = find(&listed, &package(id, "sws"));
+    assert_eq!(row.status, BackupStatus::PartMissing);
+    let expected = RestoreRefusal::PartMissing {
+        backup_id: id.to_string(),
+        path: PathBuf::from(settings),
+    };
+    assert_eq!(row.refusal.as_ref(), Some(&expected));
+    for package_id in [Some("sws"), None] {
+        for dry_run in [true, false] {
+            let error = restore_backup_set_within(
+                &resource,
+                id,
+                &RestoreBackupOptions {
+                    dry_run,
+                    allow_reaper_running: true,
+                    package_id: package_id.map(ToString::to_string),
+                },
+                &OutsideRestoreRules::default(),
+            )
+            .unwrap_err();
+            assert_eq!(refusal(&error), &expected, "{package_id:?} {dry_run}");
+        }
+    }
+    assert_eq!(
+        crate::rollback::restore_run_tests::snapshot(dir.path()),
+        before
+    );
 }
 
 /// Earlier versions follow the swap's rules (backup plan 6.4). Those that
@@ -1594,6 +1657,91 @@ fn the_listing_is_built_on_the_overview() {
     fs::create_dir_all(&fresh).unwrap();
     assert!(list_backup_sets(&fresh).unwrap().is_empty());
     assert!(!fresh.join("RABBIT").exists());
+}
+
+/// A manifest modified before 1970, as after a copy that zeroed its time,
+/// still gets a fingerprint that the listing writes as JSON, and that a
+/// restore compares as listed. Times before 1970 count back from it.
+#[test]
+fn a_manifest_from_before_1970_is_still_listed_as_json() {
+    use super::ModifiedTime;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    assert_eq!(
+        ModifiedTime::of(UNIX_EPOCH - Duration::from_millis(1500)),
+        Some(ModifiedTime {
+            seconds: -2,
+            nanos: 500_000_000
+        })
+    );
+    assert_eq!(
+        ModifiedTime::of(UNIX_EPOCH - Duration::from_secs(3)),
+        Some(ModifiedTime {
+            seconds: -3,
+            nanos: 0
+        })
+    );
+    assert_eq!(
+        ModifiedTime::of(UNIX_EPOCH + Duration::new(7, 900)),
+        Some(ModifiedTime {
+            seconds: 7,
+            nanos: 900
+        })
+    );
+
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    let sws = "UserPlugins/reaper_sws-x64.dll";
+    write(&resource.join(sws), b"sws");
+    let id = "uninstall-unix-100";
+    let set = uninstall_set(
+        &resource,
+        id,
+        &[("sws", Some(entry("sws", "1", &[])), &[sws])],
+    );
+    let long_ago = UNIX_EPOCH - Duration::from_secs(400 * 24 * 60 * 60);
+    fs::File::options()
+        .write(true)
+        .open(set.join("backup-manifest.json"))
+        .unwrap()
+        .set_modified(long_ago)
+        .unwrap();
+
+    let sets = list_backup_sets(&resource).unwrap();
+
+    let Some(SetFingerprint::Manifest {
+        modified: Some(modified),
+        ..
+    }) = sets[0].fingerprint
+    else {
+        panic!("{:?}", sets[0].fingerprint);
+    };
+    assert_eq!(modified.seconds, -400 * 24 * 60 * 60);
+    let json = serde_json::to_value(&sets).unwrap();
+    assert_eq!(
+        json[0]["fingerprint"]["modified"]["seconds"],
+        -400 * 24 * 60 * 60
+    );
+    let listed: Vec<crate::rollback::BackupSet> = serde_json::from_value(json).unwrap();
+    assert_eq!(listed, sets);
+    let report = crate::rollback::restore_backups_with(
+        &resource,
+        &[crate::rollback::RestoreItem {
+            fingerprint: sets[0].fingerprint.clone(),
+            ..crate::rollback::RestoreItem::package(id, "sws")
+        }],
+        &crate::rollback::RestoreRunOptions {
+            dry_run: true,
+            quick: true,
+            allow_reaper_running: true,
+        },
+        &BackupEnvironment::AS_USER,
+        OutsideRestoreRules::default,
+        &crate::progress::ProgressReporter::noop(),
+        &crate::cancel::CancelToken::new(),
+    )
+    .unwrap();
+    assert_eq!(report.backups[0].refusal, None, "{report:?}");
 }
 
 #[test]

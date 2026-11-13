@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::tempdir;
 
-use super::restore_run_tests::snapshot;
+use super::restore_run_tests::{snapshot, snapshot_but_lock_folder};
 use super::restore_seam::{self, Step};
 use super::{
     BEFORE_RESTORE_REASON, BackupEnvironment, BackupSetWriter, MoveOutAction, OutsideRestoreRules,
@@ -245,7 +245,8 @@ fn sets_in(resource: &Path) -> Vec<String> {
 
 /// Restore `set_id`, or `package_id` of it, in a dry run and for real as
 /// the user with `environment`, expecting the same refusal both times, and
-/// check that nothing below `dir` changed.
+/// check that nothing below `dir` changed: no file, folder or link, besides
+/// the empty folder of the lock a real run refused under it leaves.
 fn refused(
     dir: &Path,
     resource: &Path,
@@ -254,6 +255,7 @@ fn refused(
     environment: &BackupEnvironment<'_>,
 ) -> RabbitError {
     let before = snapshot(dir);
+    let unlocked = snapshot_but_lock_folder(dir, resource);
     let mut errors = Vec::new();
     for dry_run in [true, false] {
         errors.push(
@@ -266,9 +268,13 @@ fn refused(
             )
             .unwrap_err(),
         );
+        let (after, expected) = if dry_run {
+            (snapshot(dir), &before)
+        } else {
+            (snapshot_but_lock_folder(dir, resource), &unlocked)
+        };
         assert_eq!(
-            snapshot(dir),
-            before,
+            &after, expected,
             "{set_id} {package_id:?} changed something"
         );
     }
@@ -413,6 +419,8 @@ fn a_dry_run_and_the_quick_plan_change_nothing_and_hash_nothing() {
 
     let full = restore(&resource, SET, Some("reapack"), true);
     assert_eq!(snapshot(dir.path()), before);
+    // Not even an empty before-restore set, which would list as a backup.
+    assert_eq!(sets_in(&resource), [SET]);
     assert_eq!(full.status, RestoreStatus::WouldRestore);
     let swap = full.swap.as_ref().unwrap();
     assert_eq!(swap.moved_out.len(), 1);
@@ -437,6 +445,7 @@ fn a_dry_run_and_the_quick_plan_change_nothing_and_hash_nothing() {
     .unwrap();
     assert_eq!(crate::hash::hashes_on_this_thread(), hashed);
     assert_eq!(snapshot(dir.path()), before);
+    assert_eq!(sets_in(&resource), [SET]);
     assert_eq!(quick.saved_report, None);
     let one = &quick.backups[0];
     assert_eq!(one.status, RestoreStatus::WouldRestore);
@@ -711,6 +720,131 @@ fn an_earlier_version_that_isnt_complete_is_refused() {
     assert_eq!(quick.refusal.as_ref(), Some(&expected));
 }
 
+/// An earlier entry RABBIT would never write doesn't go into its records.
+/// One whose id names another package is no entry of ReaPack, so its
+/// version is unknown. One that records a file at a place RABBIT never
+/// installs to, outside every folder it installs into, with `..` in it or
+/// in RABBIT's own folder, is refused even for a file with no hash, which
+/// counts as the user's and is never checked for being complete. Each in
+/// a dry run and for real, alone and in the whole set, and the row says the
+/// same; nothing changes. A file at `.`, the resource folder itself, and a
+/// folder inside it, as a receipt records them with no hash, are places
+/// RABBIT installs to, and the version comes back with them.
+#[test]
+fn an_earlier_entry_rabbit_would_never_write_is_refused() {
+    let edit = |resource: &Path, change: &dyn Fn(&mut PackageReceipt)| {
+        let set = resource.join("RABBIT/backups").join(SET);
+        let mut manifest = load_backup_manifest(&set).unwrap().unwrap();
+        change(
+            manifest
+                .replaced
+                .get_mut("reapack")
+                .unwrap()
+                .receipt
+                .as_mut()
+                .unwrap(),
+        );
+        save_backup_manifest(&set, &manifest).unwrap();
+    };
+    let users = |path: &Path| InstalledFileReceipt {
+        path: path.to_path_buf(),
+        sha256: None,
+        size: None,
+    };
+
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    updated_reapack(&resource, Some(reapack_old()));
+    edit(&resource, &|entry| entry.id = "sws".to_string());
+    let expected = RestoreRefusal::VersionUnknown {
+        backup_id: SET.to_string(),
+        package_id: "reapack".to_string(),
+    };
+    for package_id in [Some("reapack"), None] {
+        let error = refused(
+            dir.path(),
+            &resource,
+            SET,
+            package_id,
+            &BackupEnvironment::AS_USER,
+        );
+        assert_eq!(refusal(&error), &expected, "{package_id:?}");
+    }
+    let row = reapack_row(&resource);
+    assert_eq!(row.status, BackupStatus::VersionUnknown);
+    assert_eq!(row.refusal, Some(expected));
+
+    for case in ["outside", "parent", "rabbit-folder"] {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        updated_reapack(&resource, Some(reapack_old()));
+        let (path, reason) = match case {
+            "outside" => {
+                let documents = dir.path().join("Documents").join("thesis.docx");
+                write(&documents, b"thesis");
+                (documents, TargetRefusal::OutsideAllowedFolders)
+            }
+            "parent" => (
+                PathBuf::from("..").join("Desktop").join("notes.txt"),
+                TargetRefusal::NotPlainPath,
+            ),
+            _ => (
+                PathBuf::from("RABBIT").join("install-state.json"),
+                TargetRefusal::RabbitFolder,
+            ),
+        };
+        edit(&resource, &|entry| entry.installed_files.push(users(&path)));
+        let expected = RestoreRefusal::EarlierFileRefused {
+            backup_id: SET.to_string(),
+            package_id: "reapack".to_string(),
+            path: path.clone(),
+            reason: Box::new(reason),
+        };
+
+        for package_id in [Some("reapack"), None] {
+            let error = refused(
+                dir.path(),
+                &resource,
+                SET,
+                package_id,
+                &BackupEnvironment::AS_USER,
+            );
+            assert_eq!(refusal(&error), &expected, "{case} {package_id:?}");
+        }
+        let row = reapack_row(&resource);
+        assert_eq!(row.refusal.as_ref(), Some(&expected), "{case}");
+        assert_eq!(row.refused_path.as_ref(), Some(&path), "{case}");
+        assert_eq!(row.restore_scope, None, "{case}");
+        let quick = quick_plan(&resource, Some("reapack"));
+        assert_eq!(quick.refusal.as_ref(), Some(&expected), "{case}");
+    }
+
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    updated_reapack(&resource, Some(reapack_old()));
+    let kept = [PathBuf::from("."), PathBuf::from("Data").join("Grooves")];
+    edit(&resource, &|entry| {
+        entry
+            .installed_files
+            .extend(kept.iter().map(|path| users(path)));
+    });
+    assert_eq!(reapack_row(&resource).refusal, None);
+
+    let report = restore(&resource, SET, Some("reapack"), false);
+
+    assert_eq!(report.status, RestoreStatus::Restored, "{report:?}");
+    let records = load_install_state(&resource).unwrap().unwrap();
+    let paths: Vec<&Path> = records.packages["reapack"]
+        .installed_files
+        .iter()
+        .map(|file| file.path.as_path())
+        .collect();
+    assert!(
+        paths.ends_with(&[kept[0].as_path(), kept[1].as_path()]),
+        "{paths:?}"
+    );
+}
+
 /// A copy the set holds at the place of a file of the earlier version
 /// counts only when the restore puts it back: one of another package, or
 /// the key map's, doesn't make the version complete.
@@ -789,7 +923,7 @@ fn going_back_to_a_copy_rabbit_didnt_install_removes_the_entry() {
         assert_eq!(failed.status, RestoreStatus::NotRestored);
         assert_eq!(failed.before_restore_set_id, None);
     }
-    let after_failure: Vec<_> = snapshot(dir.path())
+    let after_failure: Vec<_> = snapshot_but_lock_folder(dir.path(), &resource)
         .into_iter()
         .filter(|(path, _)| !path.starts_with(resource.join("RABBIT/logs")))
         .collect();
@@ -1100,6 +1234,62 @@ fn a_whole_update_set_goes_back_package_by_package() {
         assert_eq!(state, expected, "{records}");
         assert_eq!(fs::read(&copy).ok(), copy_before, "{records}");
     }
+}
+
+/// Two earlier versions of one update's set in one run, as two ticked
+/// rows: each package goes back on its own, with the fingerprint listed
+/// and a before-restore set of its own, and the set doesn't change.
+#[test]
+fn two_earlier_versions_of_one_set_come_back_in_one_run() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    updated_both(&resource, true);
+    let set = resource.join("RABBIT/backups").join(SET);
+    let set_before = snapshot(&set);
+    let listed = overview_with(&resource, &BackupEnvironment::AS_USER).unwrap();
+    let fingerprint = listed.sets[0].fingerprint.clone();
+    assert!(fingerprint.is_some());
+    let item = |package_id: &str| RestoreItem {
+        fingerprint: fingerprint.clone(),
+        ..RestoreItem::package(SET, package_id)
+    };
+
+    let report = restore_backups_with(
+        &resource,
+        &[item("reapack"), item("sws")],
+        &RestoreRunOptions {
+            dry_run: false,
+            quick: false,
+            allow_reaper_running: true,
+        },
+        &BackupEnvironment::AS_USER,
+        OutsideRestoreRules::default,
+        &ProgressReporter::noop(),
+        &CancelToken::new(),
+    )
+    .unwrap();
+
+    let statuses: Vec<RestoreStatus> = report.backups.iter().map(|item| item.status).collect();
+    assert_eq!(
+        statuses,
+        [RestoreStatus::Restored, RestoreStatus::Restored],
+        "{report:#?}"
+    );
+    let before_restore: Vec<&str> = report
+        .backups
+        .iter()
+        .map(|item| item.before_restore_set_id.as_deref().unwrap())
+        .collect();
+    assert_ne!(before_restore[0], before_restore[1]);
+    assert_eq!(read(&resource, PLUGIN), b"reapack 1.2.4");
+    assert_eq!(
+        read(&resource, "UserPlugins/reaper_sws-x64.dll"),
+        b"sws 2.14"
+    );
+    let state = load_install_state(&resource).unwrap().unwrap();
+    assert_eq!(state.packages["reapack"].version, Some(version("1.2.4")));
+    assert_eq!(state.packages["sws"], sws_old());
+    assert_eq!(snapshot(&set), set_before);
 }
 
 /// A file that fails partway through going back, after the newer

@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 use tempfile::tempdir;
 
-use super::restore_run_tests::snapshot;
+use super::restore_run_tests::{snapshot, snapshot_but_lock_folder};
 use super::restore_seam::{self, Step};
 use super::{
     BEFORE_RESTORE_REASON, BackupEntryState, BackupEnvironment, BackupPackageRecord,
@@ -31,7 +31,7 @@ use crate::error::Result;
 use crate::hash::sha256_bytes;
 use crate::progress::ProgressReporter;
 use crate::receipt::{load_install_state, save_install_state};
-use crate::restore_refusal::{RestoreRefusal, refusal};
+use crate::restore_refusal::{RestoreRefusal, TargetRefusal, refusal};
 use crate::uninstall::paths::link_folder;
 use crate::version::Version;
 
@@ -691,9 +691,10 @@ fn a_key_map_with_its_scripts_goes_back_when_the_records_fail() {
 
 /// A file that leads to the key map another way is the key map all the
 /// same: through a link folder inside the resource folder, which a restore
-/// allows, and on Windows by a name in other case with `..` in the
-/// resource folder's path. Its scripts are kept, and it never comes back
-/// while REAPER may run.
+/// allows, and, on Windows and on a Mac's volume that counts names in
+/// another case as one, by a name in other case with `..` in the resource
+/// folder's path. Its scripts are kept, and it never comes back while
+/// REAPER may run.
 #[test]
 fn a_key_map_reached_another_way_is_the_key_map() {
     let dir = tempdir().unwrap();
@@ -701,10 +702,10 @@ fn a_key_map_reached_another_way_is_the_key_map() {
     let now = text(&[OSARA_KEY, NEW_SCRIPT], "\n");
     let resource = keymap_replaced(dir.path(), old.as_bytes(), now.as_bytes());
     link_folder(&resource.join("loop"), &resource);
-    #[cfg_attr(not(windows), allow(unused_mut))]
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(unused_mut))]
     let mut cases = vec![(resource.clone(), PathBuf::from("loop").join(KB))];
-    #[cfg(windows)]
-    {
+    #[cfg(any(windows, target_os = "macos"))]
+    if super::restore_run_tests::names_in_another_case_are_one(dir.path()) {
         fs::create_dir_all(dir.path().join("other")).unwrap();
         cases.push((
             dir.path().join("other").join("..").join("REAPER"),
@@ -812,6 +813,180 @@ fn a_key_map_in_an_update_s_set_comes_back_alone() {
         fs::read_to_string(&keymap).unwrap(),
         format!("{old}{NEW_SCRIPT}\r\n")
     );
+}
+
+/// The key map and an earlier version of one update's set in one run, as
+/// two ticked rows: the key map comes back alone, with its scripts kept,
+/// then the earlier version by the swap, each with the fingerprint listed
+/// and a before-restore set of its own; the set doesn't change.
+#[test]
+fn a_key_map_and_an_earlier_version_of_one_set_come_back_in_one_run() {
+    use super::swap_tests::{NEW_ONLY, PLUGIN, SHARED, reapack_new, reapack_old, records_with};
+
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    let keymap = resource.join(KB);
+    let plugin = resource.join(PLUGIN);
+    let old = text(&[OWN_KEY], "\r\n");
+    write(&keymap, old.as_bytes());
+    write(&plugin, b"reapack 1.2.4");
+    write(&resource.join(SHARED), b"shared");
+    let id = "unix-100";
+    let mut writer = BackupSetWriter::new(&resource, id, UPDATE_BACKUP_REASON);
+    writer
+        .record_replaced(
+            "reapack",
+            ReplacedPackageRecord {
+                receipt: Some(reapack_old()),
+                replaced_by: Some(Version::parse("1.2.5").unwrap()),
+            },
+        )
+        .unwrap();
+    writer.copy_file(Some("reapack"), &plugin).unwrap();
+    writer.copy_file(Some("osara"), &keymap).unwrap();
+    drop(writer);
+    write(&plugin, b"reapack 1.2.5");
+    write(&resource.join(NEW_ONLY), b"new in 1.2.5");
+    fs::write(&keymap, text(&[OSARA_KEY, NEW_SCRIPT], "\r\n")).unwrap();
+    save_install_state(&resource, &records_with(Some(reapack_new()))).unwrap();
+    let set = set_path(&resource, id);
+    let set_before = snapshot(&set);
+    let listed = crate::backup_overview::overview_with(&resource, &BackupEnvironment::AS_USER)
+        .unwrap()
+        .sets
+        .into_iter()
+        .find(|listed| listed.id == id)
+        .and_then(|listed| listed.fingerprint);
+    assert!(listed.is_some());
+
+    let report = restore_backups_with(
+        &resource,
+        &[
+            RestoreItem {
+                fingerprint: listed.clone(),
+                ..RestoreItem::keymap(id)
+            },
+            RestoreItem {
+                fingerprint: listed,
+                ..RestoreItem::package(id, "reapack")
+            },
+        ],
+        &APPLY,
+        &BackupEnvironment::AS_USER,
+        OutsideRestoreRules::default,
+        &ProgressReporter::noop(),
+        &CancelToken::new(),
+    )
+    .unwrap();
+
+    let statuses: Vec<RestoreStatus> = report.backups.iter().map(|item| item.status).collect();
+    assert_eq!(
+        statuses,
+        [RestoreStatus::Restored, RestoreStatus::Restored],
+        "{report:#?}"
+    );
+    assert!(report.backups[0].keymap_only);
+    assert_eq!(
+        report.backups[0]
+            .keymap
+            .as_ref()
+            .and_then(|keymap| keymap.scripts_added),
+        Some(1)
+    );
+    assert_ne!(
+        report.backups[0].before_restore_set_id,
+        report.backups[1].before_restore_set_id
+    );
+    assert_eq!(
+        fs::read_to_string(&keymap).unwrap(),
+        format!("{old}{NEW_SCRIPT}\r\n")
+    );
+    assert_eq!(fs::read(&plugin).unwrap(), b"reapack 1.2.4");
+    let state = load_install_state(&resource).unwrap().unwrap();
+    assert_eq!(
+        state.packages["reapack"].version,
+        Some(Version::parse("1.2.4").unwrap())
+    );
+    assert_eq!(snapshot(&set), set_before);
+}
+
+/// A file of an earlier version that is the key map by its real place,
+/// reached through a link folder inside the resource folder, as only a
+/// manifest RABBIT didn't write can name it, is refused: a version's files
+/// never include the key map, which comes back only as a key map of its
+/// own, with its scripts kept. One package or the whole set, in a dry run
+/// and for real, with REAPER allowed to run or not; nothing changes.
+#[test]
+fn a_version_file_that_is_the_key_map_is_refused() {
+    use super::swap_tests::{NEW_ONLY, PLUGIN, SHARED, reapack_new, reapack_old, records_with};
+
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    let keymap = resource.join(KB);
+    let plugin = resource.join(PLUGIN);
+    write(&keymap, text(&[OWN_KEY], "\r\n").as_bytes());
+    write(&plugin, b"reapack 1.2.4");
+    write(&resource.join(SHARED), b"shared");
+    let id = "unix-100";
+    let mut writer = BackupSetWriter::new(&resource, id, UPDATE_BACKUP_REASON);
+    writer
+        .record_replaced(
+            "reapack",
+            ReplacedPackageRecord {
+                receipt: Some(reapack_old()),
+                replaced_by: Some(Version::parse("1.2.5").unwrap()),
+            },
+        )
+        .unwrap();
+    writer.copy_file(Some("reapack"), &plugin).unwrap();
+    writer.copy_file(Some("reapack"), &keymap).unwrap();
+    write(&plugin, b"reapack 1.2.5");
+    write(&resource.join(NEW_ONLY), b"new in 1.2.5");
+    fs::write(&keymap, text(&[OSARA_KEY, NEW_SCRIPT], "\r\n")).unwrap();
+    save_install_state(&resource, &records_with(Some(reapack_new()))).unwrap();
+    link_folder(&resource.join("loop"), &resource);
+    let set = set_path(&resource, id);
+    let mut manifest = load_backup_manifest(&set).unwrap().unwrap();
+    manifest
+        .files
+        .iter_mut()
+        .find(|entry| entry.original_path.file_name() == Some(KB.as_ref()))
+        .unwrap()
+        .original_path = PathBuf::from("loop").join(KB);
+    save_backup_manifest(&set, &manifest).unwrap();
+    let before = snapshot(dir.path());
+
+    let mut locked = false;
+    for item in [
+        RestoreItem::package(id, "reapack"),
+        RestoreItem::whole_set(id),
+    ] {
+        for allow_reaper_running in [false, true] {
+            for dry_run in [true, false] {
+                let options = RestoreRunOptions {
+                    dry_run,
+                    quick: false,
+                    allow_reaper_running,
+                };
+                let error = restore(&resource, &item, &options).unwrap_err();
+                let case = format!("{item:?} {options:?}");
+                let RestoreRefusal::TargetRefused { path, reason, .. } = refusal(&error) else {
+                    panic!("{case}: {error:?}");
+                };
+                assert_eq!(*reason, TargetRefusal::KeymapAmongVersionFiles, "{case}");
+                assert!(path.ends_with(PathBuf::from("loop").join(KB)), "{case}");
+                // A dry run takes no lock, so until a real run took one,
+                // not even its folder is there.
+                locked |= !dry_run;
+                if !locked {
+                    assert_eq!(snapshot(dir.path()), before, "{case}");
+                }
+            }
+        }
+    }
+    // Refused under the lock, a real run leaves only the lock's empty
+    // folder.
+    assert_eq!(snapshot_but_lock_folder(dir.path(), &resource), before);
 }
 
 /// A set without a manifest, restored whole, keeps the scripts the same way
@@ -965,6 +1140,18 @@ fn a_running_reaper_refuses_a_key_map_restore_as_any_restore() {
 
     let error = restore(&APPLY).unwrap_err();
     assert_eq!(refusal(&error).code(), "reaper-running");
+    // The refusal says the key map comes back, since letting REAPER run
+    // is refused for it: nobody is told to try that.
+    assert!(
+        matches!(
+            refusal(&error),
+            RestoreRefusal::ReaperRunning {
+                puts_keymap_back: true,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
     let planned = restore(&DRY_RUN).unwrap();
     assert_eq!(planned.status, RestoreStatus::WouldRestore);
     assert!(planned.preflight.passed);
@@ -972,6 +1159,47 @@ fn a_running_reaper_refuses_a_key_map_restore_as_any_restore() {
         super::tests::check_named(&planned, crate::preflight::REAPER_PROCESS_CHECK).status,
         crate::preflight::PreflightStatus::Warn
     );
+    assert_eq!(snapshot(dir.path()), before);
+
+    // A whole set that puts the key map back says so too, one without a
+    // manifest included, also among other backups of a run; a restore that
+    // leaves the key map alone doesn't.
+    write(
+        &set_path(&resource, "unix-300").join(KB),
+        text(&[OWN_KEY], "\r\n").as_bytes(),
+    );
+    sws_uninstalled(&resource, "uninstall-unix-400");
+    let before = snapshot(dir.path());
+    let keymap_back = |items: &[RestoreItem]| {
+        let error = restore_backups_with(
+            &resource,
+            items,
+            &APPLY,
+            &environment,
+            OutsideRestoreRules::default,
+            &ProgressReporter::noop(),
+            &CancelToken::new(),
+        )
+        .unwrap_err();
+        match refusal(&error) {
+            RestoreRefusal::ReaperRunning {
+                every_reaper_for,
+                puts_keymap_back,
+                ..
+            } if every_reaper_for.is_empty() => *puts_keymap_back,
+            other => panic!("{other:?}"),
+        }
+    };
+    assert!(keymap_back(&[RestoreItem::whole_set(SET)]));
+    assert!(keymap_back(&[RestoreItem::whole_set("unix-300")]));
+    assert!(keymap_back(&[
+        RestoreItem::package("uninstall-unix-400", "sws"),
+        RestoreItem::keymap(SET),
+    ]));
+    assert!(!keymap_back(&[RestoreItem::package(
+        "uninstall-unix-400",
+        "sws"
+    )]));
     assert_eq!(snapshot(dir.path()), before);
 }
 
@@ -1073,5 +1301,6 @@ fn key_map_rows_and_runs_give_equal_refusals() {
             backup_id: "uninstall-unix-500".to_string()
         }
     );
-    assert_eq!(snapshot(dir.path()), before);
+    // A place refused under the lock leaves only the lock's empty folder.
+    assert_eq!(snapshot_but_lock_folder(dir.path(), &resource), before);
 }

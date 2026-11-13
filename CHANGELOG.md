@@ -89,24 +89,29 @@ from this file and posts it as the GitHub release body.
   to bring back is refused the same way.
 - `rabbit restore-backup` can now go back to the version a package had
   before an update, from the backup that update made: one package with
-  `--package <id>`, or every package of that backup in turn without it,
-  each all or nothing on its own. Only that package's entry in RABBIT's
-  records changes: it becomes the one from before the update, on the
-  channel the package is on now. Files of the newer version that the
-  earlier one doesn't have move into a new backup, with the files the
-  restore replaces, so restoring that backup goes forward again the same
-  way. A file of the newer version that was edited since stays where it
-  is, and the command says so. When RABBIT hadn't installed the copy the
-  update replaced, the package's entry goes, and the newer version's other
-  files stay where they are, with a copy of each in the new backup,
-  because RABBIT can't tell which of them that copy had too. Where the
-  package's uninstall needs its entry, as FFmpeg's does, the command says
-  that RABBIT can't uninstall it until it is installed again. RABBIT
-  refuses, and changes nothing, when part of the earlier version is
-  neither in the backup nor on disk, when it can't tell which version the
-  backup holds, when a file of the newer version is at a place it couldn't
-  put it back to from the new backup, or while another package whose
-  install removes this one is installed.
+  `--package <id>`, or each package of that backup in turn without it,
+  each all or nothing. Only updates RABBIT installs file by file make such
+  a backup, not those by a vendor's installer, such as REAPER's, or by
+  OSARA's archive on a Mac. Only that package's entry in RABBIT's records
+  changes, to the one from before the update, on the package's current
+  channel. Files of the newer version that the earlier one lacks move into
+  a new backup with the files the restore replaces, so restoring that
+  backup goes forward again. A newer file you edited since stays, and the
+  command says so. If RABBIT hadn't installed the copy the update replaced,
+  the package's entry goes and the newer files stay, each copied into the
+  new backup; for a package whose uninstall needs that entry, such as
+  FFmpeg, the command then says RABBIT can't uninstall it until it is
+  installed again. RABBIT refuses, and changes nothing, when part of the
+  earlier version is neither in the backup nor on disk, when it can't tell
+  which version the backup holds, when a newer file is somewhere it
+  couldn't put back from the new backup, while another package whose
+  install removes this one is installed, or when the backup's record of
+  the earlier version lists a file outside the folders RABBIT installs
+  into. With `--json`, restoring a whole update's backup reports each
+  package under `swaps`, each with its own `status`, `actions` and
+  `before_restore_set_id`; the top-level `actions` is then empty, and the
+  top-level `status` is `partly-restored` when some packages went back and
+  others didn't.
 - Restoring a key map from a backup now puts your old key map back and
   keeps the scripts ReaPack registered since in REAPER's Actions list: the
   script lines of the key map it replaces that the old one doesn't have go
@@ -122,36 +127,31 @@ from this file and posts it as the GitHub release body.
   same way, again keeping the scripts. REAPER must be closed:
   `--allow-reaper-running` is refused for a restore that puts a key map
   back, because REAPER may save its own key map when it quits, over the one
-  restored.
+  restored, and when REAPER is open, the message about it says only to
+  close it.
 - `rabbit delete-backup` deletes backup sets for good, to free the room they
   take. Name each with `--backup-id`, exactly as `rabbit backups` lists it.
-  Without `--apply` it only shows what would go: each set's size, and which
-  backups in it are the only copy of something, such as a package you
-  uninstalled or your old key map. A set goes whole, even when it holds
-  several backups, and is deleted even when it holds the only copy of
-  something. RABBIT first moves the set into `RABBIT\backups-deleting`, so no
+  Without `--apply` it only shows each set's size, and which backups in it
+  are the only copy of something, such as a package you uninstalled or your
+  old key map. A set always goes whole, even when it holds the only copy of
+  something. RABBIT first moves it into `RABBIT\backups-deleting`, so no
   restore finds it any more, then removes what is in it. It never follows a
-  symbolic link or junction: a link in a set is removed, not what it leads
-  to, and nothing outside RABBIT's backup folders changes, besides the
-  report a real run saves in `RABBIT\logs`, also when a set couldn't be
-  deleted or every set was already gone; a run a check refuses before
-  anything changes saves none. What can't be removed stays in
-  `RABBIT\backups-deleting` as an unfinished deletion, which `rabbit
-  backups` lists with the command that finishes it: name its id again. On
-  Windows, a set with a file open in another program, such as Explorer or an
-  antivirus scan, isn't deleted, and nothing of it changes. A set that
-  belongs to another account, as one made with `sudo` on a Mac, isn't
-  deleted, and on a Mac `--apply` doesn't run as root. Ctrl+C stops the run
-  once the set it is on is done. The exit code is 0 when every set you named
-  is gone: deleted now, an unfinished deletion finished, or already gone, so
-  a script can run twice; 2 when one can't be deleted, because its id isn't
-  one RABBIT gives a backup set, it is a link, or it belongs to another
-  account, and then nothing changes; and 1 when a set couldn't be deleted or
-  the run was stopped, another RABBIT is working on the same REAPER, or
-  there is no folder at `--resource-path`, as after a typo. `--json` prints
-  the report, with a code for each set that can't be deleted, and a refusal
-  of the whole run, such as the lock, as JSON with its code. `rabbit
-  backups` now ends with the command that deletes a set.
+  symbolic link or junction: it removes the link, not what it leads to.
+  Nothing outside its backup folders changes but RABBIT's lock and the
+  report in `RABBIT\logs`. What can't be removed stays as an unfinished
+  deletion: `rabbit backups` lists it, and naming its id again finishes it.
+  On Windows, a set with a file open in another program, such as Explorer
+  or an antivirus scan, isn't deleted, and nothing of it changes. A set of
+  another account isn't deleted, and on a Mac `--apply` doesn't run as
+  root. Ctrl+C stops the run once the set it is on is done. The exit code
+  is 0 when every set you named is gone, already gone included, so a script
+  can run twice; 2 when one can't be deleted because of its id, a link or
+  its owner, and then nothing changes; and 1 when a set couldn't be
+  deleted, the run was stopped, or an error came first, such as another
+  RABBIT working on the same REAPER, root on a Mac or no folder at
+  `--resource-path`. A run a check refuses saves no report. `--json` prints
+  the report, or a refusal of the whole run, with codes. `rabbit backups`
+  now ends with the command that deletes a set.
 - `rabbit components` says for each package whether RABBIT can uninstall it,
   and if not, why.
 - OSARA can be uninstalled too, from the wizard's **Uninstall** tab and with
@@ -334,8 +334,10 @@ from this file and posts it as the GitHub release body.
   `--save-report` still saves one for a dry run, under a name of its own,
   never over another report. When the restore replaced files, the report,
   the command's text and its `--json` output name the backup RABBIT made of
-  them: restoring that backup puts those files back. Files the restore
-  added, RABBIT's records and REAPER's language stay as they are.
+  them: restoring that backup puts those files back. After an uninstall's
+  backup, files the restore added, RABBIT's records and REAPER's language
+  stay as they are; after an update's backup, restoring it goes forward to
+  the newer version again, records included.
 - A restore is now all or nothing. Before, when a file failed partway, the
   files before it stayed restored, RABBIT's records stayed as they were, and
   no report was saved. Now, when a file can't be restored, or RABBIT's
@@ -366,8 +368,9 @@ from this file and posts it as the GitHub release body.
   map. It also says when each set was made, in your local time and in UTC,
   what made it, how big it is, and whether each backup can be restored,
   with the exact `rabbit restore-backup` command that does it, or why not.
-  For an update's backup whose packages can all go back, it also gives the
-  command that restores them together. It no longer lists every file.
+  For an update's backup of more than one package, when all of them can go
+  back, it also gives the command that restores them together. It no longer
+  lists every file.
   `--backup-id` shows one backup set with each file in it, where it came
   from and whether its copy finished.
   `--json` keeps its fields and adds `kind`, `created_unix`, `size`,
@@ -389,8 +392,7 @@ from this file and posts it as the GitHub release body.
   the resource folder, the CLAP folder and, for the JAWS scripts' own files,
   JAWS's settings folder, and doesn't run while an install into the same
   REAPER is running. Backups made from now on note each file before copying
-  it, so even a backup from an interrupted run can be restored, except, for
-  now, one from an update.
+  it, so even a backup from an interrupted run can be restored.
 - `rabbit backups` no longer fails when one backup's manifest is damaged.
   It lists every backup and shows a warning on the damaged one.
 - `rabbit install-extension --apply` no longer runs while another copy of

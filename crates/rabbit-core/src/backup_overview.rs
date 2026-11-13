@@ -26,7 +26,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -37,12 +37,13 @@ use crate::rollback::{
     BACKUP_MANIFEST_FILE, BEFORE_RESTORE_REASON, BackupEntryState, BackupEnvironment,
     BackupManifest, BackupManifestFile, BackupSet, DELETING_DIR, KEYMAP_BACKUP_REASON,
     KeymapOrigin, OutsideRestoreRules, RECORDS_BACKUP_REASON, UPDATE_BACKUP_REASON,
-    backup_id_is_well_formed, backups_root, copy_in_set, earlier_entry_in, files_only_in_newer,
-    find_backup_set, first_file_not_kept, inside_place_by_text, is_keymap_entry,
-    is_outside_file_in_layout, is_real_folder, is_receipt, is_receipt_entry, is_set_bookkeeping,
-    is_version_entry, load_backup_manifest, manifest_holds_receipt, manifest_refusal,
-    others_of_its_group_installed, read_receipt_copy, receipt_copy_of, receipt_place_by_text,
-    restore_place_by_text, same_place, set_to_restore, swap_package_ids, takes_by_swap,
+    backup_id_is_well_formed, backups_root, copy_in_set, earlier_entry_in, earlier_file_refused,
+    files_only_in_newer, find_backup_set, first_file_not_kept, inside_place_by_text,
+    is_keymap_entry, is_outside_file_in_layout, is_real_folder, is_receipt, is_receipt_entry,
+    is_set_bookkeeping, is_version_entry, load_backup_manifest, manifest_holds_receipt,
+    manifest_refusal, others_of_its_group_installed, read_receipt_copy, receipt_copy_of,
+    receipt_place_by_text, restore_place_by_text, same_place, set_to_restore, swap_package_ids,
+    takes_by_swap,
 };
 use crate::uninstall::execute::UNINSTALL_BACKUP_REASON;
 use crate::version::Version;
@@ -304,12 +305,49 @@ pub struct BackupEntry {
 pub enum SetFingerprint {
     Manifest {
         length: u64,
-        modified: Option<SystemTime>,
+        modified: Option<ModifiedTime>,
     },
     Contents {
         file_count: u64,
         size: u64,
     },
+}
+
+/// When a file was last modified, as whole seconds since 1970-01-01 UTC,
+/// negative before it, and the nanoseconds past that second. A file's time
+/// may be any time its file system holds, one before 1970 included, as
+/// after a copy that zeroed it, and every such time can be written as JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModifiedTime {
+    pub seconds: i64,
+    pub nanos: u32,
+}
+
+impl ModifiedTime {
+    /// `time` as seconds and nanoseconds since 1970, or `None` for one too
+    /// far from 1970 for 64-bit seconds.
+    pub fn of(time: SystemTime) -> Option<Self> {
+        match time.duration_since(UNIX_EPOCH) {
+            Ok(after) => Some(Self {
+                seconds: i64::try_from(after.as_secs()).ok()?,
+                nanos: after.subsec_nanos(),
+            }),
+            Err(before) => {
+                let before = before.duration();
+                let seconds = i64::try_from(before.as_secs()).ok()?;
+                Some(match before.subsec_nanos() {
+                    0 => Self {
+                        seconds: -seconds,
+                        nanos: 0,
+                    },
+                    nanos => Self {
+                        seconds: -seconds - 1,
+                        nanos: 1_000_000_000 - nanos,
+                    },
+                })
+            }
+        }
+    }
 }
 
 /// One set in the overview.
@@ -1121,7 +1159,7 @@ fn manifest_fingerprint(set_path: &Path) -> Option<SetFingerprint> {
     let metadata = fs::symlink_metadata(set_path.join(BACKUP_MANIFEST_FILE)).ok()?;
     metadata.is_file().then(|| SetFingerprint::Manifest {
         length: metadata.len(),
-        modified: metadata.modified().ok(),
+        modified: metadata.modified().ok().and_then(ModifiedTime::of),
     })
 }
 
@@ -1637,13 +1675,16 @@ impl Judge<'_> {
         };
         // A restore puts the version's files back, and moves the newer
         // version's own files out of the way; it stops before anything
-        // changes at a place it would refuse for either.
+        // changes at a place it would refuse for either, or for a file the
+        // earlier entry records at a place RABBIT never installs to.
         let plan = match (status.can_restore(), &earlier) {
-            (true, EarlierEntry::Known(earlier)) => {
-                Some(self.plan_targets(set, &item).and_then(|written| {
-                    self.newer_files_can_move(set, package_id, *earlier, &written)
-                }))
-            }
+            (true, EarlierEntry::Known(earlier)) => Some(
+                self.plan_targets(set, &item)
+                    .and_then(|written| {
+                        self.newer_files_can_move(set, package_id, *earlier, &written)
+                    })
+                    .and_then(|()| self.earlier_files_can_be_recorded(set, package_id, *earlier)),
+            ),
             _ => None,
         };
         let refused = plan.as_ref().and_then(|plan| plan.as_ref().err().cloned());
@@ -1705,6 +1746,34 @@ impl Judge<'_> {
             })?;
         }
         Ok(())
+    }
+
+    /// Whether every file `earlier`, the entry `package_id` would go back
+    /// to, records sits at a place RABBIT would install to, judged from the
+    /// text as a restore judges it (see [`earlier_file_refused`]). `Err` is
+    /// the refusal of the first one that doesn't
+    /// ([`RestoreRefusal::EarlierFileRefused`]).
+    fn earlier_files_can_be_recorded(
+        &self,
+        set: &BackupSetOverview,
+        package_id: &str,
+        earlier: Option<&PackageReceipt>,
+    ) -> std::result::Result<(), RestoreRefusal> {
+        let Some(earlier) = earlier else {
+            return Ok(());
+        };
+        match earlier_file_refused(self.resource_path, package_id, earlier, || {
+            self.outside
+                .get_or_init(|| (self.environment.outside_rules)(self.resource_path))
+        }) {
+            Some((path, reason)) => Err(RestoreRefusal::EarlierFileRefused {
+                backup_id: set.id.clone(),
+                package_id: package_id.to_string(),
+                path,
+                reason: Box::new(reason),
+            }),
+            None => Ok(()),
+        }
     }
 
     /// Backup plan 3.4 for an earlier version, by the swap's rules (6.4):
@@ -1878,7 +1947,8 @@ fn refused_path_of(refusal: &RestoreRefusal) -> Option<PathBuf> {
             ..
         } => None,
         RestoreRefusal::TargetRefused { path, .. }
-        | RestoreRefusal::NewerFileRefused { path, .. } => Some(path.clone()),
+        | RestoreRefusal::NewerFileRefused { path, .. }
+        | RestoreRefusal::EarlierFileRefused { path, .. } => Some(path.clone()),
         _ => None,
     }
 }
