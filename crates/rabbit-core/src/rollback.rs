@@ -68,9 +68,10 @@ pub(crate) const RECORDS_BACKUP_REASON: &str = "unattended-receipt-update";
 /// before OSARA's key map replaced it.
 pub(crate) const KEYMAP_BACKUP_REASON: &str = "osara-keymap-replacement";
 
-/// The folder beside `RABBIT/backups` where delete (still to come) moves a
-/// set before it removes anything, so a restore never finds half a set.
-/// Restore and the overview only look here, and never create it.
+/// The folder beside `RABBIT/backups` where delete moves a set before it
+/// removes anything, so a restore never finds half a set (see
+/// [`crate::backup_delete`]). Restore and the overview only look here, and
+/// never create it; only delete does.
 pub(crate) const DELETING_DIR: &str = "backups-deleting";
 
 /// One backup set as `rabbit backups --json` prints it, built from the
@@ -2524,7 +2525,7 @@ fn keymap_needs_reaper_closed(backup_id: &str) -> RabbitError {
 /// differs from `listed`, the one its item names
 /// ([`RestoreRefusal::ChangedSinceListed`]): what the caller was shown of
 /// it may no longer hold. Nothing is checked without one.
-fn refuse_changed_since_listed(
+pub(crate) fn refuse_changed_since_listed(
     backup_id: &str,
     backup_path: &Path,
     listed: Option<&SetFingerprint>,
@@ -2667,9 +2668,9 @@ fn status_of_swaps(swaps: &[RestoreReportItem]) -> RestoreStatus {
 /// link or junction where RABBIT keeps its backups
 /// ([`RestoreRefusal::IsLink`]), and the lock another RABBIT holds
 /// ([`RestoreRefusal::LockHeld`]). Anything else stays as it is. Only for
-/// an error from before a restore changes anything (see
-/// [`restore_backup_set_with`]).
-fn as_restore_refusal(error: RabbitError) -> RabbitError {
+/// an error from before a restore, or a delete, changes anything (see
+/// [`restore_backup_set_with`] and [`crate::backup_delete`]).
+pub(crate) fn as_restore_refusal(error: RabbitError) -> RabbitError {
     match error {
         RabbitError::BackupPathIsLink { path } => RestoreRefusal::IsLink { path }.into(),
         RabbitError::PackageInstallInProgress { lock_path, pid } => {
@@ -6171,6 +6172,9 @@ pub(crate) struct FoundBackupSet {
     /// differs from the id only in upper and lower case. It is only named,
     /// so the person learns the set is still there, and never used.
     pub(crate) other_case: Option<String>,
+    /// When `deleting` is `None`, the same for an unfinished deletion in
+    /// `RABBIT/backups-deleting`. Only a delete names it.
+    pub(crate) deleting_other_case: Option<String>,
 }
 
 /// Find the set `backup_id` names, in `RABBIT/backups` and in
@@ -6197,11 +6201,12 @@ pub(crate) fn find_backup_set(resource_path: &Path, backup_id: &str) -> Result<F
         return Ok(FoundBackupSet::default());
     }
     let (set, other_case) = find_folder_named(&rabbit.join("backups"), backup_id)?;
-    let (deleting, _) = find_folder_named(&rabbit.join(DELETING_DIR), backup_id)?;
+    let (deleting, deleting_other_case) = find_folder_named(&rabbit.join(DELETING_DIR), backup_id)?;
     Ok(FoundBackupSet {
         set,
         deleting,
         other_case,
+        deleting_other_case,
     })
 }
 
@@ -6249,7 +6254,7 @@ pub(crate) fn set_to_restore(resource_path: &Path, backup_id: &str) -> Result<Pa
 /// spaces and, without them, is a well-formed id that names a set in
 /// `RABBIT/backups` exactly (see [`find_backup_set`]). The set is only
 /// named, never used.
-fn set_without_dots_or_spaces_at_the_end(
+pub(crate) fn set_without_dots_or_spaces_at_the_end(
     resource_path: &Path,
     backup_id: &str,
 ) -> Option<RestoreRefusal> {
@@ -6274,7 +6279,10 @@ fn set_without_dots_or_spaces_at_the_end(
 /// differs from `name` only in upper and lower case and could be a set's,
 /// the first by byte order if there are several. It is only named, never
 /// used.
-fn find_folder_named(folder: &Path, name: &str) -> Result<(Option<PathBuf>, Option<String>)> {
+pub(crate) fn find_folder_named(
+    folder: &Path,
+    name: &str,
+) -> Result<(Option<PathBuf>, Option<String>)> {
     if !is_real_folder(folder)? {
         return Ok((None, None));
     }
@@ -10683,6 +10691,7 @@ mod tests {
                 set: None,
                 deleting: Some(deleting.clone()),
                 other_case: None,
+                deleting_other_case: None,
             }
         );
 
@@ -10698,6 +10707,7 @@ mod tests {
                 set: Some(set.clone()),
                 deleting: Some(deleting.clone()),
                 other_case: None,
+                deleting_other_case: None,
             }
         );
         let unfinished = snapshot(&deleting);
@@ -11836,7 +11846,7 @@ mod tests {
 
 #[cfg(test)]
 #[path = "restore_run_tests.rs"]
-mod restore_run_tests;
+pub(crate) mod restore_run_tests;
 
 #[cfg(test)]
 #[path = "swap_tests.rs"]

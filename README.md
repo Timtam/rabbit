@@ -890,6 +890,82 @@ what it removes. Make it a real folder again, with the backups inside it,
 first. A restore also never writes through a link or junction that leads out of
 the resource folder or into `RABBIT`.
 
+### Delete backups
+
+`delete-backup` deletes backup sets for good, to free the room they take. Name
+each set with `--backup-id`, exactly as `rabbit backups` lists it, upper and
+lower case included. Like the other commands, it only shows what it would do
+until you add `--apply`:
+
+```
+# See what would go, how big it is, and what it holds the only copy of:
+RABBIT delete-backup --resource-path "%APPDATA%\REAPER" \
+     --backup-id uninstall-unix-1234567890
+
+# Delete two backup sets:
+RABBIT delete-backup --resource-path "%APPDATA%\REAPER" \
+     --backup-id uninstall-unix-1234567890 --backup-id unix-1234567890 --apply
+```
+
+- **Whole sets, for good.** Each set goes whole, in the order you named them.
+  When it holds several backups, such as two packages one uninstall removed,
+  they all go. Deleted backups don't go to the Recycle Bin or the Trash, and
+  can't be restored. A set goes even when it holds the only copy of
+  something, such as a package you uninstalled or the key map you had before
+  OSARA's replaced it: the dry run says when it does.
+- **Moved first, then removed.** RABBIT first moves the set into
+  `RABBIT\backups-deleting`, so no restore finds it any more, then removes
+  what is in it. It never follows a symbolic link or junction: a link in a set
+  is removed, not what it leads to. Nothing outside `RABBIT\backups` and
+  `RABBIT\backups-deleting` changes, besides the report and RABBIT's lock. If
+  something in a set can't be removed, it stays in `RABBIT\backups-deleting`
+  as an unfinished deletion. `rabbit backups` lists it with the command that
+  finishes it: name its id again. A folder in a cloud folder, such as a
+  OneDrive placeholder, is no link, and is deleted like any other.
+- **Files in use (Windows).** Windows doesn't let RABBIT move a set while a
+  file in it is open in another program, such as Explorer or an antivirus
+  scan. That set isn't deleted, nothing of it changes, and the command says it
+  is in use: close the program and run the command again.
+- **REAPER may stay open.** Deleting a backup never touches REAPER's files.
+  Another RABBIT working on the same REAPER stops it before anything changes.
+- **Ctrl+C stops between sets.** The set being deleted finishes, and the rest
+  stay as they are. Press Ctrl+C again to stop at once; what is left of that
+  set stays as an unfinished deletion.
+- **Reports.** `--apply` saves a report under `RABBIT\logs`, also when a set
+  couldn't be deleted, the run was stopped or every set was already gone. A
+  run that a check stopped before anything changed saves none: one with exit
+  code 2, or one stopped by another RABBIT or by root on a Mac. Neither does
+  a run in a REAPER folder with no `RABBIT` folder, where there is nothing to
+  delete. `--report-path` writes the report where you say, in a dry run and a
+  refused run too. `--json` prints the report; a set that can't be deleted
+  has the code of why (`invalid-id`, `is-link`, `not-yours` and so on), and
+  a refusal of the whole run, such as another RABBIT working on the same
+  REAPER, is printed as JSON with its code (`lock-held`, `as-root`).
+- **A wrong resource folder.** If there is no folder at `--resource-path`, as
+  after a typo, the command says so and exits with 1, instead of counting
+  every set as already gone.
+
+There is no `--all` and no way to delete by kind or age: a script can pick ids
+from `rabbit backups --json`. The exit code follows one table for the dry run
+and `--apply`:
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Every backup set you named is gone: deleted now, an unfinished deletion finished, or already gone, so a script can run twice. In a dry run: every one can be deleted. |
+| 1 | A backup set couldn't be deleted, or the run was stopped; the report names what went before it. Also when an error stopped RABBIT before anything changed, such as another RABBIT working on the same REAPER, `--apply` run as root on a Mac, or no folder at `--resource-path`; the message says which. |
+| 2 | A backup set you named can't be deleted: its id isn't one RABBIT gives a backup set, it is a symbolic link or junction, or it belongs to another account. Nothing changed. |
+
+On a Mac, run `delete-backup` as yourself: run as root, as with `sudo`,
+`--apply` refuses and changes nothing. A backup set that belongs to another
+account, such as one `sudo` made for root, isn't deleted, and `rabbit backups`
+says it belongs to another account. To remove one yourself, choose Go > Go to
+Folder in Finder, enter the backups folder, such as
+`~/Library/Application Support/REAPER/RABBIT/backups`, move the backup set's
+folder to the Trash, and empty the Trash. For an unfinished deletion, the
+folder is `RABBIT/backups-deleting` instead; the message names the right one.
+Finder asks for an administrator's name and password, because the folder
+belongs to another account.
+
 ### Maintain
 
 ```
@@ -898,6 +974,8 @@ RABBIT backups --resource-path "%APPDATA%\REAPER" \
      --backup-id uninstall-unix-1234567890                 # one set, file by file
 RABBIT restore-backup --resource-path "%APPDATA%\REAPER" \
      --backup-id uninstall-unix-1234567890 --apply         # restore one set
+RABBIT delete-backup --resource-path "%APPDATA%\REAPER" \
+     --backup-id uninstall-unix-1234567890 --apply         # delete one set
 ```
 
 `rabbit backups` lists the backup sets newest first. For each set it says its
@@ -921,7 +999,9 @@ true. Listing
 changes nothing and hashes no file. It reads only the backup sets' manifests,
 RABBIT's records and file sizes, never a backed-up file, so it is quick even
 with FFmpeg's backups. A restore command is printed only for a set whose name
-needs no quotes, as RABBIT's own names don't.
+needs no quotes, as RABBIT's own names don't. The listing ends with the
+`delete-backup` command that deletes a set (see "Delete backups" above), and an
+unfinished deletion's line gives the command that finishes it.
 
 ### Update RABBIT itself
 

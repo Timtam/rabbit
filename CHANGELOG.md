@@ -123,6 +123,35 @@ from this file and posts it as the GitHub release body.
   `--allow-reaper-running` is refused for a restore that puts a key map
   back, because REAPER may save its own key map when it quits, over the one
   restored.
+- `rabbit delete-backup` deletes backup sets for good, to free the room they
+  take. Name each with `--backup-id`, exactly as `rabbit backups` lists it.
+  Without `--apply` it only shows what would go: each set's size, and which
+  backups in it are the only copy of something, such as a package you
+  uninstalled or your old key map. A set goes whole, even when it holds
+  several backups, and is deleted even when it holds the only copy of
+  something. RABBIT first moves the set into `RABBIT\backups-deleting`, so no
+  restore finds it any more, then removes what is in it. It never follows a
+  symbolic link or junction: a link in a set is removed, not what it leads
+  to, and nothing outside RABBIT's backup folders changes, besides the
+  report a real run saves in `RABBIT\logs`, also when a set couldn't be
+  deleted or every set was already gone; a run a check refuses before
+  anything changes saves none. What can't be removed stays in
+  `RABBIT\backups-deleting` as an unfinished deletion, which `rabbit
+  backups` lists with the command that finishes it: name its id again. On
+  Windows, a set with a file open in another program, such as Explorer or an
+  antivirus scan, isn't deleted, and nothing of it changes. A set that
+  belongs to another account, as one made with `sudo` on a Mac, isn't
+  deleted, and on a Mac `--apply` doesn't run as root. Ctrl+C stops the run
+  once the set it is on is done. The exit code is 0 when every set you named
+  is gone: deleted now, an unfinished deletion finished, or already gone, so
+  a script can run twice; 2 when one can't be deleted, because its id isn't
+  one RABBIT gives a backup set, it is a link, or it belongs to another
+  account, and then nothing changes; and 1 when a set couldn't be deleted or
+  the run was stopped, another RABBIT is working on the same REAPER, or
+  there is no folder at `--resource-path`, as after a typo. `--json` prints
+  the report, with a code for each set that can't be deleted, and a refusal
+  of the whole run, such as the lock, as JSON with its code. `rabbit
+  backups` now ends with the command that deletes a set.
 - `rabbit components` says for each package whether RABBIT can uninstall it,
   and if not, why.
 - OSARA can be uninstalled too, from the wizard's **Uninstall** tab and with

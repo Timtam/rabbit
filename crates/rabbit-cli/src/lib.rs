@@ -6,6 +6,10 @@ use rabbit_core::artifact::{
     ArtifactDescriptor, CachedArtifact, default_cache_dir, download_artifacts,
     resolve_latest_artifacts_on,
 };
+use rabbit_core::backup_delete::{
+    DeleteItem, DeleteReport, DeleteReportItem, DeleteRunOptions, DeleteStatus, NotDeletedReason,
+    delete_backups,
+};
 use rabbit_core::backup_overview::{
     BackupEntry, BackupItem, BackupOverview, BackupSetKind, BackupSetOverview, BackupSize,
     BackupStatus, RestoreScope, backup_overview, backup_overview_of,
@@ -231,7 +235,7 @@ enum Command {
     /// List the backups RABBIT kept for a REAPER, newest first: when each
     /// backup set was made, what made it, its size, and for each backup in
     /// it whether it can be restored, with the command that restores it or
-    /// why not. Changes nothing.
+    /// why not. Changes nothing. `delete-backup` deletes a set.
     Backups {
         /// REAPER's resource folder — the one holding `reaper.ini`. Usually
         /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
@@ -303,6 +307,36 @@ enum Command {
         /// directory. A run with --apply always saves one there.
         #[arg(long)]
         save_report: bool,
+        /// Print the result as JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete backup sets for good, each whole, in the order given. Without
+    /// --apply it only shows what would go: each set's size, and which
+    /// backups in it are the only copy of something.
+    #[command(after_help = DELETE_BACKUP_AFTER_HELP)]
+    DeleteBackup {
+        /// REAPER's resource folder — the one holding `reaper.ini`. Usually
+        /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
+        /// Support/REAPER` on macOS; for a portable install it is the REAPER
+        /// folder itself.
+        #[arg(long)]
+        resource_path: PathBuf,
+        /// A backup set to delete, as listed by `backups`, upper and lower
+        /// case included. Repeatable. The id of an unfinished deletion
+        /// finishes it.
+        #[arg(long = "backup-id", required = true)]
+        backup_id: Vec<String>,
+        /// Actually delete. Without it the command is a dry run that only
+        /// reports what it would delete.
+        #[arg(long)]
+        apply: bool,
+        /// Write the JSON run report to exactly this path, in a dry run
+        /// too. A run with --apply also saves one under the resource
+        /// folder's `RABBIT` directory, when there is one, unless a check
+        /// stopped the run before anything changed.
+        #[arg(long)]
+        report_path: Option<PathBuf>,
         /// Print the result as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
@@ -730,6 +764,34 @@ also when a removal finishes only after a restart; 2 when one of them can't \
 be uninstalled, and then nothing changes; 1 when a removal failed or was \
 stopped, or the administrator prompt was declined or cancelled.";
 
+/// Shown below `rabbit delete-backup --help`: what a delete takes, what
+/// becomes of what it can't remove, and the exit codes.
+const DELETE_BACKUP_AFTER_HELP: &str = "\
+A backup set goes whole: when it holds several backups, such as two packages \
+one uninstall removed, they all go. Deleted backups are gone for good; they \
+don't go to the Recycle Bin or the Trash. A set is deleted even when it holds \
+the only copy of something; the dry run says when it does.
+
+RABBIT first moves the set into the backups-deleting folder beside its \
+backups, so no restore finds it any more, then removes what is in it. It \
+never follows a symbolic link or junction: a link in a set is removed, not \
+what it leads to. What can't be removed stays there as an unfinished \
+deletion, which `rabbit backups` lists; naming its id again finishes it. \
+REAPER may stay open.
+
+On a Mac, --apply doesn't run as root: run rabbit as yourself, not with sudo. \
+A backup set that belongs to another account, such as one sudo made, isn't \
+deleted; the message says how to remove it in Finder.
+
+Exit codes: 0 when every backup set named is gone: deleted, an unfinished \
+deletion finished, or already gone, so a script can run twice; in a dry run, \
+when every one can be deleted. 2 when one of them can't be deleted, because \
+its id isn't one RABBIT gives a backup set, it is a symbolic link or \
+junction, or it belongs to another account; then nothing changes. 1 when a \
+set couldn't be deleted or the run was stopped, or an error stopped RABBIT \
+before anything changed, such as another RABBIT working on the same REAPER, \
+or --apply run as root on a Mac.";
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum OutputFormat {
     Text,
@@ -844,6 +906,7 @@ fn run_with(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         command @ Command::InitResource { .. } => run_init_resource(command),
         command @ Command::Backups { .. } => run_backups(command),
         command @ Command::RestoreBackup { .. } => run_restore_backup(command),
+        command @ Command::DeleteBackup { .. } => run_delete_backup(command),
         command @ Command::InstallExtension { .. } => run_install_extension(command),
         command @ Command::ApplyPackages { .. } => run_apply_packages(command),
         command @ Command::Setup { .. } => run_setup(command),
@@ -1475,6 +1538,364 @@ fn restore_refusal_text(refusal: &RestoreRefusal, resource_path: &Path) -> Strin
              --allow-reaper-running."
         ),
         other => other.to_string(),
+    }
+}
+
+fn run_delete_backup(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let code = delete_backup(command)?;
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+/// What the first Ctrl+C during `delete-backup --apply` prints. The run
+/// reads the request before each backup set.
+const DELETE_BACKUP_CTRL_C_NOTICE: &str = "\nStopping once the backup set being deleted now is \
+     done. Press Ctrl+C again to stop at once.\n";
+
+/// Run `delete-backup` up to its exit code: delete the sets, or in a dry
+/// run check them, save the report where asked, and print it. An error
+/// before anything changed, such as the lock or root on a Mac, is `Err`,
+/// which exits with 1.
+fn delete_backup(command: Command) -> Result<i32, Box<dyn std::error::Error>> {
+    let Command::DeleteBackup {
+        resource_path,
+        backup_id,
+        apply,
+        report_path,
+        json,
+    } = command
+    else {
+        unreachable!("dispatched as Command::DeleteBackup");
+    };
+    // A set stopped partway stays as an unfinished deletion, which the next
+    // run finishes, but stopping between sets leaves nothing to finish. So
+    // with --apply the first Ctrl+C asks the run to stop once the set it is
+    // on is done, and a second one ends RABBIT as usual.
+    let ctrl_c = apply
+        .then(|| rabbit_platform::catch_ctrl_c(DELETE_BACKUP_CTRL_C_NOTICE).ok())
+        .flatten();
+    let cancel = ctrl_c.as_ref().map_or_else(CancelToken::new, |guard| {
+        CancelToken::watching(guard.flag())
+    });
+    let items: Vec<DeleteItem> = backup_id.iter().map(|id| DeleteItem::new(id)).collect();
+    let report = match delete_backups(
+        &resource_path,
+        &items,
+        &DeleteRunOptions { dry_run: !apply },
+        &ProgressReporter::noop(),
+        &cancel,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            // A refusal of the whole run, such as the lock, has a code too,
+            // which a script reading --json gets on stdout; the words go to
+            // stderr as for every error, and the exit code stays 1.
+            if let (true, rabbit_core::RabbitError::RestoreRefused(refusal)) = (json, &error) {
+                println!("{}", delete_refusal_json(refusal)?);
+            }
+            return Err(cli_delete_error(error, &resource_path));
+        }
+    };
+    drop(ctrl_c);
+    save_cli_report(
+        &resource_path,
+        report.saved_report.as_ref(),
+        report_path,
+        false,
+        "delete-backup",
+        &report,
+    )?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", delete_backup_report_text(&report));
+    }
+    Ok(delete_backup_exit_code(&report))
+}
+
+/// The exit code of a delete, the same table for the dry run and
+/// `--apply`, as for `uninstall`:
+/// - 2: a set named can't be deleted, because of its id, a link or its
+///   owner, and nothing changed;
+/// - 1: a set couldn't be deleted, or the run was stopped;
+/// - 0: every set named is gone, or in a dry run can be deleted: deleted,
+///   an unfinished deletion finished, or already gone.
+///
+/// An error before anything changed, such as another RABBIT holding the
+/// lock, is returned as `Err` before this is asked, and exits with 1.
+fn delete_backup_exit_code(report: &DeleteReport) -> i32 {
+    if report.refused {
+        2
+    } else if report.stopped || report.sets.iter().any(|set| !set.status.is_gone()) {
+        1
+    } else {
+        0
+    }
+}
+
+/// What `rabbit delete-backup --apply` says when RABBIT runs as root on
+/// macOS, as under sudo: the engine refuses before anything happens.
+const DELETE_AS_ROOT_TEXT: &str = "rabbit delete-backup --apply doesn't run as root, as it \
+     would under sudo: RABBIT's folder of deletions, its lock and its report would be root's, and \
+     root could remove what permissions protect. Run it again as yourself, without sudo.";
+
+/// The JSON `delete-backup --json` prints for a refusal of the whole run,
+/// such as another RABBIT holding the lock: the refusal with its code.
+fn delete_refusal_json(refusal: &RestoreRefusal) -> serde_json::Result<String> {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "refused": true,
+        "refusal": refusal,
+    }))
+}
+
+/// A delete's error as the CLI prints it: a refusal in the words of
+/// [`delete_refusal_text`], a resource folder that can't be opened, as
+/// after a typo, in words that say so, anything else as it is.
+fn cli_delete_error(
+    error: rabbit_core::RabbitError,
+    resource_path: &Path,
+) -> Box<dyn std::error::Error> {
+    match error {
+        rabbit_core::RabbitError::RestoreRefused(refusal) => {
+            delete_refusal_text(&refusal, resource_path, false).into()
+        }
+        rabbit_core::RabbitError::Io { path, source } if path == resource_path => format!(
+            "There is no folder at \"{}\" ({source}), so RABBIT deleted nothing. Check \
+             --resource-path: it is REAPER's resource folder, the one holding reaper.ini.",
+            path.display()
+        )
+        .into(),
+        other => other.into(),
+    }
+}
+
+/// A delete's refusal as the CLI prints it: the engine's English for a
+/// delete, which holds no command-line syntax, then what only the command
+/// line can say:
+/// - for an id that names no backup set as written, the command that lists
+///   the sets there are;
+/// - for a set of another account, how to remove it in Finder, which asks
+///   for an administrator's name and password itself: from
+///   `RABBIT/backups-deleting` when `in_deleting` says the folder is an
+///   unfinished deletion, otherwise from `RABBIT/backups`.
+///
+/// The refusal to run as root is said in the CLI's own words.
+fn delete_refusal_text(
+    refusal: &RestoreRefusal,
+    resource_path: &Path,
+    in_deleting: bool,
+) -> String {
+    let text = refusal.delete_text();
+    match refusal {
+        RestoreRefusal::InvalidId { .. }
+        | RestoreRefusal::DiffersInCase { .. }
+        | RestoreRefusal::EndsInDotOrSpace { .. } => format!(
+            "{text}. rabbit backups --resource-path \"{}\" lists the backup sets there are.",
+            resource_path.display()
+        ),
+        RestoreRefusal::NotYours { backup_id } => format!(
+            "{text}. To remove it, open the folder \"{}\" in Finder (Go > Go to Folder), move \
+             the folder {} to the Trash and empty the Trash; Finder asks for an administrator's \
+             name and password, because the folder belongs to another account.",
+            resource_path
+                .join("RABBIT")
+                .join(if in_deleting {
+                    "backups-deleting"
+                } else {
+                    "backups"
+                })
+                .display(),
+            one_line(backup_id)
+        ),
+        RestoreRefusal::AsRoot => DELETE_AS_ROOT_TEXT.to_string(),
+        _ => format!("{text}."),
+    }
+}
+
+/// A delete's report as text: one line per backup set named, in the order
+/// given, with what came of it or in a dry run would, and lines below it
+/// for the backups it holds the only copy of, where what is left of it
+/// stays, and why it couldn't go; then what the run freed in all.
+fn delete_backup_report_text(report: &DeleteReport) -> String {
+    let mut out = String::new();
+    let names = package_names();
+    if report.refused {
+        out.push_str(if report.dry_run {
+            "RABBIT would delete none of these backup sets: it deletes none of them while one \
+             can't be deleted.\n"
+        } else {
+            "Nothing was deleted: RABBIT deletes none of the backup sets named while one of them \
+             can't be deleted.\n"
+        });
+    }
+    for set in &report.sets {
+        write_deleted_set(&mut out, report, set, &names);
+    }
+    if report.refused {
+        return out;
+    }
+    if report.dry_run {
+        let going: Vec<&DeleteReportItem> = report
+            .sets
+            .iter()
+            .filter(|set| {
+                matches!(
+                    set.status,
+                    DeleteStatus::WouldDelete | DeleteStatus::WouldFinishEarlierDeletion
+                )
+            })
+            .collect();
+        if going.is_empty() {
+            out.push_str("Nothing to delete.\n");
+        } else {
+            let _ = writeln!(
+                out,
+                "This was a dry run, and nothing was deleted. With --apply, RABBIT deletes {} for \
+                 good, {} in all.",
+                if going.len() == 1 { "it" } else { "them" },
+                size_text(going.iter().map(|set| set.size).sum())
+            );
+        }
+    } else {
+        let _ = writeln!(out, "In all: {} freed.", size_text(report.bytes_freed));
+    }
+    out
+}
+
+/// What a delete's text says of a set that is in use. Windows refuses to
+/// move a folder while any file in it is open; elsewhere the system rarely
+/// says a folder is busy, and Explorer is no example there.
+const DELETE_IN_USE_TEXT: &str = if cfg!(windows) {
+    "not deleted: a file in it is open in another program, such as Explorer or an antivirus \
+     scan. Nothing of it changed. Close that program, then run the command again."
+} else {
+    "not deleted: it is in use. Nothing of it changed. Close what uses it, then run the command \
+     again."
+};
+
+/// One backup set of a delete's report: its id and what came of it, then
+/// the lines that say more.
+fn write_deleted_set(
+    out: &mut String,
+    report: &DeleteReport,
+    set: &DeleteReportItem,
+    names: &std::collections::BTreeMap<String, String>,
+) {
+    let freed = size_text(set.bytes_freed);
+    let left_in = || {
+        set.left_in
+            .as_ref()
+            .map(|path| one_line(&path.display().to_string()))
+            .unwrap_or_default()
+    };
+    let line = match set.status {
+        DeleteStatus::Deleted => format!("deleted, {freed} freed."),
+        DeleteStatus::FinishedEarlierDeletion => {
+            format!("finished an earlier deletion, {freed} freed.")
+        }
+        DeleteStatus::AlreadyGone => "already gone.".to_string(),
+        // A refused dry run says what each set would do on its own.
+        DeleteStatus::WouldDelete if report.refused => {
+            format!("could be deleted on its own, {}.", size_text(set.size))
+        }
+        DeleteStatus::WouldDelete => format!("would be deleted, {}.", size_text(set.size)),
+        DeleteStatus::WouldFinishEarlierDeletion if report.refused => format!(
+            "an earlier deletion of it didn't finish; it could be finished on its own, {}.",
+            size_text(set.size)
+        ),
+        DeleteStatus::WouldFinishEarlierDeletion => format!(
+            "an earlier deletion of it didn't finish; --apply finishes it, {}.",
+            size_text(set.size)
+        ),
+        DeleteStatus::NotDeleted => match set.not_deleted {
+            Some(NotDeletedReason::InUse) => DELETE_IN_USE_TEXT.to_string(),
+            Some(NotDeletedReason::Permission) => {
+                "not deleted: RABBIT may not move it. Nothing of it changed.".to_string()
+            }
+            Some(NotDeletedReason::EarlierDeletionLeft) => format!(
+                "not deleted: an earlier deletion of it didn't finish and still couldn't be \
+                 finished, so the backup set stays as it was. What is left of that deletion is \
+                 in \"{}\"; run the command again to finish it.",
+                left_in()
+            ),
+            Some(NotDeletedReason::Other) | None => {
+                "not deleted. Nothing of it changed.".to_string()
+            }
+        },
+        DeleteStatus::PartlyDeleted if set.set_path.is_none() => format!(
+            "an earlier deletion of it still couldn't be finished, {freed} freed. What is left \
+             stays in \"{}\"; run the command again to finish it.",
+            left_in()
+        ),
+        DeleteStatus::PartlyDeleted => format!(
+            "partly deleted, {freed} freed. What RABBIT couldn't remove stays in \"{}\", which \
+             `rabbit backups` lists as an unfinished deletion, and no restore uses it any more. \
+             Run the command again to finish it.",
+            left_in()
+        ),
+        DeleteStatus::Refused => match &set.refusal {
+            // A refused item names the folder the refusal is about.
+            Some(refusal) => format!(
+                "can't be deleted: {}",
+                delete_refusal_text(
+                    refusal,
+                    &report.resource_path,
+                    set.set_path.is_none() && set.unfinished_deletion.is_some()
+                )
+            ),
+            None => "can't be deleted.".to_string(),
+        },
+        DeleteStatus::NotReached if report.stopped => {
+            "not reached: the run was stopped before it, so it is as it was.".to_string()
+        }
+        DeleteStatus::NotReached => {
+            "not deleted, because another backup set named can't be.".to_string()
+        }
+    };
+    let _ = writeln!(out, "{}: {line}", one_line(&set.set_id));
+    if set.finished_earlier_deletion && set.status == DeleteStatus::Deleted {
+        out.push_str("  An earlier deletion of it, which hadn't finished, is finished too.\n");
+    } else if set.status == DeleteStatus::WouldDelete && set.unfinished_deletion.is_some() {
+        out.push_str("  An earlier deletion of it, which didn't finish, would be finished too.\n");
+    }
+    let only: Vec<String> = set
+        .only_copy
+        .iter()
+        .filter_map(|item| match item {
+            BackupItem::Package { package_id, .. } => Some(
+                names
+                    .get(package_id)
+                    .cloned()
+                    .unwrap_or_else(|| one_line(package_id)),
+            ),
+            BackupItem::Keymap { .. } => Some("a key map".to_string()),
+            BackupItem::Set { .. } => Some("files no other backup holds".to_string()),
+            BackupItem::Deleting { .. } | BackupItem::Records { .. } => None,
+        })
+        .collect();
+    if !only.is_empty() {
+        match set.status {
+            DeleteStatus::WouldDelete => {
+                let _ = writeln!(
+                    out,
+                    "  It holds the only copy of {}.",
+                    names_in_a_sentence(&only)
+                );
+            }
+            DeleteStatus::Deleted | DeleteStatus::PartlyDeleted => {
+                let _ = writeln!(
+                    out,
+                    "  It held the only copy of {}.",
+                    names_in_a_sentence(&only)
+                );
+            }
+            _ => {}
+        }
+    }
+    if let (Some(error), false) = (&set.error, set.status == DeleteStatus::Refused) {
+        let _ = writeln!(out, "  Why: {}", one_line(error));
     }
 }
 
@@ -2898,7 +3319,8 @@ fn one_line(text: &str) -> String {
         .collect()
 }
 
-/// What couldn't be read beyond the sets, then how big they all are.
+/// What couldn't be read beyond the sets, then how big they all are and
+/// the command that deletes a set.
 fn write_backup_overview_footer(out: &mut String, overview: &BackupOverview) {
     let listed: Vec<&Path> = overview.sets.iter().map(|set| set.path.as_path()).collect();
     for unreadable in &overview.unreadable {
@@ -2921,6 +3343,12 @@ fn write_backup_overview_footer(out: &mut String, overview: &BackupOverview) {
             "In all: {count} backup {}, {}.",
             if count == 1 { "set" } else { "sets" },
             size_text(overview.total_size)
+        );
+        let _ = writeln!(
+            out,
+            "To delete a backup set for good, whole: rabbit delete-backup --resource-path \"{}\" \
+             --backup-id <id> --apply. Without --apply it only shows what would go.",
+            overview.resource_path.display()
         );
     }
 }
@@ -3100,6 +3528,12 @@ fn backup_reason_text(
         _ => match set.kind {
             BackupSetKind::Records => "RABBIT never copies its records back.".to_string(),
             BackupSetKind::Damaged => "Its manifest can't be read.".to_string(),
+            BackupSetKind::Deleting if is_plain_name(&set.id) => format!(
+                "Its deletion started and didn't finish, so part of it may be gone. rabbit \
+                 delete-backup --resource-path \"{}\" --backup-id {} --apply finishes it.",
+                resource_path.display(),
+                set.id
+            ),
             BackupSetKind::Deleting => {
                 "Its deletion started and didn't finish, so part of it may be gone.".to_string()
             }
@@ -6528,7 +6962,8 @@ mod tests {
     /// looks. It fails with the preflight's `backup-folder` check before it
     /// takes the lock, so nothing changes, not even where the link leads,
     /// though the artifact is already in the cache. rabbit-core's link
-    /// helper is for its own tests, so this one makes the link itself.
+    /// helper is for its own tests, so this module has its own
+    /// (`link_folder`).
     #[test]
     fn install_extension_refuses_a_linked_backups_folder() {
         for linked in [&["RABBIT"][..], &["RABBIT", "backups"][..]] {
@@ -6543,20 +6978,7 @@ mod tests {
             std::fs::create_dir_all(link.parent().unwrap()).unwrap();
             let elsewhere = dir.path().join("Elsewhere");
             std::fs::create_dir_all(&elsewhere).unwrap();
-            #[cfg(windows)]
-            {
-                let windows_path =
-                    |path: &std::path::Path| path.to_string_lossy().replace('/', "\\");
-                let made = std::process::Command::new("cmd")
-                    .args(["/C", "mklink", "/J"])
-                    .arg(windows_path(&link))
-                    .arg(windows_path(&elsewhere))
-                    .output()
-                    .unwrap();
-                assert!(made.status.success(), "{made:?}");
-            }
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+            link_folder(&link, &elsewhere);
             let cache = dir.path().join("cache");
             let cached = cache
                 .join("reapack")
@@ -9996,6 +10418,10 @@ mod tests {
                     "In all: 4 backup sets, {}.",
                     super::size_text(overview.total_size)
                 ),
+                &*format!(
+                    "To delete a backup set for good, whole: rabbit delete-backup {quoted} \
+                     --backup-id <id> --apply. Without --apply it only shows what would go."
+                ),
             ]
         );
         for expected in [
@@ -10304,8 +10730,8 @@ mod tests {
         }
     }
 
-    /// Both backup commands, and each of their options, have help text, and
-    /// `rabbit --help` names both.
+    /// Every backup command, and each of their options, has help text, and
+    /// `rabbit --help` names each.
     #[test]
     fn the_backup_commands_have_help_text() {
         use clap::CommandFactory;
@@ -10317,6 +10743,10 @@ mod tests {
         );
         assert!(
             overview.contains("Restore a backup set, or one package"),
+            "{overview}"
+        );
+        assert!(
+            overview.contains("Delete backup sets for good"),
             "{overview}"
         );
         for (name, texts) in [
@@ -10337,6 +10767,23 @@ mod tests {
                     "Restore only this package",
                     "Restore only the key map this backup set holds",
                     "Actually make the changes",
+                ][..],
+            ),
+            (
+                "delete-backup",
+                &[
+                    "Delete backup sets for good, each whole, in the order given",
+                    "which backups in it are the only copy of something",
+                    "A backup set to delete, as listed by `backups`",
+                    "The id of an unfinished deletion finishes it",
+                    "Actually delete",
+                    "Write the JSON run report to exactly this path",
+                    "REAPER's resource folder",
+                    "Print the result as JSON",
+                    "they don't go to the Recycle Bin or the Trash",
+                    "On a Mac, --apply doesn't run as root",
+                    "the message says how to remove it in Finder",
+                    "Exit codes: 0 when every backup set named is gone",
                 ][..],
             ),
         ] {
@@ -10654,6 +11101,16 @@ mod tests {
             (
                 entry(whole.clone(), Other, NotHere),
                 set(Kind::Deleting),
+                "Its deletion started and didn't finish, so part of it may be gone. rabbit \
+                 delete-backup --resource-path \"R\" --backup-id unix-1 --apply finishes it."
+                    .to_string(),
+            ),
+            (
+                entry(whole.clone(), Other, NotHere),
+                BackupSetOverview {
+                    id: "unix 1".to_string(),
+                    ..set(Kind::Deleting)
+                },
                 "Its deletion started and didn't finish, so part of it may be gone.".to_string(),
             ),
             (
@@ -10715,5 +11172,780 @@ mod tests {
         // A package id with a line break in it stays on one line.
         let odd = entry(package("x\n    rabbit"), UninstalledSoftware, CanRestore);
         assert_eq!(super::backup_label(&odd, &names), "x?    rabbit");
+    }
+
+    /// `delete-backup`, parsed from its arguments for `resource` and `more`.
+    fn delete_args(resource: &std::path::Path, more: &[&str]) -> Command {
+        let mut args: Vec<std::ffi::OsString> = vec![
+            "rabbit".into(),
+            "delete-backup".into(),
+            "--resource-path".into(),
+            resource.as_os_str().to_owned(),
+        ];
+        args.extend(more.iter().map(Into::into));
+        Cli::try_parse_from(args).unwrap().command
+    }
+
+    /// Make `link` point to the folder `target`: a junction on Windows,
+    /// which needs no administrator rights, a symbolic link elsewhere.
+    fn link_folder(link: &std::path::Path, target: &std::path::Path) {
+        #[cfg(windows)]
+        {
+            let windows_path = |path: &std::path::Path| path.to_string_lossy().replace('/', "\\");
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(windows_path(link))
+                .arg(windows_path(target))
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "{made:?}");
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    /// The names in `folder`, sorted, or none when it isn't there.
+    fn names_in(folder: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// `delete-backup` takes several ids, in the order given, and needs at
+    /// least one. There is no way to delete by kind, by age or everything.
+    #[test]
+    fn delete_backup_parses_several_ids() {
+        let parsed = Cli::try_parse_from([
+            "rabbit",
+            "delete-backup",
+            "--resource-path",
+            "R",
+            "--backup-id",
+            "unix-1",
+            "--backup-id",
+            "uninstall-unix-2",
+            "--apply",
+            "--report-path",
+            "delete.json",
+            "--json",
+        ])
+        .unwrap();
+        assert!(
+            matches!(
+                parsed.command,
+                Command::DeleteBackup {
+                    ref backup_id,
+                    apply: true,
+                    json: true,
+                    report_path: Some(ref report_path),
+                    ..
+                } if backup_id == &["unix-1", "uninstall-unix-2"]
+                    && report_path == &PathBuf::from("delete.json")
+            ),
+            "{parsed:?}"
+        );
+        let dry = Cli::try_parse_from([
+            "rabbit",
+            "delete-backup",
+            "--resource-path",
+            "R",
+            "--backup-id",
+            "unix-1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            dry.command,
+            Command::DeleteBackup {
+                apply: false,
+                json: false,
+                report_path: None,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["rabbit", "delete-backup", "--resource-path", "R"]).is_err());
+        for flag in [
+            "--all",
+            "--kind",
+            "--older-than",
+            "--package",
+            "--save-report",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "rabbit",
+                    "delete-backup",
+                    "--resource-path",
+                    "R",
+                    "--backup-id",
+                    "unix-1",
+                    flag,
+                ])
+                .is_err(),
+                "{flag}"
+            );
+        }
+    }
+
+    /// A dry run says what would go, how big it is and which backups it
+    /// holds the only copy of, changes nothing, saves no report, and exits
+    /// with 0, with and without --json. The JSON is the report.
+    #[test]
+    fn delete_backup_dry_run_says_what_would_go_and_exits_with_0() {
+        use rabbit_core::backup_delete::{DeleteItem, DeleteRunOptions, delete_backups};
+        let dir = tempfile::tempdir().unwrap();
+        let resource = resource_with_backups(dir.path());
+        let sets = resource.join("RABBIT").join("backups");
+        let before = names_in(&sets);
+        let ids = ["uninstall-unix-300", "unattended-unix-100-000000000"];
+
+        for json in [false, true] {
+            let mut more = vec!["--backup-id", ids[0], "--backup-id", ids[1]];
+            if json {
+                more.push("--json");
+            }
+            assert_eq!(
+                super::delete_backup(delete_args(&resource, &more)).unwrap(),
+                0
+            );
+        }
+
+        assert_eq!(names_in(&sets), before);
+        assert!(!resource.join("RABBIT").join("logs").exists());
+        assert!(!resource.join("RABBIT").join("backups-deleting").exists());
+        let report = delete_backups(
+            &resource,
+            &ids.map(DeleteItem::new),
+            &DeleteRunOptions { dry_run: true },
+            &super::ProgressReporter::noop(),
+            &super::CancelToken::new(),
+        )
+        .unwrap();
+        let text = super::delete_backup_report_text(&report);
+        let size = |id: &str| {
+            super::size_text(
+                report
+                    .sets
+                    .iter()
+                    .find(|set| set.set_id == id)
+                    .unwrap()
+                    .size,
+            )
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                &*format!("uninstall-unix-300: would be deleted, {}.", size(ids[0])),
+                "  It holds the only copy of SWS Extension.",
+                &*format!(
+                    "unattended-unix-100-000000000: would be deleted, {}.",
+                    size(ids[1])
+                ),
+                "  It holds the only copy of a key map.",
+                &*format!(
+                    "This was a dry run, and nothing was deleted. With --apply, RABBIT deletes \
+                     them for good, {} in all.",
+                    super::size_text(report.sets.iter().map(|set| set.size).sum())
+                ),
+            ],
+            "{text}"
+        );
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["dry_run"], true);
+        assert_eq!(json["sets"][0]["status"], "would-delete");
+        assert_eq!(json["sets"][0]["only_copy"][0]["package_id"], "sws");
+        assert_eq!(json["sets"][1]["only_copy"][0]["kind"], "keymap");
+    }
+
+    /// Every exit code of the table, with and without --json, in a dry run
+    /// and with --apply: 2 when a set named can't be deleted for its id or
+    /// because it is a link, with nothing changed; 1 for an error before
+    /// anything changed, such as another RABBIT holding the lock or a
+    /// resource folder that isn't there; 0 when every set named is gone:
+    /// deleted, an unfinished deletion finished, or already gone, so a
+    /// script can run twice.
+    #[test]
+    fn delete_backup_exit_codes_follow_the_table() {
+        for json in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let resource = resource_with_backups(dir.path());
+            let sets = resource.join("RABBIT").join("backups");
+            let logs = resource.join("RABBIT").join("logs");
+            let elsewhere = dir.path().join("Elsewhere");
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            std::fs::write(elsewhere.join("keep.dll"), b"keep").unwrap();
+            link_folder(&sets.join("unix-400"), &elsewhere);
+            let run = |more: &[&str]| {
+                let mut more = more.to_vec();
+                if json {
+                    more.push("--json");
+                }
+                super::delete_backup(delete_args(&resource, &more))
+            };
+            let before = names_in(&sets);
+
+            for ids in [
+                &["--backup-id", "a/b", "--backup-id", "unix-200"][..],
+                &["--backup-id", "unix-200", "--backup-id", "unix-400"][..],
+            ] {
+                assert_eq!(run(ids).unwrap(), 2, "{ids:?}");
+                assert_eq!(run(&[ids, &["--apply"]].concat()).unwrap(), 2, "{ids:?}");
+            }
+            assert_eq!(names_in(&sets), before);
+            assert_eq!(std::fs::read(elsewhere.join("keep.dll")).unwrap(), b"keep");
+            assert!(!logs.exists());
+
+            let held = rabbit_core::lock::acquire_package_install_lock(&resource).unwrap();
+            let error = run(&["--backup-id", "unix-200", "--apply"]).unwrap_err();
+            drop(held);
+            let text = error.to_string();
+            assert!(
+                text.starts_with("Another RABBIT is working on this REAPER")
+                    && text.contains("doesn't delete anything"),
+                "{text}"
+            );
+            assert_eq!(names_in(&sets), before);
+
+            // A resource folder that isn't there, as after a typo, is an
+            // error too, not a run in which every set is already gone.
+            let typo = dir.path().join("REAPPER");
+            let mut more = vec!["--backup-id", "unix-200", "--apply"];
+            if json {
+                more.push("--json");
+            }
+            let error = super::delete_backup(delete_args(&typo, &more)).unwrap_err();
+            let text = error.to_string();
+            assert!(
+                text.starts_with(&format!("There is no folder at \"{}\"", typo.display()))
+                    && text.contains("Check --resource-path"),
+                "{text}"
+            );
+            assert!(!typo.exists());
+
+            let unfinished = resource
+                .join("RABBIT")
+                .join("backups-deleting")
+                .join("unix-77");
+            std::fs::create_dir_all(&unfinished).unwrap();
+            std::fs::write(unfinished.join("left.dll"), b"left").unwrap();
+            assert_eq!(
+                run(&[
+                    "--backup-id",
+                    "unix-200",
+                    "--backup-id",
+                    "unix-77",
+                    "--backup-id",
+                    "unix-404",
+                    "--apply",
+                ])
+                .unwrap(),
+                0
+            );
+            assert!(!sets.join("unix-200").exists());
+            assert!(!unfinished.exists());
+            let logged = names_in(&logs);
+            assert_eq!(logged.len(), 2, "{logged:?}");
+            assert!(logged[0].starts_with("delete-backup-unix-"), "{logged:?}");
+            // Once gone, the same ids are gone in a dry run too, which
+            // saves nothing, and in a real run, which saves its report.
+            assert_eq!(
+                run(&["--backup-id", "unix-200", "--backup-id", "unix-77"]).unwrap(),
+                0
+            );
+            assert_eq!(names_in(&logs), logged);
+            assert_eq!(
+                run(&[
+                    "--backup-id",
+                    "unix-200",
+                    "--backup-id",
+                    "unix-77",
+                    "--apply"
+                ])
+                .unwrap(),
+                0
+            );
+            assert_eq!(names_in(&logs).len(), 4);
+        }
+    }
+
+    /// `--report-path` writes the report where it says, in a dry run too;
+    /// with --apply, the report in RABBIT's logs is saved as well.
+    #[test]
+    fn delete_backup_writes_the_report_where_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = resource_with_backups(dir.path());
+        let asked = dir.path().join("reports").join("delete.json");
+        let path = asked.to_string_lossy().into_owned();
+
+        let code = super::delete_backup(delete_args(
+            &resource,
+            &["--backup-id", "unix-200", "--report-path", &path],
+        ))
+        .unwrap();
+
+        assert_eq!(code, 0);
+        let envelope: rabbit_core::report::SavedJsonReport =
+            serde_json::from_str(&std::fs::read_to_string(&asked).unwrap()).unwrap();
+        assert_eq!(envelope.report["dry_run"], true);
+        assert_eq!(envelope.report["sets"][0]["status"], "would-delete");
+        assert!(asked.with_extension("txt").is_file());
+        assert!(!resource.join("RABBIT").join("logs").exists());
+
+        let code = super::delete_backup(delete_args(
+            &resource,
+            &["--backup-id", "unix-200", "--report-path", &path, "--apply"],
+        ))
+        .unwrap();
+
+        assert_eq!(code, 0);
+        let envelope: rabbit_core::report::SavedJsonReport =
+            serde_json::from_str(&std::fs::read_to_string(&asked).unwrap()).unwrap();
+        assert_eq!(envelope.report["sets"][0]["status"], "deleted");
+        assert_eq!(names_in(&resource.join("RABBIT").join("logs")).len(), 2);
+    }
+
+    /// On Windows, a set with a file another program holds open isn't
+    /// deleted: the command keeps it whole and exits with 1.
+    #[cfg(windows)]
+    #[test]
+    fn delete_backup_exits_with_1_when_a_set_is_in_use() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let resource = resource_with_backups(dir.path());
+        let set = resource
+            .join("RABBIT")
+            .join("backups")
+            .join("uninstall-unix-300");
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(set.join("backup-manifest.json"))
+            .unwrap();
+
+        for more in [&[][..], &["--json"][..]] {
+            let code = super::delete_backup(delete_args(
+                &resource,
+                &[&["--backup-id", "uninstall-unix-300", "--apply"][..], more].concat(),
+            ))
+            .unwrap();
+            assert_eq!(code, 1, "{more:?}");
+        }
+        drop(held);
+
+        assert!(set.join("backup-manifest.json").is_file());
+    }
+
+    /// On Unix, a set with a folder RABBIT may not look into is only partly
+    /// deleted, and the command exits with 1; naming it again once the
+    /// folder may be read finishes it, and exits with 0.
+    #[cfg(unix)]
+    #[test]
+    fn delete_backup_exits_with_1_when_a_set_is_partly_deleted() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        for more in [&[][..], &["--json"][..]] {
+            let dir = tempfile::tempdir().unwrap();
+            if std::fs::metadata(dir.path()).unwrap().uid() == 0 {
+                return;
+            }
+            let resource = resource_with_backups(dir.path());
+            let set = resource.join("RABBIT").join("backups").join("unix-50");
+            let locked = set.join("locked");
+            std::fs::create_dir_all(&locked).unwrap();
+            std::fs::write(locked.join("kept.dll"), b"kept").unwrap();
+            let left = resource
+                .join("RABBIT")
+                .join("backups-deleting")
+                .join("unix-50")
+                .join("locked");
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let args = [&["--backup-id", "unix-50", "--apply"][..], more].concat();
+
+            let code = super::delete_backup(delete_args(&resource, &args));
+            let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+            let _ = std::fs::set_permissions(&left, std::fs::Permissions::from_mode(0o755));
+
+            assert_eq!(code.unwrap(), 1, "{more:?}");
+            assert!(left.join("kept.dll").is_file());
+            let code = super::delete_backup(delete_args(&resource, &args));
+            assert_eq!(code.unwrap(), 0, "{more:?}");
+            assert!(!left.exists());
+        }
+    }
+
+    /// The text says what came of each set in plain words, with the size
+    /// freed, why one wasn't deleted and where what is left of one stays,
+    /// and which backups a set held the only copy of. A stop exits with 1.
+    #[test]
+    fn delete_backup_text_says_what_came_of_each_set() {
+        use rabbit_core::backup_delete::{
+            DeleteReport, DeleteReportItem, DeleteStatus, NotDeletedReason,
+        };
+        use rabbit_core::backup_overview::BackupItem;
+        let resource = PathBuf::from("R");
+        let deleting = resource.join("RABBIT").join("backups-deleting");
+        let item = |id: &str, status: DeleteStatus| DeleteReportItem {
+            set_id: id.to_string(),
+            status,
+            set_path: Some(resource.join("RABBIT").join("backups").join(id)),
+            unfinished_deletion: None,
+            size: 2048,
+            only_copy: Vec::new(),
+            bytes_freed: 0,
+            not_deleted: None,
+            left_in: None,
+            finished_earlier_deletion: false,
+            refusal: None,
+            error: None,
+        };
+        let sets = vec![
+            DeleteReportItem {
+                bytes_freed: 3 * 1024 * 1024,
+                finished_earlier_deletion: true,
+                only_copy: vec![
+                    BackupItem::Package {
+                        set_id: "uninstall-unix-1".to_string(),
+                        package_id: "sws".to_string(),
+                    },
+                    BackupItem::Package {
+                        set_id: "uninstall-unix-1".to_string(),
+                        package_id: "no-such-package".to_string(),
+                    },
+                ],
+                ..item("uninstall-unix-1", DeleteStatus::Deleted)
+            },
+            DeleteReportItem {
+                set_path: None,
+                unfinished_deletion: Some(deleting.join("unix-2")),
+                bytes_freed: 1024,
+                finished_earlier_deletion: true,
+                ..item("unix-2", DeleteStatus::FinishedEarlierDeletion)
+            },
+            DeleteReportItem {
+                set_path: None,
+                ..item("unix-3", DeleteStatus::AlreadyGone)
+            },
+            DeleteReportItem {
+                not_deleted: Some(NotDeletedReason::InUse),
+                error: Some("unix-4: access denied".to_string()),
+                ..item("unix-4", DeleteStatus::NotDeleted)
+            },
+            DeleteReportItem {
+                not_deleted: Some(NotDeletedReason::EarlierDeletionLeft),
+                left_in: Some(deleting.join("unix-5")),
+                ..item("unix-5", DeleteStatus::NotDeleted)
+            },
+            DeleteReportItem {
+                bytes_freed: 1024,
+                left_in: Some(deleting.join("unix-6")),
+                error: Some("locked: permission denied".to_string()),
+                ..item("unix-6", DeleteStatus::PartlyDeleted)
+            },
+            DeleteReportItem {
+                refusal: Some(super::RestoreRefusal::IsLink {
+                    path: resource.join("RABBIT").join("backups").join("unix-7"),
+                }),
+                ..item("unix-7", DeleteStatus::Refused)
+            },
+            item("unix-8", DeleteStatus::NotReached),
+            DeleteReportItem {
+                not_deleted: Some(NotDeletedReason::Permission),
+                error: Some("unix-9: permission denied".to_string()),
+                ..item("unix-9", DeleteStatus::NotDeleted)
+            },
+            DeleteReportItem {
+                set_path: None,
+                unfinished_deletion: Some(deleting.join("unix-10")),
+                bytes_freed: 1024,
+                left_in: Some(deleting.join("unix-10")),
+                error: Some("held.dll: in use".to_string()),
+                ..item("unix-10", DeleteStatus::PartlyDeleted)
+            },
+            DeleteReportItem {
+                not_deleted: Some(NotDeletedReason::Other),
+                error: Some("unix-11 is there already".to_string()),
+                ..item("unix-11", DeleteStatus::NotDeleted)
+            },
+        ];
+        let report = DeleteReport {
+            resource_path: resource.clone(),
+            dry_run: false,
+            sets,
+            refused: false,
+            stopped: true,
+            bytes_freed: 5 * 1024 * 1024,
+            saved_report: None,
+        };
+
+        let text = super::delete_backup_report_text(&report);
+
+        let place = |id: &str| deleting.join(id).display().to_string();
+        for expected in [
+            "uninstall-unix-1: deleted, 3 MB freed.".to_string(),
+            "  An earlier deletion of it, which hadn't finished, is finished too.".to_string(),
+            "  It held the only copy of SWS Extension and no-such-package.".to_string(),
+            "unix-2: finished an earlier deletion, 1 KB freed.".to_string(),
+            "unix-3: already gone.".to_string(),
+            format!("unix-4: {}", super::DELETE_IN_USE_TEXT),
+            "  Why: unix-4: access denied".to_string(),
+            format!(
+                "unix-5: not deleted: an earlier deletion of it didn't finish and still couldn't \
+                 be finished, so the backup set stays as it was. What is left of that deletion \
+                 is in \"{}\"; run the command again to finish it.",
+                place("unix-5")
+            ),
+            format!(
+                "unix-6: partly deleted, 1 KB freed. What RABBIT couldn't remove stays in \"{}\", \
+                 which `rabbit backups` lists as an unfinished deletion, and no restore uses it \
+                 any more. Run the command again to finish it.",
+                place("unix-6")
+            ),
+            "  Why: locked: permission denied".to_string(),
+            format!(
+                "unix-7: can't be deleted: RABBIT doesn't use {}: it is a symbolic link or \
+                 junction, and RABBIT never follows one in its backups.",
+                resource
+                    .join("RABBIT")
+                    .join("backups")
+                    .join("unix-7")
+                    .display()
+            ),
+            "unix-8: not reached: the run was stopped before it, so it is as it was.".to_string(),
+            "unix-9: not deleted: RABBIT may not move it. Nothing of it changed.".to_string(),
+            "  Why: unix-9: permission denied".to_string(),
+            format!(
+                "unix-10: an earlier deletion of it still couldn't be finished, 1 KB freed. What \
+                 is left stays in \"{}\"; run the command again to finish it.",
+                place("unix-10")
+            ),
+            "  Why: held.dll: in use".to_string(),
+            "unix-11: not deleted. Nothing of it changed.".to_string(),
+            "  Why: unix-11 is there already".to_string(),
+            "In all: 5 MB freed.".to_string(),
+        ] {
+            assert!(
+                text.lines().any(|line| line == expected),
+                "{expected:?} missing from:\n{text}"
+            );
+        }
+        // Only a set deleted beside an unfinished deletion says it finished
+        // that one too; one that finished only the deletion says so once.
+        assert_eq!(text.matches("is finished too").count(), 1, "{text}");
+        assert!(super::DELETE_IN_USE_TEXT.contains("Nothing of it changed"));
+        assert_eq!(
+            super::DELETE_IN_USE_TEXT.contains("Explorer"),
+            cfg!(windows)
+        );
+        assert_eq!(super::delete_backup_exit_code(&report), 1);
+        // An unfinished deletion that still couldn't be finished: 1.
+        let unfinished = DeleteReport {
+            sets: report.sets[9..10].to_vec(),
+            stopped: false,
+            ..report.clone()
+        };
+        assert_eq!(super::delete_backup_exit_code(&unfinished), 1);
+
+        // Every set gone: 0. A set left partly: 1.
+        let gone = DeleteReport {
+            sets: report.sets[..3].to_vec(),
+            stopped: false,
+            ..report.clone()
+        };
+        assert_eq!(super::delete_backup_exit_code(&gone), 0);
+        let partly = DeleteReport {
+            sets: report.sets[5..6].to_vec(),
+            stopped: false,
+            ..report.clone()
+        };
+        assert_eq!(super::delete_backup_exit_code(&partly), 1);
+
+        // A refused run says nothing was deleted and why, and exits with 2;
+        // a refused dry run says what each could do on its own.
+        let refused = DeleteReport {
+            sets: vec![
+                item("unix-1", DeleteStatus::NotReached),
+                DeleteReportItem {
+                    set_path: None,
+                    refusal: Some(super::RestoreRefusal::InvalidId {
+                        backup_id: "D:".to_string(),
+                    }),
+                    ..item("D:", DeleteStatus::Refused)
+                },
+            ],
+            refused: true,
+            stopped: false,
+            bytes_freed: 0,
+            ..report.clone()
+        };
+        let text = super::delete_backup_report_text(&refused);
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            [
+                "Nothing was deleted: RABBIT deletes none of the backup sets named while one of \
+                 them can't be deleted.",
+                "unix-1: not deleted, because another backup set named can't be.",
+                "D:: can't be deleted: \"D:\" can't be a backup id: an id is the name of one \
+                 backup in RABBIT's backups folder, and RABBIT never names a backup like that. \
+                 rabbit backups --resource-path \"R\" lists the backup sets there are.",
+            ],
+            "{text}"
+        );
+        assert_eq!(super::delete_backup_exit_code(&refused), 2);
+        let refused_dry_run = DeleteReport {
+            dry_run: true,
+            sets: vec![
+                item("unix-1", DeleteStatus::WouldDelete),
+                refused.sets[1].clone(),
+            ],
+            ..refused
+        };
+        let text = super::delete_backup_report_text(&refused_dry_run);
+        assert!(
+            text.starts_with(
+                "RABBIT would delete none of these backup sets: it deletes none of them while one \
+                 can't be deleted.\nunix-1: could be deleted on its own, 2 KB.\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(super::delete_backup_exit_code(&refused_dry_run), 2);
+
+        // An unfinished deletion in a dry run, alone and beside its set,
+        // and in a refused dry run.
+        let unfinished = |id: &str| DeleteReportItem {
+            set_path: None,
+            unfinished_deletion: Some(deleting.join(id)),
+            ..item(id, DeleteStatus::WouldFinishEarlierDeletion)
+        };
+        let dry_run = DeleteReport {
+            dry_run: true,
+            sets: vec![
+                unfinished("unix-12"),
+                DeleteReportItem {
+                    unfinished_deletion: Some(deleting.join("unix-13")),
+                    ..item("unix-13", DeleteStatus::WouldDelete)
+                },
+            ],
+            refused: false,
+            stopped: false,
+            bytes_freed: 0,
+            ..report.clone()
+        };
+        let text = super::delete_backup_report_text(&dry_run);
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            [
+                "unix-12: an earlier deletion of it didn't finish; --apply finishes it, 2 KB.",
+                "unix-13: would be deleted, 2 KB.",
+                "  An earlier deletion of it, which didn't finish, would be finished too.",
+                "This was a dry run, and nothing was deleted. With --apply, RABBIT deletes them \
+                 for good, 4 KB in all.",
+            ],
+            "{text}"
+        );
+        assert_eq!(super::delete_backup_exit_code(&dry_run), 0);
+        let refused_unfinished = DeleteReport {
+            sets: vec![unfinished("unix-12"), refused.sets[1].clone()],
+            refused: true,
+            ..dry_run
+        };
+        let text = super::delete_backup_report_text(&refused_unfinished);
+        assert!(
+            text.lines().any(|line| line
+                == "unix-12: an earlier deletion of it didn't finish; it could be finished on its \
+                    own, 2 KB."),
+            "{text}"
+        );
+        assert_eq!(super::delete_backup_exit_code(&refused_unfinished), 2);
+    }
+
+    /// A delete's refusals print the engine's words for a delete, then the
+    /// CLI's own hints: the command that lists the sets for an id that names
+    /// none, and how to remove another account's set in Finder, never with
+    /// sudo. The refusal to run as root is said in the CLI's own words.
+    #[test]
+    fn delete_refusals_get_the_clis_hints_after_the_engines_words() {
+        let resource = std::path::Path::new("R");
+        let text =
+            |refusal: super::RestoreRefusal| super::delete_refusal_text(&refusal, resource, false);
+
+        let invalid = text(super::RestoreRefusal::InvalidId {
+            backup_id: "C:foo".to_string(),
+        });
+        assert!(
+            invalid.ends_with(
+                ". rabbit backups --resource-path \"R\" lists the backup sets there are."
+            ),
+            "{invalid}"
+        );
+        let other_case = text(super::RestoreRefusal::DiffersInCase {
+            backup_id: "UNIX-1".to_string(),
+            existing: "unix-1".to_string(),
+        });
+        assert!(
+            other_case.contains("there is one named unix-1. rabbit backups"),
+            "{other_case}"
+        );
+        let not_yours = text(super::RestoreRefusal::NotYours {
+            backup_id: "uninstall-unix-1".to_string(),
+        });
+        let backups = resource.join("RABBIT").join("backups");
+        assert!(
+            not_yours.starts_with(
+                "The backup uninstall-unix-1 belongs to another account, so RABBIT doesn't delete \
+                 it. To remove it, open the folder"
+            ) && not_yours.contains(&format!("\"{}\" in Finder", backups.display()))
+                && not_yours.contains("move the folder uninstall-unix-1 to the Trash")
+                && not_yours.contains("administrator's name and password")
+                && !not_yours.contains("sudo"),
+            "{not_yours}"
+        );
+        // Another account's unfinished deletion is in the folder of
+        // deletions, and the hint says so.
+        let deletion_not_yours = super::delete_refusal_text(
+            &super::RestoreRefusal::NotYours {
+                backup_id: "uninstall-unix-1".to_string(),
+            },
+            resource,
+            true,
+        );
+        let deletions = resource.join("RABBIT").join("backups-deleting");
+        assert!(
+            deletion_not_yours.contains(&format!("\"{}\" in Finder", deletions.display())),
+            "{deletion_not_yours}"
+        );
+        assert_eq!(
+            text(super::RestoreRefusal::AsRoot),
+            super::DELETE_AS_ROOT_TEXT
+        );
+        let lock = text(super::RestoreRefusal::LockHeld {
+            lock_path: PathBuf::from("RABBIT")
+                .join("locks")
+                .join("package-install.lock"),
+            pid: 42,
+        });
+        assert!(
+            lock.contains("doesn't delete anything") && !lock.contains("restor"),
+            "{lock}"
+        );
+        let error = super::cli_delete_error(
+            rabbit_core::RabbitError::RestoreRefused(super::RestoreRefusal::AsRoot),
+            resource,
+        );
+        assert_eq!(error.to_string(), super::DELETE_AS_ROOT_TEXT);
+        assert!(super::DELETE_AS_ROOT_TEXT.contains("without sudo"));
+        assert!(!super::DELETE_AS_ROOT_TEXT.contains("another account"));
+
+        // With --json, a refusal of the whole run is JSON with its code.
+        let json: serde_json::Value = serde_json::from_str(
+            &super::delete_refusal_json(&super::RestoreRefusal::AsRoot).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["refused"], true);
+        assert_eq!(json["refusal"]["code"], "as-root");
     }
 }

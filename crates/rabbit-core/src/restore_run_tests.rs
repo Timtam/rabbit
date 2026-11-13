@@ -159,7 +159,7 @@ fn saved(report: &RestoreRunReport) -> serde_json::Value {
 
 /// Every file and link below `root`, each file with what it holds, found
 /// without following any link.
-pub(super) fn snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+pub(crate) fn snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
     let mut found = Vec::new();
     let mut folders = vec![root.to_path_buf()];
     while let Some(folder) = folders.pop() {

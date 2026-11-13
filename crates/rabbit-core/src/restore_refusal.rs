@@ -12,6 +12,13 @@
 //! status, or a file a restore would refuse, says the same thing (see
 //! [`crate::backup_overview::BackupEntry::refusal`]), so a row in the
 //! wizard and a run agree.
+//!
+//! A delete of backup sets refuses with the same codes where the reason is
+//! the same (see [`crate::backup_delete`]): an id that can't name a set, a
+//! link, another account's set, root on macOS, the lock, a set changed
+//! since it was listed. Its English comes from
+//! [`RestoreRefusal::delete_text`], which says "delete" where the text
+//! says "restore".
 
 use std::path::{Path, PathBuf};
 
@@ -381,6 +388,34 @@ impl RestoreRefusal {
             Self::NotYours { .. } => "not-yours",
             Self::ChangedWhileRead { .. } => "changed-while-read",
             Self::ChangedSinceListed { .. } => "changed-since-listed",
+        }
+    }
+
+    /// The refusal as a delete of backup sets says it in English, for the
+    /// command line: the refusals a delete shares with a restore whose text
+    /// speaks of restoring say it of deleting, and every other one is said
+    /// as a restore says it. Like the restore's text, it holds no
+    /// command-line syntax.
+    pub fn delete_text(&self) -> String {
+        match self {
+            Self::NotYours { backup_id } => format!(
+                "The backup {backup_id} belongs to another account, so RABBIT doesn't delete it"
+            ),
+            Self::AsRoot => "RABBIT is running as root, as it does under sudo, and doesn't \
+                 delete backups like that: RABBIT's folder of deletions, its lock and its report \
+                 would be root's, and root could remove what permissions protect. Run RABBIT as \
+                 yourself, not with sudo"
+                .to_string(),
+            Self::LockHeld { lock_path, pid } => format!(
+                "Another RABBIT is working on this REAPER (lock {}, PID {pid}), so RABBIT \
+                 doesn't delete anything until it has finished",
+                lock_path.display()
+            ),
+            Self::ChangedSinceListed { backup_id } => format!(
+                "The backup {backup_id} changed since RABBIT listed it. Nothing was deleted; \
+                 look at the backups again, then delete"
+            ),
+            other => other.to_string(),
         }
     }
 }
@@ -811,6 +846,48 @@ mod tests {
         assert_eq!(distinct.len(), VARIANTS);
         let reasons: BTreeSet<&str> = every_reason().iter().map(TargetRefusal::code).collect();
         assert_eq!(reasons.len(), REASONS);
+    }
+
+    /// What a delete says holds no command-line syntax either, for every
+    /// refusal. The refusals a delete gives never speak of restoring, and
+    /// those whose restore text does say "delete" instead, with the same
+    /// code.
+    #[test]
+    fn a_delete_says_its_refusals_in_words_of_its_own() {
+        for refusal in every_refusal() {
+            let text = refusal.delete_text();
+            assert!(!text.contains("--"), "{text}");
+            assert!(!text.contains("rabbit "), "{text}");
+            assert!(!text.trim().is_empty(), "{refusal:?}");
+        }
+        let given_by_a_delete = |refusal: &RestoreRefusal| {
+            matches!(
+                refusal,
+                RestoreRefusal::InvalidId { .. }
+                    | RestoreRefusal::DiffersInCase { .. }
+                    | RestoreRefusal::EndsInDotOrSpace { .. }
+                    | RestoreRefusal::IsLink { .. }
+                    | RestoreRefusal::NotYours { .. }
+                    | RestoreRefusal::AsRoot
+                    | RestoreRefusal::LockHeld { .. }
+                    | RestoreRefusal::ChangedSinceListed { .. }
+            )
+        };
+        let mut reworded = 0;
+        for refusal in every_refusal().iter().filter(|r| given_by_a_delete(r)) {
+            let text = refusal.delete_text();
+            assert!(!text.to_lowercase().contains("restor"), "{text}");
+            if text != refusal.to_string() {
+                assert!(text.contains("delet"), "{text}");
+                reworded += 1;
+            }
+        }
+        assert_eq!(reworded, 4);
+        assert!(
+            RestoreRefusal::AsRoot
+                .delete_text()
+                .ends_with("Run RABBIT as yourself, not with sudo")
+        );
     }
 
     /// A backup that names no set keeps the words Phase 0 gave it. A

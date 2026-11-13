@@ -234,11 +234,11 @@ fn the_administrator_prompt_counts_no_phase() {
     assert_eq!(state.percentage(), 100);
 }
 
-/// The wizard doesn't restore backups until Phase 2 of the backup plan:
-/// until then a restore's events are neither spoken nor counted, and move
-/// no focus.
+/// The wizard doesn't restore or delete backups until Phase 2 of the
+/// backup plan: until then a restore's and a delete's events are neither
+/// spoken nor counted, and move no focus.
 #[test]
-fn restore_events_say_and_count_nothing_yet() {
+fn restore_and_delete_events_say_and_count_nothing_yet() {
     let mut state = ProgressUiState::new(WizardMode::Uninstall, 1, 0);
     for event in [
         ProgressEvent::RestoreStarted {
@@ -249,6 +249,14 @@ fn restore_events_say_and_count_nothing_yet() {
             set_id: "uninstall-unix-1".to_string(),
             package_id: None,
             status: rabbit_core::rollback::RestoreStatus::Restored,
+        },
+        ProgressEvent::DeleteStarted {
+            set_id: "uninstall-unix-1".to_string(),
+        },
+        ProgressEvent::DeleteCompleted {
+            set_id: "uninstall-unix-1".to_string(),
+            status: rabbit_core::backup_delete::DeleteStatus::Deleted,
+            bytes_freed: 1024,
         },
     ] {
         assert!(!is_spoken(&event), "{event:?}");

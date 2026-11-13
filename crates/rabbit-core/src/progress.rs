@@ -1,4 +1,5 @@
-//! Progress-event plumbing for the install, uninstall and restore pipelines.
+//! Progress-event plumbing for the install, uninstall, restore and delete
+//! pipelines.
 //!
 //! The setup pipeline is normally silent until its final [`SetupReport`] is
 //! returned: callers see a finished result, not the per-package boundaries
@@ -36,13 +37,14 @@
 
 use std::sync::Arc;
 
+use crate::backup_delete::DeleteStatus;
 use crate::rollback::RestoreStatus;
 
-/// A single progress signal emitted by the install, uninstall or restore
-/// pipeline. The variants cover the three observable phases of an install
-/// (download, install, configuration) plus per-byte progress within a
-/// download, the removal of each package in an uninstall, and each backup a
-/// restore brings back.
+/// A single progress signal emitted by the install, uninstall, restore or
+/// delete pipeline. The variants cover the three observable phases of an
+/// install (download, install, configuration) plus per-byte progress within
+/// a download, the removal of each package in an uninstall, each backup a
+/// restore brings back, and each backup set a delete deletes.
 ///
 /// Events carry only the package / step identity, not an "n of N" count.
 /// UIs already know how many packages they queued (from the install plan)
@@ -135,6 +137,19 @@ pub enum ProgressEvent {
         set_id: String,
         package_id: Option<String>,
         status: RestoreStatus,
+    },
+    /// A delete is about to delete the backup set `set_id`, and any
+    /// unfinished deletion of that id. Deletes run one set at a time, so
+    /// their events never interleave. A dry run sends none.
+    DeleteStarted { set_id: String },
+    /// The delete is done with that set: `status` says what came of it, and
+    /// `bytes_freed` how much the files it removed held. It fires after
+    /// every `DeleteStarted`, also when the set wasn't deleted. A set the
+    /// run was stopped before sends neither.
+    DeleteCompleted {
+        set_id: String,
+        status: DeleteStatus,
+        bytes_freed: u64,
     },
 }
 

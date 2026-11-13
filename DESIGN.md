@@ -1981,6 +1981,85 @@ Extension files:
   fingerprint, its manifest's length and modified time or, without one, its
   file count and size, for a later run to compare under the lock. Local time
   comes from the operating system on Windows and macOS, UTC elsewhere.
+- `delete_backups` (`backup_delete.rs`) deletes whole backup sets for good,
+  in the order given; it is behind `rabbit delete-backup`, and later the
+  wizard's Backups tab. An item (`DeleteItem`) names a set by its exact id
+  and optionally the fingerprint the caller listed; the overview's records
+  row gives each of its sets' ids (`BackupItem::set_ids`), and each is
+  deleted as an item of its own. Before anything changes: a real delete as
+  root on macOS is refused first (`as-root`), through the environment, as
+  for uninstall and restore. A resource folder that isn't there, as after a
+  typo, is an error (exit 1), since every id would otherwise count as
+  already gone. Then every id must be well-formed and name its set or
+  unfinished deletion exactly (`invalid-id`, `differs-in-case`,
+  `ends-in-dot-or-space`, checked against both folders; counting such an id
+  as already gone would tell a script a set is gone that is still there),
+  with no link on the way (`is-link`; a linked `RABBIT`, `RABBIT/backups`
+  or `RABBIT/backups-deleting`, or a linked entry named after the id in
+  either, refuses), the set and any unfinished deletion of the id must
+  belong to the owner of `RABBIT/backups`, never compared with the account
+  RABBIT runs as (`not-yours`; the refused item names the folder that is
+  another account's, so the CLI's Finder hint names the right one), and a
+  listed fingerprint must still match (`changed-since-listed`), the set's
+  in `RABBIT/backups` when there is one. One refused item refuses the whole
+  run: nothing changes, the report says `refused`, and no report is saved;
+  a refusal before the lock takes no lock. The codes are
+  `RestoreRefusal`'s, said in a delete's words by `delete_text`. A dry run
+  stops after these checks and reports each set's size from the overview's
+  walk and the backups in it marked as the only copy; such a set is still
+  deleted when named. A real run then takes the install lock (`lock-held`,
+  an error), checks every item again under it (a refusal there refuses the
+  whole run as before, and saves no report), and then, per set: finishes
+  an unfinished deletion of the id first, so the set gets a free name
+  (folders are never merged; one that can't be finished leaves the set as
+  it was, `earlier-deletion-left`), makes `RABBIT/backups-deleting` if
+  needed and refuses it as a link, renames the set there in one rename, and
+  only then walks it by each entry's own metadata. A name in
+  `RABBIT/backups-deleting` taken by anything but an unfinished deletion of
+  the id itself, such as a file or, where names differ only in case, an
+  unfinished deletion of another id, is never moved onto or removed: the
+  set is `not-deleted` (`other`) and the report names what is in the way.
+  The walk removes a symbolic link or junction as itself, never followed.
+  A folder that is a Windows reparse point of another kind, such as a
+  OneDrive placeholder, leads nowhere else and Rust doesn't count it as a
+  link, so the walk goes into it, as the overview and a restore treat it;
+  refusing it only after the rename would leave every set in a cloud folder
+  as an unfinished deletion no run could finish. Files go, on Windows
+  losing a read-only attribute through a handle opened on the entry itself
+  if a removal refuses one; folders go deepest first, the set's folder
+  last. Each folder is checked again right before it is listed, and one
+  that became a link is left as it is (`partly-deleted`, and the next run
+  removes the link as a link). On Windows the walk holds each folder open
+  from that check until it is removed, with a handle that shares reading
+  and writing but not deleting: no other program can move or delete it,
+  and Windows moves no folder above an open one, so no folder on the way
+  can be swapped for a junction. macOS and Linux have no such hold: a
+  folder swapped for a link between the check and the listing would still
+  be followed, which takes another program of the same account racing the
+  walk. Before anything is removed, its path is checked to lie inside
+  `RABBIT/backups-deleting/<id>` (`DeleteGuard`, by the path's text).
+  Statuses:
+  `deleted`, `finished-earlier-deletion`, `already-gone` (a well-formed id
+  that names nothing, so a script can run twice), `not-deleted` (`in-use`,
+  `permission`, `earlier-deletion-left`, `other`; nothing of the set
+  changed), `partly-deleted` (what the walk couldn't remove stays in
+  `RABBIT/backups-deleting`, listed as an unfinished deletion, and the
+  next delete of the id finishes it), `refused` and `not-reached`; a dry
+  run says `would-delete` or `would-finish-earlier-deletion`. Windows 11
+  refuses to rename a folder while any file in it is open, whatever the
+  sharing, with "access denied", so a set in use is `not-deleted` with
+  nothing changed; that error counts as in use when RABBIT may open the
+  set's folder with delete access, and as permission otherwise. The cancel
+  token is read between sets; each set sends `DeleteStarted` and
+  `DeleteCompleted`, which the wizard ignores until Phase 2. A real run that
+  gets past its checks saves `delete-backup-unix-<s>` in `RABBIT/logs`, also
+  when every id was already gone; a dry run and a refused run save none,
+  and neither does a run in a resource folder with no `RABBIT` folder,
+  which takes no lock either, so it never makes one. Nothing outside
+  `RABBIT/backups` and `RABBIT/backups-deleting` is written, renamed or
+  removed, besides the lock and the report, and there is no REAPER check: a
+  delete never touches REAPER's files. The uninstall guard's refusal of
+  `RABBIT` stays as it is.
 - `rabbit install-extension --apply` takes the install lock across its
   download, install and receipt change, as the package operation does, so
   it never writes files, a backup set or the receipt while another RABBIT

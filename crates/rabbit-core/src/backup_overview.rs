@@ -127,6 +127,17 @@ impl BackupItem {
         }
     }
 
+    /// Every set the backup is in: its one set, or, for the records, each
+    /// set that holds only a copy of RABBIT's records. A delete takes whole
+    /// sets, so deleting this backup deletes each of them, each as an item
+    /// of its own (see [`crate::backup_delete::DeleteItem`]).
+    pub fn set_ids(&self) -> Vec<&str> {
+        match self {
+            Self::Records { set_ids } => set_ids.iter().map(String::as_str).collect(),
+            other => other.set_id().into_iter().collect(),
+        }
+    }
+
     /// The package the backup is of, if it is one package's.
     pub fn package_id(&self) -> Option<&str> {
         match self {
@@ -779,15 +790,7 @@ fn build_overview(
     unreadable: Vec<UnreadableSet>,
     environment: &BackupEnvironment<'_>,
 ) -> BackupOverview {
-    let rabbit = resource_path.join("RABBIT");
-    let backups = backups_root(resource_path);
-    // Sets are compared with the owner of `RABBIT/backups`, not with the
-    // account RABBIT runs as, so the overview says the same under sudo.
-    let reference_owner = if is_real_folder(&backups).unwrap_or(false) {
-        (environment.owner_of)(&backups)
-    } else {
-        (environment.owner_of)(&rabbit)
-    };
+    let reference_owner = reference_owner(resource_path, environment);
     let mut unreadable = unreadable;
     let mut sets: Vec<BackupSetOverview> = folders
         .into_iter()
@@ -878,6 +881,23 @@ fn build_overview(
         unreadable,
         receipt_error: receipt.err(),
         targets,
+    }
+}
+
+/// The account every set in the REAPER at `resource_path` is compared
+/// with: the owner of `RABBIT/backups`, or of `RABBIT` while there is no
+/// `RABBIT/backups`. Never the account RABBIT runs as, so the overview, and
+/// a delete's dry run, say the same under sudo. `None` where owners can't
+/// be read, as on Windows.
+pub(crate) fn reference_owner(
+    resource_path: &Path,
+    environment: &BackupEnvironment<'_>,
+) -> Option<u32> {
+    let backups = backups_root(resource_path);
+    if is_real_folder(&backups).unwrap_or(false) {
+        (environment.owner_of)(&backups)
+    } else {
+        (environment.owner_of)(&resource_path.join("RABBIT"))
     }
 }
 
