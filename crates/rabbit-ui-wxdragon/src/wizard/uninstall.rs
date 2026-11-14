@@ -379,7 +379,9 @@ fn uninstall_row(
     }
 }
 
-fn details_text(summary: &str, explanation: &str) -> String {
+/// A row's details text: its label, then a blank line and the explanation,
+/// when it has one. The Backups tab's rows use it too.
+pub(super) fn details_text(summary: &str, explanation: &str) -> String {
     if explanation.is_empty() {
         summary.to_string()
     } else {

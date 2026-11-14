@@ -5274,8 +5274,10 @@ fn refuse_two_files_for_one_place(plan: &RestorePlan) -> Result<()> {
 
 /// `path` as the file system tells places apart: by its components, with
 /// upper and lower case alike on Windows and macOS, and `\\?\C:\` read as
-/// `C:\`.
-pub(crate) fn same_place(path: &Path) -> Vec<String> {
+/// `C:\`. Two paths name the same place when these are equal. Public so the
+/// wizard's Review tells two restores that write the same file apart by the
+/// same rule a restore uses.
+pub fn same_place(path: &Path) -> Vec<String> {
     comparable_components(path)
         .unwrap_or_else(|| vec![path.to_string_lossy().into_owned()])
         .into_iter()

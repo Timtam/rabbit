@@ -552,6 +552,184 @@ impl TargetRefusal {
     }
 }
 
+/// One reason of every kind for a refused place, for [`sample_refusals`].
+fn sample_target_refusals() -> Vec<TargetRefusal> {
+    let folder = PathBuf::from("REAPER").join("UserPlugins");
+    vec![
+        TargetRefusal::RabbitFolder,
+        TargetRefusal::LeadsIntoRabbitFolder,
+        TargetRefusal::NameNotAsWritten {
+            name: "Vendor.".to_string(),
+        },
+        TargetRefusal::PlaceIsLink,
+        TargetRefusal::ThroughLink {
+            link: folder.join("linked"),
+        },
+        TargetRefusal::LeadsOutsideResourceFolder {
+            folder: folder.clone(),
+        },
+        TargetRefusal::LeadsOutside {
+            folder: folder.clone(),
+        },
+        TargetRefusal::OutsideAllowedFolders,
+        TargetRefusal::NotPlainPath,
+        TargetRefusal::GuardFolderGone {
+            folder: folder.clone(),
+        },
+        TargetRefusal::CouldNotCheck {
+            path: folder,
+            detail: "access denied".to_string(),
+        },
+        TargetRefusal::TwoFilesForOnePlace,
+        TargetRefusal::OutsideWithoutManifest,
+        TargetRefusal::CopyOutsideSet,
+        TargetRefusal::KeymapAmongVersionFiles,
+    ]
+}
+
+/// One refusal of every kind, each reason of a refused place included,
+/// with lists of more than one so their sentences are read too: for the
+/// tests here, and for the wizard's, which read each refusal in every
+/// language. Not for anything a user sees.
+#[doc(hidden)]
+pub fn sample_refusals() -> Vec<RestoreRefusal> {
+    let id = || "uninstall-unix-1".to_string();
+    let path = PathBuf::from("UserPlugins").join("reaper_sws-x64.dll");
+    let reaper = RunningProcess {
+        pid: "1234".to_string(),
+        name: "reaper.exe".to_string(),
+        executable_path: None,
+    };
+    let packages = || vec!["ffmpeg".to_string(), "sws".to_string()];
+    let mut refusals = vec![
+        RestoreRefusal::InvalidId {
+            backup_id: "D:".to_string(),
+        },
+        RestoreRefusal::NotFound { backup_id: id() },
+        RestoreRefusal::DiffersInCase {
+            backup_id: "Unix-1".to_string(),
+            existing: "unix-1".to_string(),
+        },
+        RestoreRefusal::EndsInDotOrSpace {
+            backup_id: "unix-1.".to_string(),
+            existing: "unix-1".to_string(),
+        },
+        RestoreRefusal::BeingDeleted { backup_id: id() },
+        RestoreRefusal::IsLink { path: path.clone() },
+        RestoreRefusal::NoManifest {
+            backup_id: id(),
+            package_id: "sws".to_string(),
+        },
+        RestoreRefusal::NoPackageRecords {
+            backup_id: id(),
+            package_id: "sws".to_string(),
+        },
+        RestoreRefusal::PackageNotInSet {
+            backup_id: id(),
+            package_id: "osara".to_string(),
+            packages: packages(),
+        },
+        RestoreRefusal::DamagedManifest {
+            backup_id: id(),
+            path: path.clone(),
+            detail: "expected value at line 1 column 1".to_string(),
+        },
+        RestoreRefusal::RecordsOnly { backup_id: id() },
+        RestoreRefusal::ReceiptInSet {
+            backup_id: id(),
+            backup_path: path.clone(),
+        },
+        RestoreRefusal::ReinstalledSince {
+            backup_id: id(),
+            package_id: "sws".to_string(),
+            other_packages: vec!["ffmpeg".to_string()],
+        },
+        RestoreRefusal::NothingOfItInSet {
+            backup_id: id(),
+            package_ids: packages(),
+        },
+        RestoreRefusal::PartMissing {
+            backup_id: id(),
+            path: path.clone(),
+        },
+        RestoreRefusal::NotComplete {
+            backup_id: id(),
+            package_id: "ffmpeg".to_string(),
+            path: path.clone(),
+        },
+        RestoreRefusal::VersionUnknown {
+            backup_id: id(),
+            package_id: "osara".to_string(),
+        },
+        RestoreRefusal::OtherLanguagePackInstalled {
+            backup_id: id(),
+            package_id: "langpack-de".to_string(),
+            installed: vec!["langpack-fr".to_string()],
+        },
+        RestoreRefusal::ReceiptUnreadable {
+            detail: "expected value at line 1 column 1".to_string(),
+        },
+        RestoreRefusal::ReaperRunning {
+            every_reaper_for: Vec::new(),
+            package_names: Vec::new(),
+            processes: vec![reaper.clone()],
+            puts_keymap_back: false,
+        },
+        RestoreRefusal::ReaperRunning {
+            every_reaper_for: Vec::new(),
+            package_names: Vec::new(),
+            processes: vec![reaper.clone()],
+            puts_keymap_back: true,
+        },
+        RestoreRefusal::ReaperRunning {
+            every_reaper_for: vec!["app2clap".to_string(), "jaws-scripts".to_string()],
+            package_names: vec!["app2clap".to_string(), "JAWS scripts".to_string()],
+            processes: vec![reaper],
+            puts_keymap_back: false,
+        },
+        RestoreRefusal::ProgramRunning {
+            package_ids: vec!["surge-xt".to_string()],
+            package_names: vec!["Surge XT".to_string()],
+            programs: vec!["Surge XT.exe".to_string()],
+        },
+        RestoreRefusal::NotWritable {
+            path: PathBuf::from("REAPER"),
+            check: "resource-path".to_string(),
+            detail: "REAPER is read-only".to_string(),
+        },
+        RestoreRefusal::LockHeld {
+            lock_path: PathBuf::from("RABBIT").join("package-install.lock"),
+            pid: 42,
+        },
+        RestoreRefusal::AsRoot,
+        RestoreRefusal::NotYours { backup_id: id() },
+        RestoreRefusal::ChangedWhileRead { backup_id: id() },
+        RestoreRefusal::ChangedSinceListed { backup_id: id() },
+        RestoreRefusal::NoKeymapInSet { backup_id: id() },
+        RestoreRefusal::KeymapNeedsReaperClosed { backup_id: id() },
+    ];
+    for reason in sample_target_refusals() {
+        refusals.push(RestoreRefusal::TargetRefused {
+            path: path.clone(),
+            reason,
+            other_packages: vec!["ffmpeg".to_string()],
+        });
+    }
+    refusals.push(RestoreRefusal::NewerFileRefused {
+        backup_id: id(),
+        package_id: "sws".to_string(),
+        path: path.clone(),
+        reason: Box::new(TargetRefusal::RabbitFolder),
+    });
+    refusals.push(RestoreRefusal::EarlierFileRefused {
+        backup_id: id(),
+        package_id: "sws".to_string(),
+        path: path.clone(),
+        reason: Box::new(TargetRefusal::OutsideAllowedFolders),
+    });
+    refusals
+}
+
 /// The refusal `error` is, for tests that check a refusal's code. Panics,
 /// naming the error, when it is no refusal.
 #[cfg(test)]
@@ -610,13 +788,14 @@ fn reaper_running_text(package_names: &[String], processes: &[RunningProcess]) -
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::path::PathBuf;
 
-    use super::{RestoreRefusal, TargetRefusal, names_in_a_sentence};
+    use super::{
+        RestoreRefusal, TargetRefusal, names_in_a_sentence, sample_refusals, sample_target_refusals,
+    };
     use crate::preflight::RunningProcess;
 
     /// The number of each variant, so a new one fails to compile here until
-    /// [`every_refusal`] lists it.
+    /// [`sample_refusals`] lists it.
     fn variant_number(refusal: &RestoreRefusal) -> usize {
         match refusal {
             RestoreRefusal::InvalidId { .. } => 0,
@@ -679,186 +858,12 @@ mod tests {
 
     const REASONS: usize = 15;
 
-    fn every_reason() -> Vec<TargetRefusal> {
-        let folder = PathBuf::from("REAPER").join("UserPlugins");
-        vec![
-            TargetRefusal::RabbitFolder,
-            TargetRefusal::LeadsIntoRabbitFolder,
-            TargetRefusal::NameNotAsWritten {
-                name: "Vendor.".to_string(),
-            },
-            TargetRefusal::PlaceIsLink,
-            TargetRefusal::ThroughLink {
-                link: folder.join("linked"),
-            },
-            TargetRefusal::LeadsOutsideResourceFolder {
-                folder: folder.clone(),
-            },
-            TargetRefusal::LeadsOutside {
-                folder: folder.clone(),
-            },
-            TargetRefusal::OutsideAllowedFolders,
-            TargetRefusal::NotPlainPath,
-            TargetRefusal::GuardFolderGone {
-                folder: folder.clone(),
-            },
-            TargetRefusal::CouldNotCheck {
-                path: folder,
-                detail: "access denied".to_string(),
-            },
-            TargetRefusal::TwoFilesForOnePlace,
-            TargetRefusal::OutsideWithoutManifest,
-            TargetRefusal::CopyOutsideSet,
-            TargetRefusal::KeymapAmongVersionFiles,
-        ]
-    }
-
-    /// One refusal of every kind, each reason of a refused place included,
-    /// with lists of more than one so their sentences are read too.
-    fn every_refusal() -> Vec<RestoreRefusal> {
-        let id = || "uninstall-unix-1".to_string();
-        let path = PathBuf::from("UserPlugins").join("reaper_sws-x64.dll");
-        let reaper = RunningProcess {
-            pid: "1234".to_string(),
-            name: "reaper.exe".to_string(),
-            executable_path: None,
-        };
-        let packages = || vec!["ffmpeg".to_string(), "sws".to_string()];
-        let mut refusals = vec![
-            RestoreRefusal::InvalidId {
-                backup_id: "D:".to_string(),
-            },
-            RestoreRefusal::NotFound { backup_id: id() },
-            RestoreRefusal::DiffersInCase {
-                backup_id: "Unix-1".to_string(),
-                existing: "unix-1".to_string(),
-            },
-            RestoreRefusal::EndsInDotOrSpace {
-                backup_id: "unix-1.".to_string(),
-                existing: "unix-1".to_string(),
-            },
-            RestoreRefusal::BeingDeleted { backup_id: id() },
-            RestoreRefusal::IsLink { path: path.clone() },
-            RestoreRefusal::NoManifest {
-                backup_id: id(),
-                package_id: "sws".to_string(),
-            },
-            RestoreRefusal::NoPackageRecords {
-                backup_id: id(),
-                package_id: "sws".to_string(),
-            },
-            RestoreRefusal::PackageNotInSet {
-                backup_id: id(),
-                package_id: "osara".to_string(),
-                packages: packages(),
-            },
-            RestoreRefusal::DamagedManifest {
-                backup_id: id(),
-                path: path.clone(),
-                detail: "expected value at line 1 column 1".to_string(),
-            },
-            RestoreRefusal::RecordsOnly { backup_id: id() },
-            RestoreRefusal::ReceiptInSet {
-                backup_id: id(),
-                backup_path: path.clone(),
-            },
-            RestoreRefusal::ReinstalledSince {
-                backup_id: id(),
-                package_id: "sws".to_string(),
-                other_packages: vec!["ffmpeg".to_string()],
-            },
-            RestoreRefusal::NothingOfItInSet {
-                backup_id: id(),
-                package_ids: packages(),
-            },
-            RestoreRefusal::PartMissing {
-                backup_id: id(),
-                path: path.clone(),
-            },
-            RestoreRefusal::NotComplete {
-                backup_id: id(),
-                package_id: "ffmpeg".to_string(),
-                path: path.clone(),
-            },
-            RestoreRefusal::VersionUnknown {
-                backup_id: id(),
-                package_id: "osara".to_string(),
-            },
-            RestoreRefusal::OtherLanguagePackInstalled {
-                backup_id: id(),
-                package_id: "langpack-de".to_string(),
-                installed: vec!["langpack-fr".to_string()],
-            },
-            RestoreRefusal::ReceiptUnreadable {
-                detail: "expected value at line 1 column 1".to_string(),
-            },
-            RestoreRefusal::ReaperRunning {
-                every_reaper_for: Vec::new(),
-                package_names: Vec::new(),
-                processes: vec![reaper.clone()],
-                puts_keymap_back: false,
-            },
-            RestoreRefusal::ReaperRunning {
-                every_reaper_for: Vec::new(),
-                package_names: Vec::new(),
-                processes: vec![reaper.clone()],
-                puts_keymap_back: true,
-            },
-            RestoreRefusal::ReaperRunning {
-                every_reaper_for: vec!["app2clap".to_string(), "jaws-scripts".to_string()],
-                package_names: vec!["app2clap".to_string(), "JAWS scripts".to_string()],
-                processes: vec![reaper],
-                puts_keymap_back: false,
-            },
-            RestoreRefusal::ProgramRunning {
-                package_ids: vec!["surge-xt".to_string()],
-                package_names: vec!["Surge XT".to_string()],
-                programs: vec!["Surge XT.exe".to_string()],
-            },
-            RestoreRefusal::NotWritable {
-                path: PathBuf::from("REAPER"),
-                check: "resource-path".to_string(),
-                detail: "REAPER is read-only".to_string(),
-            },
-            RestoreRefusal::LockHeld {
-                lock_path: PathBuf::from("RABBIT").join("package-install.lock"),
-                pid: 42,
-            },
-            RestoreRefusal::AsRoot,
-            RestoreRefusal::NotYours { backup_id: id() },
-            RestoreRefusal::ChangedWhileRead { backup_id: id() },
-            RestoreRefusal::ChangedSinceListed { backup_id: id() },
-            RestoreRefusal::NoKeymapInSet { backup_id: id() },
-            RestoreRefusal::KeymapNeedsReaperClosed { backup_id: id() },
-        ];
-        for reason in every_reason() {
-            refusals.push(RestoreRefusal::TargetRefused {
-                path: path.clone(),
-                reason,
-                other_packages: vec!["ffmpeg".to_string()],
-            });
-        }
-        refusals.push(RestoreRefusal::NewerFileRefused {
-            backup_id: id(),
-            package_id: "sws".to_string(),
-            path: path.clone(),
-            reason: Box::new(TargetRefusal::RabbitFolder),
-        });
-        refusals.push(RestoreRefusal::EarlierFileRefused {
-            backup_id: id(),
-            package_id: "sws".to_string(),
-            path: path.clone(),
-            reason: Box::new(TargetRefusal::OutsideAllowedFolders),
-        });
-        refusals
-    }
-
     /// The lists above hold every variant, so the tests below read them all.
     #[test]
     fn the_samples_hold_every_refusal_and_every_reason() {
-        let refusals: BTreeSet<usize> = every_refusal().iter().map(variant_number).collect();
+        let refusals: BTreeSet<usize> = sample_refusals().iter().map(variant_number).collect();
         assert_eq!(refusals, (0..VARIANTS).collect());
-        let reasons: BTreeSet<usize> = every_reason().iter().map(reason_number).collect();
+        let reasons: BTreeSet<usize> = sample_target_refusals().iter().map(reason_number).collect();
         assert_eq!(reasons, (0..REASONS).collect());
     }
 
@@ -866,7 +871,7 @@ mod tests {
     /// hints, and the wizard shows its own words.
     #[test]
     fn no_refusal_text_holds_command_line_syntax() {
-        for refusal in every_refusal() {
+        for refusal in sample_refusals() {
             let text = refusal.to_string();
             assert!(!text.contains("--"), "{text}");
             assert!(!text.contains("rabbit "), "{text}");
@@ -880,7 +885,7 @@ mod tests {
     #[test]
     fn codes_are_the_serde_tags_and_unique() {
         let mut codes = BTreeSet::new();
-        for refusal in every_refusal() {
+        for refusal in sample_refusals() {
             let json = serde_json::to_value(&refusal).unwrap();
             assert_eq!(json["code"], refusal.code(), "{refusal:?}");
             let code = refusal.code();
@@ -897,7 +902,10 @@ mod tests {
         }
         let distinct: BTreeSet<&str> = codes.iter().map(|(_, code)| *code).collect();
         assert_eq!(distinct.len(), VARIANTS);
-        let reasons: BTreeSet<&str> = every_reason().iter().map(TargetRefusal::code).collect();
+        let reasons: BTreeSet<&str> = sample_target_refusals()
+            .iter()
+            .map(TargetRefusal::code)
+            .collect();
         assert_eq!(reasons.len(), REASONS);
     }
 
@@ -907,7 +915,7 @@ mod tests {
     /// code.
     #[test]
     fn a_delete_says_its_refusals_in_words_of_its_own() {
-        for refusal in every_refusal() {
+        for refusal in sample_refusals() {
             let text = refusal.delete_text();
             assert!(!text.contains("--"), "{text}");
             assert!(!text.contains("rabbit "), "{text}");
@@ -927,7 +935,7 @@ mod tests {
             )
         };
         let mut reworded = 0;
-        for refusal in every_refusal().iter().filter(|r| given_by_a_delete(r)) {
+        for refusal in sample_refusals().iter().filter(|r| given_by_a_delete(r)) {
             let text = refusal.delete_text();
             assert!(!text.to_lowercase().contains("restor"), "{text}");
             if text != refusal.to_string() {

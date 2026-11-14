@@ -864,14 +864,6 @@ fn ids(ids: &[&str]) -> Vec<String> {
     ids.iter().map(ToString::to_string).collect()
 }
 
-/// No message key or placeholder shows through.
-fn assert_reads(locale: &str, text: &str) {
-    assert!(!text.is_empty(), "{locale}: empty");
-    for marker in ["wizard-", "status-", "{", "}"] {
-        assert!(!text.contains(marker), "{locale}: {text}");
-    }
-}
-
 // ---------------------------------------------------------------------------
 // What the progress log starts with.
 // ---------------------------------------------------------------------------
