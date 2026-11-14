@@ -737,6 +737,19 @@ wizard-restore-target-two-files-for-one-place = la copia de seguridad contiene m
 wizard-restore-target-outside-without-manifest = la copia de seguridad no registra a dónde pertenece este archivo de fuera de la carpeta de recursos
 wizard-restore-target-copy-outside-set = el registro de la copia de seguridad sitúa su copia fuera de la copia de seguridad
 wizard-restore-target-keymap-among-version-files = es el mapa de teclado de REAPER, que RABBIT solo devuelve como mapa de teclado por sí mismo
+# Why RABBIT doesn't delete a backup, or any of them, a sentence or two
+# each, as the Done page and Show details say it. Those about one backup
+# call it "it": the Done page puts them after "RABBIT can't delete
+# <backup>.". $path is a folder as the computer writes it, keep it as it
+# is. sudo and root are never translated.
+wizard-delete-refusal-invalid-id = Su nombre no es uno que RABBIT dé a una copia de seguridad.
+wizard-delete-refusal-differs-in-case = RABBIT solo la encuentra con un nombre con otras mayúsculas y minúsculas.
+wizard-delete-refusal-ends-in-dot-or-space = RABBIT solo la encuentra con un nombre sin el punto o el espacio del final.
+wizard-delete-refusal-is-link = RABBIT no usa { $path }: es un enlace, y RABBIT nunca sigue enlaces en sus copias de seguridad.
+wizard-delete-refusal-not-yours = Pertenece a otra cuenta, así que RABBIT no la elimina.
+wizard-delete-refusal-changed-since-listed = Cambió desde que RABBIT la mostró. Vuelve a abrir RABBIT para ver las copias de seguridad tal como están ahora.
+wizard-delete-refusal-lock-held = Otra copia de RABBIT está trabajando en este REAPER. Espera a que termine y vuelve a ejecutar RABBIT.
+wizard-delete-refusal-as-root = RABBIT se está ejecutando como root, como ocurre con sudo, y así no elimina copias de seguridad. Sal de RABBIT y ábrelo con tu propia cuenta.
 
 # $package is the localized package name the configuration step depends on.
 wizard-configuration-row-unavailable = No está disponible: Se requiere instalar { $package }.
@@ -1006,6 +1019,28 @@ wizard-progress-uninstall-heading = Desinstalación
 wizard-progress-status-uninstall-running = Desinstalando los paquetes marcados.
 wizard-progress-details-uninstall-starting = Iniciando la desinstalación.
 wizard-progress-status-uninstall-cancelling = Deteniendo. RABBIT termina el paso que empezó y luego se cierra.
+# The progress page while backups are deleted: its heading, the first status
+# line and the first line of the log. Once the user asked to stop, the
+# status line says wizard-progress-status-cancelling.
+wizard-progress-delete-heading = Eliminando copias de seguridad
+wizard-progress-status-delete-running = Eliminando las copias de seguridad marcadas.
+wizard-progress-details-delete-starting = Iniciando la eliminación de copias de seguridad.
+# The status and log line when RABBIT starts deleting a backup, which is
+# spoken, then the log line when it is done with it. $backups is what the
+# rows call the backups that go together, one name or several joined as
+# wizard-backups-list-and joins them, each with when it was made, as
+# wizard-backups-row-reference says it, when another ticked backup has the
+# same name. $count is how many there are, a number, and $size a size, such
+# as "4 MB".
+wizard-progress-status-deleting = { $count ->
+    [one] Eliminando la copia de seguridad: { $backups }…
+   *[other] Eliminando las copias de seguridad: { $backups }…
+}
+wizard-progress-log-delete-deleted = { $backups }: se eliminó. Espacio liberado: { $size }.
+wizard-progress-log-delete-finished = { $backups }: se terminó una eliminación que empezó antes. Espacio liberado: { $size }.
+wizard-progress-log-delete-already-gone = { $backups }: ya no estaba.
+wizard-progress-log-delete-partly = { $backups }: solo se eliminó en parte. Espacio liberado: { $size }.
+wizard-progress-log-delete-failed = { $backups }: no se eliminó.
 
 # Live per-package status line on the progress page.
 # $package is the localized package display name (e.g. "REAPER", "OSARA").
@@ -1369,6 +1404,149 @@ wizard-summary-uninstall-backup = Copia de seguridad: { $id }
 wizard-summary-uninstall-restore = Para recuperar { $package }, cierra REAPER y ejecuta: { $command }
 # $path is the full path of the report RABBIT saved.
 wizard-summary-uninstall-report = Informe: { $path }
+# The Done page after a delete of backups. Its first line, one of the seven
+# below, also ends the progress page. Backups are counted as Review counts
+# them, one for each ticked row. $count and $deleted are numbers: the
+# backups ticked, or in the first message those deleted, and of them those
+# deleted. $size is a size, such as "520 MB".
+wizard-done-delete-status-success = RABBIT ha eliminado { $count ->
+    [one] una copia de seguridad
+   *[other] { $count } copias de seguridad
+} y ha liberado { $size }.
+wizard-done-delete-status-partial = RABBIT ha eliminado { $deleted } de { $count } copias de seguridad.
+wizard-done-delete-status-none = { $count ->
+    [one] RABBIT no ha podido eliminar la copia de seguridad.
+   *[other] RABBIT no ha podido eliminar las copias de seguridad.
+}
+wizard-done-delete-status-already-gone = { $count ->
+    [one] La copia de seguridad ya no estaba, así que no había nada que eliminar.
+   *[other] Las copias de seguridad ya no estaban, así que no había nada que eliminar.
+}
+wizard-done-delete-status-stopped = { $deleted ->
+    [0] RABBIT se detuvo antes de eliminar ninguna copia de seguridad. Las que todavía no había alcanzado se conservan.
+   *[other] RABBIT se detuvo después de eliminar { $deleted } de { $count } copias de seguridad. Las que todavía no había alcanzado se conservan.
+}
+# When the user stopped the run partway through a backup, before RABBIT had
+# deleted a whole one: part of a backup is gone.
+wizard-done-delete-status-stopped-partway = { $count ->
+    [one] RABBIT se detuvo antes de haber eliminado la copia de seguridad entera.
+   *[other] RABBIT se detuvo antes de haber eliminado una copia de seguridad entera. Las que todavía no había alcanzado se conservan.
+}
+# When RABBIT deleted nothing because it refused the run, or something went
+# wrong before it started.
+wizard-done-delete-status-nothing = No se ha eliminado nada.
+# Why backups weren't deleted, after the first line, one sentence each.
+# $total is how many backups were ticked, and $count how many of them the
+# sentence is about; both are numbers. The [1] form is for a delete of a
+# single backup: the first line calls it "the backup", so the sentence
+# calls it "it". Name "Show details" as wizard-done-show-details does, and
+# the Backups tab as wizard-packages-tab-backups does.
+wizard-done-delete-in-use = { $total ->
+    [1] Un archivo suyo está abierto en otro programa. Cierra ese programa y vuelve a ejecutar RABBIT para eliminarla.
+   *[other] { $count ->
+        [one] Una no se pudo eliminar porque un archivo suyo está abierto en otro programa. Cierra ese programa y vuelve a ejecutar RABBIT para eliminarla.
+       *[other] { $count } no se pudieron eliminar porque un archivo suyo está abierto en otro programa. Cierra ese programa y vuelve a ejecutar RABBIT para eliminarlas.
+    }
+}
+wizard-done-delete-permission = { $total ->
+    [1] RABBIT no tiene permiso para moverla. Se queda como estaba.
+   *[other] { $count ->
+        [one] Una no se pudo eliminar porque RABBIT no tiene permiso para moverla. Se queda como estaba.
+       *[other] { $count } no se pudieron eliminar porque RABBIT no tiene permiso para moverlas. Se quedan como estaban.
+    }
+}
+wizard-done-delete-earlier-deletion-left = { $total ->
+    [1] Una eliminación anterior de esta copia de seguridad no terminó y RABBIT tampoco ha podido terminarla ahora, así que la copia de seguridad se queda como estaba. Vuelve a ejecutar RABBIT para intentarlo otra vez.
+   *[other] { $count ->
+        [one] Una no se pudo eliminar porque una eliminación anterior suya no terminó y RABBIT tampoco ha podido terminarla ahora. Se queda como estaba. Vuelve a ejecutar RABBIT para intentarlo otra vez.
+       *[other] { $count } no se pudieron eliminar porque eliminaciones anteriores suyas no terminaron y RABBIT tampoco ha podido terminarlas ahora. Se quedan como estaban. Vuelve a ejecutar RABBIT para intentarlo otra vez.
+    }
+}
+wizard-done-delete-other = { $total ->
+    [1] Algo salió mal y se queda como estaba. «Mostrar detalles» indica qué.
+   *[other] { $count ->
+        [one] Una no se pudo eliminar y se queda como estaba. «Mostrar detalles» indica por qué.
+       *[other] { $count } no se pudieron eliminar y se quedan como estaban. «Mostrar detalles» indica por qué.
+    }
+}
+wizard-done-delete-partly = { $total ->
+    [1] RABBIT solo la ha eliminado en parte. Lo que queda es una eliminación sin terminar, que ya no usa ninguna restauración. Para terminarla, vuelve a ejecutar RABBIT y elimínala en la pestaña «Copias de seguridad».
+   *[other] { $count ->
+        [one] Una solo se eliminó en parte. Lo que queda de ella es una eliminación sin terminar, que ya no usa ninguna restauración. Para terminarla, vuelve a ejecutar RABBIT y elimínala en la pestaña «Copias de seguridad».
+       *[other] { $count } solo se eliminaron en parte. Lo que queda de ellas son eliminaciones sin terminar, que ya no usa ninguna restauración. Para terminarlas, vuelve a ejecutar RABBIT y elimínalas en la pestaña «Copias de seguridad».
+    }
+}
+# The row for the old copies of RABBIT's records stands for several
+# backups on disk, and only it can end like this: RABBIT deleted some of
+# them, and couldn't delete the others, or the user stopped the run before
+# it reached them.
+wizard-done-delete-part-left = { $total ->
+    [1] RABBIT eliminó una parte, pero no pudo eliminar el resto, que se queda como estaba. «Mostrar detalles» indica por qué.
+   *[other] { $count ->
+        [one] Una solo se eliminó en parte: RABBIT no pudo eliminar el resto, que se queda como estaba. «Mostrar detalles» indica por qué.
+       *[other] { $count } solo se eliminaron en parte: RABBIT no pudo eliminar el resto, que se queda como estaba. «Mostrar detalles» indica por qué.
+    }
+}
+wizard-done-delete-stopped-partway = { $total ->
+    [1] RABBIT eliminó una parte antes de detenerse. El resto se conserva.
+   *[other] { $count ->
+        [one] Una solo se eliminó en parte antes de que RABBIT se detuviera. El resto se conserva.
+       *[other] { $count } solo se eliminaron en parte antes de que RABBIT se detuviera. El resto se conserva.
+    }
+}
+# After the first line, when some of the ticked backups were gone before the
+# run. $count is a number, fewer than the backups ticked.
+wizard-done-delete-already-gone = { $count ->
+    [one] Una ya no estaba.
+   *[other] { $count } ya no estaban.
+}
+# After "Nothing was deleted." when a ticked backup can't be deleted, which
+# refuses the whole run; said only when more than one backup was ticked.
+wizard-done-delete-refused-run = RABBIT solo elimina las copias de seguridad marcadas si puede eliminarlas todas.
+# Why a backup can't be deleted. $backup is what its row calls it with when
+# it was made, as wizard-backups-row-reference says it, or several such
+# joined as wizard-backups-list-and joins them when one backup on disk holds
+# them together; $count is how many, a number. $reason is one of the
+# wizard-delete-refusal-* sentences, which calls that one backup "it".
+wizard-done-delete-refused-backup = { $count ->
+    [one] RABBIT no puede eliminar { $backup }. { $reason }
+   *[other] RABBIT no puede eliminar { $backup }, que van juntas en una sola copia de seguridad. { $reason }
+}
+# When RABBIT couldn't read REAPER's resource folder, or a folder of its own
+# backups in it, so it deleted nothing. $path is that folder as the computer
+# writes it, keep it as it is.
+wizard-done-delete-folder-unreadable = RABBIT no pudo leer la carpeta { $path }. Comprueba que existe y que puedes abrirla, y luego vuelve a ejecutar RABBIT.
+# When something else went wrong before RABBIT deleted anything. $error is
+# the error message, in English.
+wizard-done-delete-error = Algo salió mal antes de que RABBIT eliminara nada: { $error }
+# Show details after a delete of backups: one line per ticked backup, or per
+# backups that went together, then lines indented below it. $backups is
+# what the rows call them, joined as wizard-backups-list-and joins names,
+# each with when it was made, as wizard-backups-row-reference says it, when
+# another ticked backup has the same name. $status is one of the
+# wizard-delete-status-* labels, $size a size, such as "4 MB", and $path a
+# folder as the computer writes it, keep it as it is. Name the Backups tab
+# as wizard-packages-tab-backups does. The lines below say "it" of the
+# backup; for backups that go together, wizard-summary-delete-together
+# comes first and says that one backup holds them.
+wizard-summary-delete-backup = { $backups }: { $status }
+wizard-summary-delete-freed = Espacio liberado: { $size }
+wizard-summary-delete-together = Van juntas: una sola copia de seguridad las guarda.
+# What happened to a backup that wasn't deleted, then why, in a line of
+# its own. Part of the row for the old copies of RABBIT's records, which
+# stands for several backups on disk, may have gone though the rest didn't.
+wizard-summary-delete-nothing-changed = No ha cambiado nada de ella.
+wizard-summary-delete-part-left = RABBIT eliminó una parte. El resto no se pudo eliminar y se queda como estaba.
+wizard-summary-delete-in-use = Un archivo suyo está abierto en otro programa, así que no se pudo mover.
+wizard-summary-delete-permission = RABBIT no tiene permiso para moverla.
+wizard-summary-delete-earlier-deletion-left = Una eliminación anterior suya no terminó y RABBIT tampoco ha podido terminarla ahora. Lo que queda de esa eliminación está en { $path }.
+wizard-summary-delete-left-in = Lo que RABBIT no pudo quitar se queda en { $path }. La pestaña «Copias de seguridad» lo muestra como una eliminación sin terminar, que ya no usa ninguna restauración; si lo eliminas allí, se termina.
+wizard-summary-delete-not-reached-stopped = RABBIT se detuvo antes de llegar a ella, así que se conserva.
+wizard-summary-delete-stopped-partway = RABBIT eliminó una parte y luego se detuvo. El resto se conserva.
+wizard-summary-delete-not-reached-refused = RABBIT no ha eliminado nada en esta operación, así que se conserva.
+wizard-summary-delete-freed-total = Espacio liberado en total: { $size }
+# $path is the full path of the report RABBIT saved.
+wizard-summary-delete-report = Informe: { $path }
 status-installed-or-checked = Instalado o revisado
 status-planned-unattended = Plan desatendido
 status-deferred-unattended = Plan diferido
@@ -1386,6 +1564,16 @@ status-remove-blocked = No desinstalado
 status-remove-failed = No se pudo desinstalar
 status-remove-cancelled = Sigue instalado (lo detuviste)
 status-remove-not-reached = Sigue instalado (el proceso se detuvo antes)
+# What came of a backup in a delete, after its name in "Show details".
+wizard-delete-status-deleted = Eliminada
+wizard-delete-status-finished-earlier-deletion = Eliminada; así terminó una eliminación que empezó antes
+wizard-delete-status-already-gone = Ya no estaba
+wizard-delete-status-would-delete = Se eliminaría
+wizard-delete-status-would-finish-earlier-deletion = Terminaría una eliminación que empezó antes
+wizard-delete-status-not-deleted = No eliminada
+wizard-delete-status-partly-deleted = Eliminada en parte
+wizard-delete-status-refused = No se puede eliminar
+wizard-delete-status-not-reached = No alcanzada
 
 # Per-package status messages surfaced on the wizard's Done page next to the
 # package name (e.g. "OSARA: <message>"). The wrapper template

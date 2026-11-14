@@ -65,9 +65,10 @@ impl PackagesTab {
 /// button stays disabled, blockers or not.
 pub const RESTORE_RUN_AVAILABLE: bool = false;
 
-/// Whether a delete of backups can start from Review: the same, for the
-/// delete run, which comes in step 2c of the backup plan.
-pub const DELETE_BACKUPS_RUN_AVAILABLE: bool = false;
+/// Whether a delete of backups can start from Review: it can, once its
+/// Review found something ticked to delete. The Delete button is still
+/// never the default button, and a question with No focused comes first.
+pub const DELETE_BACKUPS_RUN_AVAILABLE: bool = true;
 
 /// What the run does. The Packages tab showing when Next is pressed decides
 /// it, and on the Backups tab the choice below its list, Restore or Delete.

@@ -178,6 +178,10 @@ pub struct WizardText {
     pub progress_uninstall_heading: String,
     pub progress_status_uninstall_running: String,
     pub progress_status_uninstall_cancelling: String,
+    /// The progress page's heading and first status line while backups
+    /// are deleted. A stop says `progress_status_cancelling`.
+    pub progress_delete_heading: String,
+    pub progress_status_delete_running: String,
     pub done_heading: String,
     pub done_status: String,
     pub done_status_success: String,

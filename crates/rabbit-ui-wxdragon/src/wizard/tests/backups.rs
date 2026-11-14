@@ -40,19 +40,19 @@ const NOV_3_0912: u64 = 1_793_697_120;
 /// November 1, 2026, 18:40 UTC.
 const NOV_1_1840: u64 = 1_793_558_400;
 /// October 2, 2026, 11:00 UTC.
-const OCT_2_1100: u64 = 1_790_938_800;
+pub(super) const OCT_2_1100: u64 = 1_790_938_800;
 /// November 2, 2026, 10:00 UTC.
 const NOV_2_1000: u64 = 1_793_613_600;
 
-const KB: u64 = 1024;
-const MB: u64 = 1024 * 1024;
+pub(super) const KB: u64 = 1024;
+pub(super) const MB: u64 = 1024 * 1024;
 const GB: u64 = 1024 * 1024 * 1024;
 
-fn en() -> Localizer {
+pub(super) fn en() -> Localizer {
     Localizer::embedded(DEFAULT_LOCALE).unwrap()
 }
 
-fn version(text: &str) -> Version {
+pub(super) fn version(text: &str) -> Version {
     Version::parse(text).unwrap()
 }
 
@@ -97,7 +97,7 @@ fn backup(item: BackupItem, group: BackupGroup, created_unix: Option<u64>) -> Ba
     }
 }
 
-fn package(set_id: &str, package_id: &str) -> BackupItem {
+pub(super) fn package(set_id: &str, package_id: &str) -> BackupItem {
     BackupItem::Package {
         set_id: set_id.to_string(),
         package_id: package_id.to_string(),
@@ -105,7 +105,7 @@ fn package(set_id: &str, package_id: &str) -> BackupItem {
 }
 
 /// SWS 2.14.0.7 as an uninstall on November 9 kept it, with its settings.
-fn sws() -> BackupEntry {
+pub(super) fn sws() -> BackupEntry {
     BackupEntry {
         version: Some(version("2.14.0.7")),
         with_settings: Some(true),
@@ -118,7 +118,7 @@ fn sws() -> BackupEntry {
 }
 
 /// FFmpeg 7.1, from the same uninstall as [`sws`].
-fn ffmpeg() -> BackupEntry {
+pub(super) fn ffmpeg() -> BackupEntry {
     BackupEntry {
         version: Some(version("7.1")),
         with_settings: Some(false),
@@ -132,7 +132,7 @@ fn ffmpeg() -> BackupEntry {
 }
 
 /// ReaPack 1.2.4, which an update to 1.2.5 replaced on November 3.
-fn reapack() -> BackupEntry {
+pub(super) fn reapack() -> BackupEntry {
     BackupEntry {
         version: Some(version("1.2.4")),
         replaced_by: Some(version("1.2.5")),
@@ -146,7 +146,7 @@ fn reapack() -> BackupEntry {
 }
 
 /// The user's own key map, which OSARA's replaced on November 1.
-fn keymap() -> BackupEntry {
+pub(super) fn keymap() -> BackupEntry {
     BackupEntry {
         keymap_origin: Some(KeymapOrigin::OwnKeymap),
         size: 38 * KB,
@@ -161,7 +161,7 @@ fn keymap() -> BackupEntry {
 }
 
 /// Every old copy of RABBIT's records, 23 sets.
-fn records() -> BackupEntry {
+pub(super) fn records() -> BackupEntry {
     BackupEntry {
         size: 420 * KB,
         status: BackupStatus::NotHere,
@@ -229,22 +229,26 @@ fn utc(_: u64) -> i32 {
     0
 }
 
-fn list_in(localizer: &Localizer, entries: Vec<BackupEntry>) -> WizardBackupList {
+pub(super) fn list_in(localizer: &Localizer, entries: Vec<BackupEntry>) -> WizardBackupList {
     backup_list_from_source(localizer, &source(entries), &utc)
 }
 
-fn backup_list(entries: Vec<BackupEntry>) -> WizardBackupList {
+pub(super) fn backup_list(entries: Vec<BackupEntry>) -> WizardBackupList {
     list_in(&en(), entries)
 }
 
-fn index_of(list: &WizardBackupList, name: &str) -> usize {
+pub(super) fn index_of(list: &WizardBackupList, name: &str) -> usize {
     list.rows
         .iter()
         .position(|row| row.name == name)
         .unwrap_or_else(|| panic!("no row named {name}"))
 }
 
-fn tick(list: &mut WizardBackupList, name: &str, choice: BackupChoice) -> BackupTickChange {
+pub(super) fn tick(
+    list: &mut WizardBackupList,
+    name: &str,
+    choice: BackupChoice,
+) -> BackupTickChange {
     let index = index_of(list, name);
     apply_backup_checkbox(&mut list.rows, index, choice, true)
 }
@@ -1806,7 +1810,7 @@ fn a_reaper_without_backups_lists_none_and_gets_no_folder() {
 /// Uninstall SWS 2.14.0.7 and FFmpeg 7.1 from `resource` the way an
 /// uninstall moves them: one set, `uninstall-unix-1794233100`, that holds
 /// both, each with its record.
-fn write_uninstall_set(resource: &std::path::Path) {
+pub(super) fn write_uninstall_set(resource: &std::path::Path) {
     let plugins = resource.join("UserPlugins");
     fs::create_dir_all(&plugins).unwrap();
     fs::write(plugins.join("reaper_sws-x64.dll"), b"sws").unwrap();

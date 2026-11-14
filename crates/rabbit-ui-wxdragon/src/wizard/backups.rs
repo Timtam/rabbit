@@ -282,9 +282,17 @@ impl WizardBackupList {
     /// The rows ticked for `choice`, in list order. Only rows that can be
     /// ticked for it count.
     pub fn ticked_rows(&self, choice: BackupChoice) -> impl Iterator<Item = &BackupRow> {
+        self.ticked_indices(choice).map(|index| &self.rows[index])
+    }
+
+    /// Where the rows [`WizardBackupList::ticked_rows`] gives are in the
+    /// list, so a run copied out of it counts the same rows.
+    pub(super) fn ticked_indices(&self, choice: BackupChoice) -> impl Iterator<Item = usize> {
         self.rows
             .iter()
-            .filter(move |row| row.can_tick(choice) && row.is_ticked(choice))
+            .enumerate()
+            .filter(move |(_, row)| row.can_tick(choice) && row.is_ticked(choice))
+            .map(|(index, _)| index)
     }
 
     /// The label right before the list. It names the tab first and gives
@@ -389,6 +397,15 @@ pub fn backup_list_for_target(model: &WizardModel, target: &TargetRow) -> Wizard
         return WizardBackupList::default();
     };
     backup_list_at(&localizer, &target.path)
+}
+
+/// Read the Backups tab's rows for `target` again in place of `list`'s, as
+/// the version check and the rescan after every run do: what changed on
+/// disk shows, no tick of either choice is kept, and Restore is chosen
+/// again.
+pub fn reread_backup_list(list: &mut WizardBackupList, model: &WizardModel, target: &TargetRow) {
+    *list = backup_list_for_target(model, target);
+    reset_backup_ticks(list);
 }
 
 /// The Backups tab's rows for the REAPER at `resource_path`, from the
@@ -1421,7 +1438,7 @@ fn tie_drafts(localizer: &Localizer, drafts: &mut [RowDraft]) {
 /// order: those whose sets, in `lists`, share an id with it, and so on, as a
 /// delete of one takes every set of the others too. Headings, with no set,
 /// go with nothing.
-fn tied_indices(lists: &[&[String]], index: usize) -> Vec<usize> {
+pub(super) fn tied_indices(lists: &[&[String]], index: usize) -> Vec<usize> {
     let Some(own) = lists.get(index) else {
         return Vec::new();
     };
@@ -2290,11 +2307,15 @@ fn delete_line(localizer: &Localizer, row: &BackupRow) -> String {
 // Words.
 // ---------------------------------------------------------------------------
 
-fn text(localizer: &Localizer, key: &str) -> String {
+pub(super) fn text(localizer: &Localizer, key: &str) -> String {
     localizer.text(key).value
 }
 
-fn say(localizer: &Localizer, key: &str, arguments: &[(&str, FluentArgument<'_>)]) -> String {
+pub(super) fn say(
+    localizer: &Localizer,
+    key: &str,
+    arguments: &[(&str, FluentArgument<'_>)],
+) -> String {
     localizer.format_with(key, arguments).value
 }
 

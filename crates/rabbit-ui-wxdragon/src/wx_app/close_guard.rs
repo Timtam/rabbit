@@ -1,11 +1,12 @@
-//! Decides what closing the window means while an install or an uninstall
-//! is running, and asks the user when the answer is "stop the run".
+//! Decides what closing the window means while a run is going: an install,
+//! an uninstall or a delete of backups, and asks the user when the answer
+//! is "stop the run".
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
-use crate::{WizardMode, WizardModel};
+use crate::{WizardMode, WizardModel, stop_question, stopping_line};
 use rabbit_core::cancel::CancelToken;
 
 use wxdragon::prelude::*;
@@ -14,8 +15,9 @@ use crate::wx_app::globals::with_ui_frame;
 use crate::wx_app::self_update_ui::SELF_UPDATE_APPLYING;
 use crate::wx_app::widgets::WizardWidgets;
 
-/// The worker's half of the close handshake, for an install and an
-/// uninstall alike: both stop at their next package boundary.
+/// The worker's half of the close handshake, for an install, an uninstall
+/// and a delete of backups alike: each stops at its next package or backup
+/// boundary.
 ///
 /// Closing the window used to end the process wherever the worker happened
 /// to be: mid-download, mid-extract, or between a vendor installer finishing
@@ -149,23 +151,15 @@ pub(crate) enum CloseVerdict {
 }
 
 /// Say that RABBIT is stopping, in both places the progress page speaks
-/// from: the status heading and the running log. An uninstall says it
-/// finishes the step it started, since that is where it stops: one
-/// package, or on macOS the administrator command, which covers several.
-/// A restore or a delete of backups stops after the backup it is on, and
-/// says so with the install's line, as backup plan 4.5 has it.
+/// from: the status heading and the running log, in the words of the run
+/// (see [`stopping_line`]).
 ///
 /// The log is a `TextCtrl` and takes focus; the status heading is a
 /// `StaticText` and cannot, and a label change on its own is not something
 /// a screen reader announces. Moving focus onto the log is what makes the
 /// answer to "did it hear me?" audible.
 pub(crate) fn announce_stopping(widgets: &WizardWidgets, model: &WizardModel, mode: WizardMode) {
-    let line = match mode {
-        WizardMode::Install | WizardMode::Restore | WizardMode::DeleteBackups => {
-            &model.text.progress_status_cancelling
-        }
-        WizardMode::Uninstall => &model.text.progress_status_uninstall_cancelling,
-    };
+    let line = stopping_line(&model.text, mode);
     widgets.progress_status.set_label(line);
     widgets.progress_details.append_text(&format!("\n{line}"));
     widgets.progress_details.set_focus();
@@ -188,33 +182,15 @@ pub(crate) fn close_verdict(install_run: &InstallRunState) -> CloseVerdict {
 }
 
 /// Ask before throwing away a running run: an install, an uninstall, a
-/// restore or a delete of backups. Returns `true` when the user confirmed.
-/// No restore or delete runs yet; their questions are here so the run that
-/// comes can't fall back to another run's words.
+/// restore or a delete of backups, each in its own words (see
+/// [`stop_question`]). Returns `true` when the user confirmed.
 ///
 /// `wxNO_DEFAULT` puts the focused button on **No**: this dialog appears
 /// over work the user asked for, so a stray Enter or Space — from a screen
 /// reader user tabbing around the progress page, say — must not be what
 /// stops their REAPER install halfway.
 pub(crate) fn confirm_stop_install(model: &WizardModel, mode: WizardMode) -> bool {
-    let (title, body) = match mode {
-        WizardMode::Install => (
-            &model.text.close_during_install_title,
-            &model.text.close_during_install_body,
-        ),
-        WizardMode::Uninstall => (
-            &model.text.close_during_uninstall_title,
-            &model.text.close_during_uninstall_body,
-        ),
-        WizardMode::Restore => (
-            &model.text.close_during_restore_title,
-            &model.text.close_during_restore_body,
-        ),
-        WizardMode::DeleteBackups => (
-            &model.text.close_during_delete_title,
-            &model.text.close_during_delete_body,
-        ),
-    };
+    let (title, body) = stop_question(&model.text, mode);
     let mut confirmed = false;
     with_ui_frame(|frame| {
         let dialog = MessageDialog::builder(frame, body, title)

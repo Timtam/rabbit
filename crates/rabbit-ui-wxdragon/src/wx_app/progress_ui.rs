@@ -8,8 +8,8 @@ use rabbit_core::localization::Localizer;
 use rabbit_core::progress::ProgressEvent;
 
 use crate::{
-    ProgressUiState, administrator_prompt_line, administrator_still_waiting_line, is_spoken,
-    removal_started_lines,
+    ProgressUiState, administrator_prompt_line, administrator_still_waiting_line,
+    backup_delete_progress_lines, is_spoken, removal_started_lines,
 };
 
 use crate::wx_app::globals::{AnnouncePriority, announce, with_ui_localizer};
@@ -274,12 +274,18 @@ pub(crate) fn apply_progress_event_to_ui(
             status_line = Some(line.clone());
             log_line = Some(line);
         }
-        // The wizard doesn't restore or delete backups until Phase 2 of the
-        // backup plan: their events change no line and log nothing yet.
-        ProgressEvent::RestoreStarted { .. }
-        | ProgressEvent::RestoreCompleted { .. }
-        | ProgressEvent::DeleteStarted { .. }
-        | ProgressEvent::DeleteCompleted { .. } => {}
+        // A delete holds the status line with the backup it is deleting,
+        // said once for each group of ticked rows, however many sets it
+        // takes, and logs what came of the group once its last set is done
+        // with; see `backup_delete_progress_lines`.
+        ProgressEvent::DeleteStarted { .. } | ProgressEvent::DeleteCompleted { .. } => {
+            let (status, log) = backup_delete_progress_lines(localizer, &mut state, &event);
+            status_line = status;
+            log_line = log;
+        }
+        // The wizard doesn't restore backups until step 2d of the backup
+        // plan: a restore's events change no line and log nothing yet.
+        ProgressEvent::RestoreStarted { .. } | ProgressEvent::RestoreCompleted { .. } => {}
     });
 
     widgets.progress_gauge.set_value(state.percentage());

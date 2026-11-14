@@ -3,6 +3,7 @@
 //! drive them directly.
 
 mod backups;
+mod backups_run;
 mod bootstrap;
 mod configuration;
 mod expert_mode;
@@ -25,6 +26,7 @@ mod uninstall_run;
 mod tests;
 
 pub use backups::*;
+pub use backups_run::*;
 pub use bootstrap::*;
 pub use configuration::*;
 pub use expert_mode::*;

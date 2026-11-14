@@ -1,5 +1,6 @@
 //! The wxWidgets wizard shell: `run` builds the frame, wires every page's
 //! events, and hands the work to the modules beside it.
+mod backup_delete_run;
 mod close_guard;
 mod expert_mode;
 mod globals;
@@ -33,8 +34,8 @@ use crate::{
     build_uninstall_review_preview, execute_wizard_install_with_progress, inactive_tab_notes,
     install_request_from_target_and_rows, install_tab_ticks_left_out, load_wizard_model,
     localizer_from_options, reapack_selected_for_install_or_update,
-    recompute_configuration_row_availability, refreshed_target_row, run_wizard_self_update_check,
-    run_wizard_self_update_release_notes, save_wizard_outcome_report,
+    recompute_configuration_row_availability, refreshed_target_row, reread_backup_list,
+    run_wizard_self_update_check, run_wizard_self_update_release_notes, save_wizard_outcome_report,
     selected_configuration_step_ids, uninstall_list_for_target, wizard_error_reason,
     wizard_outcome_report_from_error, wizard_outcome_report_from_success,
     wizard_package_plan_for_target, wizard_package_plan_for_target_with_available,
@@ -45,6 +46,7 @@ use rabbit_core::progress::ProgressReporter;
 use wxdragon::prelude::*;
 use wxdragon::widgets::SimpleBook;
 
+use crate::wx_app::backup_delete_run::{BackupDeleteRunUi, start_backup_delete};
 use crate::wx_app::close_guard::{
     CloseVerdict, InstallRunState, announce_stopping, close_verdict, confirm_stop_install,
     defer_close_dialog, show_close_blocked_by_self_update,
@@ -55,7 +57,7 @@ use crate::wx_app::globals::{
 };
 use crate::wx_app::packages_page::{
     PackagesStateCell, new_backups_state, new_packages_state, new_uninstall_state,
-    rebuild_uninstall_list_widgets, refresh_package_checklist,
+    rebuild_backups_list_widgets, rebuild_uninstall_list_widgets, refresh_package_checklist,
 };
 use crate::wx_app::packages_tabs::{
     bind_packages_tab_switching, focus_backups_list, focus_uninstall_list, selected_wizard_mode,
@@ -64,7 +66,7 @@ use crate::wx_app::pages::{add_pages, build_language_footer};
 use crate::wx_app::progress_ui::apply_progress_event_to_ui;
 use crate::wx_app::self_update_ui::{SelfUpdateUiState, render_self_update_status};
 use crate::wx_app::shell::{launch_reaper, open_resource_folder, seat_macos_apple_languages};
-use crate::wx_app::uninstall_run::{UninstallNavigation, UninstallRunUi, start_uninstall};
+use crate::wx_app::uninstall_run::{RunNavigation, UninstallRunUi, start_uninstall};
 use crate::wx_app::version_check::{VersionCheckUi, start_version_check};
 use crate::wx_app::widgets::{
     append_done_status, bind_done_page_enter_closes, bind_reapack_ack_navigation_updates,
@@ -695,19 +697,23 @@ pub fn run() {
             let install_run = Arc::clone(&install_run);
             let uninstall_list = Rc::clone(&uninstall_list);
             let uninstall_items = Rc::clone(&uninstall_items);
+            let backup_list = Rc::clone(&backup_list);
+            let backup_items = Rc::clone(&backup_items);
             let wizard_mode = Rc::clone(&wizard_mode);
             let review_can_uninstall = Rc::clone(&review_can_uninstall);
             let review_can_run_backups = Rc::clone(&review_can_run_backups);
-            // Rebuilds both Packages tabs from fresh detection after a run,
-            // an install or an uninstall. The run arms it as the post-run
-            // hook, which holds this UI-thread `Rc<RefCell>` state so the
-            // worker's `call_after` completion can refresh it without
-            // smuggling non-Send references across threads. It re-detects
-            // the selected target, plans against the fresh receipts, and
-            // rebuilds the cached state and both lists in place, never the
-            // tab selection or focus. After an uninstall the Install tab
+            // Rebuilds the three Packages tabs' lists after every kind of
+            // run: an install, an uninstall or a delete of backups. The run
+            // arms it as the post-run hook, which holds this UI-thread
+            // `Rc<RefCell>` state so the worker's `call_after` completion can
+            // refresh it without smuggling non-Send references across
+            // threads. It reads the selected target's backups again,
+            // re-detects the target, plans against the fresh receipts, and
+            // rebuilds the cached state and all three lists in place, never
+            // the tab selection or focus. After an uninstall the Install tab
             // offers what went again, unticked, because the run recorded it
-            // as declined.
+            // as declined, and the Backups tab lists the set it wrote. After
+            // a delete, the sets it deleted are gone from the Backups tab.
             let rescan_after_run: Rc<dyn Fn()> = {
                 let model = Arc::clone(&model);
                 let package_rows = Rc::clone(&package_rows);
@@ -722,11 +728,21 @@ pub fn run() {
                 let last_resource_path = Arc::clone(&last_resource_path);
                 let uninstall_list = Rc::clone(&uninstall_list);
                 let uninstall_items = Rc::clone(&uninstall_items);
+                let backup_list = Rc::clone(&backup_list);
+                let backup_items = Rc::clone(&backup_items);
                 Rc::new(move || {
                     let Some(target) = selected_target_row(&model, &widgets) else {
                         return;
                     };
                     let refreshed_target = refreshed_target_row(&model, &target);
+                    // The Backups rows, read again for the same target, as
+                    // the version check reads them: an install writes update
+                    // sets, an uninstall an uninstall set, and a delete
+                    // removes sets. Nothing stays ticked, and the choice
+                    // below the list is Restore again. First, so a plan that
+                    // can't be made below still leaves the rows current.
+                    reread_backup_list(&mut backup_list.borrow_mut(), &model, &refreshed_target);
+                    rebuild_backups_list_widgets(&widgets, &backup_items, &backup_list.borrow());
                     // Plan against the versions this run installed from,
                     // so a development build just installed reads as
                     // current instead of as something to replace.
@@ -810,22 +826,30 @@ pub fn run() {
                     );
                 })
             };
+            let run_navigation = RunNavigation {
+                model: Arc::clone(&model),
+                widgets,
+                book,
+                step_label,
+                labels: Arc::clone(&labels),
+                back,
+                next,
+                install,
+                close,
+                current_step: Arc::clone(&current_step),
+                last_reaper_app_path: Arc::clone(&last_reaper_app_path),
+                last_resource_path: Arc::clone(&last_resource_path),
+            };
             let uninstall_run_ui = UninstallRunUi {
-                navigation: UninstallNavigation {
-                    model: Arc::clone(&model),
-                    widgets,
-                    book,
-                    step_label,
-                    labels: Arc::clone(&labels),
-                    back,
-                    next,
-                    install,
-                    close,
-                    current_step: Arc::clone(&current_step),
-                    last_reaper_app_path: Arc::clone(&last_reaper_app_path),
-                    last_resource_path: Arc::clone(&last_resource_path),
-                },
+                navigation: run_navigation.clone(),
                 uninstall_list: Rc::clone(&uninstall_list),
+                install_run: Arc::clone(&install_run),
+                rescan: Rc::clone(&rescan_after_run),
+                wizard_mode: Rc::clone(&wizard_mode),
+            };
+            let backup_delete_run_ui = BackupDeleteRunUi {
+                navigation: run_navigation,
+                backup_list: Rc::clone(&backup_list),
                 install_run: Arc::clone(&install_run),
                 rescan: Rc::clone(&rescan_after_run),
                 wizard_mode: Rc::clone(&wizard_mode),
@@ -834,21 +858,24 @@ pub fn run() {
             let review_step = Arc::clone(&current_step);
             let review_mode = Rc::clone(&wizard_mode);
             let start_install = Rc::new(move || {
-                // The run button runs what Review shows, so an uninstall
-                // goes its own way from here and none of the install below
-                // applies to it.
+                // The run button runs what Review shows, so an uninstall and
+                // a delete of backups go their own way from here and none of
+                // the install below applies to them.
                 match wizard_mode.get() {
                     WizardMode::Install => {}
                     WizardMode::Uninstall => {
                         start_uninstall(&uninstall_run_ui);
                         return;
                     }
-                    // The restore and delete runs come in later steps of the
-                    // backup plan (2c, 2d). Until then their Reviews keep the
-                    // run button disabled, and nothing starts here, whatever
-                    // got here: never an install with ticks a restore or a
-                    // delete left out.
-                    WizardMode::Restore | WizardMode::DeleteBackups => return,
+                    WizardMode::DeleteBackups => {
+                        start_backup_delete(&backup_delete_run_ui);
+                        return;
+                    }
+                    // The restore run comes in a later step of the backup
+                    // plan (2d). Until then its Review keeps the run button
+                    // disabled, and nothing starts here, whatever got here:
+                    // never an install with ticks a restore left out.
+                    WizardMode::Restore => return,
                 }
                 // Catch a running REAPER here, while the user can still do
                 // something about it. The install's preflight would refuse

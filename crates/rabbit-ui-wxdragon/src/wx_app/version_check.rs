@@ -10,10 +10,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{
     ConfigurationRow, PackageRow, TargetRow, WizardBackupList, WizardMode, WizardModel,
-    WizardUninstallList, apply_version_check_failures_to_rows, backup_list_for_target,
-    localized_package_display_name, localizer_from_options,
-    recompute_configuration_row_availability, remember_default_ticks, reset_backup_ticks,
-    uninstall_list_for_target, wizard_desired_package_ids,
+    WizardUninstallList, apply_version_check_failures_to_rows, localized_package_display_name,
+    localizer_from_options, recompute_configuration_row_availability, remember_default_ticks,
+    reread_backup_list, uninstall_list_for_target, wizard_desired_package_ids,
     wizard_package_plan_for_target_with_available,
 };
 use rabbit_core::detection::detect_components;
@@ -195,9 +194,7 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
                         // overview reads manifests, RABBIT's records and file
                         // sizes, and hashes nothing. Both choices start with
                         // nothing ticked, and Restore is chosen again.
-                        let mut backups = backup_list_for_target(&ui.model, &ui.target);
-                        reset_backup_ticks(&mut backups);
-                        *ui.backup_list.borrow_mut() = backups;
+                        reread_backup_list(&mut ui.backup_list.borrow_mut(), &ui.model, &ui.target);
                         *ui.package_rows.borrow_mut() = plan.package_rows;
                         *ui.package_notes.borrow_mut() = plan.notes;
                         // The deferred fetch may have promoted ReaPack to

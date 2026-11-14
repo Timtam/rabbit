@@ -150,6 +150,10 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         progress_status_uninstall_cancelling: localizer
             .text("wizard-progress-status-uninstall-cancelling")
             .value,
+        progress_delete_heading: localizer.text("wizard-progress-delete-heading").value,
+        progress_status_delete_running: localizer
+            .text("wizard-progress-status-delete-running")
+            .value,
         done_status_success: localizer.text("wizard-done-status-success").value,
         done_status_completed_with_errors: localizer
             .text("wizard-done-status-completed-with-errors")

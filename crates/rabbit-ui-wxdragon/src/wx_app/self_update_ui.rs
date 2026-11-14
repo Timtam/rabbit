@@ -568,9 +568,8 @@ pub(crate) fn update_self_update_progress_window(event: &ProgressEvent) {
                     );
                 }
                 // Configuration steps belong to package installs, removals
-                // to uninstalls, and restores and deletes to backups, which
-                // the wizard doesn't restore or delete until Phase 2 of the
-                // backup plan; RABBIT's own update emits none of them.
+                // to uninstalls, and restores and deletes to backups;
+                // RABBIT's own update emits none of them.
                 ProgressEvent::ConfigurationStarted { .. }
                 | ProgressEvent::ConfigurationCompleted { .. }
                 | ProgressEvent::RemoveStarted { .. }

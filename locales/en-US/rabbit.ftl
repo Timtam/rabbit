@@ -751,6 +751,19 @@ wizard-restore-target-two-files-for-one-place = the backup holds more than one f
 wizard-restore-target-outside-without-manifest = the backup has no record of where this file from outside the resource folder belongs
 wizard-restore-target-copy-outside-set = the backup's record names its copy outside the backup
 wizard-restore-target-keymap-among-version-files = it is REAPER's key map, which RABBIT puts back only as a key map of its own
+# Why RABBIT doesn't delete a backup, or any of them, a sentence or two
+# each, as the Done page and Show details say it. Those about one backup
+# call it "it": the Done page puts them after "RABBIT can't delete
+# <backup>.". $path is a folder as the computer writes it, keep it as it
+# is. sudo and root are never translated.
+wizard-delete-refusal-invalid-id = Its name isn't one RABBIT gives a backup.
+wizard-delete-refusal-differs-in-case = RABBIT finds it only under a name in other upper and lower case.
+wizard-delete-refusal-ends-in-dot-or-space = RABBIT finds it only under a name without the dot or space at its end.
+wizard-delete-refusal-is-link = RABBIT doesn't use { $path }: it is a symbolic link or junction, and RABBIT never follows one in its backups.
+wizard-delete-refusal-not-yours = It belongs to another account, so RABBIT doesn't delete it.
+wizard-delete-refusal-changed-since-listed = It changed since RABBIT listed it. Start RABBIT again to see the backups as they are now.
+wizard-delete-refusal-lock-held = Another copy of RABBIT is working on this REAPER. Wait until it has finished, then run RABBIT again.
+wizard-delete-refusal-as-root = RABBIT is running as root, as it does under sudo, and doesn't delete backups like that. Quit RABBIT and start it as yourself.
 
 # $package is the localized package name the configuration step depends on.
 wizard-configuration-row-unavailable = Unavailable: requires { $package } to be installed.
@@ -1023,6 +1036,28 @@ wizard-progress-uninstall-heading = Uninstalling
 wizard-progress-status-uninstall-running = Uninstalling the ticked packages.
 wizard-progress-details-uninstall-starting = Starting to uninstall.
 wizard-progress-status-uninstall-cancelling = Stopping. RABBIT is finishing the step it started, then it closes.
+# The progress page while backups are deleted: its heading, the first status
+# line and the first line of the log. Once the user asked to stop, the
+# status line says wizard-progress-status-cancelling.
+wizard-progress-delete-heading = Deleting backups
+wizard-progress-status-delete-running = Deleting the ticked backups.
+wizard-progress-details-delete-starting = Starting to delete backups.
+# The status and log line when RABBIT starts deleting a backup, which is
+# spoken, then the log line when it is done with it. $backups is what the
+# rows call the backups that go together, one name or several joined as
+# wizard-backups-list-and joins them, each with when it was made, as
+# wizard-backups-row-reference says it, when another ticked backup has the
+# same name. $count is how many there are, a number, and $size a size, such
+# as "4 MB".
+wizard-progress-status-deleting = { $count ->
+    [one] Deleting the backup: { $backups }…
+   *[other] Deleting the backups: { $backups }…
+}
+wizard-progress-log-delete-deleted = { $backups }: deleted, { $size } freed.
+wizard-progress-log-delete-finished = { $backups }: finished a deletion that started earlier, { $size } freed.
+wizard-progress-log-delete-already-gone = { $backups }: already gone.
+wizard-progress-log-delete-partly = { $backups }: only partly deleted, { $size } freed.
+wizard-progress-log-delete-failed = { $backups }: not deleted.
 
 # Live per-package status line on the progress page.
 # $package is the localized package display name (e.g. "REAPER", "OSARA").
@@ -1402,6 +1437,149 @@ wizard-summary-uninstall-backup = Backup set: { $id }
 wizard-summary-uninstall-restore = To put { $package } back, close REAPER and run: { $command }
 # $path is the full path of the report RABBIT saved.
 wizard-summary-uninstall-report = Report: { $path }
+# The Done page after a delete of backups. Its first line, one of the seven
+# below, also ends the progress page. Backups are counted as Review counts
+# them, one for each ticked row. $count and $deleted are numbers: the
+# backups ticked, or in the first message those deleted, and of them those
+# deleted. $size is a size, such as "520 MB".
+wizard-done-delete-status-success = RABBIT deleted { $count ->
+    [one] one backup
+   *[other] { $count } backups
+} and freed { $size }.
+wizard-done-delete-status-partial = RABBIT deleted { $deleted } of { $count } backups.
+wizard-done-delete-status-none = { $count ->
+    [one] RABBIT couldn't delete the backup.
+   *[other] RABBIT couldn't delete the backups.
+}
+wizard-done-delete-status-already-gone = { $count ->
+    [one] The backup was already gone, so there was nothing to delete.
+   *[other] The backups were already gone, so there was nothing to delete.
+}
+wizard-done-delete-status-stopped = { $deleted ->
+    [0] RABBIT stopped before it deleted a backup. Backups it hadn't reached are kept.
+   *[other] RABBIT stopped after deleting { $deleted } of { $count } backups. Backups it hadn't reached are kept.
+}
+# When the user stopped the run partway through a backup, before RABBIT had
+# deleted a whole one: part of a backup is gone.
+wizard-done-delete-status-stopped-partway = { $count ->
+    [one] RABBIT stopped before it had deleted all of the backup.
+   *[other] RABBIT stopped before it had deleted a whole backup. Backups it hadn't reached are kept.
+}
+# When RABBIT deleted nothing because it refused the run, or something went
+# wrong before it started.
+wizard-done-delete-status-nothing = Nothing was deleted.
+# Why backups weren't deleted, after the first line, one sentence each.
+# $total is how many backups were ticked, and $count how many of them the
+# sentence is about; both are numbers. The [1] form is for a delete of a
+# single backup: the first line calls it "the backup", so the sentence
+# calls it "it". Name "Show details" as wizard-done-show-details does, and
+# the Backups tab as wizard-packages-tab-backups does.
+wizard-done-delete-in-use = { $total ->
+    [1] A file in it is open in another program. Close that program, then run RABBIT again to delete it.
+   *[other] { $count ->
+        [one] One couldn't be deleted, because a file in it is open in another program. Close that program, then run RABBIT again to delete it.
+       *[other] { $count } couldn't be deleted, because a file in them is open in another program. Close that program, then run RABBIT again to delete them.
+    }
+}
+wizard-done-delete-permission = { $total ->
+    [1] RABBIT isn't allowed to move it. It stays as it was.
+   *[other] { $count ->
+        [one] One couldn't be deleted, because RABBIT isn't allowed to move it. It stays as it was.
+       *[other] { $count } couldn't be deleted, because RABBIT isn't allowed to move them. They stay as they were.
+    }
+}
+wizard-done-delete-earlier-deletion-left = { $total ->
+    [1] An earlier deletion of it didn't finish, and RABBIT still couldn't finish it, so the backup stays as it was. Run RABBIT again to try once more.
+   *[other] { $count ->
+        [one] One couldn't be deleted, because an earlier deletion of it didn't finish and RABBIT still couldn't finish it. It stays as it was. Run RABBIT again to try once more.
+       *[other] { $count } couldn't be deleted, because earlier deletions of them didn't finish and RABBIT still couldn't finish them. They stay as they were. Run RABBIT again to try once more.
+    }
+}
+wizard-done-delete-other = { $total ->
+    [1] Something went wrong, and it stays as it was. Show details says what.
+   *[other] { $count ->
+        [one] One couldn't be deleted, and stays as it was. Show details says why.
+       *[other] { $count } couldn't be deleted, and stay as they were. Show details says why.
+    }
+}
+wizard-done-delete-partly = { $total ->
+    [1] RABBIT deleted only part of it. What is left is an unfinished deletion, which no restore uses any more. To finish it, run RABBIT again and delete it on the Backups tab.
+   *[other] { $count ->
+        [one] One was only partly deleted. What is left of it is an unfinished deletion, which no restore uses any more. To finish it, run RABBIT again and delete it on the Backups tab.
+       *[other] { $count } were only partly deleted. What is left of them are unfinished deletions, which no restore uses any more. To finish them, run RABBIT again and delete them on the Backups tab.
+    }
+}
+# The row for the old copies of RABBIT's records stands for several
+# backups on disk, and only it can end like this: RABBIT deleted some of
+# them, and couldn't delete the others, or the user stopped the run before
+# it reached them.
+wizard-done-delete-part-left = { $total ->
+    [1] RABBIT deleted part of it, but couldn't delete the rest, which stays as it was. Show details says why.
+   *[other] { $count ->
+        [one] One was deleted only in part: RABBIT couldn't delete the rest of it, which stays as it was. Show details says why.
+       *[other] { $count } were deleted only in part: RABBIT couldn't delete what is left of them, which stays as it was. Show details says why.
+    }
+}
+wizard-done-delete-stopped-partway = { $total ->
+    [1] RABBIT deleted part of it before it stopped. The rest is kept.
+   *[other] { $count ->
+        [one] One was deleted only in part before RABBIT stopped. The rest of it is kept.
+       *[other] { $count } were deleted only in part before RABBIT stopped. What is left of them is kept.
+    }
+}
+# After the first line, when some of the ticked backups were gone before the
+# run. $count is a number, fewer than the backups ticked.
+wizard-done-delete-already-gone = { $count ->
+    [one] One was already gone.
+   *[other] { $count } were already gone.
+}
+# After "Nothing was deleted." when a ticked backup can't be deleted, which
+# refuses the whole run; said only when more than one backup was ticked.
+wizard-done-delete-refused-run = RABBIT deletes the ticked backups only when it can delete every one of them.
+# Why a backup can't be deleted. $backup is what its row calls it with when
+# it was made, as wizard-backups-row-reference says it, or several such
+# joined as wizard-backups-list-and joins them when one backup on disk holds
+# them together; $count is how many, a number. $reason is one of the
+# wizard-delete-refusal-* sentences, which calls that one backup "it".
+wizard-done-delete-refused-backup = { $count ->
+    [one] RABBIT can't delete { $backup }. { $reason }
+   *[other] RABBIT can't delete { $backup }, which one backup holds together. { $reason }
+}
+# When RABBIT couldn't read REAPER's resource folder, or a folder of its own
+# backups in it, so it deleted nothing. $path is that folder as the computer
+# writes it, keep it as it is.
+wizard-done-delete-folder-unreadable = RABBIT couldn't read the folder { $path }. Check that it is there and that you can open it, then run RABBIT again.
+# When something else went wrong before RABBIT deleted anything. $error is
+# the error message, in English.
+wizard-done-delete-error = Something went wrong before RABBIT deleted anything: { $error }
+# Show details after a delete of backups: one line per ticked backup, or per
+# backups that went together, then lines indented below it. $backups is
+# what the rows call them, joined as wizard-backups-list-and joins names,
+# each with when it was made, as wizard-backups-row-reference says it, when
+# another ticked backup has the same name. $status is one of the
+# wizard-delete-status-* labels, $size a size, such as "4 MB", and $path a
+# folder as the computer writes it, keep it as it is. Name the Backups tab
+# as wizard-packages-tab-backups does. The lines below say "it" of the
+# backup; for backups that go together, wizard-summary-delete-together
+# comes first and says that one backup holds them.
+wizard-summary-delete-backup = { $backups }: { $status }
+wizard-summary-delete-freed = Freed: { $size }
+wizard-summary-delete-together = They go together: one backup holds them.
+# What happened to a backup that wasn't deleted, then why, in a line of
+# its own. Part of the row for the old copies of RABBIT's records, which
+# stands for several backups on disk, may have gone though the rest didn't.
+wizard-summary-delete-nothing-changed = Nothing of it changed.
+wizard-summary-delete-part-left = RABBIT deleted part of it. The rest couldn't be deleted and stays as it was.
+wizard-summary-delete-in-use = A file in it is open in another program, so it couldn't be moved.
+wizard-summary-delete-permission = RABBIT isn't allowed to move it.
+wizard-summary-delete-earlier-deletion-left = An earlier deletion of it didn't finish, and RABBIT still couldn't finish it. What is left of that deletion is in { $path }.
+wizard-summary-delete-left-in = What RABBIT couldn't remove stays in { $path }. The Backups tab lists it as an unfinished deletion, which no restore uses any more; deleting it there finishes it.
+wizard-summary-delete-not-reached-stopped = RABBIT stopped before it, so it is kept.
+wizard-summary-delete-stopped-partway = RABBIT deleted part of it, then stopped. The rest is kept.
+wizard-summary-delete-not-reached-refused = RABBIT deleted nothing in this run, so it is kept.
+wizard-summary-delete-freed-total = Freed in all: { $size }
+# $path is the full path of the report RABBIT saved.
+wizard-summary-delete-report = Report: { $path }
 status-installed-or-checked = Installed or checked
 status-planned-unattended = Planned unattended
 status-deferred-unattended = Deferred unattended
@@ -1419,6 +1597,16 @@ status-remove-blocked = Not uninstalled
 status-remove-failed = Couldn't be uninstalled
 status-remove-cancelled = Still installed (you stopped)
 status-remove-not-reached = Still installed (the run stopped earlier)
+# What came of a backup in a delete, after its name in "Show details".
+wizard-delete-status-deleted = Deleted
+wizard-delete-status-finished-earlier-deletion = Deleted, finishing a deletion that started earlier
+wizard-delete-status-already-gone = Already gone
+wizard-delete-status-would-delete = Would be deleted
+wizard-delete-status-would-finish-earlier-deletion = Would finish a deletion that started earlier
+wizard-delete-status-not-deleted = Not deleted
+wizard-delete-status-partly-deleted = Partly deleted
+wizard-delete-status-refused = Can't be deleted
+wizard-delete-status-not-reached = Not reached
 
 # Per-package status messages surfaced on the wizard's Done page next to the
 # package name (e.g. "OSARA: <message>"). The wrapper template
