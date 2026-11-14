@@ -580,7 +580,46 @@ CLI and UI expectations:
   outside the tab control, and plain Page Up or Page Down on a checkbox or
   button inside a tab switches tabs. That switch moves focus into the new
   tab's list, whose label names the tab, and Review names the mode and the
-  ticks the run leaves out.
+  ticks the run leaves out. The Packages page has three tabs, so arrival
+  reads "Install or update, tab, 1 of 3", and the Backups tab is two
+  presses of the Right arrow on the strip, or of Ctrl+Tab, away from the
+  Install tab. Its RadioBox is a control inside a tab too; whether Page
+  Down on it switches tabs like a checkbox does is not checked yet, and the
+  hardware pass finds out. If it does, it is the same documented quirk.
+- A choice between two runs on one tab is a native RadioBox below the list
+  (the Backups tab's Restore or Delete), never above it: on macOS, Tab from
+  the tab strip goes straight into the list, and a control above it would
+  be skipped. Its choices have no access keys; only buttons carry them. The
+  rows stay the same rows in both choices, and each choice keeps its own
+  ticks, so a switch only changes each row's action word and tick. Focus
+  stays on the RadioBox. On macOS, VoiceOver then says how many backups are
+  ticked for the new choice, politely, after reading the choice; on Windows,
+  which has no announcement, the rows read their new action when focus
+  comes back to them. On macOS without Full Keyboard Access, Tab doesn't
+  stop on the RadioBox, as it doesn't on the tab strip; VoiceOver's own
+  navigation reaches it, and README says so.
+- Every question before a step that can't be undone, and before stopping
+  a run, is a native Yes/No message box with No focused (`wxNO_DEFAULT`),
+  so Enter or Space pressed out of habit answers No: the uninstall question,
+  the delete-backups question, and closing the window during an install,
+  an uninstall, a restore or a delete. A restore asks nothing, because what
+  it replaces goes into a backup first; with REAPER or a program it needs
+  closed still open, it shows an OK-only warning instead and changes
+  nothing. On Review, the run button of an uninstall, a restore or a delete
+  is never the default button: the disabled Next stays the default, and
+  Enter in Review's text starts nothing.
+- Focus on each step of a restore or a delete of backups: switching to the
+  Backups tab leaves focus where the native tab control puts it on Windows,
+  and on macOS moves it into the list and says the tab's name, with the
+  empty-list sentence when there are no backups; switching Restore and
+  Delete keeps it on the RadioBox; Next goes to Review's text, and Back from
+  Review to the Backups list, on the row it was on; Restore pressed while
+  something that must be closed is open shows the warning, then focuses
+  Review's text again; Delete pressed focuses the question's No, and No
+  goes back to Review's text; a run starting focuses the progress gauge, a
+  confirmed stop the progress log with the stopping line, and the end of
+  the run the Done page's status text. The post-run rescan never moves
+  focus.
 - Avoid custom drawing, canvas controls, owner-drawn lists, and grid controls in
   the main workflow.
 - Every control needs an accessible name, role, state, keyboard focus, and
@@ -623,36 +662,40 @@ user can finish the install by pressing Next a few times.
      depend on them.
 
 3. Packages
-   - Two tabs, **Install or update** and **Uninstall**. The page opens on
-     Install or update with focus on the tab strip, so screen readers read
-     the tab and its position first, and Tab moves into the package list.
-     Where macOS can't focus the tab strip (an NSTabView takes focus only
-     with Full Keyboard Access), focus goes to the install list and RABBIT
-     announces the tab's name instead. Either way, a moment after the first
-     arrival in a run, VoiceOver says that Control-Tab switches tabs. The
-     hint waits so that VoiceOver's reading of the new focus can't cut it
-     off; if the page is gone by then, the next arrival tries again. RABBIT
-     changes the tab selection by itself only on the arrival from the
-     version check, once the page shows: wxOSX moves focus into a tab on
-     every selection change, even on a hidden page, so the rebuild after a
-     run leaves it alone. On Windows that rebuild clears a list's selection
-     before deleting its rows: wxMSW answers comctl32's notice that the
-     selected row went by focusing the list, hidden or not, and after an
-     uninstall that took focus off the Done page. After either run the
-     rebuild also happens before Done shows and takes focus, so Done's
-     status is the last focus change. Back from Review or from the ReaPack
-     page lands on the strip as well, on Windows and on macOS with Full
-     Keyboard Access: showing the page refocuses the control it last had
-     focus in, which is the notebook, even if the user left from the list.
-     In uninstall mode, Back from Review puts focus back in the Uninstall
-     list instead, on every platform. On macOS, adding the first tab while
-     the window is built also counts as a selection change, and that put
-     the start focus in the hidden Install list: VoiceOver began at the top
-     of the window and Tab did nothing. So after building all pages, RABBIT
+   - Three tabs, **Install or update**, **Uninstall** and **Backups**. The
+     page heading, "Choose what RABBIT should do", names no one run. The
+     page opens on Install or update with focus on the tab strip, so screen
+     readers read the tab and its position first ("Install or update, tab, 1
+     of 3"), and Tab moves into the package list. Where macOS can't focus
+     the tab strip (an NSTabView takes focus only with Full Keyboard
+     Access), focus goes to the install list and RABBIT announces the tab's
+     name instead. Either way, a moment after the first arrival in a run,
+     VoiceOver says that Control-Tab switches tabs. The hint waits so that
+     VoiceOver's reading of the new focus can't cut it off; if the page is
+     gone by then, the next arrival tries again. RABBIT changes the tab
+     selection by itself only on the arrival from the version check, once
+     the page shows: wxOSX moves focus into a tab on every selection change,
+     even on a hidden page, so the rebuild after a run leaves it alone. On
+     Windows that rebuild clears a list's selection before deleting its
+     rows: wxMSW answers comctl32's notice that the selected row went by
+     focusing the list, hidden or not, and after an uninstall that took
+     focus off the Done page. After every run the rebuild of all three lists
+     also happens before Done shows and takes focus, so Done's status is the
+     last focus change. Back from Review or from the ReaPack page lands on
+     the strip as well, on Windows and on macOS with Full Keyboard Access:
+     showing the page refocuses the control it last had focus in, which is
+     the notebook, even if the user left from the list. In uninstall mode,
+     Back from Review puts focus back in the Uninstall list instead, on
+     every platform, and before a restore or a delete in the Backups list,
+     each on the row it was on. On macOS, adding the first tab while the
+     window is built also counts as a selection change, and that put the
+     start focus in the hidden Install list: VoiceOver began at the top of
+     the window and Tab did nothing. So after building all pages, RABBIT
      focuses the target choice again on macOS, and the wizard opens there.
      Each list's caret goes to its top row the first time the list gets
-     focus after the page opens. The tab showing when Next is
-     pressed decides what the run does; install and uninstall never mix.
+     focus after the page opens. The tab showing when Next is pressed, and
+     on the Backups tab the choice below its list, decides what the run
+     does; runs never mix.
      The Uninstall tab lists every installed package under the same groups,
      with headings that can't be ticked, nothing ticked by default, and rows
      RABBIT can't remove shown but impossible to tick, saying why. An empty
@@ -686,8 +729,39 @@ user can finish the install by pressing Next a few times.
      disabled and out of the Tab order until a ticked package has settings
      RABBIT may remove, and unticked again when none has. On macOS,
      VoiceOver is told when a tick makes the option available or not, since
-     that happens away from the row. Everything below describes the Install
-     or update tab.
+     that happens away from the row.
+     The Backups tab lists what RABBIT kept for the target, one row per
+     backup: one package from a backup set, or one key map, so one set can
+     give several rows. Its rows come from the core's overview, the one
+     `rabbit backups` prints, read in the version check's handler next to
+     the Uninstall rows and again after every run; it reads manifests,
+     RABBIT's records and file sizes and hashes nothing. The groups, each
+     only when it has rows, are Software you uninstalled, Earlier versions,
+     Key maps and Other backups, newest first inside each, with headings
+     that can't be ticked and whose details say what the group is for and
+     what has no backup. A row reads like the other tabs' rows: its name,
+     then the action, then when the backup was made and how big it is ("SWS
+     Extension 2.14.0.7: Won't touch. Uninstalled November 9, 2026, 2:05 PM,
+     4 MB"), and its details say what it holds, whether it is the only copy,
+     what restoring does or why it can't, and what deleting loses. Neither
+     shows a set id. A path shows only where a sentence is about it: a
+     refusal's own sentence, such as a file RABBIT won't put back or a link
+     it never follows, the error when the backups folder can't be read, and
+     the Finder steps in the details of another account's backup on macOS,
+     which name its folder. The list's label names the tab and the total
+     size. An empty or unreadable list works like the empty Uninstall list.
+     Below the details, a RadioBox, "What to do with the ticked backups",
+     picks Restore (the default) or Delete, each with its own ticks, kept in
+     one wx-free model (`WizardBackupList`). With Restore, a row the core
+     would refuse can't be ticked and its suffix says why; with Delete,
+     every row can be ticked except another account's on macOS, a link or a
+     folder RABBIT didn't make, and a row that goes with one of those. A
+     delete takes whole sets, so ticking a row for Delete ticks the rows
+     from the same set too, and the details say which go together; on macOS,
+     VoiceOver says "Checked" or "Unchecked" and names the rows that went
+     with it. Nothing is ticked by default, and the version check clears
+     both choices' ticks and sets the choice back to Restore. Everything
+     below describes the Install or update tab.
    - Tree view with two top-level groups: **Packages** and
      **Configuration**. Packages contains REAPER, OSARA, SWS, ReaPack,
      ReaKontrol, FFmpeg (Windows only), JAWS scripts (Windows only), and
@@ -754,9 +828,10 @@ user can finish the install by pressing Next a few times.
    - In uninstall mode the heading says "Ready to uninstall", and the
      summary has one line per package with what goes and what stays (or,
      with Also remove settings ticked, which settings go too), the
-     warnings, a note naming what is ticked on the other tab and left out
-     (on the Install or update tab, only ticks RABBIT didn't set itself,
-     such as an update it ticked by default), and that the packages can be
+     warnings, a note per other tab naming what is ticked there and left
+     out (on the Install or update tab, only ticks RABBIT didn't set itself,
+     such as an update it ticked by default; on the Backups tab, how many
+     backups are ticked to restore and to delete), and that the packages can be
      installed again. When a ticked package's own uninstaller removes it
      (on Windows, Surge XT or a standard REAPER), or the elevated helper
      removes the uninstaller folder and registry entry the JAWS scripts'
@@ -794,6 +869,30 @@ user can finish the install by pressing Next a few times.
      once both are gone it isn't asked at all.
      Back returns to the Uninstall tab's list, never to the ReaPack
      donation page.
+   - Before a restore the heading says "Ready to restore". Next first makes
+     a quick dry run of what is ticked, on the UI thread: it takes no lock,
+     writes nothing and hashes nothing, reading only the manifests, RABBIT's
+     records and file sizes. The summary has the target, one sentence per
+     ticked backup saying what comes back and what RABBIT keeps as a backup
+     ("ReaPack goes back from 1.2.5 to 1.2.4. RABBIT keeps 1.2.5 as a
+     backup."), what else changes, such as REAPER's language, "Close REAPER
+     first." (or every REAPER) while one it needs closed is running, the
+     ticks on the other tabs and those for Delete, which the run leaves out,
+     and the blockers, each starting "Can't restore yet" or, for a backup
+     the dry run refuses, "Can't restore <backup> yet": nothing ticked, two
+     ticked backups of one package or of one file, a target RABBIT can't
+     write to, every refusal of the dry run, and a dry run that is missing
+     or covers other backups than the ticked ones, so Restore is never
+     enabled for backups nothing checked. Before a delete the heading says
+     "Ready to delete backups", and the summary says the ticked backups go
+     for good and how much room that frees, then one line per backup with
+     what is lost ("the only copy", "you can't go back to it after this"),
+     one line for each group that goes together because one set holds it,
+     the ticks left out, and "Can't delete yet" when nothing is ticked. Both
+     name backups as the tab does, with no set ids, and a path only in a
+     refusal's own sentence. As for an uninstall, focus goes to the summary,
+     the run button is not the default, and Back returns to the Backups
+     list.
 
 6. Progress
    - Single progress bar plus one current-step line. A "Show details" toggle
@@ -840,6 +939,26 @@ user can finish the install by pressing Next a few times.
      focused, and the run stops after the step it is on: one package, or on
      macOS the administrator command, which covers several. A vendor's
      uninstaller always runs to its end.
+   - Restore pressed on Review first checks whether the target's REAPER,
+     every REAPER for a package any REAPER can use, or a program a restored
+     package's uninstall names is running, by the rules the core's run uses
+     (`restore_running_refusal`), reading the sets as the dry run does. If
+     one is, an OK-only warning says what to close, focus goes back to
+     Review's text, and nothing changes. Delete pressed asks "Delete backups
+     for good?" with No focused, saying how many backups go, what that
+     frees, how many are the only copy of what they hold, and that a deleted
+     backup can't be brought back; No goes back to Review's text. A delete
+     checks no REAPER: it never touches REAPER's files. The ticked rows are
+     copied out of the list before either dialog, which runs the event loop.
+   - During a restore or a delete the heading says "Restoring backups" or
+     "Deleting backups", focus moves to the gauge, which counts one step per
+     backup, and the work runs on a worker thread, its events coming back
+     through `call_after`, as for an uninstall. The status line names each
+     backup as it starts, which macOS speaks, and the log says how each
+     ended. Closing the window asks "Stop restoring?" or "Stop deleting
+     backups?" with No focused, and the run stops after the backup it is
+     on: a restore is all or nothing per backup, so a stop never leaves half
+     of one.
 
 7. Done
    - One sentence summarizing success or failure.
@@ -851,47 +970,84 @@ user can finish the install by pressing Next a few times.
      any stayed (in the user's language for REAPER or another RABBIT being
      open, a file in use, too little room for the backup, every way a
      vendor's uninstaller can end and every way the JAWS scripts' cleanup
-     can end; otherwise the engine's own sentence), and that a package comes
-     back by ticking it on the Install or update tab in a new run. A JAWS
-     script file in use says JAWS or another program has it open, to wait
-     and run RABBIT again, and to restart JAWS first if that doesn't help,
-     rather than to close a program, which would be the user's screen
-     reader. After a cleanup that was refused, failed or lost, the reason is
-     followed by the manifest's steps to remove the scripts by hand. A
-     removal that finishes after a restart says to restart the computer,
-     and a declined permission prompt, or on macOS a cancelled
-     password window, says plainly that nothing was uninstalled. After a
-     macOS removal Done also says what moved to the Trash and what it is
-     called there now; where the administrator command stopped or what it
-     left, and that a tree it stopped in while deleting may be only partly
-     there. When no package went but the command removed part of one, the
-     first line says RABBIT removed only part of it rather than that
-     nothing was uninstalled, since that part can't be put back. Done also
-     names installer receipts macOS still lists, which do no harm, and
-     every program the command looked for when it found one of them
-     running, or couldn't check, and so changed nothing; and when
-     macOS refused a step, it says to turn RABBIT on under System Settings >
-     Privacy & Security > App Management, quit it, start it again and
-     uninstall again. Show details
-     lists the files
-     removed, kept and left over, the backup set, and one `rabbit
-     restore-backup` command per removed package whose files went into
-     that set: never for one a vendor's uninstaller, the Trash or the
-     administrator command took. For the JAWS scripts it also lists what
-     the elevated helper removed with administrator rights, each file, the
-     folder and the registry entry as regedit names it, and what of the
-     folder or entry is still there, also after a cleanup that failed part
-     way. For a removed package only, it lists the script files kept
-     because they were there before the installer ran or their records
-     disagree, then the note on removing by hand the script files that
-     stayed: while the package is still there, all of its files are. The
-     restore command for the JAWS scripts brings back their files, not the
-     folder and entry. The saved report is the engine's `uninstall-<time>`
-     report, which the details point to; the wizard writes one of its own
-     only for a run the engine refused before it began, except a macOS run
-     refused because RABBIT runs as root, whose report would be root's file
-     in the user's resource folder. Both tabs are then rebuilt from fresh
-     detection.
+     can end; otherwise the engine's own sentence), and how a package comes
+     back in a new run: by ticking it on the Install or update tab, always,
+     and by restoring it on the Backups tab, which the hint names only for
+     the packages whose files went into the backup set, since a vendor's
+     uninstaller, the Trash and the administrator command leave nothing to
+     restore. Files a failure couldn't put back, which only the set holds,
+     get a sentence that says so and that the Backups tab can restore them:
+     the set keeps the package while they are in it. A JAWS script file in
+     use says JAWS or another program has it open, to wait and run RABBIT
+     again, and to restart JAWS first if that doesn't help, rather than to
+     close a program, which would be the user's screen reader. After a
+     cleanup that was refused, failed or lost, the reason is followed by the
+     manifest's steps to remove the scripts by hand. A removal that finishes
+     after a restart says to restart the computer, and a declined permission
+     prompt, or on macOS a cancelled password window, says plainly that
+     nothing was uninstalled. After a macOS removal Done also says what
+     moved to the Trash and what it is called there now; where the
+     administrator command stopped or what it left, and that a tree it
+     stopped in while deleting may be only partly there. When no package
+     went but the command removed part of one, the first line says RABBIT
+     removed only part of it rather than that nothing was uninstalled, since
+     that part can't be put back. Done also names installer receipts macOS
+     still lists, which do no harm, and every program the command looked for
+     when it found one of them running, or couldn't check, and so changed
+     nothing; and when macOS refused a step, it says to turn RABBIT on under
+     System Settings > Privacy & Security > App Management, quit it, start
+     it again and uninstall again. Show details lists the files removed,
+     kept and left over, and for each removed package whose files went into
+     the backup set, that it can be restored on the Backups tab: never for
+     one a vendor's uninstaller, the Trash or the administrator command
+     took. It shows neither the set's id nor a `rabbit restore-backup`
+     command, which would assume `rabbit` is on the PATH; the saved report
+     keeps `backup_set_id`, and README shows the command. For the JAWS
+     scripts it also lists what the elevated helper removed with
+     administrator rights, each file, the folder and the registry entry as
+     regedit names it, and what of the folder or entry is still there, also
+     after a cleanup that failed part way. For a removed package only, it
+     lists the script files kept because they were there before the
+     installer ran or their records disagree, then the note on removing by
+     hand the script files that stayed: while the package is still there,
+     all of its files are. A restore of the JAWS scripts brings back their
+     files, not the folder and entry. The saved report is the engine's
+     `uninstall-<time>` report, which the details point to. Only when the
+     engine saved none, as for a run it refused before it began, does the
+     wizard write one of its own, which keeps `backup_set_id` too; never
+     after a macOS run refused because RABBIT runs as root, whose report
+     would be root's file in the user's resource folder. All three tabs'
+     lists are then rebuilt: the Install and Uninstall tabs from fresh
+     detection, and the Backups tab from its backups read again, which now
+     include the uninstall's set.
+   - After a restore the status leads with the outcome: "RABBIT restored SWS
+     Extension 2.14.0.7.", "ReaPack is back to 1.2.4.", "RABBIT restored 2
+     backups.", "RABBIT restored 1 of 2 backups." followed by why the other
+     wasn't, "Nothing was restored." or that the user stopped it. Known
+     refusals get their own sentences, among them another RABBIT holding the
+     lock and REAPER open; after the lock or something that must be closed,
+     Done adds that the way to try again is to close RABBIT and start it
+     again, since there is no way back to Review. It also says when REAPER's
+     language went back or stays, and when RABBIT no longer counts a package
+     as installed by it. Show details says per backup what happened, each
+     file restored, put back, left or missing, that what the restore
+     replaced is kept as a backup on the Backups tab, named as the tab names
+     it, and the report's path. Open REAPER is enabled when that REAPER
+     exists, as after an uninstall.
+   - After a delete the status says how many backups went and what that
+     freed ("RABBIT deleted 3 backups and freed 520 MB."), and for any that
+     didn't, why: a file open in another program, no permission, or only
+     part deleted, which stays as an unfinished deletion to finish from the
+     Backups tab in a new run. A row counts as deleted only when every set
+     it takes is gone, and rows from one set share its result. Show details
+     goes per group of rows that share a set, with what each freed, the
+     total, and the report's path.
+   - Both save no report of the wizard's own: the core saves
+     `restore-backup-unix-<s>` or `delete-backup-unix-<s>`, as `.json` and
+     `.txt` in `RABBIT/logs`, for every run that gets past its checks, never
+     over another report, and Show details points to it. A run refused
+     before that saves none. All three lists are then rebuilt, with nothing
+     ticked and Restore chosen on the Backups tab.
 
 Streamlining rules (apply when adding new wizard text):
 
@@ -1899,7 +2055,8 @@ Extension files:
   before each backup: the one running finishes, the rest are
   `not-reached`, and the report says the run was stopped. Each backup the
   run reaches sends `RestoreStarted` and `RestoreCompleted` with its
-  status; the wizard ignores them until its Backups tab restores.
+  status; the wizard's progress page names the backup at the start and
+  logs how it ended.
   The quick plan, a dry run with `quick`, reads and hashes no file: a copy
   counts by the size its entry recorded, as in the overview, so only a
   copy changed at the same size goes unnoticed, and a set without a
@@ -1912,7 +2069,7 @@ Extension files:
   through the restore's environment, so tests run it on every platform.
 - Every refusal a restore makes before anything changes is a
   `RestoreRefusal` (`restore_refusal.rs`): a stable kebab-case code, its
-  serde tag, which the wizard is to map to a Fluent key; fields that name
+  serde tag, which the wizard maps to a Fluent key of its own; fields that name
   the set, the packages, the paths or the programs; and English for the
   CLI with no command-line syntax in it. The CLI adds its own hints after
   that English: the command that lists the backups, the folder a receipt
@@ -1961,7 +2118,7 @@ Extension files:
   refuses a set that belongs to another account than `RABBIT/backups`
   (`not-yours`), as the overview lists it.
 - `rabbit backups` lists the sets through one overview in the core
-  (`backup_overview`), which the wizard's Backups tab is to share. It turns
+  (`backup_overview`), which the wizard's Backups tab shares. It turns
   sets into backups: one per package an uninstall recorded; one per package
   of an update's set, from its file entries and its `replaced` records; one
   key map, found by an entry whose original is the resource folder's
@@ -2004,8 +2161,17 @@ Extension files:
   JSON) or, without one, its file count and size, for a later run to
   compare under the lock. Local time
   comes from the operating system on Windows and macOS, UTC elsewhere.
+- RABBIT never deletes a backup by itself. The only sets a run removes
+  without being asked are new ones it made itself that end up holding
+  nothing it needs: an update's or an uninstall's set left with no file in
+  it, as when the first copy failed or every file went back after a
+  failure, and a restore's before-restore set that got no file, or once
+  every file in it is back on disk. Every other set stays until the user
+  deletes it, on the wizard's Backups tab or with `rabbit delete-backup`.
+  An update's set can be the only copy of a file the user edited, and an
+  uninstall's is the only copy until it is restored, however old.
 - `delete_backups` (`backup_delete.rs`) deletes whole backup sets for good,
-  in the order given; it is behind `rabbit delete-backup`, and later the
+  in the order given; it is behind `rabbit delete-backup` and the
   wizard's Backups tab. An item (`DeleteItem`) names a set by its exact id
   and optionally the fingerprint the caller listed; the overview's records
   row gives each of its sets' ids (`BackupItem::set_ids`), and each is
@@ -2074,8 +2240,9 @@ Extension files:
   nothing changed; that error counts as in use when RABBIT may open the
   set's folder with delete access, and as permission otherwise. The cancel
   token is read between sets; each set sends `DeleteStarted` and
-  `DeleteCompleted`, which the wizard ignores until its Backups tab
-  deletes. A real run that gets past its checks saves `delete-backup-unix-<s>` in `RABBIT/logs`, also
+  `DeleteCompleted`, from which the wizard's progress page names each
+  backup and logs how it ended. A real run that gets past its checks saves
+  `delete-backup-unix-<s>` in `RABBIT/logs`, also
   when every id was already gone; a dry run and a refused run save none,
   and neither does a run in a resource folder with no `RABBIT` folder,
   which takes no lock either, so it never makes one. Nothing outside

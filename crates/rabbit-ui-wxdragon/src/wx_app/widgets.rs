@@ -65,7 +65,8 @@ pub(crate) struct WizardWidgets {
     /// Review's heading, which names the mode.
     pub(crate) review_heading: StaticText,
     pub(crate) review_text: TextCtrl,
-    /// Progress's heading, which names the run: installing or uninstalling.
+    /// Progress's heading, which names the run: installing, uninstalling,
+    /// restoring or deleting backups.
     pub(crate) progress_heading: StaticText,
     pub(crate) progress_status: StaticText,
     pub(crate) progress_gauge: Gauge,

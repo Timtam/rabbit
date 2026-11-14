@@ -333,6 +333,11 @@ pub struct WizardUninstallOutcome {
     /// The saved report the details point to: the engine's, or for a run
     /// that stopped before the engine could save one, the wizard's own.
     pub report_path: Option<PathBuf>,
+    /// The backup set the run moved files into. Show details never shows
+    /// it, so the wizard's own report keeps it when the engine couldn't
+    /// save one: it is the way to that set outside the Backups tab.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_set_id: Option<String>,
 }
 
 /// The Done page's text for a run of `package_ids` that returned `report`.
@@ -417,8 +422,23 @@ pub fn wizard_uninstall_outcome(
             blocks.push(format("wizard-done-uninstall-removed-before-stop"));
         }
         // There is no way back to the package list from Done, so the way to
-        // undo a removal, whole or in part, is a new run.
-        blocks.push(localizer.text("wizard-done-uninstall-reinstall-hint").value);
+        // undo a removal, whole or in part, is a new run. Installing again
+        // always works. The Backups tab is named only for the packages whose
+        // files went into the backup set: what a vendor's uninstaller, the
+        // Trash or the macOS administrator command removed has no backup.
+        let restorable: Vec<String> = packages_in_backup_set(report)
+            .map(|item| package_name(localizer, item))
+            .collect();
+        blocks.push(if restorable.is_empty() {
+            localizer.text("wizard-done-uninstall-reinstall-hint").value
+        } else {
+            localizer
+                .format(
+                    "wizard-done-uninstall-reinstall-or-restore-hint",
+                    &[("packages", restorable.join(", ").as_str())],
+                )
+                .value
+        });
     }
     WizardUninstallOutcome {
         status,
@@ -433,6 +453,7 @@ pub fn wizard_uninstall_outcome(
             .saved_report
             .as_ref()
             .map(|saved| saved.text_path.clone()),
+        backup_set_id: report.backup_set_id.clone(),
     }
 }
 
@@ -478,6 +499,7 @@ pub fn wizard_uninstall_outcome_from_error(
         detail_lines,
         error_message: Some(error.to_string()),
         report_path: None,
+        backup_set_id: None,
     }
 }
 
@@ -835,6 +857,8 @@ fn item_reasons(
     if item.status == UninstallStatus::RemovedPendingRestart {
         reasons.push(with_package("wizard-done-uninstall-pending-restart"));
     }
+    // The set keeps the package while any of its files are still in it, so
+    // the Backups tab lists it and can put them back.
     if !item.left_in_backup.is_empty() {
         reasons.push(with_package("wizard-done-uninstall-left-in-backup"));
     }
@@ -986,8 +1010,8 @@ fn vendor_still_present(item: &UninstallReportItem) -> &[PathBuf] {
 /// was kept and why, how to remove by hand the installer's files that
 /// stayed, what was left behind, its entries in Windows' list of installed
 /// programs, the installer receipts macOS still lists, and why it stayed;
-/// then the backup set with a command for each package it holds, and where
-/// the report is.
+/// then, for each package whose files went into the backup set, that it
+/// can be restored on the Backups tab, and where the report is.
 pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallReport) -> Vec<String> {
     let path_line = |key: &str, path: &Path| {
         localizer
@@ -1175,41 +1199,19 @@ pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallRepor
                 .map(|reason| format!("  {reason}")),
         );
     }
-    if let Some(set_id) = &report.backup_set_id {
-        lines.push(
-            localizer
-                .format(
-                    "wizard-summary-uninstall-backup",
-                    &[("id", set_id.as_str())],
-                )
-                .value,
-        );
-        // Only a package whose files went into the backup set can come back
-        // from it. What a vendor's uninstaller or the macOS administrator
-        // command removed, or what went to the Trash, isn't in the set,
-        // even when another package of the same run is.
-        for item in report.items.iter().filter(|item| {
-            item.status.is_removed() && item.removed.iter().any(|file| file.backup_path.is_some())
-        }) {
-            let command = format!(
-                "rabbit restore-backup --resource-path \"{}\" --backup-id {set_id} --package {} \
-                 --apply",
-                report.resource_path.display(),
-                item.package_id
-            );
-            lines.push(
-                localizer
-                    .format(
-                        "wizard-summary-uninstall-restore",
-                        &[
-                            ("package", package_name(localizer, item).as_str()),
-                            ("command", command.as_str()),
-                        ],
-                    )
-                    .value,
-            );
-        }
-    }
+    // Where each package that can come back from the backup set is
+    // restored: the Backups tab. The saved report keeps the set's id, and
+    // README shows the command line; a GUI user may have no `rabbit` on the
+    // PATH. Files a failure left in the set are pointed there by their
+    // package's own sentence above.
+    lines.extend(packages_in_backup_set(report).map(|item| {
+        localizer
+            .format(
+                "wizard-summary-uninstall-restorable",
+                &[("package", package_name(localizer, item).as_str())],
+            )
+            .value
+    }));
     if let Some(saved) = &report.saved_report {
         lines.push(path_line(
             "wizard-summary-uninstall-report",
@@ -1217,6 +1219,19 @@ pub fn summarize_uninstall_report(localizer: &Localizer, report: &UninstallRepor
         ));
     }
     lines
+}
+
+/// The packages `report` removed that can come back from its backup set:
+/// those with a file in the set. What a vendor's uninstaller or the macOS
+/// administrator command removed, or what went to the Trash, isn't in the
+/// set, even when another package of the same run is. Done's hint and Show
+/// details name the Backups tab for these alone.
+fn packages_in_backup_set(report: &UninstallReport) -> impl Iterator<Item = &UninstallReportItem> {
+    report.items.iter().filter(|item| {
+        report.backup_set_id.is_some()
+            && item.status.is_removed()
+            && item.removed.iter().any(|file| file.backup_path.is_some())
+    })
 }
 
 /// How Show details names one path the run removed: moved into the backup

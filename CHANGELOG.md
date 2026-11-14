@@ -33,10 +33,33 @@ from this file and posts it as the GitHub release body.
 
 ### Added
 
+- The wizard has a new **Backups** tab, the third on the **Packages** page,
+  where you get back what RABBIT kept and delete what you no longer need.
+  It lists the backups of the chosen REAPER in groups: software you
+  uninstalled, earlier versions an update replaced, your key map from before
+  OSARA's key map replaced it, and other backups. Each row says what it is,
+  when it was made and how big it is, and the text below the list says what
+  restoring and deleting it would do, and whether it is the only copy.
+  Below the list, choose **Restore** or **Delete** for the backups you
+  tick; each choice keeps its own ticks, and nothing is ticked to begin
+  with. **Restore** brings an uninstalled package back as it was, settings
+  included if they went with it, takes a package back to the version it had
+  before an update, or puts your old key map back while keeping the scripts
+  installed since. What it replaces goes into a new backup first; after an
+  earlier version or a key map, restoring that one goes back again. A
+  backup that can't be restored can't be ticked and says why, such as a
+  package you installed again since. **Delete** removes backups for good,
+  to free the room they take; RABBIT asks first, with **No** selected.
+  Backups RABBIT kept together, such as two packages one uninstall removed,
+  are ticked and deleted together. Both go through Review, the progress
+  page and the Done page, like an install or an uninstall: Enter never
+  starts either, a restore asks you to close REAPER first, and closing
+  RABBIT during one asks first, then stops after the backup it is on.
+  RABBIT never deletes a backup by itself.
 - The wizard can now uninstall: the **Packages** page has an **Uninstall**
   tab beside **Install or update**. The page opens on **Install or update**
   with focus on the tabs, so screen readers read "Install or update, tab, 1
-  of 2" first; press Tab to reach the package list, which works as before,
+  of 3" first; press Tab to reach the package list, which works as before,
   and Shift+Tab from the list to get back to the tabs. On a Mac the tabs
   take focus only with keyboard navigation on; without it, the page opens
   in the package list. Switch tabs with Ctrl+Tab or Ctrl+Page Down on
@@ -56,9 +79,9 @@ from this file and posts it as the GitHub release body.
   on macOS the administrator command, which can remove several. The Done
   page says what went, why anything stayed, and how to get a package back:
   run RABBIT again and tick it on **Install or update**, where it is no
-  longer ticked by itself. **Show details** lists the files, the backup
-  they went into, and the `rabbit restore-backup` command that brings each
-  package back.
+  longer ticked by itself, or, when RABBIT kept its files, restore it on
+  the **Backups** tab. **Show details** lists the files, and names each
+  package that can be restored there.
 - `rabbit uninstall` removes SWS, ReaPack, ReaKontrol, FFmpeg, app2clap and
   the language packs. Name each package with `--package`. Without `--apply`
   it only lists what would go, what stays and what would stop it, and with
@@ -253,12 +276,13 @@ from this file and posts it as the GitHub release body.
   that folder and entry back. Once both are gone, there is no permission
   prompt and no question. RABBIT removes them only when they are exactly as
   the installer leaves them; otherwise it changes nothing and says how to
-  remove the scripts by hand. `rabbit restore-backup --package jaws-scripts`
-  brings the files back, but not the folder and entry. Every REAPER must be
-  closed; JAWS can keep running, and if it has a script file open, RABBIT puts
-  everything back and says to wait and try again. From a portable REAPER,
-  RABBIT says to uninstall the scripts from the standard REAPER, and how to
-  remove them by hand.
+  remove the scripts by hand. Restoring them, on the **Backups** tab or with
+  `rabbit restore-backup --package jaws-scripts`, brings the files back, but
+  not the folder and entry. Every REAPER must be closed; JAWS can keep
+  running, and if it has a script file open, RABBIT puts everything back and
+  says to wait and try again. From a portable REAPER, RABBIT says to
+  uninstall the scripts from the standard REAPER, and how to remove them by
+  hand.
 - Brazilian Portuguese (pt-BR) UI translation. The language picker now lists
   Português (Brasil), it ships in the macOS app bundle, and OS-language
   auto-detection on first launch covers Portuguese locales (any `pt-*`, which
@@ -266,9 +290,13 @@ from this file and posts it as the GitHub release body.
 
 ### Changed
 
-- When another copy of RABBIT is already installing into the same REAPER,
-  the Done page now says so in plain words, in your language, instead of
-  naming a lock file and a process number.
+- When another copy of RABBIT is already working on the same REAPER,
+  installing, uninstalling, or restoring or deleting backups, the Done page
+  now says so in plain words, in your language ("Another copy of RABBIT is
+  working on this REAPER."), instead of naming a lock file and a process
+  number.
+- The **Packages** page's heading now reads "Choose what RABBIT should do",
+  since the page installs, uninstalls, and restores or deletes backups.
 - A package you uninstalled, or turned down in the wizard, is no longer
   offered again by itself while it is gone: the wizard doesn't tick it, and
   `rabbit apply-packages` and `rabbit setup` without `--package` skip it and

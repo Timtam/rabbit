@@ -756,7 +756,7 @@ fn the_tabs_sit_where_the_notebook_has_them() {
 fn only_an_install_goes_through_the_reapack_page() {
     assert!(WizardMode::Install.shows_reapack_acknowledgement(true));
     assert!(!WizardMode::Install.shows_reapack_acknowledgement(false));
-    // ReaPack ticked for install on the other tab changes nothing about an
+    // ReaPack ticked on the Install or update tab changes nothing about an
     // uninstall, a restore or a delete, on the way to Review or back from it.
     for mode in [
         WizardMode::Uninstall,

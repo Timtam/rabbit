@@ -109,10 +109,10 @@ impl UninstallSideWidgets {
 
 /// Build "Also remove settings" below the Uninstall list's details: a
 /// heading, the checkbox, unticked, and a read-only note saying what it
-/// would remove. Like the key map checkbox on the other tab, it is always
-/// there, and disabled and out of the Tab order while it can't apply,
-/// rather than hidden: a control that comes and goes is harder to find
-/// again than one that says why it can't be used.
+/// would remove. Like the key map checkbox on the Install or update tab, it
+/// is always there, and disabled and out of the Tab order while it can't
+/// apply, rather than hidden: a control that comes and goes is harder to
+/// find again than one that says why it can't be used.
 pub(crate) fn build_uninstall_settings(
     page: &Panel,
     sizer: &BoxSizer,

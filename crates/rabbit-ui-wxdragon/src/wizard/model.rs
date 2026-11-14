@@ -194,7 +194,8 @@ pub struct WizardText {
     pub reaper_running_body: String,
     pub error_reaper_running: String,
     /// Why a run failed when another RABBIT holds the target's install
-    /// lock, installing or uninstalling there.
+    /// lock, installing, uninstalling, or restoring or deleting backups
+    /// there.
     pub error_lock_held: String,
     /// Why an uninstall didn't start on macOS: RABBIT itself runs as root,
     /// as under sudo.

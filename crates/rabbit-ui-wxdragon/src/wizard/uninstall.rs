@@ -1186,7 +1186,7 @@ fn backups_tab_note(localizer: &Localizer, ticks: &PackagesTabTicks) -> Option<S
 /// that go with them before anyone sees the tab. Naming those told someone
 /// who never opened the tab that their ticks were left out, and named the
 /// very package Review was about to remove whenever it had an update. A tick
-/// the user did make, before a Page Down took them to the other tab, say,
+/// the user did make, before a Page Down took them to another tab, say,
 /// is what the note is for.
 pub fn install_tab_ticks_left_out(
     package_rows: &[PackageRow],

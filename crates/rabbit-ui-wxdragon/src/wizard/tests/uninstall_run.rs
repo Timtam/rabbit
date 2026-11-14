@@ -473,9 +473,9 @@ fn no_request_without_a_writable_target_or_a_tick() {
 
 /// From the Uninstall tab to the engine and back, in a temporary REAPER
 /// folder: the wizard's request is one the engine carries out, the Done
-/// page's details name the backup and the command that brings SWS back,
-/// and the rebuilt Install tab offers SWS again, unticked. Once SWS is put
-/// back by hand, its update is ticked.
+/// page's hint and details send SWS to the Backups tab while the saved
+/// report keeps the set's id, and the rebuilt Install tab offers SWS
+/// again, unticked. Once SWS is put back by hand, its update is ticked.
 ///
 /// The rows are planned on temporary folders alone. The engine and the
 /// Install tab read this computer's own detection and folders, which find
@@ -564,25 +564,42 @@ fn the_wizard_request_runs_in_the_engine_and_the_lists_follow() {
     let outcome = wizard_uninstall_outcome(&localizer, &request.package_ids, &report);
     assert_eq!(outcome.status, UninstallOutcomeStatus::Success);
     assert_eq!(outcome.heading, "RABBIT uninstalled SWS Extension.");
+    assert!(
+        outcome.status_text.ends_with(
+            "To get one back, run RABBIT again and tick it on the Install or update tab. You can \
+             also restore SWS Extension on the Backups tab."
+        ),
+        "{}",
+        outcome.status_text
+    );
+    // Show details points to the Backups tab, never to the set's id or a
+    // command line. The saved report keeps the id.
     let set_id = report.backup_set_id.clone().unwrap();
     let details = outcome.detail_lines.join("\n");
     assert!(
-        details.contains(&format!("Backup set: {set_id}")),
+        details.contains("SWS Extension can be restored on the Backups tab."),
         "{details}"
     );
+    // The report's name holds the same time, so only its line may.
     assert!(
-        details.contains(&format!(
-            "rabbit restore-backup --resource-path \"{}\" --backup-id {set_id} --package sws \
-             --apply",
-            resource.display()
-        )),
+        outcome
+            .detail_lines
+            .iter()
+            .filter(|line| !line.starts_with("Report: "))
+            .all(|line| !line.contains(&set_id)),
         "{details}"
     );
+    assert!(!details.contains("restore-backup"), "{details}");
     assert!(details.contains(&plugin.display().to_string()), "{details}");
     // The engine saved its report, and Done points to it rather than
     // writing a second one.
     let saved = outcome.report_path.clone().unwrap();
     assert!(saved.exists());
+    let json = std::fs::read_to_string(&report.saved_report.as_ref().unwrap().json_path).unwrap();
+    assert!(
+        json.contains(&format!("\"backup_set_id\": \"{set_id}\"")),
+        "{json}"
+    );
     let mut outcome = outcome;
     save_wizard_uninstall_outcome(&localizer, &mut outcome).unwrap();
     assert_eq!(outcome.report_path, Some(saved));
@@ -1006,6 +1023,12 @@ fn outcome(report: &UninstallReport) -> WizardUninstallOutcome {
 
 const HINT: &str = "To get one back, run RABBIT again and tick it on the Install or update tab.";
 
+/// Done's hint when RABBIT kept a backup of `packages`: the Install route,
+/// then the Backups tab for those alone.
+fn restore_hint(packages: &str) -> String {
+    format!("{HINT} You can also restore {packages} on the Backups tab.")
+}
+
 #[test]
 fn success_names_what_went_and_how_to_get_it_back() {
     let report = UninstallReport {
@@ -1034,7 +1057,11 @@ fn success_names_what_went_and_how_to_get_it_back() {
     );
     assert_eq!(
         outcome.status_text,
-        format!("{}\n\n{HINT}", outcome.heading)
+        format!(
+            "{}\n\n{}",
+            outcome.heading,
+            restore_hint("SWS Extension, ReaPack")
+        )
     );
     assert_eq!(
         outcome.detail_lines,
@@ -1046,11 +1073,8 @@ fn success_names_what_went_and_how_to_get_it_back() {
             "  Removed: C:/REAPER/Scripts/sws_python64.py",
             "ReaPack: Uninstalled",
             "  Removed: C:/REAPER/UserPlugins/reaper_reapack-x64.dll",
-            "Backup set: uninstall-unix-1",
-            "To put SWS Extension back, close REAPER and run: rabbit restore-backup \
-             --resource-path \"C:/REAPER\" --backup-id uninstall-unix-1 --package sws --apply",
-            "To put ReaPack back, close REAPER and run: rabbit restore-backup --resource-path \
-             \"C:/REAPER\" --backup-id uninstall-unix-1 --package reapack --apply",
+            "SWS Extension can be restored on the Backups tab.",
+            "ReaPack can be restored on the Backups tab.",
             "Report: C:/REAPER/RABBIT/logs/uninstall-unix-1.txt",
         ]
     );
@@ -1123,7 +1147,11 @@ fn a_file_in_use_finishes_with_problems_and_says_which_file() {
                   RABBIT again.";
     assert_eq!(
         outcome.status_text,
-        format!("{}\n\n{reason}\n\n{HINT}", outcome.heading)
+        format!(
+            "{}\n\n{reason}\n\n{}",
+            outcome.heading,
+            restore_hint("SWS Extension")
+        )
     );
     let details = outcome.detail_lines.join("\n");
     assert!(
@@ -1131,7 +1159,11 @@ fn a_file_in_use_finishes_with_problems_and_says_which_file() {
         "{details}"
     );
     assert!(
-        !details.contains("--package reapack"),
+        details.contains("SWS Extension can be restored on the Backups tab."),
+        "{details}"
+    );
+    assert!(
+        !details.contains("ReaPack can be restored"),
         "only what went can come back: {details}"
     );
 }
@@ -1266,7 +1298,8 @@ fn a_stopped_run_says_what_went_before_the_stop() {
         outcome.status_text,
         format!(
             "You stopped the uninstall. Packages RABBIT hadn't reached yet are still \
-             installed.\n\nBefore you stopped it, RABBIT uninstalled SWS Extension.\n\n{HINT}"
+             installed.\n\nBefore you stopped it, RABBIT uninstalled SWS Extension.\n\n{}",
+            restore_hint("SWS Extension")
         )
     );
     assert!(
@@ -1323,7 +1356,7 @@ fn a_reaper_opened_after_review_uninstalls_nothing_and_says_why() {
         !outcome
             .detail_lines
             .iter()
-            .any(|line| line.starts_with("Backup set"))
+            .any(|line| line.contains("Backups tab"))
     );
 }
 
@@ -1376,9 +1409,10 @@ fn a_failed_removal_uninstalls_nothing_and_keeps_the_engines_words() {
     );
 }
 
-#[test]
-fn files_left_in_the_backup_after_a_failure_are_pointed_out() {
-    let sws = UninstallReportItem {
+/// SWS failed, and some of its files couldn't go back: they are only in
+/// the backup set, which keeps SWS for them, as the engine reports it.
+fn sws_left_in_backup() -> UninstallReportItem {
+    UninstallReportItem {
         left_in_backup: vec![PathBuf::from("C:/REAPER/UserPlugins/reaper_sws-x64.dll")],
         ..report_item(
             "sws",
@@ -1387,15 +1421,28 @@ fn files_left_in_the_backup_after_a_failure_are_pointed_out() {
                 error: "disk full".to_string(),
             },
         )
-    };
-    let outcome = outcome(&report(vec![sws]));
+    }
+}
 
-    assert!(
-        outcome.status_text.contains(
-            "Some files of SWS Extension couldn't be put back and are still in the backup."
-        ),
-        "{}",
-        outcome.status_text
+/// Files a failure left in the backup set: Done and Show details say they
+/// are still there and that the Backups tab can restore them, since
+/// nothing else names the set. The package wasn't removed, so the hint
+/// about getting a package back doesn't come.
+#[test]
+fn files_left_in_the_backup_after_a_failure_are_pointed_out() {
+    let report = UninstallReport {
+        backup_set_id: Some("uninstall-unix-1".to_string()),
+        ..report(vec![sws_left_in_backup()])
+    };
+    let outcome = outcome(&report);
+
+    let sentence = "Some files of SWS Extension couldn't be put back and are still in the \
+                    backup. Show details lists them, and you can restore them on the Backups \
+                    tab.";
+    assert_eq!(outcome.status, UninstallOutcomeStatus::Failed);
+    assert_eq!(
+        outcome.status_text,
+        format!("Uninstalling failed.\n\nEnglish message for sws.\n{sentence}")
     );
     assert!(
         outcome
@@ -1404,6 +1451,57 @@ fn files_left_in_the_backup_after_a_failure_are_pointed_out() {
         "{:?}",
         outcome.detail_lines
     );
+    assert!(
+        outcome.detail_lines.contains(&format!("  {sentence}")),
+        "{:#?}",
+        outcome.detail_lines
+    );
+    // Not as a package that can come back: it never went.
+    assert!(
+        !outcome
+            .detail_lines
+            .iter()
+            .any(|line| line.contains("SWS Extension can be restored")),
+        "{:#?}",
+        outcome.detail_lines
+    );
+}
+
+/// The same in every language: the sentence names the Backups tab by its
+/// own label, in Done and in Show details.
+#[test]
+fn files_left_in_the_backup_name_the_backups_tab_in_every_locale() {
+    let report = UninstallReport {
+        backup_set_id: Some("uninstall-unix-1".to_string()),
+        ..report(vec![sws_left_in_backup()])
+    };
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let backups_tab = localizer.text("wizard-packages-tab-backups").value;
+        let sentence = localizer
+            .format(
+                "wizard-done-uninstall-left-in-backup",
+                &[("package", localizer.text("package-sws").value.as_str())],
+            )
+            .value;
+        assert_reads(locale, &sentence);
+        assert!(sentence.contains(&backups_tab), "{locale}: {sentence}");
+
+        let outcome = wizard_uninstall_outcome(&localizer, &ids(&["sws"]), &report);
+        assert!(
+            outcome.status_text.ends_with(&sentence),
+            "{locale}: {}",
+            outcome.status_text
+        );
+        assert!(
+            outcome.detail_lines.contains(&format!("  {sentence}")),
+            "{locale}: {:#?}",
+            outcome.detail_lines
+        );
+        for line in &outcome.detail_lines {
+            assert!(!line.contains("uninstall-unix-1"), "{locale}: {line}");
+        }
+    }
 }
 
 #[test]
@@ -1567,12 +1665,10 @@ fn done_reads_in_every_locale() {
             let outcome = wizard_uninstall_outcome(&localizer, &package_ids, report);
             assert_reads(locale, &outcome.heading);
             assert_reads(locale, &outcome.status_text);
-            for line in outcome
-                .detail_lines
-                .iter()
-                .filter(|line| !line.contains("rabbit restore-backup"))
-            {
+            for line in &outcome.detail_lines {
                 assert_reads(locale, line);
+                assert!(!line.contains("restore-backup"), "{locale}: {line}");
+                assert!(!line.contains("uninstall-unix-"), "{locale}: {line}");
             }
         }
         for status in statuses {
@@ -1610,8 +1706,8 @@ fn a_held_lock_reads_as_another_rabbit_at_work() {
     };
     assert_eq!(
         wizard_error_reason(&model, &error),
-        "Another copy of RABBIT is installing or uninstalling in this REAPER. Wait until it has \
-         finished, then run RABBIT again."
+        "Another copy of RABBIT is working on this REAPER. Wait until it has finished, then run \
+         RABBIT again."
     );
 
     let outcome = wizard_uninstall_outcome_from_error(
@@ -1716,6 +1812,59 @@ fn a_refused_run_leaves_a_report_of_its_own() {
     save_wizard_uninstall_outcome(&localizer, &mut outcome).unwrap();
     assert_eq!(outcome.report_path, None);
     assert!(!missing.exists());
+}
+
+/// A run that moved files into a backup set but whose report the engine
+/// couldn't save: the wizard's own report keeps the set's id, which Show
+/// details doesn't show, so the set can still be found outside the
+/// Backups tab. A run with no set writes no such field.
+#[test]
+fn the_wizards_own_report_keeps_the_backup_set_id() {
+    let dir = tempdir().unwrap();
+    let report = UninstallReport {
+        resource_path: dir.path().to_path_buf(),
+        ..report(vec![removed(
+            "sws",
+            &["C:/REAPER/UserPlugins/reaper_sws-x64.dll"],
+        )])
+    };
+    assert_eq!(report.saved_report, None);
+    let localizer = en();
+    let mut outcome = wizard_uninstall_outcome(&localizer, &ids(&["sws"]), &report);
+    assert!(
+        outcome
+            .detail_lines
+            .iter()
+            .all(|line| !line.contains("uninstall-unix-1")),
+        "{:#?}",
+        outcome.detail_lines
+    );
+
+    save_wizard_uninstall_outcome(&localizer, &mut outcome).unwrap();
+
+    let saved = outcome.report_path.clone().unwrap();
+    let json = std::fs::read_to_string(saved.with_extension("json")).unwrap();
+    assert!(
+        json.contains("\"backup_set_id\": \"uninstall-unix-1\""),
+        "{json}"
+    );
+
+    let (_, model) = langpack_model(PlanActionKind::Install);
+    let mut refused = wizard_uninstall_outcome_from_error(
+        &model,
+        &localizer,
+        dir.path(),
+        &ids(&["sws"]),
+        false,
+        &RabbitError::PackageInstallInProgress {
+            lock_path: dir.path().join("RABBIT/locks/package-install.lock"),
+            pid: 42,
+        },
+    );
+    save_wizard_uninstall_outcome(&localizer, &mut refused).unwrap();
+    let saved = refused.report_path.clone().unwrap();
+    let json = std::fs::read_to_string(saved.with_extension("json")).unwrap();
+    assert!(!json.contains("backup_set_id"), "{json}");
 }
 
 // ---------------------------------------------------------------------------
@@ -2340,8 +2489,8 @@ fn jaws_cleanup_failed_item(cleanup: CleanupOutcome) -> UninstallReportItem {
 /// registry entry, Show details lists what it removed with administrator
 /// rights, file by file, then the folder and the entry as regedit names
 /// it, after the files that went into the backup. A file that was gone
-/// already isn't listed as removed. The restore command follows, for the
-/// files in the backup set.
+/// already isn't listed as removed. Then that the scripts can be restored
+/// on the Backups tab, for the files in the backup set.
 #[test]
 fn done_lists_the_cleanup_with_administrator_rights_and_the_registry_key() {
     let report = jaws_report_planned(
@@ -2368,11 +2517,7 @@ fn done_lists_the_cleanup_with_administrator_rights_and_the_registry_key() {
             ),
             format!("  Removed with administrator rights: {JAWS_FOLDER}"),
             format!("  Removed from the registry with administrator rights: {JAWS_KEY}"),
-            "Backup set: uninstall-unix-1".to_string(),
-            format!(
-                "To put {JAWS} back, close REAPER and run: rabbit restore-backup --resource-path \
-                 \"C:/REAPER\" --backup-id uninstall-unix-1 --package jaws-scripts --apply"
-            ),
+            format!("{JAWS} can be restored on the Backups tab."),
         ]
     );
 }
@@ -2439,7 +2584,7 @@ fn show_details_after_a_failed_cleanup_lists_what_is_gone_and_what_is_still_ther
     // by hand is for a removed package only.
     let note = en().text(SCRIPTS_NOTE_KEY).value;
     assert!(!details.contains(&note), "{details}");
-    assert!(!details.contains("restore-backup"), "{details}");
+    assert!(!details.contains("Backups tab"), "{details}");
 
     let lost = UninstallReportItem {
         cleanup: Some(CleanupOutcome::lost("jaws-scripts", "the pipe broke")),
@@ -2784,8 +2929,8 @@ fn a_cancelled_password_window_says_nothing_was_uninstalled_on_macos() {
 /// An app moved to the Trash says where it is there only when RABBIT saw
 /// it there, and that it can come back until the Trash is emptied. Show
 /// details names where it was and where it is now. Nothing of it is in the
-/// backup set, so no restore command is offered for it, even when another
-/// package's files went into one.
+/// backup set, so neither Done nor Show details sends it to the Backups
+/// tab, even when another package's files went into one.
 #[test]
 fn an_app_in_the_trash_says_where_it_is_only_when_rabbit_saw_it() {
     let report = UninstallReport {
@@ -2821,11 +2966,18 @@ fn an_app_in_the_trash_says_where_it_is_only_when_rabbit_saw_it() {
     for line in [
         format!("REAPER: Uninstalled\n  Moved to the Trash: {MAC_REAPER_APP}"),
         format!("  Now in the Trash: {IN_TRASH}"),
-        "--package sws --apply".to_string(),
+        "SWS Extension can be restored on the Backups tab.".to_string(),
     ] {
         assert!(details.contains(&line), "{line}\n{details}");
     }
-    assert!(!details.contains("--package reaper"), "{details}");
+    assert!(!details.contains("REAPER can be restored"), "{details}");
+    assert!(
+        outcome
+            .status_text
+            .ends_with(&restore_hint("SWS Extension")),
+        "{}",
+        outcome.status_text
+    );
 
     // macOS didn't say where, and RABBIT couldn't see it: no place named.
     let outcome = self::outcome(&mac_report(
@@ -2845,7 +2997,12 @@ fn an_app_in_the_trash_says_where_it_is_only_when_rabbit_saw_it() {
     );
     let details = outcome.detail_lines.join("\n");
     assert!(!details.contains("Now in the Trash"), "{details}");
-    assert!(!details.contains("restore-backup"), "{details}");
+    assert!(!details.contains("Backups tab"), "{details}");
+    assert!(
+        outcome.status_text.ends_with(&format!("\n\n{HINT}")),
+        "{}",
+        outcome.status_text
+    );
 }
 
 /// An app the administrator command moved into the Trash keeps the owner it
@@ -3026,7 +3183,7 @@ fn a_partly_removed_package_is_never_nothing_uninstalled() {
 }
 
 /// What the administrator command removed is listed path by path, and only
-/// a package in the backup set gets a restore command. Receipts macOS still
+/// a package in the backup set is sent to the Backups tab. Receipts macOS still
 /// lists, ones RABBIT couldn't check, and a command that ended unclearly
 /// are each said plainly, with no harm claimed where there is none.
 #[test]
@@ -3075,11 +3232,11 @@ fn removed_as_administrator_lists_each_path_and_offers_no_restore() {
         format!("  Removed with administrator rights: {SURGE_APP}"),
         format!("  Removed with administrator rights: {SURGE_VST3_MAC}"),
         "  Still listed by macOS's installer: org.surge-synth-team.surge-xt.app.pkg".to_string(),
-        "--package sws --apply".to_string(),
+        "SWS Extension can be restored on the Backups tab.".to_string(),
     ] {
         assert!(details.contains(&line), "{line}\n{details}");
     }
-    assert!(!details.contains("--package surge-xt"), "{details}");
+    assert!(!details.contains("Surge XT can be restored"), "{details}");
 
     let unchecked = UninstallReportItem {
         problems: vec![UninstallProblem::InstallerRecordsUnchecked {
@@ -3096,27 +3253,198 @@ fn removed_as_administrator_lists_each_path_and_offers_no_restore() {
     );
 }
 
-/// The restore list names only packages whose files went into the backup
-/// set. On Windows too: a vendor's uninstaller in the same run as SWS
-/// leaves nothing in the set to restore.
-#[test]
-fn the_restore_list_names_only_packages_in_the_backup_set() {
-    let surge = report_item(
+/// Surge XT, removed by its own uninstaller: nothing of it is in the
+/// backup set.
+fn surge_by_vendor() -> UninstallReportItem {
+    report_item(
         "surge-xt",
         UninstallStatus::Removed,
         UninstallMessage::UninstalledByVendor,
-    );
-    let outcome = outcome(&report(vec![
-        removed("sws", &["C:/REAPER/UserPlugins/reaper_sws-x64.dll"]),
-        surge,
-    ]));
-    let restores: Vec<&String> = outcome
+    )
+}
+
+/// The lines of Show details that send a package to the Backups tab.
+fn restorable_lines(outcome: &WizardUninstallOutcome) -> Vec<&String> {
+    outcome
         .detail_lines
         .iter()
-        .filter(|line| line.contains("restore-backup"))
-        .collect();
-    assert_eq!(restores.len(), 1, "{restores:#?}");
-    assert!(restores[0].contains("--package sws"), "{restores:#?}");
+        .filter(|line| line.contains("Backups tab"))
+        .collect()
+}
+
+/// Show details names only packages whose files went into the backup set.
+/// On Windows too: a vendor's uninstaller in the same run as SWS leaves
+/// nothing in the set to restore.
+#[test]
+fn the_restore_list_names_only_packages_in_the_backup_set() {
+    let outcome = outcome(&report(vec![
+        removed("sws", &["C:/REAPER/UserPlugins/reaper_sws-x64.dll"]),
+        surge_by_vendor(),
+    ]));
+    assert_eq!(
+        restorable_lines(&outcome),
+        ["SWS Extension can be restored on the Backups tab."]
+    );
+}
+
+/// Done's hint always names the Install or update tab, since installing
+/// again works after every removal, and adds the Backups tab only for the
+/// packages whose files went into the backup set: never for one a vendor's
+/// uninstaller took, nor for a set that holds nothing of a package.
+#[test]
+fn the_done_hint_names_the_backups_tab_only_for_what_is_in_the_set() {
+    let sws = || removed("sws", &["C:/REAPER/UserPlugins/reaper_sws-x64.dll"]);
+
+    // A set with SWS in it.
+    let outcome = self::outcome(&report(vec![sws()]));
+    assert_eq!(
+        outcome.status_text,
+        format!(
+            "RABBIT uninstalled SWS Extension.\n\n{}",
+            restore_hint("SWS Extension")
+        )
+    );
+    assert_eq!(
+        outcome.status_text.lines().last().unwrap(),
+        "To get one back, run RABBIT again and tick it on the Install or update tab. You can \
+         also restore SWS Extension on the Backups tab."
+    );
+
+    // A vendor's uninstaller alone: no backup, so the Install route only.
+    let outcome = self::outcome(&report(vec![surge_by_vendor()]));
+    assert_eq!(outcome.status, UninstallOutcomeStatus::Success);
+    assert_eq!(
+        outcome.status_text,
+        format!("RABBIT uninstalled Surge XT.\n\n{HINT}")
+    );
+    assert!(restorable_lines(&outcome).is_empty());
+
+    // Both in one run: the Backups tab names SWS alone.
+    let outcome = self::outcome(&report(vec![sws(), surge_by_vendor()]));
+    assert_eq!(
+        outcome.status_text,
+        format!(
+            "RABBIT uninstalled SWS Extension, Surge XT.\n\n{}",
+            restore_hint("SWS Extension")
+        )
+    );
+
+    // A package that stayed isn't one to get back, even with a file of it
+    // reported in the set.
+    let reapack_stayed = UninstallReportItem {
+        removed: removed("reapack", &["C:/REAPER/UserPlugins/reaper_reapack-x64.dll"]).removed,
+        ..report_item(
+            "reapack",
+            UninstallStatus::Failed,
+            UninstallMessage::FileInUse {
+                path: PathBuf::from("C:/REAPER/UserPlugins/reaper_reapack-x64.dll"),
+                error: "sharing violation".to_string(),
+            },
+        )
+    };
+    assert!(reapack_stayed.removed[0].backup_path.is_some());
+    let outcome = self::outcome(&report(vec![sws(), reapack_stayed]));
+    assert!(
+        outcome
+            .status_text
+            .ends_with(&format!("\n\n{}", restore_hint("SWS Extension"))),
+        "{}",
+        outcome.status_text
+    );
+    assert_eq!(
+        restorable_lines(&outcome),
+        ["SWS Extension can be restored on the Backups tab."]
+    );
+
+    // A removal whose files have no place in a set, even with a set id
+    // for the run, and a run with no set at all.
+    let no_copy = UninstallReportItem {
+        removed: vec![RemovedFile {
+            backup_path: None,
+            ..sws().removed[0].clone()
+        }],
+        ..sws()
+    };
+    for report in [
+        report(vec![no_copy]),
+        UninstallReport {
+            backup_set_id: None,
+            ..report(vec![sws()])
+        },
+    ] {
+        let outcome = self::outcome(&report);
+        assert!(
+            outcome.status_text.ends_with(&format!("\n\n{HINT}")),
+            "{}",
+            outcome.status_text
+        );
+        assert!(restorable_lines(&outcome).is_empty());
+    }
+}
+
+/// The hint and Show details, with and without a backup, in every
+/// language: each names the tabs by their own labels, the hint with a
+/// backup keeps the one without it word for word, Show details names the
+/// package, and neither shows the set's id or a command line.
+#[test]
+fn the_done_hint_and_show_details_name_the_tabs_in_every_locale() {
+    let with_set = report(vec![
+        removed("sws", &["C:/REAPER/UserPlugins/reaper_sws-x64.dll"]),
+        surge_by_vendor(),
+    ]);
+    // A vendor's uninstaller alone moves nothing into a set, and the
+    // engine then names none.
+    let without_set = UninstallReport {
+        backup_set_id: None,
+        ..report(vec![surge_by_vendor()])
+    };
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let install_tab = localizer.text("wizard-packages-tab-install").value;
+        let backups_tab = localizer.text("wizard-packages-tab-backups").value;
+        let sws = localizer.text("package-sws").value;
+        let surge = localizer.text("package-surge-xt").value;
+        let package_ids = ids(&["sws", "surge-xt"]);
+        let plain_hint = localizer.text("wizard-done-uninstall-reinstall-hint").value;
+
+        let outcome = wizard_uninstall_outcome(&localizer, &package_ids, &with_set);
+        let hint = outcome.status_text.rsplit("\n\n").next().unwrap();
+        assert_reads(locale, hint);
+        assert!(
+            hint.starts_with(&format!("{plain_hint} ")),
+            "{locale}: the Install route reads the same with a backup: {hint}"
+        );
+        for part in [&install_tab, &backups_tab, &sws] {
+            assert!(hint.contains(part.as_str()), "{locale}: {part}: {hint}");
+        }
+        assert!(!hint.contains(&surge), "{locale}: {hint}");
+        let restorable: Vec<&String> = outcome
+            .detail_lines
+            .iter()
+            .filter(|line| line.contains(&backups_tab))
+            .collect();
+        assert_eq!(restorable.len(), 1, "{locale}: {:#?}", outcome.detail_lines);
+        assert_reads(locale, restorable[0]);
+        assert!(restorable[0].contains(&sws), "{locale}: {}", restorable[0]);
+        for line in &outcome.detail_lines {
+            assert!(!line.contains("restore-backup"), "{locale}: {line}");
+            assert!(!line.contains("uninstall-unix-1"), "{locale}: {line}");
+        }
+
+        let outcome = wizard_uninstall_outcome(&localizer, &ids(&["surge-xt"]), &without_set);
+        let hint = outcome.status_text.rsplit("\n\n").next().unwrap();
+        assert_eq!(hint, plain_hint, "{locale}");
+        assert_reads(locale, hint);
+        assert!(hint.contains(&install_tab), "{locale}: {hint}");
+        assert!(
+            !outcome
+                .detail_lines
+                .iter()
+                .any(|line| line.contains(&backups_tab)),
+            "{locale}: {:#?}",
+            outcome.detail_lines
+        );
+    }
 }
 
 /// The administrator command's first step found a program it looks for

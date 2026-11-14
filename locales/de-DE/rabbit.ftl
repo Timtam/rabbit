@@ -5,8 +5,9 @@ common-yes = ja
 common-no = nein
 
 # What happens to a package in this run, the first thing its row says. An
-# unticked row on either tab gets action-keep, so keep it neutral: on the
-# Uninstall tab it only means the package isn't marked for removal.
+# unticked row on every tab gets action-keep, so keep it neutral: on the
+# Uninstall tab it only means the package isn't marked for removal, and on
+# the Backups tab that the backup isn't ticked to restore or delete.
 action-install = Installieren
 action-update = Aktualisieren
 action-keep = Beibehalten
@@ -268,7 +269,7 @@ wizard-target-details = REAPER-Anwendung: { $app_path }
     Ressourcenpfad: { $path }
     Beschreibbar: { $writable }
 
-wizard-packages-heading = Auswählen, was installiert, aktualisiert oder deinstalliert wird
+wizard-packages-heading = Auswählen, was RABBIT tun soll
 wizard-packages-list-label = Installieren oder aktualisieren: Pakete und Einstellungen
 wizard-packages-row-checked = Ausgewählt
 wizard-packages-row-unchecked = Nicht ausgewählt
@@ -279,8 +280,8 @@ wizard-additional-software-tree-group-label = Zusätzliche Software
 wizard-language-tree-group-label = Sprachpakete
 wizard-configuration-tree-group-label = Konfiguration
 
-# The two tabs on the Packages page. Screen readers read the selected tab's
-# name when the page opens, so keep both short.
+# The first two of the Packages page's three tabs. Screen readers read the
+# selected tab's name when the page opens, so keep them short.
 wizard-packages-tab-install = Installieren oder aktualisieren
 wizard-packages-tab-uninstall = Deinstallieren
 # The third tab, where RABBIT's backups are restored or deleted. Keep it
@@ -1125,9 +1126,9 @@ wizard-done-status-error = Installation fehlgeschlagen. Bitte prüfen Sie den Fe
 wizard-reaper-running-title = REAPER ist noch geöffnet
 wizard-reaper-running-body = Schließen Sie REAPER und drücken Sie dann erneut auf „Installieren“. RABBIT kann REAPER und seine Erweiterungen nicht aktualisieren, solange REAPER läuft.
 wizard-error-reaper-running = RABBIT hat angehalten, weil REAPER geöffnet war. Schließen Sie REAPER und starten Sie RABBIT dann erneut.
-# Why a run stopped when another RABBIT is installing or uninstalling in the
-# same REAPER.
-wizard-error-lock-held = Ein anderes geöffnetes RABBIT-Fenster installiert oder deinstalliert gerade in diesem REAPER. Warten Sie, bis es fertig ist, und starten Sie RABBIT dann erneut.
+# Why a run stopped when another RABBIT is working on the same REAPER:
+# installing, uninstalling, or restoring or deleting backups.
+wizard-error-lock-held = Ein anderes RABBIT arbeitet gerade an diesem REAPER. Warten Sie, bis es fertig ist, und starten Sie RABBIT dann erneut.
 # Shown instead of starting an uninstall while REAPER is open. Name the
 # button as wizard-button-uninstall does.
 wizard-reaper-running-uninstall-body = Schließen Sie REAPER und drücken Sie dann erneut auf „Deinstallieren“. RABBIT kann nichts aus REAPER deinstallieren, solange REAPER läuft.
@@ -1196,11 +1197,20 @@ wizard-done-uninstall-removed-before-stop = Bevor Sie angehalten haben, hat RABB
 # There is no way back to the package list from the Done page. Name the tab
 # as wizard-packages-tab-install does.
 wizard-done-uninstall-reinstall-hint = Um ein Paket zurückzubekommen, starten Sie RABBIT erneut und wählen Sie es auf der Registerkarte „Installieren oder aktualisieren“ aus.
+# Used instead of wizard-done-uninstall-reinstall-hint when RABBIT kept a
+# backup of a removed package: the same sentence, then where to restore
+# it. $packages is a comma-separated list of localized package names, only
+# those whose files went into the backup, which may be fewer than were
+# uninstalled. Name the tabs as wizard-packages-tab-install and
+# wizard-packages-tab-backups do.
+wizard-done-uninstall-reinstall-or-restore-hint = Um ein Paket zurückzubekommen, starten Sie RABBIT erneut und wählen Sie es auf der Registerkarte „Installieren oder aktualisieren“ aus. Sie können { $packages } auch auf der Registerkarte „Sicherungen“ wiederherstellen.
 # What to look at after an uninstall, one sentence per package. $package is
 # the localized package name. Name "Show details" as wizard-done-show-details
 # does.
 wizard-done-uninstall-not-installed = { $package } war nicht mehr installiert, es gab also nichts zu entfernen.
-wizard-done-uninstall-left-in-backup = Einige Dateien von { $package } konnten nicht zurückgelegt werden und liegen noch in der Sicherung. „Details anzeigen“ listet sie auf.
+# The backup still holds the files, so the Backups tab lists it and can put
+# them back. Name the tab as wizard-packages-tab-backups does.
+wizard-done-uninstall-left-in-backup = Einige Dateien von { $package } konnten nicht zurückgelegt werden und liegen noch in der Sicherung. „Details anzeigen“ listet sie auf, und auf der Registerkarte „Sicherungen“ können Sie sie wiederherstellen.
 wizard-done-uninstall-leftovers = RABBIT findet noch Teile von { $package } und lässt sie unangetastet. „Details anzeigen“ listet sie auf.
 wizard-done-uninstall-language-reset-failed = RABBIT konnte REAPER nach dem Entfernen von { $package } nicht auf Englisch zurückstellen. Wählen Sie in den Einstellungen von REAPER eine Sprache.
 wizard-done-uninstall-registry-failed = RABBIT hat { $package } deinstalliert, aber die Liste der installierten Programme von Windows zeigt es möglicherweise noch an. „Details anzeigen“ nennt den Eintrag.
@@ -1447,12 +1457,10 @@ wizard-summary-registry-failed = Weiterhin in der Liste der installierten Progra
 # and is never translated. The folder and its files are listed with
 # wizard-summary-removed-as-admin.
 wizard-summary-registry-key-removed = Mit Administratorrechten aus der Registrierung entfernt: { $key }
-# $id is the backup set's name, such as uninstall-unix-1782841261.
-wizard-summary-uninstall-backup = Sicherung: { $id }
-# One line per uninstalled package. $package is the localized package name,
-# and $command the complete rabbit restore-backup command that brings it
-# back, which is never translated.
-wizard-summary-uninstall-restore = Um { $package } zurückzuholen, schließen Sie REAPER und führen Sie diesen Befehl aus: { $command }
+# One line per uninstalled package whose files went into the backup.
+# $package is the localized package name. Name the tab as
+# wizard-packages-tab-backups does.
+wizard-summary-uninstall-restorable = Sie können { $package } auf der Registerkarte „Sicherungen“ wiederherstellen.
 # $path is the full path of the report RABBIT saved.
 wizard-summary-uninstall-report = Bericht: { $path }
 # The Done page after a delete of backups. Its first line, one of the seven

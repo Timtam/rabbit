@@ -1077,8 +1077,9 @@ pub fn run() {
 
                 // Arm the post-run rescan (`rescan_after_run`), which the
                 // completion below fires once the install has written its
-                // receipts, so navigating Back from Done shows the new
-                // versions without the user having to do anything.
+                // receipts, so the three Packages tabs' lists match what is
+                // installed now. Back is disabled on Done: after a run the
+                // user starts RABBIT again.
                 {
                     let rescan = Rc::clone(&rescan_after_run);
                     arm_post_install_hook(move || rescan());
@@ -1254,10 +1255,9 @@ pub fn run() {
                                 // landed, and the cached package_rows
                                 // still reflect pre-install state. Fire
                                 // the post-install hook the click handler
-                                // armed earlier so navigating back from
-                                // the Done page (or via Rescan) reflects
-                                // the new on-disk state without the user
-                                // having to click anything.
+                                // armed earlier, so the three Packages
+                                // tabs' lists reflect the new on-disk
+                                // state. Back stays disabled on Done.
                                 fire_post_install_hook();
                             }
                             Err(error) => {

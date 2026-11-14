@@ -389,6 +389,46 @@ fn the_tab_switch_hint_names_control_and_tab_in_every_locale() {
     }
 }
 
+/// The Packages page's heading names no one run, since the page installs,
+/// uninstalls, restores and deletes backups. Nor does the reason a run
+/// stopped while another RABBIT holds the lock: it says what a delete's
+/// refusal for the same lock says, in every language.
+#[test]
+fn the_page_heading_and_the_lock_text_name_no_one_run_in_every_locale() {
+    let en = wizard_text(&Localizer::embedded(DEFAULT_LOCALE).unwrap());
+    assert_eq!(en.packages_heading, "Choose what RABBIT should do");
+    assert_eq!(
+        en.error_lock_held,
+        "Another copy of RABBIT is working on this REAPER. Wait until it has finished, then run \
+         RABBIT again."
+    );
+    for &locale in rabbit_core::localization::embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let text = wizard_text(&localizer);
+        for label in [&text.packages_heading, &text.error_lock_held] {
+            assert!(
+                !label.is_empty()
+                    && !label.starts_with("wizard-")
+                    && !label.contains('{')
+                    && !label.contains('&'),
+                "{locale}: {label}"
+            );
+        }
+        // Every new heading asks what RABBIT should do; none of the old
+        // ones, which listed the runs, named RABBIT.
+        assert!(
+            text.packages_heading.contains("RABBIT"),
+            "{locale}: {}",
+            text.packages_heading
+        );
+        assert_eq!(
+            text.error_lock_held,
+            localizer.text("wizard-delete-refusal-lock-held").value,
+            "{locale}"
+        );
+    }
+}
+
 #[test]
 fn wx_mnemonic_labels_support_translated_access_keys() {
     assert_eq!(wx_mnemonic_label("Weiter", "W"), "&Weiter");
