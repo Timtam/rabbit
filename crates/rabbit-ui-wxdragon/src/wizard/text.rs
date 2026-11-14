@@ -44,6 +44,10 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         packages_heading: localizer.text("wizard-packages-heading").value,
         packages_tab_install: localizer.text("wizard-packages-tab-install").value,
         packages_tab_uninstall: localizer.text("wizard-packages-tab-uninstall").value,
+        packages_tab_backups: localizer.text("wizard-packages-tab-backups").value,
+        backups_choice_label: localizer.text("wizard-backups-choice-label").value,
+        backups_choice_restore: localizer.text("wizard-backups-choice-restore").value,
+        backups_choice_delete: localizer.text("wizard-backups-choice-delete").value,
         packages_tabs_switch_hint_macos: localizer
             .text("wizard-packages-tabs-switch-hint-macos")
             .value,
@@ -111,6 +115,8 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         package_handling_unavailable: localizer.text("wizard-package-handling-unavailable").value,
         review_heading: localizer.text("wizard-review-heading").value,
         review_uninstall_heading: localizer.text("wizard-review-uninstall-heading").value,
+        review_restore_heading: localizer.text("wizard-review-restore-heading").value,
+        review_delete_heading: localizer.text("wizard-review-delete-heading").value,
         confirm_uninstall_title: localizer.text("wizard-confirm-uninstall-title").value,
         review_target_prefix: localizer.text("wizard-review-target-prefix").value,
         review_package_heading: localizer.text("wizard-review-package-heading").value,
@@ -186,6 +192,10 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         close_during_install_body: localizer.text("wizard-close-during-install-body").value,
         close_during_uninstall_title: localizer.text("wizard-close-during-uninstall-title").value,
         close_during_uninstall_body: localizer.text("wizard-close-during-uninstall-body").value,
+        close_during_restore_title: localizer.text("wizard-close-during-restore-title").value,
+        close_during_restore_body: localizer.text("wizard-close-during-restore-body").value,
+        close_during_delete_title: localizer.text("wizard-close-during-delete-title").value,
+        close_during_delete_body: localizer.text("wizard-close-during-delete-body").value,
         close_during_self_update_title: localizer
             .text("wizard-close-during-self-update-title")
             .value,

@@ -221,6 +221,13 @@ wizard-button-install = Installer
 wizard-button-install-mnemonic = I
 wizard-button-uninstall = Désinstaller
 wizard-button-uninstall-mnemonic = D
+# The run button before a restore and before a delete of backups, both
+# started from the Backups tab. Their access keys must differ from those of
+# Back, Next, Close and Cancel, which sit beside it.
+wizard-button-restore = Restaurer
+wizard-button-restore-mnemonic = R
+wizard-button-delete = Supprimer
+wizard-button-delete-mnemonic = U
 wizard-button-close = Fermer
 wizard-button-close-mnemonic = F
 wizard-button-cancel = Annuler
@@ -631,6 +638,12 @@ wizard-backups-details-together = { $origin ->
 } Jusqu'à une version ultérieure, RABBIT les supprime ensemble.
 # After the sentence above, when one of those rows can't be deleted.
 wizard-backups-details-tied = L'une d'elles ne peut pas être supprimée, RABBIT ne peut donc pas supprimer celle-ci non plus.
+# The choice below the Backups list: its label, which screen readers read
+# with the choice, then the two choices, Restore and Delete. Restore is
+# where the tab starts. The choices have no access keys.
+wizard-backups-choice-label = Que faire des sauvegardes cochées
+wizard-backups-choice-restore = Restaurer
+wizard-backups-choice-delete = Supprimer
 # The choice below the Backups list, Restore or Delete, keeps its own ticks.
 # After a switch, VoiceOver on macOS says how many backups are ticked for the
 # new choice. $choice is restore or delete, and $count a number.
@@ -849,6 +862,19 @@ wizard-review-uninstall-trash-elevated-note-macos = { $package } va dans votre C
 # such as "Set REAPER's language".
 wizard-review-inactive-tab-note-install = Ce qui est coché dans l'onglet « Installer ou mettre à jour » ne fait pas partie de cette opération : { $packages }.
 wizard-review-inactive-tab-note-uninstall = Ce qui est coché dans l'onglet « Désinstaller » ne fait pas partie de cette opération : { $packages }.
+# The same note for the Backups tab. $backups is one or both of the two
+# messages below, joined as wizard-backups-list-and joins names.
+wizard-review-inactive-tab-note-backups = Ce qui est coché dans l'onglet « Sauvegardes » ne fait pas partie de cette opération : { $backups }.
+# How many backups are ticked on the Backups tab to restore, and to delete,
+# for the note above. $count is a number, never 0.
+wizard-review-inactive-tab-backups-restore = { $count ->
+    [one] une sauvegarde à restaurer
+   *[other] { $count } sauvegardes à restaurer
+}
+wizard-review-inactive-tab-backups-delete = { $count ->
+    [one] une sauvegarde à supprimer
+   *[other] { $count } sauvegardes à supprimer
+}
 wizard-review-uninstall-reinstall-hint = Vous pourrez les réinstaller plus tard depuis l'onglet « Installer ou mettre à jour ».
 # Why the Uninstall button is disabled. $reason is a sentence, such as
 # wizard-review-uninstall-not-writable.
@@ -1173,6 +1199,13 @@ wizard-close-during-install-body = RABBIT est en train d'installer. Si vous arr�
 # too.
 wizard-close-during-uninstall-title = Arrêter la désinstallation ?
 wizard-close-during-uninstall-body = RABBIT est en train de désinstaller. Si vous arrêtez maintenant, RABBIT termine l'étape commencée, puis s'arrête et se ferme. Les paquets qu'il n'a pas encore atteints restent installés. Arrêter la désinstallation ?
+
+# The same question while a restore runs, and while a delete of backups
+# runs. No is the focused button here too.
+wizard-close-during-restore-title = Arrêter la restauration ?
+wizard-close-during-restore-body = RABBIT est en train de restaurer. Si vous arrêtez maintenant, RABBIT termine la sauvegarde qu'il restaure, puis s'arrête et se ferme. Les sauvegardes qu'il n'a pas encore atteintes restent telles quelles. Arrêter la restauration ?
+wizard-close-during-delete-title = Arrêter la suppression des sauvegardes ?
+wizard-close-during-delete-body = RABBIT est en train de supprimer des sauvegardes. Si vous arrêtez maintenant, RABBIT termine la sauvegarde qu'il supprime, puis s'arrête et se ferme. Les sauvegardes qu'il n'a pas encore atteintes sont conservées. Arrêter la suppression des sauvegardes ?
 
 # Asked before an uninstall that a backup can't undo, or that a package's
 # manifest asks to confirm. The No button is the focused one, so Enter never

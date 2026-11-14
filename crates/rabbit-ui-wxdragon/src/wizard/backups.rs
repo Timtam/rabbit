@@ -31,12 +31,14 @@ use rabbit_core::backup_overview::{
     BackupEntry, BackupGroup, BackupItem, BackupOverview, BackupSetKind, BackupSize, BackupStatus,
     RestoreScope, SetFingerprint, backup_overview,
 };
+use rabbit_core::cancel::CancelToken;
 use rabbit_core::localization::{FluentArgument, Localizer};
 use rabbit_core::preflight::{PreflightStatus, REAPER_PROCESS_CHECK};
+use rabbit_core::progress::ProgressReporter;
 use rabbit_core::restore_refusal::{RestoreRefusal, TargetRefusal};
 use rabbit_core::rollback::{
     KeymapOrigin, RestoreItem, RestorePart, RestoreReportItem, RestoreRunOptions, RestoreRunReport,
-    SwappedEntry, same_place,
+    SwappedEntry, restore_backups, same_place,
 };
 use rabbit_core::uninstall::ANY_REAPER_PROCESS_CHECK;
 use rabbit_core::version::Version;
@@ -54,6 +56,31 @@ pub enum BackupChoice {
     #[default]
     Restore,
     Delete,
+}
+
+impl BackupChoice {
+    /// The choices in the order the choice below the list shows them.
+    pub const ALL: [BackupChoice; 2] = [Self::Restore, Self::Delete];
+
+    /// The choice at `selection`, the RadioBox's selection. Anything but
+    /// Delete, no selection included, is Restore, where the tab starts.
+    pub fn from_selection(selection: i32) -> Self {
+        match usize::try_from(selection)
+            .ok()
+            .and_then(|index| Self::ALL.get(index))
+        {
+            Some(choice) => *choice,
+            None => Self::Restore,
+        }
+    }
+
+    /// Where the choice sits in the RadioBox.
+    pub fn selection(self) -> i32 {
+        match self {
+            Self::Restore => 0,
+            Self::Delete => 1,
+        }
+    }
 }
 
 /// One folder of RABBIT's backup folders, as Review and a run need it.
@@ -307,6 +334,52 @@ impl WizardBackupList {
             Some((label, _)) => format!("{tab}. {label}"),
             None => tab,
         }
+    }
+
+    /// The details text the tab starts with: the first row's, a heading's,
+    /// or for an empty list the placeholder's.
+    pub fn initial_details(&self, localizer: &Localizer) -> String {
+        match self.rows.first() {
+            Some(row) => row.details.clone(),
+            None => self
+                .placeholder(localizer)
+                .map(|(_, details)| details)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Where the headings are in `rows`, in list order.
+    pub fn heading_indices(&self) -> Vec<usize> {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.is_heading())
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// The heading the row at `index` sits under: the last heading before
+    /// it. `None` for a heading, and for an index past the last row.
+    pub fn heading_of(&self, index: usize) -> Option<usize> {
+        if self.rows.get(index)?.is_heading() {
+            return None;
+        }
+        self.rows[..index].iter().rposition(BackupRow::is_heading)
+    }
+
+    /// The rows under the heading at `heading`, in list order: those after
+    /// it, up to the next heading. Empty for what is no heading.
+    pub fn rows_under(&self, heading: usize) -> Vec<usize> {
+        if !self.rows.get(heading).is_some_and(BackupRow::is_heading) {
+            return Vec::new();
+        }
+        self.rows
+            .iter()
+            .enumerate()
+            .skip(heading + 1)
+            .take_while(|(_, row)| !row.is_heading())
+            .map(|(index, _)| index)
+            .collect()
     }
 }
 
@@ -566,15 +639,38 @@ pub fn backup_delete_bytes(list: &WizardBackupList) -> u64 {
         .sum()
 }
 
-/// How the quick plan before Review runs: a dry run that reads no file's
-/// content, with REAPER not allowed to run, so it reports a running REAPER
-/// without refusing for it.
+/// How the quick plan before Review runs: a dry run that hashes nothing,
+/// with REAPER not allowed to run, so it reports a running REAPER without
+/// refusing for it.
 pub fn backup_quick_plan_options() -> RestoreRunOptions {
     RestoreRunOptions {
         dry_run: true,
         quick: true,
         allow_reaper_running: false,
     }
+}
+
+/// The quick plan Review checks a restore against: a quick dry run of what
+/// is ticked to restore in `list`, in the REAPER at `resource_path`, run on
+/// the calling thread. `None` with nothing ticked, as there is nothing to
+/// check. It changes nothing: a dry run takes no lock, writes no file and
+/// saves no report, and a quick one hashes nothing. It reads only the sets'
+/// manifests, RABBIT's records and file sizes.
+pub fn backup_quick_plan(
+    resource_path: &Path,
+    list: &WizardBackupList,
+) -> Option<RestoreQuickPlan> {
+    let items = backup_restore_items(list);
+    if items.is_empty() {
+        return None;
+    }
+    Some(RestoreQuickPlan::from_result(restore_backups(
+        resource_path,
+        &items,
+        &backup_quick_plan_options(),
+        &ProgressReporter::noop(),
+        &CancelToken::new(),
+    )))
 }
 
 /// What the quick plan of a restore found, for Review: its report, or why
@@ -2204,7 +2300,7 @@ fn say(localizer: &Localizer, key: &str, arguments: &[(&str, FluentArgument<'_>)
 
 /// Names as a sentence lists them in the user's language: "a", "a and b",
 /// "a, b and c".
-fn and_list(localizer: &Localizer, names: &[String]) -> String {
+pub(crate) fn and_list(localizer: &Localizer, names: &[String]) -> String {
     match names {
         [] => String::new(),
         [name] => name.clone(),

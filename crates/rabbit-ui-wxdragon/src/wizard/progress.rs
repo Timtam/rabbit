@@ -49,11 +49,12 @@ pub struct ProgressUiState {
 /// The phases one package goes through in a run of `mode`. An install
 /// downloads, then installs. An uninstall only removes: counting two
 /// phases there would park the gauge near 50 percent and then jump, and
-/// NVDA beeps every step of the gauge.
+/// NVDA beeps every step of the gauge. A restore or a delete has one phase
+/// per backup, which the run counts in place of packages.
 pub fn phases_per_package(mode: WizardMode) -> usize {
     match mode {
         WizardMode::Install => 2,
-        WizardMode::Uninstall => 1,
+        WizardMode::Uninstall | WizardMode::Restore | WizardMode::DeleteBackups => 1,
     }
 }
 

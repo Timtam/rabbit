@@ -654,47 +654,219 @@ fn the_wizard_plan_hands_over_its_detections() {
 // The mode, the run button and Review in uninstall mode.
 // ---------------------------------------------------------------------------
 
+const ALL_MODES: [WizardMode; 4] = [
+    WizardMode::Install,
+    WizardMode::Uninstall,
+    WizardMode::Restore,
+    WizardMode::DeleteBackups,
+];
+
 #[test]
 fn the_tab_showing_decides_the_mode() {
-    assert_eq!(
-        WizardMode::for_packages_tab(PACKAGES_INSTALL_TAB as i32),
-        WizardMode::Install
-    );
-    assert_eq!(
-        WizardMode::for_packages_tab(PACKAGES_UNINSTALL_TAB as i32),
-        WizardMode::Uninstall
-    );
-    // No selection, or a tab that doesn't exist: the page opens on Install.
-    assert_eq!(WizardMode::for_packages_tab(-1), WizardMode::Install);
-    assert_eq!(WizardMode::for_packages_tab(7), WizardMode::Install);
+    for choice in BackupChoice::ALL {
+        assert_eq!(
+            WizardMode::for_packages_tab(PACKAGES_INSTALL_TAB as i32, choice),
+            WizardMode::Install
+        );
+        assert_eq!(
+            WizardMode::for_packages_tab(PACKAGES_UNINSTALL_TAB as i32, choice),
+            WizardMode::Uninstall
+        );
+        // No selection, or a tab that doesn't exist: the page opens on Install.
+        assert_eq!(
+            WizardMode::for_packages_tab(-1, choice),
+            WizardMode::Install
+        );
+        assert_eq!(WizardMode::for_packages_tab(7, choice), WizardMode::Install);
+    }
     assert_eq!(WizardMode::default(), WizardMode::Install);
 }
 
 #[test]
-fn an_uninstall_never_goes_through_the_reapack_page() {
-    assert!(WizardMode::Install.shows_reapack_acknowledgement(true));
-    assert!(!WizardMode::Install.shows_reapack_acknowledgement(false));
-    // ReaPack ticked for install on the other tab changes nothing about an
-    // uninstall, on the way to Review or back from it.
-    assert!(!WizardMode::Uninstall.shows_reapack_acknowledgement(true));
-    assert!(!WizardMode::Uninstall.shows_reapack_acknowledgement(false));
+fn the_backups_tab_restores_or_deletes_as_chosen_below_its_list() {
+    assert_eq!(
+        WizardMode::for_packages_tab(PACKAGES_BACKUPS_TAB as i32, BackupChoice::Restore),
+        WizardMode::Restore
+    );
+    assert_eq!(
+        WizardMode::for_packages_tab(PACKAGES_BACKUPS_TAB as i32, BackupChoice::Delete),
+        WizardMode::DeleteBackups
+    );
+    // The tab starts on Restore.
+    assert_eq!(
+        WizardMode::for_packages_tab(PACKAGES_BACKUPS_TAB as i32, BackupChoice::default()),
+        WizardMode::Restore
+    );
 }
 
 #[test]
-fn enter_never_starts_an_uninstall() {
+fn every_tab_index_maps_to_its_mode_with_either_choice() {
+    for selection in -3..=9 {
+        for choice in BackupChoice::ALL {
+            let expected = match selection {
+                1 => WizardMode::Uninstall,
+                2 if choice == BackupChoice::Restore => WizardMode::Restore,
+                2 => WizardMode::DeleteBackups,
+                _ => WizardMode::Install,
+            };
+            assert_eq!(
+                WizardMode::for_packages_tab(selection, choice),
+                expected,
+                "tab {selection}, {choice:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_tabs_sit_where_the_notebook_has_them() {
+    assert_eq!(PACKAGES_INSTALL_TAB, 0);
+    assert_eq!(PACKAGES_UNINSTALL_TAB, 1);
+    assert_eq!(PACKAGES_BACKUPS_TAB, 2);
+    assert_eq!(PackagesTab::from_selection(0), Some(PackagesTab::Install));
+    assert_eq!(PackagesTab::from_selection(1), Some(PackagesTab::Uninstall));
+    assert_eq!(PackagesTab::from_selection(2), Some(PackagesTab::Backups));
+    assert_eq!(PackagesTab::from_selection(3), None);
+    assert_eq!(PackagesTab::from_selection(-1), None);
+    assert_eq!(
+        PackagesTab::ALL,
+        [
+            PackagesTab::Install,
+            PackagesTab::Uninstall,
+            PackagesTab::Backups
+        ]
+    );
+    // Each mode runs from the tab that decides it.
+    for mode in ALL_MODES {
+        let tab = mode.packages_tab();
+        let index = PackagesTab::ALL
+            .iter()
+            .position(|each| *each == tab)
+            .unwrap();
+        let choice = if mode == WizardMode::DeleteBackups {
+            BackupChoice::Delete
+        } else {
+            BackupChoice::Restore
+        };
+        assert_eq!(WizardMode::for_packages_tab(index as i32, choice), mode);
+    }
+}
+
+#[test]
+fn only_an_install_goes_through_the_reapack_page() {
+    assert!(WizardMode::Install.shows_reapack_acknowledgement(true));
+    assert!(!WizardMode::Install.shows_reapack_acknowledgement(false));
+    // ReaPack ticked for install on the other tab changes nothing about an
+    // uninstall, a restore or a delete, on the way to Review or back from it.
+    for mode in [
+        WizardMode::Uninstall,
+        WizardMode::Restore,
+        WizardMode::DeleteBackups,
+    ] {
+        assert!(!mode.shows_reapack_acknowledgement(true), "{mode:?}");
+        assert!(!mode.shows_reapack_acknowledgement(false), "{mode:?}");
+    }
+}
+
+#[test]
+fn enter_starts_only_an_install() {
     assert!(WizardMode::Install.enter_starts_run());
     assert!(!WizardMode::Uninstall.enter_starts_run());
+    assert!(!WizardMode::Restore.enter_starts_run());
+    assert!(!WizardMode::DeleteBackups.enter_starts_run());
 }
 
 #[test]
 fn the_uninstall_button_has_its_own_run_flag() {
     // Install: both the plan and Review must allow it.
-    assert!(WizardMode::Install.run_button_enabled(true, true, false));
-    assert!(!WizardMode::Install.run_button_enabled(false, true, true));
-    assert!(!WizardMode::Install.run_button_enabled(true, false, true));
+    assert!(WizardMode::Install.run_button_enabled(true, true, false, false));
+    assert!(!WizardMode::Install.run_button_enabled(false, true, true, true));
+    assert!(!WizardMode::Install.run_button_enabled(true, false, true, true));
     // Uninstall: only its own Review counts.
-    assert!(WizardMode::Uninstall.run_button_enabled(false, false, true));
-    assert!(!WizardMode::Uninstall.run_button_enabled(true, true, false));
+    assert!(WizardMode::Uninstall.run_button_enabled(false, false, true, false));
+    assert!(!WizardMode::Uninstall.run_button_enabled(true, true, false, true));
+}
+
+#[test]
+fn restore_and_delete_never_start_until_their_runs_are_built() {
+    // Backup plan 2c and 2d turn these on, with their runs.
+    const {
+        assert!(!RESTORE_RUN_AVAILABLE);
+        assert!(!DELETE_BACKUPS_RUN_AVAILABLE);
+    }
+    for mode in [WizardMode::Restore, WizardMode::DeleteBackups] {
+        for plan_can_install in [false, true] {
+            for review_can_install in [false, true] {
+                for review_can_uninstall in [false, true] {
+                    for review_can_run_backups in [false, true] {
+                        assert!(
+                            !mode.run_button_enabled(
+                                plan_can_install,
+                                review_can_install,
+                                review_can_uninstall,
+                                review_can_run_backups,
+                            ),
+                            "{mode:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_install_and_uninstall_flags_dont_start_a_backup_run() {
+    // The backup Reviews' own flag is the only one the two backup modes
+    // read; the other flags being set says nothing about them.
+    for mode in [WizardMode::Restore, WizardMode::DeleteBackups] {
+        assert!(
+            !mode.run_button_enabled(true, true, true, false),
+            "{mode:?}"
+        );
+    }
+    // And theirs starts neither an install nor an uninstall.
+    assert!(!WizardMode::Install.run_button_enabled(false, false, false, true));
+    assert!(!WizardMode::Uninstall.run_button_enabled(false, false, false, true));
+}
+
+#[test]
+fn a_restore_or_a_delete_counts_one_phase_per_backup() {
+    assert_eq!(phases_per_package(WizardMode::Install), 2);
+    for mode in [
+        WizardMode::Uninstall,
+        WizardMode::Restore,
+        WizardMode::DeleteBackups,
+    ] {
+        assert_eq!(phases_per_package(mode), 1, "{mode:?}");
+        assert_eq!(ProgressUiState::new(mode, 3, 0).total_phases(), 3);
+    }
+}
+
+#[test]
+fn the_run_button_says_what_each_mode_runs() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        Vec::new(),
+        None,
+        InstallPlan {
+            target: None,
+            actions: Vec::new(),
+            notes: Vec::new(),
+        },
+    );
+    let labels = model.controls.run_button_labels();
+    let expected = if cfg!(target_os = "macos") {
+        ["Install", "Uninstall", "Restore", "Delete"]
+    } else {
+        ["&Install", "&Uninstall", "&Restore", "&Delete"]
+    };
+    for (mode, label) in ALL_MODES.into_iter().zip(expected) {
+        assert_eq!(labels.for_mode(mode), label, "{mode:?}");
+    }
 }
 
 /// A target RABBIT can write to, at a folder that needn't exist.
@@ -725,6 +897,8 @@ pub(super) fn tick(list: &mut WizardUninstallList, package_id: &str) {
     assert!(apply_uninstall_checkbox(row, true), "{package_id}");
 }
 
+/// Review in uninstall mode, with `install_tab_ticked` ticked on the
+/// Install or update tab, as the wizard builds it.
 fn review(
     list: &WizardUninstallList,
     target: Option<&TargetRow>,
@@ -732,13 +906,15 @@ fn review(
     install_tab_ticked: &[String],
 ) -> WizardUninstallReviewPreview {
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
-    build_uninstall_review_preview(
+    let notes = inactive_tab_notes(
         &localizer,
-        target,
-        list,
-        remove_settings,
-        install_tab_ticked,
-    )
+        WizardMode::Uninstall,
+        &PackagesTabTicks {
+            install: install_tab_ticked.to_vec(),
+            ..PackagesTabTicks::default()
+        },
+    );
+    build_uninstall_review_preview(&localizer, target, list, remove_settings, &notes)
 }
 
 /// Review's flag in uninstall mode, as the wizard sets it: the run button
@@ -747,7 +923,7 @@ fn uninstall_button_enabled(plan_can_install: bool) -> bool {
     let mut list = list_for(vec![removable_sws()]);
     tick(&mut list, "sws");
     let preview = review(&list, Some(&target(true)), false, &[]);
-    WizardMode::Uninstall.run_button_enabled(plan_can_install, false, preview.can_uninstall)
+    WizardMode::Uninstall.run_button_enabled(plan_can_install, false, preview.can_uninstall, false)
 }
 
 #[test]
@@ -792,7 +968,7 @@ fn nothing_ticked_disables_uninstall_and_review_says_why() {
             .iter()
             .any(|line| line.contains("again later"))
     );
-    assert!(!WizardMode::Uninstall.run_button_enabled(true, true, preview.can_uninstall));
+    assert!(!WizardMode::Uninstall.run_button_enabled(true, true, preview.can_uninstall, true));
 }
 
 #[test]
@@ -1038,22 +1214,135 @@ fn defaults_are_the_ticks_the_install_tab_opens_with() {
 fn an_install_review_names_the_uninstall_ticks_it_leaves_out() {
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
     assert_eq!(
-        inactive_tab_note(
+        inactive_tab_notes(
             &localizer,
             WizardMode::Install,
-            &["SWS Extension".to_string()]
+            &PackagesTabTicks {
+                uninstall: vec!["SWS Extension".to_string()],
+                ..PackagesTabTicks::default()
+            }
+        ),
+        ["What is ticked on the Uninstall tab isn't part of this run: SWS Extension."]
+    );
+    for mode in ALL_MODES {
+        assert_eq!(
+            inactive_tab_notes(&localizer, mode, &PackagesTabTicks::default()),
+            Vec::<String>::new(),
+            "{mode:?}"
+        );
+    }
+}
+
+/// Something ticked on every tab: two install ticks, one uninstall tick,
+/// two backups to restore and one to delete.
+fn ticks_on_every_tab() -> PackagesTabTicks {
+    PackagesTabTicks {
+        install: vec!["OSARA".to_string(), "REAPER".to_string()],
+        uninstall: vec!["SWS Extension".to_string()],
+        backups_to_restore: 2,
+        backups_to_delete: 1,
+    }
+}
+
+#[test]
+fn each_review_names_the_ticks_on_both_other_tabs_in_tab_order() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let ticks = ticks_on_every_tab();
+    let install = "What is ticked on the Install or update tab isn't part of this run: \
+                   OSARA, REAPER.";
+    let uninstall = "What is ticked on the Uninstall tab isn't part of this run: SWS Extension.";
+    let backups = "What is ticked on the Backups tab isn't part of this run: 2 backups to \
+                   restore and one backup to delete.";
+    assert_eq!(
+        inactive_tab_notes(&localizer, WizardMode::Install, &ticks),
+        [uninstall, backups]
+    );
+    assert_eq!(
+        inactive_tab_notes(&localizer, WizardMode::Uninstall, &ticks),
+        [install, backups]
+    );
+    // The Backups tab's own Reviews say what is ticked for the other choice
+    // there, so only the other two tabs get a note.
+    for mode in [WizardMode::Restore, WizardMode::DeleteBackups] {
+        assert_eq!(
+            inactive_tab_notes(&localizer, mode, &ticks),
+            [install, uninstall],
+            "{mode:?}"
+        );
+    }
+}
+
+#[test]
+fn the_backups_tab_note_counts_each_choice_it_has_ticks_for() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let note = |restore: usize, delete: usize| {
+        inactive_tab_notes(
+            &localizer,
+            WizardMode::Install,
+            &PackagesTabTicks {
+                backups_to_restore: restore,
+                backups_to_delete: delete,
+                ..PackagesTabTicks::default()
+            },
         )
-        .as_deref(),
-        Some("What is ticked on the Uninstall tab isn't part of this run: SWS Extension.")
-    );
+    };
+    let prefix = "What is ticked on the Backups tab isn't part of this run: ";
+    assert_eq!(note(1, 0), [format!("{prefix}one backup to restore.")]);
+    assert_eq!(note(0, 3), [format!("{prefix}3 backups to delete.")]);
     assert_eq!(
-        inactive_tab_note(&localizer, WizardMode::Install, &[]),
-        None
+        note(1, 1),
+        [format!(
+            "{prefix}one backup to restore and one backup to delete."
+        )]
     );
-    assert_eq!(
-        inactive_tab_note(&localizer, WizardMode::Uninstall, &[]),
-        None
-    );
+    assert_eq!(note(0, 0), Vec::<String>::new());
+}
+
+#[test]
+fn the_three_tab_notes_read_in_every_locale() {
+    let ticks = ticks_on_every_tab();
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        for mode in ALL_MODES {
+            let notes = inactive_tab_notes(&localizer, mode, &ticks);
+            assert_eq!(notes.len(), 2, "{locale}: {mode:?}");
+            for note in &notes {
+                assert_reads(locale, note);
+            }
+        }
+        for (restore, delete) in [(1, 0), (0, 1), (5, 7)] {
+            let notes = inactive_tab_notes(
+                &localizer,
+                WizardMode::Uninstall,
+                &PackagesTabTicks {
+                    backups_to_restore: restore,
+                    backups_to_delete: delete,
+                    ..PackagesTabTicks::default()
+                },
+            );
+            assert_eq!(notes.len(), 1, "{locale}");
+            assert_reads(locale, &notes[0]);
+            for count in [restore, delete].into_iter().filter(|count| *count > 1) {
+                assert!(notes[0].contains(&count.to_string()), "{locale}: {notes:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn an_uninstall_review_names_the_ticks_on_both_other_tabs() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let mut list = list_for(vec![removable_sws()]);
+    tick(&mut list, "sws");
+    let notes = inactive_tab_notes(&localizer, WizardMode::Uninstall, &ticks_on_every_tab());
+    let text =
+        build_uninstall_review_preview(&localizer, Some(&target(true)), &list, false, &notes)
+            .lines
+            .join("\n");
+    for note in &notes {
+        assert!(text.contains(note.as_str()), "{text}");
+    }
+    assert!(text.contains("Backups tab"), "{text}");
 }
 
 #[test]
@@ -1746,7 +2035,15 @@ fn review_and_the_settings_note_read_in_every_locale() {
                 Some(&target(writable)),
                 &list,
                 remove_settings,
-                &["OSARA".to_string()],
+                &inactive_tab_notes(
+                    &localizer,
+                    WizardMode::Uninstall,
+                    &PackagesTabTicks {
+                        install: vec!["OSARA".to_string()],
+                        backups_to_restore: 2,
+                        ..PackagesTabTicks::default()
+                    },
+                ),
             );
             texts.push(preview.lines.join("\n"));
         }
@@ -1761,9 +2058,15 @@ fn review_and_the_settings_note_read_in_every_locale() {
             .lines
             .join("\n"),
         );
-        texts.push(
-            inactive_tab_note(&localizer, WizardMode::Install, &["SWS".to_string()]).unwrap(),
-        );
+        texts.extend(inactive_tab_notes(
+            &localizer,
+            WizardMode::Install,
+            &PackagesTabTicks {
+                uninstall: vec!["SWS".to_string()],
+                backups_to_delete: 1,
+                ..PackagesTabTicks::default()
+            },
+        ));
         for text in texts {
             assert!(
                 !text.contains("wizard-")

@@ -24,6 +24,7 @@ use rabbit_core::uninstall::{
     VendorLookup, VendorRefusal, build_uninstall_plan,
 };
 
+use super::backups::{BackupChoice, and_list};
 use super::bootstrap::localizer_from_options;
 use super::labels::version_text;
 use super::model::{ConfigurationRow, PackageRow, TargetRow, WizardModel, WizardText};
@@ -32,46 +33,106 @@ use super::packages::localized_package_display_name;
 /// The Packages page's tabs, in the notebook's order.
 pub const PACKAGES_INSTALL_TAB: usize = 0;
 pub const PACKAGES_UNINSTALL_TAB: usize = 1;
+pub const PACKAGES_BACKUPS_TAB: usize = 2;
+
+/// One of the Packages page's tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackagesTab {
+    Install,
+    Uninstall,
+    Backups,
+}
+
+impl PackagesTab {
+    /// The tabs, in the notebook's order.
+    pub const ALL: [PackagesTab; 3] = [Self::Install, Self::Uninstall, Self::Backups];
+
+    /// The tab at `selection`, the notebook's selection. `None` for no
+    /// selection, and for an index past the last tab.
+    pub fn from_selection(selection: i32) -> Option<Self> {
+        match usize::try_from(selection).ok()? {
+            PACKAGES_INSTALL_TAB => Some(Self::Install),
+            PACKAGES_UNINSTALL_TAB => Some(Self::Uninstall),
+            PACKAGES_BACKUPS_TAB => Some(Self::Backups),
+            _ => None,
+        }
+    }
+}
+
+/// Whether a restore can start from Review. The Backups tab and its Review
+/// are there, but the restore run comes in a later step of the backup plan
+/// (2d). Until then Review shows what a restore would do, and the Restore
+/// button stays disabled, blockers or not.
+pub const RESTORE_RUN_AVAILABLE: bool = false;
+
+/// Whether a delete of backups can start from Review: the same, for the
+/// delete run, which comes in step 2c of the backup plan.
+pub const DELETE_BACKUPS_RUN_AVAILABLE: bool = false;
 
 /// What the run does. The Packages tab showing when Next is pressed decides
-/// it, and it stays fixed through Review, Progress and Done: install and
-/// uninstall never mix in one run, and the ticks on the other tab are kept
-/// but left out.
+/// it, and on the Backups tab the choice below its list, Restore or Delete.
+/// It stays fixed through Review, Progress and Done: runs never mix, and the
+/// ticks on the other tabs are kept but left out.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum WizardMode {
     #[default]
     Install,
     Uninstall,
+    /// Restore the backups ticked to restore on the Backups tab.
+    Restore,
+    /// Delete the backups ticked to delete on the Backups tab.
+    DeleteBackups,
 }
 
 impl WizardMode {
     /// The mode for the Packages tab at `selection`, the notebook's
-    /// selection. Anything but the Uninstall tab, no selection included,
-    /// means install, the tab the page opens on.
-    pub fn for_packages_tab(selection: i32) -> Self {
-        if usize::try_from(selection) == Ok(PACKAGES_UNINSTALL_TAB) {
-            Self::Uninstall
-        } else {
-            Self::Install
+    /// selection, with `backup_choice` chosen below the Backups list. The
+    /// Uninstall tab means uninstall, the Backups tab restore or delete, as
+    /// chosen. Anything else, no selection included, means install, the tab
+    /// the page opens on.
+    pub fn for_packages_tab(selection: i32, backup_choice: BackupChoice) -> Self {
+        match PackagesTab::from_selection(selection) {
+            Some(PackagesTab::Uninstall) => Self::Uninstall,
+            Some(PackagesTab::Backups) => match backup_choice {
+                BackupChoice::Restore => Self::Restore,
+                BackupChoice::Delete => Self::DeleteBackups,
+            },
+            Some(PackagesTab::Install) | None => Self::Install,
+        }
+    }
+
+    /// The tab whose ticks the run takes.
+    pub fn packages_tab(self) -> PackagesTab {
+        match self {
+            Self::Install => PackagesTab::Install,
+            Self::Uninstall => PackagesTab::Uninstall,
+            Self::Restore | Self::DeleteBackups => PackagesTab::Backups,
         }
     }
 
     /// Whether the ReaPack donation page is part of the run, on the way to
     /// Review and on the way back. Only an install or update of ReaPack
-    /// goes through it. Ticks on the Install tab survive while the
-    /// Uninstall tab runs, so without the mode an uninstall would land on
-    /// an install-only page.
+    /// goes through it. Ticks on the Install tab survive while another tab
+    /// runs, so without the mode an uninstall, a restore or a delete would
+    /// land on an install-only page.
     pub fn shows_reapack_acknowledgement(self, reapack_ticked_for_install: bool) -> bool {
-        self == Self::Install && reapack_ticked_for_install
+        match self {
+            Self::Install => reapack_ticked_for_install,
+            Self::Uninstall | Self::Restore | Self::DeleteBackups => false,
+        }
     }
 
     /// Whether Enter starts the run on Review: the run button is the
-    /// default button, and Enter in the Review text presses it. Never for
-    /// an uninstall, so that it can't be two Enter presses away from most
-    /// controls on the Packages page; there the disabled Next stays the
-    /// default, as on Progress. The mnemonic and Tab, then Space, still work.
+    /// default button, and Enter in the Review text presses it. Only for an
+    /// install. Never for an uninstall, a restore or a delete, so that none
+    /// of them can be two Enter presses away from most controls on the
+    /// Packages page; there the disabled Next stays the default, as on
+    /// Progress. The mnemonic and Tab, then Space, still work.
     pub fn enter_starts_run(self) -> bool {
-        self == Self::Install
+        match self {
+            Self::Install => true,
+            Self::Uninstall | Self::Restore | Self::DeleteBackups => false,
+        }
     }
 
     /// Whether the run button is enabled on Review. An install needs
@@ -79,16 +140,22 @@ impl WizardMode {
     /// uninstall has its own flag, from its own Review: the install plan's
     /// flag is false exactly when everything is installed and current, or
     /// every version check failed, and neither says anything about what can
-    /// be removed.
+    /// be removed. A restore and a delete share one flag, set by whichever
+    /// of their Reviews was built last, and start only once their run is
+    /// available (see [`RESTORE_RUN_AVAILABLE`] and
+    /// [`DELETE_BACKUPS_RUN_AVAILABLE`]).
     pub fn run_button_enabled(
         self,
         plan_can_install: bool,
         review_can_install: bool,
         review_can_uninstall: bool,
+        review_can_run_backups: bool,
     ) -> bool {
         match self {
             Self::Install => plan_can_install && review_can_install,
             Self::Uninstall => review_can_uninstall,
+            Self::Restore => RESTORE_RUN_AVAILABLE && review_can_run_backups,
+            Self::DeleteBackups => DELETE_BACKUPS_RUN_AVAILABLE && review_can_run_backups,
         }
     }
 }
@@ -845,8 +912,8 @@ pub struct WizardUninstallReviewPreview {
 ///    that may name osascript, and cancelling it uninstalls nothing;
 /// 6. for a package going to the Trash, that it can come back from there
 ///    until the Trash is emptied;
-/// 7. the ticks on the Install tab, which this run leaves out
-///    (`install_tab_ticked`, their package names);
+/// 7. `other_tab_notes`: what is ticked on the other tabs, which this run
+///    leaves out (see [`inactive_tab_notes`]);
 /// 8. that the packages can be installed again;
 /// 9. why the Uninstall button stays disabled, if it does.
 pub fn build_uninstall_review_preview(
@@ -854,7 +921,7 @@ pub fn build_uninstall_review_preview(
     target: Option<&TargetRow>,
     list: &WizardUninstallList,
     remove_settings: bool,
-    install_tab_ticked: &[String],
+    other_tab_notes: &[String],
 ) -> WizardUninstallReviewPreview {
     let text = |key: &str| localizer.text(key).value;
     let format = |key: &str, args: &[(&str, &str)]| localizer.format(key, args).value;
@@ -1000,9 +1067,7 @@ pub fn build_uninstall_review_preview(
         };
         add_note(format(key, &[("package", row.display_name.as_str())]));
     }
-    if let Some(note) = inactive_tab_note(localizer, WizardMode::Uninstall, install_tab_ticked) {
-        add_note(note);
-    }
+    other_tab_notes.iter().cloned().for_each(&mut add_note);
     if !ticked.is_empty() {
         add_note(text("wizard-review-uninstall-reinstall-hint"));
     }
@@ -1032,34 +1097,98 @@ pub fn build_uninstall_review_preview(
     }
 }
 
-/// The note Review adds about the tab that isn't running: what is ticked
-/// there stays ticked but isn't part of this run. A tab can change behind
-/// the user's back, by Page Down on a checkbox on Windows, so Review says
-/// so. `other_tab_ticked` are the names to list: the Uninstall tab's ticks,
-/// or `install_tab_ticks_left_out` for the Install or update tab. `None`
-/// when there are none.
-pub fn inactive_tab_note(
+/// What is ticked on each Packages tab, as Review's notes on the tabs a run
+/// leaves out name it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackagesTabTicks {
+    /// The Install or update tab's ticks the user made, packages first,
+    /// then settings: see [`install_tab_ticks_left_out`].
+    pub install: Vec<String>,
+    /// The Uninstall tab's ticked packages, by their names.
+    pub uninstall: Vec<String>,
+    /// How many backups are ticked on the Backups tab to restore, and how
+    /// many to delete. Each choice keeps its own ticks, so both can count.
+    pub backups_to_restore: usize,
+    pub backups_to_delete: usize,
+}
+
+/// The notes Review adds about the tabs that aren't running, in tab order:
+/// what is ticked there stays ticked but isn't part of this run. A tab can
+/// change behind the user's back, by Page Down on a checkbox on Windows, so
+/// Review says so. One note per tab with ticks: the Install or update tab's
+/// and the Uninstall tab's name what is ticked, and the Backups tab's says
+/// how many backups are ticked to restore and to delete. The tab of `mode`
+/// gets none; the Backups tab's Reviews say themselves what is ticked for
+/// the other choice there.
+pub fn inactive_tab_notes(
     localizer: &Localizer,
     mode: WizardMode,
-    other_tab_ticked: &[String],
-) -> Option<String> {
-    if other_tab_ticked.is_empty() {
+    ticks: &PackagesTabTicks,
+) -> Vec<String> {
+    let names = |key: &str, names: &[String]| {
+        (!names.is_empty()).then(|| {
+            localizer
+                .format(key, &[("packages", names.join(", ").as_str())])
+                .value
+        })
+    };
+    let mut notes = Vec::new();
+    for tab in PackagesTab::ALL {
+        if tab == mode.packages_tab() {
+            continue;
+        }
+        let note = match tab {
+            PackagesTab::Install => {
+                names("wizard-review-inactive-tab-note-install", &ticks.install)
+            }
+            PackagesTab::Uninstall => names(
+                "wizard-review-inactive-tab-note-uninstall",
+                &ticks.uninstall,
+            ),
+            PackagesTab::Backups => backups_tab_note(localizer, ticks),
+        };
+        notes.extend(note);
+    }
+    notes
+}
+
+/// The note on what is ticked on the Backups tab, such as "What is ticked on
+/// the Backups tab isn't part of this run: 2 backups to restore and one
+/// backup to delete.", or `None` with nothing ticked there.
+fn backups_tab_note(localizer: &Localizer, ticks: &PackagesTabTicks) -> Option<String> {
+    let counted = |key: &str, count: usize| {
+        (count > 0).then(|| localizer.format_with(key, &[("count", count.into())]).value)
+    };
+    let parts: Vec<String> = [
+        counted(
+            "wizard-review-inactive-tab-backups-restore",
+            ticks.backups_to_restore,
+        ),
+        counted(
+            "wizard-review-inactive-tab-backups-delete",
+            ticks.backups_to_delete,
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if parts.is_empty() {
         return None;
     }
-    let key = match mode {
-        WizardMode::Install => "wizard-review-inactive-tab-note-uninstall",
-        WizardMode::Uninstall => "wizard-review-inactive-tab-note-install",
-    };
+    let backups = and_list(localizer, &parts);
     Some(
         localizer
-            .format(key, &[("packages", other_tab_ticked.join(", ").as_str())])
+            .format(
+                "wizard-review-inactive-tab-note-backups",
+                &[("backups", backups.as_str())],
+            )
             .value,
     )
 }
 
-/// What an uninstall's Review names as left out of the Install or update
-/// tab: the ticks there that RABBIT didn't set by itself, packages first,
-/// then settings, which the run leaves out just the same.
+/// What Review in any other mode names as left out of the Install or
+/// update tab: the ticks there that RABBIT didn't set by itself, packages
+/// first, then settings, which the run leaves out just the same.
 ///
 /// RABBIT ticks every update, the recommended packages and the settings
 /// that go with them before anyone sees the tab. Naming those told someone

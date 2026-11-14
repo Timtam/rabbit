@@ -222,6 +222,13 @@ wizard-button-install = Install
 wizard-button-install-mnemonic = I
 wizard-button-uninstall = Uninstall
 wizard-button-uninstall-mnemonic = U
+# The run button before a restore and before a delete of backups, both
+# started from the Backups tab. Their access keys must differ from those of
+# Back, Next, Close and Cancel, which sit beside it.
+wizard-button-restore = Restore
+wizard-button-restore-mnemonic = R
+wizard-button-delete = Delete
+wizard-button-delete-mnemonic = D
 wizard-button-close = Close
 wizard-button-close-mnemonic = C
 wizard-button-cancel = Cancel
@@ -636,6 +643,12 @@ wizard-backups-details-together = { $origin ->
 } Until a later version, RABBIT deletes them together.
 # After the sentence above, when one of those rows can't be deleted.
 wizard-backups-details-tied = One of them can't be deleted, so RABBIT can't delete this one either.
+# The choice below the Backups list: its label, which screen readers read
+# with the choice, then the two choices, Restore and Delete. Restore is
+# where the tab starts. The choices have no access keys.
+wizard-backups-choice-label = What to do with the ticked backups
+wizard-backups-choice-restore = Restore
+wizard-backups-choice-delete = Delete
 # The choice below the Backups list, Restore or Delete, keeps its own ticks.
 # After a switch, VoiceOver on macOS says how many backups are ticked for the
 # new choice. $choice is restore or delete, and $count a number.
@@ -863,6 +876,19 @@ wizard-review-uninstall-trash-elevated-note-macos = { $package } goes into your 
 # such as "Set REAPER's language".
 wizard-review-inactive-tab-note-install = What is ticked on the Install or update tab isn't part of this run: { $packages }.
 wizard-review-inactive-tab-note-uninstall = What is ticked on the Uninstall tab isn't part of this run: { $packages }.
+# The same note for the Backups tab. $backups is one or both of the two
+# messages below, joined as wizard-backups-list-and joins names.
+wizard-review-inactive-tab-note-backups = What is ticked on the Backups tab isn't part of this run: { $backups }.
+# How many backups are ticked on the Backups tab to restore, and to delete,
+# for the note above. $count is a number, never 0.
+wizard-review-inactive-tab-backups-restore = { $count ->
+    [one] one backup to restore
+   *[other] { $count } backups to restore
+}
+wizard-review-inactive-tab-backups-delete = { $count ->
+    [one] one backup to delete
+   *[other] { $count } backups to delete
+}
 wizard-review-uninstall-reinstall-hint = You can install these again later from the Install or update tab.
 # Why the Uninstall button is disabled. $reason is a sentence, such as
 # wizard-review-uninstall-not-writable.
@@ -1200,6 +1226,13 @@ wizard-close-during-install-body = RABBIT is installing. If you stop now, RABBIT
 # too.
 wizard-close-during-uninstall-title = Stop uninstalling?
 wizard-close-during-uninstall-body = RABBIT is uninstalling. If you stop now, RABBIT finishes the step it started, then stops and closes. Packages it hasn't reached stay installed. Stop uninstalling?
+
+# The same question while a restore runs, and while a delete of backups
+# runs. No is the focused button here too.
+wizard-close-during-restore-title = Stop restoring?
+wizard-close-during-restore-body = RABBIT is restoring. If you stop now, RABBIT finishes the backup it is restoring, then stops and closes. Backups it hasn't reached stay as they are. Stop restoring?
+wizard-close-during-delete-title = Stop deleting backups?
+wizard-close-during-delete-body = RABBIT is deleting backups. If you stop now, RABBIT finishes the backup it is deleting, then stops and closes. Backups it hasn't reached are kept. Stop deleting backups?
 
 # Asked before an uninstall that a backup can't undo, or that a package's
 # manifest asks to confirm. The No button is the focused one, so Enter never

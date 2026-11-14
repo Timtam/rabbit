@@ -221,6 +221,13 @@ wizard-button-install = Instalar
 wizard-button-install-mnemonic = I
 wizard-button-uninstall = Desinstalar
 wizard-button-uninstall-mnemonic = D
+# The run button before a restore and before a delete of backups, both
+# started from the Backups tab. Their access keys must differ from those of
+# Back, Next, Close and Cancel, which sit beside it.
+wizard-button-restore = Restaurar
+wizard-button-restore-mnemonic = R
+wizard-button-delete = Eliminar
+wizard-button-delete-mnemonic = E
 wizard-button-close = Cerrar
 wizard-button-close-mnemonic = C
 wizard-button-cancel = Cancelar
@@ -628,6 +635,12 @@ wizard-backups-details-together = { $origin ->
 } Hasta una versión posterior, RABBIT las elimina juntas.
 # After the sentence above, when one of those rows can't be deleted.
 wizard-backups-details-tied = Una de ellas no se puede eliminar, así que RABBIT tampoco puede eliminar esta.
+# The choice below the Backups list: its label, which screen readers read
+# with the choice, then the two choices, Restore and Delete. Restore is
+# where the tab starts. The choices have no access keys.
+wizard-backups-choice-label = Qué hacer con las copias de seguridad marcadas
+wizard-backups-choice-restore = Restaurar
+wizard-backups-choice-delete = Eliminar
 # The choice below the Backups list, Restore or Delete, keeps its own ticks.
 # After a switch, VoiceOver on macOS says how many backups are ticked for the
 # new choice. $choice is restore or delete, and $count a number.
@@ -846,6 +859,19 @@ wizard-review-uninstall-trash-elevated-note-macos = { $package } va a tu Papeler
 # such as "Set REAPER's language".
 wizard-review-inactive-tab-note-install = Lo que está marcado en la pestaña «Instalar o actualizar» no forma parte de esta operación: { $packages }.
 wizard-review-inactive-tab-note-uninstall = Lo que está marcado en la pestaña «Desinstalar» no forma parte de esta operación: { $packages }.
+# The same note for the Backups tab. $backups is one or both of the two
+# messages below, joined as wizard-backups-list-and joins names.
+wizard-review-inactive-tab-note-backups = Lo que está marcado en la pestaña «Copias de seguridad» no forma parte de esta operación: { $backups }.
+# How many backups are ticked on the Backups tab to restore, and to delete,
+# for the note above. $count is a number, never 0.
+wizard-review-inactive-tab-backups-restore = { $count ->
+    [one] una copia de seguridad para restaurar
+   *[other] { $count } copias de seguridad para restaurar
+}
+wizard-review-inactive-tab-backups-delete = { $count ->
+    [one] una copia de seguridad para eliminar
+   *[other] { $count } copias de seguridad para eliminar
+}
 wizard-review-uninstall-reinstall-hint = Puedes volver a instalarlos más adelante desde la pestaña «Instalar o actualizar».
 # Why the Uninstall button is disabled. $reason is a sentence, such as
 # wizard-review-uninstall-not-writable.
@@ -1170,6 +1196,13 @@ wizard-close-during-install-body = RABBIT está instalando. Si lo detienes ahora
 # too.
 wizard-close-during-uninstall-title = ¿Detener la desinstalación?
 wizard-close-during-uninstall-body = RABBIT está desinstalando. Si lo detienes ahora, RABBIT termina el paso que empezó, luego se detiene y se cierra. Los paquetes a los que todavía no ha llegado siguen instalados. ¿Quieres detener la desinstalación?
+
+# The same question while a restore runs, and while a delete of backups
+# runs. No is the focused button here too.
+wizard-close-during-restore-title = ¿Detener la restauración?
+wizard-close-during-restore-body = RABBIT está restaurando. Si lo detienes ahora, RABBIT termina la copia de seguridad que está restaurando, luego se detiene y se cierra. Las copias de seguridad a las que todavía no ha llegado se quedan como están. ¿Quieres detener la restauración?
+wizard-close-during-delete-title = ¿Detener la eliminación de copias de seguridad?
+wizard-close-during-delete-body = RABBIT está eliminando copias de seguridad. Si lo detienes ahora, RABBIT termina la copia de seguridad que está eliminando, luego se detiene y se cierra. Las copias de seguridad a las que todavía no ha llegado se conservan. ¿Quieres detener la eliminación?
 
 # Asked before an uninstall that a backup can't undo, or that a package's
 # manifest asks to confirm. The No button is the focused one, so Enter never

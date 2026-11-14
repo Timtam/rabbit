@@ -221,6 +221,13 @@ wizard-button-install = Installieren
 wizard-button-install-mnemonic = I
 wizard-button-uninstall = Deinstallieren
 wizard-button-uninstall-mnemonic = D
+# The run button before a restore and before a delete of backups, both
+# started from the Backups tab. Their access keys must differ from those of
+# Back, Next, Close and Cancel, which sit beside it.
+wizard-button-restore = Wiederherstellen
+wizard-button-restore-mnemonic = H
+wizard-button-delete = Löschen
+wizard-button-delete-mnemonic = L
 wizard-button-close = Schließen
 wizard-button-close-mnemonic = S
 wizard-button-cancel = Abbrechen
@@ -628,6 +635,12 @@ wizard-backups-details-together = { $origin ->
 } Bis zu einer späteren Version löscht RABBIT sie nur zusammen.
 # After the sentence above, when one of those rows can't be deleted.
 wizard-backups-details-tied = Eine davon lässt sich nicht löschen, daher kann RABBIT auch diese nicht löschen.
+# The choice below the Backups list: its label, which screen readers read
+# with the choice, then the two choices, Restore and Delete. Restore is
+# where the tab starts. The choices have no access keys.
+wizard-backups-choice-label = Was mit den ausgewählten Sicherungen geschehen soll
+wizard-backups-choice-restore = Wiederherstellen
+wizard-backups-choice-delete = Löschen
 # The choice below the Backups list, Restore or Delete, keeps its own ticks.
 # After a switch, VoiceOver on macOS says how many backups are ticked for the
 # new choice. $choice is restore or delete, and $count a number.
@@ -846,6 +859,19 @@ wizard-review-uninstall-trash-elevated-note-macos = { $package } kommt mit dem P
 # such as "Set REAPER's language".
 wizard-review-inactive-tab-note-install = Was auf der Registerkarte „Installieren oder aktualisieren“ ausgewählt ist, gehört nicht zu diesem Durchlauf: { $packages }.
 wizard-review-inactive-tab-note-uninstall = Was auf der Registerkarte „Deinstallieren“ ausgewählt ist, gehört nicht zu diesem Durchlauf: { $packages }.
+# The same note for the Backups tab. $backups is one or both of the two
+# messages below, joined as wizard-backups-list-and joins names.
+wizard-review-inactive-tab-note-backups = Was auf der Registerkarte „Sicherungen“ ausgewählt ist, gehört nicht zu diesem Durchlauf: { $backups }.
+# How many backups are ticked on the Backups tab to restore, and to delete,
+# for the note above. $count is a number, never 0.
+wizard-review-inactive-tab-backups-restore = { $count ->
+    [one] eine Sicherung zum Wiederherstellen
+   *[other] { $count } Sicherungen zum Wiederherstellen
+}
+wizard-review-inactive-tab-backups-delete = { $count ->
+    [one] eine Sicherung zum Löschen
+   *[other] { $count } Sicherungen zum Löschen
+}
 wizard-review-uninstall-reinstall-hint = Sie können diese Pakete später auf der Registerkarte „Installieren oder aktualisieren“ wieder installieren.
 # Why the Uninstall button is disabled. $reason is a sentence, such as
 # wizard-review-uninstall-not-writable.
@@ -1170,6 +1196,13 @@ wizard-close-during-install-body = RABBIT installiert gerade. Wenn Sie jetzt anh
 # too.
 wizard-close-during-uninstall-title = Deinstallation anhalten?
 wizard-close-during-uninstall-body = RABBIT deinstalliert gerade. Wenn Sie jetzt anhalten, beendet RABBIT den begonnenen Schritt, hält dann an und schließt sich. Pakete, die noch nicht an der Reihe waren, bleiben installiert. Deinstallation anhalten?
+
+# The same question while a restore runs, and while a delete of backups
+# runs. No is the focused button here too.
+wizard-close-during-restore-title = Wiederherstellen anhalten?
+wizard-close-during-restore-body = RABBIT stellt gerade Sicherungen wieder her. Wenn Sie jetzt anhalten, stellt RABBIT die begonnene Sicherung noch fertig wieder her, hält dann an und schließt sich. Sicherungen, die noch nicht an der Reihe waren, bleiben, wie sie sind. Wiederherstellen anhalten?
+wizard-close-during-delete-title = Löschen der Sicherungen anhalten?
+wizard-close-during-delete-body = RABBIT löscht gerade Sicherungen. Wenn Sie jetzt anhalten, löscht RABBIT die begonnene Sicherung noch fertig, hält dann an und schließt sich. Sicherungen, die noch nicht an der Reihe waren, bleiben erhalten. Löschen der Sicherungen anhalten?
 
 # Asked before an uninstall that a backup can't undo, or that a package's
 # manifest asks to confirm. The No button is the focused one, so Enter never

@@ -222,6 +222,13 @@ wizard-button-install = Instalar
 wizard-button-install-mnemonic = I
 wizard-button-uninstall = Desinstalar
 wizard-button-uninstall-mnemonic = D
+# The run button before a restore and before a delete of backups, both
+# started from the Backups tab. Their access keys must differ from those of
+# Back, Next, Close and Cancel, which sit beside it.
+wizard-button-restore = Restaurar
+wizard-button-restore-mnemonic = R
+wizard-button-delete = Excluir
+wizard-button-delete-mnemonic = E
 wizard-button-close = Fechar
 wizard-button-close-mnemonic = F
 wizard-button-cancel = Cancelar
@@ -633,6 +640,12 @@ wizard-backups-details-together = { $origin ->
 } Até uma versão futura, o RABBIT os exclui juntos.
 # After the sentence above, when one of those rows can't be deleted.
 wizard-backups-details-tied = Um deles não pode ser excluído, então o RABBIT também não pode excluir este.
+# The choice below the Backups list: its label, which screen readers read
+# with the choice, then the two choices, Restore and Delete. Restore is
+# where the tab starts. The choices have no access keys.
+wizard-backups-choice-label = O que fazer com os backups marcados
+wizard-backups-choice-restore = Restaurar
+wizard-backups-choice-delete = Excluir
 # The choice below the Backups list, Restore or Delete, keeps its own ticks.
 # After a switch, VoiceOver on macOS says how many backups are ticked for the
 # new choice. $choice is restore or delete, and $count a number.
@@ -854,6 +867,19 @@ wizard-review-uninstall-trash-elevated-note-macos = { $package } vai para o seu 
 # such as "Set REAPER's language".
 wizard-review-inactive-tab-note-install = O que está marcado na guia Instalar ou atualizar não faz parte desta execução: { $packages }.
 wizard-review-inactive-tab-note-uninstall = O que está marcado na guia Desinstalar não faz parte desta execução: { $packages }.
+# The same note for the Backups tab. $backups is one or both of the two
+# messages below, joined as wizard-backups-list-and joins names.
+wizard-review-inactive-tab-note-backups = O que está marcado na guia Backups não faz parte desta execução: { $backups }.
+# How many backups are ticked on the Backups tab to restore, and to delete,
+# for the note above. $count is a number, never 0.
+wizard-review-inactive-tab-backups-restore = { $count ->
+    [one] um backup para restaurar
+   *[other] { $count } backups para restaurar
+}
+wizard-review-inactive-tab-backups-delete = { $count ->
+    [one] um backup para excluir
+   *[other] { $count } backups para excluir
+}
 wizard-review-uninstall-reinstall-hint = Você pode instalá-los novamente mais tarde na guia Instalar ou atualizar.
 # Why the Uninstall button is disabled. $reason is a sentence, such as
 # wizard-review-uninstall-not-writable.
@@ -1191,6 +1217,13 @@ wizard-close-during-install-body = O RABBIT está instalando. Se você interromp
 # too.
 wizard-close-during-uninstall-title = Interromper a desinstalação?
 wizard-close-during-uninstall-body = O RABBIT está desinstalando. Se você interromper agora, o RABBIT conclui a etapa que começou, depois para e é fechado. Os pacotes aos quais ele ainda não chegou continuam instalados. Interromper a desinstalação?
+
+# The same question while a restore runs, and while a delete of backups
+# runs. No is the focused button here too.
+wizard-close-during-restore-title = Interromper a restauração?
+wizard-close-during-restore-body = O RABBIT está restaurando. Se você interromper agora, o RABBIT conclui o backup que está restaurando, depois para e é fechado. Os backups aos quais ele ainda não chegou ficam como estão. Interromper a restauração?
+wizard-close-during-delete-title = Interromper a exclusão de backups?
+wizard-close-during-delete-body = O RABBIT está excluindo backups. Se você interromper agora, o RABBIT conclui o backup que está excluindo, depois para e é fechado. Os backups aos quais ele ainda não chegou são mantidos. Interromper a exclusão de backups?
 
 # Asked before an uninstall that a backup can't undo, or that a package's
 # manifest asks to confirm. The No button is the focused one, so Enter never

@@ -4,7 +4,7 @@
 //! uninstall on a worker thread the way an install runs, and show how it
 //! went on the Done page.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -62,6 +62,9 @@ pub(crate) struct UninstallNavigation {
 }
 
 impl UninstallNavigation {
+    /// Move to `step` with the run button labelled for an uninstall. Only
+    /// the uninstall run gets here: [`start_uninstall`] starts nothing in
+    /// any other mode.
     fn go_to(&self, step: usize) {
         self.current_step.store(step, Ordering::SeqCst);
         update_navigation(
@@ -94,11 +97,19 @@ pub(crate) struct UninstallRunUi {
     /// Rebuilds both Packages tabs from fresh detection, as after an
     /// install. Fired once the run returns a report.
     pub(crate) rescan: Rc<dyn Fn()>,
+    /// What the run does, as Next on the Packages page fixed it.
+    pub(crate) wizard_mode: Rc<Cell<WizardMode>>,
 }
 
 /// The Uninstall button on Review. Enter never gets here: Review has no
 /// default button in uninstall mode, and Enter in its text starts nothing.
+/// In any other mode it does nothing at all, so a restore or a delete can
+/// never end up as an uninstall.
 pub(crate) fn start_uninstall(ui: &UninstallRunUi) {
+    match ui.wizard_mode.get() {
+        WizardMode::Uninstall => {}
+        WizardMode::Install | WizardMode::Restore | WizardMode::DeleteBackups => return,
+    }
     let navigation = &ui.navigation;
     let model = &navigation.model;
     let widgets = navigation.widgets;

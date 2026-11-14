@@ -221,6 +221,13 @@ wizard-button-install = Installa
 wizard-button-install-mnemonic = I
 wizard-button-uninstall = Disinstalla
 wizard-button-uninstall-mnemonic = D
+# The run button before a restore and before a delete of backups, both
+# started from the Backups tab. Their access keys must differ from those of
+# Back, Next, Close and Cancel, which sit beside it.
+wizard-button-restore = Ripristina
+wizard-button-restore-mnemonic = R
+wizard-button-delete = Elimina
+wizard-button-delete-mnemonic = E
 wizard-button-close = Chiudi
 wizard-button-close-mnemonic = C
 wizard-button-cancel = Annulla
@@ -628,6 +635,12 @@ wizard-backups-details-together = { $origin ->
 } Fino a una versione successiva, RABBIT li elimina insieme.
 # After the sentence above, when one of those rows can't be deleted.
 wizard-backups-details-tied = Uno di essi non si può eliminare, quindi RABBIT non può eliminare neanche questo.
+# The choice below the Backups list: its label, which screen readers read
+# with the choice, then the two choices, Restore and Delete. Restore is
+# where the tab starts. The choices have no access keys.
+wizard-backups-choice-label = Cosa fare con i backup selezionati
+wizard-backups-choice-restore = Ripristina
+wizard-backups-choice-delete = Elimina
 # The choice below the Backups list, Restore or Delete, keeps its own ticks.
 # After a switch, VoiceOver on macOS says how many backups are ticked for the
 # new choice. $choice is restore or delete, and $count a number.
@@ -846,6 +859,19 @@ wizard-review-uninstall-trash-elevated-note-macos = { $package } va nel tuo Cest
 # such as "Set REAPER's language".
 wizard-review-inactive-tab-note-install = Ciò che è selezionato nella scheda «Installa o aggiorna» non fa parte di questa operazione: { $packages }.
 wizard-review-inactive-tab-note-uninstall = Ciò che è selezionato nella scheda «Disinstalla» non fa parte di questa operazione: { $packages }.
+# The same note for the Backups tab. $backups is one or both of the two
+# messages below, joined as wizard-backups-list-and joins names.
+wizard-review-inactive-tab-note-backups = Ciò che è selezionato nella scheda «Backup» non fa parte di questa operazione: { $backups }.
+# How many backups are ticked on the Backups tab to restore, and to delete,
+# for the note above. $count is a number, never 0.
+wizard-review-inactive-tab-backups-restore = { $count ->
+    [one] un backup da ripristinare
+   *[other] { $count } backup da ripristinare
+}
+wizard-review-inactive-tab-backups-delete = { $count ->
+    [one] un backup da eliminare
+   *[other] { $count } backup da eliminare
+}
 wizard-review-uninstall-reinstall-hint = Potrai reinstallarli più avanti dalla scheda «Installa o aggiorna».
 # Why the Uninstall button is disabled. $reason is a sentence, such as
 # wizard-review-uninstall-not-writable.
@@ -1170,6 +1196,13 @@ wizard-close-during-install-body = RABBIT sta installando. Se interrompi adesso,
 # too.
 wizard-close-during-uninstall-title = Interrompere la disinstallazione?
 wizard-close-during-uninstall-body = RABBIT sta disinstallando. Se interrompi adesso, RABBIT completa il passaggio iniziato, poi si ferma e si chiude. I pacchetti che non ha ancora raggiunto restano installati. Vuoi interrompere la disinstallazione?
+
+# The same question while a restore runs, and while a delete of backups
+# runs. No is the focused button here too.
+wizard-close-during-restore-title = Interrompere il ripristino?
+wizard-close-during-restore-body = RABBIT sta ripristinando. Se interrompi adesso, RABBIT completa il backup che sta ripristinando, poi si ferma e si chiude. I backup che non ha ancora raggiunto restano come sono. Vuoi interrompere il ripristino?
+wizard-close-during-delete-title = Interrompere l'eliminazione dei backup?
+wizard-close-during-delete-body = RABBIT sta eliminando dei backup. Se interrompi adesso, RABBIT completa il backup che sta eliminando, poi si ferma e si chiude. I backup che non ha ancora raggiunto vengono conservati. Vuoi interrompere l'eliminazione?
 
 # Asked before an uninstall that a backup can't undo, or that a package's
 # manifest asks to confirm. The No button is the focused one, so Enter never

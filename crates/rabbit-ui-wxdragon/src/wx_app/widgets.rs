@@ -16,7 +16,9 @@ use wxdragon::widgets::SimpleBook;
 
 use wxdragon::prelude::*;
 
-use crate::wx_app::packages_page::{PackagesView, UninstallView, WXK_NUMPAD_ENTER, WXK_RETURN};
+use crate::wx_app::packages_page::{
+    BackupsView, PackagesView, UninstallView, WXK_NUMPAD_ENTER, WXK_RETURN,
+};
 use crate::wx_app::{
     DONE_STEP, PACKAGES_STEP, PROGRESS_STEP, REAPACK_ACK_STEP, REVIEW_STEP, TARGET_STEP,
 };
@@ -33,9 +35,9 @@ pub(crate) struct WizardWidgets {
     pub(crate) version_check_gauge: Gauge,
     pub(crate) version_check_error_heading: StaticText,
     pub(crate) version_check_error_log: TextCtrl,
-    /// The Packages page's two tabs, Install or update and Uninstall. The
-    /// install widgets below sit in the first, the uninstall ones in the
-    /// second.
+    /// The Packages page's three tabs, Install or update, Uninstall and
+    /// Backups. The install widgets below sit in the first, the uninstall
+    /// ones in the second, the backups ones in the third.
     pub(crate) packages_notebook: Notebook,
     pub(crate) package_checklist: PackagesView,
     pub(crate) package_details: TextCtrl,
@@ -53,6 +55,12 @@ pub(crate) struct WizardWidgets {
     /// "Also remove settings" under the Uninstall list, and its note.
     pub(crate) uninstall_remove_settings: CheckBox,
     pub(crate) uninstall_settings_note: TextCtrl,
+    /// The Backups tab: the label before its list, which carries the total,
+    /// the list, its details, and the choice below them, Restore or Delete.
+    pub(crate) backups_list_label: StaticText,
+    pub(crate) backups_list: BackupsView,
+    pub(crate) backups_details: TextCtrl,
+    pub(crate) backups_choice: RadioBox,
     pub(crate) reapack_ack_confirm: CheckBox,
     /// Review's heading, which names the mode.
     pub(crate) review_heading: StaticText,
@@ -231,17 +239,20 @@ pub(crate) fn osara_keymap_choice(checkbox: &CheckBox) -> OsaraKeymapChoice {
 }
 
 /// Whether the run button may start the run of `mode`; see
-/// [`WizardMode::run_button_enabled`].
+/// [`WizardMode::run_button_enabled`]. `review_can_run_backups` is the
+/// flag the restore and delete Reviews set.
 pub(crate) fn effective_run_enabled(
     mode: &Cell<WizardMode>,
     plan_can_install: &Cell<bool>,
     review_can_install: &Cell<bool>,
     review_can_uninstall: &Cell<bool>,
+    review_can_run_backups: &Cell<bool>,
 ) -> bool {
     mode.get().run_button_enabled(
         plan_can_install.get(),
         review_can_install.get(),
         review_can_uninstall.get(),
+        review_can_run_backups.get(),
     )
 }
 
@@ -318,11 +329,14 @@ pub(crate) fn sync_spanish_variant_widget(rows: &[crate::PackageRow], choice: &C
 pub(crate) const REAPER_LANGUAGE_LABEL_NAME: &str = "rabbit-reaper-language-label";
 pub(crate) const SPANISH_VARIANT_LABEL_NAME: &str = "rabbit-spanish-variant-label";
 
-/// wxWindow names of the two Packages tabs. `set_optional_choice_shown`
-/// knows a dropdown sits in a tab, rather than straight on a wizard page, by
-/// its parent's name.
+/// wxWindow names of the Packages tabs. `set_optional_choice_shown` knows a
+/// dropdown sits in a tab, rather than straight on a wizard page, by its
+/// parent's name. The Backups tab has no dropdown that comes and goes: the
+/// choice below its list is always shown, so that function needn't know
+/// its name.
 pub(crate) const INSTALL_TAB_NAME: &str = "rabbit-packages-install-tab";
 pub(crate) const UNINSTALL_TAB_NAME: &str = "rabbit-packages-uninstall-tab";
+pub(crate) const BACKUPS_TAB_NAME: &str = "rabbit-packages-backups-tab";
 
 /// Show or hide a dropdown together with its label, then re-lay out the page
 /// so the row's space is reclaimed (or given back).
@@ -477,9 +491,10 @@ pub(crate) fn bind_reapack_ack_navigation_updates(
 /// the Done page. Guarded on the step and on Install being enabled, so Enter
 /// never starts anything the button itself would refuse.
 ///
-/// Never in uninstall mode: Review focuses the summary there, and Enter must
-/// not start a removal (see [`WizardMode::enter_starts_run`]). The key then
-/// does what it does in any read-only text box.
+/// Never in the other modes: Review focuses the summary there, and Enter
+/// must not start an uninstall, a restore or a delete (see
+/// [`WizardMode::enter_starts_run`]). The key then does what it does in any
+/// read-only text box.
 pub(crate) fn bind_review_enter_installs(
     text: &TextCtrl,
     install: &Button,
@@ -666,9 +681,9 @@ pub(crate) fn update_navigation(
         _ => false,
     });
     install.enable(step == REVIEW_STEP && run_enabled);
-    // The run button says what the run does: Install, or Uninstall in
-    // uninstall mode. Only set when it changes, for the same reason as the
-    // close button below.
+    // The run button says what the run does: Install, Uninstall, Restore or
+    // Delete, by the mode. Only set when it changes, for the same reason as
+    // the close button below.
     if let Some(label) = crate::wx_app::globals::run_button_label(mode)
         && install.get_label() != label
     {
@@ -691,8 +706,8 @@ pub(crate) fn update_navigation(
     // and Next is disabled, which used to leave Enter a dead key). Progress
     // deliberately keeps the *disabled* Next as its default: Enter must
     // never tear the window down while the install worker is running.
-    // Review in uninstall mode does the same, so no Enter press ever starts
-    // a removal.
+    // Review in every other mode does the same, so no Enter press ever
+    // starts an uninstall, a restore or a delete.
     match step {
         REVIEW_STEP if mode.enter_starts_run() => install.set_default(),
         DONE_STEP => close.set_default(),

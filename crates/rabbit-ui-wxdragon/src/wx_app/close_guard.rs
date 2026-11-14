@@ -2,8 +2,8 @@
 //! is running, and asks the user when the answer is "stop the run".
 
 use std::cell::RefCell;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use crate::{WizardMode, WizardModel};
 use rabbit_core::cancel::CancelToken;
@@ -38,9 +38,9 @@ pub(crate) struct InstallRunState {
     /// Set when the user asked to close during an install: the completion
     /// closure closes the window once the worker is done.
     pub(crate) close_when_done: AtomicBool,
-    /// The run is an uninstall, so the stop question and the status line
-    /// after it talk about uninstalling.
-    pub(crate) uninstalling: AtomicBool,
+    /// What the run does, so the stop question and the status line after it
+    /// talk about installing, uninstalling, restoring or deleting.
+    pub(crate) mode: Mutex<WizardMode>,
 }
 
 impl InstallRunState {
@@ -49,19 +49,18 @@ impl InstallRunState {
         if let Ok(mut slot) = self.cancel.lock() {
             *slot = Some(token.clone());
         }
-        self.uninstalling
-            .store(mode == WizardMode::Uninstall, Ordering::SeqCst);
+        // The mode is a plain value that a panic can't leave half-written,
+        // so a poisoned lock still holds a good one. Going past the poison
+        // keeps a restore or a delete from being stopped with an install's
+        // words.
+        *self.mode.lock().unwrap_or_else(PoisonError::into_inner) = mode;
         self.running.store(true, Ordering::SeqCst);
         token
     }
 
     /// What the running run does, or the last one did.
     pub(crate) fn mode(&self) -> WizardMode {
-        if self.uninstalling.load(Ordering::SeqCst) {
-            WizardMode::Uninstall
-        } else {
-            WizardMode::Install
-        }
+        *self.mode.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub(crate) fn finish(&self) {
@@ -153,6 +152,8 @@ pub(crate) enum CloseVerdict {
 /// from: the status heading and the running log. An uninstall says it
 /// finishes the step it started, since that is where it stops: one
 /// package, or on macOS the administrator command, which covers several.
+/// A restore or a delete of backups stops after the backup it is on, and
+/// says so with the install's line, as backup plan 4.5 has it.
 ///
 /// The log is a `TextCtrl` and takes focus; the status heading is a
 /// `StaticText` and cannot, and a label change on its own is not something
@@ -160,7 +161,9 @@ pub(crate) enum CloseVerdict {
 /// answer to "did it hear me?" audible.
 pub(crate) fn announce_stopping(widgets: &WizardWidgets, model: &WizardModel, mode: WizardMode) {
     let line = match mode {
-        WizardMode::Install => &model.text.progress_status_cancelling,
+        WizardMode::Install | WizardMode::Restore | WizardMode::DeleteBackups => {
+            &model.text.progress_status_cancelling
+        }
         WizardMode::Uninstall => &model.text.progress_status_uninstall_cancelling,
     };
     widgets.progress_status.set_label(line);
@@ -184,8 +187,10 @@ pub(crate) fn close_verdict(install_run: &InstallRunState) -> CloseVerdict {
     CloseVerdict::Ask
 }
 
-/// Ask before throwing away a running install or uninstall. Returns `true`
-/// when the user confirmed.
+/// Ask before throwing away a running run: an install, an uninstall, a
+/// restore or a delete of backups. Returns `true` when the user confirmed.
+/// No restore or delete runs yet; their questions are here so the run that
+/// comes can't fall back to another run's words.
 ///
 /// `wxNO_DEFAULT` puts the focused button on **No**: this dialog appears
 /// over work the user asked for, so a stray Enter or Space — from a screen
@@ -200,6 +205,14 @@ pub(crate) fn confirm_stop_install(model: &WizardModel, mode: WizardMode) -> boo
         WizardMode::Uninstall => (
             &model.text.close_during_uninstall_title,
             &model.text.close_during_uninstall_body,
+        ),
+        WizardMode::Restore => (
+            &model.text.close_during_restore_title,
+            &model.text.close_during_restore_body,
+        ),
+        WizardMode::DeleteBackups => (
+            &model.text.close_during_delete_title,
+            &model.text.close_during_delete_body,
         ),
     };
     let mut confirmed = false;

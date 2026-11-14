@@ -9,10 +9,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{
-    ConfigurationRow, PackageRow, TargetRow, WizardMode, WizardModel, WizardUninstallList,
-    apply_version_check_failures_to_rows, localized_package_display_name, localizer_from_options,
-    recompute_configuration_row_availability, remember_default_ticks, uninstall_list_for_target,
-    wizard_desired_package_ids, wizard_package_plan_for_target_with_available,
+    ConfigurationRow, PackageRow, TargetRow, WizardBackupList, WizardMode, WizardModel,
+    WizardUninstallList, apply_version_check_failures_to_rows, backup_list_for_target,
+    localized_package_display_name, localizer_from_options,
+    recompute_configuration_row_availability, remember_default_ticks, reset_backup_ticks,
+    uninstall_list_for_target, wizard_desired_package_ids,
+    wizard_package_plan_for_target_with_available,
 };
 use rabbit_core::detection::detect_components;
 use rabbit_core::latest::fetch_latest_details_for_package_on;
@@ -33,8 +35,8 @@ use crate::wx_app::globals::{
     with_ui_localizer,
 };
 use crate::wx_app::packages_page::{
-    PackagesStateCell, UninstallStateCell, rebuild_package_list_widgets,
-    rebuild_uninstall_list_widgets,
+    BackupsStateCell, PackagesStateCell, UninstallStateCell, rebuild_backups_list_widgets,
+    rebuild_package_list_widgets, rebuild_uninstall_list_widgets,
 };
 use crate::wx_app::packages_tabs::arrive_on_packages_page;
 use crate::wx_app::widgets::{
@@ -54,14 +56,18 @@ pub(crate) struct VersionCheckUi {
     pub(crate) package_items: PackagesStateCell,
     pub(crate) can_install: Rc<Cell<bool>>,
     pub(crate) review_can_install: Rc<Cell<bool>>,
-    /// The run's mode and the Uninstall button's run flag, both reset for
-    /// the fresh lists.
+    /// The run's mode and the run flags of the Uninstall button and of the
+    /// backup runs, all reset for the fresh lists.
     pub(crate) wizard_mode: Rc<Cell<WizardMode>>,
     pub(crate) review_can_uninstall: Rc<Cell<bool>>,
+    pub(crate) review_can_run_backups: Rc<Cell<bool>>,
     /// The Uninstall tab's rows and list state, rebuilt from the same
     /// detection as the package rows.
     pub(crate) uninstall_list: Rc<RefCell<WizardUninstallList>>,
     pub(crate) uninstall_items: UninstallStateCell,
+    /// The Backups tab's rows and list state, read again for the target.
+    pub(crate) backup_list: Rc<RefCell<WizardBackupList>>,
+    pub(crate) backup_items: BackupsStateCell,
     pub(crate) target: TargetRow,
     /// Which builds to check each package on (empty outside expert mode).
     pub(crate) channels: rabbit_core::package::PackageChannels,
@@ -184,6 +190,14 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
                             &rabbit_core::uninstall::SystemVendorLookup,
                             &rabbit_core::uninstall::SystemMacosObjects,
                         );
+                        // The Backups tab's rows, read again for this target
+                        // on the UI thread, as the Uninstall rows are: the
+                        // overview reads manifests, RABBIT's records and file
+                        // sizes, and hashes nothing. Both choices start with
+                        // nothing ticked, and Restore is chosen again.
+                        let mut backups = backup_list_for_target(&ui.model, &ui.target);
+                        reset_backup_ticks(&mut backups);
+                        *ui.backup_list.borrow_mut() = backups;
                         *ui.package_rows.borrow_mut() = plan.package_rows;
                         *ui.package_notes.borrow_mut() = plan.notes;
                         // The deferred fetch may have promoted ReaPack to
@@ -207,6 +221,7 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
                         ui.can_install.set(plan.can_install);
                         ui.review_can_install.set(false);
                         ui.review_can_uninstall.set(false);
+                        ui.review_can_run_backups.set(false);
                         // The page opens on the Install tab, and Next decides
                         // the mode again, so the disabled run button
                         // shouldn't keep a label from an earlier pass.
@@ -244,6 +259,13 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
                             &ui.model,
                             &ui.uninstall_list.borrow(),
                         );
+                        // Also sets the choice below the list back to
+                        // Restore.
+                        rebuild_backups_list_widgets(
+                            &ui.widgets,
+                            &ui.backup_items,
+                            &ui.backup_list.borrow(),
+                        );
                         ui.current_step.store(PACKAGES_STEP, Ordering::SeqCst);
                         update_navigation(
                             PACKAGES_STEP,
@@ -261,6 +283,7 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
                                 &ui.can_install,
                                 &ui.review_can_install,
                                 &ui.review_can_uninstall,
+                                &ui.review_can_run_backups,
                             ),
                             true,
                             reapack_ack_confirmed(&ui.widgets),

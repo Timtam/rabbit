@@ -419,7 +419,7 @@ pub(crate) fn compute_configuration_group_tristate(
 }
 
 /// Windows: create a native `wxTreeCtrl` with real checkboxes, the list
-/// both Packages tabs use. Only the control is shared: what a toggle does
+/// every Packages tab uses. Only the control is shared: what a toggle does
 /// differs between the tabs, so each wires its own handlers.
 pub(crate) fn build_checkbox_tree(parent: &Panel, name: &str) -> TreeCtrl {
     // wxTreeCtrl is a thin wrapper around the platform's native tree:

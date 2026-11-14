@@ -1803,10 +1803,10 @@ fn a_reaper_without_backups_lists_none_and_gets_no_folder() {
     assert!(!dir.path().join("RABBIT").exists());
 }
 
-#[test]
-fn the_rows_come_from_a_real_uninstall_set() {
-    let dir = tempdir().unwrap();
-    let resource = dir.path();
+/// Uninstall SWS 2.14.0.7 and FFmpeg 7.1 from `resource` the way an
+/// uninstall moves them: one set, `uninstall-unix-1794233100`, that holds
+/// both, each with its record.
+fn write_uninstall_set(resource: &std::path::Path) {
     let plugins = resource.join("UserPlugins");
     fs::create_dir_all(&plugins).unwrap();
     fs::write(plugins.join("reaper_sws-x64.dll"), b"sws").unwrap();
@@ -1847,6 +1847,13 @@ fn the_rows_come_from_a_real_uninstall_set() {
             .move_file(Some(package_id), &plugins.join(file), None, false)
             .unwrap();
     }
+}
+
+#[test]
+fn the_rows_come_from_a_real_uninstall_set() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path();
+    write_uninstall_set(resource);
 
     let overview = backup_overview(resource).unwrap();
     let mut list = backup_list_from_overview(&en(), &overview);
@@ -3178,5 +3185,229 @@ fn every_row_review_and_question_reads_in_every_locale() {
                 assert!(all.contains(reached), "not reached: {reached}\n{all}");
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The tab shell: the choice's RadioBox, the list's shape, the quick plan
+// before Review, and the notes on the other tabs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_choice_below_the_list_maps_to_and_from_its_radio_box() {
+    assert_eq!(
+        BackupChoice::ALL,
+        [BackupChoice::Restore, BackupChoice::Delete]
+    );
+    for (index, choice) in BackupChoice::ALL.into_iter().enumerate() {
+        assert_eq!(choice.selection(), index as i32);
+        assert_eq!(BackupChoice::from_selection(index as i32), choice);
+    }
+    // No selection, or one past the choices: Restore, where the tab starts.
+    for selection in [-1, 2, 7] {
+        assert_eq!(
+            BackupChoice::from_selection(selection),
+            BackupChoice::Restore
+        );
+    }
+    assert_eq!(BackupChoice::default(), BackupChoice::Restore);
+}
+
+#[test]
+fn rows_sit_under_the_heading_before_them() {
+    let list = backup_list(vec![sws(), ffmpeg(), reapack(), keymap()]);
+    let headings = list.heading_indices();
+    let names = |indices: &[usize]| -> Vec<String> {
+        indices
+            .iter()
+            .map(|&index| list.rows[index].name.clone())
+            .collect()
+    };
+    assert_eq!(
+        names(&headings),
+        ["Software you uninstalled", "Earlier versions", "Key maps"]
+    );
+    for heading in &headings {
+        assert_eq!(list.heading_of(*heading), None);
+        for row in list.rows_under(*heading) {
+            assert!(!list.rows[row].is_heading());
+            assert_eq!(list.heading_of(row), Some(*heading));
+        }
+    }
+    // Every row is under exactly one heading.
+    let under: usize = headings
+        .iter()
+        .map(|heading| list.rows_under(*heading).len())
+        .sum();
+    assert_eq!(under + headings.len(), list.rows.len());
+    assert_eq!(names(&list.rows_under(headings[1])), ["ReaPack 1.2.4"]);
+    // A row is no heading, and an index past the end has nothing.
+    let sws = index_of(&list, "SWS Extension 2.14.0.7");
+    assert!(list.rows_under(sws).is_empty());
+    assert_eq!(list.heading_of(list.rows.len()), None);
+    assert!(list.rows_under(list.rows.len()).is_empty());
+}
+
+#[test]
+fn the_tab_starts_with_the_first_rows_details_or_the_placeholders() {
+    let list = backup_list(vec![sws()]);
+    assert_eq!(list.initial_details(&en()), list.rows[0].details);
+    assert!(list.rows[0].is_heading());
+
+    let empty = backup_list(Vec::new());
+    assert_eq!(
+        empty.initial_details(&en()),
+        empty.placeholder(&en()).unwrap().1
+    );
+    let unreadable = backup_list_unreadable(&RabbitError::RestoreRefused(RestoreRefusal::IsLink {
+        path: PathBuf::from("C:/REAPER/RABBIT/backups"),
+    }));
+    assert!(
+        unreadable
+            .initial_details(&en())
+            .starts_with("RABBIT couldn't read its backups folder ("),
+        "{}",
+        unreadable.initial_details(&en())
+    );
+}
+
+/// Every file and folder under `root`, with each file's content, to tell
+/// that something changed nothing.
+fn snapshot(root: &std::path::Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(folder) = pending.pop() {
+        for entry in fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if fs::symlink_metadata(&path).unwrap().is_dir() {
+                pending.push(path);
+                found.push((relative, None));
+            } else {
+                found.push((relative, Some(fs::read(&path).unwrap())));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+// The three quick-plan tests below run `backup_quick_plan` as the wizard
+// does, through `restore_backups`, which always asks this computer what
+// REAPER and other programs run and where its standard REAPER is, unlike
+// rabbit-core's own restore tests. They only read, and the only files they
+// touch are in their own temporary folder, but the answers differ between
+// computers: a REAPER running here adds Review's "Close REAPER first."
+// note. So they must never assert on notes about REAPER or other programs,
+// or on the preflight checks.
+
+#[test]
+fn the_quick_plan_runs_only_with_something_ticked_to_restore() {
+    let dir = tempdir().unwrap();
+    write_uninstall_set(dir.path());
+    let mut list = backup_list_at(&en(), dir.path());
+    assert_eq!(backup_quick_plan(dir.path(), &list), None);
+    // Ticks for Delete don't count.
+    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Delete);
+    assert_eq!(backup_quick_plan(dir.path(), &list), None);
+}
+
+#[test]
+fn the_quick_plan_of_a_real_set_lets_review_restore_and_changes_nothing() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path();
+    write_uninstall_set(resource);
+    let mut list = backup_list_at(&en(), resource);
+    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Restore);
+    let before = snapshot(resource);
+
+    let plan = backup_quick_plan(resource, &list).unwrap();
+    assert_eq!(snapshot(resource), before);
+    // No lock, no report and no before-restore set.
+    assert!(!resource.join("RABBIT").join("logs").exists());
+    let RestoreQuickPlan::Planned(report) = &plan else {
+        panic!("{plan:?}");
+    };
+    assert!(report.dry_run && report.quick);
+    assert_eq!(report.backups.len(), 1);
+    assert_eq!(report.backups[0].package_id.as_deref(), Some("sws"));
+    assert_eq!(report.backups[0].status, RestoreStatus::WouldRestore);
+
+    let target = TargetRow {
+        path: resource.to_path_buf(),
+        ..target(true)
+    };
+    let review = build_backup_restore_review(&en(), Some(&target), &list, Some(&plan), &[]);
+    assert!(review.can_restore, "{:#?}", review.lines);
+    assert_eq!(review.items, backup_restore_items(&list));
+}
+
+#[test]
+fn a_quick_plan_of_a_set_gone_since_listing_blocks_review() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path();
+    write_uninstall_set(resource);
+    let mut list = backup_list_at(&en(), resource);
+    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Restore);
+    // Gone since the tab listed it, as after a delete by hand. Only this
+    // test's own temporary folder.
+    fs::remove_dir_all(
+        resource
+            .join("RABBIT")
+            .join("backups")
+            .join("uninstall-unix-1794233100"),
+    )
+    .unwrap();
+
+    let plan = backup_quick_plan(resource, &list).unwrap();
+    let target = TargetRow {
+        path: resource.to_path_buf(),
+        ..target(true)
+    };
+    let review = build_backup_restore_review(&en(), Some(&target), &list, Some(&plan), &[]);
+    assert!(!review.can_restore);
+    assert!(
+        review
+            .lines
+            .iter()
+            .any(|line| line.starts_with("Can't restore SWS Extension 2.14.0.7 (")),
+        "{:#?}",
+        review.lines
+    );
+}
+
+#[test]
+fn both_backup_reviews_name_the_ticks_on_the_other_two_tabs() {
+    let ticks = PackagesTabTicks {
+        install: vec!["OSARA".to_string()],
+        uninstall: vec!["SWS Extension".to_string()],
+        backups_to_restore: 1,
+        backups_to_delete: 1,
+    };
+    let mut list = backup_list(vec![sws(), reapack()]);
+    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Restore);
+    tick(&mut list, "ReaPack 1.2.4", BackupChoice::Delete);
+    let install = "What is ticked on the Install or update tab isn't part of this run: OSARA.";
+    let uninstall = "What is ticked on the Uninstall tab isn't part of this run: SWS Extension.";
+
+    let notes = inactive_tab_notes(&en(), WizardMode::Restore, &ticks);
+    let restore = build_backup_restore_review(
+        &en(),
+        Some(&target(true)),
+        &list,
+        Some(&plan_all(&list)),
+        &notes,
+    );
+    let notes = inactive_tab_notes(&en(), WizardMode::DeleteBackups, &ticks);
+    let delete = build_backup_delete_review(&en(), Some(&target(true)), &list, &notes);
+    for lines in [&restore.lines, &delete.lines] {
+        assert!(lines.iter().any(|line| line == install), "{lines:#?}");
+        assert!(lines.iter().any(|line| line == uninstall), "{lines:#?}");
+        // The Backups tab's own ticks are said by the Review itself, for the
+        // other choice, not as another tab's.
+        assert!(
+            !lines.iter().any(|line| line.contains("Backups tab")),
+            "{lines:#?}"
+        );
     }
 }

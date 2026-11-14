@@ -10,6 +10,8 @@ use rabbit_core::setup::SetupReport;
 use rabbit_core::version::Version;
 use serde::Serialize;
 
+use super::uninstall::WizardMode;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UiBootstrapOptions {
     pub locale: String,
@@ -78,9 +80,15 @@ pub struct WizardText {
     pub target_custom_portable_writable_label: String,
     pub target_custom_portable_note: String,
     pub packages_heading: String,
-    /// The Packages page's two tabs.
+    /// The Packages page's tabs.
     pub packages_tab_install: String,
     pub packages_tab_uninstall: String,
+    pub packages_tab_backups: String,
+    /// The choice below the Backups list: its label, and its two choices,
+    /// in the order of [`crate::BackupChoice::ALL`].
+    pub backups_choice_label: String,
+    pub backups_choice_restore: String,
+    pub backups_choice_delete: String,
     /// macOS only: what VoiceOver says the first time the Packages page
     /// opens, that Control-Tab switches between the tabs.
     pub packages_tabs_switch_hint_macos: String,
@@ -135,6 +143,9 @@ pub struct WizardText {
     /// Review's heading in uninstall mode, so the mode is the first thing
     /// read.
     pub review_uninstall_heading: String,
+    /// Review's heading before a restore and before a delete of backups.
+    pub review_restore_heading: String,
+    pub review_delete_heading: String,
     /// The title of the question asked before an uninstall a backup can't
     /// undo.
     pub confirm_uninstall_title: String,
@@ -198,6 +209,12 @@ pub struct WizardText {
     /// The same question while an uninstall runs.
     pub close_during_uninstall_title: String,
     pub close_during_uninstall_body: String,
+    /// The same question while a restore runs, and while a delete of
+    /// backups runs.
+    pub close_during_restore_title: String,
+    pub close_during_restore_body: String,
+    pub close_during_delete_title: String,
+    pub close_during_delete_body: String,
     pub close_during_self_update_title: String,
     pub close_during_self_update_body: String,
     pub expert_enable_title: String,
@@ -361,6 +378,10 @@ pub struct WizardControls {
     pub install_label: String,
     /// The run button's label in uninstall mode, with its own mnemonic.
     pub uninstall_label: String,
+    /// The run button's labels before a restore and before a delete of
+    /// backups, each with its own mnemonic.
+    pub restore_label: String,
+    pub delete_backups_label: String,
     pub close_label: String,
     /// The close button's label while an install runs, when it stops the
     /// install (after asking) before closing RABBIT.
@@ -368,6 +389,40 @@ pub struct WizardControls {
     pub can_go_back: bool,
     pub can_go_next: bool,
     pub can_install: bool,
+}
+
+impl WizardControls {
+    /// The run button's label in each mode.
+    pub fn run_button_labels(&self) -> RunButtonLabels {
+        RunButtonLabels {
+            install: self.install_label.clone(),
+            uninstall: self.uninstall_label.clone(),
+            restore: self.restore_label.clone(),
+            delete_backups: self.delete_backups_label.clone(),
+        }
+    }
+}
+
+/// The run button's label in each mode, each with its own mnemonic. The one
+/// button says what the run does, so it is relabelled with the mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunButtonLabels {
+    pub install: String,
+    pub uninstall: String,
+    pub restore: String,
+    pub delete_backups: String,
+}
+
+impl RunButtonLabels {
+    /// The label for a run of `mode`.
+    pub fn for_mode(&self, mode: WizardMode) -> &str {
+        match mode {
+            WizardMode::Install => &self.install,
+            WizardMode::Uninstall => &self.uninstall,
+            WizardMode::Restore => &self.restore,
+            WizardMode::DeleteBackups => &self.delete_backups,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

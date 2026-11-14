@@ -1,7 +1,7 @@
-//! The Packages page's two tabs, Install or update and Uninstall: building
-//! the notebook, where focus goes when the page opens, which run Next
-//! starts, and the keyboard on macOS: switching tabs, and Tab to and from
-//! the tab strip.
+//! The Packages page's three tabs, Install or update, Uninstall and
+//! Backups: building the notebook, where focus goes when the page opens,
+//! which run Next starts, and the keyboard on macOS: switching tabs, and
+//! Tab to and from the tab strip.
 //!
 //! The notebook is a native tab control, SysTabControl32 on Windows and
 //! NSTabView on macOS, so screen readers present it as tabs. wxOSX moves
@@ -19,20 +19,25 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use wxdragon::prelude::*;
 
-use crate::{WizardMode, WizardModel, WizardUninstallList};
+use crate::{PackagesTab, WizardBackupList, WizardMode, WizardModel, WizardUninstallList};
 
 use crate::wx_app::PACKAGES_STEP;
-use crate::wx_app::globals::{AnnouncePriority, announce};
+use crate::wx_app::globals::{AnnouncePriority, announce, with_ui_localizer};
 use crate::wx_app::packages_page::{
-    PackagesStateCell, PackagesView, UninstallStateCell, UninstallView, build_packages_page,
-    build_uninstall_tab, focus_packages_list_top, reset_packages_list_caret_on_focus,
-    reset_uninstall_list_caret_on_focus,
+    BackupsStateCell, BackupsTabWidgets, BackupsView, PackagesStateCell, PackagesView,
+    UninstallStateCell, UninstallView, build_backups_tab, build_packages_page, build_uninstall_tab,
+    focus_packages_list_top, reset_backups_list_caret_on_focus, reset_packages_list_caret_on_focus,
+    reset_uninstall_list_caret_on_focus, selected_backup_choice,
 };
 use crate::wx_app::pages::{WizardPage, add_heading};
-use crate::wx_app::widgets::{INSTALL_TAB_NAME, UNINSTALL_TAB_NAME, WizardWidgets};
+use crate::wx_app::widgets::{
+    BACKUPS_TAB_NAME, INSTALL_TAB_NAME, UNINSTALL_TAB_NAME, WizardWidgets,
+};
 
+/// The tab the page opens on. Everything else that goes by a tab's index
+/// maps it through [`PackagesTab::from_selection`], so a new tab can't be
+/// left out of a match.
 pub(crate) const INSTALL_TAB: usize = crate::PACKAGES_INSTALL_TAB;
-pub(crate) const UNINSTALL_TAB: usize = crate::PACKAGES_UNINSTALL_TAB;
 
 /// `wx/defs.h`: `WXK_TAB = 9`, the ASCII value.
 const WXK_TAB: i32 = 9;
@@ -65,6 +70,10 @@ pub(crate) struct PackagesPageWidgets {
     pub(crate) uninstall_details: TextCtrl,
     pub(crate) uninstall_remove_settings: CheckBox,
     pub(crate) uninstall_settings_note: TextCtrl,
+    pub(crate) backups_list_label: StaticText,
+    pub(crate) backups_list: BackupsView,
+    pub(crate) backups_details: TextCtrl,
+    pub(crate) backups_choice: RadioBox,
 }
 
 /// Everything the Packages page's lists share with the rest of the wizard.
@@ -75,11 +84,13 @@ pub(crate) struct PackagesPageState {
     pub(crate) can_install: Rc<std::cell::Cell<bool>>,
     pub(crate) uninstall_list: Rc<RefCell<WizardUninstallList>>,
     pub(crate) uninstall_items: UninstallStateCell,
+    pub(crate) backup_list: Rc<RefCell<WizardBackupList>>,
+    pub(crate) backup_items: BackupsStateCell,
 }
 
 /// Build the Packages page: the heading, then the notebook with today's
-/// package list on the Install or update tab and the Uninstall tab beside
-/// it.
+/// package list on the Install or update tab, the Uninstall tab beside it,
+/// and the Backups tab last.
 pub(crate) fn build_packages_tabs(
     page: &WizardPage,
     model: &WizardModel,
@@ -129,6 +140,18 @@ pub(crate) fn build_packages_tabs(
             state.uninstall_items,
         );
 
+    // Screen readers read the panel's label as the tab's name: "Backups,
+    // tab, 3 of 3".
+    let backups_tab = Panel::builder(&notebook).build();
+    backups_tab.set_name(BACKUPS_TAB_NAME);
+    backups_tab.set_label(&model.text.packages_tab_backups);
+    let BackupsTabWidgets {
+        list_label: backups_list_label,
+        list: backups_list,
+        details: backups_details,
+        choice: backups_choice,
+    } = build_backups_tab(&backups_tab, model, state.backup_list, state.backup_items);
+
     notebook.add_page(&install_tab, &model.text.packages_tab_install, true, None);
     notebook.add_page(
         &uninstall_tab,
@@ -136,9 +159,12 @@ pub(crate) fn build_packages_tabs(
         false,
         None,
     );
-    // Proportion 1 and the lists' own minimum heights keep both tabs at
-    // their real size inside the scrolled page, so neither list can be
-    // squeezed out of the accessibility tree.
+    notebook.add_page(&backups_tab, &model.text.packages_tab_backups, false, None);
+    // Proportion 1 and the lists' own minimum heights keep every tab at its
+    // real size inside the scrolled page, so no list can be squeezed out of
+    // the accessibility tree. The notebook asks for the height of its
+    // tallest tab, and the page scrolls when the window is shorter than
+    // that, so a list never gets less than its minimum height.
     sizer.add(&notebook, 1, SizerFlag::All | SizerFlag::Expand, 6);
     page.set_sizer(sizer, true);
 
@@ -154,13 +180,20 @@ pub(crate) fn build_packages_tabs(
         uninstall_details,
         uninstall_remove_settings,
         uninstall_settings_note,
+        backups_list_label,
+        backups_list,
+        backups_details,
+        backups_choice,
     }
 }
 
-/// The run Next on the Packages page starts: the tab showing decides it.
-/// Install and uninstall never mix.
+/// The run Next on the Packages page starts: the tab showing decides it,
+/// and on the Backups tab the choice below its list. Runs never mix.
 pub(crate) fn selected_wizard_mode(widgets: &WizardWidgets) -> WizardMode {
-    WizardMode::for_packages_tab(widgets.packages_notebook.selection())
+    WizardMode::for_packages_tab(
+        widgets.packages_notebook.selection(),
+        selected_backup_choice(&widgets.backups_choice),
+    )
 }
 
 /// Focus the Uninstall list, on the row it was on, for Back from Review in
@@ -172,11 +205,18 @@ pub(crate) fn focus_uninstall_list(widgets: &WizardWidgets) {
     widgets.uninstall_list.set_focus();
 }
 
+/// Focus the Backups list, on the row it was on, for Back from Review
+/// before a restore or a delete, for the same reasons as
+/// [`focus_uninstall_list`].
+pub(crate) fn focus_backups_list(widgets: &WizardWidgets) {
+    widgets.backups_list.set_focus();
+}
+
 /// Land on the Packages page after the version check, once it is the page
 /// showing: the Install tab selected, and focus on the tab strip, so screen
-/// readers start with "Install or update, tab, 1 of 2" and the Uninstall
-/// tab is found without a hint. Tab then enters the install list, which
-/// starts at its top. On macOS, a moment after the first arrival in a run,
+/// readers start with "Install or update, tab, 1 of 3" and the other tabs
+/// are found without a hint. Tab then enters the install list, which starts
+/// at its top. On macOS, a moment after the first arrival in a run,
 /// VoiceOver also says that Control-Tab switches tabs.
 pub(crate) fn arrive_on_packages_page(
     model: &WizardModel,
@@ -193,6 +233,7 @@ pub(crate) fn arrive_on_packages_page(
     // NVDA read the list's row right after the tab.
     reset_packages_list_caret_on_focus();
     reset_uninstall_list_caret_on_focus();
+    reset_backups_list_caret_on_focus();
     notebook.set_focus();
     if !notebook.has_focus() {
         // macOS without Full Keyboard Access (keyboard navigation in System
@@ -258,8 +299,8 @@ fn bind_tab_switch_hint(model: &WizardModel, current_step: &Arc<AtomicUsize>) {
 ///   VoiceOver selecting a tab, focus goes to the new tab's list and the
 ///   tab's name is said: VoiceOver doesn't speak a change made from code,
 ///   and the list it lands in would otherwise be the only clue. An empty
-///   Uninstall list has no row to read, so its sentence is said with the
-///   name.
+///   Uninstall or Backups list has no row to read, so its sentence is said
+///   with the name.
 /// - The timer for the one-time Control-Tab hint, which
 ///   `arrive_on_packages_page` starts.
 ///
@@ -272,6 +313,7 @@ pub(crate) fn bind_packages_tab_switching(
     model: &Arc<WizardModel>,
     widgets: WizardWidgets,
     uninstall_list: &Rc<RefCell<WizardUninstallList>>,
+    backup_list: &Rc<RefCell<WizardBackupList>>,
     current_step: &Arc<AtomicUsize>,
 ) {
     if !cfg!(target_os = "macos") {
@@ -290,13 +332,20 @@ pub(crate) fn bind_packages_tab_switching(
     {
         let model = Arc::clone(model);
         let uninstall_list = Rc::clone(uninstall_list);
+        let backup_list = Rc::clone(backup_list);
         let current_step = Arc::clone(current_step);
         widgets.packages_notebook.on_page_changed(move |event| {
             if current_step.load(Ordering::SeqCst) != PACKAGES_STEP {
                 return;
             }
-            if let Some(tab) = event.get_selection() {
-                show_tab(&model, &widgets, &uninstall_list.borrow(), tab as usize);
+            if let Some(tab) = event.get_selection().and_then(PackagesTab::from_selection) {
+                show_tab(
+                    &model,
+                    &widgets,
+                    &uninstall_list.borrow(),
+                    &backup_list.borrow(),
+                    tab,
+                );
             }
         });
     }
@@ -415,32 +464,41 @@ fn move_focus_for_tab(widgets: &WizardWidgets, close: &Button, shift: bool) -> b
     }
 }
 
-/// The list on the tab showing.
+/// The list on the tab showing, by the tab's index: Restore and Delete
+/// share the Backups tab, so the mode can't say which list it is. No
+/// selection means the Install tab, where the page opens.
 fn selected_tab_list(widgets: &WizardWidgets) -> &dyn WxWidget {
-    match selected_wizard_mode(widgets) {
-        WizardMode::Install => &widgets.package_checklist,
-        WizardMode::Uninstall => &widgets.uninstall_list,
+    match PackagesTab::from_selection(widgets.packages_notebook.selection()) {
+        Some(PackagesTab::Install) | None => &widgets.package_checklist,
+        Some(PackagesTab::Uninstall) => &widgets.uninstall_list,
+        Some(PackagesTab::Backups) => &widgets.backups_list,
     }
 }
 
 /// Focus the list on tab `tab` and say the tab's name, and for an empty
-/// Uninstall list why it is empty.
+/// Uninstall or Backups list why it is empty.
 fn show_tab(
     model: &WizardModel,
     widgets: &WizardWidgets,
     uninstall_list: &WizardUninstallList,
-    tab: usize,
+    backup_list: &WizardBackupList,
+    tab: PackagesTab,
 ) {
     let message = match tab {
-        INSTALL_TAB => {
+        PackagesTab::Install => {
             widgets.package_checklist.set_focus();
             model.text.packages_tab_install.clone()
         }
-        UNINSTALL_TAB => {
+        PackagesTab::Uninstall => {
             widgets.uninstall_list.set_focus();
             uninstall_list.tab_announcement(&model.text)
         }
-        _ => return,
+        PackagesTab::Backups => {
+            widgets.backups_list.set_focus();
+            let mut message = model.text.packages_tab_backups.clone();
+            with_ui_localizer(|localizer| message = backup_list.tab_announcement(localizer));
+            message
+        }
     };
     announce(&message, AnnouncePriority::Interrupt);
 }
