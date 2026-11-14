@@ -32,8 +32,8 @@ use rabbit_core::rollback::{
 use rabbit_core::version::Version;
 
 use super::backups::{
-    BackupChoice, BackupRow, WizardBackupList, and_list, backup_date_text, keymap_origin_selector,
-    local_utc_offset_at, restore_refusal_text, say, text,
+    BackupChoice, BackupRow, RestoreFn, WizardBackupList, and_list, backup_date_text,
+    keymap_origin_selector, local_utc_offset_at, restore_refusal_text, say, text,
 };
 use super::backups_run::{push_once, row_label, target_line, unreadable_folder};
 use super::packages::localized_package_display_name;
@@ -207,7 +207,21 @@ pub fn backup_restore_progress_details_for_start(
 /// but only once the wizard has moved to Progress. It reads manifests and
 /// file sizes, hashes nothing and changes nothing.
 pub fn backup_restore_running_refusal(run: &BackupRestoreRun) -> Option<RestoreRefusal> {
-    restore_running_refusal(&run.resource_path, &run.items)
+    backup_restore_running_refusal_with(run, &restore_running_refusal)
+}
+
+/// The check before a restore, as [`restore_running_refusal`] makes it,
+/// given the resource folder and the backups. The wizard passes that
+/// function; its tests pass one on a made-up computer.
+pub(crate) type RunningCheckFn<'a> = &'a dyn Fn(&Path, &[RestoreItem]) -> Option<RestoreRefusal>;
+
+/// [`backup_restore_running_refusal`], with `check` asking about what
+/// runs, for every backup `run` takes.
+pub(crate) fn backup_restore_running_refusal_with(
+    run: &BackupRestoreRun,
+    check: RunningCheckFn<'_>,
+) -> Option<RestoreRefusal> {
+    check(&run.resource_path, &run.items)
 }
 
 /// The title and the text of the OK-only warning shown instead of starting
@@ -276,7 +290,18 @@ pub fn run_backup_restore(
     progress: &ProgressReporter,
     cancel: &CancelToken,
 ) -> rabbit_core::Result<RestoreRunReport> {
-    restore_backups(
+    run_backup_restore_with(run, progress, cancel, &restore_backups)
+}
+
+/// [`run_backup_restore`], with `restore` running the restore: every
+/// backup `run` takes, with [`backup_restore_run_options`].
+pub(crate) fn run_backup_restore_with(
+    run: &BackupRestoreRun,
+    progress: &ProgressReporter,
+    cancel: &CancelToken,
+    restore: RestoreFn<'_>,
+) -> rabbit_core::Result<RestoreRunReport> {
+    restore(
         &run.resource_path,
         &run.items,
         &backup_restore_run_options(),

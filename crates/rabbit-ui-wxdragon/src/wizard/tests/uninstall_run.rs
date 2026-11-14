@@ -8,7 +8,7 @@ use rabbit_core::localization::{DEFAULT_LOCALE, Localizer, embedded_locales};
 use rabbit_core::model::{ComponentDetection, InstallationKind, Platform};
 use rabbit_core::plan::{AvailablePackage, PlanActionKind};
 use rabbit_core::preflight::{
-    PreflightCheck, PreflightReport, PreflightStatus, REAPER_PROCESS_CHECK,
+    BACKUP_FOLDER_CHECK, PreflightCheck, PreflightReport, PreflightStatus, REAPER_PROCESS_CHECK,
 };
 use rabbit_core::progress::{ProgressEvent, ProgressReporter, RemovalMethod};
 use rabbit_core::report::SavedReportPaths;
@@ -1060,7 +1060,7 @@ fn success_names_what_went_and_how_to_get_it_back() {
         format!(
             "{}\n\n{}",
             outcome.heading,
-            restore_hint("SWS Extension, ReaPack")
+            restore_hint("SWS Extension and ReaPack")
         )
     );
     assert_eq!(
@@ -1390,6 +1390,42 @@ fn every_check_that_stops_a_package_says_what_to_do() {
     }
 }
 
+/// A backups folder that is a link stops the run before anything changes,
+/// and Done says so in the user's language, never in the engine's English.
+#[test]
+fn a_linked_backups_folder_stops_the_uninstall_in_every_language() {
+    let report = report(vec![checks_failed("sws", BACKUP_FOLDER_CHECK)]);
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let sentence = localizer.text("wizard-error-backup-folder-link").value;
+        assert_reads(locale, &sentence);
+        assert_eq!(
+            uninstall_reasons(&localizer, &report),
+            std::slice::from_ref(&sentence),
+            "{locale}"
+        );
+        let outcome = wizard_uninstall_outcome(&localizer, &ids(&["sws"]), &report);
+        assert!(
+            outcome.status_text.contains(&sentence),
+            "{locale}: {}",
+            outcome.status_text
+        );
+        assert!(
+            !outcome.status_text.contains("backup-folder message"),
+            "{locale}: {}",
+            outcome.status_text
+        );
+    }
+    assert!(
+        en().text("wizard-error-backup-folder-link")
+            .value
+            .starts_with(
+                "RABBIT stopped because its own folder in this REAPER, or the backups folder in \
+                 it, is a symbolic link or junction."
+            )
+    );
+}
+
 #[test]
 fn a_failed_removal_uninstalls_nothing_and_keeps_the_engines_words() {
     let sws = report_item(
@@ -1427,7 +1463,8 @@ fn sws_left_in_backup() -> UninstallReportItem {
 /// Files a failure left in the backup set: Done and Show details say they
 /// are still there and that the Backups tab can restore them, since
 /// nothing else names the set. The package wasn't removed, so the hint
-/// about getting a package back doesn't come.
+/// about getting a package back doesn't come, and Done has no Back: the
+/// sentence itself says to run RABBIT again.
 #[test]
 fn files_left_in_the_backup_after_a_failure_are_pointed_out() {
     let report = UninstallReport {
@@ -1437,8 +1474,8 @@ fn files_left_in_the_backup_after_a_failure_are_pointed_out() {
     let outcome = outcome(&report);
 
     let sentence = "Some files of SWS Extension couldn't be put back and are still in the \
-                    backup. Show details lists them, and you can restore them on the Backups \
-                    tab.";
+                    backup. Show details lists them. To put them back, run RABBIT again and \
+                    restore SWS Extension on the Backups tab.";
     assert_eq!(outcome.status, UninstallOutcomeStatus::Failed);
     assert_eq!(
         outcome.status_text,
@@ -1468,7 +1505,8 @@ fn files_left_in_the_backup_after_a_failure_are_pointed_out() {
 }
 
 /// The same in every language: the sentence names the Backups tab by its
-/// own label, in Done and in Show details.
+/// own label, in Done and in Show details, and says to run RABBIT again,
+/// in the words the other Done pages use for it.
 #[test]
 fn files_left_in_the_backup_name_the_backups_tab_in_every_locale() {
     let report = UninstallReport {
@@ -1477,6 +1515,22 @@ fn files_left_in_the_backup_name_the_backups_tab_in_every_locale() {
     };
     for &locale in embedded_locales() {
         let localizer = Localizer::embedded(locale).unwrap();
+        let again = match locale {
+            "en-US" => "run RABBIT again",
+            "de-DE" => "starten Sie RABBIT erneut",
+            "es-ES" => "vuelve a ejecutar RABBIT",
+            "fr-FR" => "relancez RABBIT",
+            "it-IT" => "avvia di nuovo RABBIT",
+            "pt-BR" => "execute o RABBIT novamente",
+            other => panic!("no words for running RABBIT again in {other}"),
+        };
+        assert!(
+            localizer
+                .text("wizard-done-uninstall-reinstall-hint")
+                .value
+                .contains(again),
+            "{locale}"
+        );
         let backups_tab = localizer.text("wizard-packages-tab-backups").value;
         let sentence = localizer
             .format(
@@ -1488,8 +1542,14 @@ fn files_left_in_the_backup_name_the_backups_tab_in_every_locale() {
         assert!(sentence.contains(&backups_tab), "{locale}: {sentence}");
 
         let outcome = wizard_uninstall_outcome(&localizer, &ids(&["sws"]), &report);
+        assert_eq!(outcome.status, UninstallOutcomeStatus::Failed, "{locale}");
         assert!(
             outcome.status_text.ends_with(&sentence),
+            "{locale}: {}",
+            outcome.status_text
+        );
+        assert!(
+            outcome.status_text.contains(again),
             "{locale}: {}",
             outcome.status_text
         );

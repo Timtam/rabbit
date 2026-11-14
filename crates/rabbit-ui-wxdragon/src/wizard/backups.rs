@@ -270,9 +270,9 @@ pub struct WizardBackupList {
     pub rows: Vec<BackupRow>,
     /// The choice the rows are labelled for.
     pub choice: BackupChoice,
-    /// Why there are no rows when RABBIT couldn't read its backup folders,
-    /// as the error said it. `None` with no rows means there are none.
-    pub unreadable: Option<String>,
+    /// Why there are no rows when RABBIT couldn't read its backup folders.
+    /// `None` with no rows means there are none.
+    pub unreadable: Option<BackupsUnreadable>,
     /// Bytes on disk of every set, for the list's label.
     pub total_size: u64,
     pub(crate) sets: Vec<BackupSetFacts>,
@@ -318,7 +318,13 @@ impl WizardBackupList {
             return None;
         }
         Some(match &self.unreadable {
-            Some(error) => (
+            // The refusal a restore or a delete gives for the same link,
+            // in the user's language.
+            Some(BackupsUnreadable::Link(path)) => (
+                text(localizer, "wizard-backups-unreadable"),
+                restore_refusal_text(localizer, &RestoreRefusal::IsLink { path: path.clone() }),
+            ),
+            Some(BackupsUnreadable::Error(error)) => (
                 text(localizer, "wizard-backups-unreadable"),
                 say(
                     localizer,
@@ -432,10 +438,28 @@ pub fn backup_list_from_overview(
     )
 }
 
+/// Why RABBIT couldn't list a REAPER's backups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackupsUnreadable {
+    /// `RABBIT` or `RABBIT/backups` at this path is a symbolic link or
+    /// junction, which RABBIT never follows there. The tab says it as a
+    /// restore's refusal says it, in the user's language.
+    Link(PathBuf),
+    /// Any other error, as it said it, in English.
+    Error(String),
+}
+
 /// An empty list that says why RABBIT couldn't read its backup folders.
 pub fn backup_list_unreadable(error: &RabbitError) -> WizardBackupList {
+    let unreadable = match error {
+        RabbitError::BackupPathIsLink { path }
+        | RabbitError::RestoreRefused(RestoreRefusal::IsLink { path }) => {
+            BackupsUnreadable::Link(path.clone())
+        }
+        other => BackupsUnreadable::Error(other.to_string()),
+    };
     WizardBackupList {
-        unreadable: Some(error.to_string()),
+        unreadable: Some(unreadable),
         ..WizardBackupList::default()
     }
 }
@@ -667,21 +691,43 @@ pub fn backup_quick_plan_options() -> RestoreRunOptions {
     }
 }
 
+/// A restore as `rabbit_core::rollback::restore_backups` runs one, given
+/// the resource folder, the backups, the options, where progress goes and
+/// what stops it. The wizard passes that function; its tests pass one on a
+/// made-up computer, so they never depend on what runs where they run.
+pub(crate) type RestoreFn<'a> = &'a dyn Fn(
+    &Path,
+    &[RestoreItem],
+    &RestoreRunOptions,
+    &ProgressReporter,
+    &CancelToken,
+) -> rabbit_core::Result<RestoreRunReport>;
+
 /// The quick plan Review checks a restore against: a quick dry run of what
 /// is ticked to restore in `list`, in the REAPER at `resource_path`, run on
 /// the calling thread. `None` with nothing ticked, as there is nothing to
 /// check. It changes nothing: a dry run takes no lock, writes no file and
-/// saves no report, and a quick one hashes nothing. It reads only the sets'
-/// manifests, RABBIT's records and file sizes.
+/// saves no report, and a quick one hashes nothing. It reads the sets'
+/// manifests, RABBIT's records and file sizes, and asks which REAPERs and
+/// other programs run, for Review's note on what to close first.
 pub fn backup_quick_plan(
     resource_path: &Path,
     list: &WizardBackupList,
+) -> Option<RestoreQuickPlan> {
+    backup_quick_plan_with(resource_path, list, &restore_backups)
+}
+
+/// [`backup_quick_plan`], with `restore` running the dry run.
+pub(crate) fn backup_quick_plan_with(
+    resource_path: &Path,
+    list: &WizardBackupList,
+    restore: RestoreFn<'_>,
 ) -> Option<RestoreQuickPlan> {
     let items = backup_restore_items(list);
     if items.is_empty() {
         return None;
     }
-    Some(RestoreQuickPlan::from_result(restore_backups(
+    Some(RestoreQuickPlan::from_result(restore(
         resource_path,
         &items,
         &backup_quick_plan_options(),
@@ -1025,7 +1071,9 @@ pub fn delete_backups_question(localizer: &Localizer, list: &WizardBackupList) -
 
 /// A restore refusal as a sentence in the user's language, about the
 /// backup it refuses, which the sentence calls "it". Review puts it after
-/// the backup's name, and a row's details after what the backup is.
+/// the backup's name or after "Can't restore yet:", the Done page after the
+/// backup's name or after its first line, a row's details after what the
+/// backup is, and an unreadable list's details on its own, for a link.
 pub fn restore_refusal_text(localizer: &Localizer, refusal: &RestoreRefusal) -> String {
     let key = format!("wizard-restore-refusal-{}", refusal.code());
     let path = |path: &Path| path.display().to_string();
@@ -2117,13 +2165,7 @@ fn restore_blockers<'a>(
             &[("reason", (&reason).into())],
         )
     };
-    let reference = |row: &BackupRow| {
-        say(
-            localizer,
-            "wizard-backups-row-reference",
-            &[("backup", (&row.name).into()), ("when", (&row.when).into())],
-        )
-    };
+    let reference = |row: &BackupRow| backup_in_sentence(localizer, row);
     let mut blockers = Vec::new();
     if ticked.is_empty() {
         blockers.push(blocked(text(
@@ -2240,6 +2282,30 @@ fn restore_blockers<'a>(
         ));
     }
     blockers
+}
+
+/// What Review calls `row` inside a sentence: its name with when it was
+/// made, as wizard-backups-row-reference says it, so that two of one name
+/// can be told apart. A key map's row name starts as a row starts, with a
+/// capital, so a dated one is named as the Done page names it in a
+/// sentence, "your key map from <date>". An undated one, which that form
+/// would call only "the key map", keeps its row's name and when-text.
+fn backup_in_sentence(localizer: &Localizer, row: &BackupRow) -> String {
+    match (&row.entry, &row.date) {
+        (Some(entry), Some(date)) if matches!(entry.item, BackupItem::Keymap { .. }) => say(
+            localizer,
+            "wizard-done-restore-keymap-in-sentence",
+            &[
+                ("origin", keymap_origin_selector(entry).into()),
+                ("date", date.into()),
+            ],
+        ),
+        _ => say(
+            localizer,
+            "wizard-backups-row-reference",
+            &[("backup", (&row.name).into()), ("when", (&row.when).into())],
+        ),
+    }
 }
 
 /// Whether `report` is of exactly the backups in `items`, each once: the

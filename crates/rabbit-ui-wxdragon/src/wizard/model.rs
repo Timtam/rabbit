@@ -197,6 +197,10 @@ pub struct WizardText {
     /// lock, installing, uninstalling, or restoring or deleting backups
     /// there.
     pub error_lock_held: String,
+    /// Why an install or an uninstall stopped before it changed anything:
+    /// `RABBIT` or `RABBIT/backups` in the REAPER is a symbolic link or
+    /// junction.
+    pub error_backup_folder_link: String,
     /// Why an uninstall didn't start on macOS: RABBIT itself runs as root,
     /// as under sudo.
     pub error_uninstall_as_root: String,

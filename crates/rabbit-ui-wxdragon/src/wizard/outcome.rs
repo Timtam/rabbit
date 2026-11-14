@@ -231,22 +231,33 @@ pub fn summarize_wizard_error(
 /// lock and the REAPER check, so both come here.
 pub fn wizard_error_reason(model: &WizardModel, error: &RabbitError) -> String {
     let reaper_check = format!("{}:", rabbit_core::preflight::REAPER_PROCESS_CHECK);
+    let backup_folder_check = format!("{}:", rabbit_core::preflight::BACKUP_FOLDER_CHECK);
     match error {
         RabbitError::PackageInstallInProgress { .. } => model.text.error_lock_held.clone(),
         RabbitError::UninstallAsRoot => model.text.error_uninstall_as_root.clone(),
-        RabbitError::PreflightFailed { message } if message.contains(&reaper_check) => {
+        RabbitError::PreflightFailed { message }
+            if message.contains(&reaper_check) || message.contains(&backup_folder_check) =>
+        {
             // A preflight lists every check that failed, joined by "; ".
             // Keep the others in view: closing REAPER would not fix them,
-            // and hiding them would just fail the next run too.
-            let others: Vec<&str> = message
-                .split("; ")
-                .filter(|part| !part.starts_with(&reaper_check))
-                .collect();
-            if others.is_empty() {
-                model.text.error_reaper_running.clone()
-            } else {
-                format!("{}\n{}", model.text.error_reaper_running, others.join("\n"))
+            // and hiding them would just fail the next run too. The two
+            // checks the wizard has its own words for come first, in them.
+            let mut lines = Vec::new();
+            if message.contains(&reaper_check) {
+                lines.push(model.text.error_reaper_running.clone());
             }
+            if message.contains(&backup_folder_check) {
+                lines.push(model.text.error_backup_folder_link.clone());
+            }
+            lines.extend(
+                message
+                    .split("; ")
+                    .filter(|part| {
+                        !part.starts_with(&reaper_check) && !part.starts_with(&backup_folder_check)
+                    })
+                    .map(str::to_string),
+            );
+            lines.join("\n")
         }
         other => other.to_string(),
     }

@@ -479,18 +479,20 @@ wizard-backups-name-unknown = Backup di un'altra versione di RABBIT
 # When a backup was made, as its row says it after the action. $date is a
 # date and time (backup-date-time), and $version a version number.
 # "Replaced by OSARA's" means by OSARA's key map.
-wizard-backups-when-uninstalled = Disinstallato il { $date }
-wizard-backups-when-replaced-by = Sostituito da { $version } il { $date }
-wizard-backups-when-replaced = Sostituito il { $date }
-wizard-backups-when-keymap-osara = Sostituita da quella di OSARA il { $date }
-wizard-backups-when-keymap-restore = Sostituita da un ripristino il { $date }
-wizard-backups-when-made = Creato il { $date }
+wizard-backups-when-uninstalled = Disinstallato il giorno { $date }
+wizard-backups-when-replaced-by = Sostituito da { $version } il giorno { $date }
+wizard-backups-when-replaced = Sostituito il giorno { $date }
+wizard-backups-when-keymap-osara = Sostituita da quella di OSARA il giorno { $date }
+wizard-backups-when-keymap-restore = Sostituita da un ripristino il giorno { $date }
+wizard-backups-when-made = Creato il giorno { $date }
 # A date and time, as rows, details and Review say when a backup was made,
 # such as "November 9, 2026, 2:05 PM". $year, $month (1 to 12), $day,
 # $hour (0 to 23) and $hour12 (1 to 12) are numbers; $minute is two digits,
 # such as "05"; $period is am or pm. Use the 24-hour clock with $hour and
 # $minute, or the 12-hour one with $hour12, $minute and $period, as your
-# language does. Name the month by the select on $month.
+# language does. Name the month by the select on $month. Sentences put the
+# date after a word such as "on" or "from": where that word would change
+# with the day, as Italian "l'8" or "dell'11" do, word them so it doesn't.
 backup-date-time = { $day } { $month ->
     [1] gennaio
     [2] febbraio
@@ -559,15 +561,15 @@ wizard-backups-details-uninstall-files = File spostati da una disinstallazione c
 wizard-backups-details-keymap-files = File conservati con una mappa dei tasti che nessun'altra riga qui rimette a posto.
 wizard-backups-details-unknown = Un backup fatto da un'altra versione di RABBIT, per un motivo che questa versione non conosce.
 # When it was made.
-wizard-backups-details-when-uninstalled = L'hai disinstallato il { $date }.
-wizard-backups-details-when-updated-to = Un aggiornamento a { $version } l'ha sostituita il { $date }.
-wizard-backups-details-when-updated = Un aggiornamento l'ha sostituita il { $date }.
-wizard-backups-details-when-restored-to = Il ritorno a { $version } l'ha sostituita il { $date }.
-wizard-backups-details-when-restored = Un ripristino l'ha sostituita il { $date }.
-wizard-backups-details-when-osara = La mappa dei tasti di OSARA l'ha sostituita il { $date }.
-wizard-backups-details-when-keymap-restored = Una mappa dei tasti ripristinata l'ha sostituita il { $date }.
-wizard-backups-details-when-made = RABBIT ha fatto questo backup il { $date }.
-wizard-backups-details-when-records = La copia più recente è del { $date }.
+wizard-backups-details-when-uninstalled = L'hai disinstallato il giorno { $date }.
+wizard-backups-details-when-updated-to = Un aggiornamento a { $version } l'ha sostituita il giorno { $date }.
+wizard-backups-details-when-updated = Un aggiornamento l'ha sostituita il giorno { $date }.
+wizard-backups-details-when-restored-to = Il ritorno a { $version } l'ha sostituita il giorno { $date }.
+wizard-backups-details-when-restored = Un ripristino l'ha sostituita il giorno { $date }.
+wizard-backups-details-when-osara = La mappa dei tasti di OSARA l'ha sostituita il giorno { $date }.
+wizard-backups-details-when-keymap-restored = Una mappa dei tasti ripristinata l'ha sostituita il giorno { $date }.
+wizard-backups-details-when-made = RABBIT ha fatto questo backup il giorno { $date }.
+wizard-backups-details-when-records = La copia più recente è del giorno { $date }.
 wizard-backups-details-when-unknown = RABBIT non può sapere quando è stato fatto questo backup.
 # What it holds and how big it is. The settings are named only when the
 # uninstall recorded that it moved them; backups from earlier versions of
@@ -591,8 +593,8 @@ wizard-backups-details-restore-uninstalled = Il ripristino rimette a posto i fil
 wizard-backups-details-restore-uninstalled-files = Il ripristino rimette a posto i file.
 wizard-backups-details-restore-stopped-partway = La disinstallazione si è fermata a metà, quindi alcuni dei suoi file sono solo in questo backup. Il ripristino li rimette a posto.
 wizard-backups-details-restore-already-back = { $package } è già tornato. Il ripristino rimette a posto i suoi file un'altra volta.
-wizard-backups-details-restore-earlier = Il ripristino torna a { $version } e conserva la versione che hai ora come backup, così puoi tornare avanti. Le tue impostazioni restano come sono.
-wizard-backups-details-restore-earlier-copy = Il ripristino rimette questa copia e conserva la versione che hai ora come backup, così puoi tornare avanti.
+wizard-backups-details-restore-earlier = Il ripristino torna a { $version } e conserva la versione che hai ora come backup, così potrai ritornarci in seguito. Le tue impostazioni restano come sono.
+wizard-backups-details-restore-earlier-copy = Il ripristino rimette questa copia e conserva la versione che hai ora come backup, così potrai ritornarci in seguito.
 wizard-backups-details-restore-earlier-already-back = { $package } è già a questa versione. Il ripristino rimette a posto i suoi file un'altra volta.
 wizard-backups-details-restore-keymap = Il ripristino la rende di nuovo la mappa dei tasti di REAPER e conserva quella attuale come backup. Gli script che hai installato da allora restano nell'elenco delle azioni di REAPER.
 wizard-backups-details-restore-default-keys = Il ripristino riporta i tasti propri di REAPER, non una tua mappa dei tasti, e conserva la mappa dei tasti attuale come backup.
@@ -616,7 +618,7 @@ wizard-backups-details-status-not-a-backup = RABBIT non ci guarda mai dentro, no
 # menu and the menu's Go to Folder item as Finder does in your language, and
 # Command-Delete as Apple's page of Mac keyboard shortcuts does. Never
 # suggest sudo.
-wizard-backups-details-not-yours-finder-macos = Per rimuoverlo, nel Finder scegli Vai > Vai alla cartella, inserisci { $folder }, poi seleziona { $name } e premi Comando-Elimina. Il Finder chiede nome e password di un amministratore se ne ha bisogno.
+wizard-backups-details-not-yours-finder-macos = Per rimuoverlo, nel Finder scegli Vai > Vai alla cartella, inserisci { $folder }, poi seleziona { $name }, premi Comando-Elimina e svuota il Cestino. Il Finder chiede nome e password di un amministratore se ne ha bisogno.
 # What deleting it loses.
 wizard-backups-details-delete-uninstalled = Se elimini questo backup, RABBIT non può più recuperare questa copia.
 wizard-backups-details-delete-earlier = Se elimini questo backup, non puoi più tornare a { $version }.
@@ -662,24 +664,35 @@ wizard-backups-ticked-macos = { $choice ->
 # "SWS 2.14.0.7 from the same uninstall is ticked too." $backups is a list
 # of what those rows call their backups, $count how many there are, a
 # number, and $origin uninstall, update or other, for what made the backup.
-wizard-backups-also-ticked-macos = Selezionato anche, { $origin ->
+wizard-backups-also-ticked-macos = { $count ->
+    [one] Selezionato anche
+   *[other] Selezionati anche
+}, { $origin ->
     [uninstall] dalla stessa disinstallazione
     [update] dallo stesso aggiornamento
    *[other] dallo stesso backup
 }: { $backups }.
-wizard-backups-also-unticked-macos = Deselezionato anche, { $origin ->
+wizard-backups-also-unticked-macos = { $count ->
+    [one] Deselezionato anche
+   *[other] Deselezionati anche
+}, { $origin ->
     [uninstall] dalla stessa disinstallazione
     [update] dallo stesso aggiornamento
    *[other] dallo stesso backup
 }: { $backups }.
 # Why a restore of a backup is refused, a sentence or two each, about the
-# backup, which they call "it". Review puts one after "Can't restore <backup>
-# yet.", and a row's details after what the backup is. $package is a
-# localized package name, $packages a list of them, $path a file or folder
-# as the computer writes it, keep it as it is, $detail an error message in
-# English, $reason one of the wizard-restore-target-* phrases, and $programs
-# a comma-separated list of program names, never translated. Name the
-# Uninstall tab as wizard-packages-tab-uninstall does.
+# backup, which they call "it". Review puts one after "Can't restore
+# <backup> yet." or "Can't restore yet:", the Done page after "RABBIT
+# didn't restore <backup>." or after its first line, and a row's details
+# after what the backup is. The sentence before names the backup by what
+# its row calls it, such as "SWS Extension 2.14.0.7" or "your key map",
+# never by the word "backup": where your language's pronoun needs a
+# matching noun, start with "this backup" instead. $package is a localized
+# package name, $packages a list of them, $path a file or folder as the
+# computer writes it, keep it as it is, $detail an error message in
+# English, $reason one of the wizard-restore-target-* phrases, and
+# $programs a comma-separated list of program names, never translated.
+# Name the Uninstall tab as wizard-packages-tab-uninstall does.
 wizard-restore-refusal-invalid-id = Il suo nome non è uno di quelli che RABBIT dà a un backup.
 wizard-restore-refusal-not-found = È stato eliminato o non è mai esistito. Avvia di nuovo RABBIT per vedere i backup come sono adesso.
 wizard-restore-refusal-differs-in-case = RABBIT lo trova solo con un nome con maiuscole e minuscole diverse.
@@ -899,8 +912,8 @@ wizard-review-restore-heading = Pronto per ripristinare
 # localized package name, $date a date and time (backup-date-time), and
 # $settings yes or no: whether the backup holds the package's settings too.
 wizard-review-restore-uninstalled = { $settings ->
-    [yes] { $backup } torna com'era il { $date }, con le tue impostazioni di { $package }.
-   *[no] { $backup } torna com'era il { $date }.
+    [yes] { $backup } torna com'era il giorno { $date }, con le tue impostazioni di { $package }.
+   *[no] { $backup } torna com'era il giorno { $date }.
 }
 wizard-review-restore-uninstalled-undated = { $settings ->
     [yes] { $backup } torna com'era prima della disinstallazione, con le tue impostazioni di { $package }.
@@ -914,9 +927,9 @@ wizard-review-restore-earlier-copy = { $package } torna alla copia sostituita da
 # A key map. $origin is own for your own key map, default-keys for REAPER's
 # default keys, and other for any other; $date as above.
 wizard-review-restore-keymap = { $origin ->
-    [own] La tua mappa dei tasti del { $date } sostituisce quella attuale, che RABBIT conserva come backup.
-    [default-keys] I tasti predefiniti di REAPER del { $date } sostituiscono la mappa dei tasti attuale, che RABBIT conserva come backup.
-   *[other] La mappa dei tasti del { $date } sostituisce quella attuale, che RABBIT conserva come backup.
+    [own] La tua mappa dei tasti del giorno { $date } sostituisce quella attuale, che RABBIT conserva come backup.
+    [default-keys] I tasti predefiniti di REAPER del giorno { $date } sostituiscono la mappa dei tasti attuale, che RABBIT conserva come backup.
+   *[other] La mappa dei tasti del giorno { $date } sostituisce quella attuale, che RABBIT conserva come backup.
 }
 wizard-review-restore-keymap-undated = { $origin ->
     [own] La tua mappa dei tasti sostituisce quella attuale, che RABBIT conserva come backup.
@@ -942,14 +955,17 @@ wizard-review-restore-other-choice-note = { $count ->
 }
 # Why the Restore button is disabled. $reason is a sentence, such as
 # wizard-review-restore-nothing-ticked. The -backup form names a backup that
-# can't come back: $backup as in wizard-backups-row-reference, and $reason
-# one of the wizard-restore-refusal-* sentences.
+# can't come back: $backup as in wizard-backups-row-reference, or for a key
+# map as wizard-done-restore-keymap-in-sentence says it, and $reason one of
+# the wizard-restore-refusal-* sentences or wizard-review-restore-plan-failed.
 wizard-review-restore-blocked = Impossibile ripristinare per ora: { $reason }
 wizard-review-restore-blocked-backup = Impossibile ripristinare { $backup } per ora. { $reason }
 wizard-review-restore-nothing-ticked = Non è selezionato niente da ripristinare.
 wizard-review-restore-not-writable = RABBIT non può scrivere nella cartella di questo REAPER.
 # $first and $second name two ticked backups, as in
-# wizard-backups-row-reference; $package is the localized package name.
+# wizard-backups-row-reference, or for a key map as
+# wizard-done-restore-keymap-in-sentence says it, so the sentence may start
+# in lower case; $package is the localized package name.
 wizard-review-restore-same-package = { $first } e { $second } sono entrambi backup di { $package }. Selezionane solo uno.
 wizard-review-restore-same-file = { $first } e { $second } rimettono entrambi a posto lo stesso file. Selezionane solo uno.
 # When RABBIT couldn't check the restore before it starts: one backup, or
@@ -968,8 +984,8 @@ wizard-review-delete-intro = { $count ->
 }
 # One line per ticked backup, saying what is lost with it. $backup is what
 # its row calls it, and $date a date and time (backup-date-time).
-wizard-review-delete-uninstalled = { $backup }, disinstallato il { $date }: l'unica copia.
-wizard-review-delete-keymap = { $backup } del { $date }: l'unica copia.
+wizard-review-delete-uninstalled = { $backup }, disinstallato il giorno { $date }: l'unica copia.
+wizard-review-delete-keymap = { $backup } del giorno { $date }: l'unica copia.
 wizard-review-delete-only-copy = { $backup }: l'unica copia.
 wizard-review-delete-earlier = { $backup }: dopo non potrai più tornarci.
 wizard-review-delete-already-back = { $backup }: i suoi file sono anche sul disco, quindi non si perde niente.
@@ -982,9 +998,9 @@ wizard-review-delete-other = { $backup }: questo backup sparisce per sempre.
 # $date a date and time (backup-date-time). The -undated form is for a
 # backup whose date RABBIT can't tell.
 wizard-review-delete-together = { $origin ->
-    [uninstall] { $backups }, della disinstallazione del { $date }, vanno insieme
-    [update] { $backups }, dell'aggiornamento del { $date }, vanno insieme
-   *[other] { $backups }, del { $date }, vanno insieme
+    [uninstall] { $backups }, della disinstallazione del giorno { $date }, vanno insieme
+    [update] { $backups }, dell'aggiornamento del giorno { $date }, vanno insieme
+   *[other] { $backups }, del giorno { $date }, vanno insieme
 }: { $count ->
     [2] un solo backup li contiene entrambi.
    *[other] un solo backup li contiene tutti e { $count }.
@@ -1065,9 +1081,9 @@ wizard-progress-status-restoring = { $kind ->
 # time (backup-date-time). The -undated form is for a key map whose date
 # RABBIT can't tell.
 wizard-progress-status-restoring-keymap = { $origin ->
-    [own] Ripristino della tua mappa dei tasti del { $date }…
-    [default-keys] Ripristino dei tasti predefiniti di REAPER del { $date }…
-   *[other] Ripristino della mappa dei tasti del { $date }…
+    [own] Ripristino della tua mappa dei tasti del giorno { $date }…
+    [default-keys] Ripristino dei tasti predefiniti di REAPER del giorno { $date }…
+   *[other] Ripristino della mappa dei tasti del giorno { $date }…
 }
 wizard-progress-status-restoring-keymap-undated = { $origin ->
     [own] Ripristino della tua mappa dei tasti…
@@ -1129,6 +1145,10 @@ wizard-error-reaper-running = RABBIT si è fermato perché REAPER era aperto. Ch
 # Why a run stopped when another RABBIT is working on the same REAPER:
 # installing, uninstalling, or restoring or deleting backups.
 wizard-error-lock-held = Un altro RABBIT sta lavorando su questo REAPER. Aspetta che finisca, poi avvia di nuovo RABBIT.
+# Why an install or an uninstall stopped before it changed anything:
+# RABBIT's own folder in the REAPER, or the backups folder in it, is a
+# symbolic link or junction, so a backup kept there couldn't be restored.
+wizard-error-backup-folder-link = RABBIT si è fermato perché la sua cartella in questo REAPER, o la cartella dei backup al suo interno, è un collegamento. RABBIT non ripristina mai un backup che si trova dietro un collegamento, quindi non cambia niente finché è così. Rendila di nuovo una cartella vera, con i backup al suo interno, poi avvia di nuovo RABBIT.
 # Shown instead of starting an uninstall while REAPER is open. Name the
 # button as wizard-button-uninstall does.
 wizard-reaper-running-uninstall-body = Chiudi REAPER, poi premi di nuovo Disinstalla. RABBIT non può disinstallare niente da REAPER mentre REAPER è aperto.
@@ -1199,18 +1219,20 @@ wizard-done-uninstall-removed-before-stop = Prima che lo interrompessi, RABBIT h
 wizard-done-uninstall-reinstall-hint = Per riaverne uno, avvia di nuovo RABBIT e selezionalo nella scheda «Installa o aggiorna».
 # Used instead of wizard-done-uninstall-reinstall-hint when RABBIT kept a
 # backup of a removed package: the same sentence, then where to restore
-# it. $packages is a comma-separated list of localized package names, only
-# those whose files went into the backup, which may be fewer than were
-# uninstalled. Name the tabs as wizard-packages-tab-install and
-# wizard-packages-tab-backups do.
+# it. $packages is a list of localized package names, joined as
+# wizard-backups-list-and joins names, only those whose files went into
+# the backup, which may be fewer than were uninstalled. Name the tabs as
+# wizard-packages-tab-install and wizard-packages-tab-backups do.
 wizard-done-uninstall-reinstall-or-restore-hint = Per riaverne uno, avvia di nuovo RABBIT e selezionalo nella scheda «Installa o aggiorna». Puoi anche ripristinare { $packages } nella scheda «Backup».
 # What to look at after an uninstall, one sentence per package. $package is
 # the localized package name. Name "Show details" as wizard-done-show-details
 # does.
 wizard-done-uninstall-not-installed = { $package } non era più installato, quindi non c'era niente da rimuovere.
 # The backup still holds the files, so the Backups tab lists it and can put
-# them back. Name the tab as wizard-packages-tab-backups does.
-wizard-done-uninstall-left-in-backup = Alcuni file di { $package } non sono stati rimessi al loro posto e sono ancora nel backup. «Mostra dettagli» li elenca e puoi ripristinarli nella scheda «Backup».
+# them back. Done has no way back to the tab, so the sentence says to run
+# RABBIT again, as wizard-done-delete-partly does. Name the tab as
+# wizard-packages-tab-backups does.
+wizard-done-uninstall-left-in-backup = Alcuni file di { $package } non sono stati rimessi al loro posto e sono ancora nel backup. «Mostra dettagli» li elenca. Per rimetterli al loro posto, avvia di nuovo RABBIT e ripristina { $package } nella scheda «Backup».
 wizard-done-uninstall-leftovers = RABBIT trova ancora parte di { $package } e la lascia com'è. «Mostra dettagli» indica quale.
 wizard-done-uninstall-language-reset-failed = RABBIT non è riuscito a riportare REAPER in inglese dopo aver rimosso { $package }. Scegli una lingua nelle preferenze di REAPER.
 wizard-done-uninstall-registry-failed = RABBIT ha disinstallato { $package }, ma l'elenco dei programmi installati di Windows potrebbe mostrarlo ancora. «Mostra dettagli» indica la voce.
@@ -1624,24 +1646,25 @@ wizard-done-restore-status-one = RABBIT ha ripristinato { $backup }.
 wizard-done-restore-status-earlier = { $package } è tornato alla versione { $version }.
 wizard-done-restore-status-earlier-copy = { $package } è tornato alla copia sostituita da un aggiornamento.
 wizard-done-restore-status-keymap = { $origin ->
-    [own] La tua mappa dei tasti del { $date } è tornata.
-    [default-keys] I tasti predefiniti di REAPER del { $date } sono tornati.
-   *[other] La mappa dei tasti del { $date } è tornata.
+    [own] La tua mappa dei tasti del giorno { $date } è tornata.
+    [default-keys] I tasti predefiniti di REAPER del giorno { $date } sono tornati.
+   *[other] La mappa dei tasti del giorno { $date } è tornata.
 }
 wizard-done-restore-status-keymap-undated = { $origin ->
     [own] La tua mappa dei tasti è tornata.
     [default-keys] I tasti predefiniti di REAPER sono tornati.
    *[other] La mappa dei tasti è tornata.
 }
-# What the Done page calls a key map inside a sentence, as $backup in
-# wizard-done-restore-status-none and in the sentences on why a backup
-# didn't come back, such as "RABBIT couldn't restore your key map from
-# <date>". Start in lower case where your language allows. $origin and
-# $date as in wizard-progress-status-restoring-keymap.
+# What the Done page and Review call a key map inside a sentence, as
+# $backup in wizard-done-restore-status-none, in the sentences on why a
+# backup didn't come back, such as "RABBIT couldn't restore your key map
+# from <date>", and in Review's on why one can't be restored yet. Start in
+# lower case where your language allows. $origin and $date as in
+# wizard-progress-status-restoring-keymap.
 wizard-done-restore-keymap-in-sentence = { $origin ->
-    [own] la tua mappa dei tasti del { $date }
-    [default-keys] i tasti predefiniti di REAPER del { $date }
-   *[other] la mappa dei tasti del { $date }
+    [own] la tua mappa dei tasti del giorno { $date }
+    [default-keys] i tasti predefiniti di REAPER del giorno { $date }
+   *[other] la mappa dei tasti del giorno { $date }
 }
 wizard-done-restore-keymap-in-sentence-undated = { $origin ->
     [own] la tua mappa dei tasti
@@ -1758,7 +1781,7 @@ wizard-summary-restore-scripts-kept = { $count ->
 # $date a date and time (backup-date-time). The -undated form is for a
 # backup whose date RABBIT can't tell. Name the Backups tab as
 # wizard-packages-tab-backups does.
-wizard-summary-restore-kept = Ciò che il ripristino ha sostituito viene conservato come backup nella scheda «Backup»: { $backup }, del { $date }.
+wizard-summary-restore-kept = Ciò che il ripristino ha sostituito viene conservato come backup nella scheda «Backup»: { $backup }, del giorno { $date }.
 wizard-summary-restore-kept-undated = Ciò che il ripristino ha sostituito viene conservato come backup nella scheda «Backup»: { $backup }.
 wizard-summary-restore-not-reached = RABBIT si è fermato prima di arrivarci, quindi resta com'è.
 # $path is the full path of the report RABBIT saved.

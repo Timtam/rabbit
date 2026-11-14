@@ -583,9 +583,10 @@ CLI and UI expectations:
   ticks the run leaves out. The Packages page has three tabs, so arrival
   reads "Install or update, tab, 1 of 3", and the Backups tab is two
   presses of the Right arrow on the strip, or of Ctrl+Tab, away from the
-  Install tab. Its RadioBox is a control inside a tab too; whether Page
-  Down on it switches tabs like a checkbox does is not checked yet, and the
-  hardware pass finds out. If it does, it is the same documented quirk.
+  Install tab. Its RadioBox is a control inside a tab too, so Page Up or
+  Page Down on it may switch tabs as on a checkbox; that is the same
+  documented quirk, and Review still names the mode and the ticks the run
+  leaves out.
 - A choice between two runs on one tab is a native RadioBox below the list
   (the Backups tab's Restore or Delete), never above it: on macOS, Tab from
   the tab strip goes straight into the list, and a control above it would
@@ -871,9 +872,11 @@ user can finish the install by pressing Next a few times.
      donation page.
    - Before a restore the heading says "Ready to restore". Next first makes
      a quick dry run of what is ticked, on the UI thread: it takes no lock,
-     writes nothing and hashes nothing, reading only the manifests, RABBIT's
-     records and file sizes. The summary has the target, one sentence per
-     ticked backup saying what comes back and what RABBIT keeps as a backup
+     writes nothing and hashes nothing; it reads the manifests, RABBIT's
+     records and file sizes, and asks which REAPERs and other programs run,
+     for the note on what to close first. The summary has the target, one
+     sentence per ticked backup saying what comes back and what RABBIT keeps
+     as a backup
      ("ReaPack goes back from 1.2.5 to 1.2.4. RABBIT keeps 1.2.5 as a
      backup."), what else changes, such as REAPER's language, "Close REAPER
      first." (or every REAPER) while one it needs closed is running, the
@@ -952,7 +955,9 @@ user can finish the install by pressing Next a few times.
      copied out of the list before either dialog, which runs the event loop.
    - During a restore or a delete the heading says "Restoring backups" or
      "Deleting backups", focus moves to the gauge, which counts one step per
-     backup, and the work runs on a worker thread, its events coming back
+     backup for a restore and one per backup set for a delete, so rows that
+     share a set are one step and the old copies of RABBIT's records are
+     several, and the work runs on a worker thread, its events coming back
      through `call_after`, as for an uninstall. The status line names each
      backup as it starts, which macOS speaks, and the log says how each
      ended. Closing the window asks "Stop restoring?" or "Stop deleting

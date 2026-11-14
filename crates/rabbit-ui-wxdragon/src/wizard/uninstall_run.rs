@@ -18,7 +18,7 @@ use rabbit_core::model::{InstallationKind, Platform};
 use rabbit_core::package::PACKAGE_REAPER;
 use rabbit_core::package::uninstall::UninstallBackup;
 use rabbit_core::preflight::{
-    PreflightCheck, PreflightReport, PreflightStatus, REAPER_PROCESS_CHECK,
+    BACKUP_FOLDER_CHECK, PreflightCheck, PreflightReport, PreflightStatus, REAPER_PROCESS_CHECK,
 };
 use rabbit_core::report::{default_report_path, save_json_and_text_reports};
 use rabbit_core::uninstall::{
@@ -31,6 +31,7 @@ use rabbit_core::uninstall::{
 use rabbit_core::{RabbitError, Result};
 use serde::Serialize;
 
+use super::backups::and_list;
 use super::model::{TargetRow, WizardModel};
 use super::outcome::wizard_error_reason;
 use super::packages::localized_package_display_name;
@@ -435,7 +436,7 @@ pub fn wizard_uninstall_outcome(
             localizer
                 .format(
                     "wizard-done-uninstall-reinstall-or-restore-hint",
-                    &[("packages", restorable.join(", ").as_str())],
+                    &[("packages", and_list(localizer, &restorable).as_str())],
                 )
                 .value
         });
@@ -912,13 +913,15 @@ fn item_reasons(
 }
 
 /// Why a check stopped a package. A running REAPER is the common case and
-/// gets the same sentence an install gets; the other checks the engine words
-/// in English, naming the programs or the drive.
+/// gets the same sentence an install gets, as does a linked backups folder;
+/// the other checks the engine words in English, naming the programs or the
+/// drive.
 fn check_reason(localizer: &Localizer, check: &PreflightCheck) -> String {
     let key = match check.name.as_str() {
         REAPER_PROCESS_CHECK => "wizard-error-reaper-running",
         ANY_REAPER_PROCESS_CHECK => "wizard-error-uninstall-any-reaper-running",
         BACKUP_SPACE_CHECK => "wizard-error-uninstall-not-enough-space",
+        BACKUP_FOLDER_CHECK => "wizard-error-backup-folder-link",
         _ => return check.message.clone(),
     };
     localizer.text(key).value

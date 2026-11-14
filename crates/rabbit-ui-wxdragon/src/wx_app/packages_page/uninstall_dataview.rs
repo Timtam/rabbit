@@ -335,8 +335,9 @@ fn expand_uninstall_groups(tree: &DataViewCtrl, model: &CustomDataViewTreeModel)
 /// list, a read-only details text and "Also remove settings". Ticking a row
 /// changes its text, the details and the settings option; the run reads the
 /// ticks when it starts.
-/// Non-Windows twin of the tree-based helper: nothing to do. A freshly
-/// rebuilt DataView has no selection, so reading starts at the top.
+/// Non-Windows twin of the tree-based helper: nothing to do. A new
+/// DataView has no selection, and `rebuild_uninstall_list_widgets` clears
+/// it, so reading starts at the top.
 pub(crate) fn reset_uninstall_list_caret_on_focus() {}
 
 pub(crate) fn build_uninstall_tab(
@@ -554,7 +555,8 @@ pub(crate) fn build_uninstall_tab(
 /// association stay; it gets fresh nodes and tells the view everything
 /// changed, and the settings option starts over with the fresh, unticked
 /// rows. Never selects a row: see `focus_packages_list_top` for why
-/// `select_row` crashes on this kind of model.
+/// `select_row` crashes on this kind of model. It clears the selection
+/// first, as `rebuild_backups_list_widgets` does and for the same reason.
 pub(crate) fn rebuild_uninstall_list_widgets(
     widgets: &WizardWidgets,
     items: &UninstallStateCell,
@@ -564,6 +566,7 @@ pub(crate) fn rebuild_uninstall_list_widgets(
     let Some(dv_model) = items.borrow().clone() else {
         return;
     };
+    widgets.uninstall_list.unselect_all();
     let row_count = list.rows.len();
     dv_model.with_userdata_mut::<UninstallTreeData, ()>(|data| {
         data.row_nodes = UninstallTreeData::row_nodes_for(row_count);

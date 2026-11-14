@@ -283,8 +283,9 @@ fn refresh_every_row(model: &CustomDataViewTreeModel) {
     }
 }
 
-/// Non-Windows twin of the tree-based helper: nothing to do. A freshly
-/// rebuilt DataView has no selection, so reading starts at the top.
+/// Non-Windows twin of the tree-based helper: nothing to do. A new
+/// DataView has no selection, and `rebuild_backups_list_widgets` clears
+/// it, so reading starts at the top.
 pub(crate) fn reset_backups_list_caret_on_focus() {}
 
 /// Non-Windows: build the Backups tab: the label naming the tab and the
@@ -525,6 +526,13 @@ pub(crate) fn build_backups_tab(
 /// association stay; it gets fresh nodes and tells the view everything
 /// changed. Never selects a row: see `focus_packages_list_top` for why
 /// `select_row` crashes on this kind of model.
+///
+/// It clears the selection first. NSOutlineView keeps the selected row's
+/// number through the reload, so the list would otherwise open on a row in
+/// the middle, maybe of another REAPER's list, while the details say the
+/// first row's. `unselect_all` is `deselectAll:`, which makes no item up the
+/// way `select_row` does; the selection event it may send has no item, so
+/// the handler ignores it.
 pub(crate) fn rebuild_backups_list_widgets(
     widgets: &WizardWidgets,
     items: &BackupsStateCell,
@@ -533,6 +541,7 @@ pub(crate) fn rebuild_backups_list_widgets(
     let Some(dv_model) = items.borrow().clone() else {
         return;
     };
+    widgets.backups_list.unselect_all();
     let row_count = list.rows.len();
     dv_model.with_userdata_mut::<BackupsTreeData, ()>(|data| {
         data.nodes = BackupsTreeData::nodes_for(row_count);

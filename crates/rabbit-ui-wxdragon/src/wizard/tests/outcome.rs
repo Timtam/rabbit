@@ -162,6 +162,49 @@ fn a_failed_install_says_why_in_words() {
     assert_eq!(wizard_error_reason(&model, &other), other.to_string());
 }
 
+/// A backups folder that is a link stops an install before anything
+/// changes, and Done says so in the user's language, never in the engine's
+/// English; another failed check stays in view after it.
+#[test]
+fn a_linked_backups_folder_stops_an_install_in_words() {
+    let check = rabbit_core::preflight::BACKUP_FOLDER_CHECK;
+    let english = r"C:\REAPER\RABBIT\backups is a symbolic link or junction. RABBIT doesn't install while it is.";
+    for &locale in rabbit_core::localization::embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let model = model_from_plan(
+            &localizer,
+            Platform::Windows,
+            Architecture::X64,
+            vec![fake_installation()],
+            Some(0),
+            InstallPlan {
+                target: None,
+                actions: Vec::new(),
+                notes: Vec::new(),
+            },
+        );
+        let sentence = localizer.text("wizard-error-backup-folder-link").value;
+        assert_reads(locale, &sentence);
+        assert_eq!(model.text.error_backup_folder_link, sentence, "{locale}");
+
+        // As the package operation's own check says it.
+        let alone = rabbit_core::RabbitError::PreflightFailed {
+            message: format!("{check}: {english}"),
+        };
+        assert_eq!(wizard_error_reason(&model, &alone), sentence, "{locale}");
+
+        // As the preflight says it, with every check that failed.
+        let both = rabbit_core::RabbitError::PreflightFailed {
+            message: format!("resource-path: the folder is not writable.; {check}: {english}"),
+        };
+        assert_eq!(
+            wizard_error_reason(&model, &both),
+            format!("{sentence}\nresource-path: the folder is not writable."),
+            "{locale}"
+        );
+    }
+}
+
 #[test]
 fn wizard_error_summary_includes_selected_request_context() {
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();

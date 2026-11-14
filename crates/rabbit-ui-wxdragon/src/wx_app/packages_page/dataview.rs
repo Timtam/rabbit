@@ -1106,6 +1106,13 @@ pub(crate) fn rebuild_packages_tree_model(
     let Some(dv_model) = package_items.borrow().as_ref().cloned() else {
         return;
     };
+    // NSOutlineView keeps the selected row's number through the reload
+    // below, so the list would open on a row in the middle while the
+    // details say the first row's. `unselect_all` is `deselectAll:`, which
+    // makes no item up the way `select_row` does (see
+    // `focus_packages_list_top`); the selection event it may send has no
+    // item, so the handler ignores it.
+    tree.unselect_all();
     let packages_group_label = model.text.packages_tree_group_label.clone();
     let additional_software_group_label = model.text.additional_software_tree_group_label.clone();
     let language_group_label = model.text.language_tree_group_label.clone();
@@ -1199,15 +1206,16 @@ pub(crate) fn rebuild_package_list_widgets(
 /// node pointers, so `select_row(0)` hands the native macOS port a garbage
 /// `0x1` pointer to dereference and crashes the app (reported by macOS
 /// users as a crash right after the first Next, when the version check
-/// auto-advances onto this page). A freshly rebuilt DataView has no
-/// selection anyway, so reading naturally starts at the top — the
-/// caret-drift problem this helper fixes is native-Windows-tree-specific.
+/// auto-advances onto this page). A new DataView has no selection, and
+/// `rebuild_packages_tree_model` clears it with `unselect_all`, so reading
+/// naturally starts at the top — the caret-drift problem this helper fixes
+/// is native-Windows-tree-specific.
 pub(crate) fn focus_packages_list_top(widgets: &WizardWidgets, _package_items: &PackagesStateCell) {
     widgets.package_checklist.set_focus();
 }
 
-/// Non-Windows twin of the tree-based helper: nothing to do. A freshly
-/// rebuilt DataView has no selection, so reading starts at the top, and
-/// selecting a row from code is exactly what crashes here (see
+/// Non-Windows twin of the tree-based helper: nothing to do. A new
+/// DataView has no selection, and a rebuild clears it, so reading starts at
+/// the top, and selecting a row from code is exactly what crashes here (see
 /// [`focus_packages_list_top`]).
 pub(crate) fn reset_packages_list_caret_on_focus() {}

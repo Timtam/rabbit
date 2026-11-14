@@ -23,9 +23,10 @@ use rabbit_core::report::SavedReportPaths;
 use rabbit_core::restore_refusal::{RestoreRefusal, sample_refusals};
 use rabbit_core::rollback::{
     BACKUP_MANIFEST_FILE, BackupSetWriter, KeymapOrigin, MoveOutAction, MovedOutFile,
-    RestoreBackupAction, RestoreBackupActionKind, RestoreItem, RestoreReportItem, RestoreRunReport,
-    RestoreStatus, RestoredKeymap, RestoredPackage, SkippedPackage, SkippedPackageReason,
-    SwappedEntry, SwappedPackage, TestComputer, restore_backups_on, restore_running_refusal_on,
+    RestoreBackupAction, RestoreBackupActionKind, RestoreItem, RestoreReportItem,
+    RestoreRunOptions, RestoreRunReport, RestoreStatus, RestoredKeymap, RestoredPackage,
+    SkippedPackage, SkippedPackageReason, SwappedEntry, SwappedPackage, TestComputer,
+    restore_backups_on, restore_running_refusal_on,
 };
 use tempfile::tempdir;
 
@@ -671,7 +672,7 @@ fn the_check_before_a_restore_decides_from_what_runs_as_the_run_does() {
     ];
     for (name, computer, refuses) in cases {
         let before = snapshot(dir.path());
-        let refusal = restore_running_refusal_on(&run.resource_path, &run.items, &computer);
+        let refusal = running_refusal(&run, &computer);
         assert_eq!(refusal.is_some(), refuses, "{name}: {refusal:?}");
         assert_eq!(
             snapshot(dir.path()),
@@ -709,9 +710,7 @@ fn the_check_before_a_restore_decides_from_what_runs_as_the_run_does() {
     }
 
     // What each one names.
-    let check = |computer: &TestComputer| {
-        restore_running_refusal_on(&run.resource_path, &run.items, computer).unwrap()
-    };
+    let check = |computer: &TestComputer| running_refusal(&run, computer).unwrap();
     assert!(matches!(
         check(&TestComputer {
             reapers: vec![target.clone()],
@@ -753,16 +752,24 @@ fn a_key_map_restore_needs_the_targets_reaper_closed() {
         ..TestComputer::default()
     };
     assert!(matches!(
-        restore_running_refusal_on(&run.resource_path, &run.items, &computer),
+        running_refusal(&run, &computer),
         Some(RestoreRefusal::ReaperRunning {
             puts_keymap_back: true,
             ..
         })
     ));
-    assert_eq!(
-        restore_running_refusal_on(&run.resource_path, &run.items, &TestComputer::default()),
-        None
-    );
+    assert_eq!(running_refusal(&run, &TestComputer::default()), None);
+}
+
+/// [`backup_restore_running_refusal`] as the Restore button asks it, on
+/// `computer`: the wizard's own function hands the check the run's folder
+/// and backups.
+fn running_refusal(run: &BackupRestoreRun, computer: &TestComputer) -> Option<RestoreRefusal> {
+    backup_restore_running_refusal_with(run, &|path, items| {
+        assert_eq!(path, run.resource_path.as_path());
+        assert_eq!(items, run.items.as_slice());
+        restore_running_refusal_on(path, items, computer)
+    })
 }
 
 #[test]
@@ -2067,21 +2074,34 @@ fn set_path(resource: &Path, set_id: &str) -> PathBuf {
     resource.join("RABBIT").join("backups").join(set_id)
 }
 
-/// Restore what `run` takes on a computer where nothing runs, as the
-/// wizard's run does it, with the wizard's options.
+/// Restore what `run` takes on a computer where nothing runs, through
+/// [`run_backup_restore`]'s own code, which hands the engine the run's
+/// folder and backups with the wizard's options.
 fn restore(
     run: &BackupRestoreRun,
     progress: &ProgressReporter,
     cancel: &CancelToken,
 ) -> rabbit_core::Result<RestoreRunReport> {
-    restore_backups_on(
-        &run.resource_path,
-        &run.items,
-        &backup_restore_run_options(),
-        &TestComputer::default(),
-        progress,
-        cancel,
-    )
+    let on_test_computer = |path: &Path,
+                            items: &[RestoreItem],
+                            options: &RestoreRunOptions,
+                            progress: &ProgressReporter,
+                            cancel: &CancelToken| {
+        assert_eq!(path, run.resource_path.as_path());
+        assert_eq!(items, run.items.as_slice());
+        // A real run, never a dry one, that refuses a running REAPER.
+        assert_eq!(*options, backup_restore_run_options());
+        assert!(!options.dry_run && !options.quick && !options.allow_reaper_running);
+        restore_backups_on(
+            path,
+            items,
+            options,
+            &TestComputer::default(),
+            progress,
+            cancel,
+        )
+    };
+    run_backup_restore_with(run, progress, cancel, &on_test_computer)
 }
 
 #[test]

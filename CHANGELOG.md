@@ -47,9 +47,10 @@ from this file and posts it as the GitHub release body.
   before an update, or puts your old key map back while keeping the scripts
   installed since. What it replaces goes into a new backup first; after an
   earlier version or a key map, restoring that one goes back again. A
-  backup that can't be restored can't be ticked and says why, such as a
-  package you installed again since. **Delete** removes backups for good,
-  to free the room they take; RABBIT asks first, with **No** selected.
+  backup that can't be restored can't be ticked for Restore and says why,
+  such as a package you installed again since. **Delete** removes backups
+  for good, to free the room they take; RABBIT asks first, with **No**
+  selected.
   Backups RABBIT kept together, such as two packages one uninstall removed,
   are ticked and deleted together. Both go through Review, the progress
   page and the Done page, like an install or an uninstall: Enter never

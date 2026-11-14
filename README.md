@@ -367,10 +367,11 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
 The **Backups** tab on the package page lists what RABBIT kept for the
 REAPER you picked, so you can get it back or delete it. It is the third tab:
 from **Install or update**, press Ctrl+Tab twice, or see **Switching tabs**
-under [Uninstalling from the wizard](#uninstalling-from-the-wizard). Press
-Tab to reach the list, and Space to tick a row. Nothing is ticked to begin
-with, and the group headings can't be ticked. The rows come in up to four
-groups:
+under [Uninstalling from the wizard](#uninstalling-from-the-wizard). On a
+Mac, and on Windows when you switch from inside a tab, focus lands in the
+list; from the tabs on Windows, press Tab to reach it. Press Space to tick a
+row. Nothing is ticked to begin with, and the group headings can't be
+ticked. The rows come in up to four groups:
 
 - **Software you uninstalled:** the files an uninstall moved away, and the
   settings it removed with them. Each is the only copy until you restore
@@ -1177,10 +1178,11 @@ key map OSARA's key map replaced, with `-2`, `-3` and so on added when the
 name is taken. Older versions also made `unattended-unix-<time>-<n>` sets
 that hold only a copy of RABBIT's records. The wizard's **Backups** tab and
 `rabbit backups` list them all.
-Restores and deletions with `--apply` that get past their checks save their
-reports under `<resource>/RABBIT/logs/` too, as JSON and text. A backup set
-whose deletion didn't finish stays in `<resource>/RABBIT/backups-deleting/<id>/`
-until `delete-backup` finishes it.
+Restores and deletions that get past their checks, from the wizard's
+**Backups** tab or with `--apply`, save their reports under
+`<resource>/RABBIT/logs/` too, as JSON and text. A backup set whose deletion
+didn't finish stays in `<resource>/RABBIT/backups-deleting/<id>/` until a
+delete finishes it, on the **Backups** tab or with `delete-backup`.
 The download cache is a `rabbit-cache` folder in your temporary folder, usually
 `%TEMP%\rabbit-cache` on Windows and `$TMPDIR/rabbit-cache` on macOS. It can be
 deleted safely at any time, and the CLI's `--cache-dir` points a single run

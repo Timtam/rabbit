@@ -10,15 +10,18 @@ use rabbit_core::backup_overview::{
     BackupEntry, BackupGroup, BackupItem, BackupSetKind, BackupStatus, ModifiedTime, RestoreScope,
     SetFingerprint, backup_overview,
 };
+use rabbit_core::cancel::CancelToken;
 use rabbit_core::localization::{DEFAULT_LOCALE, Localizer, embedded_locales};
 use rabbit_core::preflight::{
     PreflightCheck, PreflightReport, PreflightStatus, REAPER_PROCESS_CHECK,
 };
+use rabbit_core::progress::ProgressReporter;
 use rabbit_core::receipt::PackageReceipt;
 use rabbit_core::restore_refusal::{RestoreRefusal, TargetRefusal, sample_refusals};
 use rabbit_core::rollback::{
-    BackupPackageRecord, BackupSetWriter, KeymapOrigin, RestorePart, RestoreReportItem,
-    RestoreRunReport, RestoreStatus, RestoredPackage, SwappedEntry, SwappedPackage,
+    BackupPackageRecord, BackupSetWriter, KeymapOrigin, RestoreItem, RestorePart,
+    RestoreReportItem, RestoreRunOptions, RestoreRunReport, RestoreStatus, RestoredPackage,
+    SwappedEntry, SwappedPackage, TestComputer, restore_backups_on,
 };
 use rabbit_core::uninstall::ANY_REAPER_PROCESS_CHECK;
 use rabbit_core::uninstall::execute::UNINSTALL_BACKUP_REASON;
@@ -987,8 +990,8 @@ fn details_say_why_for_every_status_in_both_choices() {
                 "{sws_start}It is the only copy.\n\
                  It belongs to another account, so RABBIT neither restores nor deletes it.\n\
                  To remove it, in Finder choose Go > Go to Folder, enter {}, then select \
-                 uninstall-unix-1794233100 and press Command-Delete. Finder asks for an \
-                 administrator's name and password if it needs one.",
+                 uninstall-unix-1794233100, press Command-Delete and empty the Trash. Finder \
+                 asks for an administrator's name and password if it needs one.",
                 folder.display()
             ),
             BackupStatus::NotABackup => "This isn't a backup RABBIT made: it is a link, or a \
@@ -1121,12 +1124,13 @@ fn another_accounts_backup_says_how_to_remove_it_in_finder_and_never_sudo() {
         "{details}"
     );
     // The set is in the hidden Library folder on macOS, so the steps go
-    // through Go to Folder to the folder that holds it, then the set.
+    // through Go to Folder to the folder that holds it, then the set. In
+    // the Trash it still takes its room, so they end with emptying it.
     let folder = PathBuf::from("C:/REAPER/RABBIT").join("backups");
     assert!(
         details.contains(&format!(
             "To remove it, in Finder choose Go > Go to Folder, enter {}, then select \
-             uninstall-unix-1794233100 and press Command-Delete.",
+             uninstall-unix-1794233100, press Command-Delete and empty the Trash.",
             folder.display()
         )),
         "{details}"
@@ -1509,6 +1513,53 @@ fn a_delete_tick_names_every_other_row_it_ticks() {
     );
 }
 
+/// Where a language's participle agrees with how many rows a delete tick
+/// takes along, the macOS announcement says it in the plural for several.
+#[test]
+fn the_tie_announcement_agrees_with_how_many_rows_it_names() {
+    let reakontrol = BackupEntry {
+        item: package("uninstall-unix-1794233100", "reakontrol"),
+        version: Some(version("1.0")),
+        ..sws()
+    };
+    for (locale, one, several, several_unticked) in [
+        (
+            "es-ES",
+            "También marcado,",
+            "También marcados,",
+            "También desmarcados,",
+        ),
+        ("fr-FR", "Aussi coché,", "Aussi cochés,", "Aussi décochés,"),
+        (
+            "it-IT",
+            "Selezionato anche,",
+            "Selezionati anche,",
+            "Deselezionati anche,",
+        ),
+        (
+            "pt-BR",
+            "Também marcado,",
+            "Também marcados,",
+            "Também desmarcados,",
+        ),
+    ] {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let said = |list: &mut WizardBackupList, ticked: bool| {
+            // The first row under the heading.
+            let change = apply_backup_checkbox(&mut list.rows, 1, BackupChoice::Delete, ticked);
+            backups_also_ticked_announcement(&localizer, &list.rows, 1, &change).unwrap()
+        };
+        let mut two = list_in(&localizer, vec![sws(), ffmpeg()]);
+        let text = said(&mut two, true);
+        assert!(text.starts_with(one), "{locale}: {text}");
+        let mut three = list_in(&localizer, vec![sws(), ffmpeg(), reakontrol.clone()]);
+        let text = said(&mut three, true);
+        assert!(text.starts_with(several), "{locale}: {text}");
+        let text = said(&mut three, false);
+        assert!(text.starts_with(several_unticked), "{locale}: {text}");
+    }
+}
+
 #[test]
 fn restore_ticks_are_never_tied() {
     let mut list = backup_list(vec![sws(), ffmpeg()]);
@@ -1720,25 +1771,69 @@ fn an_empty_list_says_rabbit_has_no_backups_and_when_it_makes_them() {
     );
 }
 
+/// A backups folder that is a link says so in the user's language, as a
+/// restore's refusal of it does, whether the overview says it as a refusal
+/// or as the error the backup code gives for a link.
 #[test]
 fn an_unreadable_backups_folder_says_why() {
-    let error = RabbitError::RestoreRefused(RestoreRefusal::IsLink {
-        path: PathBuf::from("C:/REAPER/RABBIT/backups"),
-    });
-    let list = backup_list_unreadable(&error);
-    let (label, details) = list.placeholder(&en()).unwrap();
-    assert_eq!(label, "RABBIT couldn't read the backups of this REAPER.");
-    assert!(
-        details.starts_with("RABBIT couldn't read its backups folder (RABBIT doesn't use"),
-        "{details}"
-    );
-    assert!(
-        details.ends_with("so it can't list what it could restore or delete."),
-        "{details}"
-    );
+    let path = PathBuf::from("C:/REAPER/RABBIT/backups");
+    let refusal = RestoreRefusal::IsLink { path: path.clone() };
+    for error in [
+        RabbitError::RestoreRefused(refusal.clone()),
+        RabbitError::BackupPathIsLink { path: path.clone() },
+    ] {
+        let list = backup_list_unreadable(&error);
+        assert_eq!(list.unreadable, Some(BackupsUnreadable::Link(path.clone())));
+        let (label, details) = list.placeholder(&en()).unwrap();
+        assert_eq!(label, "RABBIT couldn't read the backups of this REAPER.");
+        assert_eq!(
+            details,
+            format!(
+                "RABBIT doesn't use {}: it is a symbolic link or junction, and RABBIT never \
+                 follows one in its backups.",
+                path.display()
+            )
+        );
+        assert_eq!(
+            list.tab_announcement(&en()),
+            "Backups. RABBIT couldn't read the backups of this REAPER."
+        );
+        for &locale in embedded_locales() {
+            let localizer = Localizer::embedded(locale).unwrap();
+            let (label, details) = list.placeholder(&localizer).unwrap();
+            assert_eq!(
+                label,
+                localizer.text("wizard-backups-unreadable").value,
+                "{locale}"
+            );
+            assert_eq!(
+                details,
+                restore_refusal_text(&localizer, &refusal),
+                "{locale}"
+            );
+            assert_reads(locale, &details);
+            if locale != DEFAULT_LOCALE {
+                assert!(
+                    !details.contains("RABBIT doesn't use"),
+                    "{locale}: {details}"
+                );
+            }
+        }
+    }
+
+    // Any other error is said as it is, in English, in the sentence.
+    let other = RabbitError::Io {
+        path: path.clone(),
+        source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied"),
+    };
+    let list = backup_list_unreadable(&other);
+    let (_, details) = list.placeholder(&en()).unwrap();
     assert_eq!(
-        list.tab_announcement(&en()),
-        "Backups. RABBIT couldn't read the backups of this REAPER."
+        details,
+        format!(
+            "RABBIT couldn't read its backups folder ({other}), so it can't list what it could \
+             restore or delete."
+        )
     );
 }
 
@@ -1770,19 +1865,34 @@ fn a_backups_folder_that_is_a_link_leaves_the_list_empty_and_says_why() {
     fs::create_dir_all(&elsewhere).unwrap();
     link_folder(&resource.join("RABBIT").join("backups"), &elsewhere);
 
-    let list = backup_list_at(&en(), &resource);
-    assert!(list.rows.is_empty());
-    assert!(list.unreadable.is_some());
-    let (label, details) = list.placeholder(&en()).unwrap();
-    assert_eq!(label, "RABBIT couldn't read the backups of this REAPER.");
-    assert!(
-        details.starts_with("RABBIT couldn't read its backups folder ("),
-        "{details}"
-    );
-    assert!(
-        details.ends_with("so it can't list what it could restore or delete."),
-        "{details}"
-    );
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let list = backup_list_at(&localizer, &resource);
+        assert!(list.rows.is_empty());
+        let Some(BackupsUnreadable::Link(link)) = &list.unreadable else {
+            panic!("{locale}: {:?}", list.unreadable);
+        };
+        let (label, details) = list.placeholder(&localizer).unwrap();
+        assert_eq!(
+            label,
+            localizer.text("wizard-backups-unreadable").value,
+            "{locale}"
+        );
+        // The restore's own refusal of that link, in the user's language,
+        // never the engine's English inside a sentence.
+        assert_eq!(
+            details,
+            restore_refusal_text(&localizer, &RestoreRefusal::IsLink { path: link.clone() }),
+            "{locale}"
+        );
+        assert!(details.contains(&link.display().to_string()), "{locale}");
+        if locale != DEFAULT_LOCALE {
+            assert!(
+                !details.contains("RABBIT doesn't use"),
+                "{locale}: {details}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1930,6 +2040,26 @@ fn dates_read_in_every_locale() {
     assert_eq!(date("de-DE", midnight, 0), "9. November 2026, 0:05 Uhr");
     assert_eq!(date("en-US", NOV_1_1840, 0), "November 1, 2026, 6:40 PM");
     assert_eq!(date("fr-FR", NOV_1_1840, 0), "1er novembre 2026 à 18 h 40");
+    assert_eq!(
+        date("pt-BR", NOV_1_1840, 0),
+        "1º de novembro de 2026, 18:40"
+    );
+    assert_eq!(date("it-IT", NOV_1_1840, 0), "1 novembre 2026, 18:40");
+    // Italian sentences put "il giorno" before a date, so the 1st, the 8th
+    // and the 11th read as the other days do, never "il 8" or "del 11".
+    let italian = list_in(
+        &Localizer::embedded("it-IT").unwrap(),
+        vec![keymap(), sws()],
+    );
+    let whens: Vec<&str> = italian.rows.iter().map(|row| row.when.as_str()).collect();
+    assert!(
+        whens.contains(&"Disinstallato il giorno 9 novembre 2026, 14:05"),
+        "{whens:?}"
+    );
+    assert!(
+        whens.contains(&"Sostituita da quella di OSARA il giorno 1 novembre 2026, 18:40"),
+        "{whens:?}"
+    );
 
     // Every month reads in every locale, by its own name: the 15th of each
     // month of 2026, at noon.
@@ -2401,9 +2531,8 @@ fn restore_review_blocks_two_backups_that_write_the_same_file_naming_both() {
     assert_eq!(
         blockers,
         [
-            "Can't restore yet: Your key map (Replaced by OSARA's on November 1, 2026, 6:40 PM) \
-             and Key map (Replaced by a restore on October 2, 2026, 11:00 AM) both put back the \
-             same file. Tick only one of them."
+            "Can't restore yet: your key map from November 1, 2026, 6:40 PM and the key map \
+             from October 2, 2026, 11:00 AM both put back the same file. Tick only one of them."
         ]
     );
     assert!(!review.can_restore);
@@ -3266,10 +3395,14 @@ fn the_tab_starts_with_the_first_rows_details_or_the_placeholders() {
     let unreadable = backup_list_unreadable(&RabbitError::RestoreRefused(RestoreRefusal::IsLink {
         path: PathBuf::from("C:/REAPER/RABBIT/backups"),
     }));
+    assert_eq!(
+        unreadable.initial_details(&en()),
+        unreadable.placeholder(&en()).unwrap().1
+    );
     assert!(
         unreadable
             .initial_details(&en())
-            .starts_with("RABBIT couldn't read its backups folder ("),
+            .starts_with("RABBIT doesn't use "),
         "{}",
         unreadable.initial_details(&en())
     );
@@ -3296,23 +3429,48 @@ fn snapshot(root: &std::path::Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
     found
 }
 
-// The three quick-plan tests below run `backup_quick_plan` as the wizard
-// does, through `restore_backups`, which always asks this computer what
-// REAPER and other programs run and where its standard REAPER is, unlike
-// rabbit-core's own restore tests. They only read, and the only files they
-// touch are in their own temporary folder, but the answers differ between
-// computers: a REAPER running here adds Review's "Close REAPER first."
-// note. So they must never assert on notes about REAPER or other programs,
-// or on the preflight checks.
+/// [`backup_quick_plan`] as the wizard runs it, on a made-up computer
+/// where nothing runs, so the plan never depends on what runs where the
+/// tests run. It checks the run gets the quick plan's options.
+fn quick_plan_on_test_computer(
+    resource: &std::path::Path,
+    list: &WizardBackupList,
+) -> Option<RestoreQuickPlan> {
+    let restore = |path: &std::path::Path,
+                   items: &[RestoreItem],
+                   options: &RestoreRunOptions,
+                   progress: &ProgressReporter,
+                   cancel: &CancelToken| {
+        assert_eq!(*options, backup_quick_plan_options());
+        restore_backups_on(
+            path,
+            items,
+            options,
+            &TestComputer::default(),
+            progress,
+            cancel,
+        )
+    };
+    backup_quick_plan_with(resource, list, &restore)
+}
 
 #[test]
 fn the_quick_plan_runs_only_with_something_ticked_to_restore() {
     let dir = tempdir().unwrap();
     write_uninstall_set(dir.path());
     let mut list = backup_list_at(&en(), dir.path());
-    assert_eq!(backup_quick_plan(dir.path(), &list), None);
+    let never = |_: &std::path::Path,
+                 _: &[RestoreItem],
+                 _: &RestoreRunOptions,
+                 _: &ProgressReporter,
+                 _: &CancelToken|
+     -> rabbit_core::Result<RestoreRunReport> {
+        panic!("the quick plan ran with nothing ticked to restore")
+    };
+    assert_eq!(backup_quick_plan_with(dir.path(), &list, &never), None);
     // Ticks for Delete don't count.
     tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Delete);
+    assert_eq!(backup_quick_plan_with(dir.path(), &list, &never), None);
     assert_eq!(backup_quick_plan(dir.path(), &list), None);
 }
 
@@ -3325,7 +3483,7 @@ fn the_quick_plan_of_a_real_set_lets_review_restore_and_changes_nothing() {
     tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Restore);
     let before = snapshot(resource);
 
-    let plan = backup_quick_plan(resource, &list).unwrap();
+    let plan = quick_plan_on_test_computer(resource, &list).unwrap();
     assert_eq!(snapshot(resource), before);
     // No lock, no report and no before-restore set.
     assert!(!resource.join("RABBIT").join("logs").exists());
@@ -3363,7 +3521,7 @@ fn a_quick_plan_of_a_set_gone_since_listing_blocks_review() {
     )
     .unwrap();
 
-    let plan = backup_quick_plan(resource, &list).unwrap();
+    let plan = quick_plan_on_test_computer(resource, &list).unwrap();
     let target = TargetRow {
         path: resource.to_path_buf(),
         ..target(true)
