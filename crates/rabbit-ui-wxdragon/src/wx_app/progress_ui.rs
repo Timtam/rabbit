@@ -9,7 +9,7 @@ use rabbit_core::progress::ProgressEvent;
 
 use crate::{
     ProgressUiState, administrator_prompt_line, administrator_still_waiting_line,
-    backup_delete_progress_lines, is_spoken, removal_started_lines,
+    backup_delete_progress_lines, backup_restore_progress_lines, is_spoken, removal_started_lines,
 };
 
 use crate::wx_app::globals::{AnnouncePriority, announce, with_ui_localizer};
@@ -283,9 +283,14 @@ pub(crate) fn apply_progress_event_to_ui(
             status_line = status;
             log_line = log;
         }
-        // The wizard doesn't restore backups until step 2d of the backup
-        // plan: a restore's events change no line and log nothing yet.
-        ProgressEvent::RestoreStarted { .. } | ProgressEvent::RestoreCompleted { .. } => {}
+        // A restore holds the status line with the backup it is
+        // restoring, and logs what came of each one when it ends; see
+        // `backup_restore_progress_lines`.
+        ProgressEvent::RestoreStarted { .. } | ProgressEvent::RestoreCompleted { .. } => {
+            let (status, log) = backup_restore_progress_lines(localizer, &state, &event);
+            status_line = status;
+            log_line = log;
+        }
     });
 
     widgets.progress_gauge.set_value(state.percentage());

@@ -41,7 +41,8 @@ use crate::wx_app::widgets::{
 use crate::wx_app::{DONE_STEP, PROGRESS_STEP};
 
 /// The handles a run needs to move the wizard on, Progress at the start
-/// and Done at the end: an uninstall's, and a delete of backups'.
+/// and Done at the end: an uninstall's, a restore's and a delete of
+/// backups'.
 /// Everything here is `Send`, so the worker's completion can carry it back
 /// to the UI thread in `call_after`.
 #[derive(Clone)]

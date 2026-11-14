@@ -154,6 +154,10 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         progress_status_delete_running: localizer
             .text("wizard-progress-status-delete-running")
             .value,
+        progress_restore_heading: localizer.text("wizard-progress-restore-heading").value,
+        progress_status_restore_running: localizer
+            .text("wizard-progress-status-restore-running")
+            .value,
         done_status_success: localizer.text("wizard-done-status-success").value,
         done_status_completed_with_errors: localizer
             .text("wizard-done-status-completed-with-errors")

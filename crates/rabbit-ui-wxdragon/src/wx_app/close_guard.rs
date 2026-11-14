@@ -1,6 +1,6 @@
 //! Decides what closing the window means while a run is going: an install,
-//! an uninstall or a delete of backups, and asks the user when the answer
-//! is "stop the run".
+//! an uninstall, a restore or a delete of backups, and asks the user when
+//! the answer is "stop the run".
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,9 +15,9 @@ use crate::wx_app::globals::with_ui_frame;
 use crate::wx_app::self_update_ui::SELF_UPDATE_APPLYING;
 use crate::wx_app::widgets::WizardWidgets;
 
-/// The worker's half of the close handshake, for an install, an uninstall
-/// and a delete of backups alike: each stops at its next package or backup
-/// boundary.
+/// The worker's half of the close handshake, for an install, an uninstall,
+/// a restore and a delete of backups alike: each stops at its next package
+/// or backup boundary.
 ///
 /// Closing the window used to end the process wherever the worker happened
 /// to be: mid-download, mid-extract, or between a vendor installer finishing

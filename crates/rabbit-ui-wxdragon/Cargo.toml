@@ -19,4 +19,7 @@ serde.workspace = true
 wxdragon = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The restore tests run on a made-up computer (`rollback::TestComputer`).
+# With feature resolver 2+ the hook stays out of the shipped binary.
+rabbit-core = { path = "../rabbit-core", features = ["test-support"] }
 tempfile.workspace = true

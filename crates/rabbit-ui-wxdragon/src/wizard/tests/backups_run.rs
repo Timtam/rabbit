@@ -1110,7 +1110,7 @@ fn a_refused_run_deletes_nothing_and_says_which_backup_and_why() {
     assert_eq!(
         outcome.status_text,
         "Nothing was deleted.\n\nRABBIT deletes the ticked backups only when it can delete \
-         every one of them.\nRABBIT can't delete Your key map (Replaced by OSARA's on November \
+         every one of them.\nRABBIT can't delete this backup: Your key map (Replaced by OSARA's on November \
          1, 2026, 6:40 PM). It changed since RABBIT listed it. Start RABBIT again to see the \
          backups as they are now."
     );
@@ -1144,7 +1144,7 @@ fn a_refused_run_deletes_nothing_and_says_which_backup_and_why() {
     );
     assert_eq!(
         outcome.status_text,
-        "Nothing was deleted.\n\nRABBIT can't delete Your key map (Replaced by OSARA's on \
+        "Nothing was deleted.\n\nRABBIT can't delete this backup: Your key map (Replaced by OSARA's on \
          November 1, 2026, 6:40 PM). It belongs to another account, so RABBIT doesn't delete it."
     );
 }
@@ -1853,7 +1853,7 @@ fn a_set_changed_since_listing_refuses_the_run_and_deletes_nothing() {
     assert!(
         outcome.status_text.starts_with(
             "Nothing was deleted.\n\nRABBIT deletes the ticked backups only when it can delete \
-             every one of them.\nRABBIT can't delete ReaPack 1.2.4 (Uninstalled "
+             every one of them.\nRABBIT can't delete this backup: ReaPack 1.2.4 (Uninstalled "
         ),
         "{}",
         outcome.status_text

@@ -182,6 +182,9 @@ pub struct WizardText {
     /// are deleted. A stop says `progress_status_cancelling`.
     pub progress_delete_heading: String,
     pub progress_status_delete_running: String,
+    /// The same while backups are restored.
+    pub progress_restore_heading: String,
+    pub progress_status_restore_running: String,
     pub done_heading: String,
     pub done_status: String,
     pub done_status_success: String,

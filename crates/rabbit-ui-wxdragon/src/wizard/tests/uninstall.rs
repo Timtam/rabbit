@@ -788,32 +788,25 @@ fn the_uninstall_button_has_its_own_run_flag() {
 }
 
 #[test]
-fn a_delete_starts_once_its_review_can_and_a_restore_never_yet() {
-    // The delete run is built (backup plan 2c); the restore run comes with
-    // 2d, which turns its constant on.
-    const {
-        assert!(!RESTORE_RUN_AVAILABLE);
-        assert!(DELETE_BACKUPS_RUN_AVAILABLE);
-    }
-    for plan_can_install in [false, true] {
-        for review_can_install in [false, true] {
-            for review_can_uninstall in [false, true] {
-                for review_can_run_backups in [false, true] {
-                    assert!(!WizardMode::Restore.run_button_enabled(
-                        plan_can_install,
-                        review_can_install,
-                        review_can_uninstall,
-                        review_can_run_backups,
-                    ));
-                    assert_eq!(
-                        WizardMode::DeleteBackups.run_button_enabled(
-                            plan_can_install,
-                            review_can_install,
-                            review_can_uninstall,
+fn each_backup_run_starts_only_when_its_review_can() {
+    // Each backup mode's button is enabled exactly when its own Review can
+    // run, whatever the install and uninstall flags say.
+    for mode in [WizardMode::Restore, WizardMode::DeleteBackups] {
+        for plan_can_install in [false, true] {
+            for review_can_install in [false, true] {
+                for review_can_uninstall in [false, true] {
+                    for review_can_run_backups in [false, true] {
+                        assert_eq!(
+                            mode.run_button_enabled(
+                                plan_can_install,
+                                review_can_install,
+                                review_can_uninstall,
+                                review_can_run_backups,
+                            ),
                             review_can_run_backups,
-                        ),
-                        review_can_run_backups
-                    );
+                            "{mode:?}"
+                        );
+                    }
                 }
             }
         }

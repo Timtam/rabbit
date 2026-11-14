@@ -500,7 +500,7 @@ fn quick_plan(backups: Vec<RestoreReportItem>, checks: Vec<PreflightCheck>) -> R
 
 /// A quick plan that found nothing against any backup ticked to restore in
 /// `list`, with no check failing.
-fn plan_all(list: &WizardBackupList) -> RestoreQuickPlan {
+pub(super) fn plan_all(list: &WizardBackupList) -> RestoreQuickPlan {
     quick_plan(
         backup_restore_items(list).iter().map(planned).collect(),
         Vec::new(),

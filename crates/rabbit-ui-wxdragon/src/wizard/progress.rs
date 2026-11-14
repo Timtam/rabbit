@@ -7,6 +7,7 @@ use rabbit_core::localization::Localizer;
 use rabbit_core::model::Platform;
 use rabbit_core::progress::{ProgressEvent, RemovalMethod};
 
+use super::backups_restore_run::BackupRestoreProgress;
 use super::backups_run::BackupDeleteProgress;
 use super::model::WizardText;
 use super::uninstall::WizardMode;
@@ -21,8 +22,8 @@ use super::uninstall::WizardMode;
 /// `Arc<Mutex<…>>` around it there is purely so the closures satisfy `Send`.
 #[derive(Debug, Clone)]
 pub struct ProgressUiState {
-    /// Packages the run installs or uninstalls, or the backup sets a
-    /// delete takes.
+    /// Packages the run installs or uninstalls, the backup sets a delete
+    /// takes, or the backups a restore brings back.
     pub total_packages: usize,
     /// The phases each package goes through; see [`phases_per_package`].
     pub phases_per_package: usize,
@@ -51,6 +52,9 @@ pub struct ProgressUiState {
     /// each set belongs to and what came of each group so far, for its
     /// status and log lines. Empty for every other run.
     pub backup_delete: BackupDeleteProgress,
+    /// What a restore says when each backup starts and ends, by the
+    /// backup's set and package. Empty for every other run.
+    pub backup_restore: BackupRestoreProgress,
 }
 
 /// The phases one package goes through in a run of `mode`. An install
@@ -77,6 +81,7 @@ impl ProgressUiState {
             still_waiting_count: 0,
             waiting_for_files_count: 0,
             backup_delete: BackupDeleteProgress::default(),
+            backup_restore: BackupRestoreProgress::default(),
         }
     }
 
@@ -84,6 +89,13 @@ impl ProgressUiState {
     /// groups of (see [`super::backups_run::backup_delete_progress`]).
     pub fn with_backup_delete(mut self, progress: BackupDeleteProgress) -> Self {
         self.backup_delete = progress;
+        self
+    }
+
+    /// The same state, for a restore that `progress` tells the backups of
+    /// (see [`super::backups_restore_run::backup_restore_progress`]).
+    pub fn with_backup_restore(mut self, progress: BackupRestoreProgress) -> Self {
+        self.backup_restore = progress;
         self
     }
 
@@ -161,7 +173,10 @@ impl ProgressUiState {
             }
             ProgressEvent::InstallStarted { package_id }
             | ProgressEvent::RemoveStarted { package_id, .. }
-            | ProgressEvent::DeleteStarted { set_id: package_id } => {
+            | ProgressEvent::DeleteStarted { set_id: package_id }
+            | ProgressEvent::RestoreStarted {
+                set_id: package_id, ..
+            } => {
                 self.current_package = Some(package_id.clone());
             }
             ProgressEvent::VendorStillWaiting { .. } => {
@@ -170,11 +185,12 @@ impl ProgressUiState {
             ProgressEvent::VendorWaitingForFiles { .. } => {
                 self.waiting_for_files_count += 1;
             }
-            // A delete has one phase per set, which ends when the set is
-            // done with, deleted or not.
+            // A delete has one phase per set, and a restore one per backup,
+            // which ends when the run is done with it, whatever came of it.
             ProgressEvent::InstallCompleted { .. }
             | ProgressEvent::RemoveCompleted { .. }
-            | ProgressEvent::DeleteCompleted { .. } => {
+            | ProgressEvent::DeleteCompleted { .. }
+            | ProgressEvent::RestoreCompleted { .. } => {
                 self.current_package = None;
                 self.completed_phases += 1;
             }
@@ -185,9 +201,6 @@ impl ProgressUiState {
             ProgressEvent::ConfigurationCompleted { .. } => {
                 self.completed_phases += 1;
             }
-            // The wizard doesn't restore backups until step 2d of the
-            // backup plan, so a restore's events count nothing yet.
-            ProgressEvent::RestoreStarted { .. } | ProgressEvent::RestoreCompleted { .. } => {}
         }
     }
 }
@@ -295,8 +308,8 @@ impl ProgressUiState {
 /// uninstaller's time limit. So is the line right before an administrator
 /// prompt, which says what the window is for, and the line when its
 /// password window has waited a while, which may be behind RABBIT. So is
-/// the start of each backup a delete takes; its end only goes into the log,
-/// and Done says what came of them all.
+/// the start of each backup a delete takes or a restore brings back; its
+/// end only goes into the log, and Done says what came of them all.
 ///
 /// No wildcard arm, on purpose: a new event must not compile until someone
 /// decides whether it is heard. A `matches!` here once let the uninstall
@@ -311,17 +324,15 @@ pub fn is_spoken(event: &ProgressEvent) -> bool {
         | ProgressEvent::VendorWaitingForFiles { .. }
         | ProgressEvent::AdministratorPrompt { .. }
         | ProgressEvent::AdministratorStillWaiting { .. }
-        | ProgressEvent::DeleteStarted { .. } => true,
+        | ProgressEvent::DeleteStarted { .. }
+        | ProgressEvent::RestoreStarted { .. } => true,
         ProgressEvent::DownloadStarted { .. }
         | ProgressEvent::DownloadProgress { .. }
         | ProgressEvent::DownloadCompleted { .. }
         | ProgressEvent::InstallCompleted { .. }
         | ProgressEvent::ConfigurationCompleted { .. }
-        | ProgressEvent::DeleteCompleted { .. } => false,
-        // The wizard doesn't restore backups until step 2d of the backup
-        // plan, which decides what a restore says. Until then it says
-        // nothing.
-        ProgressEvent::RestoreStarted { .. } | ProgressEvent::RestoreCompleted { .. } => false,
+        | ProgressEvent::DeleteCompleted { .. }
+        | ProgressEvent::RestoreCompleted { .. } => false,
     }
 }
 

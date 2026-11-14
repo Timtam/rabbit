@@ -1,6 +1,8 @@
 //! The wxWidgets wizard shell: `run` builds the frame, wires every page's
 //! events, and hands the work to the modules beside it.
 mod backup_delete_run;
+mod backup_restore_run;
+mod backup_run;
 mod close_guard;
 mod expert_mode;
 mod globals;
@@ -47,6 +49,7 @@ use wxdragon::prelude::*;
 use wxdragon::widgets::SimpleBook;
 
 use crate::wx_app::backup_delete_run::{BackupDeleteRunUi, start_backup_delete};
+use crate::wx_app::backup_restore_run::{BackupRestoreRunUi, start_backup_restore};
 use crate::wx_app::close_guard::{
     CloseVerdict, InstallRunState, announce_stopping, close_verdict, confirm_stop_install,
     defer_close_dialog, show_close_blocked_by_self_update,
@@ -703,17 +706,20 @@ pub fn run() {
             let review_can_uninstall = Rc::clone(&review_can_uninstall);
             let review_can_run_backups = Rc::clone(&review_can_run_backups);
             // Rebuilds the three Packages tabs' lists after every kind of
-            // run: an install, an uninstall or a delete of backups. The run
-            // arms it as the post-run hook, which holds this UI-thread
-            // `Rc<RefCell>` state so the worker's `call_after` completion can
-            // refresh it without smuggling non-Send references across
-            // threads. It reads the selected target's backups again,
+            // run: an install, an uninstall, a restore or a delete of
+            // backups. The run arms it as the post-run hook, which holds this
+            // UI-thread `Rc<RefCell>` state so the worker's `call_after`
+            // completion can refresh it without smuggling non-Send references
+            // across threads. It reads the selected target's backups again,
             // re-detects the target, plans against the fresh receipts, and
             // rebuilds the cached state and all three lists in place, never
             // the tab selection or focus. After an uninstall the Install tab
             // offers what went again, unticked, because the run recorded it
             // as declined, and the Backups tab lists the set it wrote. After
-            // a delete, the sets it deleted are gone from the Backups tab.
+            // a restore, the Backups tab lists the backup of what it replaced,
+            // and the Install and Uninstall tabs what RABBIT's records now
+            // say. After a delete, the sets it deleted are gone from the
+            // Backups tab.
             let rescan_after_run: Rc<dyn Fn()> = {
                 let model = Arc::clone(&model);
                 let package_rows = Rc::clone(&package_rows);
@@ -737,10 +743,11 @@ pub fn run() {
                     let refreshed_target = refreshed_target_row(&model, &target);
                     // The Backups rows, read again for the same target, as
                     // the version check reads them: an install writes update
-                    // sets, an uninstall an uninstall set, and a delete
-                    // removes sets. Nothing stays ticked, and the choice
-                    // below the list is Restore again. First, so a plan that
-                    // can't be made below still leaves the rows current.
+                    // sets, an uninstall an uninstall set, a restore a set of
+                    // what it replaced, and a delete removes sets. Nothing
+                    // stays ticked, and the choice below the list is Restore
+                    // again. First, so a plan that can't be made below still
+                    // leaves the rows current.
                     reread_backup_list(&mut backup_list.borrow_mut(), &model, &refreshed_target);
                     rebuild_backups_list_widgets(&widgets, &backup_items, &backup_list.borrow());
                     // Plan against the versions this run installed from,
@@ -848,6 +855,13 @@ pub fn run() {
                 wizard_mode: Rc::clone(&wizard_mode),
             };
             let backup_delete_run_ui = BackupDeleteRunUi {
+                navigation: run_navigation.clone(),
+                backup_list: Rc::clone(&backup_list),
+                install_run: Arc::clone(&install_run),
+                rescan: Rc::clone(&rescan_after_run),
+                wizard_mode: Rc::clone(&wizard_mode),
+            };
+            let backup_restore_run_ui = BackupRestoreRunUi {
                 navigation: run_navigation,
                 backup_list: Rc::clone(&backup_list),
                 install_run: Arc::clone(&install_run),
@@ -858,24 +872,23 @@ pub fn run() {
             let review_step = Arc::clone(&current_step);
             let review_mode = Rc::clone(&wizard_mode);
             let start_install = Rc::new(move || {
-                // The run button runs what Review shows, so an uninstall and
-                // a delete of backups go their own way from here and none of
-                // the install below applies to them.
+                // The run button runs what Review shows, so an uninstall, a
+                // restore and a delete of backups go their own way from here
+                // and none of the install below applies to them.
                 match wizard_mode.get() {
                     WizardMode::Install => {}
                     WizardMode::Uninstall => {
                         start_uninstall(&uninstall_run_ui);
                         return;
                     }
+                    WizardMode::Restore => {
+                        start_backup_restore(&backup_restore_run_ui);
+                        return;
+                    }
                     WizardMode::DeleteBackups => {
                         start_backup_delete(&backup_delete_run_ui);
                         return;
                     }
-                    // The restore run comes in a later step of the backup
-                    // plan (2d). Until then its Review keeps the run button
-                    // disabled, and nothing starts here, whatever got here:
-                    // never an install with ticks a restore left out.
-                    WizardMode::Restore => return,
                 }
                 // Catch a running REAPER here, while the user can still do
                 // something about it. The install's preflight would refuse

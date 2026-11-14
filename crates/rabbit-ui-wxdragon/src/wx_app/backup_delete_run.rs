@@ -4,13 +4,9 @@
 //! Done page.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use rabbit_core::backup_delete::DeleteReport;
-use rabbit_core::progress::ProgressReporter;
 use wxdragon::prelude::*;
 
 use crate::{
@@ -19,17 +15,11 @@ use crate::{
     run_backup_delete, wizard_backup_delete_outcome,
 };
 
+use crate::wx_app::backup_run::{BackupRunDone, BackupRunJob, run_backup_job};
 use crate::wx_app::close_guard::InstallRunState;
-use crate::wx_app::globals::{
-    arm_post_install_hook, fire_post_install_hook, with_ui_frame, with_ui_localizer,
-};
-use crate::wx_app::progress_ui::apply_progress_event_to_ui;
+use crate::wx_app::globals::{with_ui_frame, with_ui_localizer};
 use crate::wx_app::uninstall_run::RunNavigation;
-use crate::wx_app::widgets::{
-    can_launch_last_reaper_path, clone_last_resource_path, planned_reaper_launch_path_for_target,
-    selected_target_row, set_heading, set_last_path, set_last_resource_path,
-};
-use crate::wx_app::{DONE_STEP, PROGRESS_STEP};
+use crate::wx_app::widgets::selected_target_row;
 
 /// Everything the Delete button needs, on the UI thread.
 pub(crate) struct BackupDeleteRunUi {
@@ -115,146 +105,31 @@ fn confirm_delete_backups(title: &str, body: &str) -> bool {
     confirmed
 }
 
-/// Move to Progress and delete on a worker thread. Progress events come
-/// back through `call_after`, as an uninstall's do, and the completion
-/// shows Done.
+/// Move to Progress and delete on a worker thread, as every backup run
+/// does (see [`run_backup_job`]). The engine saves the run's report in
+/// `RABBIT/logs` itself.
 fn run_delete(ui: &BackupDeleteRunUi, run: BackupDeleteRun, details: String) {
-    let navigation = ui.navigation.clone();
-    let model = Arc::clone(&navigation.model);
-    let widgets = navigation.widgets;
-
-    navigation.go_to(PROGRESS_STEP, WizardMode::DeleteBackups);
-    navigation.back.enable(false);
-    navigation.next.enable(false);
-    navigation.install.enable(false);
-    widgets.done_launch_reaper.enable(false);
-    widgets.done_open_resource.enable(false);
-    set_heading(
-        &widgets.progress_heading,
-        &model.text.progress_delete_heading,
-    );
-    widgets
-        .progress_status
-        .set_label(&model.text.progress_status_delete_running);
-    widgets.progress_gauge.set_value(0);
-    widgets.progress_details.set_value(&details);
-    // Onto the gauge, as for an uninstall: focus would otherwise stay on
-    // the Delete button, which the page change has just hidden.
-    widgets.progress_gauge.set_focus();
-    if let Some(target) = selected_target_row(&model, &widgets) {
-        set_last_path(
-            &navigation.last_reaper_app_path,
-            Some(planned_reaper_launch_path_for_target(&target)),
-        );
-    }
-    set_last_resource_path(
-        &navigation.last_resource_path,
-        Some(run.resource_path.clone()),
-    );
-
-    // The Backups rows are read again once the run is over, so they never
-    // list a set this run deleted.
-    let rescan = Rc::clone(&ui.rescan);
-    arm_post_install_hook(move || rescan());
-
+    let text = &ui.navigation.model.text;
     let mut backups = None;
     with_ui_localizer(|localizer| backups = Some(backup_delete_progress(localizer, &run)));
-    let state = Arc::new(Mutex::new(
-        ProgressUiState::new(WizardMode::DeleteBackups, run.items.len(), 0)
+    let job = BackupRunJob {
+        mode: WizardMode::DeleteBackups,
+        resource_path: run.resource_path.clone(),
+        heading: text.progress_delete_heading.clone(),
+        status: text.progress_status_delete_running.clone(),
+        details,
+        state: ProgressUiState::new(WizardMode::DeleteBackups, run.items.len(), 0)
             .with_backup_delete(backups.unwrap_or_default()),
-    ));
-    // A delete names its backups through the state; the run has no package
-    // or configuration step names to look up.
-    let package_display_names: Arc<HashMap<String, String>> = Arc::new(HashMap::new());
-    let configuration_display_names: Arc<HashMap<String, String>> = Arc::new(HashMap::new());
-    // Nothing repaints the page once the completion has written the
-    // outcome, even an event still queued behind it.
-    let operation_finished = Arc::new(AtomicBool::new(false));
-    let progress = {
-        let operation_finished = Arc::clone(&operation_finished);
-        let install_run = Arc::clone(&ui.install_run);
-        ProgressReporter::new(move |event| {
-            if operation_finished.load(Ordering::Relaxed) {
-                return;
+        run,
+        work: run_backup_delete,
+        done: |localizer, run, result| {
+            let outcome = wizard_backup_delete_outcome(localizer, run, result);
+            BackupRunDone {
+                heading: outcome.heading,
+                status_text: outcome.status_text,
+                detail_lines: outcome.detail_lines,
             }
-            let state = Arc::clone(&state);
-            let package_display_names = Arc::clone(&package_display_names);
-            let configuration_display_names = Arc::clone(&configuration_display_names);
-            let status_frozen = install_run.stop_requested();
-            wxdragon::call_after(Box::new(move || {
-                apply_progress_event_to_ui(
-                    &state,
-                    &widgets,
-                    &package_display_names,
-                    &configuration_display_names,
-                    event,
-                    status_frozen,
-                );
-            }));
-        })
+        },
     };
-
-    let cancel = ui.install_run.begin(WizardMode::DeleteBackups);
-    let install_run = Arc::clone(&ui.install_run);
-    std::thread::spawn(move || {
-        // The engine saves the run's report in RABBIT/logs itself.
-        let result = run_backup_delete(&run, &progress, &cancel);
-        operation_finished.store(true, Ordering::Relaxed);
-        wxdragon::call_after(Box::new(move || {
-            // The rescan first, as after an uninstall: it rebuilds the hidden
-            // Packages page, and focus on Done's status must be the last
-            // focus change, or the screen reader reads something else. A run
-            // that returned an error changed nothing.
-            if result.is_ok() {
-                fire_post_install_hook();
-            }
-            show_backup_delete_outcome(&navigation, &run, &result);
-            // The worker is done and everything it held has been dropped,
-            // so the window can go now, if the user asked it to.
-            let close_now = install_run.stop_requested();
-            install_run.finish();
-            if close_now {
-                with_ui_frame(|frame| frame.close(true));
-            }
-        }));
-    });
-}
-
-/// Show how the delete went on Done, with focus on its status text, which
-/// the screen reader then reads. Back stays disabled there: after a run,
-/// RABBIT is started again.
-fn show_backup_delete_outcome(
-    navigation: &RunNavigation,
-    run: &BackupDeleteRun,
-    result: &rabbit_core::Result<DeleteReport>,
-) {
-    let widgets = navigation.widgets;
-    widgets.progress_gauge.set_value(100);
-    let mut outcome = None;
-    with_ui_localizer(|localizer| {
-        outcome = Some(wizard_backup_delete_outcome(localizer, run, result));
-    });
-    let Some(outcome) = outcome else {
-        return;
-    };
-    widgets.progress_status.set_label(&outcome.heading);
-    widgets.progress_details.set_value(&format!(
-        "{}\n\n{}",
-        outcome.heading,
-        outcome.detail_lines.join("\n")
-    ));
-    widgets.done_status.set_value(&outcome.status_text);
-    widgets
-        .done_details
-        .set_value(&outcome.detail_lines.join("\n"));
-    widgets
-        .done_launch_reaper
-        .enable(can_launch_last_reaper_path(
-            &navigation.last_reaper_app_path,
-        ));
-    widgets
-        .done_open_resource
-        .enable(clone_last_resource_path(&navigation.last_resource_path).is_some());
-    navigation.go_to(DONE_STEP, WizardMode::DeleteBackups);
-    widgets.done_status.set_focus();
+    run_backup_job(&ui.navigation, &ui.install_run, &ui.rescan, job);
 }

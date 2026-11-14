@@ -1617,6 +1617,17 @@ fn backup_name(localizer: &Localizer, entry: &BackupEntry) -> String {
     text(localizer, key)
 }
 
+/// How the sentences about a key map `entry` choose their words, as their
+/// `$origin`: `own` for the user's own key map, `default-keys` for REAPER's
+/// default keys, `other` for any other.
+pub(super) fn keymap_origin_selector(entry: &BackupEntry) -> &'static str {
+    match entry.keymap_origin {
+        Some(KeymapOrigin::OwnKeymap) => "own",
+        Some(KeymapOrigin::DefaultKeys) => "default-keys",
+        Some(KeymapOrigin::UnchangedOsara | KeymapOrigin::Unknown) | None => "other",
+    }
+}
+
 /// When the backup was made, as the row says it, by what made it.
 fn when_text(localizer: &Localizer, entry: &BackupEntry, date: Option<&str>) -> String {
     let Some(date) = date else {
@@ -1957,11 +1968,7 @@ fn restore_line(
     let package = package_name(localizer, entry).unwrap_or_else(|| row.name.clone());
     match &entry.item {
         BackupItem::Keymap { .. } => {
-            let origin = match entry.keymap_origin {
-                Some(KeymapOrigin::OwnKeymap) => "own",
-                Some(KeymapOrigin::DefaultKeys) => "default-keys",
-                _ => "other",
-            };
+            let origin = keymap_origin_selector(entry);
             match date {
                 Some(date) => say(
                     localizer,

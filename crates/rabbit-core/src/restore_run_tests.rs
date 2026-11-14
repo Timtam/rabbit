@@ -1718,3 +1718,320 @@ fn a_program_started_during_the_run_refuses_the_next_backup_alone() {
     assert!(!resource.join("UserPlugins/reaper_sws.dll").exists());
     saved(&report);
 }
+
+/// SWS as this platform's package manifests describe it, but serving every
+/// REAPER on the computer, as a machine-wide package does: its uninstall
+/// needs every REAPER closed.
+#[cfg(any(windows, target_os = "macos"))]
+fn sws_machine_wide() -> Vec<crate::package::PackageSpec> {
+    super::tests::sws_spec(|spec| spec.requires_standard_install = true)
+}
+
+/// What runs in one case of
+/// `the_check_before_a_run_refuses_what_the_run_refuses`.
+#[cfg(any(windows, target_os = "macos"))]
+struct RunningCase {
+    name: &'static str,
+    target_reaper: bool,
+    elsewhere: bool,
+    machine_wide: bool,
+    program: bool,
+    items: Vec<RestoreItem>,
+    refused: bool,
+    restored: RestoreStatus,
+}
+
+/// The check the wizard makes before it starts a restore gives exactly the
+/// refusal a real run gives for what runs, by the same rules, and none when
+/// the run goes ahead: nothing running, the target's REAPER, any REAPER
+/// for a package whose uninstall needs every REAPER closed, a REAPER
+/// elsewhere for one that doesn't, a program the package's uninstall plan
+/// names, the target's REAPER for a key map, which the refusal says, and
+/// backups a check of their own refuses, which a run refuses before it
+/// looks at what runs. The check changes nothing, and the made-up computer
+/// other crates' tests use agrees with the environment it stands for.
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn the_check_before_a_run_refuses_what_the_run_refuses() {
+    use super::tests::{another_reaper, targets_reaper};
+    use super::{TestComputer, restore_backups_on, restore_running_refusal_on};
+    use crate::preflight::RunningProcess;
+
+    const REAL: RestoreRunOptions = RestoreRunOptions {
+        dry_run: false,
+        quick: false,
+        allow_reaper_running: false,
+    };
+    const KEYMAP_SET: &str = "unattended-unix-4-000000000";
+    let packages = vec![
+        item("uninstall-unix-1", "sws"),
+        item("uninstall-unix-3", "ffmpeg"),
+    ];
+    let case = |name: &'static str| RunningCase {
+        name,
+        target_reaper: false,
+        elsewhere: false,
+        machine_wide: false,
+        program: false,
+        items: packages.clone(),
+        refused: false,
+        restored: RestoreStatus::Restored,
+    };
+    let cases = [
+        case("nothing runs"),
+        RunningCase {
+            target_reaper: true,
+            refused: true,
+            ..case("the target's REAPER")
+        },
+        RunningCase {
+            elsewhere: true,
+            machine_wide: true,
+            refused: true,
+            ..case("another REAPER, every REAPER needed closed")
+        },
+        RunningCase {
+            elsewhere: true,
+            ..case("another REAPER, only the target's needed closed")
+        },
+        RunningCase {
+            program: true,
+            refused: true,
+            ..case("a program the uninstall plan names")
+        },
+        RunningCase {
+            target_reaper: true,
+            items: vec![RestoreItem::keymap(KEYMAP_SET)],
+            refused: true,
+            ..case("the target's REAPER, for a key map")
+        },
+        RunningCase {
+            target_reaper: true,
+            elsewhere: true,
+            machine_wide: true,
+            program: true,
+            items: vec![item("uninstall-unix-9", "sws")],
+            restored: RestoreStatus::NotRestored,
+            ..case("every backup refused on its own")
+        },
+    ];
+
+    for case in cases {
+        let name = case.name;
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        three_uninstalls(&resource);
+        let keymap = resource.join("reaper-kb.ini");
+        write(&keymap, b"own keys");
+        let mut writer = BackupSetWriter::new(&resource, KEYMAP_SET, super::KEYMAP_BACKUP_REASON);
+        writer.copy_file(Some("osara"), &keymap).unwrap();
+        write(&keymap, b"osara keys");
+
+        // The target's app is made in every case, so the target is found in
+        // the resource folder and the computer's own REAPER is never looked
+        // for, even when only another REAPER is said to run.
+        let target = targets_reaper(&resource);
+        let mut reapers: Vec<RunningProcess> = Vec::new();
+        if case.target_reaper {
+            reapers.push(target);
+        }
+        if case.elsewhere {
+            reapers.push(another_reaper(dir.path()));
+        }
+        let specs = if case.machine_wide {
+            sws_machine_wide()
+        } else if case.program {
+            sws_needing_closed("Demo Tool.exe")
+        } else {
+            crate::package::builtin_package_specs(crate::model::Platform::current().unwrap())
+        };
+        let programs: Vec<RunningProcess> = if case.program {
+            vec![demo_tool()]
+        } else {
+            Vec::new()
+        };
+        let running_reapers = || reapers.clone();
+        let running_programs = |_: &[String]| programs.clone();
+        let known = |_: crate::model::Platform| specs.clone();
+        let environment = BackupEnvironment {
+            reaper_processes: &running_reapers,
+            named_processes: &running_programs,
+            package_specs: &known,
+            ..BackupEnvironment::AS_USER
+        };
+        let computer = TestComputer {
+            reapers: reapers.clone(),
+            programs: programs.clone(),
+            package_specs: Some(specs.clone()),
+        };
+        let before = snapshot(dir.path());
+
+        let checked = super::restore_running_refusal_with(&resource, &case.items, &environment);
+        assert_eq!(
+            restore_running_refusal_on(&resource, &case.items, &computer),
+            checked,
+            "{name}"
+        );
+        assert_eq!(
+            snapshot(dir.path()),
+            before,
+            "{name}: the check changed something"
+        );
+        assert_eq!(checked.is_some(), case.refused, "{name}: {checked:?}");
+
+        let result = restore_backups_with(
+            &resource,
+            &case.items,
+            &REAL,
+            &environment,
+            OutsideRestoreRules::default,
+            &ProgressReporter::noop(),
+            &CancelToken::new(),
+        );
+        match checked {
+            Some(checked) => {
+                let error = result.unwrap_err();
+                assert_eq!(refusal(&error), &checked, "{name}");
+                assert!(
+                    matches!(
+                        checked,
+                        RestoreRefusal::ReaperRunning { .. }
+                            | RestoreRefusal::ProgramRunning { .. }
+                    ),
+                    "{name}: {checked:?}"
+                );
+                assert_eq!(snapshot(dir.path()), before, "{name}");
+                // The made-up computer's run refuses the same.
+                let error = restore_backups_on(
+                    &resource,
+                    &case.items,
+                    &REAL,
+                    &computer,
+                    &ProgressReporter::noop(),
+                    &CancelToken::new(),
+                )
+                .unwrap_err();
+                assert_eq!(refusal(&error), &checked, "{name}");
+            }
+            None => {
+                let report = result.unwrap();
+                assert!(
+                    statuses(&report)
+                        .iter()
+                        .all(|status| *status == case.restored),
+                    "{name}: {report:?}"
+                );
+            }
+        }
+    }
+
+    // What each refusal says.
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    three_uninstalls(&resource);
+    let target = targets_reaper(&resource);
+    let elsewhere = another_reaper(dir.path());
+    let check = |computer: TestComputer, items: &[RestoreItem]| {
+        restore_running_refusal_on(&resource, items, &computer)
+    };
+    assert_eq!(
+        check(
+            TestComputer {
+                reapers: vec![target.clone()],
+                ..TestComputer::default()
+            },
+            &packages,
+        ),
+        Some(RestoreRefusal::ReaperRunning {
+            every_reaper_for: Vec::new(),
+            package_names: Vec::new(),
+            processes: vec![target.clone()],
+            puts_keymap_back: false,
+        })
+    );
+    let machine_wide = sws_machine_wide();
+    let sws_name = machine_wide[0].display_name.clone();
+    assert_eq!(
+        check(
+            TestComputer {
+                reapers: vec![elsewhere.clone()],
+                package_specs: Some(machine_wide),
+                ..TestComputer::default()
+            },
+            &packages,
+        ),
+        Some(RestoreRefusal::ReaperRunning {
+            every_reaper_for: vec!["sws".to_string()],
+            package_names: vec![sws_name],
+            processes: vec![elsewhere],
+            puts_keymap_back: false,
+        })
+    );
+    let blocked = TestComputer {
+        programs: vec![demo_tool()],
+        package_specs: Some(sws_needing_closed("Demo Tool.exe")),
+        ..TestComputer::default()
+    };
+    assert!(matches!(
+        check(blocked.clone(), &packages),
+        Some(RestoreRefusal::ProgramRunning { package_ids, programs, .. })
+            if package_ids == ["sws"] && programs == ["demo tool.exe"]
+    ));
+    // Only the packages the run puts back count: FFmpeg alone needs no
+    // program closed that only SWS names.
+    assert_eq!(check(blocked, &[item("uninstall-unix-3", "ffmpeg")]), None);
+    assert_eq!(check(TestComputer::default(), &packages), None);
+}
+
+/// RABBIT running as root: the check before a run gives no refusal for what
+/// runs, even with the target's REAPER open, because a real run refuses as
+/// root before it looks at what runs, and Done says that instead. The same
+/// computer as the user gets the REAPER refusal. Nothing changes.
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn the_check_before_a_run_leaves_running_as_root_to_the_run() {
+    use super::restore_running_refusal_with;
+    use super::tests::targets_reaper;
+
+    const REAL: RestoreRunOptions = RestoreRunOptions {
+        dry_run: false,
+        quick: false,
+        allow_reaper_running: false,
+    };
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    three_uninstalls(&resource);
+    let target = targets_reaper(&resource);
+    let running = move || vec![target.clone()];
+    let as_user = BackupEnvironment {
+        reaper_processes: &running,
+        ..BackupEnvironment::AS_USER
+    };
+    let as_root = BackupEnvironment {
+        runs_as_root: &|| true,
+        ..as_user
+    };
+    let items = [item("uninstall-unix-1", "sws")];
+    let before = snapshot(dir.path());
+
+    assert!(matches!(
+        restore_running_refusal_with(&resource, &items, &as_user),
+        Some(RestoreRefusal::ReaperRunning { .. })
+    ));
+    assert_eq!(
+        restore_running_refusal_with(&resource, &items, &as_root),
+        None
+    );
+    let error = restore_backups_with(
+        &resource,
+        &items,
+        &REAL,
+        &as_root,
+        OutsideRestoreRules::default,
+        &ProgressReporter::noop(),
+        &CancelToken::new(),
+    )
+    .unwrap_err();
+    assert_eq!(refusal(&error), &RestoreRefusal::AsRoot);
+    assert_eq!(snapshot(dir.path()), before);
+}

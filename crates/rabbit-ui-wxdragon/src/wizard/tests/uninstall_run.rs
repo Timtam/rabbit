@@ -234,28 +234,32 @@ fn the_administrator_prompt_counts_no_phase() {
     assert_eq!(state.percentage(), 100);
 }
 
-/// The wizard doesn't restore backups until step 2d of the backup plan:
-/// until then a restore's events are neither spoken nor counted, and move
-/// no focus. A delete's are pinned with its run, in `backups_run.rs`.
+/// A restore's start is spoken and its end counts the backup's one phase,
+/// as a delete's do; neither moves focus. Their lines are pinned with the
+/// restore run, in `backups_restore_run.rs`, and a delete's in
+/// `backups_run.rs`.
 #[test]
-fn restore_events_say_and_count_nothing_yet() {
-    let mut state = ProgressUiState::new(WizardMode::Uninstall, 1, 0);
-    for event in [
-        ProgressEvent::RestoreStarted {
-            set_id: "uninstall-unix-1".to_string(),
-            package_id: Some("sws".to_string()),
-        },
-        ProgressEvent::RestoreCompleted {
-            set_id: "uninstall-unix-1".to_string(),
-            package_id: None,
-            status: rabbit_core::rollback::RestoreStatus::Restored,
-        },
-    ] {
-        assert!(!is_spoken(&event), "{event:?}");
-        state.record(&event);
-        assert_eq!(state.percentage(), 0);
-        assert!(!state.moves_focus_to_log(&event));
-    }
+fn a_restores_start_is_spoken_and_its_end_counts_a_phase() {
+    let mut state = ProgressUiState::new(WizardMode::Restore, 1, 0);
+    let started = ProgressEvent::RestoreStarted {
+        set_id: "uninstall-unix-1".to_string(),
+        package_id: Some("sws".to_string()),
+    };
+    assert!(is_spoken(&started));
+    state.record(&started);
+    assert_eq!(state.percentage(), 0);
+    assert_eq!(state.current_package.as_deref(), Some("uninstall-unix-1"));
+    assert!(!state.moves_focus_to_log(&started));
+    let completed = ProgressEvent::RestoreCompleted {
+        set_id: "uninstall-unix-1".to_string(),
+        package_id: Some("sws".to_string()),
+        status: rabbit_core::rollback::RestoreStatus::Restored,
+    };
+    assert!(!is_spoken(&completed));
+    state.record(&completed);
+    assert_eq!(state.percentage(), 100);
+    assert!(state.current_package.is_none());
+    assert!(!state.moves_focus_to_log(&completed));
 }
 
 /// macOS's password window keeps its own text, which names osascript, so

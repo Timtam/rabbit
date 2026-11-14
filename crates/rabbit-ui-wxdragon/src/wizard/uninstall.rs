@@ -59,17 +59,6 @@ impl PackagesTab {
     }
 }
 
-/// Whether a restore can start from Review. The Backups tab and its Review
-/// are there, but the restore run comes in a later step of the backup plan
-/// (2d). Until then Review shows what a restore would do, and the Restore
-/// button stays disabled, blockers or not.
-pub const RESTORE_RUN_AVAILABLE: bool = false;
-
-/// Whether a delete of backups can start from Review: it can, once its
-/// Review found something ticked to delete. The Delete button is still
-/// never the default button, and a question with No focused comes first.
-pub const DELETE_BACKUPS_RUN_AVAILABLE: bool = true;
-
 /// What the run does. The Packages tab showing when Next is pressed decides
 /// it, and on the Backups tab the choice below its list, Restore or Delete.
 /// It stays fixed through Review, Progress and Done: runs never mix, and the
@@ -142,9 +131,12 @@ impl WizardMode {
     /// flag is false exactly when everything is installed and current, or
     /// every version check failed, and neither says anything about what can
     /// be removed. A restore and a delete share one flag, set by whichever
-    /// of their Reviews was built last, and start only once their run is
-    /// available (see [`RESTORE_RUN_AVAILABLE`] and
-    /// [`DELETE_BACKUPS_RUN_AVAILABLE`]).
+    /// of their Reviews was built last. A restore's Review sets it once it
+    /// found something ticked to restore, checked it against a quick plan
+    /// of the very ticks and found nothing in the way; a delete's, once it
+    /// found something ticked to delete. Neither button is ever the default
+    /// button: a restore checks what runs before it starts, and a delete
+    /// asks first, with No focused.
     pub fn run_button_enabled(
         self,
         plan_can_install: bool,
@@ -155,8 +147,7 @@ impl WizardMode {
         match self {
             Self::Install => plan_can_install && review_can_install,
             Self::Uninstall => review_can_uninstall,
-            Self::Restore => RESTORE_RUN_AVAILABLE && review_can_run_backups,
-            Self::DeleteBackups => DELETE_BACKUPS_RUN_AVAILABLE && review_can_run_backups,
+            Self::Restore | Self::DeleteBackups => review_can_run_backups,
         }
     }
 }

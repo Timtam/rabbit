@@ -1826,6 +1826,100 @@ impl BackupEnvironment<'static> {
     };
 }
 
+/// A made-up computer for the tests of the crates that use this one, which
+/// can't reach `BackupEnvironment`: the REAPERs and other programs said to
+/// run, and the packages RABBIT knows. Otherwise it is
+/// `BackupEnvironment::AS_USER`'s computer: RABBIT runs as the user, owners
+/// are read as on this computer, every target is a portable REAPER, and no
+/// place outside the resource folder takes a file back, so a test never
+/// depends on what runs on the computer that tests it, and never writes to
+/// the user's real CLAP or vendor folders.
+///
+/// Never use it outside tests: a restore on it skips the root, REAPER and
+/// program checks of the real computer. It and the functions that take it
+/// are built only for this crate's tests and with the `test-support`
+/// feature, which only other crates' dev-dependencies turn on.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[derive(Debug, Clone, Default)]
+pub struct TestComputer {
+    /// Every REAPER that runs.
+    pub reapers: Vec<RunningProcess>,
+    /// The other programs that run. A restore asks only about those its
+    /// packages' uninstall plans name, as it asks a real computer.
+    pub programs: Vec<RunningProcess>,
+    /// The packages RABBIT knows, with their uninstall plans. `None` for
+    /// those the embedded package manifests describe.
+    pub package_specs: Option<Vec<PackageSpec>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl TestComputer {
+    /// Run `with` on this computer, as a restore's environment.
+    fn environment<T>(&self, with: impl FnOnce(&BackupEnvironment<'_>) -> T) -> T {
+        let runs_as_root = || false;
+        let reapers = || self.reapers.clone();
+        let programs = |_: &[String]| self.programs.clone();
+        let specs = |platform: Platform| {
+            self.package_specs
+                .clone()
+                .unwrap_or_else(|| crate::package::builtin_package_specs(platform))
+        };
+        let nowhere_outside = |_: &Path| OutsideRestoreRules::default();
+        let portable = |_: Platform, _: &Path| InstallationKind::Portable;
+        with(&BackupEnvironment {
+            runs_as_root: &runs_as_root,
+            owner_of: &system_owner_of,
+            exclusive_groups: &system_exclusive_groups,
+            outside_rules: &nowhere_outside,
+            reaper_processes: &reapers,
+            named_processes: &programs,
+            package_specs: &specs,
+            target_kind: &portable,
+        })
+    }
+}
+
+/// [`restore_running_refusal`] on `computer`, for tests of the crates that
+/// use this one. Never outside tests (see [`TestComputer`]).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn restore_running_refusal_on(
+    resource_path: &Path,
+    items: &[RestoreItem],
+    computer: &TestComputer,
+) -> Option<RestoreRefusal> {
+    computer
+        .environment(|environment| restore_running_refusal_with(resource_path, items, environment))
+}
+
+/// [`restore_backups`] on `computer`, for tests of the crates that use this
+/// one: it puts no file back outside the resource folder. Never outside
+/// tests: it restores without the real computer's root, REAPER and program
+/// checks (see [`TestComputer`]).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn restore_backups_on(
+    resource_path: &Path,
+    items: &[RestoreItem],
+    options: &RestoreRunOptions,
+    computer: &TestComputer,
+    progress: &ProgressReporter,
+    cancel: &CancelToken,
+) -> Result<RestoreRunReport> {
+    computer.environment(|environment| {
+        restore_backups_with(
+            resource_path,
+            items,
+            options,
+            environment,
+            OutsideRestoreRules::default,
+            progress,
+            cancel,
+        )
+    })
+}
+
 /// Every REAPER running on this computer.
 fn system_reaper_processes() -> Vec<RunningProcess> {
     running_reaper_processes(Platform::current())
@@ -2279,23 +2373,10 @@ fn run_restore(
             return Err(RestoreRefusal::AsRoot.into());
         }
         let outside = outside();
-        let restored: std::collections::BTreeSet<String> = found
-            .iter()
-            .flatten()
-            .flat_map(FoundSet::restored_package_ids)
-            .collect();
-        let restored: Vec<String> = restored.into_iter().collect();
         // The REAPER and program checks come before the lock, as the
         // install preflight always did. A dry run makes them too, and
         // reports what runs without refusing for it.
-        let mut rules = restore_process_rules(resource_path, &restored, environment);
-        // Only for the words of a refusal for the target's REAPER: a run that
-        // puts the key map back can't be told to let REAPER run.
-        rules.puts_keymap_back = found.iter().flatten().any(|found| {
-            found
-                .puts_keymap_back(resource_path, check)
-                .unwrap_or(false)
-        });
+        let rules = run_process_rules(resource_path, &found, check, environment);
         let (preflight, refusal) =
             restore_preflight(resource_path, &rules, &run_options, environment);
         if let Some(refusal) = refusal {
@@ -2401,6 +2482,95 @@ fn run_restore(
         stopped,
         install_lock,
     })
+}
+
+/// What a run that brings back what `found` holds needs closed, by the
+/// rules of every package it puts back, read as `check` says (see
+/// [`restore_process_rules`]). Backups a check of their own refused add
+/// nothing. [`run_restore`] and [`restore_running_refusal`] both take their
+/// rules from here, so the wizard's check before a run and the run's own
+/// never disagree.
+fn run_process_rules(
+    resource_path: &Path,
+    found: &[Result<FoundSet<'_>>],
+    check: CopyCheck,
+    environment: &BackupEnvironment<'_>,
+) -> RestoreProcessRules {
+    let restored: BTreeSet<String> = found
+        .iter()
+        .flatten()
+        .flat_map(FoundSet::restored_package_ids)
+        .collect();
+    let restored: Vec<String> = restored.into_iter().collect();
+    let mut rules = restore_process_rules(resource_path, &restored, environment);
+    // Only for the words of a refusal for the target's REAPER: a run that
+    // puts the key map back can't be told to let REAPER run.
+    rules.puts_keymap_back = found.iter().flatten().any(|found| {
+        found
+            .puts_keymap_back(resource_path, check)
+            .unwrap_or(false)
+    });
+    rules
+}
+
+/// The refusal a real restore of `items` into the REAPER at
+/// `resource_path`, not told that REAPER may run, would give right now for
+/// what runs: [`RestoreRefusal::ReaperRunning`] or
+/// [`RestoreRefusal::ProgramRunning`]. `None` when nothing it needs closed
+/// runs, when a check of its own refuses every backup, and when RABBIT runs
+/// as root: a run refuses for those before it looks at what runs, and Done
+/// says so.
+///
+/// It makes the very checks [`restore_backups`] makes of what runs, before
+/// its lock and again under it, by the same rules: the target's REAPER,
+/// every REAPER for a package whose uninstall needs that, and the programs
+/// the uninstall plans of the packages it puts back name, from the embedded
+/// package manifests for this platform and kind of REAPER. It finds each
+/// set as the quick plan does, reading manifests, RABBIT's records and file
+/// sizes and hashing nothing, so the wizard can ask it on the UI thread
+/// right before a run starts. It takes no lock and changes nothing; the run
+/// checks again.
+pub fn restore_running_refusal(
+    resource_path: &Path,
+    items: &[RestoreItem],
+) -> Option<RestoreRefusal> {
+    restore_running_refusal_with(resource_path, items, &BackupEnvironment::system())
+}
+
+/// [`restore_running_refusal`], asking `environment` about the computer.
+pub(crate) fn restore_running_refusal_with(
+    resource_path: &Path,
+    items: &[RestoreItem],
+    environment: &BackupEnvironment<'_>,
+) -> Option<RestoreRefusal> {
+    // The quick plan's reading of the sets: what a backup puts back doesn't
+    // depend on its copies' content, which the run hashes before its lock
+    // and again under it.
+    let quick = RestoreRunOptions {
+        dry_run: true,
+        quick: true,
+        allow_reaper_running: false,
+    };
+    let found: Vec<Result<FoundSet<'_>>> = items
+        .iter()
+        .map(|item| find_set_to_restore(resource_path, item, quick, environment))
+        .collect();
+    if !found.iter().any(Result::is_ok) {
+        return None;
+    }
+    // A real run as root is refused next, before what runs is looked at,
+    // so telling the user to close something first would send them round
+    // for nothing.
+    if (environment.runs_as_root)() {
+        return None;
+    }
+    let rules = run_process_rules(resource_path, &found, quick.copy_check(), environment);
+    let real = RestoreRunOptions {
+        dry_run: false,
+        quick: false,
+        allow_reaper_running: false,
+    };
+    running_blockers(resource_path, &rules, environment).refusal(&real.for_backup(None))
 }
 
 /// Find the set `item` names and make the checks of it that come before
@@ -7986,7 +8156,7 @@ mod tests {
     }
 
     /// Another REAPER on the computer, a portable one elsewhere in `dir`.
-    fn another_reaper(dir: &Path) -> RunningProcess {
+    pub(super) fn another_reaper(dir: &Path) -> RunningProcess {
         RunningProcess {
             pid: "200".to_string(),
             name: "reaper.exe".to_string(),
@@ -7996,7 +8166,7 @@ mod tests {
 
     /// SWS as this platform's package manifests describe it, changed by
     /// `change`, as the only package a test's computer knows.
-    fn sws_spec(change: impl FnOnce(&mut PackageSpec)) -> Vec<PackageSpec> {
+    pub(super) fn sws_spec(change: impl FnOnce(&mut PackageSpec)) -> Vec<PackageSpec> {
         let platform = Platform::current().expect("tests run on Windows or macOS");
         let mut spec = crate::package::builtin_package_specs(platform)
             .into_iter()

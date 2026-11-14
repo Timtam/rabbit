@@ -110,8 +110,14 @@ pub fn backup_delete_run(
         }
         groups.push(BackupDeleteGroup {
             names: rows.iter().map(|row| row.name.clone()).collect(),
-            references: rows.iter().map(|row| reference(localizer, row)).collect(),
-            labels: rows.iter().map(|row| label(localizer, list, row)).collect(),
+            references: rows
+                .iter()
+                .map(|row| row_reference(localizer, row))
+                .collect(),
+            labels: rows
+                .iter()
+                .map(|row| row_label(localizer, list, row, BackupChoice::Delete))
+                .collect(),
             set_ids,
         });
     }
@@ -153,7 +159,10 @@ pub fn backup_delete_progress_details_for_start(
             localizer,
             "wizard-summary-package-message",
             &[
-                ("package", (&label(localizer, list, row)).into()),
+                (
+                    "package",
+                    (&row_label(localizer, list, row, BackupChoice::Delete)).into(),
+                ),
                 ("message", (&action).into()),
             ],
         ));
@@ -724,12 +733,15 @@ fn backup_delete_outcome_from_error(
     }
 }
 
-/// The folder `error` is about, when it is one a delete reads before it
-/// changes anything: the resource folder at `resource_path`, its `RABBIT`
-/// folder, or the `backups` or `backups-deleting` folder in that. A delete
-/// stopped by one of them deleted nothing, and the user can do something
-/// about it.
-fn unreadable_folder<'a>(resource_path: &Path, error: &'a RabbitError) -> Option<&'a Path> {
+/// The folder `error` is about, when it is one a delete or a restore reads
+/// before it changes anything: the resource folder at `resource_path`, its
+/// `RABBIT` folder, or the `backups` or `backups-deleting` folder in that. A
+/// run stopped by one of them changed nothing, and the user can do
+/// something about it.
+pub(super) fn unreadable_folder<'a>(
+    resource_path: &Path,
+    error: &'a RabbitError,
+) -> Option<&'a Path> {
     let RabbitError::Io { path, .. } = error else {
         return None;
     };
@@ -905,7 +917,7 @@ fn explain(
 
 /// Add `line` to `lines` unless it is there already: several sets of one
 /// group often have the same thing said of them.
-fn push_once(lines: &mut Vec<String>, line: Option<String>) {
+pub(super) fn push_once(lines: &mut Vec<String>, line: Option<String>) {
     if let Some(line) = line
         && !lines.contains(&line)
     {
@@ -958,17 +970,22 @@ pub fn delete_refusal_text(localizer: &Localizer, refusal: &RestoreRefusal) -> S
     }
 }
 
-/// What the progress page and Show details call `row`, ticked to delete in
-/// `list`: its name, or its reference when another row ticked to delete has
-/// the same name, so that two key maps or two unfinished deletions can be
-/// told apart.
-fn label(localizer: &Localizer, list: &WizardBackupList, row: &BackupRow) -> String {
+/// What the progress page and Show details call `row`, ticked for `choice`
+/// in `list`: its name, or its reference when another row ticked for the
+/// same choice has the same name, so that two key maps or two unfinished
+/// deletions can be told apart. A delete and a restore name their rows so.
+pub(super) fn row_label(
+    localizer: &Localizer,
+    list: &WizardBackupList,
+    row: &BackupRow,
+    choice: BackupChoice,
+) -> String {
     let same_name = list
-        .ticked_rows(BackupChoice::Delete)
+        .ticked_rows(choice)
         .filter(|other| other.name == row.name)
         .count();
     if same_name > 1 {
-        reference(localizer, row)
+        row_reference(localizer, row)
     } else {
         row.name.clone()
     }
@@ -976,7 +993,7 @@ fn label(localizer: &Localizer, list: &WizardBackupList, row: &BackupRow) -> Str
 
 /// What a row is called with when its backup was made, so two backups of
 /// one name can be told apart.
-fn reference(localizer: &Localizer, row: &BackupRow) -> String {
+pub(super) fn row_reference(localizer: &Localizer, row: &BackupRow) -> String {
     say(
         localizer,
         "wizard-backups-row-reference",
@@ -984,7 +1001,7 @@ fn reference(localizer: &Localizer, row: &BackupRow) -> String {
     )
 }
 
-fn target_line(localizer: &Localizer, path: &Path) -> String {
+pub(super) fn target_line(localizer: &Localizer, path: &Path) -> String {
     say(
         localizer,
         "wizard-summary-target",
