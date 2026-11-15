@@ -26,7 +26,9 @@ use super::cleanup::{
 use super::execute::{UninstallEnvironment, execute_uninstall_in};
 use super::helper::{ElevatedHelper, ElevatedRunRequest, ElevatedSession, ElevationStartError};
 use super::preflight::VolumeProbe;
-use super::tests::{FoundAt, installed, script_path, scripts_spec_with, write};
+#[cfg(windows)]
+use super::tests::FoundAt;
+use super::tests::{installed, script_path, scripts_spec_with, write};
 use super::vendor::{VendorEvent, VendorLookup, VendorOutcome, VendorRefusal, VendorStatus};
 use super::{
     ANY_REAPER_PROCESS_CHECK, KeptFileReason, KeptReason, NoAdministratorShell, NoMacosObjects,

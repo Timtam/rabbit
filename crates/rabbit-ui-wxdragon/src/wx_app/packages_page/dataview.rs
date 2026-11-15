@@ -62,6 +62,11 @@ pub(crate) struct Node {
 /// holds clones of the shared `package_rows` and `configuration_rows`
 /// Rcs so model callbacks can read row state without going through any
 /// external lookup.
+///
+/// Each node has its own box, although the lists are `Vec`s already: a
+/// node's address is its wx item id, and the box keeps that address the
+/// same whatever happens to the `Vec`'s buffer.
+#[allow(clippy::vec_box)]
 pub(crate) struct PackageTreeData {
     pub(crate) rows: Rc<RefCell<Vec<crate::PackageRow>>>,
     pub(crate) configuration_rows: Rc<RefCell<Vec<crate::ConfigurationRow>>>,
@@ -216,8 +221,8 @@ pub(crate) const PACKAGE_COL_LABEL: u32 = 1;
 
 /// Non-Windows: build the Packages page using a wxDataViewCtrl driven by a
 /// `CustomDataViewTreeModel`. The model exposes a synthetic Packages group
-/// + one leaf per `PackageRow`; column 0 is a Bool toggle, column 1 is the
-/// row label. wx makes the first column it is given, the toggle, the one
+/// and one leaf per `PackageRow`; column 0 is a Bool toggle, column 1 is
+/// the row label. wx makes the first column it is given, the toggle, the one
 /// with the expander triangle. The model's `set_value` callback owns all
 /// the toggle side effects.
 ///
@@ -437,20 +442,18 @@ pub(crate) fn build_packages_page(
         let spanish_checkbox = spanish_variant_choice;
         let language_choice = reaper_language_choice;
         tree.on_selection_changed(move |event| {
-            if let Some(item) = event.get_item() {
-                if let Some(node_ptr) = item.get_id::<Node>() {
-                    if !node_ptr.is_null() {
-                        // SAFETY: node_ptr originated from a Box<Node>
-                        // owned by the model's userdata; the model lives
-                        // for as long as this closure can fire.
-                        let node = unsafe { &*node_ptr };
-                        if let NodeKind::Package(idx) = node.kind {
-                            if let Some(value) = package_rows.borrow().get(idx).map(package_details)
-                            {
-                                details.set_value(&value);
-                            }
-                        }
-                    }
+            if let Some(item) = event.get_item()
+                && let Some(node_ptr) = item.get_id::<Node>()
+                && !node_ptr.is_null()
+            {
+                // SAFETY: node_ptr originated from a Box<Node> owned by the
+                // model's userdata; the model lives for as long as this
+                // closure can fire.
+                let node = unsafe { &*node_ptr };
+                if let NodeKind::Package(idx) = node.kind
+                    && let Some(value) = package_rows.borrow().get(idx).map(package_details)
+                {
+                    details.set_value(&value);
                 }
             }
             sync_osara_keymap_widgets(

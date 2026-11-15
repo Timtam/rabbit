@@ -38,8 +38,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      # Warnings fail the build. Code for one platform only, such as the
+      # macOS GUI, is compiled nowhere but on that platform's runner, so a
+      # warning in it would otherwise pass unseen.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # The gui feature gates all of wx_app.rs, so the workspace-level
       # clippy above never lints it — the artifacts job compiles it, but
@@ -66,7 +69,7 @@ jobs:
 
       - name: Clippy (GUI feature)
         shell: bash
-        run: scripts/ci-cargo-gui.sh cargo clippy -p rabbit-ui-wxdragon --features gui --all-targets
+        run: scripts/ci-cargo-gui.sh cargo clippy -p rabbit-ui-wxdragon --features gui --all-targets -- -D warnings
 
       - name: Test workspace
         run: cargo test --workspace
