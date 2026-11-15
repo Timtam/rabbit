@@ -7,11 +7,12 @@ license.workspace = true
 
 [features]
 default = []
-gui = ["rabbit-ui-wxdragon/gui"]
+gui = ["dep:rabbit-ui-wxdragon", "rabbit-ui-wxdragon/gui"]
 
 [dependencies]
 rabbit-cli = { path = "../rabbit-cli" }
-rabbit-ui-wxdragon = { path = "../rabbit-ui-wxdragon" }
+# Only the GUI build calls into it.
+rabbit-ui-wxdragon = { path = "../rabbit-ui-wxdragon", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
