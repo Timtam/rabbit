@@ -2599,15 +2599,14 @@ mod tests {
         InstallerExitMeaning, PackageAutomationSupport, PackageOperationMessage,
         PackageOperationOptions, PackageOperationStatus, PlannedArtifact, PlannedAutomationKind,
         PlannedExecutionKind, ProcessScans, backup_file_for_unattended_change, dependency_ordered,
-        execute_operation_with, execute_operation_with_process_scan,
-        execute_resolved_package_operation, execute_resolved_package_operation_with_detections,
+        execute_operation_with_process_scan, execute_resolved_package_operation,
+        execute_resolved_package_operation_with_detections,
         execute_resolved_package_operation_with_detections_and_progress, first_failed_dependency,
         manifest_snapshot_source, plan_action_for_artifact, take_install_snapshot,
         upsert_unattended_package_receipt,
     };
     use crate::artifact::{ArtifactDescriptor, ArtifactKind, CachedArtifact};
     use crate::cancel::CancelToken;
-    use crate::detection::detect_components;
     use crate::error::RabbitError;
     use crate::hash::sha256_bytes;
     use crate::model::{Architecture, ComponentDetection, Confidence, Platform};
@@ -2619,10 +2618,17 @@ mod tests {
     use crate::plan::PlanActionKind;
     use crate::preflight::RunningProcess;
     use crate::progress::{ProgressEvent, ProgressReporter};
-    use crate::receipt::{InstallState, VendorAddedFile, load_install_state, save_install_state};
+    use crate::receipt::{InstallState, VendorAddedFile, load_install_state};
     use crate::uninstall::UninstallRoots;
     use crate::version::Version;
     use std::collections::HashSet;
+    // Only the Windows tests use these.
+    #[cfg(target_os = "windows")]
+    use super::execute_operation_with;
+    #[cfg(target_os = "windows")]
+    use crate::detection::detect_components;
+    #[cfg(target_os = "windows")]
+    use crate::receipt::save_install_state;
 
     #[test]
     fn skips_deferred_artifacts_without_install_report() {
