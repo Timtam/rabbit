@@ -4,7 +4,7 @@
 //! uninstall on a worker thread the way an install runs, and show how it
 //! went on the Done page.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -40,11 +40,13 @@ use crate::wx_app::widgets::{
 };
 use crate::wx_app::{DONE_STEP, PROGRESS_STEP};
 
-/// The handles the run needs to move the wizard on, Progress at the start
-/// and Done at the end. Everything here is `Send`, so the worker's
-/// completion can carry it back to the UI thread in `call_after`.
+/// The handles a run needs to move the wizard on, Progress at the start
+/// and Done at the end: an uninstall's, a restore's and a delete of
+/// backups'.
+/// Everything here is `Send`, so the worker's completion can carry it back
+/// to the UI thread in `call_after`.
 #[derive(Clone)]
-pub(crate) struct UninstallNavigation {
+pub(crate) struct RunNavigation {
     pub(crate) model: Arc<WizardModel>,
     pub(crate) widgets: WizardWidgets,
     pub(crate) book: SimpleBook,
@@ -61,8 +63,10 @@ pub(crate) struct UninstallNavigation {
     pub(crate) last_resource_path: Arc<Mutex<Option<PathBuf>>>,
 }
 
-impl UninstallNavigation {
-    fn go_to(&self, step: usize) {
+impl RunNavigation {
+    /// Move to `step` with the run button labelled for `mode`, the mode of
+    /// the run that moves there.
+    pub(crate) fn go_to(&self, step: usize, mode: WizardMode) {
         self.current_step.store(step, Ordering::SeqCst);
         update_navigation(
             step,
@@ -74,7 +78,7 @@ impl UninstallNavigation {
             &self.install,
             &self.close,
             &self.widgets.language_footer,
-            WizardMode::Uninstall,
+            mode,
             // Progress and Done never enable the run button, whatever the
             // flag says.
             false,
@@ -86,19 +90,28 @@ impl UninstallNavigation {
 
 /// Everything the Uninstall button needs, on the UI thread.
 pub(crate) struct UninstallRunUi {
-    pub(crate) navigation: UninstallNavigation,
+    pub(crate) navigation: RunNavigation,
     pub(crate) uninstall_list: Rc<RefCell<WizardUninstallList>>,
     /// The close handshake, shared with the install: closing the window
     /// during the run asks, then stops once the step it is on has finished.
     pub(crate) install_run: Arc<InstallRunState>,
-    /// Rebuilds both Packages tabs from fresh detection, as after an
-    /// install. Fired once the run returns a report.
+    /// Rebuilds the three Packages tabs' lists from fresh detection and the
+    /// backups on disk, as after an install. Fired once the run returns a
+    /// report.
     pub(crate) rescan: Rc<dyn Fn()>,
+    /// What the run does, as Next on the Packages page fixed it.
+    pub(crate) wizard_mode: Rc<Cell<WizardMode>>,
 }
 
 /// The Uninstall button on Review. Enter never gets here: Review has no
 /// default button in uninstall mode, and Enter in its text starts nothing.
+/// In any other mode it does nothing at all, so a restore or a delete can
+/// never end up as an uninstall.
 pub(crate) fn start_uninstall(ui: &UninstallRunUi) {
+    match ui.wizard_mode.get() {
+        WizardMode::Uninstall => {}
+        WizardMode::Install | WizardMode::Restore | WizardMode::DeleteBackups => return,
+    }
     let navigation = &ui.navigation;
     let model = &navigation.model;
     let widgets = navigation.widgets;
@@ -237,7 +250,7 @@ fn run_uninstall(
     let model = Arc::clone(&navigation.model);
     let widgets = navigation.widgets;
 
-    navigation.go_to(PROGRESS_STEP);
+    navigation.go_to(PROGRESS_STEP, WizardMode::Uninstall);
     navigation.back.enable(false);
     navigation.next.enable(false);
     navigation.install.enable(false);
@@ -344,7 +357,7 @@ fn run_uninstall(
 /// screen reader then reads. A run that left no report of the engine's gets
 /// the wizard's own.
 fn show_uninstall_outcome(
-    navigation: &UninstallNavigation,
+    navigation: &RunNavigation,
     resource_path: &std::path::Path,
     package_ids: &[String],
     remove_settings: bool,
@@ -400,6 +413,6 @@ fn show_uninstall_outcome(
     widgets
         .done_open_resource
         .enable(clone_last_resource_path(&navigation.last_resource_path).is_some());
-    navigation.go_to(DONE_STEP);
+    navigation.go_to(DONE_STEP, WizardMode::Uninstall);
     widgets.done_status.set_focus();
 }

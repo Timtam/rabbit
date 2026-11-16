@@ -30,7 +30,6 @@ use super::{
 #[cfg(windows)]
 use super::{RegistryEntryAction, RegistryEntryOutcome};
 use crate::cancel::CancelToken;
-use crate::error::RabbitError;
 use crate::hash::{sha256_bytes, sha256_file};
 use crate::model::{ComponentDetection, InstallationKind, Platform};
 use crate::package::{
@@ -43,6 +42,7 @@ use crate::receipt::{
     InstallState, InstalledFileReceipt, PackageReceipt, VendorAddedFile, load_install_state,
     save_install_state,
 };
+use crate::restore_refusal::{RestoreRefusal, refusal};
 use crate::rollback::{
     BACKUP_MANIFEST_FILE, BackupEntryState, BackupManifest, FileDigest, RestoreBackupOptions,
     RestoreBackupReport, restore_backup_set,
@@ -1295,14 +1295,10 @@ fn settings_move_into_the_set_only_when_asked() {
     let preset = fixture.file("DemoData/presets/one.preset");
     let elsewhere = fixture.dir.path().join("Elsewhere");
     let outside = write(&elsewhere.join("mine.preset"), b"mine");
-    #[cfg(windows)]
-    super::paths::make_junction(
+    super::paths::link_folder(
         &fixture.resource.join("DemoData").join("linked"),
         &elsewhere,
     );
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&elsewhere, fixture.resource.join("DemoData").join("linked"))
-        .unwrap();
     let harness = Harness::new(&fixture, specs(), &["demo"]);
     let report = harness.run(&UninstallRequest {
         remove_settings: true,
@@ -1313,6 +1309,66 @@ fn settings_move_into_the_set_only_when_asked() {
     assert_eq!(demo.kept.len(), 1);
     assert_eq!(demo.kept[0].reason, KeptFileReason::HoldsLink);
     assert!(preset.is_file() && outside.is_file());
+}
+
+/// The set records, for each package, whether this uninstall moved its
+/// settings into it: `true` when "Also remove settings" moved them, and
+/// `false` without it, or when they were asked for and none moved, as when
+/// the only settings folder holds a link and stays whole.
+#[test]
+fn the_set_records_whether_it_holds_the_package_s_settings() {
+    let specs = || {
+        vec![spec(
+            "demo",
+            "",
+            &remove_files(
+                r#""remove": { "matching_user_plugins": true },
+                   "kept_user_data": [
+                       { "path": "{resource}/Demo.ini", "note_key": "test-settings" },
+                       { "path": "{resource}/DemoData", "note_key": "test-data" }
+                   ]"#,
+            ),
+        )]
+    };
+    let with_settings = |report: &UninstallReport| {
+        assert_eq!(status(report, "demo"), UninstallStatus::Removed);
+        manifest(report).packages["demo"].with_settings
+    };
+
+    let fixture = Fixture::new();
+    fixture.file("UserPlugins/reaper_demo.dll");
+    fixture.file("Demo.ini");
+    let harness = Harness::new(&fixture, specs(), &["demo"]);
+    assert_eq!(with_settings(&harness.apply(&["demo"])), Some(false));
+
+    let fixture = Fixture::new();
+    fixture.file("UserPlugins/reaper_demo.dll");
+    fixture.file("Demo.ini");
+    fixture.file("DemoData/presets/one.preset");
+    let harness = Harness::new(&fixture, specs(), &["demo"]);
+    let report = harness.run(&UninstallRequest {
+        remove_settings: true,
+        ..harness.request(&["demo"])
+    });
+    assert_eq!(with_settings(&report), Some(true));
+    assert!(!fixture.resource.join("Demo.ini").exists());
+
+    let fixture = Fixture::new();
+    fixture.file("UserPlugins/reaper_demo.dll");
+    let preset = fixture.file("DemoData/presets/one.preset");
+    let elsewhere = fixture.dir.path().join("Elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    super::paths::link_folder(
+        &fixture.resource.join("DemoData").join("linked"),
+        &elsewhere,
+    );
+    let harness = Harness::new(&fixture, specs(), &["demo"]);
+    let report = harness.run(&UninstallRequest {
+        remove_settings: true,
+        ..harness.request(&["demo"])
+    });
+    assert_eq!(with_settings(&report), Some(false));
+    assert!(preset.is_file());
 }
 
 /// The shipped plans carried out, not only planned: SWS and the German
@@ -1460,17 +1516,12 @@ fn restoring_one_package_merges_its_receipt_entry_back() {
     save_install_state(&fixture.resource, &reinstalled).unwrap();
     let refused = restore_package(&fixture, &set_id, "demo", true).unwrap_err();
     assert!(
-        matches!(&refused, RabbitError::PackageRestoreRefused { package_id, .. } if package_id == "demo"),
-        "{refused}"
+        matches!(refusal(&refused), RestoreRefusal::ReinstalledSince { package_id, other_packages, .. }
+            if package_id == "demo" && other_packages.is_empty()),
+        "{refused:?}"
     );
-    assert!(
-        refused
-            .to_string()
-            .contains("rabbit uninstall --package demo --apply"),
-        "{refused}"
-    );
-    // So would the whole set, which holds demo too; it says how to restore
-    // the rest, and restores nothing.
+    // So would the whole set, which holds demo too; it names the rest,
+    // which can be restored one at a time, and restores nothing.
     let whole = restore_backup_set(
         &fixture.resource,
         &set_id,
@@ -1481,11 +1532,19 @@ fn restoring_one_package_merges_its_receipt_entry_back() {
         },
     )
     .unwrap_err();
-    assert!(whole.to_string().contains("--package"), "{whole}");
+    assert!(
+        matches!(refusal(&whole), RestoreRefusal::ReinstalledSince { package_id, other_packages, .. }
+            if package_id == "demo" && other_packages == &["other"]),
+        "{whole:?}"
+    );
     assert!(!other.exists());
     // A package the set doesn't hold is refused, naming the ones it does.
     let unknown = restore_package(&fixture, &set_id, "nosuch", true).unwrap_err();
-    assert!(unknown.to_string().contains("demo, other"), "{unknown}");
+    assert!(
+        matches!(refusal(&unknown), RestoreRefusal::PackageNotInSet { package_id, packages, .. }
+            if package_id == "nosuch" && packages == &["demo", "other"]),
+        "{unknown:?}"
+    );
 
     restore_package(&fixture, &set_id, "other", false).unwrap();
     assert!(other.is_file());

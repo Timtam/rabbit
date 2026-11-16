@@ -2,6 +2,9 @@
 //! with no wxWidgets dependency. `wx_app` renders these types; the tests
 //! drive them directly.
 
+mod backups;
+mod backups_restore_run;
+mod backups_run;
 mod bootstrap;
 mod configuration;
 mod expert_mode;
@@ -23,6 +26,9 @@ mod uninstall_run;
 #[cfg(test)]
 mod tests;
 
+pub use backups::*;
+pub use backups_restore_run::*;
+pub use backups_run::*;
 pub use bootstrap::*;
 pub use configuration::*;
 pub use expert_mode::*;

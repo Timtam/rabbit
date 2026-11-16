@@ -1,11 +1,12 @@
-//! Decides what closing the window means while an install or an uninstall
-//! is running, and asks the user when the answer is "stop the run".
+//! Decides what closing the window means while a run is going: an install,
+//! an uninstall, a restore or a delete of backups, and asks the user when
+//! the answer is "stop the run".
 
 use std::cell::RefCell;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 
-use crate::{WizardMode, WizardModel};
+use crate::{WizardMode, WizardModel, stop_question, stopping_line};
 use rabbit_core::cancel::CancelToken;
 
 use wxdragon::prelude::*;
@@ -14,8 +15,9 @@ use crate::wx_app::globals::with_ui_frame;
 use crate::wx_app::self_update_ui::SELF_UPDATE_APPLYING;
 use crate::wx_app::widgets::WizardWidgets;
 
-/// The worker's half of the close handshake, for an install and an
-/// uninstall alike: both stop at their next package boundary.
+/// The worker's half of the close handshake, for an install, an uninstall,
+/// a restore and a delete of backups alike: each stops at its next package
+/// or backup boundary.
 ///
 /// Closing the window used to end the process wherever the worker happened
 /// to be: mid-download, mid-extract, or between a vendor installer finishing
@@ -38,9 +40,9 @@ pub(crate) struct InstallRunState {
     /// Set when the user asked to close during an install: the completion
     /// closure closes the window once the worker is done.
     pub(crate) close_when_done: AtomicBool,
-    /// The run is an uninstall, so the stop question and the status line
-    /// after it talk about uninstalling.
-    pub(crate) uninstalling: AtomicBool,
+    /// What the run does, so the stop question and the status line after it
+    /// talk about installing, uninstalling, restoring or deleting.
+    pub(crate) mode: Mutex<WizardMode>,
 }
 
 impl InstallRunState {
@@ -49,19 +51,18 @@ impl InstallRunState {
         if let Ok(mut slot) = self.cancel.lock() {
             *slot = Some(token.clone());
         }
-        self.uninstalling
-            .store(mode == WizardMode::Uninstall, Ordering::SeqCst);
+        // The mode is a plain value that a panic can't leave half-written,
+        // so a poisoned lock still holds a good one. Going past the poison
+        // keeps a restore or a delete from being stopped with an install's
+        // words.
+        *self.mode.lock().unwrap_or_else(PoisonError::into_inner) = mode;
         self.running.store(true, Ordering::SeqCst);
         token
     }
 
     /// What the running run does, or the last one did.
     pub(crate) fn mode(&self) -> WizardMode {
-        if self.uninstalling.load(Ordering::SeqCst) {
-            WizardMode::Uninstall
-        } else {
-            WizardMode::Install
-        }
+        *self.mode.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub(crate) fn finish(&self) {
@@ -150,19 +151,15 @@ pub(crate) enum CloseVerdict {
 }
 
 /// Say that RABBIT is stopping, in both places the progress page speaks
-/// from: the status heading and the running log. An uninstall says it
-/// finishes the step it started, since that is where it stops: one
-/// package, or on macOS the administrator command, which covers several.
+/// from: the status heading and the running log, in the words of the run
+/// (see [`stopping_line`]).
 ///
 /// The log is a `TextCtrl` and takes focus; the status heading is a
 /// `StaticText` and cannot, and a label change on its own is not something
 /// a screen reader announces. Moving focus onto the log is what makes the
 /// answer to "did it hear me?" audible.
 pub(crate) fn announce_stopping(widgets: &WizardWidgets, model: &WizardModel, mode: WizardMode) {
-    let line = match mode {
-        WizardMode::Install => &model.text.progress_status_cancelling,
-        WizardMode::Uninstall => &model.text.progress_status_uninstall_cancelling,
-    };
+    let line = stopping_line(&model.text, mode);
     widgets.progress_status.set_label(line);
     widgets.progress_details.append_text(&format!("\n{line}"));
     widgets.progress_details.set_focus();
@@ -184,24 +181,16 @@ pub(crate) fn close_verdict(install_run: &InstallRunState) -> CloseVerdict {
     CloseVerdict::Ask
 }
 
-/// Ask before throwing away a running install or uninstall. Returns `true`
-/// when the user confirmed.
+/// Ask before throwing away a running run: an install, an uninstall, a
+/// restore or a delete of backups, each in its own words (see
+/// [`stop_question`]). Returns `true` when the user confirmed.
 ///
 /// `wxNO_DEFAULT` puts the focused button on **No**: this dialog appears
 /// over work the user asked for, so a stray Enter or Space — from a screen
 /// reader user tabbing around the progress page, say — must not be what
 /// stops their REAPER install halfway.
 pub(crate) fn confirm_stop_install(model: &WizardModel, mode: WizardMode) -> bool {
-    let (title, body) = match mode {
-        WizardMode::Install => (
-            &model.text.close_during_install_title,
-            &model.text.close_during_install_body,
-        ),
-        WizardMode::Uninstall => (
-            &model.text.close_during_uninstall_title,
-            &model.text.close_during_uninstall_body,
-        ),
-    };
+    let (title, body) = stop_question(&model.text, mode);
     let mut confirmed = false;
     with_ui_frame(|frame| {
         let dialog = MessageDialog::builder(frame, body, title)

@@ -194,3 +194,13 @@ pub(super) fn sample_install_request(resource_path: PathBuf) -> WizardInstallReq
         package_channels: Default::default(),
     }
 }
+
+/// That `text` is a sentence RABBIT can show in `locale`: not empty, and
+/// with no message id or placeholder left in it, as a missing key or a
+/// missing argument would leave one.
+pub(super) fn assert_reads(locale: &str, text: &str) {
+    assert!(!text.is_empty(), "{locale}: empty");
+    for marker in ["wizard-", "status-", "{", "}"] {
+        assert!(!text.contains(marker), "{locale}: {text}");
+    }
+}

@@ -128,10 +128,7 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
             .iter()
             .filter_map(|action| action.backup_path.as_ref())
             .collect::<Vec<_>>();
-        if !backup_paths.is_empty()
-            || install_report.receipt_backup_path.is_some()
-            || install_report.backup_manifest_path.is_some()
-        {
+        if !backup_paths.is_empty() || install_report.backup_manifest_path.is_some() {
             detail_lines.push(format_localized_message(
                 localizer.as_ref(),
                 "wizard-summary-backup-files-created",
@@ -144,14 +141,6 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
                     "wizard-summary-backup-file",
                     &[("path", path.display().to_string())],
                     format!("Backup file: {}", path.display()),
-                ));
-            }
-            if let Some(path) = &install_report.receipt_backup_path {
-                detail_lines.push(format_localized_message(
-                    localizer.as_ref(),
-                    "wizard-summary-receipt-backup",
-                    &[("path", path.display().to_string())],
-                    format!("Receipt backup: {}", path.display()),
                 ));
             }
             if let Some(path) = &install_report.backup_manifest_path {
@@ -177,29 +166,14 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
         .iter()
         .filter_map(|item| item.backup_manifest_path.as_ref())
         .collect::<Vec<_>>();
-    let package_receipt_backup_path = report.package_operation.receipt_backup_path.as_ref();
-    let package_receipt_backup_manifest_path = report
-        .package_operation
-        .receipt_backup_manifest_path
-        .as_ref();
     if report.package_operation.install_report.is_none()
-        && (!item_backup_paths.is_empty()
-            || !item_backup_manifest_paths.is_empty()
-            || package_receipt_backup_path.is_some()
-            || package_receipt_backup_manifest_path.is_some())
+        && (!item_backup_paths.is_empty() || !item_backup_manifest_paths.is_empty())
     {
         detail_lines.push(format_localized_message(
             localizer.as_ref(),
             "wizard-summary-backup-files-created",
-            &[(
-                "count",
-                (item_backup_paths.len() + usize::from(package_receipt_backup_path.is_some()))
-                    .to_string(),
-            )],
-            format!(
-                "Backup files created: {}",
-                item_backup_paths.len() + usize::from(package_receipt_backup_path.is_some())
-            ),
+            &[("count", item_backup_paths.len().to_string())],
+            format!("Backup files created: {}", item_backup_paths.len()),
         ));
     }
     for path in item_backup_paths {
@@ -211,22 +185,6 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
         ));
     }
     for path in item_backup_manifest_paths {
-        detail_lines.push(format_localized_message(
-            localizer.as_ref(),
-            "wizard-summary-backup-manifest",
-            &[("path", path.display().to_string())],
-            format!("Backup manifest: {}", path.display()),
-        ));
-    }
-    if let Some(path) = package_receipt_backup_path {
-        detail_lines.push(format_localized_message(
-            localizer.as_ref(),
-            "wizard-summary-receipt-backup",
-            &[("path", path.display().to_string())],
-            format!("Receipt backup: {}", path.display()),
-        ));
-    }
-    if let Some(path) = package_receipt_backup_manifest_path {
         detail_lines.push(format_localized_message(
             localizer.as_ref(),
             "wizard-summary-backup-manifest",

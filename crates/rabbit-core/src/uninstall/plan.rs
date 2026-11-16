@@ -114,6 +114,73 @@ fn is_installed(input: &UninstallPlanInput<'_>, package_id: &str) -> bool {
         .any(|detection| detection.package_id == package_id && detection.installed)
 }
 
+/// The plan in `spec` for a `target` REAPER on `platform`, and whether the
+/// package can only come off a standard REAPER.
+///
+/// A machine-wide package serves every REAPER on the computer, so a
+/// portable target can't remove it: the standard REAPER would lose it too.
+/// Manifests needn't even have a plan for that case; the standard REAPER's
+/// plan says what removing the package means. Only a plan that removes
+/// something is out of reach here. One that removes nothing, manual or
+/// not_supported, holds whatever the target, note and all.
+fn plan_spec_for(
+    spec: &PackageSpec,
+    platform: Platform,
+    target: InstallationKind,
+) -> (Option<&UninstallPlanSpec>, bool) {
+    if spec.requires_standard_install && target == InstallationKind::Portable {
+        match spec
+            .uninstall
+            .plan_for(platform, InstallationKind::Standard)
+        {
+            Some(plan)
+                if matches!(
+                    plan.strategy,
+                    UninstallStrategy::RemoveFiles | UninstallStrategy::VendorUninstaller
+                ) =>
+            {
+                (None, true)
+            }
+            plan => (plan, false),
+        }
+    } else {
+        (spec.uninstall.plan_for(platform, target), false)
+    }
+}
+
+/// Whether removing `spec` by `strategy` needs every REAPER on the computer
+/// closed, not only the target's. The engine decides this itself, so a
+/// manifest can't forget it: a vendor uninstaller reacts to any REAPER
+/// window, and a machine-wide package may be loaded by any REAPER.
+fn needs_every_reaper_closed(spec: &PackageSpec, strategy: Option<UninstallStrategy>) -> bool {
+    spec.requires_standard_install || strategy == Some(UninstallStrategy::VendorUninstaller)
+}
+
+/// The programs `plan` says must not run while the package comes off.
+fn blocking_programs_of(plan: Option<&UninstallPlanSpec>) -> Vec<String> {
+    plan.map(|plan| plan.blocking_programs.clone())
+        .unwrap_or_default()
+}
+
+/// What an uninstall of `spec` from a `target` REAPER on `platform` needs
+/// closed besides the target's REAPER: whether every REAPER on the computer
+/// must be closed, and the programs its plan names. From the manifest
+/// alone, by the rules the plan of an uninstall follows, so a restore of the
+/// package checks the same (backup plan 4.4). Only an uninstall of REAPER
+/// itself that needs the administrator command adds every REAPER besides,
+/// which takes detection; no backup set holds REAPER's app.
+pub(crate) fn uninstall_process_rules(
+    spec: &PackageSpec,
+    platform: Platform,
+    target: InstallationKind,
+) -> (bool, Vec<String>) {
+    let (plan, _) = plan_spec_for(spec, platform, target);
+    (
+        needs_every_reaper_closed(spec, plan.map(|plan| plan.strategy)),
+        blocking_programs_of(plan),
+    )
+}
+
 fn plan_item(
     input: &UninstallPlanInput<'_>,
     spec: &PackageSpec,
@@ -124,33 +191,7 @@ fn plan_item(
         .iter()
         .find(|detection| detection.package_id == spec.id);
     let receipt = input.state.and_then(|state| state.packages.get(&spec.id));
-    // A machine-wide package serves every REAPER on the computer, so a
-    // portable target can't remove it: the standard REAPER would lose it
-    // too. Manifests needn't even have a plan for that case; the standard
-    // REAPER's plan says what removing the package means. Only a plan that
-    // removes something is out of reach here. One that removes nothing,
-    // manual or not_supported, holds whatever the target, note and all. A
-    // standard plan with a machine cleanup lends its by-hand steps, so a
-    // portable target still says how to remove the package without RABBIT.
-    let (plan, needs_standard_target) =
-        if spec.requires_standard_install && input.target == InstallationKind::Portable {
-            match spec
-                .uninstall
-                .plan_for(input.platform, InstallationKind::Standard)
-            {
-                Some(plan)
-                    if matches!(
-                        plan.strategy,
-                        UninstallStrategy::RemoveFiles | UninstallStrategy::VendorUninstaller
-                    ) =>
-                {
-                    (None, true)
-                }
-                plan => (plan, false),
-            }
-        } else {
-            (spec.uninstall.plan_for(input.platform, input.target), false)
-        };
+    let (plan, needs_standard_target) = plan_spec_for(spec, input.platform, input.target);
     let strategy = plan.map(|plan| plan.strategy);
     let changes_something = matches!(
         strategy,
@@ -186,17 +227,11 @@ fn plan_item(
         registry_cleanup: Vec::new(),
         vendor_run: None,
         machine_cleanup: None,
-        blocking_programs: plan
-            .map(|plan| plan.blocking_programs.clone())
-            .unwrap_or_default(),
+        blocking_programs: blocking_programs_of(plan),
         macos_pkg_forget: plan
             .map(|plan| plan.macos_pkg_forget.clone())
             .unwrap_or_default(),
-        // The engine adds this itself, so a manifest can't forget it: a
-        // vendor uninstaller reacts to any REAPER window, and a machine-wide
-        // package may be loaded by any REAPER.
-        every_reaper_closed: spec.requires_standard_install
-            || strategy == Some(UninstallStrategy::VendorUninstaller),
+        every_reaper_closed: needs_every_reaper_closed(spec, strategy),
         requires_elevation,
         unbacked,
         confirm: false,
@@ -214,6 +249,9 @@ fn plan_item(
     }
     if needs_standard_target {
         item.removability = Removability::NeedsStandardTarget;
+        // A standard plan with a machine cleanup lends its by-hand steps, so
+        // a portable target still says how to remove the package without
+        // RABBIT.
         if let Some(cleanup) = spec
             .uninstall
             .plan_for(input.platform, InstallationKind::Standard)

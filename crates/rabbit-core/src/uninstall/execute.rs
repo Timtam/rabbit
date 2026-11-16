@@ -267,24 +267,45 @@ fn target_of(
     target_app_path: Option<&Path>,
     target: Option<InstallationKind>,
 ) -> (InstallationKind, Option<PathBuf>) {
-    let standard = default_standard_installation(platform).filter(|installation| {
+    let target = target.unwrap_or_else(|| target_kind_of(platform, resource_path));
+    let app_path = target_app_path
+        .map(Path::to_path_buf)
+        .or_else(|| match target {
+            InstallationKind::Standard => standard_installation_at(platform, resource_path)
+                .map(|installation| installation.app_path),
+            InstallationKind::Portable => portable_target_app_path(resource_path, Some(platform)),
+        });
+    (target, app_path)
+}
+
+/// Whether `resource_path` is the standard REAPER's resource folder on
+/// `platform`, whatever its spelling, or a portable REAPER's. Only paths are
+/// compared; the standard REAPER's app isn't looked at. A restore reads the
+/// uninstall plan for this kind of REAPER (see
+/// `rollback::restore_process_rules`).
+pub(crate) fn target_kind_of(platform: Platform, resource_path: &Path) -> InstallationKind {
+    let standard = crate::preflight::standard_resource_path(Some(platform));
+    if standard
+        .is_some_and(|standard| same_ignoring_case(&absolute(&standard), &absolute(resource_path)))
+    {
+        InstallationKind::Standard
+    } else {
+        InstallationKind::Portable
+    }
+}
+
+/// The standard REAPER on `platform`, when `resource_path` is its resource
+/// folder.
+fn standard_installation_at(
+    platform: Platform,
+    resource_path: &Path,
+) -> Option<crate::model::Installation> {
+    default_standard_installation(platform).filter(|installation| {
         same_ignoring_case(
             &absolute(&installation.resource_path),
             &absolute(resource_path),
         )
-    });
-    let target = target.unwrap_or(if standard.is_some() {
-        InstallationKind::Standard
-    } else {
-        InstallationKind::Portable
-    });
-    let app_path = target_app_path
-        .map(Path::to_path_buf)
-        .or_else(|| match target {
-            InstallationKind::Standard => standard.map(|installation| installation.app_path),
-            InstallationKind::Portable => portable_target_app_path(resource_path, Some(platform)),
-        });
-    (target, app_path)
+    })
 }
 
 pub(crate) fn execute_uninstall_in(
@@ -1186,9 +1207,11 @@ impl RemovalRun<'_> {
     /// folder and registry entry, then take the package out of the receipt.
     fn remove_started(&mut self, plan_item: &UninstallPlanItem) -> UninstallReportItem {
         let id = plan_item.package_id.as_str();
+        // No settings have moved yet; the removal notes it once one does.
         let record = BackupPackageRecord {
             receipt: self.state.packages.get(id).cloned(),
             langpack_before: None,
+            with_settings: Some(false),
         };
         if let Err(error) = self.backups.record_package(id, record) {
             return new_item(
@@ -1327,9 +1350,12 @@ impl RemovalRun<'_> {
             .iter()
             .any(|file| file.reason != RemovalReason::Tree);
         if into_backup {
+            // No settings have moved yet; the removal notes it once one
+            // does.
             let record = BackupPackageRecord {
                 receipt: self.state.packages.get(id).cloned(),
                 langpack_before: None,
+                with_settings: Some(false),
             };
             if let Err(error) = self.backups.record_package(id, record) {
                 return new_item(
@@ -1788,6 +1814,16 @@ impl<'a> PackageRemoval<'a> {
                     })?;
                 let backup_path = moved.backup_path.clone();
                 self.moved.push(moved);
+                // After the first settings file moved, so the set never
+                // claims settings it doesn't hold. Should the save fail, the
+                // manifest says `false` until the next save; the settings
+                // are in the set all the same, and a restore brings them
+                // back with the package.
+                if reason == RemovalReason::Setting
+                    && moved_settings(&self.removed).next().is_none()
+                {
+                    let _ = backups.set_with_settings(&self.item.package_id, true);
+                }
                 Some(backup_path)
             }
         };
@@ -1893,7 +1929,8 @@ impl<'a> PackageRemoval<'a> {
     }
 
     /// Move every file this package moved back, last first. Returns the
-    /// files that went back and those still in the backup set.
+    /// files that went back and those still in the backup set. When none of
+    /// its settings is left in the set, the set records it without them.
     fn put_everything_back(&mut self) -> (Vec<PathBuf>, Vec<PathBuf>) {
         let mut put_back = Vec::new();
         let mut left = Vec::new();
@@ -1905,6 +1942,12 @@ impl<'a> PackageRemoval<'a> {
                 Ok(()) => put_back.push(moved.original),
                 Err(_) => left.push(moved.original),
             }
+        }
+        let mut settings = moved_settings(&self.removed).peekable();
+        if settings.peek().is_some()
+            && !settings.any(|setting| left.iter().any(|file| file == setting))
+        {
+            let _ = backups.set_with_settings(&self.item.package_id, false);
         }
         put_back.reverse();
         left.reverse();
@@ -1919,6 +1962,16 @@ impl<'a> PackageRemoval<'a> {
             ..new_item(self.item, status, code)
         }
     }
+}
+
+/// The settings files among `removed` that moved into the backup set, by
+/// their original paths. Any of them makes the set record the package
+/// `with_settings`.
+fn moved_settings(removed: &[RemovedFile]) -> impl Iterator<Item = &Path> {
+    removed
+        .iter()
+        .filter(|file| file.reason == RemovalReason::Setting && file.backup_path.is_some())
+        .map(|file| file.path.as_path())
 }
 
 /// The files and folders inside `folder`, in name order, without following

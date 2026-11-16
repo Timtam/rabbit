@@ -924,6 +924,17 @@ pub(crate) fn make_junction(link: &Path, target: &Path) {
     );
 }
 
+/// Make `link` point to the folder `target`: a junction on Windows, which
+/// needs no administrator rights, a symbolic link elsewhere. RABBIT, and
+/// its guard, see both as links.
+#[cfg(test)]
+pub(crate) fn link_folder(link: &Path, target: &Path) {
+    #[cfg(windows)]
+    make_junction(link, target);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -934,7 +945,8 @@ mod tests {
     use super::{
         PathRefusal, RemovalGuard, ResolvedPath, ResolvedPattern, UninstallRoots,
         check_administrator_removal, check_administrator_trash_move, check_removal,
-        check_root_reaches, expand_wildcard, pattern_matches, resolve_path, resolve_pattern,
+        check_root_reaches, expand_wildcard, link_folder, pattern_matches, resolve_path,
+        resolve_pattern,
     };
     use crate::model::Platform;
     use crate::package::uninstall::UninstallPath;
@@ -1107,15 +1119,6 @@ mod tests {
             bundle_id: None,
             guard: resolved.guard,
         }
-    }
-
-    /// Make `link` point to the folder `target`: a junction on Windows, a
-    /// symbolic link elsewhere. The guard sees both as links.
-    fn link_folder(link: &Path, target: &Path) {
-        #[cfg(windows)]
-        super::make_junction(link, target);
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(target, link).unwrap();
     }
 
     #[test]

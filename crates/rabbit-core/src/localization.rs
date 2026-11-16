@@ -28,6 +28,45 @@ pub struct LocalizedText {
     pub formatting_errors: Vec<String>,
 }
 
+/// The value of one placeholder for [`Localizer::format_with`]: text as it
+/// is, or a whole number, which a message can pick a plural form by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FluentArgument<'a> {
+    Text(&'a str),
+    Number(i64),
+}
+
+impl<'a> From<&'a str> for FluentArgument<'a> {
+    fn from(text: &'a str) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl<'a> From<&'a String> for FluentArgument<'a> {
+    fn from(text: &'a String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<i64> for FluentArgument<'_> {
+    fn from(number: i64) -> Self {
+        Self::Number(number)
+    }
+}
+
+impl From<u64> for FluentArgument<'_> {
+    /// Counts and sizes beyond `i64::MAX` read as `i64::MAX`.
+    fn from(number: u64) -> Self {
+        Self::Number(i64::try_from(number).unwrap_or(i64::MAX))
+    }
+}
+
+impl From<usize> for FluentArgument<'_> {
+    fn from(number: usize) -> Self {
+        Self::Number(i64::try_from(number).unwrap_or(i64::MAX))
+    }
+}
+
 pub struct Localizer {
     requested_locale: String,
     active_locale: String,
@@ -112,6 +151,17 @@ impl Localizer {
     }
 
     pub fn format(&self, id: &str, arguments: &[(&str, &str)]) -> LocalizedText {
+        let arguments: Vec<(&str, FluentArgument<'_>)> = arguments
+            .iter()
+            .map(|(name, value)| (*name, FluentArgument::Text(value)))
+            .collect();
+        self.format_with(id, &arguments)
+    }
+
+    /// [`Self::format`] with placeholders that may be numbers. A message
+    /// picks a plural form, such as `[one]`, or a numbered variant, such as
+    /// `[1]`, only by a number: text never matches either.
+    pub fn format_with(&self, id: &str, arguments: &[(&str, FluentArgument<'_>)]) -> LocalizedText {
         let Some(message) = self.bundle.get_message(id) else {
             return self.missing_text(id);
         };
@@ -122,7 +172,10 @@ impl Localizer {
 
         let mut args = FluentArgs::new();
         for (name, value) in arguments {
-            args.set(*name, *value);
+            match value {
+                FluentArgument::Text(text) => args.set(*name, *text),
+                FluentArgument::Number(number) => args.set(*name, *number),
+            }
         }
 
         let mut formatting_errors = Vec::new();
@@ -321,7 +374,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{DEFAULT_LOCALE, LOCALE_FILE_NAME, Localizer, available_locales};
+    use super::{DEFAULT_LOCALE, FluentArgument, LOCALE_FILE_NAME, Localizer, available_locales};
     use super::{embedded_locale_source, embedded_locales};
 
     #[test]
@@ -633,6 +686,40 @@ mod tests {
         assert!(!localizer.fallback_used());
         assert!(localizer.source_path().is_some());
         assert_eq!(localizer.text("app-title").value, "RABBIT auf Deutsch");
+    }
+
+    /// A number picks a plural form by the locale's rules, and a numbered
+    /// variant by its value. The same digits as text pick neither, so
+    /// counts must be passed as numbers.
+    #[test]
+    fn numbers_pick_plural_forms_and_numbered_variants() {
+        let dir = tempdir().unwrap();
+        let locale_dir = dir.path().join("fr-FR");
+        fs::create_dir_all(&locale_dir).unwrap();
+        fs::write(
+            locale_dir.join(LOCALE_FILE_NAME),
+            "copies = { $count ->\n    [one] { $count } copie\n   *[other] { $count } copies\n}\n\
+             month = { $month ->\n    [1] janvier\n   *[other] autre\n}\n",
+        )
+        .unwrap();
+        let localizer = Localizer::from_locale_dir(dir.path(), "fr-FR").unwrap();
+        let copies =
+            |count: FluentArgument<'_>| localizer.format_with("copies", &[("count", count)]).value;
+
+        // French counts 0 and 1 as one.
+        assert_eq!(copies(0_u64.into()), "0 copie");
+        assert_eq!(copies(1_u64.into()), "1 copie");
+        assert_eq!(copies(2_u64.into()), "2 copies");
+        assert_eq!(copies("1".into()), "1 copies");
+        let month =
+            |value: FluentArgument<'_>| localizer.format_with("month", &[("month", value)]).value;
+        assert_eq!(month(1_i64.into()), "janvier");
+        assert_eq!(month("1".into()), "autre");
+        // Plain text arguments still work through `format`.
+        assert_eq!(
+            localizer.format("copies", &[("count", "3")]).value,
+            "3 copies"
+        );
     }
 
     #[test]

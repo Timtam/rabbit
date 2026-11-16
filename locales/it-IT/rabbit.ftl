@@ -5,12 +5,19 @@ common-yes = sì
 common-no = no
 
 # What happens to a package in this run, the first thing its row says. An
-# unticked row on either tab gets action-keep, so keep it neutral: on the
-# Uninstall tab it only means the package isn't marked for removal.
+# unticked row on every tab gets action-keep, so keep it neutral: on the
+# Uninstall tab it only means the package isn't marked for removal, and on
+# the Backups tab that the backup isn't ticked to restore or delete.
 action-install = Da installare
 action-update = Da aggiornare
 action-keep = Non modificare
 action-uninstall = Da disinstallare
+# On the Backups tab: what happens to a backup ticked to restore, or to
+# delete. The last is for a backup that is the only copy of what it holds,
+# such as software you uninstalled.
+action-restore = Da ripristinare
+action-delete = Da eliminare
+action-delete-only-copy = Da eliminare (unica copia)
 
 package-reaper = REAPER
 package-osara = OSARA
@@ -215,6 +222,13 @@ wizard-button-install = Installa
 wizard-button-install-mnemonic = I
 wizard-button-uninstall = Disinstalla
 wizard-button-uninstall-mnemonic = D
+# The run button before a restore and before a delete of backups, both
+# started from the Backups tab. Their access keys must differ from those of
+# Back, Next, Close and Cancel, which sit beside it.
+wizard-button-restore = Ripristina
+wizard-button-restore-mnemonic = R
+wizard-button-delete = Elimina
+wizard-button-delete-mnemonic = E
 wizard-button-close = Chiudi
 wizard-button-close-mnemonic = C
 wizard-button-cancel = Annulla
@@ -255,7 +269,7 @@ wizard-target-details = Percorso di installazione di REAPER: { $app_path }
     Percorso delle risorse: { $path }
     Scrivibile: { $writable }
 
-wizard-packages-heading = Scegli cosa installare, aggiornare o disinstallare
+wizard-packages-heading = Scegli cosa deve fare RABBIT
 wizard-packages-list-label = Installa o aggiorna: pacchetti e impostazioni
 wizard-packages-row-checked = Selezionato
 wizard-packages-row-unchecked = Non selezionato
@@ -266,10 +280,13 @@ wizard-additional-software-tree-group-label = Software aggiuntivo
 wizard-language-tree-group-label = Pacchetti lingua
 wizard-configuration-tree-group-label = Configurazione
 
-# The two tabs on the Packages page. Screen readers read the selected tab's
-# name when the page opens, so keep both short.
+# The first two of the Packages page's three tabs. Screen readers read the
+# selected tab's name when the page opens, so keep them short.
 wizard-packages-tab-install = Installa o aggiorna
 wizard-packages-tab-uninstall = Disinstalla
+# The third tab, where RABBIT's backups are restored or deleted. Keep it
+# short too.
+wizard-packages-tab-backups = Backup
 # macOS only: VoiceOver says this once, the first time the Packages page opens.
 # Name the Tab and Shift keys as Apple's page of Mac keyboard shortcuts does,
 # and write Control out in full.
@@ -390,6 +407,363 @@ wizard-uninstall-settings-package = { $package }: { $settings }
 # wizard-uninstall-remove-settings reads.
 wizard-uninstall-settings-available = Ora disponibile sotto l'elenco: { $option }.
 wizard-uninstall-settings-unavailable = Non più disponibile: { $option }.
+
+# The Backups tab. The label right before its list names the tab first, as
+# the other tabs' labels do; screen readers read it when focus enters the
+# list. $size is a size, one of the size-* messages, such as "742 MB". The
+# -empty form is for a list with no backups.
+wizard-backups-list-label = Backup: cosa RABBIT può ripristinare o eliminare, { $size } in tutto
+wizard-backups-list-label-empty = Backup: cosa RABBIT può ripristinare o eliminare
+# The one row, without a checkbox, of a Backups list with nothing in it, and
+# its details text. On macOS, VoiceOver says the row's sentence after the
+# tab's name instead.
+wizard-backups-empty = RABBIT non ha backup per questo REAPER.
+wizard-backups-empty-details = RABBIT fa un backup quando disinstalla un pacchetto, quando un aggiornamento sostituisce i file di un pacchetto e quando la mappa dei tasti di OSARA sostituisce la tua. Niente di tutto questo è ancora successo in questo REAPER, oppure i suoi backup sono stati eliminati. Ciò che è stato cambiato dal programma di installazione o disinstallazione di un pacchetto, dal Cestino o con la password di un amministratore non ha mai un backup.
+# Stands in for the Backups list when RABBIT can't read its backups folder.
+# $error is the error message, in English.
+wizard-backups-unreadable = RABBIT non ha potuto leggere i backup di questo REAPER.
+wizard-backups-unreadable-details = RABBIT non ha potuto leggere la sua cartella dei backup ({ $error }), quindi non può elencare cosa potrebbe ripristinare o eliminare.
+# The group headings of the Backups list, rows without a checkbox, then the
+# details text each shows. The details say what backups are for, and what
+# they never hold.
+wizard-backups-group-removed = Software che hai disinstallato
+wizard-backups-group-removed-details = Quando RABBIT disinstalla un pacchetto, sposta qui i file invece di eliminarli. Ognuno di questi backup è l'unica copia. Ciò che è stato rimosso dal programma di disinstallazione di un pacchetto, dal Cestino o con la password di un amministratore non è qui.
+wizard-backups-group-versions = Versioni precedenti
+wizard-backups-group-versions-details = Quando un aggiornamento sostituisce i file di un pacchetto, RABBIT conserva qui quelli vecchi. Gli aggiornamenti fatti dal programma di installazione di un pacchetto, come quello di REAPER, non ne conservano.
+wizard-backups-group-keymaps = Mappe dei tasti
+wizard-backups-group-keymaps-details = Quando la mappa dei tasti di OSARA sostituisce la tua, RABBIT conserva qui quella vecchia. Di solito solo la più vecchia è la tua.
+wizard-backups-group-other = Altri backup
+wizard-backups-group-other-details = RABBIT non può ripristinarli qui. Puoi eliminarli.
+# One row of the Backups list, read as a list row. $backup is what the row
+# calls the backup (one of the wizard-backups-name-* messages, or a package's
+# name and version), $action is action-restore, action-delete,
+# action-delete-only-copy or action-keep, $when one of the
+# wizard-backups-when-* messages or backup-date-unknown, and $size a size,
+# such as "4 MB".
+wizard-backups-row = { $backup }: { $action }. { $when }, { $size }
+# The row that stands for every old copy of RABBIT's records, read as a list
+# row. $action as above, $count a number, the copies, and $size a size.
+wizard-backups-row-records = Vecchie copie dei registri di RABBIT: { $action }. { $count ->
+    [one] Una copia
+   *[other] { $count } copie
+}, { $size }
+# A backup named in a sentence on Review, so that two backups with the same
+# name can be told apart. $backup and $when as in wizard-backups-row.
+wizard-backups-row-reference = { $backup } ({ $when })
+# Names joined in a sentence: $rest is the names but the last, separated by
+# commas, and $last the last one, as in "FFmpeg, ReaPack and SWS".
+wizard-backups-list-and = { $rest } e { $last }
+# What a row calls a package's backup: its localized name, $package, and the
+# version in the backup, $version, a version number.
+wizard-backups-name-package = { $package } { $version }
+# What a row calls a key map: your own; one whose kind RABBIT didn't record,
+# as in backups from earlier versions of RABBIT and those a restore made;
+# REAPER's own default keys; an earlier OSARA key map you hadn't changed.
+wizard-backups-name-keymap-own = La tua mappa dei tasti
+wizard-backups-name-keymap = Mappa dei tasti
+wizard-backups-name-keymap-default = I tasti predefiniti di REAPER
+wizard-backups-name-keymap-osara = Una mappa dei tasti precedente di OSARA
+# What a row calls the other backups. "RABBIT's records" is RABBIT's list of
+# what it installed.
+wizard-backups-name-records = Vecchie copie dei registri di RABBIT
+wizard-backups-name-records-copy = Una copia dei registri di RABBIT
+wizard-backups-name-not-a-backup = Non è un backup di RABBIT
+wizard-backups-name-deleting = Eliminazione non terminata
+wizard-backups-name-no-manifest = Backup senza elenco del contenuto
+wizard-backups-name-damaged = Backup danneggiato
+wizard-backups-name-before-restore = File sostituiti da un ripristino
+wizard-backups-name-update-files = Altri file sostituiti da un aggiornamento
+wizard-backups-name-uninstall-files = Altri file spostati da una disinstallazione
+wizard-backups-name-keymap-files = Altri file conservati con una mappa dei tasti
+wizard-backups-name-unknown = Backup di un'altra versione di RABBIT
+# When a backup was made, as its row says it after the action. $date is a
+# date and time (backup-date-time), and $version a version number.
+# "Replaced by OSARA's" means by OSARA's key map.
+wizard-backups-when-uninstalled = Disinstallato il giorno { $date }
+wizard-backups-when-replaced-by = Sostituito da { $version } il giorno { $date }
+wizard-backups-when-replaced = Sostituito il giorno { $date }
+wizard-backups-when-keymap-osara = Sostituita da quella di OSARA il giorno { $date }
+wizard-backups-when-keymap-restore = Sostituita da un ripristino il giorno { $date }
+wizard-backups-when-made = Creato il giorno { $date }
+# A date and time, as rows, details and Review say when a backup was made,
+# such as "November 9, 2026, 2:05 PM". $year, $month (1 to 12), $day,
+# $hour (0 to 23) and $hour12 (1 to 12) are numbers; $minute is two digits,
+# such as "05"; $period is am or pm. Use the 24-hour clock with $hour and
+# $minute, or the 12-hour one with $hour12, $minute and $period, as your
+# language does. Name the month by the select on $month. Sentences put the
+# date after a word such as "on" or "from": where that word would change
+# with the day, as Italian "l'8" or "dell'11" do, word them so it doesn't.
+backup-date-time = { $day } { $month ->
+    [1] gennaio
+    [2] febbraio
+    [3] marzo
+    [4] aprile
+    [5] maggio
+    [6] giugno
+    [7] luglio
+    [8] agosto
+    [9] settembre
+    [10] ottobre
+    [11] novembre
+   *[12] dicembre
+} { $year }, { $hour }:{ $minute }
+# Instead of a row's when-text, for a backup whose date RABBIT can't tell.
+backup-date-unknown = Data sconosciuta
+# Sizes, in steps of 1024. $count, $whole and $tenth are numbers. A size in
+# GB is $whole and one decimal, $tenth: put your language's decimal mark
+# between them.
+size-under-kb = meno di 1 KB
+size-kb = { $count } KB
+size-mb = { $count } MB
+size-gb = { $whole },{ $tenth } GB
+# Why a Backups row can't be ticked for the choice below the list: the short
+# phrase that goes into wizard-package-row-unavailable-suffix at the end of
+# the row. $package is the localized package name.
+wizard-backups-unavailable-not-here = non ripristinabile qui
+wizard-backups-unavailable-installed-again = hai di nuovo { $package }
+wizard-backups-unavailable-not-complete = una parte non è nel backup
+wizard-backups-unavailable-nothing-in-it = nessuno dei suoi file è in questo backup
+wizard-backups-unavailable-version-unknown = RABBIT non sa quale versione fosse
+wizard-backups-unavailable-other-language-pack = è installato un altro pacchetto di lingua
+wizard-backups-unavailable-part-missing = ne manca una parte
+wizard-backups-unavailable-records-unreadable = RABBIT non riesce a leggere i suoi registri
+wizard-backups-unavailable-not-yours = appartiene a un altro account
+wizard-backups-unavailable-not-a-backup = RABBIT non lo tocca
+wizard-backups-unavailable-receipt-in-set = contiene una copia dei registri di RABBIT
+wizard-backups-unavailable-file-refused = RABBIT non rimette a posto uno dei suoi file
+wizard-backups-unavailable-cannot-restore = RABBIT non può ripristinarlo
+wizard-backups-unavailable-tied = va con un backup che RABBIT non può eliminare
+# The details text of a Backups row, a sentence or two per line, in this
+# order: what the backup is; when it was made; what it holds and how big;
+# whether it is the only copy; what restoring does, or why it can't; what
+# deleting loses. $backup is what the row calls the backup, $package the
+# localized package name, $version a version number, $date a date and time
+# (backup-date-time), $size a size, such as "4 MB", and $count a number.
+#
+# What the backup is.
+wizard-backups-details-uninstalled = { $backup }, com'era prima che lo disinstallassi.
+wizard-backups-details-earlier = { $backup }, una versione precedente.
+wizard-backups-details-keymap-own = La tua mappa dei tasti, di prima che la mappa dei tasti di OSARA la sostituisse.
+wizard-backups-details-keymap-default = I tasti predefiniti di REAPER, di prima che la mappa dei tasti di OSARA li sostituisse.
+wizard-backups-details-keymap-osara = Una mappa dei tasti precedente di OSARA, di prima che una più recente la sostituisse.
+wizard-backups-details-keymap-unknown = Una mappa dei tasti di prima che quella di OSARA la sostituisse. Può essere la tua o una mappa dei tasti di OSARA più vecchia: RABBIT non ha annotato quale.
+wizard-backups-details-keymap-restore = La mappa dei tasti sostituita da un ripristino. Può essere la tua o quella di OSARA.
+wizard-backups-details-keymap-other = Una mappa dei tasti conservata da RABBIT.
+wizard-backups-details-records = Copie dell'elenco di ciò che RABBIT ha installato, da operazioni precedenti. Eliminarle non cambia niente di ciò che è installato.
+wizard-backups-details-records-copy = Una copia dell'elenco di ciò che RABBIT ha installato, da un'operazione precedente.
+wizard-backups-details-deleting = L'eliminazione di questo backup è iniziata e non è terminata, quindi una parte potrebbe già mancare.
+wizard-backups-details-not-a-backup = Questo non è un backup di RABBIT: è un collegamento, o una cartella con un nome che RABBIT non dà mai a un backup.
+wizard-backups-details-no-manifest = Un backup senza elenco del suo contenuto, come quelli lasciati da un RABBIT precedente che si è fermato troppo presto.
+wizard-backups-details-damaged = Un backup il cui elenco del contenuto non si può leggere.
+wizard-backups-details-before-restore = File sostituiti da un ripristino, conservati per poterlo annullare.
+wizard-backups-details-update-files = File sostituiti da un aggiornamento che nessun'altra riga qui rimette a posto.
+wizard-backups-details-uninstall-files = File spostati da una disinstallazione che non appartengono a nessun pacchetto da essa registrato.
+wizard-backups-details-keymap-files = File conservati con una mappa dei tasti che nessun'altra riga qui rimette a posto.
+wizard-backups-details-unknown = Un backup fatto da un'altra versione di RABBIT, per un motivo che questa versione non conosce.
+# When it was made.
+wizard-backups-details-when-uninstalled = L'hai disinstallato il giorno { $date }.
+wizard-backups-details-when-updated-to = Un aggiornamento a { $version } l'ha sostituita il giorno { $date }.
+wizard-backups-details-when-updated = Un aggiornamento l'ha sostituita il giorno { $date }.
+wizard-backups-details-when-restored-to = Il ritorno a { $version } l'ha sostituita il giorno { $date }.
+wizard-backups-details-when-restored = Un ripristino l'ha sostituita il giorno { $date }.
+wizard-backups-details-when-osara = La mappa dei tasti di OSARA l'ha sostituita il giorno { $date }.
+wizard-backups-details-when-keymap-restored = Una mappa dei tasti ripristinata l'ha sostituita il giorno { $date }.
+wizard-backups-details-when-made = RABBIT ha fatto questo backup il giorno { $date }.
+wizard-backups-details-when-records = La copia più recente è del giorno { $date }.
+wizard-backups-details-when-unknown = RABBIT non può sapere quando è stato fatto questo backup.
+# What it holds and how big it is. The settings are named only when the
+# uninstall recorded that it moved them; backups from earlier versions of
+# RABBIT don't say, so the -older form says "anything else".
+wizard-backups-details-holds-with-settings = Contiene i suoi file e le tue impostazioni di { $package }, { $size }.
+wizard-backups-details-holds-files = Contiene i suoi file, { $size }.
+wizard-backups-details-holds-older = Contiene i suoi file e tutto ciò che quella disinstallazione ha spostato, { $size }.
+wizard-backups-details-holds-replaced = Contiene i file sostituiti, { $size }.
+wizard-backups-details-holds-keymap = Contiene la mappa dei tasti, { $size }.
+wizard-backups-details-holds-size = Occupa { $size }.
+wizard-backups-details-holds-records = { $count ->
+    [one] C'è una copia, { $size }.
+   *[other] Ci sono { $count } copie, { $size } in tutto.
+}
+wizard-backups-details-only-copy = È l'unica copia.
+# What restoring does, for a backup that can be restored. Name REAPER's
+# Actions list as REAPER does in your language. The -uninstalled-files form
+# is for a backup that names no version, which may hold no record of the
+# package to put back, so it says nothing about RABBIT's records.
+wizard-backups-details-restore-uninstalled = Il ripristino rimette a posto i file, e RABBIT considera di nuovo installato { $package }.
+wizard-backups-details-restore-uninstalled-files = Il ripristino rimette a posto i file.
+wizard-backups-details-restore-stopped-partway = La disinstallazione si è fermata a metà, quindi alcuni dei suoi file sono solo in questo backup. Il ripristino li rimette a posto.
+wizard-backups-details-restore-already-back = { $package } è già tornato. Il ripristino rimette a posto i suoi file un'altra volta.
+wizard-backups-details-restore-earlier = Il ripristino torna a { $version } e conserva la versione che hai ora come backup, così potrai ritornarci in seguito. Le tue impostazioni restano come sono.
+wizard-backups-details-restore-earlier-copy = Il ripristino rimette questa copia e conserva la versione che hai ora come backup, così potrai ritornarci in seguito.
+wizard-backups-details-restore-earlier-already-back = { $package } è già a questa versione. Il ripristino rimette a posto i suoi file un'altra volta.
+wizard-backups-details-restore-keymap = Il ripristino la rende di nuovo la mappa dei tasti di REAPER e conserva quella attuale come backup. Gli script che hai installato da allora restano nell'elenco delle azioni di REAPER.
+wizard-backups-details-restore-default-keys = Il ripristino riporta i tasti propri di REAPER, non una tua mappa dei tasti, e conserva la mappa dei tasti attuale come backup.
+# Why it can't be restored, by what RABBIT found. Name the Uninstall tab as
+# wizard-packages-tab-uninstall does.
+wizard-backups-details-not-here = RABBIT non può ripristinarlo qui.
+wizard-backups-details-cannot-restore = RABBIT non può ripristinarlo.
+wizard-backups-details-status-installed-again = Hai di nuovo { $package }. Disinstalla prima quello che hai, nella scheda «Disinstalla», poi ripristina.
+wizard-backups-details-status-not-complete = Una parte non è nel backup, quindi RABBIT non può tornare a quella versione.
+wizard-backups-details-status-nothing-in-it = Nessuno dei suoi file è in questo backup, quindi non c'è niente da ripristinare.
+wizard-backups-details-status-version-unknown = RABBIT non sa quale versione fosse, quindi non può tornarci.
+wizard-backups-details-status-other-language-pack = È installato un altro pacchetto di lingua, e installarne uno rimuove l'altro, quindi RABBIT non riporta questo finché l'altro è installato.
+wizard-backups-details-status-part-missing = Ne manca una parte nel backup, quindi RABBIT non può ripristinarlo.
+wizard-backups-details-status-records-unreadable = RABBIT non riesce a leggere i suoi registri, quindi non può sapere se questo backup corrisponde.
+wizard-backups-details-status-not-yours = Appartiene a un altro account, quindi RABBIT non lo ripristina né lo elimina.
+wizard-backups-details-status-not-a-backup = RABBIT non ci guarda mai dentro, non lo ripristina e non lo elimina.
+# macOS: how to remove another account's backup by hand. The backups are in
+# the hidden Library folder, so the steps go through Finder's Go menu.
+# $folder is the folder that holds the backup, a full macOS path, and $name
+# the backup's own folder name; keep both as they are. Name Finder, its Go
+# menu and the menu's Go to Folder item as Finder does in your language, and
+# Command-Delete as Apple's page of Mac keyboard shortcuts does. Never
+# suggest sudo.
+wizard-backups-details-not-yours-finder-macos = Per rimuoverlo, nel Finder scegli Vai > Vai alla cartella, inserisci { $folder }, poi seleziona { $name }, premi Comando-Elimina e svuota il Cestino. Il Finder chiede nome e password di un amministratore se ne ha bisogno.
+# What deleting it loses.
+wizard-backups-details-delete-uninstalled = Se elimini questo backup, RABBIT non può più recuperare questa copia.
+wizard-backups-details-delete-earlier = Se elimini questo backup, non puoi più tornare a { $version }.
+wizard-backups-details-delete-earlier-copy = Se elimini questo backup, non puoi più tornare a questa copia.
+wizard-backups-details-delete-keymap = Se elimini questo backup, RABBIT non può più recuperare questa mappa dei tasti.
+wizard-backups-details-delete-already-back = I suoi file sono anche sul disco, quindi eliminarlo non fa perdere niente.
+wizard-backups-details-delete-other = Se lo elimini, sparisce per sempre.
+wizard-backups-details-delete-deleting = Eliminarlo completa quell'eliminazione.
+# For rows that go together until a later version of RABBIT: one backup
+# holds them all, and RABBIT deletes whole backups. $backups is a list of
+# what the other rows call their backups, $count how many there are, a
+# number, and $origin uninstall, update or other, for what made the backup.
+wizard-backups-details-together = { $origin ->
+    [uninstall] Il backup di questa disinstallazione contiene anche { $backups }.
+    [update] Il backup di questo aggiornamento contiene anche { $backups }.
+   *[other] Lo stesso backup contiene anche { $backups }.
+} Fino a una versione successiva, RABBIT li elimina insieme.
+# After the sentence above, when one of those rows can't be deleted.
+wizard-backups-details-tied = Uno di essi non si può eliminare, quindi RABBIT non può eliminare neanche questo.
+# The choice below the Backups list: its label, which screen readers read
+# with the choice, then the two choices, Restore and Delete. Restore is
+# where the tab starts. The choices have no access keys.
+wizard-backups-choice-label = Cosa fare con i backup selezionati
+wizard-backups-choice-restore = Ripristina
+wizard-backups-choice-delete = Elimina
+# The choice below the Backups list, Restore or Delete, keeps its own ticks.
+# After a switch, VoiceOver on macOS says how many backups are ticked for the
+# new choice. $choice is restore or delete, and $count a number.
+wizard-backups-ticked-macos = { $choice ->
+    [delete] { $count ->
+        [0] Nessun backup selezionato da eliminare.
+        [one] Un backup selezionato da eliminare.
+       *[other] { $count } backup selezionati da eliminare.
+    }
+   *[restore] { $count ->
+        [0] Nessun backup selezionato da ripristinare.
+        [one] Un backup selezionato da ripristinare.
+       *[other] { $count } backup selezionati da ripristinare.
+    }
+}
+# Said by VoiceOver on macOS after "Checked" or "Unchecked", when ticking a
+# row to delete ticks or unticks the rows from the same backup too, such as
+# "SWS 2.14.0.7 from the same uninstall is ticked too." $backups is a list
+# of what those rows call their backups, $count how many there are, a
+# number, and $origin uninstall, update or other, for what made the backup.
+wizard-backups-also-ticked-macos = { $count ->
+    [one] Selezionato anche
+   *[other] Selezionati anche
+}, { $origin ->
+    [uninstall] dalla stessa disinstallazione
+    [update] dallo stesso aggiornamento
+   *[other] dallo stesso backup
+}: { $backups }.
+wizard-backups-also-unticked-macos = { $count ->
+    [one] Deselezionato anche
+   *[other] Deselezionati anche
+}, { $origin ->
+    [uninstall] dalla stessa disinstallazione
+    [update] dallo stesso aggiornamento
+   *[other] dallo stesso backup
+}: { $backups }.
+# Why a restore of a backup is refused, a sentence or two each, about the
+# backup, which they call "it". Review puts one after "Can't restore
+# <backup> yet." or "Can't restore yet:", the Done page after "RABBIT
+# didn't restore <backup>." or after its first line, and a row's details
+# after what the backup is. The sentence before names the backup by what
+# its row calls it, such as "SWS Extension 2.14.0.7" or "your key map",
+# never by the word "backup": where your language's pronoun needs a
+# matching noun, start with "this backup" instead. $package is a localized
+# package name, $packages a list of them, $path a file or folder as the
+# computer writes it, keep it as it is, $detail an error message in
+# English, $reason one of the wizard-restore-target-* phrases, and
+# $programs a comma-separated list of program names, never translated.
+# Name the Uninstall tab as wizard-packages-tab-uninstall does.
+wizard-restore-refusal-invalid-id = Il suo nome non è uno di quelli che RABBIT dà a un backup.
+wizard-restore-refusal-not-found = È stato eliminato o non è mai esistito. Avvia di nuovo RABBIT per vedere i backup come sono adesso.
+wizard-restore-refusal-differs-in-case = RABBIT lo trova solo con un nome con maiuscole e minuscole diverse.
+wizard-restore-refusal-ends-in-dot-or-space = RABBIT lo trova solo con un nome senza il punto o lo spazio finale.
+wizard-restore-refusal-being-deleted = La sua eliminazione è iniziata e non è terminata, quindi una parte potrebbe mancare.
+wizard-restore-refusal-is-link = RABBIT non usa { $path }: è un collegamento, e RABBIT non segue mai collegamenti nei suoi backup.
+wizard-restore-refusal-no-manifest = Non indica quali dei suoi file appartengono a { $package }.
+wizard-restore-refusal-no-package-records = Non registra pacchetti, quindi RABBIT non può ripristinarne solo { $package }.
+wizard-restore-refusal-package-not-in-set = Non contiene nessuna registrazione di { $package }.
+wizard-restore-refusal-no-keymap-in-set = Non contiene nessuna mappa dei tasti che RABBIT possa ripristinare.
+wizard-restore-refusal-damaged-manifest = RABBIT non riesce a leggere il suo elenco del contenuto ({ $detail }).
+wizard-restore-refusal-records-only = Contiene solo una copia dei registri di RABBIT, quindi non c'è niente da ripristinare.
+wizard-restore-refusal-receipt-in-set = Contiene una copia dei registri di RABBIT. Ricopiarla annullerebbe tutte le modifiche fatte da allora, quindi RABBIT non lo ripristina.
+wizard-restore-refusal-reinstalled-since = Hai di nuovo { $package }, una copia installata dopo questo backup. Disinstalla prima quella che hai, nella scheda «Disinstalla», poi ripristina.
+wizard-restore-refusal-nothing-of-it-in-set = Nessuno dei file di { $packages } è al suo interno, quindi non c'è niente da ripristinare.
+# Instead of the sentence above, when nothing in a backup of earlier
+# versions belongs to a package.
+wizard-restore-refusal-nothing-of-it-in-set-none = Niente al suo interno appartiene a un pacchetto che RABBIT può rimettere a posto.
+wizard-restore-refusal-part-missing = Ne manca una parte: la sua copia di { $path } è sparita, o non è il file registrato.
+wizard-restore-refusal-not-complete = Non è completo: { $path } non è né nel backup né sul disco come lo aveva quella versione.
+wizard-restore-refusal-version-unknown = RABBIT non sa quale versione di { $package } contenga.
+wizard-restore-refusal-other-language-pack-installed = RABBIT non riporta { $package } finché questo è installato: { $packages }. Installarne uno rimuove l'altro.
+wizard-restore-refusal-target-refused = RABBIT non rimette a posto { $path }: { $reason }.
+wizard-restore-refusal-newer-file-refused = Tornare indietro sposterebbe { $path }, un file della versione più recente di { $package }, in un backup da cui non potrebbe tornare: { $reason }.
+wizard-restore-refusal-earlier-file-refused = La sua registrazione di quella versione di { $package } indica { $path }, un posto in cui RABBIT non installa mai: { $reason }.
+wizard-restore-refusal-receipt-unreadable = RABBIT non riesce a leggere i suoi registri ({ $detail }), quindi non può sapere se questo backup corrisponde.
+wizard-restore-refusal-reaper-running = REAPER è aperto. Chiudilo, poi riprova.
+# The same, for packages every REAPER on the computer can use, such as
+# app2clap. $packages is a list of localized package names.
+wizard-restore-refusal-reaper-running-every = Un REAPER è aperto. Chiudi tutte le copie di REAPER su questo computer, comprese quelle portatili, poi riprova. Ogni REAPER può usare { $packages }.
+wizard-restore-refusal-keymap-needs-reaper-closed = Rimette a posto la mappa dei tasti di REAPER, cosa che RABBIT fa solo con REAPER chiuso.
+wizard-restore-refusal-program-running = Chiudi questi programmi, poi riprova: { $programs }.
+wizard-restore-refusal-not-writable = RABBIT non può scrivere dove il ripristino rimette i file, in { $path } ({ $detail }).
+wizard-restore-refusal-lock-held = Un altro RABBIT sta lavorando su questo REAPER. Aspetta che finisca.
+# sudo and root are never translated.
+wizard-restore-refusal-as-root = RABBIT è in esecuzione come root, come succede con sudo, e così non ripristina backup. Esci da RABBIT e avvialo con il tuo account.
+wizard-restore-refusal-not-yours = Appartiene a un altro account, quindi RABBIT non lo ripristina.
+wizard-restore-refusal-changed-while-read = È cambiato mentre RABBIT lo leggeva, come quando un altro RABBIT lo stava ancora scrivendo.
+wizard-restore-refusal-changed-since-listed = È cambiato da quando RABBIT lo ha elencato. Avvia di nuovo RABBIT per vedere i backup come sono adesso.
+# Why a restore won't put a file back at a place: the phrase that ends
+# wizard-restore-refusal-target-refused and the two after it. Start in lower
+# case where your language allows. $path is a file or folder, keep it as it
+# is; $name a file or folder name; $detail an error message in English.
+wizard-restore-target-rabbit-folder = RABBIT non rimette mai un file nella propria cartella
+wizard-restore-target-leads-into-rabbit-folder = il percorso porta nella cartella di RABBIT
+wizard-restore-target-name-not-as-written = il nome { $name } lungo il percorso può aprire un file o una cartella diversi da quelli che indica
+wizard-restore-target-place-is-link = è un collegamento, e RABBIT non sostituisce mai un collegamento
+wizard-restore-target-through-link = il percorso passa per { $path }, un collegamento, e RABBIT non segue mai i collegamenti
+wizard-restore-target-leads-outside-resource-folder = il percorso esce dalla cartella delle risorse, { $path }
+wizard-restore-target-leads-outside = il percorso esce da { $path }
+wizard-restore-target-outside-allowed-folders = è fuori dalla cartella delle risorse di REAPER e da ogni altra cartella in cui RABBIT installa
+wizard-restore-target-not-plain-path = non è un percorso semplice dentro la cartella delle risorse
+wizard-restore-target-guard-folder-gone = la cartella in cui torna, { $path }, non c'è più
+wizard-restore-target-could-not-check = RABBIT non ha potuto controllare { $path } ({ $detail })
+wizard-restore-target-two-files-for-one-place = il backup contiene più di un file per questo posto
+wizard-restore-target-outside-without-manifest = il backup non indica dove va questo file proveniente da fuori la cartella delle risorse
+wizard-restore-target-copy-outside-set = l'elenco del backup indica la sua copia fuori dal backup
+wizard-restore-target-keymap-among-version-files = è la mappa dei tasti di REAPER, che RABBIT rimette a posto solo come mappa dei tasti a sé
+# Why RABBIT doesn't delete a backup, or any of them, a sentence or two
+# each, as the Done page and Show details say it. Those about one backup
+# call it "it": the Done page puts them after "RABBIT can't delete
+# <backup>.". $path is a folder as the computer writes it, keep it as it
+# is. sudo and root are never translated.
+wizard-delete-refusal-invalid-id = Il suo nome non è uno di quelli che RABBIT dà a un backup.
+wizard-delete-refusal-differs-in-case = RABBIT lo trova solo con un nome con maiuscole e minuscole diverse.
+wizard-delete-refusal-ends-in-dot-or-space = RABBIT lo trova solo con un nome senza il punto o lo spazio finale.
+wizard-delete-refusal-is-link = RABBIT non usa { $path }: è un collegamento, e RABBIT non segue mai collegamenti nei suoi backup.
+wizard-delete-refusal-not-yours = Appartiene a un altro account, quindi RABBIT non lo elimina.
+wizard-delete-refusal-changed-since-listed = È cambiato da quando RABBIT lo ha elencato. Avvia di nuovo RABBIT per vedere i backup come sono adesso.
+wizard-delete-refusal-lock-held = Un altro RABBIT sta lavorando su questo REAPER. Aspetta che finisca, poi avvia di nuovo RABBIT.
+wizard-delete-refusal-as-root = RABBIT è in esecuzione come root, come succede con sudo, e così non elimina backup. Esci da RABBIT e avvialo con il tuo account.
 
 # $package is the localized package name the configuration step depends on.
 wizard-configuration-row-unavailable = Non disponibile: richiede l'installazione di { $package }.
@@ -512,11 +886,137 @@ wizard-review-uninstall-trash-elevated-note-macos = { $package } va nel tuo Cest
 # such as "Set REAPER's language".
 wizard-review-inactive-tab-note-install = Ciò che è selezionato nella scheda «Installa o aggiorna» non fa parte di questa operazione: { $packages }.
 wizard-review-inactive-tab-note-uninstall = Ciò che è selezionato nella scheda «Disinstalla» non fa parte di questa operazione: { $packages }.
+# The same note for the Backups tab. $backups is one or both of the two
+# messages below, joined as wizard-backups-list-and joins names.
+wizard-review-inactive-tab-note-backups = Ciò che è selezionato nella scheda «Backup» non fa parte di questa operazione: { $backups }.
+# How many backups are ticked on the Backups tab to restore, and to delete,
+# for the note above. $count is a number, never 0.
+wizard-review-inactive-tab-backups-restore = { $count ->
+    [one] un backup da ripristinare
+   *[other] { $count } backup da ripristinare
+}
+wizard-review-inactive-tab-backups-delete = { $count ->
+    [one] un backup da eliminare
+   *[other] { $count } backup da eliminare
+}
 wizard-review-uninstall-reinstall-hint = Potrai reinstallarli più avanti dalla scheda «Installa o aggiorna».
 # Why the Uninstall button is disabled. $reason is a sentence, such as
 # wizard-review-uninstall-not-writable.
 wizard-review-uninstall-blocked = Impossibile disinstallare per ora: { $reason }
 wizard-review-uninstall-not-writable = RABBIT non può scrivere nella cartella di questo REAPER.
+
+# Review before a restore from the Backups tab. The heading names what the
+# run does, so it is the first thing read.
+wizard-review-restore-heading = Pronto per ripristinare
+# One line per ticked backup. $backup is what its row calls it, $package the
+# localized package name, $date a date and time (backup-date-time), and
+# $settings yes or no: whether the backup holds the package's settings too.
+wizard-review-restore-uninstalled = { $settings ->
+    [yes] { $backup } torna com'era il giorno { $date }, con le tue impostazioni di { $package }.
+   *[no] { $backup } torna com'era il giorno { $date }.
+}
+wizard-review-restore-uninstalled-undated = { $settings ->
+    [yes] { $backup } torna com'era prima della disinstallazione, con le tue impostazioni di { $package }.
+   *[no] { $backup } torna com'era prima della disinstallazione.
+}
+# An earlier version. $version is the version it goes back to, and $current
+# the one it has now, both version numbers.
+wizard-review-restore-earlier = { $package } torna da { $current } a { $version }. RABBIT conserva { $current } come backup.
+wizard-review-restore-earlier-to = { $package } torna a { $version }. RABBIT conserva la versione che hai ora come backup.
+wizard-review-restore-earlier-copy = { $package } torna alla copia sostituita da un aggiornamento. RABBIT conserva la versione che hai ora come backup.
+# A key map. $origin is own for your own key map, default-keys for REAPER's
+# default keys, and other for any other; $date as above.
+wizard-review-restore-keymap = { $origin ->
+    [own] La tua mappa dei tasti del giorno { $date } sostituisce quella attuale, che RABBIT conserva come backup.
+    [default-keys] I tasti predefiniti di REAPER del giorno { $date } sostituiscono la mappa dei tasti attuale, che RABBIT conserva come backup.
+   *[other] La mappa dei tasti del giorno { $date } sostituisce quella attuale, che RABBIT conserva come backup.
+}
+wizard-review-restore-keymap-undated = { $origin ->
+    [own] La tua mappa dei tasti sostituisce quella attuale, che RABBIT conserva come backup.
+    [default-keys] I tasti predefiniti di REAPER sostituiscono la mappa dei tasti attuale, che RABBIT conserva come backup.
+   *[other] Questa mappa dei tasti sostituisce quella attuale, che RABBIT conserva come backup.
+}
+# Notes on what the restore changes besides the files. $file is a language
+# pack's file name, such as de_DE.ReaperLangPack, never translated; $package
+# is the localized package name.
+wizard-review-restore-language-back = La lingua di REAPER torna a essere { $file }.
+wizard-review-restore-language-stays = La lingua di REAPER resta com'è, perché nel frattempo ne è stata scelta un'altra.
+wizard-review-restore-not-counted = RABBIT non considera più { $package } installato da lui.
+wizard-review-restore-needs-reinstall = Per disinstallare { $package } con RABBIT più avanti, prima installalo di nuovo.
+# When a REAPER that has to be closed is running; the second when a ticked
+# package serves every REAPER on the computer.
+wizard-review-restore-close-reaper = Chiudi prima REAPER.
+wizard-review-restore-close-every-reaper = Chiudi prima tutte le copie di REAPER.
+# The backups ticked for the other choice below the list stay ticked, but
+# aren't part of this run. $count is a number.
+wizard-review-restore-other-choice-note = { $count ->
+    [one] Un backup selezionato da eliminare non fa parte di questa operazione.
+   *[other] { $count } backup selezionati da eliminare non fanno parte di questa operazione.
+}
+# Why the Restore button is disabled. $reason is a sentence, such as
+# wizard-review-restore-nothing-ticked. The -backup form names a backup that
+# can't come back: $backup as in wizard-backups-row-reference, or for a key
+# map as wizard-done-restore-keymap-in-sentence says it, and $reason one of
+# the wizard-restore-refusal-* sentences or wizard-review-restore-plan-failed.
+wizard-review-restore-blocked = Impossibile ripristinare per ora: { $reason }
+wizard-review-restore-blocked-backup = Impossibile ripristinare { $backup } per ora. { $reason }
+wizard-review-restore-nothing-ticked = Non è selezionato niente da ripristinare.
+wizard-review-restore-not-writable = RABBIT non può scrivere nella cartella di questo REAPER.
+# $first and $second name two ticked backups, as in
+# wizard-backups-row-reference, or for a key map as
+# wizard-done-restore-keymap-in-sentence says it, so the sentence may start
+# in lower case; $package is the localized package name.
+wizard-review-restore-same-package = { $first } e { $second } sono entrambi backup di { $package }. Selezionane solo uno.
+wizard-review-restore-same-file = { $first } e { $second } rimettono entrambi a posto lo stesso file. Selezionane solo uno.
+# When RABBIT couldn't check the restore before it starts: one backup, or
+# all of them. $error is the error message, in English.
+wizard-review-restore-plan-failed = RABBIT non ha potuto controllarlo ({ $error }).
+wizard-review-restore-check-failed = RABBIT non ha potuto controllare il ripristino ({ $error }).
+# When RABBIT hasn't checked the backups ticked now, so the restore can't
+# start yet.
+wizard-review-restore-not-checked = RABBIT non ha controllato ciò che è selezionato.
+# Review before a delete from the Backups tab.
+wizard-review-delete-heading = Pronto per eliminare i backup
+# $count is a number, the ticked backups, and $size a size, such as "520 MB".
+wizard-review-delete-intro = { $count ->
+    [one] Questo backup viene eliminato per sempre e libera { $size }:
+   *[other] Questi backup vengono eliminati per sempre e liberano { $size }:
+}
+# One line per ticked backup, saying what is lost with it. $backup is what
+# its row calls it, and $date a date and time (backup-date-time).
+wizard-review-delete-uninstalled = { $backup }, disinstallato il giorno { $date }: l'unica copia.
+wizard-review-delete-keymap = { $backup } del giorno { $date }: l'unica copia.
+wizard-review-delete-only-copy = { $backup }: l'unica copia.
+wizard-review-delete-earlier = { $backup }: dopo non potrai più tornarci.
+wizard-review-delete-already-back = { $backup }: i suoi file sono anche sul disco, quindi non si perde niente.
+wizard-review-delete-records = { $backup }: non cambia niente di ciò che è installato.
+wizard-review-delete-deleting = { $backup }: completa un'eliminazione iniziata prima.
+wizard-review-delete-other = { $backup }: questo backup sparisce per sempre.
+# Until a later version, backups from one set go together. $backups is a
+# list of what their rows call them, $count how many there are, a number, 2
+# or more, $origin uninstall, update or other, for what made the backup, and
+# $date a date and time (backup-date-time). The -undated form is for a
+# backup whose date RABBIT can't tell.
+wizard-review-delete-together = { $origin ->
+    [uninstall] { $backups }, della disinstallazione del giorno { $date }, vanno insieme
+    [update] { $backups }, dell'aggiornamento del giorno { $date }, vanno insieme
+   *[other] { $backups }, del giorno { $date }, vanno insieme
+}: { $count ->
+    [2] un solo backup li contiene entrambi.
+   *[other] un solo backup li contiene tutti e { $count }.
+}
+wizard-review-delete-together-undated = { $count ->
+    [2] { $backups } vanno insieme: un solo backup li contiene entrambi.
+   *[other] { $backups } vanno insieme: un solo backup li contiene tutti e { $count }.
+}
+# $count is a number.
+wizard-review-delete-other-choice-note = { $count ->
+    [one] Un backup selezionato da ripristinare non fa parte di questa operazione.
+   *[other] { $count } backup selezionati da ripristinare non fanno parte di questa operazione.
+}
+# Why the Delete button is disabled. $reason is a sentence.
+wizard-review-delete-blocked = Impossibile eliminare per ora: { $reason }
+wizard-review-delete-nothing-ticked = Non è selezionato niente da eliminare.
 
 wizard-progress-heading = Avanzamento dell'installazione
 wizard-progress-status-idle = Pronto per l'installazione.
@@ -536,6 +1036,65 @@ wizard-progress-uninstall-heading = Disinstallazione
 wizard-progress-status-uninstall-running = Disinstallazione dei pacchetti selezionati.
 wizard-progress-details-uninstall-starting = Avvio della disinstallazione.
 wizard-progress-status-uninstall-cancelling = Arresto in corso. RABBIT termina il passaggio iniziato, poi si chiude.
+# The progress page while backups are deleted: its heading, the first status
+# line and the first line of the log. Once the user asked to stop, the
+# status line says wizard-progress-status-cancelling.
+wizard-progress-delete-heading = Eliminazione dei backup
+wizard-progress-status-delete-running = Eliminazione dei backup selezionati.
+wizard-progress-details-delete-starting = Avvio dell'eliminazione dei backup.
+# The status and log line when RABBIT starts deleting a backup, which is
+# spoken, then the log line when it is done with it. $backups is what the
+# rows call the backups that go together, one name or several joined as
+# wizard-backups-list-and joins them, each with when it was made, as
+# wizard-backups-row-reference says it, when another ticked backup has the
+# same name. $count is how many there are, a number, and $size a size, such
+# as "4 MB".
+wizard-progress-status-deleting = { $count ->
+    [one] Eliminazione del backup: { $backups }…
+   *[other] Eliminazione dei backup: { $backups }…
+}
+wizard-progress-log-delete-deleted = { $backups }: eliminazione completata. Spazio liberato: { $size }.
+wizard-progress-log-delete-finished = { $backups }: completata un'eliminazione iniziata prima. Spazio liberato: { $size }.
+wizard-progress-log-delete-already-gone = { $backups }: non c'era già più.
+wizard-progress-log-delete-partly = { $backups }: eliminazione solo parziale. Spazio liberato: { $size }.
+wizard-progress-log-delete-failed = { $backups }: eliminazione non riuscita.
+# The progress page while backups are restored: its heading, the first
+# status line and the first line of the log. Once the user asked to stop,
+# the status line says wizard-progress-status-cancelling.
+wizard-progress-restore-heading = Ripristino dei backup
+wizard-progress-status-restore-running = Ripristino dei backup selezionati.
+wizard-progress-details-restore-starting = Avvio del ripristino dei backup.
+# The status and log line when RABBIT starts restoring a backup, which is
+# spoken. $backup is what its row calls it, such as "SWS Extension
+# 2.14.0.7" or "ReaPack 1.2.4", with when it was made, as
+# wizard-backups-row-reference says it, when another ticked backup has the
+# same name. $kind is uninstalled for software an uninstall kept, earlier
+# for an earlier version whose row names its version, and earlier-copy for
+# one whose row names only the package.
+wizard-progress-status-restoring = { $kind ->
+    [earlier] Ritorno a { $backup }…
+    [earlier-copy] Ritorno alla copia di { $backup } sostituita da un aggiornamento…
+   *[uninstalled] Ripristino di { $backup }…
+}
+# The same for a key map. $origin is own for your own key map, default-keys
+# for REAPER's default keys, and other for any other; $date is a date and
+# time (backup-date-time). The -undated form is for a key map whose date
+# RABBIT can't tell.
+wizard-progress-status-restoring-keymap = { $origin ->
+    [own] Ripristino della tua mappa dei tasti del giorno { $date }…
+    [default-keys] Ripristino dei tasti predefiniti di REAPER del giorno { $date }…
+   *[other] Ripristino della mappa dei tasti del giorno { $date }…
+}
+wizard-progress-status-restoring-keymap-undated = { $origin ->
+    [own] Ripristino della tua mappa dei tasti…
+    [default-keys] Ripristino dei tasti predefiniti di REAPER…
+   *[other] Ripristino della mappa dei tasti…
+}
+# The log line when RABBIT is done with a backup. $backup as above.
+wizard-progress-log-restore-restored = { $backup }: ripristino completato.
+wizard-progress-log-restore-not-restored = { $backup }: ripristino non eseguito, tutto è rimasto com'era.
+wizard-progress-log-restore-files-left = { $backup }: ripristino non riuscito, e alcuni file già modificati non sono potuti tornare com'erano.
+wizard-progress-log-restore-partly = { $backup }: ripristino solo parziale.
 
 # Live per-package status line on the progress page.
 # $package is the localized package display name (e.g. "REAPER", "OSARA").
@@ -583,9 +1142,13 @@ wizard-done-status-error = Installazione non riuscita. Consulta l'errore qui sot
 wizard-reaper-running-title = REAPER è ancora aperto
 wizard-reaper-running-body = Chiudi REAPER, poi premi di nuovo Installa. RABBIT non può aggiornare REAPER né le sue estensioni mentre REAPER è aperto.
 wizard-error-reaper-running = RABBIT si è fermato perché REAPER era aperto. Chiudi REAPER, poi avvia di nuovo RABBIT.
-# Why a run stopped when another RABBIT is installing or uninstalling in the
-# same REAPER.
-wizard-error-lock-held = Un altro RABBIT aperto sta installando o disinstallando in questo REAPER. Aspetta che finisca, poi avvia di nuovo RABBIT.
+# Why a run stopped when another RABBIT is working on the same REAPER:
+# installing, uninstalling, or restoring or deleting backups.
+wizard-error-lock-held = Un altro RABBIT sta lavorando su questo REAPER. Aspetta che finisca, poi avvia di nuovo RABBIT.
+# Why an install or an uninstall stopped before it changed anything:
+# RABBIT's own folder in the REAPER, or the backups folder in it, is a
+# symbolic link or junction, so a backup kept there couldn't be restored.
+wizard-error-backup-folder-link = RABBIT si è fermato perché la sua cartella in questo REAPER, o la cartella dei backup al suo interno, è un collegamento. RABBIT non ripristina mai un backup che si trova dietro un collegamento, quindi non cambia niente finché è così. Rendila di nuovo una cartella vera, con i backup al suo interno, poi avvia di nuovo RABBIT.
 # Shown instead of starting an uninstall while REAPER is open. Name the
 # button as wizard-button-uninstall does.
 wizard-reaper-running-uninstall-body = Chiudi REAPER, poi premi di nuovo Disinstalla. RABBIT non può disinstallare niente da REAPER mentre REAPER è aperto.
@@ -601,6 +1164,20 @@ wizard-reaper-running-uninstall-reaper-body-macos = Chiudi tutte le copie di REA
 # names, such as "Surge XT.exe"; they are never translated.
 wizard-programs-running-uninstall-title = Chiudi prima questi programmi
 wizard-programs-running-uninstall-body = Chiudi { $programs }, poi premi di nuovo Disinstalla.
+# Shown instead of starting a restore while REAPER is open, under
+# wizard-reaper-running-title. Name the button as wizard-button-restore
+# does.
+wizard-reaper-running-restore-body = Chiudi REAPER, poi premi di nuovo Ripristina. RABBIT non può ripristinare backup in REAPER mentre REAPER è aperto.
+# The same, when a ticked backup holds a package every REAPER on the
+# computer can load. $packages is a list of localized package names, joined
+# as wizard-backups-list-and joins names.
+wizard-reaper-running-restore-every-body = Chiudi tutte le copie di REAPER su questo computer, comprese quelle portatili, poi premi di nuovo Ripristina. Qualsiasi REAPER su questo computer può usare { $packages }.
+# Shown instead of starting a restore while a program that has to be closed
+# first is running. $programs is a list of program names, joined as
+# wizard-backups-list-and joins names. A name, such as "Surge XT.exe", is
+# never translated.
+wizard-programs-running-restore-title = Chiudi prima questi programmi
+wizard-programs-running-restore-body = Chiudi { $programs }, poi premi di nuovo Ripristina.
 # Why an uninstall stopped, on the Done page.
 wizard-error-uninstall-any-reaper-running = RABBIT si è fermato perché un REAPER era aperto. Chiudi tutte le copie di REAPER su questo computer, comprese quelle portatili, poi avvia di nuovo RABBIT.
 wizard-error-uninstall-not-enough-space = RABBIT si è fermato perché non c'è abbastanza spazio libero per il backup. Libera spazio sull'unità che contiene la cartella delle risorse di REAPER, poi avvia di nuovo RABBIT.
@@ -640,11 +1217,22 @@ wizard-done-uninstall-removed-before-stop = Prima che lo interrompessi, RABBIT h
 # There is no way back to the package list from the Done page. Name the tab
 # as wizard-packages-tab-install does.
 wizard-done-uninstall-reinstall-hint = Per riaverne uno, avvia di nuovo RABBIT e selezionalo nella scheda «Installa o aggiorna».
+# Used instead of wizard-done-uninstall-reinstall-hint when RABBIT kept a
+# backup of a removed package: the same sentence, then where to restore
+# it. $packages is a list of localized package names, joined as
+# wizard-backups-list-and joins names, only those whose files went into
+# the backup, which may be fewer than were uninstalled. Name the tabs as
+# wizard-packages-tab-install and wizard-packages-tab-backups do.
+wizard-done-uninstall-reinstall-or-restore-hint = Per riaverne uno, avvia di nuovo RABBIT e selezionalo nella scheda «Installa o aggiorna». Puoi anche ripristinare { $packages } nella scheda «Backup».
 # What to look at after an uninstall, one sentence per package. $package is
 # the localized package name. Name "Show details" as wizard-done-show-details
 # does.
 wizard-done-uninstall-not-installed = { $package } non era più installato, quindi non c'era niente da rimuovere.
-wizard-done-uninstall-left-in-backup = Alcuni file di { $package } non sono stati rimessi al loro posto e sono ancora nel backup. «Mostra dettagli» li elenca.
+# The backup still holds the files, so the Backups tab lists it and can put
+# them back. Done has no way back to the tab, so the sentence says to run
+# RABBIT again, as wizard-done-delete-partly does. Name the tab as
+# wizard-packages-tab-backups does.
+wizard-done-uninstall-left-in-backup = Alcuni file di { $package } non sono stati rimessi al loro posto e sono ancora nel backup. «Mostra dettagli» li elenca. Per rimetterli al loro posto, avvia di nuovo RABBIT e ripristina { $package } nella scheda «Backup».
 wizard-done-uninstall-leftovers = RABBIT trova ancora parte di { $package } e la lascia com'è. «Mostra dettagli» indica quale.
 wizard-done-uninstall-language-reset-failed = RABBIT non è riuscito a riportare REAPER in inglese dopo aver rimosso { $package }. Scegli una lingua nelle preferenze di REAPER.
 wizard-done-uninstall-registry-failed = RABBIT ha disinstallato { $package }, ma l'elenco dei programmi installati di Windows potrebbe mostrarlo ancora. «Mostra dettagli» indica la voce.
@@ -727,6 +1315,13 @@ wizard-close-during-install-body = RABBIT sta installando. Se interrompi adesso,
 wizard-close-during-uninstall-title = Interrompere la disinstallazione?
 wizard-close-during-uninstall-body = RABBIT sta disinstallando. Se interrompi adesso, RABBIT completa il passaggio iniziato, poi si ferma e si chiude. I pacchetti che non ha ancora raggiunto restano installati. Vuoi interrompere la disinstallazione?
 
+# The same question while a restore runs, and while a delete of backups
+# runs. No is the focused button here too.
+wizard-close-during-restore-title = Interrompere il ripristino?
+wizard-close-during-restore-body = RABBIT sta ripristinando. Se interrompi adesso, RABBIT completa il backup che sta ripristinando, poi si ferma e si chiude. I backup che non ha ancora raggiunto restano come sono. Vuoi interrompere il ripristino?
+wizard-close-during-delete-title = Interrompere l'eliminazione dei backup?
+wizard-close-during-delete-body = RABBIT sta eliminando dei backup. Se interrompi adesso, RABBIT completa il backup che sta eliminando, poi si ferma e si chiude. I backup che non ha ancora raggiunto vengono conservati. Vuoi interrompere l'eliminazione?
+
 # Asked before an uninstall that a backup can't undo, or that a package's
 # manifest asks to confirm. The No button is the focused one, so Enter never
 # starts it.
@@ -747,6 +1342,24 @@ wizard-confirm-uninstall-partly-unbacked = Un backup può recuperare i file di {
 wizard-confirm-uninstall-trash = { $package } va nel Cestino. Puoi trascinarlo fuori da lì finché non svuoti il Cestino.
 wizard-confirm-uninstall-trash-elevated-macos = { $package } va nel Cestino. Puoi trascinarlo fuori da lì finché non svuoti il Cestino, ma macOS potrebbe chiedere la password di un amministratore per farlo.
 wizard-confirm-uninstall-question = Disinstallare adesso?
+
+# Asked before backups are deleted, every time. The No button is the focused
+# one, so Enter never deletes anything. The text is the body, then the
+# only-copy sentence when one applies, then the question, as one paragraph.
+# $count and $only are numbers: the backups that go, and how many of them
+# are the only copy of what they hold. $size is a size, such as "520 MB".
+wizard-confirm-delete-backups-title = Eliminare i backup per sempre?
+wizard-confirm-delete-backups-body = RABBIT elimina { $count ->
+    [one] un backup
+   *[other] { $count } backup
+} e libera { $size }.
+wizard-confirm-delete-backups-only-copy = { $only ->
+    [one] Uno di essi è l'unica copia di ciò che contiene.
+   *[other] { $only } di essi sono l'unica copia di ciò che contengono.
+}
+# Instead of the sentence above, when only one backup goes.
+wizard-confirm-delete-backups-only-copy-single = È l'unica copia di ciò che contiene.
+wizard-confirm-delete-backups-question = Un backup eliminato non si può recuperare. Eliminare adesso?
 
 # Shown instead when the user closes the window while RABBIT is replacing its
 # own files. Not a question: that swap has no safe interruption point.
@@ -866,14 +1479,313 @@ wizard-summary-registry-failed = Ancora nell'elenco dei programmi installati di 
 # and is never translated. The folder and its files are listed with
 # wizard-summary-removed-as-admin.
 wizard-summary-registry-key-removed = Rimossa dal registro con i diritti di amministratore: { $key }
-# $id is the backup set's name, such as uninstall-unix-1782841261.
-wizard-summary-uninstall-backup = Backup: { $id }
-# One line per uninstalled package. $package is the localized package name,
-# and $command the complete rabbit restore-backup command that brings it
-# back, which is never translated.
-wizard-summary-uninstall-restore = Per recuperare { $package }, chiudi REAPER ed esegui: { $command }
+# One line per uninstalled package whose files went into the backup.
+# $package is the localized package name. Name the tab as
+# wizard-packages-tab-backups does.
+wizard-summary-uninstall-restorable = Puoi ripristinare { $package } nella scheda «Backup».
 # $path is the full path of the report RABBIT saved.
 wizard-summary-uninstall-report = Rapporto: { $path }
+# The Done page after a delete of backups. Its first line, one of the seven
+# below, also ends the progress page. Backups are counted as Review counts
+# them, one for each ticked row. $count and $deleted are numbers: the
+# backups ticked, or in the first message those deleted, and of them those
+# deleted. $size is a size, such as "520 MB".
+wizard-done-delete-status-success = RABBIT ha eliminato { $count ->
+    [one] un backup
+   *[other] { $count } backup
+} e liberato { $size }.
+wizard-done-delete-status-partial = RABBIT ha eliminato { $deleted } backup su { $count }.
+wizard-done-delete-status-none = { $count ->
+    [one] RABBIT non è riuscito a eliminare il backup.
+   *[other] RABBIT non è riuscito a eliminare i backup.
+}
+wizard-done-delete-status-already-gone = { $count ->
+    [one] Il backup non c'era già più, quindi non c'era niente da eliminare.
+   *[other] I backup non c'erano già più, quindi non c'era niente da eliminare.
+}
+wizard-done-delete-status-stopped = { $deleted ->
+    [0] RABBIT si è fermato prima di eliminare un backup. Quelli che non aveva ancora raggiunto vengono conservati.
+   *[other] RABBIT si è fermato dopo aver eliminato { $deleted } backup su { $count }. Quelli che non aveva ancora raggiunto vengono conservati.
+}
+# When the user stopped the run partway through a backup, before RABBIT had
+# deleted a whole one: part of a backup is gone.
+wizard-done-delete-status-stopped-partway = { $count ->
+    [one] RABBIT si è fermato prima di aver eliminato tutto il backup.
+   *[other] RABBIT si è fermato prima di aver eliminato un backup intero. Quelli che non aveva ancora raggiunto vengono conservati.
+}
+# When RABBIT deleted nothing because it refused the run, or something went
+# wrong before it started.
+wizard-done-delete-status-nothing = Non è stato eliminato niente.
+# Why backups weren't deleted, after the first line, one sentence each.
+# $total is how many backups were ticked, and $count how many of them the
+# sentence is about; both are numbers. The [1] form is for a delete of a
+# single backup: the first line calls it "the backup", so the sentence
+# calls it "it". Name "Show details" as wizard-done-show-details does, and
+# the Backups tab as wizard-packages-tab-backups does.
+wizard-done-delete-in-use = { $total ->
+    [1] Un suo file è aperto in un altro programma. Chiudi quel programma, poi avvia di nuovo RABBIT per eliminarlo.
+   *[other] { $count ->
+        [one] Uno non è stato eliminato perché un suo file è aperto in un altro programma. Chiudi quel programma, poi avvia di nuovo RABBIT per eliminarlo.
+       *[other] { $count } non sono stati eliminati perché un loro file è aperto in un altro programma. Chiudi quel programma, poi avvia di nuovo RABBIT per eliminarli.
+    }
+}
+wizard-done-delete-permission = { $total ->
+    [1] RABBIT non ha il permesso di spostarlo. Resta com'era.
+   *[other] { $count ->
+        [one] Uno non è stato eliminato perché RABBIT non ha il permesso di spostarlo. Resta com'era.
+       *[other] { $count } non sono stati eliminati perché RABBIT non ha il permesso di spostarli. Restano com'erano.
+    }
+}
+wizard-done-delete-earlier-deletion-left = { $total ->
+    [1] Un'eliminazione precedente di questo backup non è terminata, e RABBIT non è riuscito a completarla neanche adesso, quindi il backup resta com'era. Avvia di nuovo RABBIT per riprovare.
+   *[other] { $count ->
+        [one] Uno non è stato eliminato perché una sua eliminazione precedente non è terminata e RABBIT non è riuscito a completarla neanche adesso. Resta com'era. Avvia di nuovo RABBIT per riprovare.
+       *[other] { $count } non sono stati eliminati perché loro eliminazioni precedenti non sono terminate e RABBIT non è riuscito a completarle neanche adesso. Restano com'erano. Avvia di nuovo RABBIT per riprovare.
+    }
+}
+wizard-done-delete-other = { $total ->
+    [1] Qualcosa è andato storto, e resta com'era. «Mostra dettagli» indica cosa.
+   *[other] { $count ->
+        [one] Uno non è stato eliminato e resta com'era. «Mostra dettagli» indica perché.
+       *[other] { $count } non sono stati eliminati e restano com'erano. «Mostra dettagli» indica perché.
+    }
+}
+wizard-done-delete-partly = { $total ->
+    [1] RABBIT lo ha eliminato solo in parte. Quello che resta è un'eliminazione non terminata, che nessun ripristino usa più. Per completarla, avvia di nuovo RABBIT ed eliminalo nella scheda «Backup».
+   *[other] { $count ->
+        [one] Uno è stato eliminato solo in parte. Quello che ne resta è un'eliminazione non terminata, che nessun ripristino usa più. Per completarla, avvia di nuovo RABBIT ed eliminalo nella scheda «Backup».
+       *[other] { $count } sono stati eliminati solo in parte. Quello che ne resta sono eliminazioni non terminate, che nessun ripristino usa più. Per completarle, avvia di nuovo RABBIT ed eliminali nella scheda «Backup».
+    }
+}
+# The row for the old copies of RABBIT's records stands for several
+# backups on disk, and only it can end like this: RABBIT deleted some of
+# them, and couldn't delete the others, or the user stopped the run before
+# it reached them.
+wizard-done-delete-part-left = { $total ->
+    [1] RABBIT ne ha eliminato una parte, ma non è riuscito a eliminare il resto, che resta com'era. «Mostra dettagli» indica perché.
+   *[other] { $count ->
+        [one] Uno è stato eliminato solo in parte: RABBIT non è riuscito a eliminarne il resto, che resta com'era. «Mostra dettagli» indica perché.
+       *[other] { $count } sono stati eliminati solo in parte: RABBIT non è riuscito a eliminarne il resto, che resta com'era. «Mostra dettagli» indica perché.
+    }
+}
+wizard-done-delete-stopped-partway = { $total ->
+    [1] RABBIT ne ha eliminato una parte prima di fermarsi. Il resto viene conservato.
+   *[other] { $count ->
+        [one] Uno è stato eliminato solo in parte prima che RABBIT si fermasse. Il resto viene conservato.
+       *[other] { $count } sono stati eliminati solo in parte prima che RABBIT si fermasse. Il resto viene conservato.
+    }
+}
+# After the first line, when some of the ticked backups were gone before the
+# run. $count is a number, fewer than the backups ticked.
+wizard-done-delete-already-gone = { $count ->
+    [one] Uno non c'era già più.
+   *[other] { $count } non c'erano già più.
+}
+# After "Nothing was deleted." when a ticked backup can't be deleted, which
+# refuses the whole run; said only when more than one backup was ticked.
+wizard-done-delete-refused-run = RABBIT elimina i backup selezionati solo se può eliminarli tutti.
+# Why a backup can't be deleted. $backup is what its row calls it with when
+# it was made, as wizard-backups-row-reference says it, or several such
+# joined as wizard-backups-list-and joins them when one backup on disk holds
+# them together; $count is how many, a number. $reason is one of the
+# wizard-delete-refusal-* sentences, which calls that one backup "it". With
+# one backup, $backup comes after a colon, so a name like "Your key map"
+# keeps its capital.
+wizard-done-delete-refused-backup = { $count ->
+    [one] RABBIT non può eliminare questo backup: { $backup }. { $reason }
+   *[other] RABBIT non può eliminare { $backup }, che stanno insieme in un unico backup. { $reason }
+}
+# When RABBIT couldn't read REAPER's resource folder, or a folder of its own
+# backups in it, so it deleted nothing. $path is that folder as the computer
+# writes it, keep it as it is.
+wizard-done-delete-folder-unreadable = RABBIT non è riuscito a leggere la cartella { $path }. Controlla che esista e che tu possa aprirla, poi avvia di nuovo RABBIT.
+# When something else went wrong before RABBIT deleted anything. $error is
+# the error message, in English.
+wizard-done-delete-error = Qualcosa è andato storto prima che RABBIT eliminasse qualcosa: { $error }
+# Show details after a delete of backups: one line per ticked backup, or per
+# backups that went together, then lines indented below it. $backups is
+# what the rows call them, joined as wizard-backups-list-and joins names,
+# each with when it was made, as wizard-backups-row-reference says it, when
+# another ticked backup has the same name. $status is one of the
+# wizard-delete-status-* labels, $size a size, such as "4 MB", and $path a
+# folder as the computer writes it, keep it as it is. Name the Backups tab
+# as wizard-packages-tab-backups does. The lines below say "it" of the
+# backup; for backups that go together, wizard-summary-delete-together
+# comes first and says that one backup holds them.
+wizard-summary-delete-backup = { $backups }: { $status }
+wizard-summary-delete-freed = Spazio liberato: { $size }
+wizard-summary-delete-together = Vanno insieme: un unico backup li contiene.
+# What happened to a backup that wasn't deleted, then why, in a line of
+# its own. Part of the row for the old copies of RABBIT's records, which
+# stands for several backups on disk, may have gone though the rest didn't.
+wizard-summary-delete-nothing-changed = Non è cambiato niente.
+wizard-summary-delete-part-left = RABBIT ne ha eliminato una parte. Il resto non si è potuto eliminare e resta com'era.
+wizard-summary-delete-in-use = Un suo file è aperto in un altro programma, quindi non si è potuto spostarlo.
+wizard-summary-delete-permission = RABBIT non ha il permesso di spostarlo.
+wizard-summary-delete-earlier-deletion-left = Un'eliminazione precedente non è terminata, e RABBIT non è riuscito a completarla neanche adesso. Quello che resta di quell'eliminazione si trova in { $path }.
+wizard-summary-delete-left-in = Quello che RABBIT non è riuscito a rimuovere resta in { $path }. La scheda «Backup» lo elenca come eliminazione non terminata, che nessun ripristino usa più; eliminandolo lì, l'eliminazione si completa.
+wizard-summary-delete-not-reached-stopped = RABBIT si è fermato prima di arrivarci, quindi viene conservato.
+wizard-summary-delete-stopped-partway = RABBIT ne ha eliminato una parte, poi si è fermato. Il resto viene conservato.
+wizard-summary-delete-not-reached-refused = RABBIT non ha eliminato niente in questa operazione, quindi viene conservato.
+wizard-summary-delete-freed-total = Spazio liberato in tutto: { $size }
+# $path is the full path of the report RABBIT saved.
+wizard-summary-delete-report = Rapporto: { $path }
+# The Done page after a restore of backups. Its first line, one of those
+# below, also ends the progress page. Backups are counted as Review counts
+# them, one for each ticked row. $count and $restored are numbers: the
+# backups ticked, and of them those restored. $backup is what the row of
+# the one ticked backup calls it, such as "SWS Extension 2.14.0.7", or for
+# a key map wizard-done-restore-keymap-in-sentence.
+#
+# When the one ticked backup came back: software an uninstall kept; an
+# earlier version, where $package is the localized package name and
+# $version the version it went back to; one whose version RABBIT doesn't
+# know; a key map, with $origin and $date as in
+# wizard-progress-status-restoring-keymap.
+wizard-done-restore-status-one = RABBIT ha ripristinato { $backup }.
+wizard-done-restore-status-earlier = { $package } è tornato alla versione { $version }.
+wizard-done-restore-status-earlier-copy = { $package } è tornato alla copia sostituita da un aggiornamento.
+wizard-done-restore-status-keymap = { $origin ->
+    [own] La tua mappa dei tasti del giorno { $date } è tornata.
+    [default-keys] I tasti predefiniti di REAPER del giorno { $date } sono tornati.
+   *[other] La mappa dei tasti del giorno { $date } è tornata.
+}
+wizard-done-restore-status-keymap-undated = { $origin ->
+    [own] La tua mappa dei tasti è tornata.
+    [default-keys] I tasti predefiniti di REAPER sono tornati.
+   *[other] La mappa dei tasti è tornata.
+}
+# What the Done page and Review call a key map inside a sentence, as
+# $backup in wizard-done-restore-status-none, in the sentences on why a
+# backup didn't come back, such as "RABBIT couldn't restore your key map
+# from <date>", and in Review's on why one can't be restored yet. Start in
+# lower case where your language allows. $origin and $date as in
+# wizard-progress-status-restoring-keymap.
+wizard-done-restore-keymap-in-sentence = { $origin ->
+    [own] la tua mappa dei tasti del giorno { $date }
+    [default-keys] i tasti predefiniti di REAPER del giorno { $date }
+   *[other] la mappa dei tasti del giorno { $date }
+}
+wizard-done-restore-keymap-in-sentence-undated = { $origin ->
+    [own] la tua mappa dei tasti
+    [default-keys] i tasti predefiniti di REAPER
+   *[other] la mappa dei tasti
+}
+# Several backups, all of them back; some of them; none, with nothing
+# changed; none, where files RABBIT had changed couldn't be put back as they
+# were; and a run the user stopped.
+wizard-done-restore-status-success = RABBIT ha ripristinato { $count ->
+    [one] un backup
+   *[other] { $count } backup
+}.
+wizard-done-restore-status-partial = RABBIT ha ripristinato { $restored } backup su { $count }.
+wizard-done-restore-status-none = { $count ->
+    [one] RABBIT non è riuscito a ripristinare { $backup }, quindi ha lasciato tutto com'era.
+   *[other] RABBIT non è riuscito a ripristinare i backup, quindi ha lasciato tutto com'era.
+}
+wizard-done-restore-status-none-changed = { $count ->
+    [one] RABBIT non è riuscito a ripristinare { $backup }.
+   *[other] RABBIT non è riuscito a ripristinare i backup.
+}
+wizard-done-restore-status-stopped = { $restored ->
+    [0] RABBIT si è fermato prima di ripristinare un backup. Quelli che non aveva ancora raggiunto restano come sono.
+   *[other] RABBIT si è fermato dopo aver ripristinato { $restored } backup su { $count }. Quelli che non aveva ancora raggiunto restano come sono.
+}
+# When RABBIT restored nothing because it refused the run, or something went
+# wrong before it started.
+wizard-done-restore-status-nothing = Non è stato ripristinato niente.
+# Why a backup didn't come back, after the first line, one sentence each.
+# $total is how many backups were ticked, a number, and $backup what the row
+# calls the one the sentence is about, or for a key map
+# wizard-done-restore-keymap-in-sentence. The [1] form is for a restore of a
+# single backup, which the first line names, so the sentence calls it "it".
+# $reason is one of the wizard-restore-refusal-* sentences, which calls the
+# backup "it". Name "Show details" as wizard-done-show-details does, and the
+# Backups tab as wizard-packages-tab-backups does.
+wizard-done-restore-refused = { $total ->
+    [1] { $reason }
+   *[other] RABBIT non ha ripristinato { $backup }. { $reason }
+}
+wizard-done-restore-failed = { $total ->
+    [1] Qualcosa è andato storto. «Mostra dettagli» indica cosa.
+   *[other] Qualcosa è andato storto con { $backup }, quindi RABBIT lo ha lasciato com'era. «Mostra dettagli» indica cosa.
+}
+wizard-done-restore-files-left = { $total ->
+    [1] Alcuni file che RABBIT aveva già modificato non sono potuti tornare com'erano. I file che hanno sostituito vengono conservati come backup nella scheda «Backup». «Mostra dettagli» indica quali.
+   *[other] RABBIT non è riuscito a ripristinare { $backup }, e alcuni file che aveva già modificato non sono potuti tornare com'erano. I file che hanno sostituito vengono conservati come backup nella scheda «Backup». «Mostra dettagli» indica quali.
+}
+# The same, when the restore had replaced nothing, so no backup keeps what
+# it replaced: the files it couldn't take out again had nothing before them.
+wizard-done-restore-files-left-no-backup = { $total ->
+    [1] Alcuni file che RABBIT aveva già modificato non sono potuti tornare com'erano. «Mostra dettagli» indica quali.
+   *[other] RABBIT non è riuscito a ripristinare { $backup }, e alcuni file che aveva già modificato non sono potuti tornare com'erano. «Mostra dettagli» indica quali.
+}
+wizard-done-restore-partly = { $total ->
+    [1] È tornata solo una parte. «Mostra dettagli» indica quale.
+   *[other] RABBIT ha ripristinato { $backup } solo in parte. «Mostra dettagli» indica quale parte.
+}
+# After a refusal that ends "then try again" or "wait until it has
+# finished", such as REAPER being open: Done has no way back, so the user
+# tries again by starting RABBIT again.
+wizard-done-restore-start-again = Per riprovare, chiudi RABBIT e avvialo di nuovo.
+# When RABBIT couldn't read REAPER's resource folder, or a folder of its own
+# backups in it, so it restored nothing. $path is that folder as the computer
+# writes it, keep it as it is.
+wizard-done-restore-folder-unreadable = RABBIT non è riuscito a leggere la cartella { $path }. Controlla che esista e che tu possa aprirla, poi avvia di nuovo RABBIT.
+# When something else went wrong before RABBIT restored anything. $error is
+# the error message, in English.
+wizard-done-restore-error = Qualcosa è andato storto prima che RABBIT ripristinasse qualcosa: { $error }
+# What else the restore changed, after the lines above, and in Show
+# details. $file is a language pack's file name, such as
+# de_DE.ReaperLangPack, never translated; $package is the localized package
+# name, $packages several joined as wizard-backups-list-and joins names, and
+# $count how many, a number.
+wizard-done-restore-language-back = La lingua di REAPER è di nuovo { $file }.
+wizard-done-restore-language-stays = La lingua di REAPER resta com'è, perché nel frattempo ne è stata scelta un'altra.
+wizard-done-restore-language-failed = RABBIT non è riuscito a rimettere { $file } come lingua di REAPER. «Mostra dettagli» indica perché.
+wizard-done-restore-not-counted = RABBIT non considera più { $package } installato da lui.
+wizard-done-restore-needs-reinstall = Per disinstallare { $package } con RABBIT più avanti, prima installalo di nuovo.
+wizard-done-restore-left-out = { $count ->
+    [one] RABBIT ha tralasciato { $packages }, perché nessuno dei suoi file era nel backup.
+   *[other] RABBIT ha tralasciato { $packages }, perché nessuno dei loro file era nel backup.
+}
+# Show details after a restore of backups: one line per ticked backup, then
+# lines indented below it, which say "it" of the backup. $backup is what the
+# row calls it, with when it was made, as wizard-backups-row-reference says
+# it, when another ticked backup has the same name; $status is one of the
+# wizard-restore-status-* labels, and $path a file or folder as the computer
+# writes it, keep it as it is.
+wizard-summary-restore-backup = { $backup }: { $status }
+# Each file the restore worked on, and what came of it. "The new backup" is
+# the one this restore made of what it replaced.
+wizard-summary-restore-file-restored = Ripristinato: { $path }
+wizard-summary-restore-file-put-back = Rimesso com'era: { $path }
+wizard-summary-restore-file-left = Non è potuto tornare com'era, quindi è come nel backup: { $path }
+wizard-summary-restore-file-missing = Non c'è più e non è stato possibile rimetterlo: { $path }
+wizard-summary-restore-replaced-copy = Una copia di ciò che c'era prima si trova in { $path }
+wizard-summary-restore-file-unfinished = Non ripristinato, perché la sua copia nel backup non è mai stata completata: { $path }
+# Files of the version a package had, when it went back to an earlier one.
+wizard-summary-restore-moved-out = Spostato nel nuovo backup, perché la versione precedente non lo ha: { $path }
+wizard-summary-restore-still-in-backup = Non è potuto tornare al suo posto ed è ancora nel nuovo backup: { $path }
+wizard-summary-restore-changed-left = Resta dov'è, perché è cambiato da quando RABBIT lo ha installato: { $path }
+wizard-summary-restore-left-in-place = Resta dov'è, con una copia nel nuovo backup: { $path }
+# The scripts a key map restore kept in REAPER's Actions list, which were
+# registered since that key map was replaced. Name the Actions list as
+# REAPER does in your language. $count is a number.
+wizard-summary-restore-scripts-kept = { $count ->
+    [one] RABBIT ha conservato nell'elenco delle azioni di REAPER uno script registrato nel frattempo.
+   *[other] RABBIT ha conservato nell'elenco delle azioni di REAPER { $count } script registrati nel frattempo.
+}
+# The backup this restore made of what it replaced. $backup is what the
+# Backups tab's row calls it, such as "Key map" or "ReaPack 1.2.5", and
+# $date a date and time (backup-date-time). The -undated form is for a
+# backup whose date RABBIT can't tell. Name the Backups tab as
+# wizard-packages-tab-backups does.
+wizard-summary-restore-kept = Ciò che il ripristino ha sostituito viene conservato come backup nella scheda «Backup»: { $backup }, del giorno { $date }.
+wizard-summary-restore-kept-undated = Ciò che il ripristino ha sostituito viene conservato come backup nella scheda «Backup»: { $backup }.
+wizard-summary-restore-not-reached = RABBIT si è fermato prima di arrivarci, quindi resta com'è.
+# $path is the full path of the report RABBIT saved.
+wizard-summary-restore-report = Rapporto: { $path }
 status-installed-or-checked = Installato o verificato
 status-planned-unattended = Previsto in modo automatico
 status-deferred-unattended = Rinviato in modo automatico
@@ -891,6 +1803,23 @@ status-remove-blocked = Non disinstallato
 status-remove-failed = Impossibile disinstallare
 status-remove-cancelled = Ancora installato (hai interrotto)
 status-remove-not-reached = Ancora installato (l'operazione si è fermata prima)
+# What came of a backup in a delete, after its name in "Show details".
+wizard-delete-status-deleted = Eliminato
+wizard-delete-status-finished-earlier-deletion = Eliminato, completando un'eliminazione iniziata prima
+wizard-delete-status-already-gone = Non c'era già più
+wizard-delete-status-would-delete = Verrebbe eliminato
+wizard-delete-status-would-finish-earlier-deletion = Completerebbe un'eliminazione iniziata prima
+wizard-delete-status-not-deleted = Non eliminato
+wizard-delete-status-partly-deleted = Eliminato in parte
+wizard-delete-status-refused = Non può essere eliminato
+wizard-delete-status-not-reached = Non raggiunto
+# What came of a backup in a restore, after its name in "Show details".
+wizard-restore-status-restored = Ripristinato
+wizard-restore-status-would-restore = Verrebbe ripristinato
+wizard-restore-status-not-restored = Non ripristinato
+wizard-restore-status-files-left = Non ripristinato; alcuni file non sono potuti tornare com'erano
+wizard-restore-status-not-reached = Non raggiunto
+wizard-restore-status-partly-restored = Ripristinato in parte
 
 # Per-package status messages surfaced on the wizard's Done page next to the
 # package name (e.g. "OSARA: <message>"). The wrapper template

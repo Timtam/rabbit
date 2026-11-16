@@ -5,6 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# Hooks for the tests of the crates that use this one, such as a restore on
+# a made-up computer (`rollback::TestComputer`). Only their dev-dependencies
+# turn it on, so with feature resolver 2+ it never reaches a shipped build.
+test-support = []
+
 [dependencies]
 fluent-bundle.workspace = true
 # Battle-tested binary parsing for the executable-architecture probe in

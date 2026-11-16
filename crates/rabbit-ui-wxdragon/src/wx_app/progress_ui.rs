@@ -8,8 +8,8 @@ use rabbit_core::localization::Localizer;
 use rabbit_core::progress::ProgressEvent;
 
 use crate::{
-    ProgressUiState, administrator_prompt_line, administrator_still_waiting_line, is_spoken,
-    removal_started_lines,
+    ProgressUiState, administrator_prompt_line, administrator_still_waiting_line,
+    backup_delete_progress_lines, backup_restore_progress_lines, is_spoken, removal_started_lines,
 };
 
 use crate::wx_app::globals::{AnnouncePriority, announce, with_ui_localizer};
@@ -273,6 +273,23 @@ pub(crate) fn apply_progress_event_to_ui(
             let line = package_line(localizer, key, package_id);
             status_line = Some(line.clone());
             log_line = Some(line);
+        }
+        // A delete holds the status line with the backup it is deleting,
+        // said once for each group of ticked rows, however many sets it
+        // takes, and logs what came of the group once its last set is done
+        // with; see `backup_delete_progress_lines`.
+        ProgressEvent::DeleteStarted { .. } | ProgressEvent::DeleteCompleted { .. } => {
+            let (status, log) = backup_delete_progress_lines(localizer, &mut state, &event);
+            status_line = status;
+            log_line = log;
+        }
+        // A restore holds the status line with the backup it is
+        // restoring, and logs what came of each one when it ends; see
+        // `backup_restore_progress_lines`.
+        ProgressEvent::RestoreStarted { .. } | ProgressEvent::RestoreCompleted { .. } => {
+            let (status, log) = backup_restore_progress_lines(localizer, &state, &event);
+            status_line = status;
+            log_line = log;
         }
     });
 

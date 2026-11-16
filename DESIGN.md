@@ -580,7 +580,47 @@ CLI and UI expectations:
   outside the tab control, and plain Page Up or Page Down on a checkbox or
   button inside a tab switches tabs. That switch moves focus into the new
   tab's list, whose label names the tab, and Review names the mode and the
-  ticks the run leaves out.
+  ticks the run leaves out. The Packages page has three tabs, so arrival
+  reads "Install or update, tab, 1 of 3", and the Backups tab is two
+  presses of the Right arrow on the strip, or of Ctrl+Tab, away from the
+  Install tab. Its RadioBox is a control inside a tab too, so Page Up or
+  Page Down on it may switch tabs as on a checkbox; that is the same
+  documented quirk, and Review still names the mode and the ticks the run
+  leaves out.
+- A choice between two runs on one tab is a native RadioBox below the list
+  (the Backups tab's Restore or Delete), never above it: on macOS, Tab from
+  the tab strip goes straight into the list, and a control above it would
+  be skipped. Its choices have no access keys; only buttons carry them. The
+  rows stay the same rows in both choices, and each choice keeps its own
+  ticks, so a switch only changes each row's action word and tick. Focus
+  stays on the RadioBox. On macOS, VoiceOver then says how many backups are
+  ticked for the new choice, politely, after reading the choice; on Windows,
+  which has no announcement, the rows read their new action when focus
+  comes back to them. On macOS without Full Keyboard Access, Tab doesn't
+  stop on the RadioBox, as it doesn't on the tab strip; VoiceOver's own
+  navigation reaches it, and README says so.
+- Every question before a step that can't be undone, and before stopping
+  a run, is a native Yes/No message box with No focused (`wxNO_DEFAULT`),
+  so Enter or Space pressed out of habit answers No: the uninstall question,
+  the delete-backups question, and closing the window during an install,
+  an uninstall, a restore or a delete. A restore asks nothing, because what
+  it replaces goes into a backup first; with REAPER or a program it needs
+  closed still open, it shows an OK-only warning instead and changes
+  nothing. On Review, the run button of an uninstall, a restore or a delete
+  is never the default button: the disabled Next stays the default, and
+  Enter in Review's text starts nothing.
+- Focus on each step of a restore or a delete of backups: switching to the
+  Backups tab leaves focus where the native tab control puts it on Windows,
+  and on macOS moves it into the list and says the tab's name, with the
+  empty-list sentence when there are no backups; switching Restore and
+  Delete keeps it on the RadioBox; Next goes to Review's text, and Back from
+  Review to the Backups list, on the row it was on; Restore pressed while
+  something that must be closed is open shows the warning, then focuses
+  Review's text again; Delete pressed focuses the question's No, and No
+  goes back to Review's text; a run starting focuses the progress gauge, a
+  confirmed stop the progress log with the stopping line, and the end of
+  the run the Done page's status text. The post-run rescan never moves
+  focus.
 - Avoid custom drawing, canvas controls, owner-drawn lists, and grid controls in
   the main workflow.
 - Every control needs an accessible name, role, state, keyboard focus, and
@@ -623,36 +663,40 @@ user can finish the install by pressing Next a few times.
      depend on them.
 
 3. Packages
-   - Two tabs, **Install or update** and **Uninstall**. The page opens on
-     Install or update with focus on the tab strip, so screen readers read
-     the tab and its position first, and Tab moves into the package list.
-     Where macOS can't focus the tab strip (an NSTabView takes focus only
-     with Full Keyboard Access), focus goes to the install list and RABBIT
-     announces the tab's name instead. Either way, a moment after the first
-     arrival in a run, VoiceOver says that Control-Tab switches tabs. The
-     hint waits so that VoiceOver's reading of the new focus can't cut it
-     off; if the page is gone by then, the next arrival tries again. RABBIT
-     changes the tab selection by itself only on the arrival from the
-     version check, once the page shows: wxOSX moves focus into a tab on
-     every selection change, even on a hidden page, so the rebuild after a
-     run leaves it alone. On Windows that rebuild clears a list's selection
-     before deleting its rows: wxMSW answers comctl32's notice that the
-     selected row went by focusing the list, hidden or not, and after an
-     uninstall that took focus off the Done page. After either run the
-     rebuild also happens before Done shows and takes focus, so Done's
-     status is the last focus change. Back from Review or from the ReaPack
-     page lands on the strip as well, on Windows and on macOS with Full
-     Keyboard Access: showing the page refocuses the control it last had
-     focus in, which is the notebook, even if the user left from the list.
-     In uninstall mode, Back from Review puts focus back in the Uninstall
-     list instead, on every platform. On macOS, adding the first tab while
-     the window is built also counts as a selection change, and that put
-     the start focus in the hidden Install list: VoiceOver began at the top
-     of the window and Tab did nothing. So after building all pages, RABBIT
+   - Three tabs, **Install or update**, **Uninstall** and **Backups**. The
+     page heading, "Choose what RABBIT should do", names no one run. The
+     page opens on Install or update with focus on the tab strip, so screen
+     readers read the tab and its position first ("Install or update, tab, 1
+     of 3"), and Tab moves into the package list. Where macOS can't focus
+     the tab strip (an NSTabView takes focus only with Full Keyboard
+     Access), focus goes to the install list and RABBIT announces the tab's
+     name instead. Either way, a moment after the first arrival in a run,
+     VoiceOver says that Control-Tab switches tabs. The hint waits so that
+     VoiceOver's reading of the new focus can't cut it off; if the page is
+     gone by then, the next arrival tries again. RABBIT changes the tab
+     selection by itself only on the arrival from the version check, once
+     the page shows: wxOSX moves focus into a tab on every selection change,
+     even on a hidden page, so the rebuild after a run leaves it alone. On
+     Windows that rebuild clears a list's selection before deleting its
+     rows: wxMSW answers comctl32's notice that the selected row went by
+     focusing the list, hidden or not, and after an uninstall that took
+     focus off the Done page. After every run the rebuild of all three lists
+     also happens before Done shows and takes focus, so Done's status is the
+     last focus change. Back from Review or from the ReaPack page lands on
+     the strip as well, on Windows and on macOS with Full Keyboard Access:
+     showing the page refocuses the control it last had focus in, which is
+     the notebook, even if the user left from the list. In uninstall mode,
+     Back from Review puts focus back in the Uninstall list instead, on
+     every platform, and before a restore or a delete in the Backups list,
+     each on the row it was on. On macOS, adding the first tab while the
+     window is built also counts as a selection change, and that put the
+     start focus in the hidden Install list: VoiceOver began at the top of
+     the window and Tab did nothing. So after building all pages, RABBIT
      focuses the target choice again on macOS, and the wizard opens there.
      Each list's caret goes to its top row the first time the list gets
-     focus after the page opens. The tab showing when Next is
-     pressed decides what the run does; install and uninstall never mix.
+     focus after the page opens. The tab showing when Next is pressed, and
+     on the Backups tab the choice below its list, decides what the run
+     does; runs never mix.
      The Uninstall tab lists every installed package under the same groups,
      with headings that can't be ticked, nothing ticked by default, and rows
      RABBIT can't remove shown but impossible to tick, saying why. An empty
@@ -686,8 +730,39 @@ user can finish the install by pressing Next a few times.
      disabled and out of the Tab order until a ticked package has settings
      RABBIT may remove, and unticked again when none has. On macOS,
      VoiceOver is told when a tick makes the option available or not, since
-     that happens away from the row. Everything below describes the Install
-     or update tab.
+     that happens away from the row.
+     The Backups tab lists what RABBIT kept for the target, one row per
+     backup: one package from a backup set, or one key map, so one set can
+     give several rows. Its rows come from the core's overview, the one
+     `rabbit backups` prints, read in the version check's handler next to
+     the Uninstall rows and again after every run; it reads manifests,
+     RABBIT's records and file sizes and hashes nothing. The groups, each
+     only when it has rows, are Software you uninstalled, Earlier versions,
+     Key maps and Other backups, newest first inside each, with headings
+     that can't be ticked and whose details say what the group is for and
+     what has no backup. A row reads like the other tabs' rows: its name,
+     then the action, then when the backup was made and how big it is ("SWS
+     Extension 2.14.0.7: Won't touch. Uninstalled November 9, 2026, 2:05 PM,
+     4 MB"), and its details say what it holds, whether it is the only copy,
+     what restoring does or why it can't, and what deleting loses. Neither
+     shows a set id. A path shows only where a sentence is about it: a
+     refusal's own sentence, such as a file RABBIT won't put back or a link
+     it never follows, the error when the backups folder can't be read, and
+     the Finder steps in the details of another account's backup on macOS,
+     which name its folder. The list's label names the tab and the total
+     size. An empty or unreadable list works like the empty Uninstall list.
+     Below the details, a RadioBox, "What to do with the ticked backups",
+     picks Restore (the default) or Delete, each with its own ticks, kept in
+     one wx-free model (`WizardBackupList`). With Restore, a row the core
+     would refuse can't be ticked and its suffix says why; with Delete,
+     every row can be ticked except another account's on macOS, a link or a
+     folder RABBIT didn't make, and a row that goes with one of those. A
+     delete takes whole sets, so ticking a row for Delete ticks the rows
+     from the same set too, and the details say which go together; on macOS,
+     VoiceOver says "Checked" or "Unchecked" and names the rows that went
+     with it. Nothing is ticked by default, and the version check clears
+     both choices' ticks and sets the choice back to Restore. Everything
+     below describes the Install or update tab.
    - Tree view with two top-level groups: **Packages** and
      **Configuration**. Packages contains REAPER, OSARA, SWS, ReaPack,
      ReaKontrol, FFmpeg (Windows only), JAWS scripts (Windows only), and
@@ -754,9 +829,10 @@ user can finish the install by pressing Next a few times.
    - In uninstall mode the heading says "Ready to uninstall", and the
      summary has one line per package with what goes and what stays (or,
      with Also remove settings ticked, which settings go too), the
-     warnings, a note naming what is ticked on the other tab and left out
-     (on the Install or update tab, only ticks RABBIT didn't set itself,
-     such as an update it ticked by default), and that the packages can be
+     warnings, a note per other tab naming what is ticked there and left
+     out (on the Install or update tab, only ticks RABBIT didn't set itself,
+     such as an update it ticked by default; on the Backups tab, how many
+     backups are ticked to restore and to delete), and that the packages can be
      installed again. When a ticked package's own uninstaller removes it
      (on Windows, Surge XT or a standard REAPER), or the elevated helper
      removes the uninstaller folder and registry entry the JAWS scripts'
@@ -794,6 +870,32 @@ user can finish the install by pressing Next a few times.
      once both are gone it isn't asked at all.
      Back returns to the Uninstall tab's list, never to the ReaPack
      donation page.
+   - Before a restore the heading says "Ready to restore". Next first makes
+     a quick dry run of what is ticked, on the UI thread: it takes no lock,
+     writes nothing and hashes nothing; it reads the manifests, RABBIT's
+     records and file sizes, and asks which REAPERs and other programs run,
+     for the note on what to close first. The summary has the target, one
+     sentence per ticked backup saying what comes back and what RABBIT keeps
+     as a backup
+     ("ReaPack goes back from 1.2.5 to 1.2.4. RABBIT keeps 1.2.5 as a
+     backup."), what else changes, such as REAPER's language, "Close REAPER
+     first." (or every REAPER) while one it needs closed is running, the
+     ticks on the other tabs and those for Delete, which the run leaves out,
+     and the blockers, each starting "Can't restore yet" or, for a backup
+     the dry run refuses, "Can't restore <backup> yet": nothing ticked, two
+     ticked backups of one package or of one file, a target RABBIT can't
+     write to, every refusal of the dry run, and a dry run that is missing
+     or covers other backups than the ticked ones, so Restore is never
+     enabled for backups nothing checked. Before a delete the heading says
+     "Ready to delete backups", and the summary says the ticked backups go
+     for good and how much room that frees, then one line per backup with
+     what is lost ("the only copy", "you can't go back to it after this"),
+     one line for each group that goes together because one set holds it,
+     the ticks left out, and "Can't delete yet" when nothing is ticked. Both
+     name backups as the tab does, with no set ids, and a path only in a
+     refusal's own sentence. As for an uninstall, focus goes to the summary,
+     the run button is not the default, and Back returns to the Backups
+     list.
 
 6. Progress
    - Single progress bar plus one current-step line. A "Show details" toggle
@@ -840,6 +942,28 @@ user can finish the install by pressing Next a few times.
      focused, and the run stops after the step it is on: one package, or on
      macOS the administrator command, which covers several. A vendor's
      uninstaller always runs to its end.
+   - Restore pressed on Review first checks whether the target's REAPER,
+     every REAPER for a package any REAPER can use, or a program a restored
+     package's uninstall names is running, by the rules the core's run uses
+     (`restore_running_refusal`), reading the sets as the dry run does. If
+     one is, an OK-only warning says what to close, focus goes back to
+     Review's text, and nothing changes. Delete pressed asks "Delete backups
+     for good?" with No focused, saying how many backups go, what that
+     frees, how many are the only copy of what they hold, and that a deleted
+     backup can't be brought back; No goes back to Review's text. A delete
+     checks no REAPER: it never touches REAPER's files. The ticked rows are
+     copied out of the list before either dialog, which runs the event loop.
+   - During a restore or a delete the heading says "Restoring backups" or
+     "Deleting backups", focus moves to the gauge, which counts one step per
+     backup for a restore and one per backup set for a delete, so rows that
+     share a set are one step and the old copies of RABBIT's records are
+     several, and the work runs on a worker thread, its events coming back
+     through `call_after`, as for an uninstall. The status line names each
+     backup as it starts, which macOS speaks, and the log says how each
+     ended. Closing the window asks "Stop restoring?" or "Stop deleting
+     backups?" with No focused, and the run stops after the backup it is
+     on: a restore is all or nothing per backup, so a stop never leaves half
+     of one.
 
 7. Done
    - One sentence summarizing success or failure.
@@ -851,47 +975,84 @@ user can finish the install by pressing Next a few times.
      any stayed (in the user's language for REAPER or another RABBIT being
      open, a file in use, too little room for the backup, every way a
      vendor's uninstaller can end and every way the JAWS scripts' cleanup
-     can end; otherwise the engine's own sentence), and that a package comes
-     back by ticking it on the Install or update tab in a new run. A JAWS
-     script file in use says JAWS or another program has it open, to wait
-     and run RABBIT again, and to restart JAWS first if that doesn't help,
-     rather than to close a program, which would be the user's screen
-     reader. After a cleanup that was refused, failed or lost, the reason is
-     followed by the manifest's steps to remove the scripts by hand. A
-     removal that finishes after a restart says to restart the computer,
-     and a declined permission prompt, or on macOS a cancelled
-     password window, says plainly that nothing was uninstalled. After a
-     macOS removal Done also says what moved to the Trash and what it is
-     called there now; where the administrator command stopped or what it
-     left, and that a tree it stopped in while deleting may be only partly
-     there. When no package went but the command removed part of one, the
-     first line says RABBIT removed only part of it rather than that
-     nothing was uninstalled, since that part can't be put back. Done also
-     names installer receipts macOS still lists, which do no harm, and
-     every program the command looked for when it found one of them
-     running, or couldn't check, and so changed nothing; and when
-     macOS refused a step, it says to turn RABBIT on under System Settings >
-     Privacy & Security > App Management, quit it, start it again and
-     uninstall again. Show details
-     lists the files
-     removed, kept and left over, the backup set, and one `rabbit
-     restore-backup` command per removed package whose files went into
-     that set: never for one a vendor's uninstaller, the Trash or the
-     administrator command took. For the JAWS scripts it also lists what
-     the elevated helper removed with administrator rights, each file, the
-     folder and the registry entry as regedit names it, and what of the
-     folder or entry is still there, also after a cleanup that failed part
-     way. For a removed package only, it lists the script files kept
-     because they were there before the installer ran or their records
-     disagree, then the note on removing by hand the script files that
-     stayed: while the package is still there, all of its files are. The
-     restore command for the JAWS scripts brings back their files, not the
-     folder and entry. The saved report is the engine's `uninstall-<time>`
-     report, which the details point to; the wizard writes one of its own
-     only for a run the engine refused before it began, except a macOS run
-     refused because RABBIT runs as root, whose report would be root's file
-     in the user's resource folder. Both tabs are then rebuilt from fresh
-     detection.
+     can end; otherwise the engine's own sentence), and how a package comes
+     back in a new run: by ticking it on the Install or update tab, always,
+     and by restoring it on the Backups tab, which the hint names only for
+     the packages whose files went into the backup set, since a vendor's
+     uninstaller, the Trash and the administrator command leave nothing to
+     restore. Files a failure couldn't put back, which only the set holds,
+     get a sentence that says so and that the Backups tab can restore them:
+     the set keeps the package while they are in it. A JAWS script file in
+     use says JAWS or another program has it open, to wait and run RABBIT
+     again, and to restart JAWS first if that doesn't help, rather than to
+     close a program, which would be the user's screen reader. After a
+     cleanup that was refused, failed or lost, the reason is followed by the
+     manifest's steps to remove the scripts by hand. A removal that finishes
+     after a restart says to restart the computer, and a declined permission
+     prompt, or on macOS a cancelled password window, says plainly that
+     nothing was uninstalled. After a macOS removal Done also says what
+     moved to the Trash and what it is called there now; where the
+     administrator command stopped or what it left, and that a tree it
+     stopped in while deleting may be only partly there. When no package
+     went but the command removed part of one, the first line says RABBIT
+     removed only part of it rather than that nothing was uninstalled, since
+     that part can't be put back. Done also names installer receipts macOS
+     still lists, which do no harm, and every program the command looked for
+     when it found one of them running, or couldn't check, and so changed
+     nothing; and when macOS refused a step, it says to turn RABBIT on under
+     System Settings > Privacy & Security > App Management, quit it, start
+     it again and uninstall again. Show details lists the files removed,
+     kept and left over, and for each removed package whose files went into
+     the backup set, that it can be restored on the Backups tab: never for
+     one a vendor's uninstaller, the Trash or the administrator command
+     took. It shows neither the set's id nor a `rabbit restore-backup`
+     command, which would assume `rabbit` is on the PATH; the saved report
+     keeps `backup_set_id`, and README shows the command. For the JAWS
+     scripts it also lists what the elevated helper removed with
+     administrator rights, each file, the folder and the registry entry as
+     regedit names it, and what of the folder or entry is still there, also
+     after a cleanup that failed part way. For a removed package only, it
+     lists the script files kept because they were there before the
+     installer ran or their records disagree, then the note on removing by
+     hand the script files that stayed: while the package is still there,
+     all of its files are. A restore of the JAWS scripts brings back their
+     files, not the folder and entry. The saved report is the engine's
+     `uninstall-<time>` report, which the details point to. Only when the
+     engine saved none, as for a run it refused before it began, does the
+     wizard write one of its own, which keeps `backup_set_id` too; never
+     after a macOS run refused because RABBIT runs as root, whose report
+     would be root's file in the user's resource folder. All three tabs'
+     lists are then rebuilt: the Install and Uninstall tabs from fresh
+     detection, and the Backups tab from its backups read again, which now
+     include the uninstall's set.
+   - After a restore the status leads with the outcome: "RABBIT restored SWS
+     Extension 2.14.0.7.", "ReaPack is back to 1.2.4.", "RABBIT restored 2
+     backups.", "RABBIT restored 1 of 2 backups." followed by why the other
+     wasn't, "Nothing was restored." or that the user stopped it. Known
+     refusals get their own sentences, among them another RABBIT holding the
+     lock and REAPER open; after the lock or something that must be closed,
+     Done adds that the way to try again is to close RABBIT and start it
+     again, since there is no way back to Review. It also says when REAPER's
+     language went back or stays, and when RABBIT no longer counts a package
+     as installed by it. Show details says per backup what happened, each
+     file restored, put back, left or missing, that what the restore
+     replaced is kept as a backup on the Backups tab, named as the tab names
+     it, and the report's path. Open REAPER is enabled when that REAPER
+     exists, as after an uninstall.
+   - After a delete the status says how many backups went and what that
+     freed ("RABBIT deleted 3 backups and freed 520 MB."), and for any that
+     didn't, why: a file open in another program, no permission, or only
+     part deleted, which stays as an unfinished deletion to finish from the
+     Backups tab in a new run. A row counts as deleted only when every set
+     it takes is gone, and rows from one set share its result. Show details
+     goes per group of rows that share a set, with what each freed, the
+     total, and the report's path.
+   - Both save no report of the wizard's own: the core saves
+     `restore-backup-unix-<s>` or `delete-backup-unix-<s>`, as `.json` and
+     `.txt` in `RABBIT/logs`, for every run that gets past its checks, never
+     over another report, and Show details points to it. A run refused
+     before that saves none. All three lists are then rebuilt, with nothing
+     ticked and Restore chosen on the Backups tab.
 
 Streamlining rules (apply when adding new wizard text):
 
@@ -1571,7 +1732,9 @@ Extension files:
 ## Safety Behavior
 
 - If REAPER is running, stop before changing extension files and ask the user to
-  close it.
+  close it. An uninstall, and a restore of a package's files, are also
+  refused while any REAPER on the computer runs, or a program the package's
+  uninstall plan names, where the package needs that (see below).
 - When OSARA is selected, back up `reaper-kb.ini` and replace it with the OSARA
   key map by default only when OSARA is new or `reaper-kb.ini` still matches the
   installed OSARA key map; otherwise keep it, and point at OSARA's "Merge OSARA
@@ -1583,9 +1746,12 @@ Extension files:
   or remove under `RABBIT/backups/<id>/`, named by what made them:
   `unix-<s>` for an update, `uninstall-unix-<s>`,
   `restore-unix-<s>-before-restore`, and `unattended-unix-<s>-<n>` for the
-  key map and receipt copies made when vendor installers run, or `-2` and
-  so on when a set already has that id. Vendor installers, and OSARA's
-  macOS archive, overwrite files with no backup.
+  key map OSARA's key map replaces, or `-2` and so on when a set already has
+  that id. Earlier versions also wrote an `unattended-unix-<s>-<n>` set
+  holding only a copy of the receipt after vendor installers ran
+  (`unattended-receipt-update`); RABBIT writes none any more, and no longer
+  copies the receipt into an update's set either. Vendor installers, and
+  OSARA's macOS archive, overwrite files with no backup.
   Files from inside the resource folder keep their relative path in the
   set; files from outside it (app2clap's CLAP folder) go under
   `external/<n>/`, beside a `<file>.rabbit-origin` note of their original
@@ -1598,8 +1764,8 @@ Extension files:
   Each manifest entry is saved, through a temp file and a rename,
   before its copy starts and marked done after, so an interrupted run
   still leaves a set whose manifest names every copy in it. A set an
-  update wrote isn't restored yet (see below). Every path a set records to
-  its copy is absolute, so a set written through a relative
+  update wrote comes back package by package (see below). Every path a
+  set records to its copy is absolute, so a set written through a relative
   `--resource-path` restores from any folder; older sets that recorded
   relative paths are read by their `RABBIT/backups/<id>` part. A file from
   outside the resource folder records its absolute original path, and a
@@ -1632,10 +1798,11 @@ Extension files:
   writes first is made new, so a link at its name stops the restore, and
   only a regular file at the target is backed up. A path refused stops the
   restore before anything changes, with the reason, such as that JAWS's
-  folder is gone; in a whole set, the message adds that the set's other
-  packages can be restored one at a time with `--package` when another
-  package has a file in the set. An entry whose copy doesn't come back is
-  left out and never refused, since nothing is written for it.
+  folder is gone (`target-refused` and a reason of its own, see below); in
+  a whole set, the refusal names the set's other packages that have a file
+  in it, and the CLI adds that `--package` restores them one at a time. An
+  entry whose copy doesn't come back is left out and never refused, since
+  nothing is written for it.
 - Restore uses a set id only when it is one plain name, with no `:`,
   slash or NUL, and on Windows no trailing dot or space and no device name
   such as `CON`. It must also equal, byte for byte, a folder `read_dir`
@@ -1645,41 +1812,175 @@ Extension files:
   period after it; neither is restored. `RABBIT`, `RABBIT/backups` and the
   set must be real folders. Restore and `rabbit backups` never follow a
   link or junction there or inside a set: a link or a badly named folder
-  is listed with a warning and never looked into. An uninstall refuses the
-  whole run before anything changes while `RABBIT` or `RABBIT/backups` is a
-  link (the `backup-folder` check), and its writer refuses to record a
-  package there should one appear in between: its set is the only copy of
-  what it moves. Updates and the unattended installers' key map and
-  receipt copies still write through such a link; those sets are listed
-  and restored once the folder is a real one again.
+  is listed with a warning and never looked into. So no run writes a set
+  while `RABBIT` or `RABBIT/backups` is a link. An uninstall refuses the
+  whole run before anything changes (the `backup-folder` check), and so
+  does an install: the install preflight has the same check, failing in a
+  dry run too, so setup's first step, which makes RABBIT's folders, stops
+  before it makes any; the package operation (the wizard's install,
+  `setup`, `apply-packages`) and `install-extension --apply` check it
+  before the lock or any download. Should the folder become a link in
+  between, the package operation usually finds it before the writer does:
+  it runs the install preflight again for each extension file it installs,
+  and that stops the rest of the run with the `backup-folder` error, as a
+  REAPER started mid-run does; what installed before it stays installed
+  and in the receipt. Past those checks, the writer refuses every write to
+  a set while `RABBIT`, `RABBIT/backups` or the set's own folder is a link
+  (`BackupPathIsLink`), its first write and every later one, before
+  anything is written. Then an update stops before it replaces the file,
+  and its staged copy goes again. OSARA's key map replacement leaves
+  `reaper-kb.ini` as it is, while OSARA itself is installed: its item says
+  only that OSARA was installed, not that the key map was replaced, and
+  the receipt doesn't list `reaper-kb.ini` among OSARA's files. A restore
+  stops at the first file it would back up and puts back the files before
+  it, as for any file that fails (see the all-or-nothing rule below). An
+  uninstall's package fails, and what of it already moved goes back where
+  it can.
 - A restore never copies a receipt file over `RABBIT/install-state.json`:
   an old copy would undo every change to the receipt since, uninstalls
   included. Restore puts no file from a set back anywhere in `RABBIT/`,
   under any name Windows or macOS would open as it: in another case, and on
-  Windows with trailing dots or spaces, or a `:` stream. Only the merge
-  below changes the receipt. Before anything changes, in a dry run too, it
-  refuses a set an update wrote (`install-replacement`), whole or with
-  `--package`, because its files belong to the receipt entry from before the
-  update, until RABBIT can go back to an earlier version by changing only
-  that package's entry. It also refuses a set that holds only a receipt copy
+  Windows with trailing dots or spaces, or a `:` stream. Only the merge and
+  the swap below change the receipt. Before anything changes, in a dry run
+  too, it refuses a set that holds only a receipt copy
   (`unattended-receipt-update`), and any other set that holds a copy of the
   receipt, by its manifest or, without one, by its layout, such as the set a
-  restore of an update's set wrote in earlier versions. The copy stays in
-  the set for anyone who needs it by hand. Updates and the unattended
-  installers still copy the receipt into their sets.
+  restore of an update's set wrote in earlier versions, unless it is a set
+  of earlier versions (below), which never touches the copy. The copy stays
+  in the set for anyone who needs it by hand. No run copies the receipt into
+  a set any more.
+- What a set records besides its files, in fields that are optional in the
+  manifest, so `schema_version` stays 1, older manifests load and restore as
+  before, and older versions ignore the fields:
+  - Every set: `created_unix`, the seconds since 1970 (UTC) when its folder
+    was made. `created_at` stays the id RABBIT asked for, which the folder
+    lacks when it got `-2`.
+  - An update's set (`install-replacement`): `replaced`, for each package
+    whose files it holds, the package's receipt entry from before the
+    update, or none when the receipt had none (a copy RABBIT didn't
+    install), and the version that replaced it. Each record is saved before
+    the package's first file is copied in, so the set never holds a file
+    without it; when that first copy fails, the record goes again, and so
+    does a set left empty. One install call writes one set: the wizard one
+    per package, `install-extension` one for all its packages. The records
+    aren't in `packages`, which older versions read as an uninstall's
+    whatever the set's reason: they would merge the old entry back while
+    only the replaced files came back.
+  - An uninstall's set: in `packages`, each package's receipt entry, the
+    `langpack=` value (below), and `with_settings`, whether this uninstall
+    moved the package's settings into the set: `false` when it records the
+    package, `true` once a settings file has moved, and `false` again when
+    a failed package's settings all went back. `None` in older sets.
+  - A key map set (`osara-keymap-replacement`): `keymap_origin`, what
+    `reaper-kb.ini` was, read before OSARA's install, which overwrites the
+    OSARA key map it is compared with: `own-keymap`, `unchanged-osara`,
+    `default-keys` (a `reaper-kb.ini` without key bindings or custom
+    actions, which still goes into a set) or `unknown` (no OSARA key map to
+    compare with, or one of the two unreadable). A value a later version
+    writes reads as `unknown`.
+  - A before-restore set: its files, and when the restore went back to an
+    earlier version, `replaced` for that package, as an update's set has
+    it: the entry the package had, and the version that replaced it.
 - Restoring a set an uninstall wrote merges each package's recorded entry
   into the current receipt instead, the package comes off
   `declined_packages`, and the `langpack=` value its uninstall replaced goes
   back, but only while `reaper.ini` still says `<>`. `restore-backup
   --package` does this for one package of the set. A package installed
   again since its uninstall is refused, with nothing changed, because its
-  newer receipt entry describes newer files; so is `--package` for any other
-  set, which records no receipt entry per package. A receipt entry that is
-  still the very one the set recorded is no reinstall: the uninstall stopped
-  before it reached the receipt (RABBIT was ended halfway through the
+  newer receipt entry describes newer files; so is `--package` for any
+  other set that records no package and isn't a set of earlier versions
+  (below): `no-package-records`, or `no-manifest` for a set without a
+  manifest. A finished copy of a package's that is gone from the set, or
+  has another size, refuses the package before the lock (`part-missing`),
+  and for a whole set any package's, as the overview judges it before the
+  receipt; so the refusal is never a reinstall that uninstalling wouldn't
+  get round. A receipt entry that is still the very one the set recorded
+  is no reinstall: the uninstall stopped before it reached the receipt (RABBIT was ended halfway through the
   package, or a failed package's files couldn't all go back), or an earlier
   restore from the set put the entry back. Its files are restored and the
   entry stays as it is.
+- A set of earlier versions, an update's set or a before-restore set with
+  `replaced` records, goes back by the swap, package by package, and never
+  merges `packages`. For package P, E_old is its `replaced` record, or in
+  an older update's set without one, P's entry in the set's receipt copy,
+  none when the copy lacks P; with neither, or with an entry whose `id`
+  isn't P, P is refused (`version-unknown`). E_cur is P's entry in the
+  receipt now.
+  Before the lock, a finished copy of P's that is gone or has another size
+  refuses it (`part-missing`), and so does having no file of P's that
+  comes back (`nothing-of-it-in-set`). Under the lock, the receipt is read
+  (`receipt-unreadable`), another installed member of P's exclusive group
+  refuses it (`other-language-pack-installed`), and so does a file E_old
+  lists with a hash that is neither in the set, as a finished file of P's
+  version with that hash at that place, which the restore puts back, nor on
+  disk with it (`not-complete`): only a place the current receipt lists
+  with that hash is looked at, hashed in a real run and checked by size in
+  the quick plan. The plan takes P's files of the set, never the key map or
+  a receipt copy; a file of P's that is the key map by its real place all
+  the same, reached through a link folder or a short name, refuses P
+  (`target-refused`, `keymap-among-version-files`). Files E_cur lists with a hash that E_old doesn't list and
+  the set doesn't write move out: each place must be one a restore of the
+  before-restore set could write (`newer-file-refused` otherwise), and a
+  file still as E_cur recorded it moves, while one that changed, or isn't a
+  file, stays and is reported; a link or junction at the place stays and is
+  never followed. E_old goes into the receipt as it is, so each file it
+  lists, with a hash or without, must be at a place a restore of P would
+  write, judged from the text (`earlier-file-refused` otherwise; `.`, the
+  resource folder itself, passes): a hand-made set can't make RABBIT look
+  at, or later remove, a place it never installs to. With no E_old, RABBIT can't tell which of those files the
+  copy it goes back to had too, so none moves: each stays where it is, and
+  a copy of it goes into the before-restore set (`left_in_place`), so the
+  swap can still be undone. The run records E_cur in the new
+  before-restore set first (`record_replaced`, with E_old's version as
+  what replaced it), copies or moves those files into it, puts the set's
+  files back, each file they replace copied into it first, and only then
+  makes P's entry exactly E_old, keeping E_cur's channel, or removes it
+  when there is no E_old, and takes P off `declined_packages`; nothing else
+  in the receipt changes. The report says what happened to the entry
+  (`replaced`, `added`, `removed`, `still-none`), whether P came off
+  `declined_packages`, and, for a removed entry, whether P's uninstall
+  needs it (`requires_receipt`, as FFmpeg's does), so that RABBIT can't
+  uninstall P until it is installed again. On any failure the files put
+  back go back as before, then the moved files go back to their places,
+  the copies go with the before-restore set, and the receipt is untouched;
+  a moved file that can't go back stays in the kept set (`still-in-backup`,
+  and the backup is `files-left`). The before-restore set lists as an
+  earlier version of P, so the swap is undone the same way.
+  A whole set plans every package before any changes, so any refusal
+  refuses them all, leaves out packages with nothing in the set, and then
+  runs them in turn, each all or nothing with a set of its own (`swaps` in
+  the report; `partly-restored` when some went back and others didn't),
+  reading the stop and scanning what runs between them.
+- A key map is a backup of its own: a set entry whose
+  original is the resource folder's `reaper-kb.ini`, whatever made the set.
+  `restore-backup --key-map` (`RestorePart::Keymap`) plans only those
+  entries, whatever else the set holds, a receipt copy included, and
+  changes no receipt entry. A set with no such entry, none whose copy comes
+  back, or no manifest is refused (`no-keymap-in-set`); a finished copy that
+  is gone refuses it (`part-missing`), as the overview judges it. Every
+  restore that puts `reaper-kb.ini` back, of the key map alone or of a
+  whole set, keeps the scripts registered since: once every file is back,
+  and before the receipt is saved, the key map gets the `SCR` lines of the
+  key map it replaced, read from its copy in the before-restore set, that
+  it doesn't register by section and id, each once, ending as its own lines
+  end and in its own encoding. OSARA's key map replacement keeps them
+  through the same helper (`keymap_scripts`). The key map with the lines is
+  written to a new temporary file that then takes its place, as every file
+  a restore writes, so it is never part of a file. When that fails, or the
+  receipt after it, the key map goes back from the before-restore set with
+  the other files. The before-restore set holds the replaced key map, so
+  the overview lists it as a key map, and restoring it undoes the restore
+  the same way, again keeping the scripts: a script the older key map
+  registers that the replaced one doesn't stays. A dry run counts the lines
+  it would add (`keymap.scripts_added`, with `keymap.replaced` false when
+  there is no key map to keep them from); the quick plan reads no key map.
+  Under the lock, a planned file is the key map by its entry, or by its
+  real place, so a way to it through a link folder inside the resource
+  folder counts too. A restore that puts a key map back is refused with
+  `allow_reaper_running` (`keymap-needs-reaper-closed`), before the lock and
+  again under it, in a dry run too, since REAPER may save its own key map
+  when it quits; without it, the target's REAPER is checked as for every
+  restore.
 - An uninstall records each package before it moves anything, and keeps the
   record when it found none of the package's files to move, or stopped
   before any copy of them finished. A package has a file in the set when
@@ -1700,23 +2001,260 @@ Extension files:
 - A real restore first copies each file it replaces into a set of its own,
   `restore-unix-<s>-before-restore` (or `-2` and so on), written like any
   other, and its report names that set as `before_restore_set_id`.
-  Restoring it puts those files back; files the restore added, the
-  receipt and REAPER's language stay as they are. A restore that replaced
-  nothing writes no set and names none, and neither does a dry run. Every
-  real restore that finishes saves its report as
+  Restoring it puts those files back. After a merge, files the restore
+  added, the receipt and REAPER's language stay as they are. A swap's set
+  also holds the newer version's files and records the entry it replaced,
+  so restoring it swaps back (above), and a key map's keeps the scripts
+  registered since (above). A restore that replaced nothing writes no set
+  and names none, and neither does a dry run. Every
+  real restore that gets past its checks saves its report as
   `RABBIT/logs/restore-backup-unix-<s>.json` and `.txt` (or `-2` and so on,
   never over another report), still under the install lock, as every real
-  uninstall does. One stopped by an error
-  saves none yet; `rabbit backups` still lists its before-restore set. A
-  dry run saves nothing; `--save-report` saves its report under a free name
-  the same way, and `--report-path` writes where it says. An uninstall's
-  report is saved the same way, never over another.
+  uninstall does, also when a backup wasn't restored or the run was
+  stopped. A refusal before anything changed saves none. A dry run saves
+  nothing; `--save-report` saves its report under a free name the same
+  way, and `--report-path` writes where it says. An uninstall's report is
+  saved the same way, never over another.
+- A restore is all or nothing per backup. It checks everything first, then
+  puts the files back one by one, each file it replaces into the
+  before-restore set first. When a file fails, or the receipt can't be
+  saved, every file it changed goes back as it was, newest first: a file it
+  replaced from the before-restore set, checked against the hash recorded
+  there, and a file it added is removed, with the folders it made for it
+  once they are empty. Receipt entries and the `langpack=` line are merged
+  only once every file is back. Such a backup is `not-restored`, and its
+  before-restore set, whose copies are then all on disk again, goes again.
+  A file that can't be put back is `left`, as the backup had it, or
+  `missing`, when the restore had removed the file it replaces and its own
+  copy never took its place; the backup is `files-left`, and its
+  before-restore set stays, with the only copy of what that file replaced.
+  Each file's `action` says `restored`, `put-back`, `left`, `missing` or
+  `not-restored`, and `restore-backup` exits with 1 after the report when
+  the backup wasn't restored. `files-left` is no stop: a stop only gives
+  `not-reached` to the backups not reached, and sets the run's `stopped`.
+  A target that is no longer a regular file when its turn comes stops the
+  backup before it changes. Discarding a before-restore set removes no copy
+  while `RABBIT`, `RABBIT/backups`, the set or a folder in it is a link.
+  Tests fail single steps through a test-only hook (`restore_seam`).
+- `restore_backups` restores several backups in the order given, under one
+  lock, each with its own before-restore set, or a whole set of earlier
+  versions one per package (`swaps`); `restore_backup_item` is the same for
+  one item, as `rabbit restore-backup` uses it, and `restore_backup_set`
+  for one set or one package of it. An item (`RestoreItem`) names a set by
+  its exact id, what of it comes back (`RestorePart`: the whole set, one
+  package, or its key map), and optionally the fingerprint the caller listed. Refusals of the
+  whole run are an error, before anything changes: the lock, root on macOS,
+  a place RABBIT can't write to, and REAPER or programs that the restored
+  packages need closed, checked for all of them together. A refusal of one backup's own, such as its set, its package, a
+  file, a reinstall, or a fingerprint that differs from the one listed
+  (`changed-since-listed`, compared before the lock and again right before
+  the backup's turn), leaves it `not-restored` with that refusal, and the
+  run goes on. Each backup's set is found again in `RABBIT/backups` right
+  before its turn, so one that became a link meanwhile is refused alone,
+  and what runs is scanned again for its own packages before every backup
+  after the first, as an uninstall scans before each package. Each backup
+  is checked again and planned right before its turn, against the receipt
+  as the backups before it left it, so a dry run checks each against the
+  receipt as it is. A run whose every backup was refused by its own checks
+  takes no lock and saves no report. The cancel token is read
+  before each backup: the one running finishes, the rest are
+  `not-reached`, and the report says the run was stopped. Each backup the
+  run reaches sends `RestoreStarted` and `RestoreCompleted` with its
+  status; the wizard's progress page names the backup at the start and
+  logs how it ended.
+  The quick plan, a dry run with `quick`, reads and hashes no file: a copy
+  counts by the size its entry recorded, as in the overview, so only a
+  copy changed at the same size goes unnoticed, and a set without a
+  manifest gets no hashes. A real run always hashes every copy.
 - A real restore on macOS refuses when RABBIT itself runs as root, as under
   `sudo`, as an uninstall does: what it puts back, the before-restore set
   and the receipt would all be root's. The refusal comes after the set is
   found and the set and package refusals, before the REAPER check, the
   install lock and any change. A dry run still works. The check comes
   through the restore's environment, so tests run it on every platform.
+- Every refusal a restore makes before anything changes is a
+  `RestoreRefusal` (`restore_refusal.rs`): a stable kebab-case code, its
+  serde tag, which the wizard maps to a Fluent key of its own; fields that name
+  the set, the packages, the paths or the programs; and English for the
+  CLI with no command-line syntax in it. The CLI adds its own hints after
+  that English: the command that lists the backups, the folder a receipt
+  copy stays in, the command that uninstalls a package installed again,
+  that `--package` restores a set's other packages one at a time, and what
+  `--allow-reaper-running` does. A file refused at its place carries a
+  reason of its own (`TargetRefusal`): RABBIT's folder, a way that leads
+  into it or out of the resource folder or a package's folder, a link, a
+  name that may open another, a folder that is gone, two files for one
+  place, and so on. A damaged manifest is `damaged-manifest`, a receipt
+  that can't be read `receipt-unreadable`, a finished copy that is gone or
+  isn't the file it recorded `part-missing`, and a set that changed
+  between the reads before and under the lock `changed-while-read`. The
+  errors a restore shares with RABBIT's other runs become refusals at the
+  restore's edge, and only for what goes wrong before the first change: a
+  link where RABBIT keeps its backups (`is-link`) and the install lock
+  another RABBIT holds (`lock-held`); writers and the listing still say
+  them as `BackupPathIsLink` and the lock error, and so does a restore
+  that finds such a link once files are back. The overview gives each
+  backup the refusal a restore gives for what its status or a refused file
+  says (`refusal`), and a whole set's row what refuses the set itself, such
+  as a damaged manifest or a copy of the receipt in it, so a row and a run
+  agree.
+- Before the lock, a restore checks REAPER and programs as each restored
+  package's own uninstall would, from the package manifests for this
+  platform and kind of REAPER (`uninstall_process_rules`, which the
+  uninstall plan uses too): the target's REAPER, through the install
+  preflight with a restore wording; every REAPER on the computer when the
+  package serves every REAPER (`requires_standard_install`) or a vendor's
+  uninstaller removes it; and the programs its uninstall plan names. The
+  packages are those whose files come back, by the manifest; a set without
+  one checks only the target's REAPER. `--allow-reaper-running` lets only
+  the target's REAPER run. A real restore is refused (`reaper-running`,
+  `program-running`) with nothing changed, and the process checks run
+  again under the lock, as an uninstall's do before each package. A
+  refusal names one reason: what `--allow-reaper-running` never lets
+  through first, then a place it can't write to (`not-writable`), and the
+  target's REAPER last, so the CLI's hint to add that flag comes only when
+  nothing else stands in the way, and never for a run that puts the key map
+  back, which that flag can't let through either: such a refusal says so
+  (`puts_keymap_back`), and the CLI says only to close REAPER. A dry run makes the same checks and
+  reports what runs as warnings, refusing nothing for it, as the install
+  preflight's dry run does, so its report names everything that must be
+  closed. The scans and the package manifests come through the restore's
+  environment, so tests give their own. Any restore, a dry run too,
+  refuses a set that belongs to another account than `RABBIT/backups`
+  (`not-yours`), as the overview lists it.
+- `rabbit backups` lists the sets through one overview in the core
+  (`backup_overview`), which the wizard's Backups tab shares. It turns
+  sets into backups: one per package an uninstall recorded; one per package
+  of an update's set, from its file entries and its `replaced` records; one
+  key map, found by an entry whose original is the resource folder's
+  `reaper-kb.ini`, whatever made the set; one per package a restore's set
+  recorded as replaced; one for each other set, set without a manifest,
+  damaged set, unfinished deletion in `RABBIT/backups-deleting`, and link
+  or badly named folder; one for a set's files that no backup above holds;
+  and one for all sets that hold only a copy of the receipt. Backups are
+  grouped as uninstalled software, earlier versions,
+  key maps and other backups, newest first inside a group, those without a
+  date last and the records last of all. A set's date is its manifest's
+  `created_unix`, else the seconds in its `created_at`, else, without a
+  manifest, the seconds in its name; every id form counts, `-2` suffixes
+  included. Its size comes from a walk by each entry's own metadata, which
+  follows no link and counts files with no entry, so it is what deleting it
+  frees; a backup's size adds up its manifest entries. Each backup gets a
+  status (can restore, stopped partway, already back, installed again, not
+  complete, nothing in it, version unknown, another of its exclusive group
+  installed, part missing, records unreadable, not here, not yours, not a
+  backup), and earlier versions are judged by the rules of the swap that
+  restores them, each with the exact `--package` command, and key maps
+  each with the exact `--key-map` command; an update's set whose packages
+  can all go back is marked `swaps_whole`; `rabbit backups` adds the
+  command that restores it whole when it holds more than one package. The
+  overview reads the manifests, the receipt once, an older update set's
+  copy of the receipt, and sizes; it never hashes a file. "Not complete"
+  and "already back" compare the hashes the manifests and the receipt
+  recorded and the sizes on disk; the restore checks the files themselves.
+  Where a file goes back is judged from the paths' text by the restore's
+  own rules, and only such a place is looked at: a path outside the
+  resource folder and the folders RABBIT installs into, such as one on
+  another computer, is never opened. A backup with a file a restore would
+  refuse names it, and gets no restore command; so does an earlier version
+  with a file of the newer version that couldn't come back from the
+  before-restore set. A key map is a backup of its own: its row gets the
+  `--key-map` command whatever else its set holds. On macOS a set whose
+  owner differs from that of `RABBIT/backups` is another account's. Each set also gets a
+  fingerprint, its manifest's length and modified time (seconds since 1970,
+  negative before it, and nanoseconds, so a time before 1970 still lists as
+  JSON) or, without one, its file count and size, for a later run to
+  compare under the lock. Local time
+  comes from the operating system on Windows and macOS, UTC elsewhere.
+- RABBIT never deletes a backup by itself. The only sets a run removes
+  without being asked are new ones it made itself that end up holding
+  nothing it needs: an update's or an uninstall's set left with no file in
+  it, as when the first copy failed or every file went back after a
+  failure, and a restore's before-restore set that got no file, or once
+  every file in it is back on disk. Every other set stays until the user
+  deletes it, on the wizard's Backups tab or with `rabbit delete-backup`.
+  An update's set can be the only copy of a file the user edited, and an
+  uninstall's is the only copy until it is restored, however old.
+- `delete_backups` (`backup_delete.rs`) deletes whole backup sets for good,
+  in the order given; it is behind `rabbit delete-backup` and the
+  wizard's Backups tab. An item (`DeleteItem`) names a set by its exact id
+  and optionally the fingerprint the caller listed; the overview's records
+  row gives each of its sets' ids (`BackupItem::set_ids`), and each is
+  deleted as an item of its own. Before anything changes: a real delete as
+  root on macOS is refused first (`as-root`), through the environment, as
+  for uninstall and restore. A resource folder that isn't there, as after a
+  typo, is an error (exit 1), since every id would otherwise count as
+  already gone. Then every id must be well-formed and name its set or
+  unfinished deletion exactly (`invalid-id`, `differs-in-case`,
+  `ends-in-dot-or-space`, checked against both folders; counting such an id
+  as already gone would tell a script a set is gone that is still there),
+  with no link on the way (`is-link`; a linked `RABBIT`, `RABBIT/backups`
+  or `RABBIT/backups-deleting`, or a linked entry named after the id in
+  either, refuses), the set and any unfinished deletion of the id must
+  belong to the owner of `RABBIT/backups`, never compared with the account
+  RABBIT runs as (`not-yours`; the refused item names the folder that is
+  another account's, so the CLI's Finder hint names the right one), and a
+  listed fingerprint must still match (`changed-since-listed`), the set's
+  in `RABBIT/backups` when there is one. One refused item refuses the whole
+  run: nothing changes, the report says `refused`, and no report is saved;
+  a refusal before the lock takes no lock. The codes are
+  `RestoreRefusal`'s, said in a delete's words by `delete_text`. A dry run
+  stops after these checks and reports each set's size from the overview's
+  walk and the backups in it marked as the only copy; such a set is still
+  deleted when named. A real run then takes the install lock (`lock-held`,
+  an error), checks every item again under it (a refusal there refuses the
+  whole run as before, and saves no report), and then, per set: finishes
+  an unfinished deletion of the id first, so the set gets a free name
+  (folders are never merged; one that can't be finished leaves the set as
+  it was, `earlier-deletion-left`), makes `RABBIT/backups-deleting` if
+  needed and refuses it as a link, renames the set there in one rename, and
+  only then walks it by each entry's own metadata. A name in
+  `RABBIT/backups-deleting` taken by anything but an unfinished deletion of
+  the id itself, such as a file or, where names differ only in case, an
+  unfinished deletion of another id, is never moved onto or removed: the
+  set is `not-deleted` (`other`) and the report names what is in the way.
+  The walk removes a symbolic link or junction as itself, never followed.
+  A folder that is a Windows reparse point of another kind, such as a
+  OneDrive placeholder, leads nowhere else and Rust doesn't count it as a
+  link, so the walk goes into it, as the overview and a restore treat it;
+  refusing it only after the rename would leave every set in a cloud folder
+  as an unfinished deletion no run could finish. Files go, on Windows
+  losing a read-only attribute through a handle opened on the entry itself
+  if a removal refuses one; folders go deepest first, the set's folder
+  last. Each folder is checked again right before it is listed, and one
+  that became a link is left as it is (`partly-deleted`, and the next run
+  removes the link as a link). On Windows the walk holds each folder open
+  from that check until it is removed, with a handle that shares reading
+  and writing but not deleting: no other program can move or delete it,
+  and Windows moves no folder above an open one, so no folder on the way
+  can be swapped for a junction. macOS and Linux have no such hold: a
+  folder swapped for a link between the check and the listing would still
+  be followed, which takes another program of the same account racing the
+  walk. Before anything is removed, its path is checked to lie inside
+  `RABBIT/backups-deleting/<id>` (`DeleteGuard`, by the path's text).
+  Statuses:
+  `deleted`, `finished-earlier-deletion`, `already-gone` (a well-formed id
+  that names nothing, so a script can run twice), `not-deleted` (`in-use`,
+  `permission`, `earlier-deletion-left`, `other`; nothing of the set
+  changed), `partly-deleted` (what the walk couldn't remove stays in
+  `RABBIT/backups-deleting`, listed as an unfinished deletion, and the
+  next delete of the id finishes it), `refused` and `not-reached`; a dry
+  run says `would-delete` or `would-finish-earlier-deletion`. Windows 11
+  refuses to rename a folder while any file in it is open, whatever the
+  sharing, with "access denied", so a set in use is `not-deleted` with
+  nothing changed; that error counts as in use when RABBIT may open the
+  set's folder with delete access, and as permission otherwise. The cancel
+  token is read between sets; each set sends `DeleteStarted` and
+  `DeleteCompleted`, from which the wizard's progress page names each
+  backup and logs how it ended. A real run that gets past its checks saves
+  `delete-backup-unix-<s>` in `RABBIT/logs`, also
+  when every id was already gone; a dry run and a refused run save none,
+  and neither does a run in a resource folder with no `RABBIT` folder,
+  which takes no lock either, so it never makes one. Nothing outside
+  `RABBIT/backups` and `RABBIT/backups-deleting` is written, renamed or
+  removed, besides the lock and the report, and there is no REAPER check: a
+  delete never touches REAPER's files. The uninstall guard's refusal of
+  `RABBIT` stays as it is.
 - `rabbit install-extension --apply` takes the install lock across its
   download, install and receipt change, as the package operation does, so
   it never writes files, a backup set or the receipt while another RABBIT

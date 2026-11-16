@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::detection::detect_components;
 use crate::model::Platform;
 use crate::package::PACKAGE_OSARA;
+use crate::rollback::KeymapOrigin;
 use crate::text_file::read_text_file_lossless;
 
 /// How the key map REAPER uses compares with the installed OSARA key map.
@@ -43,6 +44,20 @@ pub enum OsaraKeymapState {
     /// There is a key map, but no OSARA key map to compare it with, or one
     /// of the two couldn't be read.
     Unknown,
+}
+
+/// The state a key map backup records, read before OSARA's install. A
+/// `reaper-kb.ini` with no records still goes into a backup, as REAPER's
+/// default keys.
+impl From<OsaraKeymapState> for KeymapOrigin {
+    fn from(state: OsaraKeymapState) -> Self {
+        match state {
+            OsaraKeymapState::DefaultKeys => Self::DefaultKeys,
+            OsaraKeymapState::UnchangedOsara => Self::UnchangedOsara,
+            OsaraKeymapState::OwnChanges => Self::OwnKeymap,
+            OsaraKeymapState::Unknown => Self::Unknown,
+        }
+    }
 }
 
 /// The key map choice a run makes when the user doesn't make one, and why.

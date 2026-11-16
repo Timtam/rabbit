@@ -12,7 +12,7 @@ use crate::wx_app::expert_mode::{
     OSARA_BUILD_CHOICE, OSARA_BUILDS_LABEL_NAME, REAPER_BUILDS_LABEL_NAME, expert_mode,
     seed_build_choices,
 };
-use crate::wx_app::packages_page::{PackagesStateCell, UninstallStateCell};
+use crate::wx_app::packages_page::{BackupsStateCell, PackagesStateCell, UninstallStateCell};
 use crate::wx_app::packages_tabs::{PackagesPageState, PackagesPageWidgets, build_packages_tabs};
 use crate::wx_app::shell::{open_external_url, relaunch_with_locale};
 use crate::wx_app::widgets::{
@@ -96,6 +96,8 @@ pub(crate) fn add_pages(
     can_install: Rc<Cell<bool>>,
     uninstall_list: Rc<RefCell<crate::WizardUninstallList>>,
     uninstall_items: UninstallStateCell,
+    backup_list: Rc<RefCell<crate::WizardBackupList>>,
+    backup_items: BackupsStateCell,
     self_update_status: StatusBar,
     language_footer: Panel,
 ) -> WizardWidgets {
@@ -135,6 +137,10 @@ pub(crate) fn add_pages(
         uninstall_details,
         uninstall_remove_settings,
         uninstall_settings_note,
+        backups_list_label,
+        backups_list,
+        backups_details,
+        backups_choice,
     } = build_packages_tabs(
         &packages_page,
         model,
@@ -145,6 +151,8 @@ pub(crate) fn add_pages(
             can_install,
             uninstall_list,
             uninstall_items,
+            backup_list,
+            backup_items,
         },
     );
     book.add_page(
@@ -217,6 +225,10 @@ pub(crate) fn add_pages(
         uninstall_details,
         uninstall_remove_settings,
         uninstall_settings_note,
+        backups_list_label,
+        backups_list,
+        backups_details,
+        backups_choice,
         reapack_ack_confirm,
         review_heading,
         review_text,

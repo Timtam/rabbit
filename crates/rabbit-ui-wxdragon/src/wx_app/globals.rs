@@ -79,15 +79,15 @@ thread_local! {
 }
 
 thread_local! {
-    /// The run button's two labels: "Install", and "Uninstall" in uninstall
-    /// mode, each with its own mnemonic. Set once when the window is built;
-    /// `update_navigation` picks one from the mode on every step change, as
-    /// it does for the close button.
-    static RUN_BUTTON_LABELS: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+    /// The run button's four labels: "Install", "Uninstall", "Restore" and
+    /// "Delete", one for each mode, each with its own mnemonic. Set once
+    /// when the window is built; `update_navigation` picks one from the mode
+    /// on every step change, as it does for the close button.
+    static RUN_BUTTON_LABELS: RefCell<Option<crate::RunButtonLabels>> = const { RefCell::new(None) };
 }
 
-pub(crate) fn install_run_button_labels(install: String, uninstall: String) {
-    RUN_BUTTON_LABELS.with(|cell| *cell.borrow_mut() = Some((install, uninstall)));
+pub(crate) fn install_run_button_labels(labels: crate::RunButtonLabels) {
+    RUN_BUTTON_LABELS.with(|cell| *cell.borrow_mut() = Some(labels));
 }
 
 /// The run button's label for `mode`.
@@ -95,10 +95,7 @@ pub(crate) fn run_button_label(mode: crate::WizardMode) -> Option<String> {
     RUN_BUTTON_LABELS.with(|cell| {
         cell.borrow()
             .as_ref()
-            .map(|(install, uninstall)| match mode {
-                crate::WizardMode::Install => install.clone(),
-                crate::WizardMode::Uninstall => uninstall.clone(),
-            })
+            .map(|labels| labels.for_mode(mode).to_string())
     })
 }
 

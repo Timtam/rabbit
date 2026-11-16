@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 use crate::model::Platform;
 use crate::preflight::{
     PreflightCheck, PreflightReport, PreflightStatus, REAPER_PROCESS_CHECK, RunningProcess,
-    macos_userplugins_write_check, resource_path_check, running_processes_named,
-    running_reaper_for_target_with_processes, running_reaper_processes,
+    is_one_of, macos_userplugins_write_check, process_list, resource_path_check,
+    running_processes_named, running_reaper_for_target_with_processes, running_reaper_processes,
 };
 
 use super::paths::inside_or_same;
@@ -35,12 +35,16 @@ use super::{PlannedRemoval, RemovalReason, RemovalRoute, UninstallPlan, Uninstal
 pub const ANY_REAPER_PROCESS_CHECK: &str = "any-reaper-process";
 /// The check that fails while a program a plan names is running.
 pub const PROGRAMS_RUNNING_CHECK: &str = "programs-running";
+/// What [`ANY_REAPER_PROCESS_CHECK`] says when it passes. A restore's check
+/// of the same name says it too.
+pub(crate) const NO_REAPER_ANYWHERE: &str = "No REAPER is running anywhere on this computer.";
 /// The check that fails when the backup's volume lacks room for the files
 /// that have to be copied there from another volume.
 pub const BACKUP_SPACE_CHECK: &str = "backup-space";
 /// The check that fails when `RABBIT` or `RABBIT/backups` is a symbolic
 /// link or junction while a package would move files into the backup set.
-pub const BACKUP_FOLDER_CHECK: &str = "backup-folder";
+/// An install's preflight has the same check, by the same name.
+pub use crate::preflight::BACKUP_FOLDER_CHECK;
 /// Room the backup's volume must keep beyond the copied files themselves:
 /// enough for the set's manifest and notes, and so that a removal never
 /// fills a drive to its last byte.
@@ -264,7 +268,7 @@ pub(crate) fn process_checks(
         checks.push(process_check(
             ANY_REAPER_PROCESS_CHECK,
             reaper_processes,
-            "No REAPER is running anywhere on this computer.",
+            NO_REAPER_ANYWHERE,
             &format!(
                 "Close every REAPER on this computer, portable ones included, before \
                  uninstalling {}",
@@ -280,20 +284,13 @@ pub(crate) fn process_checks(
     if !blocking.is_empty() {
         let running: Vec<RunningProcess> = other_processes
             .iter()
-            .filter(|process| {
-                blocking
-                    .iter()
-                    .any(|program| program.eq_ignore_ascii_case(&process.name))
-            })
+            .filter(|process| is_one_of(&process.name, &blocking))
             .cloned()
             .collect();
         checks.push(process_check(
             PROGRAMS_RUNNING_CHECK,
             &running,
-            &format!(
-                "None of these programs is running: {}.",
-                blocking.join(", ")
-            ),
+            &none_of_these_programs_running(&blocking),
             "Close these programs before uninstalling",
         ));
     }
@@ -454,14 +451,19 @@ fn process_check(
             message: pass_message.to_string(),
         };
     }
-    let list = running
-        .iter()
-        .map(|process| format!("{} ({})", process.name, process.pid))
-        .collect::<Vec<_>>()
-        .join(", ");
     PreflightCheck {
         name: name.to_string(),
         status: PreflightStatus::Fail,
-        message: format!("{fail_message}: {list}."),
+        message: format!("{fail_message}: {}.", process_list(running)),
     }
+}
+
+/// What [`PROGRAMS_RUNNING_CHECK`] says when none of `programs` runs. A
+/// restore's check of the same name says it too.
+pub(crate) fn none_of_these_programs_running(programs: &[impl AsRef<str>]) -> String {
+    let programs: Vec<&str> = programs.iter().map(AsRef::as_ref).collect();
+    format!(
+        "None of these programs is running: {}.",
+        programs.join(", ")
+    )
 }

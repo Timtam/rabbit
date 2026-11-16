@@ -38,6 +38,9 @@ windows-sys = { version = "0.61", features = [
     # without the environment.
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    # The local time zone's offset from UTC at a given moment, for the
+    # dates `rabbit backups` prints (local_time.rs).
+    "Win32_System_Time",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

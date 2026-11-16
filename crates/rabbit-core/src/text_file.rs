@@ -95,7 +95,8 @@ fn decode_utf16(bytes: &[u8], unit_from_bytes: fn([u8; 2]) -> u16) -> String {
     String::from_utf16_lossy(&units)
 }
 
-fn encode_text(text: &str, encoding: TextFileEncoding) -> Vec<u8> {
+/// `text` in `encoding`, as [`write_text_file_lossless`] writes it.
+pub(crate) fn encode_text(text: &str, encoding: TextFileEncoding) -> Vec<u8> {
     match encoding {
         TextFileEncoding::Utf8 => text.as_bytes().to_vec(),
         TextFileEncoding::Utf16Le => {

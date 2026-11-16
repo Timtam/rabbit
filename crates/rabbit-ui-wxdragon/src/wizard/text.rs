@@ -44,6 +44,10 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         packages_heading: localizer.text("wizard-packages-heading").value,
         packages_tab_install: localizer.text("wizard-packages-tab-install").value,
         packages_tab_uninstall: localizer.text("wizard-packages-tab-uninstall").value,
+        packages_tab_backups: localizer.text("wizard-packages-tab-backups").value,
+        backups_choice_label: localizer.text("wizard-backups-choice-label").value,
+        backups_choice_restore: localizer.text("wizard-backups-choice-restore").value,
+        backups_choice_delete: localizer.text("wizard-backups-choice-delete").value,
         packages_tabs_switch_hint_macos: localizer
             .text("wizard-packages-tabs-switch-hint-macos")
             .value,
@@ -111,6 +115,8 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         package_handling_unavailable: localizer.text("wizard-package-handling-unavailable").value,
         review_heading: localizer.text("wizard-review-heading").value,
         review_uninstall_heading: localizer.text("wizard-review-uninstall-heading").value,
+        review_restore_heading: localizer.text("wizard-review-restore-heading").value,
+        review_delete_heading: localizer.text("wizard-review-delete-heading").value,
         confirm_uninstall_title: localizer.text("wizard-confirm-uninstall-title").value,
         review_target_prefix: localizer.text("wizard-review-target-prefix").value,
         review_package_heading: localizer.text("wizard-review-package-heading").value,
@@ -144,6 +150,14 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         progress_status_uninstall_cancelling: localizer
             .text("wizard-progress-status-uninstall-cancelling")
             .value,
+        progress_delete_heading: localizer.text("wizard-progress-delete-heading").value,
+        progress_status_delete_running: localizer
+            .text("wizard-progress-status-delete-running")
+            .value,
+        progress_restore_heading: localizer.text("wizard-progress-restore-heading").value,
+        progress_status_restore_running: localizer
+            .text("wizard-progress-status-restore-running")
+            .value,
         done_status_success: localizer.text("wizard-done-status-success").value,
         done_status_completed_with_errors: localizer
             .text("wizard-done-status-completed-with-errors")
@@ -153,6 +167,7 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         reaper_running_body: localizer.text("wizard-reaper-running-body").value,
         error_reaper_running: localizer.text("wizard-error-reaper-running").value,
         error_lock_held: localizer.text("wizard-error-lock-held").value,
+        error_backup_folder_link: localizer.text("wizard-error-backup-folder-link").value,
         error_uninstall_as_root: localizer.text("wizard-error-uninstall-as-root").value,
         done_status_cancelled: localizer.text("wizard-done-status-cancelled").value,
         done_status_no_packages: localizer.text("wizard-done-status-no-packages").value,
@@ -186,6 +201,10 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         close_during_install_body: localizer.text("wizard-close-during-install-body").value,
         close_during_uninstall_title: localizer.text("wizard-close-during-uninstall-title").value,
         close_during_uninstall_body: localizer.text("wizard-close-during-uninstall-body").value,
+        close_during_restore_title: localizer.text("wizard-close-during-restore-title").value,
+        close_during_restore_body: localizer.text("wizard-close-during-restore-body").value,
+        close_during_delete_title: localizer.text("wizard-close-during-delete-title").value,
+        close_during_delete_body: localizer.text("wizard-close-during-delete-body").value,
         close_during_self_update_title: localizer
             .text("wizard-close-during-self-update-title")
             .value,

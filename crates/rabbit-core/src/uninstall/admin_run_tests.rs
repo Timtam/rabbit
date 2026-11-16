@@ -18,9 +18,10 @@ use super::admin_batch::{
 };
 use super::execute::{UninstallEnvironment, english_message, execute_uninstall_in};
 use super::macos_plan_tests::{
-    MacFixture, OneVolume, REAPER_ID, extension, join, link_folder, mac_spec, my_trash,
-    owned_by_me, owned_by_root, reaper_spec, snapshot,
+    MacFixture, OneVolume, REAPER_ID, extension, join, mac_spec, my_trash, owned_by_me,
+    owned_by_root, reaper_spec, snapshot,
 };
+use super::paths::link_folder;
 use super::preflight::ANY_REAPER_PROCESS_CHECK;
 use super::tests::{installed, running};
 use super::{
@@ -1753,7 +1754,8 @@ fn reaper_with_settings() -> PackageSpec {
 }
 
 /// With "Also remove settings", the settings go into the backup set
-/// first, then the app goes to the Trash as the user.
+/// first, then the app goes to the Trash as the user. The set records
+/// REAPER with its settings.
 #[test]
 fn settings_go_into_the_backup_set_before_the_app_goes_to_the_trash() {
     let mac = Mac::new();
@@ -1792,6 +1794,10 @@ fn settings_go_into_the_backup_set_before_the_app_goes_to_the_trash() {
         }),
         "{:?}",
         snapshot(&set)
+    );
+    assert_eq!(
+        super::execute_tests::manifest(&report).packages[PACKAGE_REAPER].with_settings,
+        Some(true)
     );
     assert!(join(&trashed, "Contents/MacOS/REAPER").is_file());
 }
@@ -1845,9 +1851,10 @@ fn settings_come_back_when_the_app_doesnt_go_to_the_trash() {
 
 /// With "Also remove settings", an app gone before its turn to go to the
 /// Trash still leaves its settings to go into the backup set. When they
-/// went, REAPER is named with the set. When they were gone too, the set
-/// records REAPER but holds none of its files, so only the extension,
-/// whose plug-in went in, is named with it.
+/// went, REAPER is named with the set, which records it with its settings.
+/// When they were gone too, the set records REAPER without settings and
+/// holds none of its files, so only the extension, whose plug-in went in,
+/// is named with it.
 #[test]
 fn an_app_gone_before_its_turn_is_named_with_the_set_only_when_its_settings_went_in() {
     for settings_there in [true, false] {
@@ -1901,7 +1908,10 @@ fn an_app_gone_before_its_turn_is_named_with_the_set_only_when_its_settings_went
         assert!(!demo.exists());
         assert!(run.objects.trashed().is_empty());
         let manifest = super::execute_tests::manifest(&report);
-        assert!(manifest.packages.contains_key(PACKAGE_REAPER));
+        assert_eq!(
+            manifest.packages[PACKAGE_REAPER].with_settings,
+            Some(settings_there)
+        );
         assert_eq!(
             manifest
                 .files

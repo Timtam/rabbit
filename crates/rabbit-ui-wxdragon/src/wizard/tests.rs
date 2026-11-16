@@ -1,5 +1,8 @@
 //! Wizard tests, grouped the same way the modules under test are.
 
+mod backups;
+mod backups_restore_run;
+mod backups_run;
 mod bootstrap;
 mod configuration;
 mod localization;

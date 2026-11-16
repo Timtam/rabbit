@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
 
 use super::execute::{UninstallEnvironment, execute_uninstall_in};
+use super::paths::link_folder;
 use super::preflight::{VolumeProbe, backup_space_check, moves_resource_files};
 use super::tests::{installed, write};
 use super::{
@@ -277,15 +278,6 @@ pub(super) fn my_trash() -> TrashFolderFacts {
 fn item<'a>(plan: &'a UninstallPlan, id: &str) -> &'a UninstallPlanItem {
     plan.item(id)
         .unwrap_or_else(|| panic!("the plan has no item for {id}"))
-}
-
-/// Make `link` point to the folder `target`: a junction on Windows, a
-/// symbolic link elsewhere. The guard sees both as links.
-pub(super) fn link_folder(link: &Path, target: &Path) {
-    #[cfg(windows)]
-    super::paths::make_junction(link, target);
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(target, link).unwrap();
 }
 
 #[test]
