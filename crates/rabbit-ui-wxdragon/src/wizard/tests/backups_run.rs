@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rabbit_core::RabbitError;
-use rabbit_core::backup_delete::{DeleteReport, DeleteReportItem, DeleteStatus, NotDeletedReason};
+use rabbit_core::backup_delete::{
+    DeletePart, DeleteReport, DeleteReportItem, DeleteStatus, NotDeletedReason,
+};
 use rabbit_core::backup_overview::{BackupEntry, BackupItem};
 use rabbit_core::cancel::CancelToken;
 use rabbit_core::localization::{Localizer, embedded_locales};
@@ -72,11 +74,13 @@ fn item(set_id: &str, status: DeleteStatus, bytes_freed: u64) -> DeleteReportIte
     DeleteReportItem {
         set_id: set_id.to_string(),
         status,
+        part: DeletePart::WholeSet,
         set_path: None,
         unfinished_deletion: None,
         size: bytes_freed,
         only_copy: Vec::new(),
         bytes_freed,
+        files_left: Vec::new(),
         not_deleted: None,
         left_in: None,
         finished_earlier_deletion: false,

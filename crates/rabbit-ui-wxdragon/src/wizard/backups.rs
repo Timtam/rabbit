@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use rabbit_core::RabbitError;
-use rabbit_core::backup_delete::DeleteItem;
+use rabbit_core::backup_delete::{DeleteItem, DeletePart};
 use rabbit_core::backup_overview::{
     BackupEntry, BackupGroup, BackupItem, BackupOverview, BackupSetKind, BackupSize, BackupStatus,
     RestoreScope, SetFingerprint, backup_overview,
@@ -657,6 +657,7 @@ pub fn backup_delete_items(list: &WizardBackupList) -> Vec<DeleteItem> {
             if seen.insert(set_id.clone()) {
                 items.push(DeleteItem {
                     set_id: set_id.clone(),
+                    part: DeletePart::WholeSet,
                     fingerprint: set_fingerprint(&list.sets, set_id),
                 });
             }

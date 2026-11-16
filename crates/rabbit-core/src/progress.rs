@@ -139,7 +139,8 @@ pub enum ProgressEvent {
         status: RestoreStatus,
     },
     /// A delete is about to delete the backup set `set_id`, and any
-    /// unfinished deletion of that id. Deletes run one set at a time, so
+    /// unfinished deletion of that id, or the parts its items name out of
+    /// it. Deletes run one set at a time, once for all of a set's items, so
     /// their events never interleave. A dry run sends none.
     DeleteStarted { set_id: String },
     /// The delete is done with that set: `status` says what came of it, and

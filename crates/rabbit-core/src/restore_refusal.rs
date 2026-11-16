@@ -13,12 +13,13 @@
 //! [`crate::backup_overview::BackupEntry::refusal`]), so a row in the
 //! wizard and a run agree.
 //!
-//! A delete of backup sets refuses with the same codes where the reason is
-//! the same (see [`crate::backup_delete`]): an id that can't name a set, a
+//! A delete of backups refuses with the same codes where the reason is the
+//! same (see [`crate::backup_delete`]): an id that can't name a set, a
 //! link, another account's set, root on macOS, the lock, a set changed
-//! since it was listed. Its English comes from
-//! [`RestoreRefusal::delete_text`], which says "delete" where the text
-//! says "restore".
+//! since it was listed, and for one package or the key map out of a set,
+//! a set that doesn't hold it, has no manifest or a damaged one, or is
+//! being deleted. Its English comes from [`RestoreRefusal::delete_text`],
+//! which says "delete" where the text says "restore".
 
 use std::path::{Path, PathBuf};
 
@@ -439,6 +440,54 @@ impl RestoreRefusal {
             Self::ChangedSinceListed { backup_id } => format!(
                 "The backup {backup_id} changed since RABBIT listed it. Nothing was deleted; \
                  look at the backups again, then delete"
+            ),
+            // The refusals of one package or the key map out of a set.
+            Self::NoManifest {
+                backup_id,
+                package_id,
+            } => format!(
+                "The backup {backup_id} has no manifest, so RABBIT can't tell which of its files \
+                 belong to {package_id}. It can delete the backup only as a whole"
+            ),
+            Self::NoPackageRecords {
+                backup_id,
+                package_id,
+            } => format!(
+                "The backup {backup_id} records no packages, so RABBIT can't tell which of its \
+                 files go with {package_id}, and doesn't delete them alone. It can delete the \
+                 backup as a whole"
+            ),
+            // Without a manifest, a set may hold a key map that nothing
+            // tells apart from its other files.
+            Self::NoKeymapInSet { backup_id } => format!(
+                "The backup {backup_id} holds no key map RABBIT can delete alone: it has none, or \
+                 no manifest that says which of its files is one"
+            ),
+            Self::PackageNotInSet {
+                backup_id,
+                package_id,
+                packages,
+            } if packages.is_empty() => {
+                format!("The backup {backup_id} holds no backup of {package_id} to delete")
+            }
+            Self::PackageNotInSet {
+                backup_id,
+                package_id,
+                packages,
+            } => format!(
+                "The backup {backup_id} holds no backup of {package_id} to delete; it holds {}",
+                names_in_a_sentence(packages)
+            ),
+            Self::DamagedManifest {
+                backup_id, detail, ..
+            } => format!(
+                "The manifest of the backup {backup_id} can't be read ({detail}), so RABBIT can't \
+                 tell which of its files belong to which backup. It can delete the backup only as \
+                 a whole"
+            ),
+            Self::BeingDeleted { backup_id } => format!(
+                "The backup {backup_id} is being deleted: a deletion of it started and didn't \
+                 finish, so RABBIT can only finish deleting all of it"
             ),
             other => other.to_string(),
         }
@@ -912,7 +961,8 @@ mod tests {
     /// What a delete says holds no command-line syntax either, for every
     /// refusal. The refusals a delete gives never speak of restoring, and
     /// those whose restore text does say "delete" instead, with the same
-    /// code.
+    /// code. Those of one package or the key map out of a set say what a
+    /// delete can still do.
     #[test]
     fn a_delete_says_its_refusals_in_words_of_its_own() {
         for refusal in sample_refusals() {
@@ -932,6 +982,12 @@ mod tests {
                     | RestoreRefusal::AsRoot
                     | RestoreRefusal::LockHeld { .. }
                     | RestoreRefusal::ChangedSinceListed { .. }
+                    | RestoreRefusal::NoManifest { .. }
+                    | RestoreRefusal::NoPackageRecords { .. }
+                    | RestoreRefusal::PackageNotInSet { .. }
+                    | RestoreRefusal::NoKeymapInSet { .. }
+                    | RestoreRefusal::DamagedManifest { .. }
+                    | RestoreRefusal::BeingDeleted { .. }
             )
         };
         let mut reworded = 0;
@@ -943,7 +999,7 @@ mod tests {
                 reworded += 1;
             }
         }
-        assert_eq!(reworded, 4);
+        assert_eq!(reworded, 10);
         assert!(
             RestoreRefusal::AsRoot
                 .delete_text()

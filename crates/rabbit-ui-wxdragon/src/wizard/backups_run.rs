@@ -291,14 +291,20 @@ fn delete_log_line(
     freed: u64,
 ) -> Option<String> {
     let key = match end.said() {
-        DeleteStatus::Deleted => "wizard-progress-log-delete-deleted",
+        // A backup taken out of a set that stays is deleted too.
+        DeleteStatus::Deleted | DeleteStatus::DeletedFromSet => {
+            "wizard-progress-log-delete-deleted"
+        }
         DeleteStatus::FinishedEarlierDeletion => "wizard-progress-log-delete-finished",
         DeleteStatus::AlreadyGone => "wizard-progress-log-delete-already-gone",
         DeleteStatus::PartlyDeleted => "wizard-progress-log-delete-partly",
-        DeleteStatus::NotDeleted | DeleteStatus::Refused => "wizard-progress-log-delete-failed",
+        DeleteStatus::NotDeleted | DeleteStatus::NotDeletedFromSet | DeleteStatus::Refused => {
+            "wizard-progress-log-delete-failed"
+        }
         // A real run never reports these for a set it worked on.
         DeleteStatus::WouldDelete
         | DeleteStatus::WouldFinishEarlierDeletion
+        | DeleteStatus::WouldDeleteFromSet
         | DeleteStatus::NotReached => return None,
     };
     let size = backup_size_text(localizer, freed);
@@ -385,14 +391,17 @@ struct GroupStatus {
 
 impl GroupStatus {
     fn of(statuses: &[DeleteStatus]) -> Self {
-        const ORDER: [DeleteStatus; 8] = [
+        const ORDER: [DeleteStatus; 11] = [
             DeleteStatus::Refused,
             DeleteStatus::NotDeleted,
+            DeleteStatus::NotDeletedFromSet,
             DeleteStatus::PartlyDeleted,
             DeleteStatus::NotReached,
             DeleteStatus::WouldDelete,
             DeleteStatus::WouldFinishEarlierDeletion,
+            DeleteStatus::WouldDeleteFromSet,
             DeleteStatus::Deleted,
+            DeleteStatus::DeletedFromSet,
             DeleteStatus::FinishedEarlierDeletion,
         ];
         let status = if statuses.is_empty() {
@@ -408,6 +417,7 @@ impl GroupStatus {
                 matches!(
                     status,
                     DeleteStatus::Deleted
+                        | DeleteStatus::DeletedFromSet
                         | DeleteStatus::FinishedEarlierDeletion
                         | DeleteStatus::PartlyDeleted
                 )
@@ -466,7 +476,11 @@ impl<'a> GroupOutcome<'a> {
 
     /// Why the group wasn't deleted, when nothing of it went.
     fn not_deleted_reason(&self) -> Option<NotDeletedReason> {
-        (self.end.status == DeleteStatus::NotDeleted && !self.end.part_went).then(|| {
+        let not_deleted = matches!(
+            self.end.status,
+            DeleteStatus::NotDeleted | DeleteStatus::NotDeletedFromSet
+        );
+        (not_deleted && !self.end.part_went).then(|| {
             self.telling_sets()
                 .find_map(|set| set.not_deleted)
                 .unwrap_or(NotDeletedReason::Other)
@@ -500,7 +514,9 @@ pub fn wizard_backup_delete_outcome(
     let deleted = rows(&|outcome| {
         matches!(
             outcome.end.status,
-            DeleteStatus::Deleted | DeleteStatus::FinishedEarlierDeletion
+            DeleteStatus::Deleted
+                | DeleteStatus::DeletedFromSet
+                | DeleteStatus::FinishedEarlierDeletion
         )
     });
     let gone_before = rows(&|outcome| outcome.end.status == DeleteStatus::AlreadyGone);
@@ -844,7 +860,9 @@ fn explain(
     };
     let mut lines: Vec<String> = Vec::new();
     match outcome.end.status {
-        DeleteStatus::NotDeleted => {
+        // A backup that couldn't go out of its set left the set as it was,
+        // as a set that couldn't be moved does.
+        DeleteStatus::NotDeleted | DeleteStatus::NotDeletedFromSet => {
             let state = if outcome.end.part_went {
                 "wizard-summary-delete-part-left"
             } else {
@@ -907,10 +925,12 @@ fn explain(
             )),
         ),
         DeleteStatus::Deleted
+        | DeleteStatus::DeletedFromSet
         | DeleteStatus::FinishedEarlierDeletion
         | DeleteStatus::AlreadyGone
         | DeleteStatus::WouldDelete
-        | DeleteStatus::WouldFinishEarlierDeletion => {}
+        | DeleteStatus::WouldFinishEarlierDeletion
+        | DeleteStatus::WouldDeleteFromSet => {}
     }
     lines
 }
@@ -929,14 +949,20 @@ pub(super) fn push_once(lines: &mut Vec<String>, line: Option<String>) {
 /// "Show details".
 pub fn delete_status_label(localizer: &Localizer, status: DeleteStatus) -> String {
     let key = match status {
-        DeleteStatus::Deleted => "wizard-delete-status-deleted",
+        // A backup taken out of a set that stays is deleted, or would be,
+        // as far as its row goes.
+        DeleteStatus::Deleted | DeleteStatus::DeletedFromSet => "wizard-delete-status-deleted",
         DeleteStatus::FinishedEarlierDeletion => "wizard-delete-status-finished-earlier-deletion",
         DeleteStatus::AlreadyGone => "wizard-delete-status-already-gone",
-        DeleteStatus::WouldDelete => "wizard-delete-status-would-delete",
+        DeleteStatus::WouldDelete | DeleteStatus::WouldDeleteFromSet => {
+            "wizard-delete-status-would-delete"
+        }
         DeleteStatus::WouldFinishEarlierDeletion => {
             "wizard-delete-status-would-finish-earlier-deletion"
         }
-        DeleteStatus::NotDeleted => "wizard-delete-status-not-deleted",
+        DeleteStatus::NotDeleted | DeleteStatus::NotDeletedFromSet => {
+            "wizard-delete-status-not-deleted"
+        }
         DeleteStatus::PartlyDeleted => "wizard-delete-status-partly-deleted",
         DeleteStatus::Refused => "wizard-delete-status-refused",
         DeleteStatus::NotReached => "wizard-delete-status-not-reached",

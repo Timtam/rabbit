@@ -7,8 +7,8 @@ use rabbit_core::artifact::{
     resolve_latest_artifacts_on,
 };
 use rabbit_core::backup_delete::{
-    DeleteItem, DeleteReport, DeleteReportItem, DeleteRunOptions, DeleteStatus, NotDeletedReason,
-    delete_backups,
+    DeleteItem, DeletePart, DeleteReport, DeleteReportItem, DeleteRunOptions, DeleteStatus,
+    NotDeletedReason, delete_backups,
 };
 use rabbit_core::backup_overview::{
     BackupEntry, BackupItem, BackupOverview, BackupSetKind, BackupSetOverview, BackupSize,
@@ -90,6 +90,42 @@ use serde::Serialize;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+impl Cli {
+    /// The parsed command line, or the usage error for what clap's own
+    /// checks can't express: `delete-backup --package` and `--key-map` take
+    /// one backup out of one backup set, so they need exactly one
+    /// `--backup-id`.
+    fn checked(self) -> Result<Self, clap::Error> {
+        if let Command::DeleteBackup {
+            backup_id,
+            package,
+            key_map,
+            ..
+        } = &self.command
+            && (package.is_some() || *key_map)
+            && backup_id.len() != 1
+        {
+            let flag = if *key_map { "--key-map" } else { "--package" };
+            let mut command = <Self as clap::CommandFactory>::command();
+            command.build();
+            let message = one_backup_takes_one_set(flag);
+            let error = match command.find_subcommand_mut("delete-backup") {
+                Some(delete) => delete.error(clap::error::ErrorKind::ArgumentConflict, message),
+                None => command.error(clap::error::ErrorKind::ArgumentConflict, message),
+            };
+            return Err(error);
+        }
+        Ok(self)
+    }
+}
+
+/// Why `flag`, `--package` or `--key-map` of `delete-backup`, needs
+/// exactly one `--backup-id`: the usage error [`Cli::checked`] gives, and
+/// the error `delete_backup` gives a command built some other way.
+fn one_backup_takes_one_set(flag: &str) -> String {
+    format!("{flag} deletes one backup out of one backup set, so it takes exactly one --backup-id")
 }
 
 #[derive(Debug, Subcommand)]
@@ -235,7 +271,9 @@ enum Command {
     /// List the backups RABBIT kept for a REAPER, newest first: when each
     /// backup set was made, what made it, its size, and for each backup in
     /// it whether it can be restored, with the command that restores it or
-    /// why not. Changes nothing. `delete-backup` deletes a set.
+    /// why not, and the command that deletes only a package or a key map.
+    /// Changes nothing. `delete-backup` deletes a backup set, or one backup
+    /// out of one.
     Backups {
         /// REAPER's resource folder — the one holding `reaper.ini`. Usually
         /// `%APPDATA%\REAPER` on Windows and `~/Library/Application
@@ -312,9 +350,10 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Delete backup sets for good, each whole, in the order given. Without
-    /// --apply it only shows what would go: each set's size, and which
-    /// backups in it are the only copy of something.
+    /// Delete backups for good: backup sets, each whole, in the order
+    /// given, or with --package or --key-map one backup out of a backup
+    /// set. Without --apply it only shows what would go: its size, and
+    /// which backups are the only copy of something.
     #[command(after_help = DELETE_BACKUP_AFTER_HELP)]
     DeleteBackup {
         /// REAPER's resource folder — the one holding `reaper.ini`. Usually
@@ -324,10 +363,23 @@ enum Command {
         #[arg(long)]
         resource_path: PathBuf,
         /// A backup set to delete, as listed by `backups`, upper and lower
-        /// case included. Repeatable. The id of an unfinished deletion
+        /// case included. Repeatable, except with --package or --key-map,
+        /// which take exactly one. The id of an unfinished deletion
         /// finishes it.
         #[arg(long = "backup-id", required = true)]
         backup_id: Vec<String>,
+        /// Delete only this package's backup out of the backup set: its
+        /// files in the set and what the set records of it. The set's other
+        /// backups stay, and so do the package's files in REAPER. When it is
+        /// the last backup in the set, the whole set goes.
+        #[arg(long, conflicts_with = "key_map")]
+        package: Option<String>,
+        /// Delete only the key map this backup set holds (reaper-kb.ini).
+        /// The set's other backups stay, and REAPER's own key map is never
+        /// touched. When it is the last backup in the set, the whole set
+        /// goes.
+        #[arg(long)]
+        key_map: bool,
         /// Actually delete. Without it the command is a dry run that only
         /// reports what it would delete.
         #[arg(long)]
@@ -769,29 +821,38 @@ stopped, or the administrator prompt was declined or cancelled.";
 /// becomes of what it can't remove, and the exit codes.
 const DELETE_BACKUP_AFTER_HELP: &str = "\
 A backup set goes whole: when it holds several backups, such as two packages \
-one uninstall removed, they all go. Deleted backups are gone for good; they \
-don't go to the Recycle Bin or the Trash. A set is deleted even when it holds \
-the only copy of something; the dry run says when it does.
+one uninstall removed, they all go. With --package or --key-map, only that \
+backup goes out of the one backup set named, and the set's other backups \
+stay; when it is the last backup in the set, the whole set goes. Deleted \
+backups are gone for good; they don't go to the Recycle Bin or the Trash. A \
+backup is deleted even when it is the only copy of something; the dry run \
+says when it is.
 
-RABBIT first moves the set into the backups-deleting folder beside its \
+RABBIT first moves a whole set into the backups-deleting folder beside its \
 backups, so no restore finds it any more, then removes what is in it. It \
 never follows a symbolic link or junction: a link in a set is removed, not \
 what it leads to. What can't be removed stays there as an unfinished \
-deletion, which `rabbit backups` lists; naming its id again finishes it. \
-REAPER may stay open.
+deletion, which `rabbit backups` lists; naming its id again finishes it. One \
+backup out of a set goes from the set's records first, then its files go. A \
+file of it that can't be removed, such as one open in another program, stays \
+in the set, and the command names it; so do files a run stopped at once by a \
+second Ctrl+C leaves. They go when the whole set is deleted. REAPER may stay \
+open.
 
 On a Mac, --apply doesn't run as root: run rabbit as yourself, not with sudo. \
 A backup set that belongs to another account, such as one sudo made, isn't \
 deleted; the message says how to remove it in Finder.
 
-Exit codes: 0 when every backup set named is gone: deleted, an unfinished \
-deletion finished, or already gone, so a script can run twice; in a dry run, \
-when every one can be deleted. 2 when one of them can't be deleted, because \
-its id isn't one RABBIT gives a backup set, it is a symbolic link or \
-junction, or it belongs to another account; then nothing changes. 1 when a \
-set couldn't be deleted or the run was stopped, or an error stopped RABBIT \
-before anything changed, such as another RABBIT working on the same REAPER, \
-or --apply run as root on a Mac.";
+Exit codes: 0 when every backup named is gone: deleted, out of its set, an \
+unfinished deletion finished, or already gone, so a script that deletes \
+whole sets can run twice; in a dry run, when every one can be deleted. 2 \
+when one of them can't be deleted, because its id isn't one RABBIT gives a \
+backup set, it is a symbolic link or junction, it belongs to another \
+account, or the set doesn't hold the backup --package or --key-map names, \
+as when it went out of the set before, or can't give it up alone; then \
+nothing changes. 1 when a backup couldn't be deleted or the run was \
+stopped, or an error stopped RABBIT before anything changed, such as another \
+RABBIT working on the same REAPER, or --apply run as root on a Mac.";
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum OutputFormat {
@@ -884,7 +945,13 @@ fn run_args(args: Vec<std::ffi::OsString>) -> Result<(), Box<dyn std::error::Err
     let outcome = std::thread::Builder::new()
         .name("rabbit-cli".to_string())
         .stack_size(CLI_STACK_SIZE)
-        .spawn(move || run_with(Cli::parse_from(args)).map_err(|error| error.to_string()))?
+        .spawn(move || {
+            // A usage error ends RABBIT here, as clap's own errors do.
+            let cli = Cli::parse_from(args)
+                .checked()
+                .unwrap_or_else(|error| error.exit());
+            run_with(cli).map_err(|error| error.to_string())
+        })?
         .join()
         // A panic carries on as if it had happened on the calling thread.
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
@@ -1571,7 +1638,8 @@ fn run_delete_backup(command: Command) -> Result<(), Box<dyn std::error::Error>>
 const DELETE_BACKUP_CTRL_C_NOTICE: &str = "\nStopping once the backup set being deleted now is \
      done. Press Ctrl+C again to stop at once.\n";
 
-/// Run `delete-backup` up to its exit code: delete the sets, or in a dry
+/// Run `delete-backup` up to its exit code: delete the sets, or the one
+/// backup out of a set that `--package` or `--key-map` names, or in a dry
 /// run check them, save the report where asked, and print it. An error
 /// before anything changed, such as the lock or root on a Mac, is `Err`,
 /// which exits with 1.
@@ -1579,6 +1647,8 @@ fn delete_backup(command: Command) -> Result<i32, Box<dyn std::error::Error>> {
     let Command::DeleteBackup {
         resource_path,
         backup_id,
+        package,
+        key_map,
         apply,
         report_path,
         json,
@@ -1586,17 +1656,32 @@ fn delete_backup(command: Command) -> Result<i32, Box<dyn std::error::Error>> {
     else {
         unreachable!("dispatched as Command::DeleteBackup");
     };
-    // A set stopped partway stays as an unfinished deletion, which the next
-    // run finishes, but stopping between sets leaves nothing to finish. So
-    // with --apply the first Ctrl+C asks the run to stop once the set it is
-    // on is done, and a second one ends RABBIT as usual.
+    // The parser makes sure a part comes with exactly one set (see
+    // `Cli::checked`); this holds the same for a command built otherwise.
+    let items: Vec<DeleteItem> = match (package.as_deref().map(str::trim), key_map, &backup_id[..])
+    {
+        (None, false, ids) => ids.iter().map(|id| DeleteItem::new(id)).collect(),
+        (Some(package), _, [id]) => vec![DeleteItem::package(id, package)],
+        (None, true, [id]) => vec![DeleteItem::keymap(id)],
+        _ => {
+            let flag = if key_map { "--key-map" } else { "--package" };
+            return Err(format!("{}.", one_backup_takes_one_set(flag)).into());
+        }
+    };
+    // A whole set stopped partway stays as an unfinished deletion, which
+    // the next run of the same command finishes. A backup out of a set
+    // stopped right after the set's manifest was saved without it leaves
+    // files of it in the set, which no run of --package or --key-map
+    // removes any more, only a delete of the whole set. Stopping between
+    // sets leaves neither. So with --apply the first Ctrl+C asks the run to
+    // stop once the set it is on is done, and a second one ends RABBIT as
+    // usual.
     let ctrl_c = apply
         .then(|| rabbit_platform::catch_ctrl_c(DELETE_BACKUP_CTRL_C_NOTICE).ok())
         .flatten();
     let cancel = ctrl_c.as_ref().map_or_else(CancelToken::new, |guard| {
         CancelToken::watching(guard.flag())
     });
-    let items: Vec<DeleteItem> = backup_id.iter().map(|id| DeleteItem::new(id)).collect();
     let report = match delete_backups(
         &resource_path,
         &items,
@@ -1634,11 +1719,15 @@ fn delete_backup(command: Command) -> Result<i32, Box<dyn std::error::Error>> {
 
 /// The exit code of a delete, the same table for the dry run and
 /// `--apply`, as for `uninstall`:
-/// - 2: a set named can't be deleted, because of its id, a link or its
-///   owner, and nothing changed;
-/// - 1: a set couldn't be deleted, or the run was stopped;
-/// - 0: every set named is gone, or in a dry run can be deleted: deleted,
-///   an unfinished deletion finished, or already gone.
+/// - 2: a backup named can't be deleted, because of its set's id, a link
+///   or its owner, or because the set doesn't hold the package or key map
+///   named or can't give it up alone, and nothing changed;
+/// - 1: a backup couldn't be deleted, or the run was stopped;
+/// - 0: every backup named is gone, or in a dry run can be deleted:
+///   deleted, out of its set too, even with files of it left there, an
+///   unfinished deletion finished, or already gone. Only a whole set or an
+///   id that names nothing is already gone: a package or key map taken out
+///   of a set that stays is no longer in it, so naming it again is 2.
 ///
 /// An error before anything changed, such as another RABBIT holding the
 /// lock, is returned as `Err` before this is asked, and exits with 1.
@@ -1693,6 +1782,11 @@ fn cli_delete_error(
 /// line can say:
 /// - for an id that names no backup set as written, the command that lists
 ///   the sets there are;
+/// - for a package or key map the set doesn't hold, or holds in a way it
+///   can't tell apart, the command that lists what each set holds; for one
+///   out of a set without a manifest or with a damaged one, that the
+///   command without `--package` or `--key-map` takes the whole set, and
+///   for one out of an unfinished deletion, that it finishes the deletion;
 /// - for a set of another account, how to remove it in Finder, which asks
 ///   for an administrator's name and password itself: from
 ///   `RABBIT/backups-deleting` when `in_deleting` says the folder is an
@@ -1737,6 +1831,21 @@ fn delete_refusal_words(
             one_line(backup_id)
         ),
         RestoreRefusal::AsRoot => DELETE_AS_ROOT_TEXT.to_string(),
+        // A mistyped id may lead here too, so these never point at a whole
+        // set, which may hold the only copy of something.
+        RestoreRefusal::PackageNotInSet { .. }
+        | RestoreRefusal::NoKeymapInSet { .. }
+        | RestoreRefusal::NoPackageRecords { .. } => format!(
+            "{text}. rabbit backups --resource-path \"{}\" lists the backups each set holds.",
+            resource_path.display()
+        ),
+        RestoreRefusal::NoManifest { .. } | RestoreRefusal::DamagedManifest { .. } => format!(
+            "{text}. Without --package or --key-map, rabbit delete-backup deletes the whole \
+             backup set."
+        ),
+        RestoreRefusal::BeingDeleted { .. } => format!(
+            "{text}. Without --package or --key-map, rabbit delete-backup finishes the deletion."
+        ),
         _ => format!("{text}."),
     }
 }
@@ -1757,8 +1866,11 @@ fn delete_backup_report_text(report: &DeleteReport) -> String {
              can't be deleted.\n"
         });
     }
-    for set in &report.sets {
-        write_deleted_set(&mut out, report, set, &names);
+    for (index, set) in report.sets.iter().enumerate() {
+        let repeats = report.sets[..index]
+            .iter()
+            .any(|earlier| same_outcome(earlier, set));
+        write_deleted_set(&mut out, report, set, repeats, &names);
     }
     if report.refused {
         return out;
@@ -1770,7 +1882,9 @@ fn delete_backup_report_text(report: &DeleteReport) -> String {
             .filter(|set| {
                 matches!(
                     set.status,
-                    DeleteStatus::WouldDelete | DeleteStatus::WouldFinishEarlierDeletion
+                    DeleteStatus::WouldDelete
+                        | DeleteStatus::WouldFinishEarlierDeletion
+                        | DeleteStatus::WouldDeleteFromSet
                 )
             })
             .collect();
@@ -1791,6 +1905,25 @@ fn delete_backup_report_text(report: &DeleteReport) -> String {
     out
 }
 
+/// Whether `later`, an item of a delete's report, shares what `earlier`, an
+/// item before it, says: both name one set that went whole, or would, as
+/// when an id is named twice or a run names every backup of a set, or the
+/// same part of one set. The first of them carries the sizes, and the
+/// others none.
+fn same_outcome(earlier: &DeleteReportItem, later: &DeleteReportItem) -> bool {
+    let from_set = |status: DeleteStatus| {
+        matches!(
+            status,
+            DeleteStatus::DeletedFromSet
+                | DeleteStatus::WouldDeleteFromSet
+                | DeleteStatus::NotDeletedFromSet
+        )
+    };
+    earlier.set_id == later.set_id
+        && earlier.status == later.status
+        && (!from_set(later.status) || earlier.part == later.part)
+}
+
 /// What a delete's text says of a set that is in use. Windows refuses to
 /// move a folder while any file in it is open; elsewhere the system rarely
 /// says a folder is busy, and Explorer is no example there.
@@ -1802,23 +1935,61 @@ const DELETE_IN_USE_TEXT: &str = if cfg!(windows) {
      again."
 };
 
-/// One backup set of a delete's report: its id and what came of it, then
-/// the lines that say more.
+/// What a delete's text says of a backup that couldn't go out of its set
+/// because the set's manifest is in use: a backup out of a set moves
+/// nothing, it only saves the manifest again without the backup.
+const DELETE_FROM_SET_IN_USE_TEXT: &str = if cfg!(windows) {
+    "not deleted: the backup set's manifest is open in another program, such as Explorer or an \
+     antivirus scan, so RABBIT couldn't take this backup out of it. Nothing of the set changed. \
+     Close that program, then run the command again."
+} else {
+    "not deleted: the backup set's manifest is in use, so RABBIT couldn't take this backup out \
+     of it. Nothing of the set changed. Close what uses it, then run the command again."
+};
+
+/// One backup set of a delete's report, or one backup out of a set: its id,
+/// and the package or key map named, and what came of it, then the lines
+/// that say more. An item that `repeats` the outcome of one above it says
+/// so instead of a size, since the one above carries the sizes, and says
+/// nothing more.
 fn write_deleted_set(
     out: &mut String,
     report: &DeleteReport,
     set: &DeleteReportItem,
+    repeats: bool,
     names: &std::collections::BTreeMap<String, String>,
 ) {
     let freed = size_text(set.bytes_freed);
+    let name_of = |package_id: &str| {
+        names
+            .get(package_id)
+            .cloned()
+            .unwrap_or_else(|| one_line(package_id))
+    };
     let left_in = || {
         set.left_in
             .as_ref()
             .map(|path| one_line(&path.display().to_string()))
             .unwrap_or_default()
     };
+    // A part is named after its set's id, so the line says which backup of
+    // the set it is.
+    let named = match &set.part {
+        DeletePart::WholeSet => one_line(&set.set_id),
+        DeletePart::Package { package_id } => {
+            format!("{}, {}", one_line(&set.set_id), name_of(package_id))
+        }
+        DeletePart::Keymap => format!("{}, the key map", one_line(&set.set_id)),
+    };
+    if repeats && let Some(line) = repeated_line(report.refused, set.status) {
+        let _ = writeln!(out, "{named}: {line}");
+        return;
+    }
     let line = match set.status {
         DeleteStatus::Deleted => format!("deleted, {freed} freed."),
+        DeleteStatus::DeletedFromSet => {
+            format!("deleted out of its backup set, {freed} freed. The set's other backups stay.")
+        }
         DeleteStatus::FinishedEarlierDeletion => {
             format!("finished an earlier deletion, {freed} freed.")
         }
@@ -1828,6 +1999,14 @@ fn write_deleted_set(
             format!("could be deleted on its own, {}.", size_text(set.size))
         }
         DeleteStatus::WouldDelete => format!("would be deleted, {}.", size_text(set.size)),
+        DeleteStatus::WouldDeleteFromSet if report.refused => format!(
+            "could be deleted out of its backup set on its own, {}.",
+            size_text(set.size)
+        ),
+        DeleteStatus::WouldDeleteFromSet => format!(
+            "would be deleted out of its backup set, {}. The set's other backups would stay.",
+            size_text(set.size)
+        ),
         DeleteStatus::WouldFinishEarlierDeletion if report.refused => format!(
             "an earlier deletion of it didn't finish; it could be finished on its own, {}.",
             size_text(set.size)
@@ -1849,6 +2028,18 @@ fn write_deleted_set(
             ),
             Some(NotDeletedReason::Other) | None => {
                 "not deleted. Nothing of it changed.".to_string()
+            }
+        },
+        // A backup out of a set only saves the set's manifest again, so
+        // what stopped it is about the manifest.
+        DeleteStatus::NotDeletedFromSet => match set.not_deleted {
+            Some(NotDeletedReason::InUse) => DELETE_FROM_SET_IN_USE_TEXT.to_string(),
+            Some(NotDeletedReason::Permission) => "not deleted: RABBIT may not change the backup \
+                set's manifest, so it couldn't take this backup out of it. Nothing of the set \
+                changed."
+                .to_string(),
+            Some(NotDeletedReason::EarlierDeletionLeft | NotDeletedReason::Other) | None => {
+                "not deleted. Nothing of the set changed.".to_string()
             }
         },
         DeleteStatus::PartlyDeleted if set.set_path.is_none() => format!(
@@ -1881,22 +2072,29 @@ fn write_deleted_set(
             "not deleted, because another backup set named can't be.".to_string()
         }
     };
-    let _ = writeln!(out, "{}: {line}", one_line(&set.set_id));
+    let _ = writeln!(out, "{named}: {line}");
     if set.finished_earlier_deletion && set.status == DeleteStatus::Deleted {
         out.push_str("  An earlier deletion of it, which hadn't finished, is finished too.\n");
     } else if set.status == DeleteStatus::WouldDelete && set.unfinished_deletion.is_some() {
         out.push_str("  An earlier deletion of it, which didn't finish, would be finished too.\n");
     }
+    // A backup out of a set that would hold nothing else takes the set.
+    if set.part != DeletePart::WholeSet {
+        match set.status {
+            DeleteStatus::WouldDelete => out.push_str(
+                "  Nothing else would be left in its set, so the whole backup set would go.\n",
+            ),
+            DeleteStatus::Deleted => {
+                out.push_str("  Nothing else was left in its set, so the whole backup set went.\n");
+            }
+            _ => {}
+        }
+    }
     let only: Vec<String> = set
         .only_copy
         .iter()
         .filter_map(|item| match item {
-            BackupItem::Package { package_id, .. } => Some(
-                names
-                    .get(package_id)
-                    .cloned()
-                    .unwrap_or_else(|| one_line(package_id)),
-            ),
+            BackupItem::Package { package_id, .. } => Some(name_of(package_id)),
             BackupItem::Keymap { .. } => Some("a key map".to_string()),
             BackupItem::Set { .. } => Some("files no other backup holds".to_string()),
             BackupItem::Deleting { .. } | BackupItem::Records { .. } => None,
@@ -1904,14 +2102,14 @@ fn write_deleted_set(
         .collect();
     if !only.is_empty() {
         match set.status {
-            DeleteStatus::WouldDelete => {
+            DeleteStatus::WouldDelete | DeleteStatus::WouldDeleteFromSet => {
                 let _ = writeln!(
                     out,
                     "  It holds the only copy of {}.",
                     names_in_a_sentence(&only)
                 );
             }
-            DeleteStatus::Deleted | DeleteStatus::PartlyDeleted => {
+            DeleteStatus::Deleted | DeleteStatus::DeletedFromSet | DeleteStatus::PartlyDeleted => {
                 let _ = writeln!(
                     out,
                     "  It held the only copy of {}.",
@@ -1921,9 +2119,67 @@ fn write_deleted_set(
             _ => {}
         }
     }
+    if !set.files_left.is_empty() {
+        let left: Vec<String> = set
+            .files_left
+            .iter()
+            .map(|path| one_line(&path.display().to_string()))
+            .collect();
+        let _ = writeln!(
+            out,
+            "  RABBIT couldn't remove {}, so {} in the backup set, which `rabbit backups` still \
+             counts; {} when the whole set is deleted: {}",
+            if left.len() == 1 {
+                "this file"
+            } else {
+                "these files"
+            },
+            if left.len() == 1 {
+                "it stays"
+            } else {
+                "they stay"
+            },
+            if left.len() == 1 {
+                "it goes"
+            } else {
+                "they go"
+            },
+            left.join(", ")
+        );
+    }
     if let (Some(error), false) = (&set.error, set.status == DeleteStatus::Refused) {
         let _ = writeln!(out, "  Why: {}", one_line(error));
     }
+}
+
+/// What a delete's text says of an item that shares the outcome of one
+/// above it (see [`same_outcome`]), instead of a size, for the statuses
+/// whose line says one; `None` for the others, whose own line says no
+/// size. A refused dry run says what each could do on its own.
+fn repeated_line(refused: bool, status: DeleteStatus) -> Option<&'static str> {
+    Some(match status {
+        DeleteStatus::Deleted => "went with the backup set above.",
+        DeleteStatus::PartlyDeleted => "partly deleted with the backup set above.",
+        DeleteStatus::FinishedEarlierDeletion => "finished with the line above.",
+        DeleteStatus::DeletedFromSet => "deleted out of its backup set with the line above.",
+        DeleteStatus::WouldDelete if refused => "could go with the backup set above, on its own.",
+        DeleteStatus::WouldDelete => "would go with the backup set above.",
+        DeleteStatus::WouldFinishEarlierDeletion if refused => {
+            "could be finished with the line above, on its own."
+        }
+        DeleteStatus::WouldFinishEarlierDeletion => "would be finished with the line above.",
+        DeleteStatus::WouldDeleteFromSet if refused => {
+            "could be deleted out of its backup set with the line above, on its own."
+        }
+        DeleteStatus::WouldDeleteFromSet => {
+            "would be deleted out of its backup set with the line above."
+        }
+        DeleteStatus::AlreadyGone
+        | DeleteStatus::NotDeleted
+        | DeleteStatus::NotDeletedFromSet
+        | DeleteStatus::Refused
+        | DeleteStatus::NotReached => return None,
+    })
 }
 
 fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Error>> {
@@ -3257,9 +3513,10 @@ fn write_backup_set_heading(out: &mut String, set: &BackupSetOverview) {
 }
 
 /// Each backup in `set`: what it is and its status, then the command that
-/// restores it, or why it can't be restored. A set of earlier versions
-/// whose packages can all go back together, more than one of them, gets
-/// the command that restores them all last.
+/// restores it, or why it can't be restored, and for a package or a key map
+/// the command that deletes only it. A set of earlier versions whose
+/// packages can all go back together, more than one of them, gets the
+/// command that restores them all last.
 fn write_backups_in_set(
     out: &mut String,
     overview: &BackupOverview,
@@ -3310,6 +3567,14 @@ fn write_backups_in_set(
             }
         };
         let _ = writeln!(out, "    {line}");
+        // A delete is for good, so its command is the dry run: it says
+        // what would go, and whether the whole set would, before --apply.
+        if let Some(command) = delete_one_backup_command(entry, &overview.resource_path) {
+            let _ = writeln!(
+                out,
+                "    To delete only this backup, first see what would go: {command}"
+            );
+        }
     }
     if set.swaps_whole && by_package > 1 {
         out.push_str("  All of these earlier versions: can be restored together.\n");
@@ -3320,6 +3585,34 @@ fn write_backups_in_set(
             "The backup set's name needs quotes in a command, so RABBIT prints none.".to_string()
         };
         let _ = writeln!(out, "    {line}");
+    }
+}
+
+/// The dry run of the command that deletes only `entry`, a package or a
+/// key map, out of its backup set in the REAPER at `resource_path`, as the
+/// restore command names it: it says what would go, and whether the whole
+/// set would, and --apply then deletes it. `None` for any other backup,
+/// whose set the footer's command deletes whole, for one of another
+/// account's set, which RABBIT never deletes, and when a name would need
+/// quotes in a command.
+fn delete_one_backup_command(entry: &BackupEntry, resource_path: &Path) -> Option<String> {
+    if entry.status == BackupStatus::NotYours {
+        return None;
+    }
+    let resource = resource_path.display();
+    match &entry.item {
+        BackupItem::Package { set_id, package_id }
+            if is_plain_name(set_id) && is_plain_name(package_id) =>
+        {
+            Some(format!(
+                "rabbit delete-backup --resource-path \"{resource}\" --backup-id {set_id} \
+                 --package {package_id}"
+            ))
+        }
+        BackupItem::Keymap { set_id } if is_plain_name(set_id) => Some(format!(
+            "rabbit delete-backup --resource-path \"{resource}\" --backup-id {set_id} --key-map"
+        )),
+        _ => None,
     }
 }
 
@@ -10521,12 +10814,32 @@ mod tests {
             "  Everything in it: can't be restored.",
             "    Its manifest can't be read.",
             "  Size: under 1 KB",
+            // Each package and key map can be deleted alone, too, by a
+            // command that first shows what would go.
+            &format!(
+                "    To delete only this backup, first see what would go: rabbit delete-backup \
+                 {quoted} --backup-id uninstall-unix-300 --package sws"
+            ),
+            &format!(
+                "    To delete only this backup, first see what would go: rabbit delete-backup \
+                 {quoted} --backup-id unix-200 --package reapack"
+            ),
+            &format!(
+                "    To delete only this backup, first see what would go: rabbit delete-backup \
+                 {quoted} --backup-id unattended-unix-100-000000000 --key-map"
+            ),
         ] {
             assert!(
                 text.lines().any(|line| line == expected),
                 "{expected:?} missing from:\n{text}"
             );
         }
+        // A set's own backup is deleted with the set, by the command below.
+        assert_eq!(
+            text.matches("To delete only this backup").count(),
+            3,
+            "{text}"
+        );
         // Dates in local time, which differs from computer to computer, and
         // in UTC.
         let made: Vec<&str> = text
@@ -10749,7 +11062,21 @@ mod tests {
                 resource.display()
             )
         );
-        assert!(!text.contains("--backup-id uninstall-unix-300"), "{text}");
+        // No command restores it; one deletes it alone.
+        assert!(
+            !text
+                .lines()
+                .any(|line| line.contains("restore-backup") && line.contains("uninstall-unix-300")),
+            "{text}"
+        );
+        assert_eq!(
+            lines[row + 2],
+            format!(
+                "    To delete only this backup, first see what would go: rabbit delete-backup \
+                 --resource-path \"{}\" --backup-id uninstall-unix-300 --package sws",
+                resource.display()
+            )
+        );
 
         // `--json` gives the refusal a restore gives, by its code.
         let sets = rabbit_core::rollback::list_backup_sets(&resource).unwrap();
@@ -10821,10 +11148,7 @@ mod tests {
             overview.contains("Restore a backup set, or one package"),
             "{overview}"
         );
-        assert!(
-            overview.contains("Delete backup sets for good"),
-            "{overview}"
-        );
+        assert!(overview.contains("Delete backups for good"), "{overview}");
         for (name, texts) in [
             (
                 "backups",
@@ -10848,10 +11172,14 @@ mod tests {
             (
                 "delete-backup",
                 &[
-                    "Delete backup sets for good, each whole, in the order given",
-                    "which backups in it are the only copy of something",
+                    "backup sets, each whole, in the order given, or with --package or",
+                    "which backups are the only copy of something",
                     "A backup set to delete, as listed by `backups`",
+                    "except with --package or --key-map, which take exactly one",
                     "The id of an unfinished deletion finishes it",
+                    "Delete only this package's backup out of the backup set",
+                    "Delete only the key map this backup set holds",
+                    "When it is the last backup in the set, the whole set goes",
                     "Actually delete",
                     "Write the JSON run report to exactly this path",
                     "REAPER's resource folder",
@@ -10859,7 +11187,8 @@ mod tests {
                     "they don't go to the Recycle Bin or the Trash",
                     "On a Mac, --apply doesn't run as root",
                     "the message says how to remove it in Finder",
-                    "Exit codes: 0 when every backup set named is gone",
+                    "Exit codes: 0 when every backup named is gone",
+                    "the set doesn't hold the backup --package or --key-map names",
                 ][..],
             ),
         ] {
@@ -10942,6 +11271,10 @@ mod tests {
                 &format!(
                     "    rabbit restore-backup {quoted} --backup-id \
                      restore-unix-200-before-restore --key-map --apply"
+                ),
+                &format!(
+                    "    To delete only this backup, first see what would go: rabbit \
+                     delete-backup {quoted} --backup-id restore-unix-200-before-restore --key-map"
                 ),
                 "  Everything in it: can be restored only as a whole set.",
                 &format!(
@@ -11488,13 +11821,7 @@ mod tests {
             }
         ));
         assert!(Cli::try_parse_from(["rabbit", "delete-backup", "--resource-path", "R"]).is_err());
-        for flag in [
-            "--all",
-            "--kind",
-            "--older-than",
-            "--package",
-            "--save-report",
-        ] {
+        for flag in ["--all", "--kind", "--older-than", "--save-report"] {
             assert!(
                 Cli::try_parse_from([
                     "rabbit",
@@ -11509,6 +11836,402 @@ mod tests {
                 "{flag}"
             );
         }
+    }
+
+    /// `--package` and `--key-map` take one backup out of one backup set:
+    /// each needs exactly one `--backup-id`, which is a usage error
+    /// otherwise, and they can't be given together.
+    #[test]
+    fn delete_backup_takes_one_backup_out_of_exactly_one_set() {
+        let parse = |more: &[&str]| {
+            let mut args = vec!["rabbit", "delete-backup", "--resource-path", "R"];
+            args.extend_from_slice(more);
+            Cli::try_parse_from(args).and_then(Cli::checked)
+        };
+
+        let package = parse(&["--backup-id", "uninstall-unix-1", "--package", "sws"]).unwrap();
+        assert!(
+            matches!(
+                package.command,
+                Command::DeleteBackup {
+                    ref backup_id,
+                    package: Some(ref package),
+                    key_map: false,
+                    apply: false,
+                    ..
+                } if backup_id == &["uninstall-unix-1"] && package == "sws"
+            ),
+            "{package:?}"
+        );
+        let keymap = parse(&["--backup-id", "unix-1", "--key-map", "--apply"]).unwrap();
+        assert!(matches!(
+            keymap.command,
+            Command::DeleteBackup {
+                package: None,
+                key_map: true,
+                apply: true,
+                ..
+            }
+        ));
+        let whole = parse(&["--backup-id", "unix-1", "--backup-id", "unix-2"]).unwrap();
+        assert!(matches!(
+            whole.command,
+            Command::DeleteBackup {
+                package: None,
+                key_map: false,
+                ..
+            }
+        ));
+
+        let both = parse(&["--backup-id", "unix-1", "--package", "sws", "--key-map"]).unwrap_err();
+        assert_eq!(both.kind(), clap::error::ErrorKind::ArgumentConflict);
+        for (more, flag) in [
+            (
+                &[
+                    "--backup-id",
+                    "unix-1",
+                    "--backup-id",
+                    "unix-2",
+                    "--package",
+                    "sws",
+                ][..],
+                "--package",
+            ),
+            (
+                &[
+                    "--backup-id",
+                    "unix-1",
+                    "--backup-id",
+                    "unix-2",
+                    "--key-map",
+                ][..],
+                "--key-map",
+            ),
+        ] {
+            let error = parse(more).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            let text = error.render().to_string();
+            assert!(
+                text.contains(&format!(
+                    "{flag} deletes one backup out of one backup set, so it takes exactly one \
+                     --backup-id"
+                )),
+                "{text}"
+            );
+            assert!(text.contains("rabbit delete-backup"), "{text}");
+            // Built some other way, the command refuses the same before
+            // anything is read.
+            let command = Cli::try_parse_from(
+                ["rabbit", "delete-backup", "--resource-path", "R"]
+                    .iter()
+                    .chain(more),
+            )
+            .unwrap()
+            .command;
+            assert!(super::delete_backup(command).is_err());
+        }
+        assert!(parse(&["--package", "sws"]).is_err());
+    }
+
+    /// An uninstall's backup set in `dir`'s REAPER that holds SWS and
+    /// FFmpeg, as one uninstall of both leaves it.
+    fn resource_with_two_packages_in_one_set(dir: &std::path::Path) -> PathBuf {
+        use rabbit_core::rollback::{BackupPackageRecord, BackupSetWriter};
+        let resource = dir.join("REAPER");
+        let mut uninstall = BackupSetWriter::new(&resource, "uninstall-unix-300", "uninstall");
+        for (package_id, file) in [("sws", "reaper_sws-x64.dll"), ("ffmpeg", "avcodec-61.dll")] {
+            let place = resource.join("UserPlugins").join(file);
+            std::fs::create_dir_all(place.parent().unwrap()).unwrap();
+            std::fs::write(&place, package_id.repeat(400)).unwrap();
+            uninstall
+                .record_package(package_id, BackupPackageRecord::default())
+                .unwrap();
+            uninstall
+                .move_file(Some(package_id), &place, None, false)
+                .unwrap();
+        }
+        resource
+    }
+
+    /// One package out of a set: the dry run says it would go out of its
+    /// set, how big it is and that it is the only copy, and changes nothing;
+    /// `--apply` takes it out, and the set's other package stays. Naming it
+    /// again is refused with 2, since the set no longer holds it, and so is
+    /// a key map the set doesn't hold. The last package takes the whole set,
+    /// and the dry run of `--package` for it says so; then the set is
+    /// already gone. The JSON names the part and its status. Two items of
+    /// one set that goes whole, as two packages or an id named twice, say
+    /// the set's size once.
+    #[test]
+    fn delete_backup_takes_one_package_out_of_a_set() {
+        use rabbit_core::backup_delete::{DeleteItem, DeleteRunOptions, delete_backups};
+        for json in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let resource = resource_with_two_packages_in_one_set(dir.path());
+            let set = resource
+                .join("RABBIT")
+                .join("backups")
+                .join("uninstall-unix-300");
+            let run = |more: &[&str]| {
+                let mut more = [&["--backup-id", "uninstall-unix-300"][..], more].concat();
+                if json {
+                    more.push("--json");
+                }
+                super::delete_backup(delete_args(&resource, &more)).unwrap()
+            };
+            let before = names_in(&set.join("UserPlugins"));
+
+            assert_eq!(run(&["--package", "sws"]), 0);
+            assert_eq!(names_in(&set.join("UserPlugins")), before);
+            assert_eq!(run(&["--package", "sws", "--apply"]), 0);
+            assert_eq!(names_in(&set.join("UserPlugins")), ["avcodec-61.dll"]);
+            assert_eq!(run(&["--package", "sws", "--apply"]), 2);
+            assert_eq!(run(&["--key-map"]), 2);
+            assert_eq!(run(&["--key-map", "--apply"]), 2);
+            assert_eq!(run(&["--package", "ffmpeg", "--apply"]), 0);
+            assert!(!set.exists());
+            assert_eq!(run(&["--package", "ffmpeg", "--apply"]), 0);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let resource = resource_with_two_packages_in_one_set(dir.path());
+        let dry_run = |items: &[DeleteItem]| {
+            delete_backups(
+                &resource,
+                items,
+                &DeleteRunOptions { dry_run: true },
+                &super::ProgressReporter::noop(),
+                &super::CancelToken::new(),
+            )
+            .unwrap()
+        };
+        let report = dry_run(&[DeleteItem::package("uninstall-unix-300", "sws")]);
+        let text = super::delete_backup_report_text(&report);
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            [
+                "uninstall-unix-300, SWS Extension: would be deleted out of its backup set, 1 KB. \
+                 The set's other backups would stay.",
+                "  It holds the only copy of SWS Extension.",
+                "This was a dry run, and nothing was deleted. With --apply, RABBIT deletes it for \
+                 good, 1 KB in all.",
+            ],
+            "{text}"
+        );
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["sets"][0]["status"], "would-delete-from-set");
+        assert_eq!(
+            json["sets"][0]["part"],
+            serde_json::json!({ "kind": "package", "package_id": "sws" })
+        );
+
+        let report = dry_run(&[DeleteItem::keymap("uninstall-unix-300")]);
+        let text = super::delete_backup_report_text(&report);
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            [
+                "RABBIT would delete none of these backup sets: it deletes none of them while one \
+                 can't be deleted.",
+                &*format!(
+                    "uninstall-unix-300, the key map: can't be deleted: The backup \
+                     uninstall-unix-300 holds no key map RABBIT can delete alone: it has none, or \
+                     no manifest that says which of its files is one. rabbit backups \
+                     --resource-path \"{}\" lists the backups each set holds.",
+                    resource.display()
+                ),
+            ],
+            "{text}"
+        );
+        assert_eq!(super::delete_backup_exit_code(&report), 2);
+
+        // Both packages together are the whole set, and so is one id named
+        // twice: the first item says the set's size, the second only that
+        // it goes with it.
+        let size = |report: &super::DeleteReport| super::size_text(report.sets[0].size);
+        let report = dry_run(&[
+            DeleteItem::package("uninstall-unix-300", "sws"),
+            DeleteItem::package("uninstall-unix-300", "ffmpeg"),
+        ]);
+        let text = super::delete_backup_report_text(&report);
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            [
+                &*format!(
+                    "uninstall-unix-300, SWS Extension: would be deleted, {}.",
+                    size(&report)
+                ),
+                "  Nothing else would be left in its set, so the whole backup set would go.",
+                "  It holds the only copy of FFmpeg and SWS Extension.",
+                "uninstall-unix-300, FFmpeg: would go with the backup set above.",
+                &*format!(
+                    "This was a dry run, and nothing was deleted. With --apply, RABBIT deletes \
+                     them for good, {} in all.",
+                    size(&report)
+                ),
+            ],
+            "{text}"
+        );
+        assert_eq!(super::delete_backup_exit_code(&report), 0);
+        let twice = [
+            DeleteItem::new("uninstall-unix-300"),
+            DeleteItem::new("uninstall-unix-300"),
+        ];
+        let report = dry_run(&twice);
+        let text = super::delete_backup_report_text(&report);
+        assert_eq!(
+            text.lines().collect::<Vec<_>>()[..3],
+            [
+                &*format!("uninstall-unix-300: would be deleted, {}.", size(&report)),
+                "  It holds the only copy of FFmpeg and SWS Extension.",
+                "uninstall-unix-300: would go with the backup set above.",
+            ],
+            "{text}"
+        );
+        let report = delete_backups(
+            &resource,
+            &twice,
+            &DeleteRunOptions { dry_run: false },
+            &super::ProgressReporter::noop(),
+            &super::CancelToken::new(),
+        )
+        .unwrap();
+        let text = super::delete_backup_report_text(&report);
+        assert_eq!(
+            text.lines().collect::<Vec<_>>()[..3],
+            [
+                &*format!(
+                    "uninstall-unix-300: deleted, {} freed.",
+                    super::size_text(report.bytes_freed)
+                ),
+                "  It held the only copy of FFmpeg and SWS Extension.",
+                "uninstall-unix-300: went with the backup set above.",
+            ],
+            "{text}"
+        );
+        assert_eq!(super::delete_backup_exit_code(&report), 0);
+
+        // The last package out of a set takes the set, and its own dry run
+        // says so.
+        let dir = tempfile::tempdir().unwrap();
+        let resource = resource_with_two_packages_in_one_set(dir.path());
+        let take = |package: &str, apply: bool| {
+            delete_backups(
+                &resource,
+                &[DeleteItem::package("uninstall-unix-300", package)],
+                &DeleteRunOptions { dry_run: !apply },
+                &super::ProgressReporter::noop(),
+                &super::CancelToken::new(),
+            )
+            .unwrap()
+        };
+        let report = take("sws", true);
+        let text = super::delete_backup_report_text(&report);
+        assert!(
+            text.starts_with(&format!(
+                "uninstall-unix-300, SWS Extension: deleted out of its backup set, {} freed. The \
+                 set's other backups stay.\n",
+                super::size_text(report.bytes_freed)
+            )),
+            "{text}"
+        );
+        let report = take("ffmpeg", false);
+        let text = super::delete_backup_report_text(&report);
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            [
+                &*format!(
+                    "uninstall-unix-300, FFmpeg: would be deleted, {}.",
+                    size(&report)
+                ),
+                "  Nothing else would be left in its set, so the whole backup set would go.",
+                "  It holds the only copy of FFmpeg.",
+                &*format!(
+                    "This was a dry run, and nothing was deleted. With --apply, RABBIT deletes it \
+                     for good, {} in all.",
+                    size(&report)
+                ),
+            ],
+            "{text}"
+        );
+        let report = take("ffmpeg", true);
+        let text = super::delete_backup_report_text(&report);
+        assert!(
+            text.contains(
+                "\n  Nothing else was left in its set, so the whole backup set went.\n  It held \
+                 the only copy of FFmpeg.\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(super::delete_backup_exit_code(&report), 0);
+    }
+
+    /// On Windows, a backup out of a set whose manifest another program
+    /// holds open isn't deleted: the set's manifest can't be saved without
+    /// it, so nothing of the set changes, and the command exits with 1. The
+    /// text says it is the manifest that is in use.
+    #[cfg(windows)]
+    #[test]
+    fn delete_backup_exits_with_1_when_a_sets_manifest_is_in_use() {
+        use rabbit_core::backup_delete::{DeleteItem, DeleteRunOptions, delete_backups};
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const SHARE_READ: u32 = 0x1;
+        let dir = tempfile::tempdir().unwrap();
+        let resource = resource_with_two_packages_in_one_set(dir.path());
+        let set = resource
+            .join("RABBIT")
+            .join("backups")
+            .join("uninstall-unix-300");
+        let manifest = std::fs::read(set.join("backup-manifest.json")).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(SHARE_READ)
+            .open(set.join("backup-manifest.json"))
+            .unwrap();
+
+        for more in [&[][..], &["--json"][..]] {
+            let code = super::delete_backup(delete_args(
+                &resource,
+                &[
+                    &[
+                        "--backup-id",
+                        "uninstall-unix-300",
+                        "--package",
+                        "sws",
+                        "--apply",
+                    ][..],
+                    more,
+                ]
+                .concat(),
+            ))
+            .unwrap();
+            assert_eq!(code, 1, "{more:?}");
+        }
+        let report = delete_backups(
+            &resource,
+            &[DeleteItem::package("uninstall-unix-300", "sws")],
+            &DeleteRunOptions { dry_run: false },
+            &super::ProgressReporter::noop(),
+            &super::CancelToken::new(),
+        )
+        .unwrap();
+        drop(held);
+
+        let text = super::delete_backup_report_text(&report);
+        assert!(
+            text.starts_with(&format!(
+                "uninstall-unix-300, SWS Extension: {}\n",
+                super::DELETE_FROM_SET_IN_USE_TEXT
+            )),
+            "{text}"
+        );
+        assert_eq!(
+            std::fs::read(set.join("backup-manifest.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            names_in(&set.join("UserPlugins")),
+            ["avcodec-61.dll", "reaper_sws-x64.dll"]
+        );
     }
 
     /// A dry run says what would go, how big it is and which backups it
@@ -11803,7 +12526,7 @@ mod tests {
     #[test]
     fn delete_backup_text_says_what_came_of_each_set() {
         use rabbit_core::backup_delete::{
-            DeleteReport, DeleteReportItem, DeleteStatus, NotDeletedReason,
+            DeletePart, DeleteReport, DeleteReportItem, DeleteStatus, NotDeletedReason,
         };
         use rabbit_core::backup_overview::BackupItem;
         let resource = PathBuf::from("R");
@@ -11811,11 +12534,13 @@ mod tests {
         let item = |id: &str, status: DeleteStatus| DeleteReportItem {
             set_id: id.to_string(),
             status,
+            part: DeletePart::WholeSet,
             set_path: Some(resource.join("RABBIT").join("backups").join(id)),
             unfinished_deletion: None,
             size: 2048,
             only_copy: Vec::new(),
             bytes_freed: 0,
+            files_left: Vec::new(),
             not_deleted: None,
             left_in: None,
             finished_earlier_deletion: false,
@@ -11890,6 +12615,52 @@ mod tests {
                 error: Some("unix-11 is there already".to_string()),
                 ..item("unix-11", DeleteStatus::NotDeleted)
             },
+            DeleteReportItem {
+                part: DeletePart::Package {
+                    package_id: "sws".to_string(),
+                },
+                bytes_freed: 2048,
+                only_copy: vec![BackupItem::Package {
+                    set_id: "uninstall-unix-12".to_string(),
+                    package_id: "sws".to_string(),
+                }],
+                files_left: vec![
+                    resource
+                        .join("RABBIT")
+                        .join("backups")
+                        .join("uninstall-unix-12")
+                        .join("reaper_sws-x64.dll"),
+                ],
+                error: Some("reaper_sws-x64.dll: in use".to_string()),
+                ..item("uninstall-unix-12", DeleteStatus::DeletedFromSet)
+            },
+            DeleteReportItem {
+                part: DeletePart::Keymap,
+                bytes_freed: 1024,
+                ..item("unix-13", DeleteStatus::Deleted)
+            },
+            DeleteReportItem {
+                part: DeletePart::Package {
+                    package_id: "sws".to_string(),
+                },
+                not_deleted: Some(NotDeletedReason::InUse),
+                error: Some("backup-manifest.json: access denied".to_string()),
+                ..item("uninstall-unix-14", DeleteStatus::NotDeletedFromSet)
+            },
+            DeleteReportItem {
+                part: DeletePart::Keymap,
+                not_deleted: Some(NotDeletedReason::Permission),
+                ..item("unix-15", DeleteStatus::NotDeletedFromSet)
+            },
+            // The second item of a set that went whole carries no size.
+            DeleteReportItem {
+                part: DeletePart::Package {
+                    package_id: "ffmpeg".to_string(),
+                },
+                size: 0,
+                finished_earlier_deletion: true,
+                ..item("uninstall-unix-1", DeleteStatus::Deleted)
+            },
         ];
         let report = DeleteReport {
             resource_path: resource.clone(),
@@ -11945,6 +12716,32 @@ mod tests {
             "  Why: held.dll: in use".to_string(),
             "unix-11: not deleted. Nothing of it changed.".to_string(),
             "  Why: unix-11 is there already".to_string(),
+            "uninstall-unix-12, SWS Extension: deleted out of its backup set, 2 KB freed. The \
+             set's other backups stay."
+                .to_string(),
+            "  It held the only copy of SWS Extension.".to_string(),
+            format!(
+                "  RABBIT couldn't remove this file, so it stays in the backup set, which `rabbit \
+                 backups` still counts; it goes when the whole set is deleted: {}",
+                resource
+                    .join("RABBIT")
+                    .join("backups")
+                    .join("uninstall-unix-12")
+                    .join("reaper_sws-x64.dll")
+                    .display()
+            ),
+            "  Why: reaper_sws-x64.dll: in use".to_string(),
+            "unix-13, the key map: deleted, 1 KB freed.".to_string(),
+            "  Nothing else was left in its set, so the whole backup set went.".to_string(),
+            format!(
+                "uninstall-unix-14, SWS Extension: {}",
+                super::DELETE_FROM_SET_IN_USE_TEXT
+            ),
+            "  Why: backup-manifest.json: access denied".to_string(),
+            "unix-15, the key map: not deleted: RABBIT may not change the backup set's manifest, \
+             so it couldn't take this backup out of it. Nothing of the set changed."
+                .to_string(),
+            "uninstall-unix-1, FFmpeg: went with the backup set above.".to_string(),
             "In all: 5 MB freed.".to_string(),
         ] {
             assert!(
@@ -11953,11 +12750,18 @@ mod tests {
             );
         }
         // Only a set deleted beside an unfinished deletion says it finished
-        // that one too; one that finished only the deletion says so once.
+        // that one too; one that finished only the deletion says so once,
+        // and the item that goes with the line above says nothing more.
         assert_eq!(text.matches("is finished too").count(), 1, "{text}");
         assert!(super::DELETE_IN_USE_TEXT.contains("Nothing of it changed"));
         assert_eq!(
             super::DELETE_IN_USE_TEXT.contains("Explorer"),
+            cfg!(windows)
+        );
+        assert!(super::DELETE_FROM_SET_IN_USE_TEXT.contains("Nothing of the set changed"));
+        assert!(super::DELETE_FROM_SET_IN_USE_TEXT.contains("the backup set's manifest"));
+        assert_eq!(
+            super::DELETE_FROM_SET_IN_USE_TEXT.contains("Explorer"),
             cfg!(windows)
         );
         assert_eq!(super::delete_backup_exit_code(&report), 1);
@@ -12015,11 +12819,30 @@ mod tests {
             "{text}"
         );
         assert_eq!(super::delete_backup_exit_code(&refused), 2);
+        // A backup out of a set, alone or taking its set, and an item that
+        // goes with the line above, say so for a refused dry run too.
         let refused_dry_run = DeleteReport {
             dry_run: true,
             sets: vec![
                 item("unix-1", DeleteStatus::WouldDelete),
                 refused.sets[1].clone(),
+                DeleteReportItem {
+                    part: DeletePart::Package {
+                        package_id: "sws".to_string(),
+                    },
+                    ..item("uninstall-unix-16", DeleteStatus::WouldDeleteFromSet)
+                },
+                DeleteReportItem {
+                    part: DeletePart::Keymap,
+                    ..item("unix-17", DeleteStatus::WouldDelete)
+                },
+                DeleteReportItem {
+                    part: DeletePart::Package {
+                        package_id: "ffmpeg".to_string(),
+                    },
+                    size: 0,
+                    ..item("unix-17", DeleteStatus::WouldDelete)
+                },
             ],
             ..refused
         };
@@ -12028,6 +12851,15 @@ mod tests {
             text.starts_with(
                 "RABBIT would delete none of these backup sets: it deletes none of them while one \
                  can't be deleted.\nunix-1: could be deleted on its own, 2 KB.\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(
+                "uninstall-unix-16, SWS Extension: could be deleted out of its backup set on its \
+                 own, 2 KB.\nunix-17, the key map: could be deleted on its own, 2 KB.\n  Nothing \
+                 else would be left in its set, so the whole backup set would go.\nunix-17, \
+                 FFmpeg: could go with the backup set above, on its own.\n"
             ),
             "{text}"
         );
@@ -12151,6 +12983,71 @@ mod tests {
             lock.contains("doesn't delete anything") && !lock.contains("restor"),
             "{lock}"
         );
+        // A package or key map a set doesn't hold, or can't give up alone,
+        // says what to do instead, and never speaks of restoring. Only a set
+        // without a manifest, or with a damaged one, is pointed at a delete
+        // of the whole set: a mistyped id leads to the others too.
+        let id = || "uninstall-unix-1".to_string();
+        for (refusal, hint) in [
+            (
+                super::RestoreRefusal::PackageNotInSet {
+                    backup_id: id(),
+                    package_id: "osara".to_string(),
+                    packages: vec!["ffmpeg".to_string(), "sws".to_string()],
+                },
+                "it holds ffmpeg and sws. rabbit backups --resource-path \"R\" lists the backups \
+                 each set holds.",
+            ),
+            (
+                super::RestoreRefusal::PackageNotInSet {
+                    backup_id: id(),
+                    package_id: "osara".to_string(),
+                    packages: Vec::new(),
+                },
+                "The backup uninstall-unix-1 holds no backup of osara to delete. rabbit backups \
+                 --resource-path \"R\" lists the backups each set holds.",
+            ),
+            (
+                super::RestoreRefusal::NoKeymapInSet { backup_id: id() },
+                "holds no key map RABBIT can delete alone: it has none, or no manifest that says \
+                 which of its files is one. rabbit backups --resource-path \"R\" lists the \
+                 backups each set holds.",
+            ),
+            (
+                super::RestoreRefusal::NoManifest {
+                    backup_id: id(),
+                    package_id: "sws".to_string(),
+                },
+                "It can delete the backup only as a whole. Without --package or --key-map, \
+                 rabbit delete-backup deletes the whole backup set.",
+            ),
+            (
+                super::RestoreRefusal::NoPackageRecords {
+                    backup_id: id(),
+                    package_id: "sws".to_string(),
+                },
+                "It can delete the backup as a whole. rabbit backups --resource-path \"R\" lists \
+                 the backups each set holds.",
+            ),
+            (
+                super::RestoreRefusal::DamagedManifest {
+                    backup_id: id(),
+                    path: PathBuf::from("backup-manifest.json"),
+                    detail: "expected value".to_string(),
+                },
+                "Without --package or --key-map, rabbit delete-backup deletes the whole backup \
+                 set.",
+            ),
+            (
+                super::RestoreRefusal::BeingDeleted { backup_id: id() },
+                "so RABBIT can only finish deleting all of it. Without --package or --key-map, \
+                 rabbit delete-backup finishes the deletion.",
+            ),
+        ] {
+            let said = text(refusal);
+            assert!(said.ends_with(hint), "{said}");
+            assert!(!said.to_lowercase().contains("restor"), "{said}");
+        }
         let error = super::cli_delete_error(
             rabbit_core::RabbitError::RestoreRefused(super::RestoreRefusal::AsRoot),
             resource,

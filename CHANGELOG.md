@@ -157,25 +157,37 @@ from this file and posts it as the GitHub release body.
   take. Name each with `--backup-id`, exactly as `rabbit backups` lists it.
   Without `--apply` it only shows each set's size, and which backups in it
   are the only copy of something, such as a package you uninstalled or your
-  old key map. A set always goes whole, even when it holds the only copy of
-  something. RABBIT first moves it into `RABBIT\backups-deleting`, so no
-  restore finds it any more, then removes what is in it. It never follows a
-  symbolic link or junction: it removes the link, not what it leads to.
-  Nothing outside its backup folders changes but RABBIT's lock and the
-  report in `RABBIT\logs`. What can't be removed stays as an unfinished
-  deletion: `rabbit backups` lists it, and naming its id again finishes it.
-  On Windows, a set with a file open in another program, such as Explorer
-  or an antivirus scan, isn't deleted, and nothing of it changes. A set of
-  another account isn't deleted, and on a Mac `--apply` doesn't run as
-  root. Ctrl+C stops the run once the set it is on is done. The exit code
-  is 0 when every set you named is gone, already gone included, so a script
-  can run twice; 2 when one can't be deleted because of its id, a link or
-  its owner, and then nothing changes; and 1 when a set couldn't be
-  deleted, the run was stopped, or an error came first, such as another
-  RABBIT working on the same REAPER, root on a Mac or no folder at
-  `--resource-path`. A run a check refuses saves no report. `--json` prints
-  the report, or a refusal of the whole run, with codes. `rabbit backups`
-  now ends with the command that deletes a set.
+  old key map. Without `--package` or `--key-map` a set goes whole, even
+  when it holds the only copy of something. RABBIT first moves it into
+  `RABBIT\backups-deleting`, so no restore finds it any more, then removes
+  what is in it. It never follows a symbolic link or junction: it removes
+  the link, not what it leads to. Nothing outside its backup folders changes
+  but RABBIT's lock and the report in `RABBIT\logs`. What can't be removed
+  stays as an unfinished deletion: `rabbit backups` lists it, and naming its
+  id again finishes it. On Windows, a set with a file open in another
+  program, such as Explorer or an antivirus scan, isn't deleted, and nothing
+  of it changes. A set of another account isn't deleted, and on a Mac
+  `--apply` doesn't run as root. Ctrl+C stops the run once the set it is on
+  is done. The exit code is 0 when every backup you named is gone, already
+  gone included, so a script that deletes whole sets can run twice; 2 when
+  one can't be deleted because of its id, a link or its owner, and then
+  nothing changes; and 1 when a set couldn't be deleted, the run was
+  stopped, or an error came first, such as another RABBIT working on the
+  same REAPER, root on a Mac or no folder at `--resource-path`. A run a
+  check refuses saves no report. `--json` prints the report, or a refusal of
+  the whole run, with codes. `rabbit backups` now ends with the command that
+  deletes a set. `--package` and `--key-map`, with exactly one
+  `--backup-id`, delete one package's backup or the key map out of a set,
+  and its other backups stay; the last backup in a set takes the whole set.
+  A package or key map the set doesn't hold, also one that went out of it
+  before, or one it can't give up alone, as a set without a manifest can't,
+  is refused with 2. A set that also holds files none of its packages or key
+  map holds stays with them. RABBIT never removes a file the set still
+  needs, its records or a copy another backup in it uses, whatever spelling
+  names it. A file of it that can't be removed, such as one open in another
+  program, stays in the set until the whole set is deleted, and the output
+  names it. `rabbit backups` gives each package and key map the command that
+  deletes only it, without `--apply`, so it first shows what would go.
 - `rabbit components` says for each package whether RABBIT can uninstall it,
   and if not, why.
 - OSARA can be uninstalled too, from the wizard's **Uninstall** tab and with

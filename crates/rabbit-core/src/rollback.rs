@@ -48,7 +48,7 @@ const EXTERNAL_DIR: &str = "external";
 pub const ORIGIN_SIDECAR_SUFFIX: &str = ".rabbit-origin";
 
 /// The manifest is written here first and then renamed over the real one.
-const MANIFEST_STAGING_FILE: &str = "backup-manifest.json.rabbit-tmp";
+pub(crate) const MANIFEST_STAGING_FILE: &str = "backup-manifest.json.rabbit-tmp";
 
 /// The reason recorded for the set that holds the files a restore replaced.
 pub(crate) const BEFORE_RESTORE_REASON: &str = "before-restore";
@@ -2889,7 +2889,10 @@ fn refuse_another_accounts_set(
 /// The manifest of the set `backup_id` at `backup_path`, or `None` without
 /// one. A manifest that can't be read as one is refused
 /// ([`RestoreRefusal::DamagedManifest`]); any other error stays as it is.
-fn load_manifest_to_restore(backup_id: &str, backup_path: &Path) -> Result<Option<BackupManifest>> {
+pub(crate) fn load_manifest_to_restore(
+    backup_id: &str,
+    backup_path: &Path,
+) -> Result<Option<BackupManifest>> {
     load_backup_manifest(backup_path).map_err(|error| match error {
         RabbitError::Json { path, source } => RestoreRefusal::DamagedManifest {
             backup_id: backup_id.to_string(),
@@ -5979,22 +5982,43 @@ fn restore_source(
     recorded_backup_path: &Path,
     recorded: Option<&RecordedSet>,
 ) -> Result<PathBuf> {
-    let relative = match recorded {
-        Some(recorded) => Some(recorded.inside.clone()),
-        None if recorded_backup_path.is_relative() => Some(recorded_backup_path.to_path_buf()),
-        None => None,
-    };
-    match relative {
-        Some(relative)
-            if is_plain_relative(&relative) && !same_path(&relative, BACKUP_MANIFEST_FILE) =>
-        {
+    match copy_place_in_set(recorded_backup_path, recorded) {
+        Some(relative) => {
             check_no_link_in_set(backup_path, &relative)?;
             Ok(backup_path.join(relative))
         }
-        _ => Err(TargetRefusal::CopyOutsideSet
+        None => Err(TargetRefusal::CopyOutsideSet
             .refuse(recorded_backup_path)
             .into()),
     }
+}
+
+/// Where in its set the copy is that a manifest recorded at
+/// `recorded_backup_path`, as a plain path relative to the set, read from
+/// the recorded path's text alone, as a restore reads it (see
+/// [`restore_source`]). `None` for a copy the manifest names outside the
+/// set, or at the manifest's own place, which a restore refuses and a
+/// delete never removes. Nothing on disk is read.
+pub(crate) fn copy_relative_in_set(recorded_backup_path: &Path) -> Option<PathBuf> {
+    copy_place_in_set(
+        recorded_backup_path,
+        recorded_set_location(recorded_backup_path).as_ref(),
+    )
+}
+
+/// [`copy_relative_in_set`] with where the set was when it recorded the
+/// path already read from it.
+fn copy_place_in_set(
+    recorded_backup_path: &Path,
+    recorded: Option<&RecordedSet>,
+) -> Option<PathBuf> {
+    let relative = match recorded {
+        Some(recorded) => recorded.inside.clone(),
+        None if recorded_backup_path.is_relative() => recorded_backup_path.to_path_buf(),
+        None => return None,
+    };
+    (is_plain_relative(&relative) && !same_path(&relative, BACKUP_MANIFEST_FILE))
+        .then_some(relative)
 }
 
 /// Where a set was when it recorded a copy's path, read from the last
@@ -6435,6 +6459,18 @@ pub fn save_backup_manifest(backup_set: &Path, manifest: &BackupManifest) -> Res
 /// A set's manifest, or `None` when it has none. A manifest that is a
 /// symbolic link or junction is refused, never read.
 pub(crate) fn load_backup_manifest(backup_set: &Path) -> Result<Option<BackupManifest>> {
+    let Some(content) = read_backup_manifest_text(backup_set)? else {
+        return Ok(None);
+    };
+    let path = backup_set.join(BACKUP_MANIFEST_FILE);
+    let manifest = serde_json::from_str(&content).with_json_path(&path)?;
+    Ok(Some(manifest))
+}
+
+/// A set's manifest as its file holds it, or `None` when it has none, read
+/// as [`load_backup_manifest`] reads it: a manifest that is a symbolic link
+/// or junction is refused, never read.
+pub(crate) fn read_backup_manifest_text(backup_set: &Path) -> Result<Option<String>> {
     let path = backup_set.join(BACKUP_MANIFEST_FILE);
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -6445,10 +6481,7 @@ pub(crate) fn load_backup_manifest(backup_set: &Path) -> Result<Option<BackupMan
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).with_path(path),
     }
-
-    let content = fs::read_to_string(&path).with_path(&path)?;
-    let manifest = serde_json::from_str(&content).with_json_path(&path)?;
-    Ok(Some(manifest))
+    fs::read_to_string(&path).with_path(&path).map(Some)
 }
 
 /// Where a backup set id leads, as [`find_backup_set`] found it.
@@ -6806,7 +6839,7 @@ fn may_open_as(name: &OsStr, expected: &str) -> bool {
 /// in a `\\?\` path, so the same name could open two different entries.
 /// Nor when it is a device name such as `CON` or `COM1.clap` (see
 /// [`is_windows_device_name`]), which may open the device instead.
-fn opens_as_written(name: &OsStr) -> bool {
+pub(crate) fn opens_as_written(name: &OsStr) -> bool {
     let name = name.to_string_lossy();
     !name.contains(':')
         && !(cfg!(windows) && (name.ends_with(['.', ' ']) || is_windows_device_name(&name)))

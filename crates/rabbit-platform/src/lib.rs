@@ -15,6 +15,7 @@ pub mod ctrl_c;
 pub mod defender;
 pub mod disk_image;
 pub mod elevation;
+pub mod file_identity;
 pub mod file_version;
 pub mod fs_security;
 pub mod jaws;
@@ -49,6 +50,7 @@ pub use elevation::{
     is_rabbit_file_stem, run_administrator_shell, run_elevated_and_wait, running_as_rabbit,
     spawn_elevated,
 };
+pub use file_identity::{FileIdentity, file_identity};
 pub use file_version::{
     read_file_version_parts, read_file_version_string, read_string_file_info_key,
 };
