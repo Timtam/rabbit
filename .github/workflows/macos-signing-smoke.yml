@@ -41,7 +41,7 @@ jobs:
           fi
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@1.100
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
