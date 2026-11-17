@@ -232,6 +232,7 @@ fn source(entries: Vec<BackupEntry>) -> BackupListSource {
         entries,
         sets,
         targets: Default::default(),
+        installed_packages: None,
     }
 }
 
@@ -962,7 +963,8 @@ fn details_say_why_for_every_status_in_both_choices() {
             ),
             BackupStatus::NotComplete => format!(
                 "{reapack_start}It isn't complete: C:/REAPER/UserPlugins/reaper_reapack-x64.dll \
-                 is neither in the backup nor on disk as that version had it.\n\
+                 isn't in the backup, and RABBIT's records don't list it on disk as that version \
+                 had it.\n\
                  If you delete this backup, you can't go back to 1.2.4."
             ),
             BackupStatus::NothingInIt => format!(
@@ -4169,10 +4171,10 @@ fn rows_and_details_name_the_variant_of_a_package_that_comes_in_variants() {
          An update to Team PMA (es_MX) replaced it on November 3, 2026, 9:12 AM.\n\
          It holds the files of this version that were replaced or are no longer installed, \
          4 MB.\n\
-         Restoring goes back to 1.0, REAPER Accesible español (es_ES) and keeps the version you \
-         have now as a backup, so you can go forward again. If REAPER uses the version you have \
-         now for its language, it uses this one instead.\n\
-         If you delete this backup, you can't go back to 1.0, REAPER Accesible español (es_ES)."
+         Restoring goes back to REAPER Accesible español (es_ES) and keeps the version you have \
+         now as a backup, so you can go forward again. If REAPER uses the version you have now \
+         for its language, it uses this one instead.\n\
+         If you delete this backup, you can't go back to REAPER Accesible español (es_ES)."
     );
     assert!(
         explanation_of(&list, mx).contains(
@@ -4212,6 +4214,14 @@ fn a_switch_within_one_digest_version_says_the_digest_once() {
         format!(
             "{name}: Won't touch. Replaced by Team PMA (es_MX) on November 3, 2026, 9:12 AM, 4 MB"
         )
+    );
+    // The details say it once too, in the name: restoring and deleting name
+    // the variant alone.
+    let explanation = explanation_of(&list, name);
+    assert_eq!(explanation.matches(digest).count(), 1, "{explanation}");
+    assert!(
+        explanation.contains("Restoring goes back to REAPER Accesible español (es_ES) and"),
+        "{explanation}"
     );
 
     tick(&mut list, name, BackupChoice::Restore);
@@ -4316,15 +4326,11 @@ fn variants_are_named_in_every_locale() {
             assert_reads_here(locale, &row.summary);
             assert_reads_here(locale, &row.details);
         }
-        let version = say(
-            &localizer,
-            "wizard-backups-version-variant",
-            &[("version", "1.0".into()), ("variant", (&rae).into())],
-        );
+        // The same version in another variant: the variant alone.
         let restoring = say(
             &localizer,
             "wizard-backups-details-restore-earlier-language-pack",
-            &[("version", (&version).into())],
+            &[("version", (&rae).into())],
         );
         assert_reads_here(locale, &restoring);
         let es = list
@@ -4476,7 +4482,8 @@ fn restore_review_names_the_variants_and_reapers_language() {
         ),
         (
             PlannedLanguage::Unreadable,
-            "RABBIT can't read REAPER's settings now, so REAPER's language may stay as it is.",
+            "RABBIT can't read REAPER's settings now, so it may not be able to set REAPER's \
+             language to es_ES.ReaperLangPack.",
         ),
     ] {
         let plan = quick_plan(vec![spanish_plan(&items[0], language)], Vec::new());
@@ -4532,5 +4539,235 @@ fn restore_review_names_the_variants_and_reapers_language() {
                 assert_reads_here(locale, line);
             }
         }
+    }
+}
+
+/// Going back within one variant, as after an update of the Spanish pack
+/// from one digest to the next, names each version by its digest alone in
+/// the details, Review and Done: both are the same variant, which the
+/// row's name already says, so it isn't read out on each side.
+#[test]
+fn going_back_within_one_variant_names_the_versions_alone() {
+    let (earlier, newer) = ("h1a2b3c4d5e6f", "h9f8e7d6c5b4a");
+    let entry = BackupEntry {
+        version: Some(version(earlier)),
+        replaced_by: Some(version(newer)),
+        replaced_by_variant: Some("rae".to_string()),
+        ..spanish_es()
+    };
+    let mut list = backup_list(vec![entry]);
+    let name = "REAPER in Spanish h1a2b3c4d5e6f, REAPER Accesible español (es_ES)";
+    let explanation = explanation_of(&list, name);
+    for sentence in [
+        "Restoring goes back to h1a2b3c4d5e6f and keeps the version you have now as a backup",
+        "If you delete this backup, you can't go back to h1a2b3c4d5e6f.",
+    ] {
+        assert!(explanation.contains(sentence), "{explanation}");
+    }
+
+    tick(&mut list, name, BackupChoice::Restore);
+    let items = backup_restore_items(&list);
+    let mut planned = planned(&items[0]);
+    planned.swap = Some(SwappedPackage {
+        variant: Some("rae".to_string()),
+        replaced_variant: Some("rae".to_string()),
+        ..swap("langpack-es", Some(earlier), Some(newer))
+    });
+    let plan = quick_plan(vec![planned], Vec::new());
+    let review = build_backup_restore_review(&en(), Some(&target(true)), &list, Some(&plan), &[]);
+    assert!(
+        review.lines.iter().any(|line| line
+            == "REAPER in Spanish goes back from h9f8e7d6c5b4a to h1a2b3c4d5e6f. RABBIT keeps \
+                h9f8e7d6c5b4a as a backup."),
+        "{:#?}",
+        review.lines
+    );
+}
+
+/// A list of `entries` in English, where RABBIT's records list only
+/// `installed`.
+fn list_with_installed(entries: Vec<BackupEntry>, installed: &[&str]) -> WizardBackupList {
+    let mut source = source(entries);
+    source.installed_packages = Some(installed.iter().map(ToString::to_string).collect());
+    backup_list_from_source(&en(), &source, &utc)
+}
+
+/// An earlier version of a package that isn't installed now, as after it
+/// was uninstalled, says restoring installs it again, in its details and
+/// on Review, never that RABBIT keeps "the version you have now"; for a
+/// language pack, that REAPER's language stays as it is and how to choose
+/// it. While RABBIT's records list the package, or can't be read, the
+/// details say what they said.
+#[test]
+fn an_earlier_version_of_a_package_not_installed_says_it_installs_it_again() {
+    let list = list_with_installed(vec![reapack(), spanish_es()], &["sws"]);
+    let reapack_explanation = explanation_of(&list, "ReaPack 1.2.4");
+    assert!(
+        reapack_explanation.contains(
+            "Restoring installs 1.2.4 again from this backup, and RABBIT counts ReaPack as \
+             installed. Your settings stay as they are."
+        ),
+        "{reapack_explanation}"
+    );
+    let spanish = "REAPER in Spanish 1.0, REAPER Accesible español (es_ES)";
+    let spanish_explanation = explanation_of(&list, spanish);
+    assert!(
+        spanish_explanation.contains(
+            "Restoring installs REAPER Accesible español (es_ES) again from this backup, and \
+             RABBIT counts REAPER in Spanish as installed. REAPER's language stays as it is: to \
+             use this one, choose it in REAPER's preferences."
+        ),
+        "{spanish_explanation}"
+    );
+    for explanation in [&reapack_explanation, &spanish_explanation] {
+        assert!(
+            !explanation.contains("the version you have now"),
+            "{explanation}"
+        );
+    }
+    let copy = BackupEntry {
+        version: None,
+        ..reapack()
+    };
+    let list = list_with_installed(vec![copy], &[]);
+    assert!(
+        explanation_of(&list, "ReaPack").contains("Restoring puts this copy back.\n"),
+        "{}",
+        explanation_of(&list, "ReaPack")
+    );
+    for installed in [
+        Some(list_with_installed(vec![reapack()], &["reapack"])),
+        None,
+    ] {
+        let list = installed.unwrap_or_else(|| backup_list(vec![reapack()]));
+        assert!(
+            explanation_of(&list, "ReaPack 1.2.4").contains(
+                "Restoring goes back to 1.2.4 and keeps the version you have now as a backup"
+            ),
+            "{}",
+            explanation_of(&list, "ReaPack 1.2.4")
+        );
+    }
+
+    // Review: the quick plan adds the earlier entry, and moves nothing out.
+    let mut list = list_with_installed(vec![spanish_es()], &[]);
+    tick(&mut list, spanish, BackupChoice::Restore);
+    let items = backup_restore_items(&list);
+    let mut added = planned(&items[0]);
+    added.swap = Some(SwappedPackage {
+        entry: SwappedEntry::Added,
+        variant: Some("rae".to_string()),
+        ..swap("langpack-es", Some("1.0"), None)
+    });
+    let plan = quick_plan(vec![added], Vec::new());
+    let review = build_backup_restore_review(&en(), Some(&target(true)), &list, Some(&plan), &[]);
+    assert!(
+        review
+            .lines
+            .iter()
+            .any(|line| line
+                == "REAPER in Spanish comes back at 1.0, REAPER Accesible español (es_ES)."),
+        "{:#?}",
+        review.lines
+    );
+    assert!(
+        !review.lines.iter().any(|line| line.contains("as a backup")),
+        "{:#?}",
+        review.lines
+    );
+    assert_eq!(notes_of(&review), ["REAPER's language stays as it is."]);
+
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        for key in [
+            "wizard-backups-details-restore-earlier-again",
+            "wizard-backups-details-restore-earlier-again-language-pack",
+        ] {
+            let text = say(
+                &localizer,
+                key,
+                &[("version", "1.2.4".into()), ("package", "ReaPack".into())],
+            );
+            assert_reads_here(locale, &text);
+        }
+        assert_reads_here(
+            locale,
+            &text(
+                &localizer,
+                "wizard-backups-details-restore-earlier-copy-again",
+            ),
+        );
+        assert_reads_here(
+            locale,
+            &say(
+                &localizer,
+                "wizard-review-restore-earlier-again",
+                &[("package", "ReaPack".into()), ("version", "1.2.4".into())],
+            ),
+        );
+        assert_reads_here(
+            locale,
+            &say(
+                &localizer,
+                "wizard-review-restore-earlier-copy-again",
+                &[("package", "ReaPack".into())],
+            ),
+        );
+    }
+}
+
+/// The German language pack 1.0 as an uninstall on November 9 kept it.
+fn uninstalled_langpack_de() -> BackupEntry {
+    BackupEntry {
+        version: Some(version("1.0")),
+        with_settings: Some(false),
+        ..backup(
+            package("uninstall-unix-1794233100", "langpack-de"),
+            BackupGroup::UninstalledSoftware,
+            Some(NOV_9_1405),
+        )
+    }
+}
+
+/// Restoring an uninstalled language pack, whose language REAPER no longer
+/// uses, together with an earlier version of another one: Review says once
+/// what becomes of REAPER's language. When the earlier version sets it,
+/// nothing says it stays; when neither does, it stays is said once.
+#[test]
+fn restore_review_says_reapers_language_once_for_two_language_packs() {
+    let mut list = backup_list(vec![uninstalled_langpack_de(), spanish_es()]);
+    tick(&mut list, "REAPER in German 1.0", BackupChoice::Restore);
+    tick(
+        &mut list,
+        "REAPER in Spanish 1.0, REAPER Accesible español (es_ES)",
+        BackupChoice::Restore,
+    );
+    let items = backup_restore_items(&list);
+    let mut german = planned(&items[0]);
+    german.packages = vec![RestoredPackage {
+        package_id: "langpack-de".to_string(),
+        receipt_merged: true,
+        receipt_already_current: false,
+        langpack_before: Some("de_DE.ReaperLangPack".to_string()),
+        langpack_restored: false,
+        langpack_error: None,
+    }];
+    for (spanish, expected) in [
+        (
+            PlannedLanguage::Set,
+            "REAPER's language goes back to es_ES.ReaperLangPack.",
+        ),
+        (
+            PlannedLanguage::Unchanged,
+            "REAPER's language stays as it is, because another one was chosen since.",
+        ),
+    ] {
+        let plan = quick_plan(
+            vec![german.clone(), spanish_plan(&items[1], spanish)],
+            Vec::new(),
+        );
+        let review =
+            build_backup_restore_review(&en(), Some(&target(true)), &list, Some(&plan), &[]);
+        assert_eq!(notes_of(&review), [expected], "{spanish:?}");
     }
 }

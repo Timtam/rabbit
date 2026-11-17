@@ -17,7 +17,8 @@ use rabbit_core::backup_overview::{
 use rabbit_core::cancel::CancelToken;
 use rabbit_core::detection::{DiscoveryOptions, detect_components, discover_installations};
 use rabbit_core::install::{
-    InstallFileReport, InstallOptions, InstallReport, install_cached_artifacts,
+    InstallFileAction, InstallFileReport, InstallOptions, InstallReport, ReaperLanguageReport,
+    install_cached_artifacts,
 };
 use rabbit_core::latest::fetch_latest_versions_on;
 use rabbit_core::localization::{
@@ -3418,7 +3419,9 @@ fn print_install_report(report: &InstallReport) {
 /// with where the copy of a replaced file went, and each file of a
 /// package's previous version that it moved into the backup, or left
 /// where it was and why. Such a file has no source of its own: its target
-/// is where it was.
+/// is where it was, and it has no size when RABBIT never read it, such as
+/// a folder or a link at its place. Then what became of REAPER's language
+/// when a language pack file it named moved into the backup.
 fn install_report_text(report: &InstallReport) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Resource path: {}", report.resource_path.display());
@@ -3438,7 +3441,14 @@ fn install_report_text(report: &InstallReport) -> String {
         if let Some(backup_path) = &action.backup_path {
             let _ = writeln!(out, "  Backup: {}", backup_path.display());
         }
-        let _ = writeln!(out, "  Size: {}", action.size);
+        // A file left where it was that RABBIT never read has no size to
+        // give: "Size: 0" would say it is empty.
+        let never_read = action.action == InstallFileAction::LeftInPlace
+            && action.sha256.is_empty()
+            && action.size == 0;
+        if !never_read {
+            let _ = writeln!(out, "  Size: {}", action.size);
+        }
         if !action.sha256.is_empty() {
             let _ = writeln!(out, "  SHA-256: {}", action.sha256);
         }
@@ -3446,7 +3456,57 @@ fn install_report_text(report: &InstallReport) -> String {
             let _ = writeln!(out, "  Warning: {warning}");
         }
     }
+    for language in &report.reaper_language {
+        let _ = writeln!(out, "{}", language.package_id);
+        let _ = writeln!(out, "  {}", reaper_language_text(language, report.dry_run));
+    }
     out
+}
+
+/// What became of REAPER's language when an update moved the language
+/// pack file it named into the backup, or in a dry run would, in English
+/// like the rest of an install's text: set to the new version's file, or
+/// why it wasn't.
+fn reaper_language_text(language: &ReaperLanguageReport, dry_run: bool) -> String {
+    let value = one_line(&language.langpack);
+    if let Some(error) = &language.error {
+        return if dry_run {
+            format!(
+                "RABBIT couldn't read REAPER's settings ({}), so it can't tell whether REAPER's \
+                 language would be set to {value}.",
+                one_line(error)
+            )
+        } else {
+            format!(
+                "REAPER's language could not be set to {value} ({}). Choose it in REAPER's \
+                 preferences.",
+                one_line(error)
+            )
+        };
+    }
+    let before = language
+        .langpack_before
+        .as_deref()
+        .map_or_else(|| "the language pack file".to_string(), one_line);
+    match (language.reaper_may_run, dry_run) {
+        (true, true) => format!(
+            "REAPER's language would still name {before}, which would move into the backup, \
+             since an open REAPER writes its own setting back when it quits. Once REAPER is \
+             closed, choose {value} in REAPER's preferences."
+        ),
+        (true, false) => format!(
+            "REAPER's language still names {before}, which moved into the backup, since an open \
+             REAPER writes its own setting back when it quits. Once REAPER is closed, choose \
+             {value} in REAPER's preferences."
+        ),
+        (false, true) => format!(
+            "REAPER's language would be set to {value}: it is {before}, which would move into \
+             the backup."
+        ),
+        (false, false) => format!(
+            "REAPER's language is set to {value}: it was {before}, which moved into the backup."
+        ),
+    }
 }
 
 fn print_resource_init_report(report: &ResourceInitReport) {
@@ -4264,10 +4324,12 @@ fn write_swapped_package(
     };
     // A package that comes in variants names them, so the same version
     // number in another variant reads apart. Going back between two
-    // variants of the same version names only the variants.
+    // variants of the same version names only the variants, and going back
+    // within one variant only the versions.
     let with_variant = |version: &rabbit_core::version::Version, variant: Option<&String>| {
         let version = one_line(&version.to_string());
         match variant.map(|variant| variant_name(&swap.package_id, variant)) {
+            Some(_) if swap.variant == swap.replaced_variant => version,
             Some(variant) if variants_only(swap) => variant,
             Some(variant) => format!("{version} as {variant}"),
             None => version,
@@ -4917,16 +4979,27 @@ fn install_action_text(action: &InstallFileReport) -> String {
 
 /// The files of `package_id`'s previous version that the operation's
 /// install moved into the backup, or would in a dry run, or left where
-/// they were, in the style of [`install_action_text`]. The item names only
-/// the first file installed, so these come from the install's report.
+/// they were, in the style of [`install_action_text`], and what became of
+/// REAPER's language when one of them was the language pack file it named.
+/// The item names only the first file installed, so these come from the
+/// install's report.
 fn superseded_files_text(report: &PackageOperationReport, package_id: &str) -> String {
-    report
+    let mut out: String = report
         .install_report
         .iter()
         .flat_map(|install| &install.actions)
         .filter(|action| action.package_id == package_id && action.action.is_superseded_file())
         .map(install_action_text)
-        .collect()
+        .collect();
+    for language in report
+        .install_report
+        .iter()
+        .flat_map(|install| &install.reaper_language)
+        .filter(|language| language.package_id == package_id)
+    {
+        let _ = writeln!(out, "  {}", reaper_language_text(language, report.dry_run));
+    }
+    out
 }
 
 /// What the CLI says about a package's result. A vendor installer's exit
@@ -6898,6 +6971,174 @@ mod tests {
         assert_eq!(super::swapped_language_text(&other_package, false), None);
     }
 
+    /// Going back names each version with its variant only where the two
+    /// differ by it: within one variant the versions alone, at one version
+    /// the variants alone, and otherwise both.
+    #[test]
+    fn restore_backup_names_only_what_differs_between_the_versions() {
+        use rabbit_core::rollback::{RestoreStatus, SwappedEntry, SwappedPackage};
+        use rabbit_core::version::Version;
+
+        let at = |version: &str, variant: &str| {
+            (
+                Some(Version::parse(version).unwrap()),
+                Some(variant.to_string()),
+            )
+        };
+        let swap = |earlier: (Option<Version>, Option<String>),
+                    newer: (Option<Version>, Option<String>)| SwappedPackage {
+            package_id: "langpack-es".to_string(),
+            version: earlier.0,
+            replaced_version: newer.0,
+            variant: earlier.1,
+            replaced_variant: newer.1,
+            entry: SwappedEntry::Replaced,
+            uninstall_needs_reinstall: false,
+            undeclined: false,
+            moved_out: Vec::new(),
+            changed_left: Vec::new(),
+            left_in_place: Vec::new(),
+            langpack: None,
+            langpack_before: None,
+            langpack_restored: false,
+            langpack_error: None,
+            langpack_reaper_may_run: false,
+        };
+        for (earlier, newer, expected) in [
+            (
+                at("1.0", "rae"),
+                at("1.1", "rae"),
+                "Went back from 1.1 to 1.0. Only its entry in RABBIT's records changed.",
+            ),
+            (
+                at("1.0", "rae"),
+                at("1.0", "pma"),
+                "Went back from Team PMA (es_MX) to REAPER Accesible español (es_ES). Only its \
+                 entry in RABBIT's records changed.",
+            ),
+            (
+                at("1.0", "rae"),
+                at("1.1", "pma"),
+                "Went back from 1.1 as Team PMA (es_MX) to 1.0 as REAPER Accesible español \
+                 (es_ES). Only its entry in RABBIT's records changed.",
+            ),
+        ] {
+            let mut out = String::new();
+            super::write_swapped_package(
+                &mut out,
+                &swap(earlier, newer),
+                RestoreStatus::Restored,
+                false,
+            );
+            assert!(
+                out.lines().any(|line| line == format!("  {expected}")),
+                "{expected:?} missing from:\n{out}"
+            );
+        }
+    }
+
+    /// An install's text says what became of REAPER's language when an
+    /// update moved the language pack file it named into the backup, under
+    /// the package in the package operation's text too, in a dry run and a
+    /// real one: set, staying while REAPER may run, and not set.
+    #[test]
+    fn install_text_says_what_became_of_reapers_language() {
+        use rabbit_core::install::{InstallReport, ReaperLanguageReport};
+        use rabbit_core::operation::PackageOperationReport;
+
+        let set = ReaperLanguageReport {
+            package_id: "langpack-es".to_string(),
+            langpack: "es_MX.ReaperLangPack".to_string(),
+            langpack_before: Some("es_ES.ReaperLangPack".to_string()),
+            switched: true,
+            error: None,
+            reaper_may_run: false,
+        };
+        let reaper_open = ReaperLanguageReport {
+            switched: false,
+            reaper_may_run: true,
+            ..set.clone()
+        };
+        let failed = ReaperLanguageReport {
+            switched: false,
+            error: Some("access denied".to_string()),
+            ..set.clone()
+        };
+        for (language, dry_run, expected) in [
+            (
+                &set,
+                true,
+                "REAPER's language would be set to es_MX.ReaperLangPack: it is \
+                 es_ES.ReaperLangPack, which would move into the backup.",
+            ),
+            (
+                &set,
+                false,
+                "REAPER's language is set to es_MX.ReaperLangPack: it was es_ES.ReaperLangPack, \
+                 which moved into the backup.",
+            ),
+            (
+                &reaper_open,
+                true,
+                "REAPER's language would still name es_ES.ReaperLangPack, which would move into \
+                 the backup, since an open REAPER writes its own setting back when it quits. \
+                 Once REAPER is closed, choose es_MX.ReaperLangPack in REAPER's preferences.",
+            ),
+            (
+                &reaper_open,
+                false,
+                "REAPER's language still names es_ES.ReaperLangPack, which moved into the \
+                 backup, since an open REAPER writes its own setting back when it quits. Once \
+                 REAPER is closed, choose es_MX.ReaperLangPack in REAPER's preferences.",
+            ),
+            (
+                &failed,
+                true,
+                "RABBIT couldn't read REAPER's settings (access denied), so it can't tell \
+                 whether REAPER's language would be set to es_MX.ReaperLangPack.",
+            ),
+            (
+                &failed,
+                false,
+                "REAPER's language could not be set to es_MX.ReaperLangPack (access denied). \
+                 Choose it in REAPER's preferences.",
+            ),
+        ] {
+            assert_eq!(super::reaper_language_text(language, dry_run), expected);
+        }
+
+        let report = InstallReport {
+            resource_path: PathBuf::from("C:/REAPER"),
+            dry_run: false,
+            preflight: rabbit_core::preflight::PreflightReport {
+                passed: true,
+                checks: Vec::new(),
+            },
+            receipt_written: true,
+            receipt_backup_path: None,
+            backup_manifest_path: None,
+            actions: Vec::new(),
+            reaper_language: vec![set],
+        };
+        let line = "  REAPER's language is set to es_MX.ReaperLangPack: it was \
+                    es_ES.ReaperLangPack, which moved into the backup.";
+        let text = super::install_report_text(&report);
+        assert!(text.contains(&format!("langpack-es\n{line}\n")), "{text}");
+        let operation = PackageOperationReport {
+            resource_path: PathBuf::from("C:/REAPER"),
+            dry_run: false,
+            install_report: Some(report),
+            receipt_backup_path: None,
+            receipt_backup_manifest_path: None,
+            items: Vec::new(),
+        };
+        assert_eq!(
+            super::superseded_files_text(&operation, "langpack-es"),
+            format!("{line}\n")
+        );
+        assert_eq!(super::superseded_files_text(&operation, "reapack"), "");
+    }
+
     /// A whole update's backup set goes back package by package. When one
     /// package fails, here because another program holds SWS's plug-in
     /// open with no sharing, the others stay restored, and the command
@@ -6983,6 +7224,7 @@ mod tests {
             backup_manifest_path: Some(PathBuf::from(
                 "C:/REAPER/RABBIT/backups/unix-1/backup-manifest.json",
             )),
+            reaper_language: Vec::new(),
             actions: vec![
                 InstallFileReport {
                     package_id: "reapack".to_string(),
@@ -7020,6 +7262,19 @@ mod tests {
                     ),
                     left_reason: Some(LeftInPlaceReason::InUse),
                 },
+                // RABBIT never read a folder at the old place, so it has no
+                // size to give.
+                InstallFileReport {
+                    package_id: "reapack".to_string(),
+                    source_path: file("reapack_data"),
+                    target_path: file("reapack_data"),
+                    backup_path: None,
+                    action: InstallFileAction::LeftInPlace,
+                    size: 0,
+                    sha256: String::new(),
+                    warning: Some("It is a folder, not a file, so it isn't moved.".to_string()),
+                    left_reason: Some(LeftInPlaceReason::Folder),
+                },
             ],
         };
 
@@ -7042,6 +7297,11 @@ mod tests {
             .filter(|line| line.starts_with("  Source: "))
             .collect();
         assert_eq!(sources, ["  Source: C:/cache/reaper_reapack-x64.dll"]);
+        let sizes: Vec<&str> = text
+            .lines()
+            .filter(|line| line.starts_with("  Size: "))
+            .collect();
+        assert_eq!(sizes, ["  Size: 13", "  Size: 13", "  Size: 6"]);
         assert_eq!(
             text.lines()
                 .filter(|line| line.starts_with("  SHA-256: "))
@@ -7064,7 +7324,10 @@ mod tests {
              \x20 Backup: C:/REAPER/RABBIT/backups/unix-1/UserPlugins/reaper_reapack64.dll\n\
              \x20 Install action: LeftInPlace\n\
              \x20 Target: C:/REAPER/UserPlugins/reapack_helper.dll\n\
-             \x20 Warning: Another program has it open, so RABBIT couldn't move it into the backup.\n"
+             \x20 Warning: Another program has it open, so RABBIT couldn't move it into the backup.\n\
+             \x20 Install action: LeftInPlace\n\
+             \x20 Target: C:/REAPER/UserPlugins/reapack_data\n\
+             \x20 Warning: It is a folder, not a file, so it isn't moved.\n"
         );
         assert_eq!(super::superseded_files_text(&operation, "sws"), "");
     }

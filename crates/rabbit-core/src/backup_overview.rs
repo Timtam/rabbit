@@ -434,6 +434,10 @@ pub struct BackupOverview {
     pub unreadable: Vec<UnreadableSet>,
     /// Why RABBIT's receipt couldn't be read, when it couldn't.
     pub receipt_error: Option<String>,
+    /// The packages RABBIT's receipt lists now, by id, so an earlier version
+    /// of one it doesn't list, as after an uninstall, can say that restoring
+    /// installs it again. `None` when the receipt couldn't be read.
+    pub installed_packages: Option<BTreeSet<String>>,
     /// The files a restore of each backup would write, for those that
     /// write any (see [`Self::restore_targets`]).
     targets: BTreeMap<BackupItem, Vec<PathBuf>>,
@@ -935,6 +939,10 @@ fn build_overview(
         sets,
         entries,
         unreadable,
+        installed_packages: receipt
+            .as_ref()
+            .ok()
+            .map(|state| state.packages.keys().cloned().collect()),
         receipt_error: receipt.err(),
         targets,
     }

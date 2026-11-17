@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use rabbit_core::artifact::{ArtifactDescriptor, ArtifactKind};
 use rabbit_core::install::{
-    InstallFileAction, InstallFileReport, InstallReport, LeftInPlaceReason,
+    InstallFileAction, InstallFileReport, InstallReport, LeftInPlaceReason, ReaperLanguageReport,
 };
 use rabbit_core::localization::{DEFAULT_LOCALE, FluentArgument, Localizer, embedded_locales};
 use rabbit_core::model::{Architecture, Platform};
@@ -12,7 +12,7 @@ use rabbit_core::operation::{
     localized_install_problem,
 };
 use rabbit_core::package::{
-    PACKAGE_JAWS_SCRIPTS, PACKAGE_OSARA, PACKAGE_REAPACK, PACKAGE_SURGE_XT,
+    PACKAGE_FFMPEG, PACKAGE_JAWS_SCRIPTS, PACKAGE_OSARA, PACKAGE_REAPACK, PACKAGE_SURGE_XT,
 };
 use rabbit_core::plan::{InstallPlan, PlanActionKind};
 use rabbit_core::preflight::PreflightReport;
@@ -247,6 +247,7 @@ fn setup_summary_includes_backup_paths_when_present() {
                     warning: None,
                     left_reason: None,
                 }],
+                reaper_language: Vec::new(),
             }),
             receipt_backup_path: None,
             receipt_backup_manifest_path: None,
@@ -675,7 +676,8 @@ fn superseded_without_reason(name: &str) -> InstallFileReport {
     }
 }
 
-/// A finished update of ReaPack whose report holds `actions`.
+/// A finished update of ReaPack whose report holds `actions`, with ReaPack's
+/// item as the run reports it.
 fn update_report(actions: Vec<InstallFileReport>) -> SetupReport {
     let mut report = empty_setup_report(PathBuf::from("C:/PortableREAPER"));
     report.dry_run = false;
@@ -693,8 +695,54 @@ fn update_report(actions: Vec<InstallFileReport>) -> SetupReport {
             "C:/PortableREAPER/RABBIT/backups/unix-1/backup-manifest.json",
         )),
         actions,
+        reaper_language: Vec::new(),
     });
     report
+        .package_operation
+        .items
+        .push(updated_item(PACKAGE_REAPACK, "1.2.6"));
+    report
+}
+
+/// The item of a package the run updated to `version` with RABBIT's own
+/// installer.
+fn updated_item(package_id: &str, version: &str) -> PackageOperationItem {
+    PackageOperationItem {
+        plan_action: PlanActionKind::Update,
+        status: PackageOperationStatus::InstalledOrChecked,
+        artifact: ArtifactDescriptor {
+            version: Version::parse(version).unwrap(),
+            kind: ArtifactKind::ExtensionBinary,
+            ..failed_item(
+                package_id,
+                PackageOperationMessage::ExtensionBinaryInstalled,
+            )
+            .artifact
+        },
+        message: "Single extension binary handled by RABBIT installer.".to_string(),
+        ..failed_item(
+            package_id,
+            PackageOperationMessage::ExtensionBinaryInstalled,
+        )
+    }
+}
+
+/// The Spanish language pack.
+const LANGPACK_ES: &str = "langpack-es";
+
+/// Show details' lines of a package: from the line that starts with
+/// `first`, its name and a colon, up to the next that starts with one of
+/// `others`, another package's, or the end.
+fn lines_of_package<'a>(lines: &'a [String], first: &str, others: &[&str]) -> &'a [String] {
+    let start = lines
+        .iter()
+        .position(|line| line.starts_with(first))
+        .unwrap_or_else(|| panic!("{first:?} not in {lines:#?}"));
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| others.iter().any(|other| line.starts_with(other)))
+        .map_or(lines.len(), |end| start + 1 + end);
+    &lines[start..end]
 }
 
 /// After an update, Show details names each file of an earlier version that
@@ -728,6 +776,8 @@ fn files_an_update_left_in_place_are_told_on_done_and_in_show_details_in_every_l
     let all = update_report(actions);
 
     let summary = summarize_setup_report(&model, &all);
+    // After ReaPack's own lines, so each says whose version it was.
+    let reapack = lines_of_package(&summary.detail_lines, "ReaPack: ", &[]);
     for expected in [
         "Moved into the backup, because the new version no longer installs it: \
          C:/PortableREAPER/UserPlugins/reaper_reapack64.dll",
@@ -741,7 +791,7 @@ fn files_an_update_left_in_place_are_told_on_done_and_in_show_details_in_every_l
          C:/PortableREAPER/UserPlugins/older.dll",
     ] {
         assert!(
-            summary.detail_lines.iter().any(|line| line == expected),
+            reapack.iter().any(|line| line == expected),
             "{expected:?} not in {:#?}",
             summary.detail_lines
         );
@@ -826,6 +876,202 @@ fn files_an_update_left_in_place_are_told_on_done_and_in_show_details_in_every_l
                 "{locale}: {status}"
             );
             assert_reads(locale, &hint);
+        }
+    }
+}
+
+/// Show details puts each file an update moved or left under the package
+/// whose earlier version it was, after that package's status, never under
+/// another package's or above them all, so a screen reader names the
+/// package first.
+#[test]
+fn files_an_update_moved_are_told_under_their_own_package() {
+    let english = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let model = model_from_plan(
+        &english,
+        Platform::Windows,
+        Architecture::X64,
+        vec![fake_installation()],
+        Some(0),
+        InstallPlan {
+            target: None,
+            actions: Vec::new(),
+            notes: Vec::new(),
+        },
+    );
+    let ffmpeg_dll = |name: &str| InstallFileReport {
+        package_id: PACKAGE_FFMPEG.to_string(),
+        ..superseded(name, Some(LeftInPlaceReason::InUse))
+    };
+    let mut report = update_report(vec![
+        ffmpeg_dll("avcodec-61.dll"),
+        superseded("reaper_reapack64.dll", None),
+    ]);
+    report
+        .package_operation
+        .items
+        .insert(0, updated_item(PACKAGE_FFMPEG, "8.0"));
+
+    let lines = summarize_setup_report(&model, &report).detail_lines;
+
+    let ffmpeg = lines_of_package(
+        &lines,
+        "FFmpeg for Improved Video Support: ",
+        &["ReaPack: "],
+    );
+    assert!(
+        ffmpeg.contains(
+            &"Stays where it is, because another program has it open: \
+              C:/PortableREAPER/UserPlugins/avcodec-61.dll"
+                .to_string()
+        ),
+        "{lines:#?}"
+    );
+    assert!(
+        !ffmpeg
+            .iter()
+            .any(|line| line.contains("reaper_reapack64.dll")),
+        "{lines:#?}"
+    );
+    let reapack = lines_of_package(
+        &lines,
+        "ReaPack: ",
+        &["FFmpeg for Improved Video Support: "],
+    );
+    assert!(
+        reapack.contains(
+            &"Moved into the backup, because the new version no longer installs it: \
+              C:/PortableREAPER/UserPlugins/reaper_reapack64.dll"
+                .to_string()
+        ),
+        "{lines:#?}"
+    );
+    assert!(
+        !reapack.iter().any(|line| line.contains("avcodec-61.dll")),
+        "{lines:#?}"
+    );
+    // Each once.
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("avcodec-61.dll"))
+            .count(),
+        1,
+        "{lines:#?}"
+    );
+}
+
+/// After an update moved the language pack file REAPER's language named
+/// into the backup, Show details says under the pack what became of the
+/// language: set to the new file, still the old one while REAPER may be
+/// open, or not set. In every language, and not after a dry run, which
+/// set nothing.
+#[test]
+fn what_became_of_reapers_language_is_told_under_the_language_pack_in_every_locale() {
+    let english = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let mut model = model_from_plan(
+        &english,
+        Platform::Windows,
+        Architecture::X64,
+        vec![fake_installation()],
+        Some(0),
+        InstallPlan {
+            target: None,
+            actions: Vec::new(),
+            notes: Vec::new(),
+        },
+    );
+    let set = ReaperLanguageReport {
+        package_id: LANGPACK_ES.to_string(),
+        langpack: "es_MX.ReaperLangPack".to_string(),
+        langpack_before: Some("es_ES.ReaperLangPack".to_string()),
+        switched: true,
+        error: None,
+        reaper_may_run: false,
+    };
+    let reaper_open = ReaperLanguageReport {
+        switched: false,
+        reaper_may_run: true,
+        ..set.clone()
+    };
+    let failed = ReaperLanguageReport {
+        switched: false,
+        error: Some("access denied".to_string()),
+        ..set.clone()
+    };
+    let switched = |language: &ReaperLanguageReport| {
+        let mut report = update_report(Vec::new());
+        report.package_operation.items = vec![updated_item(LANGPACK_ES, "1.0")];
+        let install = report.package_operation.install_report.as_mut().unwrap();
+        install.actions = vec![InstallFileReport {
+            package_id: LANGPACK_ES.to_string(),
+            ..superseded("es_ES.ReaperLangPack", None)
+        }];
+        install.reaper_language = vec![language.clone()];
+        report
+    };
+    let cases = [
+        (
+            &set,
+            "wizard-summary-language-switched",
+            "REAPER's language now uses es_MX.ReaperLangPack, because es_ES.ReaperLangPack \
+             moved into the backup.",
+        ),
+        (
+            &reaper_open,
+            "wizard-summary-language-reaper-may-run",
+            "REAPER's language still names es_ES.ReaperLangPack, which moved into the backup, \
+             because REAPER may be open. Once REAPER is closed, choose es_MX.ReaperLangPack in \
+             REAPER's preferences.",
+        ),
+        (
+            &failed,
+            "wizard-summary-language-failed",
+            "RABBIT couldn't set REAPER's language to es_MX.ReaperLangPack. Choose it in \
+             REAPER's preferences.",
+        ),
+    ];
+    for (language, _, expected) in cases {
+        let lines = summarize_setup_report(&model, &switched(language)).detail_lines;
+        let pack = lines_of_package(&lines, "REAPER in Spanish: ", &[]);
+        assert_eq!(
+            pack.last().map(String::as_str),
+            Some(expected),
+            "{lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("access denied")),
+            "the core's English error isn't shown: {lines:#?}"
+        );
+        let mut dry = switched(language);
+        dry.dry_run = true;
+        assert!(
+            !summarize_setup_report(&model, &dry)
+                .detail_lines
+                .iter()
+                .any(|line| line.contains("REAPER's")),
+        );
+    }
+
+    for &locale in embedded_locales() {
+        model.bootstrap_options.locale = locale.to_string();
+        let localizer = Localizer::embedded(locale).unwrap();
+        for (language, key, _) in cases {
+            let line = localizer
+                .format(
+                    key,
+                    &[
+                        ("file", "es_MX.ReaperLangPack"),
+                        ("before", "es_ES.ReaperLangPack"),
+                    ],
+                )
+                .value;
+            let lines = summarize_setup_report(&model, &switched(language)).detail_lines;
+            assert!(
+                lines.contains(&line),
+                "{locale}: {line:?} not in {lines:#?}"
+            );
+            assert_reads(locale, &line);
         }
     }
 }

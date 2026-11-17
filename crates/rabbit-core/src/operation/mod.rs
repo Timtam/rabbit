@@ -1722,18 +1722,20 @@ fn dependency_ordered(planned: Vec<PlannedArtifact>) -> Vec<PlannedArtifact> {
 }
 
 /// Fold a single-package install report into the running direct-install
-/// report surfaced in the operation result. Actions accumulate; the first
-/// backup manifest seen is kept as representative. Each per-package call
-/// that replaces files, or moves files of the package's previous version
-/// into a backup, writes its own timestamped backup set, and every set
-/// stays on disk and is listed by `RABBIT backups` for rollback — the
-/// report just needs one path to show the user. No install names a receipt
-/// backup any more (see [`InstallReport::receipt_backup_path`]).
+/// report surfaced in the operation result. Actions accumulate, and so does
+/// what became of REAPER's language; the first backup manifest seen is kept
+/// as representative. Each per-package call that replaces files, or moves
+/// files of the package's previous version into a backup, writes its own
+/// timestamped backup set, and every set stays on disk and is listed by
+/// `RABBIT backups` for rollback — the report just needs one path to show
+/// the user. No install names a receipt backup any more (see
+/// [`InstallReport::receipt_backup_path`]).
 fn merge_install_report(target: &mut Option<InstallReport>, source: InstallReport) {
     match target {
         None => *target = Some(source),
         Some(existing) => {
             existing.actions.extend(source.actions);
+            existing.reaper_language.extend(source.reaper_language);
             existing.receipt_written |= source.receipt_written;
             if existing.backup_manifest_path.is_none() {
                 existing.backup_manifest_path = source.backup_manifest_path;
@@ -5991,5 +5993,49 @@ type nul > "!DEST!\Scripts\sws_python64.py"
 type nul > "!DEST!\Data\Grooves\default.rgt"
 exit /b 0
 "#
+    }
+
+    /// The operation installs each package with its own call and folds the
+    /// reports into one: what became of REAPER's language comes along from
+    /// every one of them, not only the first, as the language pack is
+    /// rarely the first package of a run.
+    #[test]
+    fn merged_install_reports_keep_reapers_language_from_each() {
+        use std::path::PathBuf;
+
+        use super::merge_install_report;
+        use crate::install::{InstallReport, ReaperLanguageReport};
+        use crate::preflight::PreflightReport;
+
+        let report = |language: Option<&str>| InstallReport {
+            resource_path: PathBuf::from("C:/REAPER"),
+            dry_run: false,
+            preflight: PreflightReport {
+                passed: true,
+                checks: Vec::new(),
+            },
+            receipt_written: true,
+            receipt_backup_path: None,
+            backup_manifest_path: None,
+            actions: Vec::new(),
+            reaper_language: language
+                .map(|file| ReaperLanguageReport {
+                    package_id: "langpack-es".to_string(),
+                    langpack: file.to_string(),
+                    langpack_before: Some("es_ES.ReaperLangPack".to_string()),
+                    switched: true,
+                    error: None,
+                    reaper_may_run: false,
+                })
+                .into_iter()
+                .collect(),
+        };
+        let mut merged = None;
+        merge_install_report(&mut merged, report(None));
+        merge_install_report(&mut merged, report(Some("es_MX.ReaperLangPack")));
+
+        let merged = merged.unwrap();
+        assert_eq!(merged.reaper_language.len(), 1);
+        assert_eq!(merged.reaper_language[0].langpack, "es_MX.ReaperLangPack");
     }
 }

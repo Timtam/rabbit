@@ -33,11 +33,11 @@ use rabbit_core::version::Version;
 
 use super::backups::{
     BackupChoice, BackupRow, RestoreFn, WizardBackupList, and_list, backup_date_text,
-    keymap_origin_selector, local_utc_offset_at, package_backup_name, restore_refusal_text,
-    same_version_other_variant, say, text, version_beside_text,
+    keep_one_language_note, keymap_origin_selector, local_utc_offset_at, package_backup_name,
+    restore_refusal_text, same_version_other_variant, say, switch_side_text, text,
 };
 use super::backups_run::{push_once, row_label, target_line, unreadable_folder};
-use super::packages::localized_package_display_name;
+use super::packages::{is_language_pack, localized_package_display_name};
 use super::progress::ProgressUiState;
 
 /// What a ticked backup brings back, as the progress page and Done name it.
@@ -628,6 +628,17 @@ pub fn wizard_backup_restore_outcome_at(
             }
         }
     }
+    // Each backup says what became of REAPER's language as if it were the
+    // only one: no line that it stays beside one that it was set, and that
+    // it stays only once.
+    keep_one_language_note(
+        &mut notes,
+        language_set,
+        &[
+            text(localizer, "wizard-done-restore-language-stays"),
+            text(localizer, "wizard-done-restore-language-unchanged"),
+        ],
+    );
 
     let mut blocks = vec![heading.clone()];
     if !reasons.is_empty() {
@@ -684,13 +695,15 @@ fn one_restored_heading(
         ),
         RestoredBackupKind::Earlier { version } => {
             // The version the run went back to, as RABBIT's records now say,
-            // with its variant for a package that comes in variants, or the
-            // variant alone after going back within one version.
+            // with its variant for a package that comes in variants, but
+            // only what tells it apart from the version it replaced: the
+            // variant alone after going back within one version, and the
+            // version alone within one variant.
             let version = match item
                 .and_then(|item| item.swap.as_ref())
                 .filter(|swap| swap.version.is_some())
             {
-                Some(swap) => version_beside_text(
+                Some(swap) => switch_side_text(
                     localizer,
                     &swap.package_id,
                     (swap.version.as_ref(), swap.variant.as_deref()),
@@ -777,7 +790,8 @@ fn restored_swaps(item: &RestoreReportItem) -> impl Iterator<Item = &SwappedPack
 /// The lines on REAPER's language for a backup that came back: for a
 /// package an uninstall removed, whether its language went back, and for
 /// an earlier version of a language pack, whether REAPER's language
-/// followed its file.
+/// followed its file, or, when the pack wasn't installed, that the language
+/// stays as it is.
 fn language_lines(
     localizer: &Localizer,
     item: &RestoreReportItem,
@@ -805,6 +819,16 @@ fn language_lines(
         } else {
             text(localizer, "wizard-done-restore-language-unchanged")
         });
+    }
+    // A language pack that wasn't installed came back, and REAPER's
+    // language stays as the uninstall left it.
+    if let Some(swap) = &item.swap
+        && swap.langpack.is_none()
+        && swap.entry == SwappedEntry::Added
+        && is_language_pack(&swap.package_id)
+        && !*language_set
+    {
+        lines.push(text(localizer, "wizard-done-restore-language-unchanged"));
     }
     for package in &item.packages {
         let Some(file) = &package.langpack_before else {

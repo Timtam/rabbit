@@ -19,8 +19,12 @@ use crate::model::{InstallationKind, Platform};
 use crate::package::{
     InstallDestination, PACKAGE_FFMPEG, PackageSpec, builtin_package_specs, package_specs_by_id,
 };
-use crate::preflight::{PreflightOptions, PreflightReport, run_install_preflight};
+use crate::preflight::{
+    PreflightOptions, PreflightReport, RunningProcess, run_install_preflight_with_processes,
+    running_reaper_processes,
+};
 use crate::progress::{ProgressEvent, ProgressReporter};
+use crate::reaper_ini::{lang_pack_is_one_of, lang_pack_setting, switch_lang_pack_if_selected};
 use crate::receipt::{
     InstallState, PackageReceipt, PackageReceiptParams, load_install_state, save_install_state,
     upsert_package_receipt,
@@ -29,7 +33,8 @@ use crate::restore_refusal::TargetRefusal;
 use crate::rollback::{
     BackupSetWriter, FileDigest, KEYMAP_FILE, MoveFileError, MovedFile, OutsideRestoreRules,
     ReplacedPackageRecord, UPDATE_BACKUP_REASON, absolute_without_dots, is_keymap_place,
-    link_at_place, receipt_file_path, receipt_place_by_text, same_place, update_backup_place,
+    lang_pack_file_at, lang_pack_names_ignore_case, link_at_place, receipt_file_path,
+    receipt_place_by_text, same_place, update_backup_place,
 };
 use crate::uninstall::paths::{UninstallRoots, resolve_pattern};
 use crate::version::Version;
@@ -59,6 +64,52 @@ pub struct InstallReport {
     pub receipt_backup_path: Option<PathBuf>,
     pub backup_manifest_path: Option<PathBuf>,
     pub actions: Vec<InstallFileReport>,
+    /// What became of REAPER's language for each package whose update moved
+    /// a language pack file into its backup set while the new version
+    /// installs one of its own, such as the Spanish pack's
+    /// `es_ES.ReaperLangPack` after a switch to es_MX (see
+    /// [`ReaperLanguageReport`]). Empty for every other install, and in
+    /// reports from earlier versions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reaper_language: Vec<ReaperLanguageReport>,
+}
+
+/// REAPER's language after an update moved a language pack file into its
+/// backup set, or in a dry run would. REAPER picks its language pack by
+/// the file name `langpack=` under `[REAPER]` in `reaper.ini` gives, and
+/// OSARA its own translation by that name too. So while the line names a
+/// file that moved, it is set to the new version's own file, as going back
+/// to an earlier version sets it, and the update's set records the value it
+/// replaced (see [`ReplacedPackageRecord::langpack_before`]), so restoring
+/// that earlier version puts it back. Another pack, `<>` or no line stays
+/// as it is, and then there is no report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaperLanguageReport {
+    pub package_id: String,
+    /// The new version's language pack file, by name, as the language step
+    /// writes it: what `langpack=` is set to.
+    pub langpack: String,
+    /// The `langpack=` value, exactly as written, that named a file that
+    /// moved into the backup: the value [`Self::langpack`] replaced, or in a
+    /// dry run would replace, or the one that stays. `None` when RABBIT
+    /// couldn't read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub langpack_before: Option<String>,
+    /// Whether `langpack=` was set to [`Self::langpack`], or in a dry run
+    /// would be.
+    #[serde(default)]
+    pub switched: bool,
+    /// Why RABBIT couldn't read or set `langpack=`. The new version is in
+    /// place all the same, and the user can pick the language in REAPER's
+    /// preferences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The install let the target's REAPER run (`allow_reaper_running`),
+    /// so `langpack=` stays as it is, or in a dry run would: REAPER may
+    /// write its own setting back when it quits. The user picks
+    /// [`Self::langpack`] in REAPER's preferences once REAPER is closed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reaper_may_run: bool,
 }
 
 /// What an install did with one file, or in a dry run would do. Most
@@ -191,27 +242,33 @@ pub fn install_cached_artifacts_with_progress(
         options,
         progress,
         &outside_install_roots,
+        &|| running_reaper_processes(Platform::current()),
     )
 }
 
 /// [`install_cached_artifacts_with_progress`], with `outside_roots` as the
-/// folders outside the resource folder that RABBIT installs into. They are
-/// asked only when a file of a previous version is outside the resource
-/// folder; tests give their own, so they never touch the real CLAP folder.
+/// folders outside the resource folder that RABBIT installs into, and
+/// `reapers` as every REAPER running on this computer, which the preflight
+/// checks the target's among. The folders are asked only when a file of a
+/// previous version is outside the resource folder. Tests give their own
+/// of both, so they never touch the real CLAP folder and never depend on
+/// what runs on the computer that tests them.
 pub(crate) fn install_cached_artifacts_within(
     resource_path: &Path,
     artifacts: &[CachedArtifact],
     options: &InstallOptions,
     progress: &ProgressReporter,
     outside_roots: &dyn Fn() -> Vec<PathBuf>,
+    reapers: &dyn Fn() -> Vec<RunningProcess>,
 ) -> Result<InstallReport> {
-    let preflight = run_install_preflight(
+    let preflight = run_install_preflight_with_processes(
         resource_path,
         &PreflightOptions {
             dry_run: options.dry_run,
             allow_reaper_running: options.allow_reaper_running,
             target_app_path: options.target_app_path.clone(),
         },
+        &reapers(),
     );
     if !preflight.passed {
         return Err(RabbitError::PreflightFailed {
@@ -228,6 +285,7 @@ pub(crate) fn install_cached_artifacts_within(
         receipt_backup_path: None,
         backup_manifest_path: None,
         actions: Vec::new(),
+        reaper_language: Vec::new(),
     };
 
     let mut state = load_install_state(resource_path)?.unwrap_or_default();
@@ -389,6 +447,15 @@ pub(crate) fn install_cached_artifacts_within(
             &mut replacement_backups,
         );
         places.record(&run, package_id, &artifact_target_paths, &superseded);
+        // REAPER's language follows a language pack file that moved, while
+        // it names it, as the files on disk are now.
+        report.reaper_language.extend(run.follow_language(
+            package_id,
+            &artifact_target_paths,
+            &superseded,
+            options.allow_reaper_running,
+            &mut replacement_backups,
+        ));
         report.actions.extend(superseded);
         if !options.dry_run {
             remove_exclusive_group_siblings(
@@ -797,6 +864,118 @@ impl UpdateRun<'_> {
         (path.is_relative() && is_keymap_place(path))
             || file_identity(&self.resource_path.join(KEYMAP_FILE))
                 .is_ok_and(|keymap| file_identity(place).is_ok_and(|identity| identity == keymap))
+    }
+
+    /// Make REAPER's language follow `package_id`'s language pack, as the
+    /// files on disk are now (see [`ReaperLanguageReport`]): when
+    /// `superseded` moved a language pack file out of REAPER's `LangPack`
+    /// folder into the update's set, `installed` put one of the new
+    /// version's there, and `langpack=` names a file that moved, the line is
+    /// set to the new file, as going back to an earlier version sets it.
+    /// Otherwise REAPER would point at a file that is only in the backup,
+    /// and start without the language. The value it replaces goes into the
+    /// package's record in `backups` first, so restoring that earlier
+    /// version puts it back exactly as it was written, and it goes again
+    /// when the line didn't change. With `allow_reaper_running` the line
+    /// stays, as a REAPER that may run writes its own setting back when it
+    /// quits; a dry run plans the same and writes nothing. `None` when the
+    /// language has nothing to do with it.
+    fn follow_language(
+        &self,
+        package_id: &str,
+        installed: &[PathBuf],
+        superseded: &[InstallFileReport],
+        allow_reaper_running: bool,
+        backups: &mut Option<BackupSetWriter>,
+    ) -> Option<ReaperLanguageReport> {
+        let moved: Vec<String> = superseded
+            .iter()
+            .filter(|action| {
+                matches!(
+                    action.action,
+                    InstallFileAction::MovedToBackup | InstallFileAction::WouldMoveToBackup
+                )
+            })
+            .filter_map(|action| lang_pack_file_at(self.resource_path, &action.target_path))
+            .collect();
+        if moved.is_empty() {
+            return None;
+        }
+        // A name with a control character in it would break the line.
+        let langpack = installed
+            .iter()
+            .find_map(|path| lang_pack_file_at(self.resource_path, path))
+            .filter(|name| !name.chars().any(char::is_control))?;
+        let mut report = ReaperLanguageReport {
+            package_id: package_id.to_string(),
+            langpack,
+            langpack_before: None,
+            switched: false,
+            error: None,
+            reaper_may_run: false,
+        };
+        let ignore_case = lang_pack_names_ignore_case();
+        let current = match lang_pack_setting(self.resource_path) {
+            Ok(current) => current,
+            Err(error) => {
+                report.error = Some(error.to_string());
+                return Some(report);
+            }
+        };
+        let current =
+            current.filter(|current| lang_pack_is_one_of(current, &moved, ignore_case))?;
+        report.langpack_before = Some(current.clone());
+        if allow_reaper_running {
+            report.reaper_may_run = true;
+            return Some(report);
+        }
+        if self.dry_run {
+            report.switched = true;
+            return Some(report);
+        }
+        // The set holds the moved file, so it has the package's record.
+        let Some(writer) = backups.as_mut() else {
+            report.error = Some(format!(
+                "the update's backup has no record of {package_id} to keep REAPER's language \
+                 setting in"
+            ));
+            return Some(report);
+        };
+        if let Err(error) = writer.set_replaced_langpack_before(package_id, Some(current.clone())) {
+            report.error = Some(error.to_string());
+            return Some(report);
+        }
+        match switch_lang_pack_if_selected(
+            self.resource_path,
+            &moved,
+            &report.langpack,
+            ignore_case,
+        ) {
+            Ok(Some(replaced)) => {
+                // The value recorded just before is the same, unless the
+                // line changed in between: then the record takes what was
+                // replaced, as far as it can be saved. Either names a file
+                // that moved.
+                let _ = writer.set_replaced_langpack_before(package_id, Some(replaced.clone()));
+                report.langpack_before = Some(replaced);
+                report.switched = true;
+            }
+            // The line changed in between and names no file that moved.
+            Ok(None) => {
+                let _ = writer.set_replaced_langpack_before(package_id, None);
+                return None;
+            }
+            Err(error) => {
+                // Nothing to put back while the line is as it was. A write
+                // that failed partway may have changed it, and then the
+                // record keeps the value.
+                if lang_pack_setting(self.resource_path).ok().flatten() == Some(current) {
+                    let _ = writer.set_replaced_langpack_before(package_id, None);
+                }
+                report.error = Some(error.to_string());
+            }
+        }
+        Some(report)
     }
 }
 

@@ -616,6 +616,15 @@ wizard-backups-details-restore-earlier = Die Wiederherstellung kehrt zu { $versi
 # earlier version while it names the version you have now.
 wizard-backups-details-restore-earlier-language-pack = Die Wiederherstellung kehrt zu { $version } zurück und bewahrt die Version, die Sie jetzt haben, als Sicherung auf, sodass Sie wieder zu ihr wechseln können. Wenn REAPER die Version, die Sie jetzt haben, für seine Sprache verwendet, verwendet es stattdessen diese.
 wizard-backups-details-restore-earlier-copy = Die Wiederherstellung legt diese Kopie zurück und bewahrt die Version, die Sie jetzt haben, als Sicherung auf, sodass Sie wieder zu ihr wechseln können.
+# The same for an earlier version of a package that isn't installed now,
+# as after you uninstalled it: restoring installs it again, and there is no
+# version to keep as a backup. A language pack's restore leaves REAPER's
+# language as it is, so that form says how to choose it; name REAPER's
+# preferences as REAPER does in your language. The -copy form is for a
+# copy RABBIT didn't install, whose version it doesn't know.
+wizard-backups-details-restore-earlier-again = Die Wiederherstellung installiert { $version } aus dieser Sicherung wieder, und RABBIT zählt { $package } als installiert. Ihre Einstellungen bleiben, wie sie sind.
+wizard-backups-details-restore-earlier-again-language-pack = Die Wiederherstellung installiert { $version } aus dieser Sicherung wieder, und RABBIT zählt { $package } als installiert. Die Sprache von REAPER bleibt, wie sie ist: Um dieses Sprachpaket zu verwenden, wählen Sie es in den Einstellungen von REAPER.
+wizard-backups-details-restore-earlier-copy-again = Die Wiederherstellung legt diese Kopie zurück.
 wizard-backups-details-restore-earlier-already-back = { $package } hat diese Version schon. Die Wiederherstellung legt die Dateien noch einmal zurück.
 wizard-backups-details-restore-keymap = Die Wiederherstellung macht sie wieder zur Tastenzuordnung von REAPER und bewahrt die aktuelle als Sicherung auf. Skripte, die Sie seitdem installiert haben, bleiben in der Aktionsliste von REAPER.
 wizard-backups-details-restore-default-keys = Die Wiederherstellung bringt die Standardtasten von REAPER zurück, nicht Ihre eigene Tastenzuordnung, und bewahrt die aktuelle Tastenzuordnung als Sicherung auf.
@@ -717,7 +726,11 @@ wizard-restore-refusal-nothing-of-it-in-set = Keine der Dateien von { $packages 
 # versions belongs to a package.
 wizard-restore-refusal-nothing-of-it-in-set-none = Nichts darin gehört zu einem Paket, das RABBIT zurücklegen kann.
 wizard-restore-refusal-part-missing = Ein Teil davon fehlt: Die Kopie von { $path } in dieser Sicherung ist weg oder ist nicht die Datei, die die Sicherung verzeichnet.
-wizard-restore-refusal-not-complete = Diese Sicherung ist nicht vollständig: { $path } ist weder in der Sicherung noch so auf der Festplatte, wie diese Version es hatte.
+# Not complete: a file of that version isn't in the backup, and RABBIT's
+# records don't list it on disk with that version's content. A file that
+# is on disk but that RABBIT no longer keeps track of, such as one an
+# update couldn't move, doesn't count. $path is the file's path.
+wizard-restore-refusal-not-complete = Diese Sicherung ist nicht vollständig: { $path } ist nicht in der Sicherung, und die Einträge von RABBIT verzeichnen die Datei nicht so auf der Festplatte, wie diese Version sie hatte.
 wizard-restore-refusal-version-unknown = RABBIT weiß nicht, welche Version von { $package } diese Sicherung enthält.
 wizard-restore-refusal-other-language-pack-installed = RABBIT bringt { $package } nicht zurück, solange Folgendes installiert ist: { $packages }. Die Installation des einen Sprachpakets entfernt das andere.
 wizard-restore-refusal-target-refused = RABBIT legt { $path } nicht zurück: { $reason }.
@@ -945,6 +958,11 @@ wizard-review-restore-uninstalled-undated = { $settings ->
 wizard-review-restore-earlier = { $package } geht von { $current } auf { $version } zurück. RABBIT bewahrt { $current } als Sicherung auf.
 wizard-review-restore-earlier-to = { $package } geht auf { $version } zurück. RABBIT bewahrt die Version, die Sie jetzt haben, als Sicherung auf.
 wizard-review-restore-earlier-copy = { $package } geht auf die Kopie zurück, die eine Aktualisierung ersetzt hat. RABBIT bewahrt die Version, die Sie jetzt haben, als Sicherung auf.
+# An earlier version of a package that isn't installed now, as after you
+# uninstalled it: it comes back, and no version goes into a backup. The
+# -copy form is for a copy RABBIT didn't install. $version as above.
+wizard-review-restore-earlier-again = { $package } kommt in der Version { $version } zurück.
+wizard-review-restore-earlier-copy-again = { $package } kommt als die Kopie zurück, die eine Aktualisierung ersetzt hat.
 # A key map. $origin is own for your own key map, default-keys for REAPER's
 # default keys, and other for any other; $date as above.
 wizard-review-restore-keymap = { $origin ->
@@ -967,8 +985,11 @@ wizard-review-restore-language-stays = Die Sprache von REAPER bleibt, wie sie is
 wizard-review-restore-language-unchanged = Die Sprache von REAPER bleibt, wie sie ist.
 # Going back to an earlier version of a language pack when RABBIT
 # couldn't read REAPER's settings for Review: the restore reads them
-# again, and Done says what came of REAPER's language.
-wizard-review-restore-language-unreadable = RABBIT kann die Einstellungen von REAPER gerade nicht lesen, daher bleibt die Sprache von REAPER vielleicht, wie sie ist.
+# again, and Done says what came of REAPER's language. If it still can't
+# read them, REAPER's language keeps naming the newer version's file,
+# which moves into a backup all the same. $file is the earlier version's
+# language pack file, as above.
+wizard-review-restore-language-unreadable = RABBIT kann die Einstellungen von REAPER gerade nicht lesen und kann die Sprache von REAPER daher vielleicht nicht auf { $file } stellen.
 wizard-review-restore-not-counted = RABBIT zählt { $package } nicht mehr als von ihm installiert.
 wizard-review-restore-needs-reinstall = Um { $package } später mit RABBIT zu deinstallieren, installieren Sie es zuerst erneut.
 # When a REAPER that has to be closed is running; the second when a ticked
@@ -1481,6 +1502,17 @@ wizard-summary-left-in-place-keymap = Bleibt, wo sie ist, weil sie die Tastenzuo
 wizard-summary-left-in-place-refused = Bleibt, wo sie ist, weil RABBIT sie aus einer Sicherung nicht dorthin zurücklegen könnte: { $path }
 wizard-summary-left-in-place-unreadable = Bleibt, wo sie ist, weil RABBIT sie nicht lesen konnte: { $path }
 wizard-summary-left-in-place-other = Bleibt, wo sie ist, weil RABBIT sie nicht in die Sicherung verschieben konnte: { $path }
+# Show details after an update that moved the language pack file REAPER's
+# language named into the backup, such as after a switch between the two
+# Spanish variants: REAPER's language now names the new version's file;
+# or it still names the old one, because REAPER may be open and would
+# write its own setting back when it quits; or RABBIT couldn't set it.
+# $file is the new version's language pack file and $before the old one's,
+# file names such as es_MX.ReaperLangPack, never translated. Name REAPER's
+# preferences as REAPER does in your language.
+wizard-summary-language-switched = Die Sprache von REAPER verwendet jetzt { $file }, weil { $before } in die Sicherung verschoben wurde.
+wizard-summary-language-reaper-may-run = Die Sprache von REAPER nennt noch { $before }, das in die Sicherung verschoben wurde, weil REAPER vielleicht geöffnet ist. Sobald REAPER geschlossen ist, wählen Sie { $file } in den Einstellungen von REAPER.
+wizard-summary-language-failed = RABBIT konnte die Sprache von REAPER nicht auf { $file } stellen. Wählen Sie sie in den Einstellungen von REAPER.
 # Said on Done after an install that left files of a package's earlier
 # version where they were, which the new version no longer installs,
 # instead of moving them into the update's backup. $count is how many, a

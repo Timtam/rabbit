@@ -213,13 +213,14 @@ pub struct ReplacedPackageRecord {
     /// variants, and in sets from earlier versions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaced_by_variant: Option<String>,
-    /// The `langpack=` value under `[REAPER]` in `reaper.ini` that a
-    /// restore replaced when it went back to an earlier version of this
-    /// language pack: it named a file of `receipt` that the restore moved
-    /// into this set, and the restore set it to the earlier version's own
-    /// file. Restoring this set puts the value back, while the line still
-    /// names the file that restore set. Only a before-restore set records
-    /// it; `reaper.ini` itself never goes into a set.
+    /// The `langpack=` value under `[REAPER]` in `reaper.ini` that was
+    /// replaced when this language pack's files moved into this set: it
+    /// named a file of `receipt` that moved in, and an update set it to the
+    /// new version's own file (see [`crate::install::ReaperLanguageReport`]),
+    /// or a restore that went back to an earlier version set it to that
+    /// version's. Restoring this set puts the value back, while the line
+    /// still names the file then set. `reaper.ini` itself never goes into a
+    /// set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub langpack_before: Option<String>,
 }
@@ -3635,17 +3636,21 @@ struct PlannedSwap {
 
 /// Whether `langpack=` values compare file names without case here, as
 /// an uninstall compares them on Windows.
-fn lang_pack_names_ignore_case() -> bool {
+pub(crate) fn lang_pack_names_ignore_case() -> bool {
     Platform::current() == Some(Platform::Windows)
 }
 
 /// The name of the language pack file at `place`, when it sits right in the
 /// `LangPack` folder of the resource folder at `resource_path`, where REAPER
-/// looks for the file `langpack=` names.
-fn lang_pack_file_at(resource_path: &Path, place: &Path) -> Option<String> {
-    let in_lang_packs = place
+/// looks for the file `langpack=` names. Both are made absolute, with no
+/// `.` or `..`, first, so a resource folder given as `.` or `../REAPER`
+/// finds its language packs too.
+pub(crate) fn lang_pack_file_at(resource_path: &Path, place: &Path) -> Option<String> {
+    let plain = |path: &Path| absolute_without_dots(path).unwrap_or_else(|_| path.to_path_buf());
+    let lang_packs = plain(resource_path).join("LangPack");
+    let in_lang_packs = plain(place)
         .parent()
-        .is_some_and(|folder| same_ignoring_case(folder, &resource_path.join("LangPack")));
+        .is_some_and(|folder| same_ignoring_case(folder, &lang_packs));
     in_lang_packs
         .then(|| crate::configuration::lang_pack_file_name(place))
         .flatten()

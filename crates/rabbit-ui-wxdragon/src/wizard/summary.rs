@@ -1,6 +1,8 @@
 //! Renders a finished [`SetupReport`] into the done page's summary text.
 
-use rabbit_core::install::{InstallFileAction, InstallFileReport, LeftInPlaceReason};
+use rabbit_core::install::{
+    InstallFileAction, InstallFileReport, LeftInPlaceReason, ReaperLanguageReport,
+};
 use rabbit_core::localization::{FluentArgument, Localizer};
 use rabbit_core::operation::{PackageOperationStatus, PlannedExecutionKind, PlannedExecutionPlan};
 use rabbit_core::resource::ResourceInitActionKind;
@@ -153,10 +155,19 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
                 ));
             }
         }
+        // A file of a package the run has no item for, which it always has
+        // for a package it installed, still gets its line, here.
         detail_lines.extend(
             install_report
                 .actions
                 .iter()
+                .filter(|action| {
+                    !report
+                        .package_operation
+                        .items
+                        .iter()
+                        .any(|item| item.package_id == action.package_id)
+                })
                 .filter_map(|action| superseded_file_line(localizer.as_ref(), action)),
         );
     }
@@ -252,6 +263,26 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
                 &[("version", installed_version.clone())],
                 format!("  Installed version: {installed_version}"),
             ));
+        }
+        // Right after the package's own lines, so each says whose it is:
+        // each file of its earlier version that the new one no longer
+        // installs, and, after a real run, REAPER's language when one of
+        // them was the language pack file it named.
+        if let Some(install_report) = &report.package_operation.install_report {
+            let languages = install_report
+                .reaper_language
+                .iter()
+                .filter(|_| !report.dry_run)
+                .filter(|language| language.package_id == item.package_id)
+                .map(|language| reaper_language_line(localizer.as_ref(), language));
+            detail_lines.extend(
+                install_report
+                    .actions
+                    .iter()
+                    .filter(|action| action.package_id == item.package_id)
+                    .filter_map(|action| superseded_file_line(localizer.as_ref(), action))
+                    .chain(languages),
+            );
         }
         if let Some(plan) = &item.planned_execution {
             detail_lines.push(format_localized_message(
@@ -459,6 +490,45 @@ fn superseded_file_line(
         &[("path", path.clone())],
         format!("{fallback}: {path}"),
     ))
+}
+
+/// Show details' line for what became of REAPER's language after an update
+/// moved the language pack file it named into the backup, in the user's
+/// language: set to the new version's file, or why it wasn't. The core's
+/// own error is English, so it isn't shown.
+fn reaper_language_line(localizer: Option<&Localizer>, language: &ReaperLanguageReport) -> String {
+    let file = language.langpack.clone();
+    let before = language
+        .langpack_before
+        .clone()
+        .unwrap_or_else(|| file.clone());
+    if language.error.is_none() && language.switched {
+        format_localized_message(
+            localizer,
+            "wizard-summary-language-switched",
+            &[("file", file.clone()), ("before", before.clone())],
+            format!("REAPER's language now uses {file}, because {before} moved into the backup."),
+        )
+    } else if language.error.is_none() && language.reaper_may_run {
+        format_localized_message(
+            localizer,
+            "wizard-summary-language-reaper-may-run",
+            &[("file", file.clone()), ("before", before.clone())],
+            format!(
+                "REAPER's language still names {before}, which moved into the backup, because \
+                 REAPER may be open. Once REAPER is closed, choose {file} in REAPER's preferences."
+            ),
+        )
+    } else {
+        format_localized_message(
+            localizer,
+            "wizard-summary-language-failed",
+            &[("file", file.clone())],
+            format!(
+                "RABBIT couldn't set REAPER's language to {file}. Choose it in REAPER's preferences."
+            ),
+        )
+    }
 }
 
 /// The sentences Done adds after an install that left files of a package's

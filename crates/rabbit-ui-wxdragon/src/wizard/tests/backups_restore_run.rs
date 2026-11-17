@@ -2532,3 +2532,99 @@ fn reapers_language_after_another_variant_reads_in_every_locale() {
         }
     }
 }
+
+/// Going back within one variant, as after an update of the Spanish pack
+/// from one digest to the next, Done names the version by its digest
+/// alone: it is the same variant as before.
+#[test]
+fn going_back_within_one_variant_names_the_version_alone() {
+    let entry = BackupEntry {
+        version: Some(version("h1a2b3c4d5e6f")),
+        replaced_by: Some(version("h9f8e7d6c5b4a")),
+        replaced_by_variant: Some("rae".to_string()),
+        ..super::backups::spanish_es()
+    };
+    let run = one(entry);
+    let mut restored = spanish_restored(&run.items[0], SpanishLanguage::Unchanged);
+    if let Some(swap) = &mut restored.swap {
+        swap.version = Some(version("h1a2b3c4d5e6f"));
+        swap.replaced_version = Some(version("h9f8e7d6c5b4a"));
+        swap.replaced_variant = Some("rae".to_string());
+        swap.langpack = None;
+        swap.moved_out = Vec::new();
+    }
+    assert_eq!(
+        done(&run, Ok(report(vec![restored]))).heading,
+        "REAPER in Spanish is back to h1a2b3c4d5e6f."
+    );
+}
+
+/// An uninstalled language pack whose language REAPER no longer uses,
+/// restored together with an earlier version of another language pack:
+/// Done says once what became of REAPER's language. When the earlier
+/// version set it, nothing says it stays; when neither did, it stays is
+/// said once.
+#[test]
+fn done_says_reapers_language_once_for_two_language_packs() {
+    let german = BackupEntry {
+        version: Some(version("1.0")),
+        with_settings: Some(false),
+        item: package("uninstall-unix-1794233100", "langpack-de"),
+        ..sws()
+    };
+    let run = run_of(
+        &en(),
+        &all_ticked(&en(), vec![german, super::backups::spanish_es()]),
+    );
+    let mut german_back = sws_restored(&run.items[0]);
+    german_back.packages = vec![RestoredPackage {
+        package_id: "langpack-de".to_string(),
+        receipt_merged: true,
+        receipt_already_current: false,
+        langpack_before: Some("de_DE.ReaperLangPack".to_string()),
+        langpack_restored: false,
+        langpack_error: None,
+    }];
+    for (spanish, expected) in [
+        (
+            SpanishLanguage::Set,
+            "RABBIT restored 2 backups.\n\nREAPER's language is back to es_ES.ReaperLangPack.",
+        ),
+        (
+            SpanishLanguage::Unchanged,
+            "RABBIT restored 2 backups.\n\nREAPER's language stays as it is, because another \
+             one was chosen since.",
+        ),
+    ] {
+        let outcome = done(
+            &run,
+            Ok(report(vec![
+                german_back.clone(),
+                spanish_restored(&run.items[1], spanish),
+            ])),
+        );
+        assert_eq!(outcome.status_text, expected, "{spanish:?}");
+    }
+}
+
+/// An earlier version of a language pack that wasn't installed, as after
+/// it was uninstalled, came back: Done says REAPER's language stays as it
+/// is, as Review and the row's details said.
+#[test]
+fn an_earlier_language_pack_that_wasnt_installed_leaves_the_language() {
+    let run = one(super::backups::spanish_es());
+    let mut restored = spanish_restored(&run.items[0], SpanishLanguage::Unchanged);
+    if let Some(swap) = &mut restored.swap {
+        swap.entry = SwappedEntry::Added;
+        swap.replaced_version = None;
+        swap.replaced_variant = None;
+        swap.langpack = None;
+        swap.moved_out = Vec::new();
+    }
+    let outcome = done(&run, Ok(report(vec![restored])));
+    assert_eq!(
+        outcome.status_text,
+        "REAPER in Spanish is back to 1.0, REAPER Accesible español (es_ES).\n\nREAPER's \
+         language stays as it is."
+    );
+}

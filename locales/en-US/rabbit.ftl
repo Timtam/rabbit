@@ -624,6 +624,15 @@ wizard-backups-details-restore-earlier = Restoring goes back to { $version } and
 # earlier version while it names the version you have now.
 wizard-backups-details-restore-earlier-language-pack = Restoring goes back to { $version } and keeps the version you have now as a backup, so you can go forward again. If REAPER uses the version you have now for its language, it uses this one instead.
 wizard-backups-details-restore-earlier-copy = Restoring puts this copy back and keeps the version you have now as a backup, so you can go forward again.
+# The same for an earlier version of a package that isn't installed now,
+# as after you uninstalled it: restoring installs it again, and there is no
+# version to keep as a backup. A language pack's restore leaves REAPER's
+# language as it is, so that form says how to choose it; name REAPER's
+# preferences as REAPER does in your language. The -copy form is for a
+# copy RABBIT didn't install, whose version it doesn't know.
+wizard-backups-details-restore-earlier-again = Restoring installs { $version } again from this backup, and RABBIT counts { $package } as installed. Your settings stay as they are.
+wizard-backups-details-restore-earlier-again-language-pack = Restoring installs { $version } again from this backup, and RABBIT counts { $package } as installed. REAPER's language stays as it is: to use this one, choose it in REAPER's preferences.
+wizard-backups-details-restore-earlier-copy-again = Restoring puts this copy back.
 wizard-backups-details-restore-earlier-already-back = { $package } is at this version already. Restoring puts its files back again.
 wizard-backups-details-restore-keymap = Restoring makes it REAPER's key map again and keeps the current one as a backup. Scripts you installed since stay in REAPER's Actions list.
 wizard-backups-details-restore-default-keys = Restoring brings back REAPER's own keys, not a key map of yours, and keeps the current key map as a backup.
@@ -725,7 +734,11 @@ wizard-restore-refusal-nothing-of-it-in-set = None of the files of { $packages }
 # versions belongs to a package.
 wizard-restore-refusal-nothing-of-it-in-set-none = Nothing in it belongs to a package RABBIT can put back.
 wizard-restore-refusal-part-missing = Part of it is missing: its copy of { $path } is gone, or isn't the file it recorded.
-wizard-restore-refusal-not-complete = It isn't complete: { $path } is neither in the backup nor on disk as that version had it.
+# Not complete: a file of that version isn't in the backup, and RABBIT's
+# records don't list it on disk with that version's content. A file that
+# is on disk but that RABBIT no longer keeps track of, such as one an
+# update couldn't move, doesn't count. $path is the file's path.
+wizard-restore-refusal-not-complete = It isn't complete: { $path } isn't in the backup, and RABBIT's records don't list it on disk as that version had it.
 wizard-restore-refusal-version-unknown = RABBIT doesn't know which version of { $package } it holds.
 wizard-restore-refusal-other-language-pack-installed = RABBIT doesn't bring { $package } back while this is installed: { $packages }. Installing one of them removes the other.
 wizard-restore-refusal-target-refused = RABBIT doesn't put back { $path }: { $reason }.
@@ -956,6 +969,11 @@ wizard-review-restore-uninstalled-undated = { $settings ->
 wizard-review-restore-earlier = { $package } goes back from { $current } to { $version }. RABBIT keeps { $current } as a backup.
 wizard-review-restore-earlier-to = { $package } goes back to { $version }. RABBIT keeps the version you have now as a backup.
 wizard-review-restore-earlier-copy = { $package } goes back to the copy an update replaced. RABBIT keeps the version you have now as a backup.
+# An earlier version of a package that isn't installed now, as after you
+# uninstalled it: it comes back, and no version goes into a backup. The
+# -copy form is for a copy RABBIT didn't install. $version as above.
+wizard-review-restore-earlier-again = { $package } comes back at { $version }.
+wizard-review-restore-earlier-copy-again = { $package } comes back as the copy an update replaced.
 # A key map. $origin is own for your own key map, default-keys for REAPER's
 # default keys, and other for any other; $date as above.
 wizard-review-restore-keymap = { $origin ->
@@ -978,8 +996,11 @@ wizard-review-restore-language-stays = REAPER's language stays as it is, because
 wizard-review-restore-language-unchanged = REAPER's language stays as it is.
 # Going back to an earlier version of a language pack when RABBIT
 # couldn't read REAPER's settings for Review: the restore reads them
-# again, and Done says what came of REAPER's language.
-wizard-review-restore-language-unreadable = RABBIT can't read REAPER's settings now, so REAPER's language may stay as it is.
+# again, and Done says what came of REAPER's language. If it still can't
+# read them, REAPER's language keeps naming the newer version's file,
+# which moves into a backup all the same. $file is the earlier version's
+# language pack file, as above.
+wizard-review-restore-language-unreadable = RABBIT can't read REAPER's settings now, so it may not be able to set REAPER's language to { $file }.
 wizard-review-restore-not-counted = RABBIT no longer counts { $package } as installed by it.
 wizard-review-restore-needs-reinstall = To uninstall { $package } with RABBIT later, install it again first.
 # When a REAPER that has to be closed is running; the second when a ticked
@@ -1505,6 +1526,17 @@ wizard-summary-left-in-place-keymap = Stays where it is, because it is REAPER's 
 wizard-summary-left-in-place-refused = Stays where it is, because no restore could put it back there: { $path }
 wizard-summary-left-in-place-unreadable = Stays where it is, because RABBIT couldn't read it: { $path }
 wizard-summary-left-in-place-other = Stays where it is, because RABBIT couldn't move it into the backup: { $path }
+# Show details after an update that moved the language pack file REAPER's
+# language named into the backup, such as after a switch between the two
+# Spanish variants: REAPER's language now names the new version's file;
+# or it still names the old one, because REAPER may be open and would
+# write its own setting back when it quits; or RABBIT couldn't set it.
+# $file is the new version's language pack file and $before the old one's,
+# file names such as es_MX.ReaperLangPack, never translated. Name REAPER's
+# preferences as REAPER does in your language.
+wizard-summary-language-switched = REAPER's language now uses { $file }, because { $before } moved into the backup.
+wizard-summary-language-reaper-may-run = REAPER's language still names { $before }, which moved into the backup, because REAPER may be open. Once REAPER is closed, choose { $file } in REAPER's preferences.
+wizard-summary-language-failed = RABBIT couldn't set REAPER's language to { $file }. Choose it in REAPER's preferences.
 # Said on Done after an install that left files of a package's earlier
 # version where they were, which the new version no longer installs,
 # instead of moving them into the update's backup. $count is how many, a

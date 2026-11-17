@@ -751,9 +751,18 @@ user can finish the install by pressing Next a few times.
      version that replaced it names its variant where that differs; the
      same version in another variant is named by its variant alone, so a
      switch within one version never reads as "1.0 replaced by 1.0" and the
-     Spanish pack's version, a long digest, is said once. Review and Done
-     name them the same way. The details of an earlier version of a
-     language pack say that REAPER's language follows it. A set's
+     Spanish pack's version, a long digest, is said once. The details'
+     restore and delete sentences, Review and Done name each side of a
+     switch by what tells it from the other: the variant alone within one
+     version, the version alone within one variant, otherwise both. The
+     details of an earlier version of a language pack say that REAPER's
+     language follows it. An earlier version of a package RABBIT's records
+     don't list now, as after an uninstall (the overview's
+     `installed_packages`), says restoring installs it again and keeps no
+     version as a backup, and for a language pack that REAPER's language
+     stays as it is; Review does the same when the quick plan adds the
+     entry (`added` or `still-none`), and Review and Done then say the
+     language stays. A set's
      own row beside a package or the key map of that set says only what
      those rows don't take up of the set, so the rows of a set add up to
      it; Review still counts the whole set its delete takes. Neither shows a
@@ -1006,8 +1015,18 @@ user can finish the install by pressing Next a few times.
      names each such file with its reason in the user's words, by the
      report's `left_reason` (a report without one reads as another reason),
      never the core's English warning, and each file the update moved into
-     its set, with why. No sentence advises removing such a file: it may be
-     REAPER's key map, a folder, or outside REAPER's folders.
+     its set, with why, right after the lines of the package it belongs to,
+     so a screen reader has named the package first. After them, when the
+     update moved the language pack file REAPER's language named, it says
+     that the language now uses the new file, still names the old one
+     because REAPER may be open, or couldn't be set (by the report's
+     `reaper_language`, never its English error; not after a dry run). No
+     sentence advises removing such a file: it may be REAPER's key map, a
+     folder, or outside REAPER's folders.
+   - Review and Done of a restore say what became of REAPER's language
+     once: each backup's note is written as if it were the only one, so
+     when one sets the language every note that it stays goes, and
+     otherwise only the first one that it stays is kept.
    - After an uninstall the status names the packages that went, says why
      any stayed (in the user's language for REAPER or another RABBIT being
      open, a file in use, too little room for the backup, every way a
@@ -1905,7 +1924,24 @@ Extension files:
   switch is found by any name there that isn't the chosen variant's, so an
   old name kept there would be activated, or reinstalled on every run. A
   dry run plans the same moves with a planning writer, reports where each
-  file would go (`would-move-to-backup`), and writes nothing. Files of
+  file would go (`would-move-to-backup`), and writes nothing. REAPER's
+  language follows a language pack file that moved, as the swap's does
+  (below): when a moved file is a `.ReaperLangPack` file right in
+  `<resource>/LangPack`, the new version installs one there, and
+  `langpack=` names a moved file (in any case on Windows), the value goes
+  into P's `replaced` record in the update's set (`langpack_before`) and
+  then the line is set to the new version's first such file, right after
+  the moves, so REAPER never points at a file that is only in the backup.
+  The wizard's and the CLI's language step can't cover this: it counts as
+  already applied before the run, when the receipt's only pack is the one
+  REAPER uses, and `install-extension` runs none. Another pack, `<>` or no
+  line stays, and the report says nothing; with `allow_reaper_running` the
+  line stays and the report says so, a dry run plans it, and a failure is
+  reported and leaves the new version in place. The install report's
+  `reaper_language` holds each such outcome (`package_id`, `langpack`,
+  `langpack_before`, `switched`, `error`, `reaper_may_run`); the CLI prints
+  it under the package and Show details says it. Going back to the
+  earlier version from that set sets the recorded value again. Files of
   another package of the same exclusive group, which an install removes
   with its receipt entry, still go with no backup; no package declares
   such a group now.
@@ -1967,7 +2003,9 @@ Extension files:
     install), the version that replaced it, and for a package that comes in
     variants, such as the Spanish language pack, the variant that replaced
     it (`replaced_by_variant`), so the same version in another variant
-    reads apart. Each record is saved before the package's first file is
+    reads apart, and `langpack_before`, the `langpack=` value the update
+    replaced when it set REAPER's language to the new version's file
+    (above). Each record is saved before the package's first file is
     copied or moved in, so the set never holds a file without it, also
     when the update replaced none of the package's files and only moved
     files of its previous version in; when that first copy or move fails,
@@ -2027,7 +2065,9 @@ Extension files:
   lists with a hash that is neither in the set, as a file of P's version
   with that hash at that place which the restore puts back (a finished
   entry, or a pending one whose copy is whole), nor on disk with it
-  (`not-complete`): only a place the current receipt lists
+  (`not-complete`, whose sentence says the receipt doesn't list it on disk,
+  as a file an update left in place is on disk but untracked): only a
+  place the current receipt lists
   with that hash is looked at, hashed in a real run and checked by size in
   the quick plan. The plan takes P's files of the set, never the key map or
   a receipt copy; a file of P's that is the key map by its real place all
@@ -2051,7 +2091,9 @@ Extension files:
   makes P's entry exactly E_old, keeping E_cur's channel, or removes it
   when there is no E_old, and takes P off `declined_packages`; nothing else
   in the receipt changes. REAPER's language follows, after the receipt is
-  saved: when a file that moved out of `<resource>/LangPack` is a
+  saved: when a file that moved out of `<resource>/LangPack` (both made
+  absolute, with no `.` or `..`, so `--resource-path ../REAPER` finds it
+  too) is a
   `.ReaperLangPack` file, E_old lists one there with a hash, and `langpack=`
   under `[REAPER]` still names a file that moved out (in any case on
   Windows, as an uninstall compares it), the line gets the value P's
