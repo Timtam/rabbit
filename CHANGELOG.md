@@ -117,18 +117,18 @@ from this file and posts it as the GitHub release body.
   `--package <id>`, or each package of that backup in turn without it,
   each all or nothing. Only updates RABBIT installs file by file make such
   a backup, not those by a vendor's installer, such as REAPER's, or by
-  OSARA's archive on a Mac. Only that package's entry in RABBIT's records
-  changes, to the one from before the update, on the package's current
-  channel. Files of the newer version that the earlier one lacks move into
-  a new backup with the files the restore replaces, so restoring that
-  backup goes forward again. A newer file you edited since stays, and the
-  command says so. If RABBIT hadn't installed the copy the update replaced,
-  the package's entry goes and the newer files stay, each copied into the
-  new backup; for a package whose uninstall needs that entry, such as
-  FFmpeg, the command then says RABBIT can't uninstall it until it is
-  installed again. RABBIT refuses, and changes nothing, when part of the
-  earlier version is neither in the backup nor on disk, when it can't tell
-  which version the backup holds, when a newer file is somewhere it
+  OSARA's archive on a Mac. A restore changes only that package's entry in
+  RABBIT's records, to the one from before the update, on the package's
+  current channel. Files of the newer version that the earlier one lacks
+  move into a new backup with the files the restore replaces, so restoring
+  that backup goes forward again. A newer file you edited since stays, and
+  the command says so. If RABBIT hadn't installed the copy the update
+  replaced, the package's entry goes and the newer files stay, each copied
+  into the new backup; for a package whose uninstall needs that entry,
+  such as FFmpeg, the command then says RABBIT can't uninstall it until it
+  is installed again. RABBIT refuses, and changes nothing, when part of
+  the earlier version is neither in the backup nor on disk, when it can't
+  tell which version the backup holds, when a newer file is somewhere it
   couldn't put back from the new backup, while another package whose
   install removes this one is installed, or when the backup's record of
   the earlier version lists a file outside the folders RABBIT installs
@@ -136,7 +136,13 @@ from this file and posts it as the GitHub release body.
   package under `swaps`, each with its own `status`, `actions` and
   `before_restore_set_id`; the top-level `actions` is then empty, and the
   top-level `status` is `partly-restored` when some packages went back and
-  others didn't.
+  others didn't. An update RABBIT installs file by file now also moves
+  the files of the earlier version that the new one no longer installs
+  into its backup, instead of deleting them, such as FFmpeg's libraries
+  when their names change, or the Spanish language pack's old file after a
+  switch between es_ES and es_MX, so that version comes back whole; the
+  install's output says where each went, or why one that couldn't be
+  moved stayed where it was.
 - Restoring a key map from a backup now puts your old key map back and
   keeps the scripts ReaPack registered since in REAPER's Actions list: the
   script lines of the key map it replaces that the old one doesn't have go

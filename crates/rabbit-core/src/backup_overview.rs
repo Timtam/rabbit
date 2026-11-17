@@ -1831,6 +1831,7 @@ impl Judge<'_> {
                 package_id,
                 earlier,
                 state,
+                &|entry| comes_back(&set.path, entry),
                 &on_disk,
             )
         }) {

@@ -1838,6 +1838,55 @@ Extension files:
   in it, and the CLI adds that `--package` restores them one at a time. An
   entry whose copy doesn't come back is left out and never refused, since
   nothing is written for it.
+- An update keeps the version it replaces whole in its set. Each file it
+  replaces is copied in just before the new file takes its place. Each
+  file the package's previous receipt entry lists that the new version
+  doesn't install, such as FFmpeg's libraries after they were renamed, or
+  the Spanish language pack's old name after a switch from es_ES to es_MX,
+  is moved in, never deleted. Only that package's own previous entry is
+  read, and only the files it records with a hash: `reaper.ini`, folders
+  and other files recorded without one are the user's, as a restore treats
+  them. A file the new version installs stays, by any spelling of its place
+  (both made absolute, with no `.` or `..`, so `--resource-path .` changes
+  nothing) or as the same file by its identity, such as a short name on
+  Windows, and so does one another package lists. In an install of several
+  packages, each is judged by what the run did before it: the new files of
+  the packages it installed and the files it moved, the same way in a dry
+  run, which changes neither. A file the user changed since moves too: the
+  set is its only copy. Its place must be one a restore of the set could
+  write back to, by the restore's rules above, judged first from the text
+  alone, so a place outside every folder RABBIT installs into, or on
+  another computer, is never opened. A symbolic link or junction at the
+  place, a folder, REAPER's key map, and a place a restore refuses stay
+  where they are, never followed, and the install's action for each is
+  `left-in-place` with a `warning`. A file outside the resource folder goes
+  under `external/<n>/` like any other. The order keeps a whole version on
+  disk or in the set at every moment: the moves come after every new file
+  is in place and the package's entry changed in memory, and before the
+  receipt is saved. Each move saves its manifest entry as pending first
+  and marks it done once the file is in the set; across volumes the file
+  is copied, checked, and only then removed. An entry left pending with a
+  whole copy, because RABBIT stopped or couldn't save it as done, still
+  counts as in the set, for the restore and for the completeness rule.
+  Should RABBIT stop before the receipt is saved, the receipt still lists
+  the moved files, and the next update finds them gone. A file that can't
+  be moved, because another program holds it open or its folder may not
+  be changed, stays where it is with a warning, and the install still
+  succeeds, since the new version is in place; a set left with nothing in
+  it goes again, record and all, also when the record or the first entry
+  couldn't be saved. A file left in place this way is in no receipt entry
+  any more: RABBIT no longer keeps track of it, no later update or
+  uninstall touches it, and the earlier version isn't complete, so it
+  can't be restored. The warning says so. Keeping the file in the new
+  entry would let the next update try again, but the language step sets
+  the first `.ReaperLangPack` file a pack's entry lists, and a variant
+  switch is found by any name there that isn't the chosen variant's, so an
+  old name kept there would be activated, or reinstalled on every run. A
+  dry run plans the same moves with a planning writer, reports where each
+  file would go (`would-move-to-backup`), and writes nothing. Files of
+  another package of the same exclusive group, which an install removes
+  with its receipt entry, still go with no backup; no package declares
+  such a group now.
 - Restore uses a set id only when it is one plain name, with no `:`,
   slash or NUL, and on Windows no trailing dot or space and no device name
   such as `CON`. It must also equal, byte for byte, a folder `read_dir`
@@ -1894,9 +1943,11 @@ Extension files:
     whose files it holds, the package's receipt entry from before the
     update, or none when the receipt had none (a copy RABBIT didn't
     install), and the version that replaced it. Each record is saved before
-    the package's first file is copied in, so the set never holds a file
-    without it; when that first copy fails, the record goes again, and so
-    does a set left empty. One install call writes one set: the wizard one
+    the package's first file is copied or moved in, so the set never holds
+    a file without it, also when the update replaced none of the package's
+    files and only moved files of its previous version in; when that first
+    copy or move fails, the record goes again, and so does a set left
+    empty. One install call writes one set: the wizard one
     per package, `install-extension` one for all its packages. The records
     aren't in `packages`, which older versions read as an uninstall's
     whatever the set's reason: they would merge the old entry back while
@@ -1946,9 +1997,10 @@ Extension files:
   comes back (`nothing-of-it-in-set`). Under the lock, the receipt is read
   (`receipt-unreadable`), another installed member of P's exclusive group
   refuses it (`other-language-pack-installed`), and so does a file E_old
-  lists with a hash that is neither in the set, as a finished file of P's
-  version with that hash at that place, which the restore puts back, nor on
-  disk with it (`not-complete`): only a place the current receipt lists
+  lists with a hash that is neither in the set, as a file of P's version
+  with that hash at that place which the restore puts back (a finished
+  entry, or a pending one whose copy is whole), nor on disk with it
+  (`not-complete`): only a place the current receipt lists
   with that hash is looked at, hashed in a real run and checked by size in
   the quick plan. The plan takes P's files of the set, never the key map or
   a receipt copy; a file of P's that is the key map by its real place all

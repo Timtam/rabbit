@@ -242,6 +242,7 @@ fn setup_summary_includes_backup_paths_when_present() {
                     action: InstallFileAction::Replaced,
                     size: 7,
                     sha256: "hash".to_string(),
+                    warning: None,
                 }],
             }),
             receipt_backup_path: None,

@@ -1104,7 +1104,9 @@ fn execute_operation_with(
     // gate on its dependencies (all of these depend on REAPER, so a failed
     // REAPER install cascades a dependency-skip onto every one), tolerate a
     // failed download or install, and keep going. Each is a single file, so
-    // its report carries exactly one action.
+    // its report starts with that file's one action; the actions for files
+    // of the package's previous version that it moved into its backup set,
+    // or left where they were, follow it, and `.first()` relies on that.
     let mut install_report: Option<InstallReport> = None;
     for (planned, handle) in direct_installable.iter().zip(direct_handles) {
         let package_id = planned.artifact.package_id.clone();
@@ -1722,7 +1724,8 @@ fn dependency_ordered(planned: Vec<PlannedArtifact>) -> Vec<PlannedArtifact> {
 /// Fold a single-package install report into the running direct-install
 /// report surfaced in the operation result. Actions accumulate; the first
 /// backup manifest seen is kept as representative. Each per-package call
-/// that replaces files writes its own timestamped backup set, and every set
+/// that replaces files, or moves files of the package's previous version
+/// into a backup, writes its own timestamped backup set, and every set
 /// stays on disk and is listed by `RABBIT backups` for rollback — the
 /// report just needs one path to show the user. No install names a receipt
 /// backup any more (see [`InstallReport::receipt_backup_path`]).
@@ -4692,6 +4695,111 @@ mod tests {
                 assert!(!locks.exists());
             }
         }
+    }
+
+    /// The wizard's install, `setup` and `apply-packages` update a package
+    /// through the same install as `install-extension`: when the new
+    /// version's file has another name, the old one moves into that
+    /// package's own update set, which records its entry from before. The
+    /// item names the file installed, and the install's report the move.
+    #[test]
+    fn an_update_through_the_package_operation_moves_the_old_file_into_its_set() {
+        use crate::install::InstallFileAction;
+        use crate::receipt::{InstalledFileReceipt, PackageReceipt, save_install_state};
+
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let resource_path = dir.path().join("REAPER");
+        let old = resource_path
+            .join("UserPlugins")
+            .join("reaper_reapack64.dll");
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        fs::write(&old, b"reapack 1.2.2").unwrap();
+        let before = PackageReceipt {
+            id: PACKAGE_REAPACK.to_string(),
+            version: Some(Version::parse("1.2.2").unwrap()),
+            source_url: None,
+            source_sha256: None,
+            variant: None,
+            channel: None,
+            installed_files: vec![InstalledFileReceipt {
+                path: std::path::Path::new("UserPlugins").join("reaper_reapack64.dll"),
+                sha256: Some(sha256_bytes(b"reapack 1.2.2")),
+                size: Some(13),
+            }],
+            installed_at: Some("unix-1".to_string()),
+            rabbit_version: Some("0.6.0".to_string()),
+            architecture: None,
+            vendor_added_files: Vec::new(),
+        };
+        let mut state = InstallState::default();
+        state
+            .packages
+            .insert(PACKAGE_REAPACK.to_string(), before.clone());
+        save_install_state(&resource_path, &state).unwrap();
+        let source = dir.path().join("reaper_reapack-x64.dll");
+        fs::write(&source, b"reapack 1.2.3").unwrap();
+
+        let report = execute_resolved_package_operation(
+            &resource_path,
+            vec![artifact_with_url(
+                PACKAGE_REAPACK,
+                ArtifactKind::ExtensionBinary,
+                "reaper_reapack-x64.dll",
+                &source.display().to_string(),
+            )],
+            cache.path(),
+            &PackageOperationOptions {
+                dry_run: false,
+                allow_reaper_running: true,
+                stage_unsupported: false,
+                replace_osara_keymap: false,
+                target_app_path: None,
+                lock_path: Some(dir.path().join("locks").join("install.lock")),
+                force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
+                package_channels: Default::default(),
+            },
+        )
+        .unwrap();
+
+        let item = &report.items[0];
+        assert_eq!(item.status, PackageOperationStatus::InstalledOrChecked);
+        assert_eq!(
+            item.install_action.as_ref().unwrap().action,
+            InstallFileAction::Installed
+        );
+        let actions = &report.install_report.as_ref().unwrap().actions;
+        let moved = actions
+            .iter()
+            .find(|action| action.action == InstallFileAction::MovedToBackup)
+            .unwrap();
+        assert_eq!(moved.target_path, old);
+        assert!(!old.exists());
+        let copy = moved.backup_path.as_ref().unwrap();
+        assert_eq!(fs::read(copy).unwrap(), b"reapack 1.2.2");
+        let sets: Vec<_> = fs::read_dir(resource_path.join("RABBIT").join("backups"))
+            .unwrap()
+            .collect();
+        assert_eq!(sets.len(), 1);
+        let set = sets[0].as_ref().unwrap().path();
+        assert!(copy.starts_with(&set));
+        let manifest = crate::rollback::load_backup_manifest(&set)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            manifest.replaced[PACKAGE_REAPACK].receipt.as_ref(),
+            Some(&before)
+        );
+        assert_eq!(
+            fs::read(
+                resource_path
+                    .join("UserPlugins")
+                    .join("reaper_reapack-x64.dll")
+            )
+            .unwrap(),
+            b"reapack 1.2.3"
+        );
     }
 
     /// The wizard's Close button cancels through this path, so a cancelled

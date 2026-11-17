@@ -16,7 +16,9 @@ use rabbit_core::backup_overview::{
 };
 use rabbit_core::cancel::CancelToken;
 use rabbit_core::detection::{DiscoveryOptions, detect_components, discover_installations};
-use rabbit_core::install::{InstallOptions, InstallReport, install_cached_artifacts};
+use rabbit_core::install::{
+    InstallFileReport, InstallOptions, InstallReport, install_cached_artifacts,
+};
 use rabbit_core::latest::fetch_latest_versions_on;
 use rabbit_core::localization::{
     DEFAULT_LOCALE, LocalizedText, Localizer, available_locales, resolve_runtime_locale,
@@ -3409,24 +3411,42 @@ fn print_cached_artifacts(cached: &[CachedArtifact]) {
 }
 
 fn print_install_report(report: &InstallReport) {
-    println!("Resource path: {}", report.resource_path.display());
-    println!("Dry run: {}", yes_no(report.dry_run));
-    print_preflight_report(&report.preflight);
-    println!("Receipt written: {}", yes_no(report.receipt_written));
+    print!("{}", install_report_text(report));
+}
+
+/// An install's report as text: each file it installed, replaced or kept,
+/// with where the copy of a replaced file went, and each file of a
+/// package's previous version that it moved into the backup, or left
+/// where it was and why. Such a file has no source of its own: its target
+/// is where it was.
+fn install_report_text(report: &InstallReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Resource path: {}", report.resource_path.display());
+    let _ = writeln!(out, "Dry run: {}", yes_no(report.dry_run));
+    out.push_str(&preflight_report_text(&report.preflight));
+    let _ = writeln!(out, "Receipt written: {}", yes_no(report.receipt_written));
     if let Some(backup_manifest_path) = &report.backup_manifest_path {
-        println!("Backup manifest: {}", backup_manifest_path.display());
+        let _ = writeln!(out, "Backup manifest: {}", backup_manifest_path.display());
     }
     for action in &report.actions {
-        println!("{}", action.package_id);
-        println!("  Action: {:?}", action.action);
-        println!("  Source: {}", action.source_path.display());
-        println!("  Target: {}", action.target_path.display());
-        if let Some(backup_path) = &action.backup_path {
-            println!("  Backup: {}", backup_path.display());
+        let _ = writeln!(out, "{}", action.package_id);
+        let _ = writeln!(out, "  Action: {:?}", action.action);
+        if !action.action.is_superseded_file() {
+            let _ = writeln!(out, "  Source: {}", action.source_path.display());
         }
-        println!("  Size: {}", action.size);
-        println!("  SHA-256: {}", action.sha256);
+        let _ = writeln!(out, "  Target: {}", action.target_path.display());
+        if let Some(backup_path) = &action.backup_path {
+            let _ = writeln!(out, "  Backup: {}", backup_path.display());
+        }
+        let _ = writeln!(out, "  Size: {}", action.size);
+        if !action.sha256.is_empty() {
+            let _ = writeln!(out, "  SHA-256: {}", action.sha256);
+        }
+        if let Some(warning) = &action.warning {
+            let _ = writeln!(out, "  Warning: {warning}");
+        }
     }
+    out
 }
 
 fn print_resource_init_report(report: &ResourceInitReport) {
@@ -4738,10 +4758,40 @@ fn print_package_operation_report(report: &PackageOperationReport) {
             println!("  SHA-256: {}", cached.sha256);
         }
         if let Some(action) = &item.install_action {
-            println!("  Install action: {:?}", action.action);
-            println!("  Target: {}", action.target_path.display());
+            print!("{}", install_action_text(action));
         }
+        print!("{}", superseded_files_text(report, &item.package_id));
     }
+}
+
+/// One file an install handled, as an item of the package operation's text
+/// shows it: the action, the file, where its copy or the file itself went
+/// in the backup, and why a file stayed where it was.
+fn install_action_text(action: &InstallFileReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "  Install action: {:?}", action.action);
+    let _ = writeln!(out, "  Target: {}", action.target_path.display());
+    if let Some(backup_path) = &action.backup_path {
+        let _ = writeln!(out, "  Backup: {}", backup_path.display());
+    }
+    if let Some(warning) = &action.warning {
+        let _ = writeln!(out, "  Warning: {warning}");
+    }
+    out
+}
+
+/// The files of `package_id`'s previous version that the operation's
+/// install moved into the backup, or would in a dry run, or left where
+/// they were, in the style of [`install_action_text`]. The item names only
+/// the first file installed, so these come from the install's report.
+fn superseded_files_text(report: &PackageOperationReport, package_id: &str) -> String {
+    report
+        .install_report
+        .iter()
+        .flat_map(|install| &install.actions)
+        .filter(|action| action.package_id == package_id && action.action.is_superseded_file())
+        .map(install_action_text)
+        .collect()
 }
 
 /// What the CLI says about a package's result. A vendor installer's exit
@@ -6503,6 +6553,118 @@ mod tests {
             state.packages["sws"].version,
             Some(rabbit_core::version::Version::parse("2.15").unwrap())
         );
+    }
+
+    /// An install's text says where each file of a package's previous
+    /// version that the new one no longer has went in the backup, as it
+    /// says where a replaced file's copy went, and why a file stayed. Such
+    /// a file has no source line. The package operation's text, for setup
+    /// and the install command, shows the same under its package.
+    #[test]
+    fn install_text_says_where_a_file_the_new_version_no_longer_has_went() {
+        use rabbit_core::install::{InstallFileAction, InstallFileReport, InstallReport};
+        use rabbit_core::operation::PackageOperationReport;
+        use rabbit_core::preflight::PreflightReport;
+
+        let file = |name: &str| PathBuf::from(format!("C:/REAPER/UserPlugins/{name}"));
+        let in_set = |name: &str| {
+            PathBuf::from(format!(
+                "C:/REAPER/RABBIT/backups/unix-1/UserPlugins/{name}"
+            ))
+        };
+        let report = InstallReport {
+            resource_path: PathBuf::from("C:/REAPER"),
+            dry_run: false,
+            preflight: PreflightReport {
+                passed: true,
+                checks: Vec::new(),
+            },
+            receipt_written: true,
+            receipt_backup_path: None,
+            backup_manifest_path: Some(PathBuf::from(
+                "C:/REAPER/RABBIT/backups/unix-1/backup-manifest.json",
+            )),
+            actions: vec![
+                InstallFileReport {
+                    package_id: "reapack".to_string(),
+                    source_path: PathBuf::from("C:/cache/reaper_reapack-x64.dll"),
+                    target_path: file("reaper_reapack-x64.dll"),
+                    backup_path: None,
+                    action: InstallFileAction::Installed,
+                    size: 13,
+                    sha256: "new".to_string(),
+                    warning: None,
+                },
+                InstallFileReport {
+                    package_id: "reapack".to_string(),
+                    source_path: file("reaper_reapack64.dll"),
+                    target_path: file("reaper_reapack64.dll"),
+                    backup_path: Some(in_set("reaper_reapack64.dll")),
+                    action: InstallFileAction::MovedToBackup,
+                    size: 13,
+                    sha256: "old".to_string(),
+                    warning: None,
+                },
+                InstallFileReport {
+                    package_id: "reapack".to_string(),
+                    source_path: file("reapack_helper.dll"),
+                    target_path: file("reapack_helper.dll"),
+                    backup_path: None,
+                    action: InstallFileAction::LeftInPlace,
+                    size: 6,
+                    sha256: String::new(),
+                    warning: Some(
+                        "Another program has it open, so RABBIT couldn't move it into the backup."
+                            .to_string(),
+                    ),
+                },
+            ],
+        };
+
+        let text = super::install_report_text(&report);
+
+        for expected in [
+            "  Action: MovedToBackup",
+            "  Target: C:/REAPER/UserPlugins/reaper_reapack64.dll",
+            "  Backup: C:/REAPER/RABBIT/backups/unix-1/UserPlugins/reaper_reapack64.dll",
+            "  Action: LeftInPlace",
+            "  Warning: Another program has it open, so RABBIT couldn't move it into the backup.",
+        ] {
+            assert!(
+                text.lines().any(|line| line == expected),
+                "{expected:?} missing from:\n{text}"
+            );
+        }
+        let sources: Vec<&str> = text
+            .lines()
+            .filter(|line| line.starts_with("  Source: "))
+            .collect();
+        assert_eq!(sources, ["  Source: C:/cache/reaper_reapack-x64.dll"]);
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("  SHA-256: "))
+                .count(),
+            2
+        );
+
+        let operation = PackageOperationReport {
+            resource_path: PathBuf::from("C:/REAPER"),
+            dry_run: false,
+            install_report: Some(report),
+            receipt_backup_path: None,
+            receipt_backup_manifest_path: None,
+            items: Vec::new(),
+        };
+        assert_eq!(
+            super::superseded_files_text(&operation, "reapack"),
+            "  Install action: MovedToBackup\n\
+             \x20 Target: C:/REAPER/UserPlugins/reaper_reapack64.dll\n\
+             \x20 Backup: C:/REAPER/RABBIT/backups/unix-1/UserPlugins/reaper_reapack64.dll\n\
+             \x20 Install action: LeftInPlace\n\
+             \x20 Target: C:/REAPER/UserPlugins/reapack_helper.dll\n\
+             \x20 Warning: Another program has it open, so RABBIT couldn't move it into the backup.\n"
+        );
+        assert_eq!(super::superseded_files_text(&operation, "sws"), "");
     }
 
     /// The text of a whole set of earlier versions names each package, how

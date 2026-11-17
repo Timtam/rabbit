@@ -857,9 +857,11 @@ pub enum RestoreBackupActionKind {
 /// and every file is refused before it is written (see
 /// [`Self::start_or_check`]).
 ///
-/// Installs and restore copy files in and leave the originals alone.
-/// Uninstall moves them in (see [`BackupSetWriter::move_file`]) and can move
-/// them back while its run still goes on.
+/// Restore copies files in and leaves the originals alone, and so does an
+/// update for the files it replaces. Uninstall moves them in (see
+/// [`BackupSetWriter::move_file`]) and can move them back while its run
+/// still goes on; an update moves in the files of a package's previous
+/// version that the new one no longer installs.
 ///
 /// Files inside the resource folder keep their relative path in the set.
 /// Files outside it (app2clap's CLAP folder) go under
@@ -946,6 +948,12 @@ impl BackupSetWriter {
     /// Whether anything has been written yet.
     pub fn is_started(&self) -> bool {
         self.started
+    }
+
+    /// Whether the set holds an entry for a file, or for a planning writer
+    /// would: a set a run named must still be there when the run ends.
+    pub(crate) fn holds_files(&self) -> bool {
+        !self.manifest.files.is_empty()
     }
 
     /// The SHA-256 the set recorded for the finished copy at `backup_path`.
@@ -1068,7 +1076,9 @@ impl BackupSetWriter {
     }
 
     /// Move `original` into the set and say where it went. Uninstall's way
-    /// in: the file leaves its place, and the set is the only copy.
+    /// in, and an update's for the files of a package's previous version
+    /// that the new one no longer installs: the file leaves its place, and
+    /// the set is the only copy.
     ///
     /// The entry is saved as pending before the file moves and marked done
     /// after, as for a copy. On the same volume the move is a rename. With
@@ -1257,10 +1267,11 @@ impl BackupSetWriter {
     }
 
     /// Forget what [`Self::record_replaced`] recorded of `package_id` when
-    /// the set holds no entry of the package: copying its first file failed
-    /// before the entry was saved, as when the file couldn't be read. A set
-    /// left with nothing in it is removed again, so such a failure leaves no
-    /// set, as it did before the record came first. Best effort.
+    /// the set holds no entry of the package: saving the record, or copying
+    /// or moving its first file, failed before the entry was saved, as when
+    /// the file couldn't be read. A set left with nothing in it is removed
+    /// again, so such a failure leaves no set, as it did before the record
+    /// came first. Best effort.
     pub(crate) fn forget_replaced_without_entry(&mut self, package_id: &str) {
         if !self.started
             || self.planning
@@ -1399,7 +1410,13 @@ impl BackupSetWriter {
             state: BackupEntryState::Pending,
         });
         if !self.planning {
-            self.save()?;
+            if let Err(error) = self.save() {
+                // Not on disk, so not in the set: nothing moves or is
+                // copied for it, and no later save may name it.
+                self.manifest.files.pop();
+                let _ = self.save();
+                return Err(error);
+            }
             if let Some(note_path) = slot.origin_note
                 && let Err(error) = write_origin_note(&note_path, &slot.original_path)
             {
@@ -2990,7 +3007,7 @@ pub(crate) fn is_receipt_entry(resource_path: &Path, entry: &BackupManifestFile)
 
 /// The key map's name in the resource folder. A set entry whose original
 /// is this file is a key map, whatever made the set.
-const KEYMAP_FILE: &str = "reaper-kb.ini";
+pub(crate) const KEYMAP_FILE: &str = "reaper-kb.ini";
 
 /// Whether `entry` is the key map: its original is the resource folder's
 /// `reaper-kb.ini`.
@@ -3003,7 +3020,7 @@ pub(crate) fn is_keymap_entry(resource_path: &Path, entry: &BackupManifestFile) 
 
 /// Whether `relative`, a place inside the resource folder, is the key map's,
 /// by a name the file system reads as `reaper-kb.ini`.
-fn is_keymap_place(relative: &Path) -> bool {
+pub(crate) fn is_keymap_place(relative: &Path) -> bool {
     same_place(relative) == same_place(Path::new(KEYMAP_FILE))
 }
 
@@ -3106,12 +3123,12 @@ pub(crate) fn earlier_entry_in<'a>(
 /// records at a place no restore would put a file of the package back to,
 /// judged from the text alone (see [`receipt_place_by_text`]), with the
 /// reason. Going back makes `earlier` the package's entry in RABBIT's
-/// records, whose files RABBIT then looks at, at every start, and removes
-/// when an update no longer has them; so an entry naming such a place,
-/// which RABBIT never writes, isn't taken, even for a file with no hash.
-/// `.`, the resource folder itself, is a place a receipt records. Only
-/// `outside` is read, for an absolute path outside the resource folder;
-/// nothing on disk.
+/// records, whose files RABBIT then looks at, at every start, and moves
+/// into an update's set when an update no longer has them; so an entry
+/// naming such a place, which RABBIT never writes, isn't taken, even for a
+/// file with no hash. `.`, the resource folder itself, is a place a
+/// receipt records. Only `outside` is read, for an absolute path outside
+/// the resource folder; nothing on disk.
 pub(crate) fn earlier_file_refused<'a>(
     resource_path: &Path,
     package_id: &str,
@@ -3181,23 +3198,28 @@ pub(crate) fn others_of_its_group_installed(
 
 /// The first file of `earlier`, the receipt entry `package_id` goes back
 /// to, that going back would leave missing, by its path in that entry:
-/// neither in the set `manifest` describes, as a finished file of the
-/// package's version with that hash and at the same place, which the
-/// restore puts back, nor on disk with it. A copy the restore doesn't put
-/// back, such as the key map's or another package's, doesn't count. A
-/// file counts as on disk only where RABBIT's current records `state` list
-/// a file with that hash at that place, and `on_disk` then finds it there,
-/// given the place as the current records spell it and the earlier entry's
-/// record of the file. Only such places are ever looked at, never one only
-/// a set names. Files the receipt records without a hash, such as
-/// `reaper.ini`, belong to the user and count as kept. The overview of the
-/// backups and the restore judge by it, each with its own `on_disk`.
+/// neither in the set `manifest` describes, as a file of the package's
+/// version with that hash and at the same place, which the restore puts
+/// back, nor on disk with it. `comes_back` says whether the restore puts an
+/// entry's copy back, by the restore's rule (see [`entry_comes_back`]): a
+/// finished one always, and a pending one whose copy is complete, as when
+/// an update moved a file in and couldn't then save its entry as done. A
+/// copy the restore doesn't put back, such as the key map's or another
+/// package's, doesn't count. A file counts as on disk only where RABBIT's
+/// current records `state` list a file with that hash at that place, and
+/// `on_disk` then finds it there, given the place as the current records
+/// spell it and the earlier entry's record of the file. Only such places
+/// are ever looked at, never one only a set names. Files the receipt
+/// records without a hash, such as `reaper.ini`, belong to the user and
+/// count as kept. The overview of the backups and the restore judge by it,
+/// each with its own `comes_back` and `on_disk`.
 pub(crate) fn first_file_not_kept(
     resource_path: &Path,
     manifest: &BackupManifest,
     package_id: &str,
     earlier: &PackageReceipt,
     state: &InstallState,
+    comes_back: &dyn Fn(&BackupManifestFile) -> bool,
     on_disk: &dyn Fn(&Path, &InstalledFileReceipt) -> bool,
 ) -> Option<PathBuf> {
     earlier
@@ -3209,12 +3231,12 @@ pub(crate) fn first_file_not_kept(
             };
             let place = same_place(&receipt_file_path(resource_path, &file.path));
             let in_set = manifest.files.iter().any(|entry| {
-                entry.state == BackupEntryState::Done
-                    && entry.package_id.as_deref() == Some(package_id)
+                entry.package_id.as_deref() == Some(package_id)
                     && is_version_entry(resource_path, entry)
                     && entry.sha256 == *sha256
                     && entry_place(resource_path, entry)
                         .is_some_and(|found| same_place(&found.path(resource_path)) == place)
+                    && comes_back(entry)
             });
             let kept_on_disk = || {
                 state
@@ -4002,6 +4024,7 @@ fn plan_swap(
             package_id,
             earlier,
             state,
+            &|entry| entry_comes_back(backup_path, entry, context.check),
             &|place, file| {
                 matches!(
                     recorded_file_on_disk(place, file, context.check),
@@ -4205,17 +4228,58 @@ fn newer_file_place(
         Err(RabbitError::RestoreRefused(RestoreRefusal::TargetRefused { reason, .. })) => reason,
         Err(other) => return Err(other),
     };
-    let place = same_place(&receipt_file_path(resource_path, path));
+    if link_at_place(&reason, resource_path, path) {
+        return Ok(None);
+    }
+    Err(RestoreRefusal::NewerFileRefused {
+        backup_id: backup_id.to_string(),
+        package_id: package_id.to_string(),
+        path: path.to_path_buf(),
+        reason: Box::new(reason),
+    }
+    .into())
+}
+
+/// Whether a restore refused `path`, a file a receipt entry records, for
+/// `reason` because a symbolic link or junction stands at the place
+/// itself: [`TargetRefusal::PlaceIsLink`], or [`TargetRefusal::ThroughLink`]
+/// naming the place. Such a link is no file of a version: going back to an
+/// earlier version and an update both leave it where it is, never
+/// followed. A link further up the way is refused as any other place is.
+pub(crate) fn link_at_place(reason: &TargetRefusal, resource_path: &Path, path: &Path) -> bool {
     match reason {
-        TargetRefusal::PlaceIsLink => Ok(None),
-        TargetRefusal::ThroughLink { link } if same_place(&link) == place => Ok(None),
-        reason => Err(RestoreRefusal::NewerFileRefused {
-            backup_id: backup_id.to_string(),
-            package_id: package_id.to_string(),
-            path: path.to_path_buf(),
-            reason: Box::new(reason),
+        TargetRefusal::PlaceIsLink => true,
+        TargetRefusal::ThroughLink { link } => {
+            same_place(link) == same_place(&receipt_file_path(resource_path, path))
         }
-        .into()),
+        _ => false,
+    }
+}
+
+/// Where an update finds `path`, a file the receipt entry `package_id` had
+/// before the update records, to move it into the update's set because the
+/// new version no longer installs it: the place a restore of that set would
+/// put it back to (see [`restore_target`]), so the set never holds a file
+/// it couldn't bring back. Otherwise the reason a restore refuses the place
+/// for, which leaves the file where it is; [`link_at_place`] tells when a
+/// symbolic link or junction stands at the place itself. A link on the way
+/// that stays inside the resource folder is followed, as a restore follows
+/// it.
+pub(crate) fn update_backup_place(
+    resource_path: &Path,
+    path: &Path,
+    package_id: &str,
+    outside: &OutsideRestoreRules,
+) -> std::result::Result<PathBuf, TargetRefusal> {
+    match restore_target(resource_path, path, None, Some(package_id), outside) {
+        Ok(place) => Ok(place),
+        Err(RabbitError::RestoreRefused(RestoreRefusal::TargetRefused { reason, .. })) => {
+            Err(reason)
+        }
+        Err(other) => Err(TargetRefusal::CouldNotCheck {
+            path: receipt_file_path(resource_path, path),
+            detail: other.to_string(),
+        }),
     }
 }
 
