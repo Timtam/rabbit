@@ -50,13 +50,14 @@ from this file and posts it as the GitHub release body.
   backup that can't be restored can't be ticked for Restore and says why,
   such as a package you installed again since. **Delete** removes backups
   for good, to free the room they take; RABBIT asks first, with **No**
-  selected.
-  Backups RABBIT kept together, such as two packages one uninstall removed,
-  are ticked and deleted together. Both go through Review, the progress
-  page and the Done page, like an install or an uninstall: Enter never
-  starts either, a restore asks you to close REAPER first, and closing
-  RABBIT during one asks first, then stops after the backup it is on.
-  RABBIT never deletes a backup by itself.
+  selected. Each backup is ticked on its own: of two packages one
+  uninstall removed, you can delete one and keep the other. A few rows
+  under **Other backups** can only go together with the backups kept
+  beside them, and Review says which to tick too. Both go through Review,
+  the progress page and the Done page, like an install or an uninstall:
+  Enter never starts either, a restore asks you to close REAPER first, and
+  closing RABBIT during one asks first, then stops after the backup it is
+  on. RABBIT never deletes a backup by itself.
 - The wizard can now uninstall: the **Packages** page has an **Uninstall**
   tab beside **Install or update**. The page opens on **Install or update**
   with focus on the tabs, so screen readers read "Install or update, tab, 1
@@ -153,29 +154,35 @@ from this file and posts it as the GitHub release body.
   back, because REAPER may save its own key map when it quits, over the one
   restored, and when REAPER is open, the message about it says only to
   close it.
-- `rabbit delete-backup` deletes backup sets for good, to free the room they
-  take. Name each with `--backup-id`, exactly as `rabbit backups` lists it.
-  Without `--apply` it only shows each set's size, and which backups in it
-  are the only copy of something, such as a package you uninstalled or your
-  old key map. A set always goes whole, even when it holds the only copy of
-  something. RABBIT first moves it into `RABBIT\backups-deleting`, so no
-  restore finds it any more, then removes what is in it. It never follows a
-  symbolic link or junction: it removes the link, not what it leads to.
-  Nothing outside its backup folders changes but RABBIT's lock and the
-  report in `RABBIT\logs`. What can't be removed stays as an unfinished
-  deletion: `rabbit backups` lists it, and naming its id again finishes it.
-  On Windows, a set with a file open in another program, such as Explorer
-  or an antivirus scan, isn't deleted, and nothing of it changes. A set of
-  another account isn't deleted, and on a Mac `--apply` doesn't run as
-  root. Ctrl+C stops the run once the set it is on is done. The exit code
-  is 0 when every set you named is gone, already gone included, so a script
-  can run twice; 2 when one can't be deleted because of its id, a link or
-  its owner, and then nothing changes; and 1 when a set couldn't be
-  deleted, the run was stopped, or an error came first, such as another
-  RABBIT working on the same REAPER, root on a Mac or no folder at
-  `--resource-path`. A run a check refuses saves no report. `--json` prints
-  the report, or a refusal of the whole run, with codes. `rabbit backups`
-  now ends with the command that deletes a set.
+- `rabbit delete-backup` deletes backups for good, to free the room they
+  take. Name each backup set with `--backup-id`, exactly as `rabbit backups`
+  lists it. Without `--apply` it only shows what would go, how big it is,
+  and which backups are the only copy of something, such as a package you
+  uninstalled or your old key map. A set goes whole, even when it holds the
+  only copy of something. With `--package` or `--key-map` and exactly one
+  `--backup-id`, only that package's backup or the key map goes out of the
+  set; its other backups stay and can still be restored, and the last one
+  takes the whole set with it. Files of the set that `rabbit backups` lists
+  as the set's own backup go only with the whole set. `rabbit backups`
+  prints the command for each set, package and key map. RABBIT moves a whole
+  set into `RABBIT\backups-deleting` first, so no restore finds it, then
+  removes what is in it. It never follows a symbolic link or junction, never
+  removes a file the set still needs, and changes nothing outside its backup
+  folders but its lock and the report in `RABBIT\logs`. What it can't remove
+  stays and is named: of a whole set, as an unfinished deletion, which
+  `rabbit backups` lists and naming its id again finishes; of one backup, in
+  its set until the whole set is deleted. On Windows, a set with a file open
+  in another program isn't deleted, and nothing of it changes. A set of
+  another account isn't deleted, and on a Mac `--apply` doesn't run as root.
+  Ctrl+C stops after the set it is on. The exit code is 0 when everything
+  named is gone, already gone included, so a script that deletes whole sets
+  can run twice; 2 when something named can't be deleted, because of its
+  id, a link, its owner, or a package or key map the set doesn't hold (also
+  one deleted before) or can't give up alone, and then nothing changes and
+  no report is saved; and 1 when a deletion failed, the run was stopped, or
+  an error came first, such as another RABBIT working on the same REAPER or
+  no folder at `--resource-path`. `--json` prints the report, or a refusal
+  of the whole run, with codes.
 - `rabbit components` says for each package whether RABBIT can uninstall it,
   and if not, why.
 - OSARA can be uninstalled too, from the wizard's **Uninstall** tab and with

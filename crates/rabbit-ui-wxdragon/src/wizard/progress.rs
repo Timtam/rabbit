@@ -23,7 +23,7 @@ use super::uninstall::WizardMode;
 #[derive(Debug, Clone)]
 pub struct ProgressUiState {
     /// Packages the run installs or uninstalls, the backup sets a delete
-    /// takes, or the backups a restore brings back.
+    /// deletes from, each once, or the backups a restore brings back.
     pub total_packages: usize,
     /// The phases each package goes through; see [`phases_per_package`].
     pub phases_per_package: usize,
@@ -48,9 +48,9 @@ pub struct ProgressUiState {
     /// How many times RABBIT was reported still waiting for an ended
     /// uninstaller's files to go.
     pub waiting_for_files_count: usize,
-    /// What a delete of backups calls each group of ticked rows, the group
-    /// each set belongs to and what came of each group so far, for its
-    /// status and log lines. Empty for every other run.
+    /// What a delete of backups calls the ticked rows of each set, the
+    /// group of rows each set belongs to and what came of each group so
+    /// far, for its status and log lines. Empty for every other run.
     pub backup_delete: BackupDeleteProgress,
     /// What a restore says when each backup starts and ends, by the
     /// backup's set and package. Empty for every other run.
@@ -87,7 +87,8 @@ impl ProgressUiState {
     }
 
     /// The same state, for a delete of backups that `progress` tells the
-    /// groups of (see [`super::backups_run::backup_delete_progress`]).
+    /// rows of, set by set (see
+    /// [`super::backups_run::backup_delete_progress`]).
     pub fn with_backup_delete(mut self, progress: BackupDeleteProgress) -> Self {
         self.backup_delete = progress;
         self

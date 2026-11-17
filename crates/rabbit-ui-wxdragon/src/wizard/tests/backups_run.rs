@@ -1,15 +1,17 @@
 //! Deleting backups from the Backups tab: what the run is given, what the
 //! progress page says, what Done and Show details say for every way a
-//! delete can end, in every language, and a real delete of sets in a
-//! temporary folder.
+//! delete can end, in every language, and real deletes of whole sets and of
+//! parts of them in a temporary folder.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rabbit_core::RabbitError;
-use rabbit_core::backup_delete::{DeleteReport, DeleteReportItem, DeleteStatus, NotDeletedReason};
-use rabbit_core::backup_overview::{BackupEntry, BackupItem};
+use rabbit_core::backup_delete::{
+    DeleteItem, DeletePart, DeleteReport, DeleteReportItem, DeleteStatus, NotDeletedReason,
+};
+use rabbit_core::backup_overview::{BackupEntry, BackupGroup, BackupItem};
 use rabbit_core::cancel::CancelToken;
 use rabbit_core::localization::{Localizer, embedded_locales};
 use rabbit_core::progress::{ProgressEvent, ProgressReporter};
@@ -21,8 +23,8 @@ use rabbit_core::uninstall::execute::UNINSTALL_BACKUP_REASON;
 use tempfile::tempdir;
 
 use super::backups::{
-    KB, MB, OCT_2_1100, backup_list, en, ffmpeg, index_of, keymap, list_in, package, reapack,
-    records, sws, tick, version, write_uninstall_set,
+    KB, MB, NOV_9_1405, OCT_2_1100, backup, backup_list, en, ffmpeg, index_of, keymap, list_in,
+    package, reapack, records, sws, tick, version, write_uninstall_set,
 };
 use super::support::{assert_reads, langpack_model};
 use super::uninstall::target;
@@ -34,7 +36,8 @@ use crate::wizard::*;
 
 const RESOURCE: &str = "C:/REAPER";
 
-/// FFmpeg 7.1 from an uninstall of its own on October 2, so it goes alone.
+/// FFmpeg 7.1 from an uninstall of its own on October 2, so it is the only
+/// backup of its set.
 fn ffmpeg_alone() -> BackupEntry {
     BackupEntry {
         item: package("uninstall-unix-1790938800", "ffmpeg"),
@@ -55,9 +58,11 @@ fn older_keymap() -> BackupEntry {
     }
 }
 
-/// The set id the row named `name` takes.
+/// The set id the row named `name` is in.
 fn set_of(list: &WizardBackupList, name: &str) -> String {
-    list.rows[index_of(list, name)].set_ids()[0].clone()
+    let row = &list.rows[index_of(list, name)];
+    let entry = row.entry.as_ref().expect("a backup's row");
+    entry.item.set_ids()[0].to_string()
 }
 
 /// What a delete of what is ticked to delete in `list` takes, in the
@@ -66,22 +71,33 @@ fn run_of(localizer: &Localizer, list: &WizardBackupList) -> BackupDeleteRun {
     backup_delete_run(localizer, Path::new(RESOURCE), list)
 }
 
-/// A report item of the set `set_id` that came out as `status`, freeing
-/// `bytes_freed`.
+/// A report item of the whole set `set_id` that came out as `status`,
+/// freeing `bytes_freed`.
 fn item(set_id: &str, status: DeleteStatus, bytes_freed: u64) -> DeleteReportItem {
     DeleteReportItem {
         set_id: set_id.to_string(),
         status,
+        part: DeletePart::WholeSet,
         set_path: None,
         unfinished_deletion: None,
         size: bytes_freed,
         only_copy: Vec::new(),
         bytes_freed,
+        files_left: Vec::new(),
         not_deleted: None,
         left_in: None,
         finished_earlier_deletion: false,
         refusal: None,
         error: None,
+    }
+}
+
+/// The report item of the run's `delete`, its set and part, that came out
+/// as `status`, freeing `bytes_freed`.
+fn ended(delete: &DeleteItem, status: DeleteStatus, bytes_freed: u64) -> DeleteReportItem {
+    DeleteReportItem {
+        part: delete.part.clone(),
+        ..item(&delete.set_id, status, bytes_freed)
     }
 }
 
@@ -96,6 +112,36 @@ fn not_deleted(set_id: &str, reason: NotDeletedReason) -> DeleteReportItem {
         item.left_in = Some(PathBuf::from(format!(
             "C:/REAPER/RABBIT/backups-deleting/{set_id}"
         )));
+    }
+    item
+}
+
+/// The run's `delete`, a package or the key map, that couldn't go out of its
+/// set, because the set's manifest couldn't be saved for `reason`.
+fn not_deleted_from_set(delete: &DeleteItem, reason: NotDeletedReason) -> DeleteReportItem {
+    let mut item = ended(delete, DeleteStatus::NotDeletedFromSet, 0);
+    item.not_deleted = Some(reason);
+    item.error = Some(format!(
+        "C:/REAPER/RABBIT/backups/{}/backup-manifest.json: Access is denied. (os error 5)",
+        delete.set_id
+    ));
+    item
+}
+
+/// The run's `delete`, a package or the key map, gone out of its set, with
+/// `left` of its files still there.
+fn deleted_from_set(delete: &DeleteItem, bytes_freed: u64, left: usize) -> DeleteReportItem {
+    let mut item = ended(delete, DeleteStatus::DeletedFromSet, bytes_freed);
+    item.files_left = (0..left)
+        .map(|n| {
+            PathBuf::from(format!(
+                "C:/REAPER/RABBIT/backups/{}/UserPlugins/left-{n}.dll",
+                delete.set_id
+            ))
+        })
+        .collect();
+    if left > 0 {
+        item.error = Some("left-0.dll: Access is denied. (os error 5)".to_string());
     }
     item
 }
@@ -150,6 +196,18 @@ fn stopped_report(sets: Vec<DeleteReportItem>) -> DeleteReport {
     }
 }
 
+/// `report`, written by set, as the engine gives it for `run`: each item
+/// with the part the run named of its set. For runs whose rows are each the
+/// only one ticked of their set, so a set names one part.
+fn by_part(run: &BackupDeleteRun, mut report: DeleteReport) -> DeleteReport {
+    for set in &mut report.sets {
+        if let Some(delete) = run.items.iter().find(|delete| delete.set_id == set.set_id) {
+            set.part = delete.part.clone();
+        }
+    }
+    report
+}
+
 /// A list of `entries` in `localizer`'s language, with Delete chosen and
 /// every backup ticked to delete.
 fn all_ticked(localizer: &Localizer, entries: Vec<BackupEntry>) -> WizardBackupList {
@@ -164,39 +222,47 @@ fn all_ticked(localizer: &Localizer, entries: Vec<BackupEntry>) -> WizardBackupL
     list
 }
 
-/// FFmpeg alone, ReaPack and your key map, each a set of its own, all
-/// ticked to delete, in `localizer`'s language.
+/// FFmpeg alone, ReaPack and your key map, each the only backup of its set,
+/// all ticked to delete, in `localizer`'s language.
 fn three_alone(localizer: &Localizer) -> WizardBackupList {
     all_ticked(localizer, vec![ffmpeg_alone(), reapack(), keymap()])
 }
 
+const SWS: &str = "SWS Extension 2.14.0.7";
+const FFMPEG: &str = "FFmpeg for Improved Video Support 7.1";
 const REAPACK: &str = "ReaPack 1.2.4";
 const KEYMAP: &str = "Your key map";
 const RECORDS: &str = "Old copies of RABBIT's records";
 const KEYMAP_NOV_1: &str = "Your key map (Replaced by OSARA's on November 1, 2026, 6:40 PM)";
 const KEYMAP_OCT_2: &str = "Your key map (Replaced by OSARA's on October 2, 2026, 11:00 AM)";
+const BOTH_SET: &str = "uninstall-unix-1794233100";
 
-/// The Done page for `result` of the run of `list`, in English.
+/// The Done page for `result` of the run of `list`, in English, with the
+/// report written by set (see [`by_part`]).
 fn done(
     list: &WizardBackupList,
     result: rabbit_core::Result<DeleteReport>,
 ) -> WizardBackupDeleteOutcome {
-    wizard_backup_delete_outcome(&en(), &run_of(&en(), list), &result)
+    let run = run_of(&en(), list);
+    let result = result.map(|report| by_part(&run, report));
+    wizard_backup_delete_outcome(&en(), &run, &result)
 }
 
 /// The records row's 23 sets, of which those at `ended` ended as given,
 /// freeing a KB each when gone; the others as `rest`.
 fn records_sets(
     run: &BackupDeleteRun,
-    group: usize,
+    row: usize,
     ended: &dyn Fn(usize, &str) -> Option<DeleteReportItem>,
     rest: DeleteStatus,
 ) -> Vec<DeleteReportItem> {
-    run.groups[group]
-        .set_ids
+    run.rows[row]
+        .items
         .iter()
         .enumerate()
-        .map(|(index, id)| ended(index, id).unwrap_or_else(|| item(id, rest, 0)))
+        .map(|(index, delete)| {
+            ended(index, &delete.set_id).unwrap_or_else(|| item(&delete.set_id, rest, 0))
+        })
         .collect()
 }
 
@@ -205,9 +271,9 @@ fn records_sets(
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_run_is_copied_out_of_the_list_by_what_goes_together() {
+fn the_run_is_copied_out_of_the_list_row_by_row() {
     let mut list = backup_list(vec![sws(), ffmpeg(), reapack(), keymap(), records()]);
-    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Delete);
+    tick(&mut list, SWS, BackupChoice::Delete);
     tick(&mut list, REAPACK, BackupChoice::Delete);
     tick(&mut list, RECORDS, BackupChoice::Delete);
     // A tick for Restore is no part of a delete.
@@ -216,40 +282,45 @@ fn the_run_is_copied_out_of_the_list_by_what_goes_together() {
     let run = run_of(&en(), &list);
     assert_eq!(run.resource_path, PathBuf::from(RESOURCE));
     assert_eq!(run.items, backup_delete_items(&list));
-    // Counted as Review and the question count: one per ticked row.
-    assert_eq!(run.backups(), 4);
-    assert_eq!(run.groups.len(), 3);
+    // Counted as Review and the question count: one per ticked row. SWS
+    // goes without FFmpeg, from the same uninstall.
+    assert_eq!(run.backups(), 3);
+    let names: Vec<&str> = run.rows.iter().map(|row| row.name.as_str()).collect();
+    assert_eq!(names, [SWS, REAPACK, RECORDS]);
     assert_eq!(
-        run.groups[0].names,
-        [
-            "SWS Extension 2.14.0.7",
-            "FFmpeg for Improved Video Support 7.1"
-        ]
+        run.rows[0].items,
+        [DeleteItem::package(BOTH_SET, "sws")
+            .with_fingerprint(run.items[0].fingerprint.clone().unwrap())]
     );
-    assert_eq!(run.groups[0].set_ids, ["uninstall-unix-1794233100"]);
     assert_eq!(
-        run.groups[0].references[0],
+        run.rows[0].reference,
         "SWS Extension 2.14.0.7 (Uninstalled November 9, 2026, 2:05 PM)"
     );
     // No other ticked row has their names, so they are said without dates.
-    assert_eq!(run.groups[0].labels, run.groups[0].names);
-    assert_eq!(run.groups[1].names, [REAPACK]);
-    assert_eq!(run.groups[2].names, [RECORDS]);
-    assert_eq!(run.groups[2].set_ids.len(), 23);
+    assert_eq!(run.rows[0].label, SWS);
+    assert_eq!(run.rows[2].items.len(), 23);
+    // One item per ticked package, and per set of the records; the run
+    // goes through each set once.
+    assert_eq!(run.items.len(), 1 + 1 + 23);
+    assert_eq!(run.set_count(), 1 + 1 + 23);
     // Every fingerprint the list read goes with it.
     assert!(run.items.iter().all(|item| item.fingerprint.is_some()));
+
+    // Two rows of one set give the run two items, but one set to go
+    // through.
+    tick(&mut list, FFMPEG, BackupChoice::Delete);
+    let run = run_of(&en(), &list);
+    assert_eq!(run.backups(), 4);
+    assert_eq!(run.items.len(), 2 + 1 + 23);
+    assert_eq!(run.set_count(), 1 + 1 + 23);
 }
 
 #[test]
 fn review_the_question_and_done_count_the_same_backups() {
-    // A pair that shares a set, a row alone, the records row and a tick
+    // A package of a set of two, a row alone, the records row and a tick
     // for Restore only.
     let mut list = backup_list(vec![sws(), ffmpeg(), reapack(), keymap(), records()]);
-    tick(
-        &mut list,
-        "FFmpeg for Improved Video Support 7.1",
-        BackupChoice::Delete,
-    );
+    tick(&mut list, FFMPEG, BackupChoice::Delete);
     tick(&mut list, REAPACK, BackupChoice::Delete);
     tick(&mut list, RECORDS, BackupChoice::Delete);
     tick(&mut list, KEYMAP, BackupChoice::Restore);
@@ -258,23 +329,32 @@ fn review_the_question_and_done_count_the_same_backups() {
         run.backups(),
         list.ticked_rows(BackupChoice::Delete).count()
     );
-    assert_eq!(run.backups(), 4);
+    assert_eq!(run.backups(), 3);
 
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(
+        review.lines[2].starts_with("These backups go for good and free "),
+        "{:#?}",
+        review.lines
+    );
     let (_, question) = delete_backups_question(&en(), &list);
     assert!(
-        question.starts_with("RABBIT deletes 4 backups and frees "),
+        question.starts_with("RABBIT deletes 3 backups and frees "),
         "{question}"
     );
     let all_deleted: Vec<DeleteReportItem> = run
         .items
         .iter()
-        .map(|delete| item(&delete.set_id, DeleteStatus::Deleted, KB))
+        .map(|delete| match delete.part {
+            DeletePart::WholeSet => ended(delete, DeleteStatus::Deleted, KB),
+            _ => ended(delete, DeleteStatus::DeletedFromSet, KB),
+        })
         .collect();
     let outcome = wizard_backup_delete_outcome(&en(), &run, &Ok(report(all_deleted)));
     assert!(
         outcome
             .heading
-            .starts_with("RABBIT deleted 4 backups and freed "),
+            .starts_with("RABBIT deleted 3 backups and freed "),
         "{}",
         outcome.heading
     );
@@ -286,21 +366,23 @@ fn nothing_ticked_to_delete_gives_a_run_of_nothing() {
     tick(&mut list, REAPACK, BackupChoice::Restore);
     let run = run_of(&en(), &list);
     assert!(run.items.is_empty());
-    assert!(run.groups.is_empty());
+    assert!(run.rows.is_empty());
     assert_eq!(run.backups(), 0);
+    assert_eq!(run.set_count(), 0);
 }
 
 #[test]
 fn the_progress_log_starts_with_the_target_and_what_goes() {
     let mut list = backup_list(vec![sws(), ffmpeg(), reapack()]);
-    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Delete);
+    tick(&mut list, SWS, BackupChoice::Delete);
     tick(&mut list, REAPACK, BackupChoice::Delete);
+    // FFmpeg, from the same uninstall as SWS, isn't ticked, so it isn't
+    // said.
     assert_eq!(
         backup_delete_progress_details_for_start(&en(), Path::new(RESOURCE), &list),
         "Starting to delete backups.\n\
          Target: C:/REAPER\n\
          SWS Extension 2.14.0.7: Will delete the only copy\n\
-         FFmpeg for Improved Video Support 7.1: Will delete the only copy\n\
          ReaPack 1.2.4: Will delete"
     );
 }
@@ -324,9 +406,9 @@ fn completed(set_id: &str, status: DeleteStatus, bytes_freed: u64) -> ProgressEv
 }
 
 /// The progress page's state at the start of the delete `run`, in
-/// `localizer`'s language.
+/// `localizer`'s language, as the Delete button sets it up.
 fn progress_of(localizer: &Localizer, run: &BackupDeleteRun) -> ProgressUiState {
-    ProgressUiState::new(WizardMode::DeleteBackups, run.items.len(), 0)
+    ProgressUiState::new(WizardMode::DeleteBackups, run.set_count(), 0)
         .with_backup_delete(backup_delete_progress(localizer, run))
 }
 
@@ -336,17 +418,21 @@ fn hear(state: &mut ProgressUiState, event: &ProgressEvent) -> (Option<String>, 
     backup_delete_progress_lines(&en(), state, event)
 }
 
+/// The engine starts and ends a set once for every ticked row of it: the
+/// start line names them all, the end line says what came of them, and the
+/// gauge counts the set once.
 #[test]
-fn a_delete_says_each_backup_it_starts_and_logs_what_came_of_it() {
+fn a_delete_says_each_set_it_starts_with_its_ticked_rows_and_logs_what_came_of_it() {
     let mut list = backup_list(vec![sws(), ffmpeg(), reapack()]);
-    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Delete);
+    tick(&mut list, SWS, BackupChoice::Delete);
+    tick(&mut list, FFMPEG, BackupChoice::Delete);
     tick(&mut list, REAPACK, BackupChoice::Delete);
     let run = run_of(&en(), &list);
-    assert_eq!(run.items.len(), 2);
+    assert_eq!(run.items.len(), 3);
+    assert_eq!(run.set_count(), 2);
     let mut state = progress_of(&en(), &run);
 
-    let both = "uninstall-unix-1794233100";
-    let event = started(both);
+    let event = started(BOTH_SET);
     assert!(is_spoken(&event));
     let (status, log) = hear(&mut state, &event);
     let line = "Deleting the backups: SWS Extension 2.14.0.7 and FFmpeg for Improved Video Support \
@@ -356,7 +442,7 @@ fn a_delete_says_each_backup_it_starts_and_logs_what_came_of_it() {
     assert_eq!(state.percentage(), 0);
     assert!(!state.moves_focus_to_log(&event));
 
-    let event = completed(both, DeleteStatus::Deleted, 254 * MB);
+    let event = completed(BOTH_SET, DeleteStatus::Deleted, 254 * MB);
     assert!(!is_spoken(&event));
     assert_eq!(
         hear(&mut state, &event),
@@ -387,6 +473,28 @@ fn a_delete_says_each_backup_it_starts_and_logs_what_came_of_it() {
 }
 
 #[test]
+fn one_package_out_of_a_set_is_said_alone() {
+    let mut list = backup_list(vec![sws(), ffmpeg()]);
+    tick(&mut list, FFMPEG, BackupChoice::Delete);
+    let run = run_of(&en(), &list);
+    let mut state = progress_of(&en(), &run);
+    assert_eq!(
+        hear(&mut state, &started(BOTH_SET)).0.as_deref(),
+        Some("Deleting the backup: FFmpeg for Improved Video Support 7.1…")
+    );
+    assert_eq!(
+        hear(
+            &mut state,
+            &completed(BOTH_SET, DeleteStatus::DeletedFromSet, 250 * MB)
+        )
+        .1
+        .as_deref(),
+        Some("FFmpeg for Improved Video Support 7.1: deleted, 250 MB freed.")
+    );
+    assert_eq!(state.percentage(), 100);
+}
+
+#[test]
 fn every_end_of_a_set_has_its_log_line() {
     let list = three_alone(&en());
     let run = run_of(&en(), &list);
@@ -394,6 +502,10 @@ fn every_end_of_a_set_has_its_log_line() {
     let cases = [
         (
             DeleteStatus::Deleted,
+            Some("ReaPack 1.2.4: deleted, 2 MB freed."),
+        ),
+        (
+            DeleteStatus::DeletedFromSet,
             Some("ReaPack 1.2.4: deleted, 2 MB freed."),
         ),
         (
@@ -412,11 +524,16 @@ fn every_end_of_a_set_has_its_log_line() {
             DeleteStatus::NotDeleted,
             Some("ReaPack 1.2.4: not deleted."),
         ),
+        (
+            DeleteStatus::NotDeletedFromSet,
+            Some("ReaPack 1.2.4: not deleted."),
+        ),
         (DeleteStatus::Refused, Some("ReaPack 1.2.4: not deleted.")),
         // A real run sends no end for these.
         (DeleteStatus::NotReached, None),
         (DeleteStatus::WouldDelete, None),
         (DeleteStatus::WouldFinishEarlierDeletion, None),
+        (DeleteStatus::WouldDeleteFromSet, None),
     ];
     for (status, line) in cases {
         let mut state = progress_of(&en(), &run);
@@ -431,7 +548,11 @@ fn the_records_row_is_said_once_at_its_start_and_once_at_its_end() {
     tick(&mut list, RECORDS, BackupChoice::Delete);
     tick(&mut list, REAPACK, BackupChoice::Delete);
     let run = run_of(&en(), &list);
-    let record_sets: Vec<String> = run.groups[1].set_ids.clone();
+    let record_sets: Vec<String> = run.rows[1]
+        .items
+        .iter()
+        .map(|item| item.set_id.clone())
+        .collect();
     assert_eq!(record_sets.len(), 23);
 
     // Every set of the row goes, but the last, which is in use.
@@ -490,11 +611,11 @@ fn two_backups_of_one_name_are_each_said_with_their_dates() {
     apply_backup_checkbox(&mut list.rows, first + 1, BackupChoice::Delete, true);
     assert_eq!(list.rows[first + 1].name, KEYMAP);
     let run = run_of(&en(), &list);
-    assert_eq!(run.groups.len(), 2);
-    assert_eq!(run.groups[0].labels, [KEYMAP_NOV_1]);
-    assert_eq!(run.groups[1].labels, [KEYMAP_OCT_2]);
-    let newer = run.groups[0].set_ids[0].clone();
-    let older = run.groups[1].set_ids[0].clone();
+    assert_eq!(run.rows.len(), 2);
+    assert_eq!(run.rows[0].label, KEYMAP_NOV_1);
+    assert_eq!(run.rows[1].label, KEYMAP_OCT_2);
+    let newer = run.items[0].set_id.clone();
+    let older = run.items[1].set_id.clone();
     assert_eq!(
         backup_delete_progress_details_for_start(&en(), Path::new(RESOURCE), &list),
         format!(
@@ -529,13 +650,17 @@ fn two_backups_of_one_name_are_each_said_with_their_dates() {
         ]
     );
 
-    // Show details tells them apart too.
+    // Show details tells them apart too. Each key map is the only backup
+    // of its set, which goes whole.
     let outcome = wizard_backup_delete_outcome(
         &en(),
         &run,
         &Ok(report(vec![
-            item(&newer, DeleteStatus::Deleted, 38 * KB),
-            not_deleted(&older, NotDeletedReason::InUse),
+            ended(&run.items[0], DeleteStatus::Deleted, 38 * KB),
+            DeleteReportItem {
+                part: DeletePart::Keymap,
+                ..not_deleted(&older, NotDeletedReason::InUse)
+            },
         ])),
     );
     assert_eq!(
@@ -599,31 +724,35 @@ fn only_a_deletes_events_have_delete_lines() {
 #[test]
 fn a_full_delete_says_how_many_backups_went_and_what_it_freed() {
     let mut list = backup_list(vec![sws(), ffmpeg(), reapack(), keymap()]);
-    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Delete);
+    tick(&mut list, SWS, BackupChoice::Delete);
     tick(&mut list, REAPACK, BackupChoice::Delete);
-    let outcome = done(
-        &list,
-        Ok(report(vec![
-            item("uninstall-unix-1794233100", DeleteStatus::Deleted, 400 * MB),
-            item("unix-1793697120", DeleteStatus::Deleted, 120 * MB),
+    let run = run_of(&en(), &list);
+    // SWS goes out of the set it shares with FFmpeg; ReaPack is the only
+    // backup of its set, which goes whole.
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(vec![
+            ended(&run.items[0], DeleteStatus::DeletedFromSet, 4 * MB),
+            ended(&run.items[1], DeleteStatus::Deleted, 120 * MB),
         ])),
     );
     assert_eq!(outcome.status, BackupDeleteOutcomeStatus::Deleted);
-    // Three backups, as Review and the question counted them, in two sets.
+    // Two backups, as Review and the question counted them.
     assert_eq!(
         outcome.heading,
-        "RABBIT deleted 3 backups and freed 520 MB."
+        "RABBIT deleted 2 backups and freed 124 MB."
     );
     assert_eq!(outcome.status_text, outcome.heading);
     assert_eq!(
         outcome.detail_lines,
         [
             "Target: C:/REAPER",
-            "SWS Extension 2.14.0.7 and FFmpeg for Improved Video Support 7.1: Deleted",
-            "  Freed: 400 MB",
+            "SWS Extension 2.14.0.7: Deleted",
+            "  Freed: 4 MB",
             "ReaPack 1.2.4: Deleted",
             "  Freed: 120 MB",
-            "Freed in all: 520 MB",
+            "Freed in all: 124 MB",
             "Report: C:/REAPER/RABBIT/logs/delete-backup-unix-1.txt",
         ]
     );
@@ -632,6 +761,514 @@ fn a_full_delete_says_how_many_backups_went_and_what_it_freed() {
         Some(PathBuf::from(
             "C:/REAPER/RABBIT/logs/delete-backup-unix-1.txt"
         ))
+    );
+}
+
+/// Every backup of a set ticked: the engine deletes the set whole for all
+/// of them, and gives its bytes to the first. Done counts each row once,
+/// and the bytes once, in the total; no row says it freed the set.
+#[test]
+fn every_backup_of_a_set_deleted_whole_counts_each_row_and_the_bytes_once() {
+    let mut list = backup_list(vec![sws(), ffmpeg()]);
+    tick(&mut list, SWS, BackupChoice::Delete);
+    tick(&mut list, FFMPEG, BackupChoice::Delete);
+    let run = run_of(&en(), &list);
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(vec![
+            ended(&run.items[0], DeleteStatus::Deleted, 254 * MB),
+            ended(&run.items[1], DeleteStatus::Deleted, 0),
+        ])),
+    );
+    assert_eq!(outcome.status, BackupDeleteOutcomeStatus::Deleted);
+    assert_eq!(
+        outcome.heading,
+        "RABBIT deleted 2 backups and freed 254 MB."
+    );
+    assert_eq!(
+        outcome.detail_lines,
+        [
+            "Target: C:/REAPER",
+            "SWS Extension 2.14.0.7: Deleted",
+            "FFmpeg for Improved Video Support 7.1: Deleted",
+            "Freed in all: 254 MB",
+            "Report: C:/REAPER/RABBIT/logs/delete-backup-unix-1.txt",
+        ]
+    );
+}
+
+/// Two ticked rows of one set name the same set with other parts: each
+/// finds what came of it by set and part, wherever the report lists it.
+#[test]
+fn each_row_finds_its_own_result_by_set_and_part() {
+    let mut list = backup_list(vec![sws(), ffmpeg(), reapack()]);
+    tick(&mut list, SWS, BackupChoice::Delete);
+    tick(&mut list, FFMPEG, BackupChoice::Delete);
+    let run = run_of(&en(), &list);
+    let [sws_item, ffmpeg_item] = &run.items[..] else {
+        panic!("{:#?}", run.items);
+    };
+    assert_eq!(sws_item.set_id, ffmpeg_item.set_id);
+    // FFmpeg first in the report, though the run named SWS first.
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(vec![
+            ended(ffmpeg_item, DeleteStatus::DeletedFromSet, 250 * MB),
+            DeleteReportItem {
+                refusal: Some(RestoreRefusal::PackageNotInSet {
+                    backup_id: BOTH_SET.to_string(),
+                    package_id: "sws".to_string(),
+                    packages: vec!["ffmpeg".to_string()],
+                }),
+                ..ended(sws_item, DeleteStatus::Refused, 0)
+            },
+        ])),
+    );
+    assert_eq!(
+        outcome.status,
+        BackupDeleteOutcomeStatus::CompletedWithProblems
+    );
+    assert_eq!(
+        outcome.status_text,
+        "RABBIT deleted 1 of 2 backups.\n\nRABBIT can't delete this backup: SWS Extension \
+         2.14.0.7 (Uninstalled November 9, 2026, 2:05 PM). The backup it was kept in no longer \
+         holds a copy of SWS Extension that RABBIT can delete."
+    );
+    assert_eq!(
+        outcome.detail_lines,
+        [
+            "Target: C:/REAPER",
+            "SWS Extension 2.14.0.7: Can't be deleted",
+            "  The backup it was kept in no longer holds a copy of SWS Extension that RABBIT \
+             can delete.",
+            "FFmpeg for Improved Video Support 7.1: Deleted",
+            "  Freed: 250 MB",
+            "Freed in all: 250 MB",
+            "Report: C:/REAPER/RABBIT/logs/delete-backup-unix-1.txt",
+        ]
+    );
+
+    // A report item of the set with another part, or of the whole set,
+    // is no row's: the row wasn't reached.
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(stopped_report(vec![
+            ended(sws_item, DeleteStatus::DeletedFromSet, 4 * MB),
+            item(BOTH_SET, DeleteStatus::Deleted, 0),
+        ])),
+    );
+    assert_eq!(
+        outcome.status_text,
+        "RABBIT stopped after deleting 1 of 2 backups. Backups it hadn't reached are kept."
+    );
+    assert_eq!(
+        outcome.detail_lines[3..5],
+        [
+            "FFmpeg for Improved Video Support 7.1: Not reached",
+            "  RABBIT stopped before it, so it is kept.",
+        ]
+    );
+}
+
+/// A package or the key map stays in its set when the set's record of
+/// what it holds can't be saved without it. Nothing changed, and it isn't a
+/// file of the backup that was open.
+#[test]
+fn a_backup_that_couldnt_go_out_of_its_set_says_its_record_couldnt_be_changed() {
+    let mut list = backup_list(vec![sws(), ffmpeg(), reapack()]);
+    tick(&mut list, FFMPEG, BackupChoice::Delete);
+    let run = run_of(&en(), &list);
+    let manifest_error = format!(
+        "  Error: C:/REAPER/RABBIT/backups/{BOTH_SET}/backup-manifest.json: Access is denied. \
+         (os error 5)"
+    );
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(vec![not_deleted_from_set(
+            &run.items[0],
+            NotDeletedReason::InUse,
+        )])),
+    );
+    assert_eq!(outcome.status, BackupDeleteOutcomeStatus::NothingDeleted);
+    assert_eq!(
+        outcome.status_text,
+        "RABBIT couldn't delete the backup.\n\nIts record of what it holds is open in another \
+         program. Close that program, then run RABBIT again to delete it."
+    );
+    assert_eq!(
+        outcome.detail_lines,
+        [
+            "Target: C:/REAPER".to_string(),
+            "FFmpeg for Improved Video Support 7.1: Not deleted".to_string(),
+            "  Nothing of it changed.".to_string(),
+            "  Its record of what it holds is open in another program, so it couldn't be \
+             changed."
+                .to_string(),
+            manifest_error.clone(),
+            "Freed in all: under 1 KB".to_string(),
+            "Report: C:/REAPER/RABBIT/logs/delete-backup-unix-1.txt".to_string(),
+        ]
+    );
+
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(vec![not_deleted_from_set(
+            &run.items[0],
+            NotDeletedReason::Permission,
+        )])),
+    );
+    assert_eq!(
+        outcome.status_text,
+        "RABBIT couldn't delete the backup.\n\nRABBIT isn't allowed to change its record of what \
+         it holds. It stays as it was."
+    );
+    assert_eq!(
+        outcome.detail_lines[2..5],
+        [
+            "  Nothing of it changed.".to_string(),
+            "  RABBIT isn't allowed to change its record of what it holds.".to_string(),
+            manifest_error,
+        ]
+    );
+
+    // Among others, counted, and never said as a file open in the backup.
+    tick(&mut list, REAPACK, BackupChoice::Delete);
+    tick(&mut list, SWS, BackupChoice::Delete);
+    let run = run_of(&en(), &list);
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(vec![
+            not_deleted_from_set(&run.items[0], NotDeletedReason::InUse),
+            not_deleted_from_set(&run.items[1], NotDeletedReason::InUse),
+            ended(&run.items[2], DeleteStatus::Deleted, 2 * MB),
+        ])),
+    );
+    assert_eq!(
+        outcome.status_text,
+        "RABBIT deleted 1 of 3 backups.\n\n2 couldn't be deleted, because their record of what \
+         they hold is open in another program. Close that program, then run RABBIT again to \
+         delete them."
+    );
+}
+
+/// A package gone out of its set whose files couldn't all be removed: Done
+/// counts it deleted, and says that files of it stay and take up room,
+/// since no row lists them after the rescan; Show details says how many
+/// stayed and when they go.
+#[test]
+fn files_left_in_the_set_are_said_on_done_and_in_show_details() {
+    let mut list = backup_list(vec![sws(), ffmpeg()]);
+    tick(&mut list, FFMPEG, BackupChoice::Delete);
+    let run = run_of(&en(), &list);
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(vec![deleted_from_set(&run.items[0], 249 * MB, 2)])),
+    );
+    assert_eq!(outcome.status, BackupDeleteOutcomeStatus::Deleted);
+    assert_eq!(
+        outcome.status_text,
+        "RABBIT deleted one backup and freed 249 MB.\n\nNot all of its files could be removed. \
+         Those left stay in the backup it was kept in, and take up room there until the rest of \
+         that backup is deleted."
+    );
+    assert_eq!(
+        outcome.detail_lines,
+        [
+            "Target: C:/REAPER",
+            "FFmpeg for Improved Video Support 7.1: Deleted",
+            "  Freed: 249 MB",
+            "  2 of its files couldn't be removed and stay in the backup they were kept in. They \
+             go when the rest of that backup is deleted.",
+            "  Error: left-0.dll: Access is denied. (os error 5)",
+            "Freed in all: 249 MB",
+            "Report: C:/REAPER/RABBIT/logs/delete-backup-unix-1.txt",
+        ]
+    );
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(vec![deleted_from_set(&run.items[0], 249 * MB, 1)])),
+    );
+    assert_eq!(
+        outcome.detail_lines[3],
+        "  One of its files couldn't be removed and stays in the backup it was kept in. It goes \
+         when the rest of that backup is deleted."
+    );
+    // None left: nothing more to say.
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(vec![deleted_from_set(&run.items[0], 250 * MB, 0)])),
+    );
+    assert_eq!(
+        outcome.status_text,
+        "RABBIT deleted one backup and freed 250 MB."
+    );
+    assert_eq!(
+        outcome.detail_lines[1..3],
+        [
+            "FFmpeg for Improved Video Support 7.1: Deleted",
+            "  Freed: 250 MB",
+        ]
+    );
+    assert_eq!(outcome.detail_lines.len(), 5);
+}
+
+/// Two packages out of one set, both gone, one with files of it left:
+/// Done counts the one among the ticked backups.
+#[test]
+fn files_left_by_one_of_several_are_counted_on_done() {
+    let mut list = backup_list(vec![sws(), ffmpeg(), reapack()]);
+    tick(&mut list, SWS, BackupChoice::Delete);
+    tick(&mut list, REAPACK, BackupChoice::Delete);
+    let run = run_of(&en(), &list);
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(vec![
+            deleted_from_set(&run.items[0], 2 * MB, 1),
+            ended(&run.items[1], DeleteStatus::Deleted, 2 * MB),
+        ])),
+    );
+    assert_eq!(
+        outcome.status_text,
+        "RABBIT deleted 2 backups and freed 4 MB.\n\nOne was deleted, but not all of its files \
+         could be removed. Those left stay in the backup it was kept in, and take up room there \
+         until the rest of that backup is deleted."
+    );
+}
+
+/// A package refused because an unfinished deletion of its set's id is
+/// another account's: Done says so of that deletion, never that the
+/// package is another account's.
+#[test]
+fn a_refusal_for_another_accounts_unfinished_deletion_says_so() {
+    let mut list = backup_list(vec![sws(), ffmpeg()]);
+    tick(&mut list, SWS, BackupChoice::Delete);
+    let run = run_of(&en(), &list);
+    let deleting = PathBuf::from(format!("C:/REAPER/RABBIT/backups-deleting/{BOTH_SET}"));
+    let not_yours = RestoreRefusal::NotYours {
+        backup_id: BOTH_SET.to_string(),
+    };
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(refused_report(vec![DeleteReportItem {
+            refusal: Some(not_yours.clone()),
+            unfinished_deletion: Some(deleting.clone()),
+            ..ended(&run.items[0], DeleteStatus::Refused, 0)
+        }])),
+    );
+    assert_eq!(
+        outcome.status_text,
+        "Nothing was deleted.\n\nRABBIT can't delete this backup: SWS Extension 2.14.0.7 \
+         (Uninstalled November 9, 2026, 2:05 PM). An unfinished deletion of the backup it is \
+         kept in belongs to another account, so RABBIT doesn't change that backup."
+    );
+    assert_eq!(
+        outcome.detail_lines[1..3],
+        [
+            "SWS Extension 2.14.0.7: Can't be deleted",
+            "  An unfinished deletion of the backup it is kept in belongs to another account, so \
+             RABBIT doesn't change that backup.",
+        ]
+    );
+    // The set itself another account's: said of the backup.
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(refused_report(vec![DeleteReportItem {
+            refusal: Some(not_yours.clone()),
+            set_path: Some(PathBuf::from(format!(
+                "C:/REAPER/RABBIT/backups/{BOTH_SET}"
+            ))),
+            ..ended(&run.items[0], DeleteStatus::Refused, 0)
+        }])),
+    );
+    assert!(
+        outcome
+            .status_text
+            .ends_with("It belongs to another account, so RABBIT doesn't delete it."),
+        "{}",
+        outcome.status_text
+    );
+    // An unfinished deletion ticked itself is the deletion it is about.
+    let deleting_row = BackupEntry {
+        restore_scope: None,
+        ..backup(
+            BackupItem::Deleting {
+                set_id: "uninstall-unix-1".to_string(),
+            },
+            BackupGroup::Other,
+            Some(OCT_2_1100),
+        )
+    };
+    let mut list = backup_list(vec![deleting_row]);
+    tick(&mut list, "Unfinished deletion", BackupChoice::Delete);
+    let run = run_of(&en(), &list);
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(refused_report(vec![DeleteReportItem {
+            refusal: Some(RestoreRefusal::NotYours {
+                backup_id: "uninstall-unix-1".to_string(),
+            }),
+            unfinished_deletion: Some(PathBuf::from(
+                "C:/REAPER/RABBIT/backups-deleting/uninstall-unix-1",
+            )),
+            ..ended(&run.items[0], DeleteStatus::Refused, 0)
+        }])),
+    );
+    assert!(
+        outcome
+            .status_text
+            .ends_with("It belongs to another account, so RABBIT doesn't delete it."),
+        "{}",
+        outcome.status_text
+    );
+}
+
+/// A set that went whole finished an unfinished deletion of its id first,
+/// which no row ticked: Show details says so once, below the set's first
+/// row, and not when the unfinished deletion was ticked itself.
+#[test]
+fn an_unfinished_deletion_finished_with_its_set_is_said_once() {
+    let deleting = BackupEntry {
+        restore_scope: None,
+        ..backup(
+            BackupItem::Deleting {
+                set_id: BOTH_SET.to_string(),
+            },
+            BackupGroup::Other,
+            Some(NOV_9_1405),
+        )
+    };
+    let mut list = backup_list(vec![sws(), ffmpeg(), deleting]);
+    tick(&mut list, SWS, BackupChoice::Delete);
+    tick(&mut list, FFMPEG, BackupChoice::Delete);
+    let run = run_of(&en(), &list);
+    let finished = |delete: &DeleteItem, bytes_freed: u64| DeleteReportItem {
+        finished_earlier_deletion: true,
+        ..ended(delete, DeleteStatus::Deleted, bytes_freed)
+    };
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(vec![
+            finished(&run.items[0], 255 * MB),
+            finished(&run.items[1], 0),
+        ])),
+    );
+    assert_eq!(
+        outcome.heading,
+        "RABBIT deleted 2 backups and freed 255 MB."
+    );
+    assert_eq!(
+        outcome.detail_lines[1..5],
+        [
+            "SWS Extension 2.14.0.7: Deleted",
+            "  RABBIT also finished an unfinished deletion of the backup it was kept in.",
+            "FFmpeg for Improved Video Support 7.1: Deleted",
+            "Freed in all: 255 MB",
+        ]
+    );
+
+    // Ticked itself, the unfinished deletion's own line says it.
+    tick(&mut list, "Unfinished deletion", BackupChoice::Delete);
+    let run = run_of(&en(), &list);
+    assert!(run.rows[2].unfinished_deletion);
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(vec![
+            finished(&run.items[0], 255 * MB),
+            finished(&run.items[1], 0),
+            finished(&run.items[2], 0),
+        ])),
+    );
+    assert!(
+        outcome
+            .detail_lines
+            .iter()
+            .all(|line| !line.contains("also finished")),
+        "{:#?}",
+        outcome.detail_lines
+    );
+}
+
+/// The engine refused one ticked row of a set right before that set's turn
+/// and left the set's other ticked row as it was, then went on: that row
+/// says so, not that the run stopped, and Done counts it.
+#[test]
+fn a_backup_kept_because_another_of_its_set_was_refused_says_so() {
+    let mut list = backup_list(vec![sws(), ffmpeg(), reapack()]);
+    tick(&mut list, SWS, BackupChoice::Delete);
+    tick(&mut list, FFMPEG, BackupChoice::Delete);
+    tick(&mut list, REAPACK, BackupChoice::Delete);
+    let run = run_of(&en(), &list);
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(vec![
+            DeleteReportItem {
+                refusal: Some(RestoreRefusal::ChangedSinceListed {
+                    backup_id: BOTH_SET.to_string(),
+                }),
+                ..ended(&run.items[0], DeleteStatus::Refused, 0)
+            },
+            ended(&run.items[1], DeleteStatus::NotReached, 0),
+            ended(&run.items[2], DeleteStatus::Deleted, 2 * MB),
+        ])),
+    );
+    assert_eq!(
+        outcome.status,
+        BackupDeleteOutcomeStatus::CompletedWithProblems
+    );
+    assert_eq!(
+        outcome.status_text,
+        "RABBIT deleted 1 of 3 backups.\n\nOne couldn't be deleted, and stays as it was. Show \
+         details says why.\nRABBIT can't delete this backup: SWS Extension 2.14.0.7 \
+         (Uninstalled November 9, 2026, 2:05 PM). It changed since RABBIT listed it. Start \
+         RABBIT again to see the backups as they are now."
+    );
+    assert_eq!(
+        outcome.detail_lines[3..5],
+        [
+            "FFmpeg for Improved Video Support 7.1: Not reached",
+            "  It stays as it was, because RABBIT couldn't delete another ticked backup kept with \
+             it.",
+        ]
+    );
+    // Stopped later, it is still that other backup that kept it.
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(stopped_report(vec![
+            DeleteReportItem {
+                refusal: Some(RestoreRefusal::ChangedSinceListed {
+                    backup_id: BOTH_SET.to_string(),
+                }),
+                ..ended(&run.items[0], DeleteStatus::Refused, 0)
+            },
+            ended(&run.items[1], DeleteStatus::NotReached, 0),
+            ended(&run.items[2], DeleteStatus::NotReached, 0),
+        ])),
+    );
+    assert_eq!(
+        outcome.detail_lines[4..7],
+        [
+            "  It stays as it was, because RABBIT couldn't delete another ticked backup kept with \
+             it.",
+            "ReaPack 1.2.4: Not reached",
+            "  RABBIT stopped before it, so it is kept.",
+        ]
     );
 }
 
@@ -803,6 +1440,91 @@ fn a_partly_deleted_backup_says_what_is_left_and_where() {
     );
 }
 
+/// Two ticked rows of one set that went whole, and so came out as one: a
+/// set not deleted, deleted only in part, or whose record of what it holds
+/// couldn't be changed. Show details says what happened, and why, below
+/// the first only, and the second names it; Done counts both rows.
+#[test]
+fn rows_that_share_their_sets_outcome_say_why_once() {
+    let mut list = backup_list(vec![sws(), ffmpeg()]);
+    tick(&mut list, SWS, BackupChoice::Delete);
+    tick(&mut list, FFMPEG, BackupChoice::Delete);
+    let run = run_of(&en(), &list);
+    let both = |whole: DeleteReportItem| -> DeleteReport {
+        report(
+            run.items
+                .iter()
+                .enumerate()
+                .map(|(nth, delete)| DeleteReportItem {
+                    part: delete.part.clone(),
+                    bytes_freed: if nth == 0 { whole.bytes_freed } else { 0 },
+                    ..whole.clone()
+                })
+                .collect(),
+        )
+    };
+    let same = format!(
+        "What happened to it, and why, is said above, below the backup it was kept with: {SWS}."
+    );
+
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(both(not_deleted(BOTH_SET, NotDeletedReason::InUse))),
+    );
+    assert_eq!(
+        below(&outcome, SWS),
+        [
+            "Nothing of it changed.".to_string(),
+            "A file in it is open in another program, so it couldn't be moved.".to_string(),
+            format!("Error: C:/REAPER/RABBIT/backups/{BOTH_SET}: Access is denied. (os error 5)"),
+        ]
+    );
+    assert_eq!(below(&outcome, FFMPEG), [same.as_str()]);
+    assert_eq!(
+        outcome.status_text,
+        "RABBIT couldn't delete the backups.\n\n2 couldn't be deleted, because a file in them is \
+         open in another program. Close that program, then run RABBIT again to delete them."
+    );
+
+    let outcome =
+        wizard_backup_delete_outcome(&en(), &run, &Ok(both(partly_deleted(BOTH_SET, KB))));
+    assert_eq!(below(&outcome, SWS).len(), 2, "{:#?}", outcome.detail_lines);
+    assert_eq!(below(&outcome, FFMPEG), [same.as_str()]);
+
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(
+            run.items
+                .iter()
+                .map(|delete| not_deleted_from_set(delete, NotDeletedReason::Permission))
+                .collect(),
+        )),
+    );
+    assert_eq!(below(&outcome, SWS).len(), 3, "{:#?}", outcome.detail_lines);
+    assert_eq!(below(&outcome, FFMPEG), [same.as_str()]);
+
+    // Each part's own outcome, files left of both, is said below each.
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(
+            run.items
+                .iter()
+                .map(|delete| deleted_from_set(delete, MB, 1))
+                .collect(),
+        )),
+    );
+    assert!(
+        below(&outcome, FFMPEG)
+            .iter()
+            .all(|line| !line.starts_with("What happened")),
+        "{:#?}",
+        outcome.detail_lines
+    );
+}
+
 #[test]
 fn reasons_are_counted_and_a_single_backup_is_called_it() {
     // Two of three in use: one sentence, counted.
@@ -959,7 +1681,8 @@ fn the_records_row_stopped_partway_says_part_of_it_went() {
         &deleted_five,
         DeleteStatus::NotReached,
     ));
-    let outcome = wizard_backup_delete_outcome(&en(), &run, &Ok(stopped_report(sets)));
+    let outcome =
+        wizard_backup_delete_outcome(&en(), &run, &Ok(by_part(&run, stopped_report(sets))));
     assert_eq!(
         outcome.status_text,
         "RABBIT stopped after deleting 1 of 2 backups. Backups it hadn't reached are kept.\n\n\
@@ -973,7 +1696,7 @@ fn the_records_row_with_one_set_left_is_partly_deleted_never_as_it_was() {
     let mut list = backup_list(vec![records()]);
     tick(&mut list, RECORDS, BackupChoice::Delete);
     let run = run_of(&en(), &list);
-    let last = run.groups[0].set_ids[22].clone();
+    let last = run.rows[0].items[22].set_id.clone();
     let one_in_use = |index: usize, id: &str| {
         Some(if index == 22 {
             not_deleted(id, NotDeletedReason::InUse)
@@ -1012,7 +1735,7 @@ fn the_records_row_with_one_set_left_is_partly_deleted_never_as_it_was() {
     let run = run_of(&en(), &list);
     let mut sets = vec![item("unix-1793697120", DeleteStatus::Deleted, 2 * MB)];
     sets.extend(records_sets(&run, 1, &one_in_use, DeleteStatus::NotReached));
-    let outcome = wizard_backup_delete_outcome(&en(), &run, &Ok(report(sets)));
+    let outcome = wizard_backup_delete_outcome(&en(), &run, &Ok(by_part(&run, report(sets))));
     assert_eq!(
         outcome.status,
         BackupDeleteOutcomeStatus::CompletedWithProblems
@@ -1149,41 +1872,53 @@ fn a_refused_run_deletes_nothing_and_says_which_backup_and_why() {
     );
 }
 
+/// Each ticked row of a set refused is said on its own, as one backup.
 #[test]
-fn a_refused_set_of_several_rows_is_said_as_the_one_backup_that_holds_them() {
+fn two_refused_backups_of_one_set_are_each_said() {
     let mut list = backup_list(vec![sws(), ffmpeg(), reapack()]);
-    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Delete);
+    tick(&mut list, SWS, BackupChoice::Delete);
+    tick(&mut list, FFMPEG, BackupChoice::Delete);
     tick(&mut list, REAPACK, BackupChoice::Delete);
-    let both = "uninstall-unix-1794233100";
-    let outcome = done(
-        &list,
-        Ok(refused_report(vec![
-            refused(
-                both,
-                RestoreRefusal::ChangedSinceListed {
-                    backup_id: both.to_string(),
-                },
-            ),
-            item("unix-1793697120", DeleteStatus::NotReached, 0),
+    let run = run_of(&en(), &list);
+    let changed = RestoreRefusal::ChangedSinceListed {
+        backup_id: BOTH_SET.to_string(),
+    };
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(refused_report(vec![
+            DeleteReportItem {
+                refusal: Some(changed.clone()),
+                ..ended(&run.items[0], DeleteStatus::Refused, 0)
+            },
+            DeleteReportItem {
+                refusal: Some(changed),
+                ..ended(&run.items[1], DeleteStatus::Refused, 0)
+            },
+            ended(&run.items[2], DeleteStatus::NotReached, 0),
         ])),
     );
     assert_eq!(
         outcome.status_text,
         "Nothing was deleted.\n\nRABBIT deletes the ticked backups only when it can delete \
-         every one of them.\nRABBIT can't delete SWS Extension 2.14.0.7 (Uninstalled November 9, \
-         2026, 2:05 PM) and FFmpeg for Improved Video Support 7.1 (Uninstalled November 9, \
-         2026, 2:05 PM), which one backup holds together. It changed since RABBIT listed it. \
-         Start RABBIT again to see the backups as they are now."
+         every one of them.\nRABBIT can't delete this backup: SWS Extension 2.14.0.7 \
+         (Uninstalled November 9, 2026, 2:05 PM). It changed since RABBIT listed it. Start \
+         RABBIT again to see the backups as they are now.\nRABBIT can't delete this backup: \
+         FFmpeg for Improved Video Support 7.1 (Uninstalled November 9, 2026, 2:05 PM). It \
+         changed since RABBIT listed it. Start RABBIT again to see the backups as they are now."
     );
     assert_eq!(
-        below(
-            &outcome,
-            "SWS Extension 2.14.0.7 and FFmpeg for Improved Video Support 7.1"
-        ),
+        outcome.detail_lines,
         [
-            "They go together: one backup holds them.",
-            "It changed since RABBIT listed it. Start RABBIT again to see the backups as they are \
-             now.",
+            "Target: C:/REAPER",
+            "SWS Extension 2.14.0.7: Can't be deleted",
+            "  It changed since RABBIT listed it. Start RABBIT again to see the backups as they \
+             are now.",
+            "FFmpeg for Improved Video Support 7.1: Can't be deleted",
+            "  It changed since RABBIT listed it. Start RABBIT again to see the backups as they \
+             are now.",
+            "ReaPack 1.2.4: Not reached",
+            "  RABBIT deleted nothing in this run, so it is kept.",
         ]
     );
 }
@@ -1278,11 +2013,26 @@ fn delete_refusals_have_words_of_their_own_and_the_rest_a_restores() {
         "RABBIT doesn't use C:/REAPER/RABBIT/backups: it is a symbolic link or junction, and \
          RABBIT never follows one in its backups."
     );
-    // Never a restore's words where a delete has its own.
+    // Never a restore's words where a delete has its own, those of a
+    // package or the key map out of its set among them.
     for refusal in delete_refusals() {
         let text = delete_refusal_text(&en(), &refusal);
         assert!(!text.contains("restore"), "{text}");
+        if PART_REFUSAL_CODES.contains(&refusal.code()) {
+            assert_ne!(text, restore_refusal_text(&en(), &refusal), "{refusal:?}");
+        }
     }
+    assert_eq!(
+        delete_refusal_text(
+            &en(),
+            &RestoreRefusal::NoManifest {
+                backup_id: BOTH_SET.to_string(),
+                package_id: "sws".to_string(),
+            }
+        ),
+        "The backup it is kept in has no record of which of its files belong to SWS \
+         Extension, so RABBIT doesn't delete them on their own."
+    );
     // A refusal a delete never gives is said as a restore says it.
     let reinstalled = RestoreRefusal::ReinstalledSince {
         backup_id: "uninstall-unix-1".to_string(),
@@ -1300,9 +2050,10 @@ fn delete_refusals_have_words_of_their_own_and_the_rest_a_restores() {
 // ---------------------------------------------------------------------------
 
 /// The codes of every refusal `delete_backups` gives: of the whole run
-/// (root, the lock) and of one item (its id, a link, another account's set,
-/// a set changed since it was listed).
-const DELETE_REFUSAL_CODES: [&str; 8] = [
+/// (root, the lock), of one item (its id, a link, another account's set, a
+/// set changed since it was listed), and of a package or the key map that
+/// can't go out of its set alone.
+const DELETE_REFUSAL_CODES: [&str; 14] = [
     "invalid-id",
     "differs-in-case",
     "ends-in-dot-or-space",
@@ -1311,6 +2062,23 @@ const DELETE_REFUSAL_CODES: [&str; 8] = [
     "changed-since-listed",
     "lock-held",
     "as-root",
+    "being-deleted",
+    "no-manifest",
+    "damaged-manifest",
+    "no-keymap-in-set",
+    "no-package-records",
+    "package-not-in-set",
+];
+
+/// The codes of the refusals of a package or the key map that can't go out
+/// of its set alone, which a restore words in its own terms.
+const PART_REFUSAL_CODES: [&str; 6] = [
+    "being-deleted",
+    "no-manifest",
+    "damaged-manifest",
+    "no-keymap-in-set",
+    "no-package-records",
+    "package-not-in-set",
 ];
 
 /// One refusal of each kind `delete_backups` gives.
@@ -1323,14 +2091,17 @@ fn delete_refusals() -> Vec<RestoreRefusal> {
     refusals
 }
 
-/// Every status a delete can give a set.
-const STATUSES: [DeleteStatus; 9] = [
+/// Every status a delete can give a set or a part of one.
+const STATUSES: [DeleteStatus; 12] = [
     DeleteStatus::Deleted,
+    DeleteStatus::DeletedFromSet,
     DeleteStatus::FinishedEarlierDeletion,
     DeleteStatus::AlreadyGone,
     DeleteStatus::WouldDelete,
     DeleteStatus::WouldFinishEarlierDeletion,
+    DeleteStatus::WouldDeleteFromSet,
     DeleteStatus::NotDeleted,
+    DeleteStatus::NotDeletedFromSet,
     DeleteStatus::PartlyDeleted,
     DeleteStatus::Refused,
     DeleteStatus::NotReached,
@@ -1400,6 +2171,7 @@ fn every_done_page_and_show_details_reads_in_every_locale() {
         let run = backup_delete_run(&localizer, Path::new(RESOURCE), &list);
         let ids: Vec<String> = run.items.iter().map(|item| item.set_id.clone()).collect();
         let check_run = |run: &BackupDeleteRun, result: rabbit_core::Result<DeleteReport>| {
+            let result = result.map(|report| by_part(run, report));
             let outcome = wizard_backup_delete_outcome(&localizer, run, &result);
             assert_outcome_reads(locale, &outcome);
             outcome
@@ -1416,19 +2188,35 @@ fn every_done_page_and_show_details_reads_in_every_locale() {
             sets[1] = item(&ids[1], status, KB);
             check(Ok(report(sets)));
         }
-        // Every reason, for all three, for one of three and for two.
-        for reason in REASONS {
-            check(Ok(report(each(&|id| not_deleted(id, reason)))));
-            let mut sets = each(&|id| item(id, DeleteStatus::Deleted, MB));
-            sets[2] = not_deleted(&ids[2], reason);
-            check(Ok(report(sets.clone())));
-            sets[1] = not_deleted(&ids[1], reason);
-            check(Ok(report(sets)));
+        // Every reason, for all three, for one of three and for two, of a
+        // whole set and of a part that stayed in its set.
+        for status in [DeleteStatus::NotDeleted, DeleteStatus::NotDeletedFromSet] {
+            for reason in REASONS {
+                let stayed = |id: &str| DeleteReportItem {
+                    status,
+                    ..not_deleted(id, reason)
+                };
+                check(Ok(report(each(&stayed))));
+                let mut sets = each(&|id| item(id, DeleteStatus::Deleted, MB));
+                sets[2] = stayed(&ids[2]);
+                check(Ok(report(sets.clone())));
+                sets[1] = stayed(&ids[1]);
+                check(Ok(report(sets)));
+            }
         }
         let mut sets = each(&|id| item(id, DeleteStatus::Deleted, MB));
         sets[0] = partly_deleted(&ids[0], KB);
         check(Ok(report(sets)));
         check(Ok(report(each(&|id| partly_deleted(id, KB)))));
+        // Files left in the set, one and several.
+        for left in [1, 2] {
+            let sets = run
+                .items
+                .iter()
+                .map(|delete| deleted_from_set(delete, MB, left))
+                .collect();
+            check(Ok(report(sets)));
+        }
         // Gone before, alone and among others, also in a stopped run.
         let mut sets = each(&|id| item(id, DeleteStatus::Deleted, MB));
         sets[0] = item(&ids[0], DeleteStatus::AlreadyGone, 0);
@@ -1471,9 +2259,18 @@ fn every_done_page_and_show_details_reads_in_every_locale() {
         let id = run_one.items[0].set_id.clone();
         let mut alone: Vec<DeleteReportItem> = REASONS
             .iter()
-            .map(|&reason| not_deleted(&id, reason))
+            .flat_map(|&reason| {
+                [
+                    not_deleted(&id, reason),
+                    DeleteReportItem {
+                        status: DeleteStatus::NotDeletedFromSet,
+                        ..not_deleted(&id, reason)
+                    },
+                ]
+            })
             .collect();
         alone.push(partly_deleted(&id, KB));
+        alone.push(deleted_from_set(&run_one.items[0], KB, 1));
         alone.push(item(&id, DeleteStatus::AlreadyGone, 0));
         alone.push(item(&id, DeleteStatus::Deleted, KB));
         for set in alone {
@@ -1485,7 +2282,7 @@ fn every_done_page_and_show_details_reads_in_every_locale() {
         for entries in [vec![records()], vec![reapack(), records()]] {
             let records_list = all_ticked(&localizer, entries);
             let run = backup_delete_run(&localizer, Path::new(RESOURCE), &records_list);
-            let group = run.groups.len() - 1;
+            let row = run.rows.len() - 1;
             let ended = |index: usize, id: &str| {
                 Some(match index {
                     0 => not_deleted(id, NotDeletedReason::InUse),
@@ -1494,40 +2291,162 @@ fn every_done_page_and_show_details_reads_in_every_locale() {
                 })
             };
             let first = |run: &BackupDeleteRun| -> Vec<DeleteReportItem> {
-                run.groups[..group]
+                run.rows[..row]
                     .iter()
-                    .map(|group| item(&group.set_ids[0], DeleteStatus::Deleted, MB))
+                    .map(|row| item(&row.items[0].set_id, DeleteStatus::Deleted, MB))
                     .collect()
             };
             let mut sets = first(&run);
-            sets.extend(records_sets(&run, group, &ended, DeleteStatus::NotReached));
+            sets.extend(records_sets(&run, row, &ended, DeleteStatus::NotReached));
             check_run(&run, Ok(report(sets)));
             let five =
                 |index: usize, id: &str| (index < 5).then(|| item(id, DeleteStatus::Deleted, KB));
             let mut sets = first(&run);
-            sets.extend(records_sets(&run, group, &five, DeleteStatus::NotReached));
+            sets.extend(records_sets(&run, row, &five, DeleteStatus::NotReached));
             let outcome = check_run(&run, Ok(stopped_report(sets)));
             assert_eq!(outcome.status, BackupDeleteOutcomeStatus::Stopped);
         }
 
-        // Rows that go together, refused: "they", then the backup as "it".
-        let mut tied = list_in(&localizer, vec![sws(), ffmpeg(), reapack()]);
-        apply_backup_checkbox(&mut tied.rows, 1, BackupChoice::Delete, true);
-        let run_tied = backup_delete_run(&localizer, Path::new(RESOURCE), &tied);
-        assert_eq!(run_tied.groups[0].names.len(), 2);
-        let both = run_tied.items[0].set_id.clone();
+        // Two rows of one set: refused each, one stayed in it, and the set
+        // gone whole for both.
+        let mut pair = list_in(&localizer, vec![sws(), ffmpeg(), reapack()]);
+        apply_backup_checkbox(&mut pair.rows, 1, BackupChoice::Delete, true);
+        apply_backup_checkbox(&mut pair.rows, 2, BackupChoice::Delete, true);
+        let run_pair = backup_delete_run(&localizer, Path::new(RESOURCE), &pair);
+        assert_eq!(run_pair.rows.len(), 2);
+        assert_eq!(run_pair.set_count(), 1);
+        let pair_outcome = |sets: Vec<DeleteReportItem>, refused: bool| {
+            let report = if refused {
+                refused_report(sets)
+            } else {
+                report(sets)
+            };
+            let outcome = wizard_backup_delete_outcome(&localizer, &run_pair, &Ok(report));
+            assert_outcome_reads(locale, &outcome);
+        };
         for refusal in delete_refusals() {
-            check_run(&run_tied, Ok(refused_report(vec![refused(&both, refusal)])));
+            pair_outcome(
+                run_pair
+                    .items
+                    .iter()
+                    .map(|delete| DeleteReportItem {
+                        refusal: Some(refusal.clone()),
+                        ..ended(delete, DeleteStatus::Refused, 0)
+                    })
+                    .collect(),
+                true,
+            );
         }
-        check_run(
-            &run_tied,
-            Ok(report(vec![not_deleted(&both, NotDeletedReason::InUse)])),
+        pair_outcome(
+            vec![
+                not_deleted_from_set(&run_pair.items[0], NotDeletedReason::InUse),
+                deleted_from_set(&run_pair.items[1], MB, 0),
+            ],
+            false,
         );
+        pair_outcome(
+            vec![
+                ended(&run_pair.items[0], DeleteStatus::Deleted, MB),
+                ended(&run_pair.items[1], DeleteStatus::Deleted, 0),
+            ],
+            false,
+        );
+        // The set not deleted, or deleted only in part, for both, and the
+        // record of what it holds that couldn't be changed for both: said
+        // below the first, and named below the second. Files left of one.
+        let pair_set = run_pair.items[0].set_id.clone();
+        for whole in [
+            not_deleted(&pair_set, NotDeletedReason::InUse),
+            partly_deleted(&pair_set, KB),
+        ] {
+            pair_outcome(
+                run_pair
+                    .items
+                    .iter()
+                    .map(|delete| DeleteReportItem {
+                        part: delete.part.clone(),
+                        ..whole.clone()
+                    })
+                    .collect(),
+                false,
+            );
+        }
+        pair_outcome(
+            run_pair
+                .items
+                .iter()
+                .map(|delete| not_deleted_from_set(delete, NotDeletedReason::Permission))
+                .collect(),
+            false,
+        );
+        pair_outcome(
+            vec![
+                deleted_from_set(&run_pair.items[0], MB, 1),
+                deleted_from_set(&run_pair.items[1], MB, 0),
+            ],
+            false,
+        );
+
+        // One refused under the lock and the other kept with it; the set
+        // gone whole with an unfinished deletion of its id; and refused for
+        // another account's unfinished deletion.
+        let kept = report(vec![
+            DeleteReportItem {
+                refusal: Some(RestoreRefusal::ChangedSinceListed {
+                    backup_id: run_pair.items[0].set_id.clone(),
+                }),
+                ..ended(&run_pair.items[0], DeleteStatus::Refused, 0)
+            },
+            ended(&run_pair.items[1], DeleteStatus::NotReached, 0),
+        ]);
+        let finished = report(
+            run_pair
+                .items
+                .iter()
+                .map(|delete| DeleteReportItem {
+                    finished_earlier_deletion: true,
+                    ..ended(delete, DeleteStatus::Deleted, MB)
+                })
+                .collect(),
+        );
+        let not_yours = refused_report(
+            run_pair
+                .items
+                .iter()
+                .map(|delete| DeleteReportItem {
+                    refusal: Some(RestoreRefusal::NotYours {
+                        backup_id: delete.set_id.clone(),
+                    }),
+                    unfinished_deletion: Some(PathBuf::from("C:/REAPER/RABBIT/backups-deleting/x")),
+                    ..ended(delete, DeleteStatus::Refused, 0)
+                })
+                .collect(),
+        );
+        for (report, key) in [
+            (kept, "wizard-summary-delete-not-reached-kept-with"),
+            (
+                finished,
+                "wizard-summary-delete-finished-earlier-deletion-too",
+            ),
+            (
+                not_yours,
+                "wizard-delete-refusal-not-yours-earlier-deletion",
+            ),
+        ] {
+            let outcome = wizard_backup_delete_outcome(&localizer, &run_pair, &Ok(report));
+            assert_outcome_reads(locale, &outcome);
+            let line = localizer.text(key).value;
+            assert!(
+                outcome.detail_lines.iter().any(|said| said.contains(&line)),
+                "{locale}: {key}\n{:#?}",
+                outcome.detail_lines
+            );
+        }
 
         // Two key maps: each said with its date.
         let two = all_ticked(&localizer, vec![keymap(), older_keymap()]);
         let run_two = backup_delete_run(&localizer, Path::new(RESOURCE), &two);
-        assert_ne!(run_two.groups[0].labels, run_two.groups[1].labels);
+        assert_ne!(run_two.rows[0].label, run_two.rows[1].label);
         let sets: Vec<DeleteReportItem> = run_two
             .items
             .iter()
@@ -1536,7 +2455,7 @@ fn every_done_page_and_show_details_reads_in_every_locale() {
         check_run(&run_two, Ok(report(sets)));
 
         // The progress page's lines.
-        let progress_runs = [&run, &run_tied, &run_two];
+        let progress_runs = [&run, &run_pair, &run_two];
         for run in progress_runs {
             for status in STATUSES {
                 let mut state = ProgressUiState::new(WizardMode::DeleteBackups, 3, 0)
@@ -1642,7 +2561,7 @@ fn closing_the_window_during_a_delete_asks_in_the_deletes_words() {
 }
 
 // ---------------------------------------------------------------------------
-// A real delete, in a temporary folder.
+// Real deletes, in a temporary folder.
 // ---------------------------------------------------------------------------
 
 /// An uninstall set `set_id` in `resource` holding ReaPack 1.2.4, moved
@@ -1680,48 +2599,108 @@ fn write_reapack_set(resource: &Path, set_id: &str) {
         .unwrap();
 }
 
-const BOTH_SET: &str = "uninstall-unix-1794233100";
+/// A set a restore made in `resource`, `set_id`, holding the key map and
+/// another file the restore replaced: the tab lists a key map row and the
+/// set's own row for the other file.
+fn write_keymap_and_file_set(resource: &Path, set_id: &str) {
+    fs::write(resource.join("reaper-kb.ini"), b"KEY 1 65 _OSARA_X 0\n").unwrap();
+    fs::write(resource.join("reaper-extstate.ini"), b"[osara]\n").unwrap();
+    let mut writer = BackupSetWriter::new(resource, set_id, "before-restore");
+    writer
+        .copy_file(None, &resource.join("reaper-kb.ini"))
+        .unwrap();
+    writer
+        .copy_file(None, &resource.join("reaper-extstate.ini"))
+        .unwrap();
+}
+
 const REAPACK_SET: &str = "uninstall-unix-1790938800";
+const KEYMAP_SET: &str = "restore-unix-1790938800-before-restore";
 
 fn set_path(resource: &Path, set_id: &str) -> PathBuf {
     resource.join("RABBIT").join("backups").join(set_id)
 }
 
-#[test]
-fn a_real_delete_takes_exactly_the_ticked_sets_and_saves_its_report_there() {
-    let dir = tempdir().unwrap();
-    let resource = dir.path().join("REAPER");
-    fs::create_dir_all(&resource).unwrap();
-    write_uninstall_set(&resource);
-    write_reapack_set(&resource, REAPACK_SET);
-    assert!(set_path(&resource, BOTH_SET).is_dir());
-    assert!(set_path(&resource, REAPACK_SET).is_dir());
+/// What the rows read again after a run call themselves, in list order.
+fn rows_after(list: &mut WizardBackupList, resource: &Path) -> Vec<String> {
+    let (_, model) = langpack_model(rabbit_core::plan::PlanActionKind::Install);
+    let target = TargetRow {
+        path: resource.to_path_buf(),
+        ..target(true)
+    };
+    reread_backup_list(list, &model, &target);
+    list.rows.iter().map(|row| row.name.clone()).collect()
+}
 
-    let mut list = backup_list_at(&en(), &resource);
-    set_backup_choice(&mut list, BackupChoice::Delete);
-    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Delete);
-    let run = backup_delete_run(&en(), &resource, &list);
-    assert_eq!(run.items.len(), 1);
-    assert_eq!(run.backups(), 2);
+/// The names of the files in `folder` and the folders in it, at any
+/// depth.
+fn file_names_under(folder: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(folder).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if entry.file_type().unwrap().is_dir() {
+            names.extend(file_names_under(&path));
+        } else {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    names
+}
 
+/// A run that records the events it hears.
+fn recording() -> (ProgressReporter, Arc<Mutex<Vec<ProgressEvent>>>) {
     let events: Arc<Mutex<Vec<ProgressEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let progress = {
         let events = Arc::clone(&events);
         ProgressReporter::new(move |event| events.lock().unwrap().push(event))
     };
+    (progress, events)
+}
+
+/// One package of an uninstall that removed two: only it goes, out of the
+/// set, and the other stays listed and can still be restored after the
+/// rescan.
+#[test]
+fn a_real_delete_of_one_package_leaves_the_other_listed_and_restorable() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    fs::create_dir_all(&resource).unwrap();
+    write_uninstall_set(&resource);
+    write_reapack_set(&resource, REAPACK_SET);
+
+    let mut list = backup_list_at(&en(), &resource);
+    set_backup_choice(&mut list, BackupChoice::Delete);
+    tick(&mut list, SWS, BackupChoice::Delete);
+    let run = backup_delete_run(&en(), &resource, &list);
+    assert_eq!(run.backups(), 1);
+    assert_eq!(
+        run.items[0].part,
+        DeletePart::Package {
+            package_id: "sws".to_string()
+        }
+    );
+
+    let (progress, events) = recording();
     let result = run_backup_delete(&run, &progress, &CancelToken::new());
     let report = result.as_ref().unwrap();
     assert!(!report.refused && !report.stopped);
+    assert_eq!(report.sets[0].status, DeleteStatus::DeletedFromSet);
 
-    // The ticked set is gone, and nothing of it is left to finish; the
-    // other set is as it was.
-    assert!(!set_path(&resource, BOTH_SET).exists());
+    // The set stays, with FFmpeg's file; SWS's is gone, and so is its
+    // entry. The other set is as it was.
+    let set = set_path(&resource, BOTH_SET);
+    assert!(set.join(BACKUP_MANIFEST_FILE).is_file());
+    let manifest = fs::read_to_string(set.join(BACKUP_MANIFEST_FILE)).unwrap();
     assert!(
-        !resource
-            .join("RABBIT")
-            .join("backups-deleting")
-            .join(BOTH_SET)
-            .exists()
+        manifest.contains("ffmpeg") && !manifest.contains("\"sws\""),
+        "{manifest}"
+    );
+    let copies = file_names_under(&set);
+    assert!(copies.contains(&"avcodec-61.dll".to_string()), "{copies:?}");
+    assert!(
+        !copies.contains(&"reaper_sws-x64.dll".to_string()),
+        "{copies:?}"
     );
     assert!(
         set_path(&resource, REAPACK_SET)
@@ -1737,52 +2716,169 @@ fn a_real_delete_takes_exactly_the_ticked_sets_and_saves_its_report_there() {
     let name = saved.json_path.file_name().unwrap().to_string_lossy();
     assert!(name.starts_with("delete-backup-unix-"), "{name}");
 
-    // The progress page heard the set start and end.
+    // The progress page heard the set start and end, and said SWS alone.
     let events = events.lock().unwrap();
     assert!(matches!(
         &events[..],
         [
             ProgressEvent::DeleteStarted { set_id },
             ProgressEvent::DeleteCompleted {
-                status: DeleteStatus::Deleted,
+                status: DeleteStatus::DeletedFromSet,
                 ..
             },
         ] if set_id == BOTH_SET
     ));
+    let mut state = progress_of(&en(), &run);
+    assert_eq!(
+        backup_delete_progress_lines(&en(), &mut state, &events[0]).0,
+        Some(format!("Deleting the backup: {SWS}…"))
+    );
 
-    // Done counts the two rows of the set, and points to the report.
+    // Done counts the one row, with what it freed, and points to the
+    // report.
     let outcome = wizard_backup_delete_outcome(&en(), &run, &result);
     assert_eq!(outcome.status, BackupDeleteOutcomeStatus::Deleted);
     assert!(
         outcome
             .heading
-            .starts_with("RABBIT deleted 2 backups and freed "),
+            .starts_with("RABBIT deleted one backup and freed "),
         "{}",
         outcome.heading
     );
+    assert_eq!(outcome.detail_lines[1], format!("{SWS}: Deleted"));
     assert_eq!(outcome.report_path.as_ref(), Some(&saved.text_path));
     assert_eq!(
         outcome.detail_lines.last(),
         Some(&format!("Report: {}", saved.text_path.display()))
     );
 
-    // The rescan after the run reads the live list again: the deleted rows
-    // are gone, no tick is kept, and Restore is chosen again.
-    let (_, model) = langpack_model(rabbit_core::plan::PlanActionKind::Install);
-    let target = TargetRow {
-        path: resource.clone(),
-        ..target(true)
-    };
+    // The rescan reads the list again: FFmpeg is still there and can be
+    // restored, no tick is kept, and Restore is chosen again.
     assert_eq!(list.choice, BackupChoice::Delete);
-    assert_eq!(list.ticked_rows(BackupChoice::Delete).count(), 2);
-    reread_backup_list(&mut list, &model, &target);
-    let names: Vec<&str> = list.rows.iter().map(|row| row.name.as_str()).collect();
-    assert_eq!(names, ["Software you uninstalled", "ReaPack 1.2.4"]);
+    // Both sets were made in this test, maybe in one second, so their
+    // order isn't checked.
+    let mut names = rows_after(&mut list, &resource);
+    names.sort();
+    assert_eq!(names, [FFMPEG, REAPACK, "Software you uninstalled"]);
     assert_eq!(list.choice, BackupChoice::Restore);
     assert!(
         list.rows
             .iter()
             .all(|row| !row.restore_ticked && !row.delete_ticked)
+    );
+    let ffmpeg = &list.rows[index_of(&list, FFMPEG)];
+    assert!(ffmpeg.can_tick(BackupChoice::Restore), "{}", ffmpeg.summary);
+    let entry = ffmpeg.entry.as_ref().expect("a backup's row");
+    assert_eq!(entry.item.set_ids(), [BOTH_SET]);
+}
+
+/// Every backup of a set ticked: the engine deletes the set whole, nothing
+/// of it is left to finish, and Done counts each row once and the bytes
+/// once.
+#[test]
+fn a_real_delete_of_every_backup_of_a_set_deletes_it_whole() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    fs::create_dir_all(&resource).unwrap();
+    write_uninstall_set(&resource);
+    write_reapack_set(&resource, REAPACK_SET);
+
+    let mut list = backup_list_at(&en(), &resource);
+    tick(&mut list, SWS, BackupChoice::Delete);
+    tick(&mut list, FFMPEG, BackupChoice::Delete);
+    let run = backup_delete_run(&en(), &resource, &list);
+    assert_eq!(run.backups(), 2);
+    assert_eq!(run.set_count(), 1);
+
+    let (progress, events) = recording();
+    let result = run_backup_delete(&run, &progress, &CancelToken::new());
+    let report = result.as_ref().unwrap();
+    assert!(!set_path(&resource, BOTH_SET).exists());
+    assert!(
+        !resource
+            .join("RABBIT")
+            .join("backups-deleting")
+            .join(BOTH_SET)
+            .exists()
+    );
+    assert!(set_path(&resource, REAPACK_SET).is_dir());
+    assert!(
+        report
+            .sets
+            .iter()
+            .all(|set| set.status == DeleteStatus::Deleted)
+    );
+    // Only the first item carries the set's bytes.
+    assert!(report.bytes_freed > 0);
+    assert_eq!(report.sets[0].bytes_freed, report.bytes_freed);
+    assert_eq!(report.sets[1].bytes_freed, 0);
+    // One start and one end for the set, said with both rows.
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    let mut state = progress_of(&en(), &run);
+    assert_eq!(
+        backup_delete_progress_lines(&en(), &mut state, &events[0]).0,
+        Some(format!("Deleting the backups: {FFMPEG} and {SWS}…"))
+    );
+
+    let outcome = wizard_backup_delete_outcome(&en(), &run, &result);
+    assert_eq!(outcome.status, BackupDeleteOutcomeStatus::Deleted);
+    let size = backup_size_text(&en(), report.bytes_freed);
+    assert_eq!(
+        outcome.heading,
+        format!("RABBIT deleted 2 backups and freed {size}.")
+    );
+    assert_eq!(
+        outcome.detail_lines[1..4],
+        [
+            format!("{FFMPEG}: Deleted"),
+            format!("{SWS}: Deleted"),
+            format!("Freed in all: {size}"),
+        ]
+    );
+
+    assert_eq!(
+        rows_after(&mut list, &resource),
+        ["Software you uninstalled", REAPACK]
+    );
+}
+
+/// A key map out of a set that also holds other files a restore replaced:
+/// the key map goes, and the set stays with its own row for those files.
+#[test]
+fn a_real_delete_of_a_key_map_keeps_the_sets_own_row() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    fs::create_dir_all(&resource).unwrap();
+    write_keymap_and_file_set(&resource, KEYMAP_SET);
+
+    let mut list = backup_list_at(&en(), &resource);
+    let names: Vec<&str> = list.rows.iter().map(|row| row.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "Key maps",
+            "Key map",
+            "Other backups",
+            "Files a restore replaced"
+        ]
+    );
+    tick(&mut list, "Key map", BackupChoice::Delete);
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(review.can_delete, "{:#?}", review.lines);
+    let run = backup_delete_run(&en(), &resource, &list);
+    assert_eq!(run.items[0].part, DeletePart::Keymap);
+
+    let result = run_backup_delete(&run, &ProgressReporter::noop(), &CancelToken::new());
+    let report = result.as_ref().unwrap();
+    assert_eq!(report.sets[0].status, DeleteStatus::DeletedFromSet);
+    assert!(set_path(&resource, KEYMAP_SET).is_dir());
+    let outcome = wizard_backup_delete_outcome(&en(), &run, &result);
+    assert_eq!(outcome.status, BackupDeleteOutcomeStatus::Deleted);
+
+    assert_eq!(
+        rows_after(&mut list, &resource),
+        ["Other backups", "Files a restore replaced"]
     );
 }
 
@@ -1795,7 +2891,7 @@ fn a_delete_stopped_before_the_first_set_deletes_nothing() {
     write_reapack_set(&resource, REAPACK_SET);
 
     let mut list = backup_list_at(&en(), &resource);
-    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Delete);
+    tick(&mut list, SWS, BackupChoice::Delete);
     tick(&mut list, REAPACK, BackupChoice::Delete);
     let run = backup_delete_run(&en(), &resource, &list);
     assert_eq!(run.items.len(), 2);
@@ -1831,7 +2927,7 @@ fn a_set_changed_since_listing_refuses_the_run_and_deletes_nothing() {
     write_reapack_set(&resource, REAPACK_SET);
 
     let mut list = backup_list_at(&en(), &resource);
-    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Delete);
+    tick(&mut list, SWS, BackupChoice::Delete);
     tick(&mut list, REAPACK, BackupChoice::Delete);
     let run = backup_delete_run(&en(), &resource, &list);
     // Another program changes one set after the list was read.

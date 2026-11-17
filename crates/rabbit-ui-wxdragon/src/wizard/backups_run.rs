@@ -11,14 +11,18 @@
 //! saves none, from the wizard as from the command line.
 //!
 //! Done counts backups as Review and the question before the delete count
-//! them: one for each row ticked to delete. The engine deletes sets, and
-//! the rows of one set go together, while the row for the old copies of
-//! RABBIT's records stands for several sets. So a row counts as deleted
-//! when every set it takes is gone, and the rows that go together share
-//! what came of their set. A row of several sets of which some went and
-//! others didn't is said to be partly deleted, never to be as it was.
+//! them: one for each row ticked to delete, each on its own. A row gives
+//! the engine its own items: a package or the key map out of its set, or a
+//! set's own backup, an unfinished deletion or the old copies of RABBIT's
+//! records, whose sets go whole. The engine deletes a set whole when the
+//! ticked rows name every backup it lists, and then the rows share that
+//! result: the first of them carries the bytes freed. A row finds what came
+//! of each of its items in the report by set and part. It counts as deleted
+//! when everything it names is gone, and a row of several sets of which
+//! some went and others didn't is said to be partly deleted, never to be as
+//! it was.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use rabbit_core::RabbitError;
@@ -26,32 +30,38 @@ use rabbit_core::backup_delete::{
     DeleteItem, DeleteReport, DeleteReportItem, DeleteRunOptions, DeleteStatus, NotDeletedReason,
     delete_backups,
 };
+use rabbit_core::backup_overview::BackupItem;
 use rabbit_core::cancel::CancelToken;
 use rabbit_core::localization::Localizer;
 use rabbit_core::progress::{ProgressEvent, ProgressReporter};
 use rabbit_core::restore_refusal::RestoreRefusal;
 
 use super::backups::{
-    BackupChoice, BackupRow, WizardBackupList, and_list, backup_delete_items, backup_size_text,
-    restore_refusal_text, say, text, tied_indices,
+    BackupChoice, BackupRow, WizardBackupList, and_list, backup_size_text, restore_refusal_text,
+    row_delete_items, say, text,
 };
+use super::packages::localized_package_display_name;
 use super::progress::ProgressUiState;
 
-/// Rows ticked to delete that the run takes together: the rows of one set,
-/// or the one row that stands for several sets.
+/// One row ticked to delete, copied out of the list for the run.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BackupDeleteGroup {
-    /// What the rows call the backups, in list order.
-    pub names: Vec<String>,
-    /// The same, each with when it was made, as
-    /// `wizard-backups-row-reference` says it.
-    pub references: Vec<String>,
-    /// What the progress page and Show details call each row: its name, or
-    /// its reference when another ticked row has the same name, so that two
-    /// key maps or two unfinished deletions can be told apart.
-    pub labels: Vec<String>,
-    /// The sets a delete of them takes, by id, each once.
-    pub set_ids: Vec<String>,
+pub struct BackupDeleteRow {
+    /// What the row calls the backup.
+    pub name: String,
+    /// The same, with when it was made, as `wizard-backups-row-reference`
+    /// says it.
+    pub reference: String,
+    /// What the progress page and Show details call it: its name, or its
+    /// reference when another ticked row has the same name, so that two key
+    /// maps or two unfinished deletions can be told apart.
+    pub label: String,
+    /// What the engine is given for it, with the fingerprints the list
+    /// read: one item, or for the old copies of RABBIT's records one for
+    /// each of their sets.
+    pub items: Vec<DeleteItem>,
+    /// The row is an unfinished deletion: what it finishes is its own, never
+    /// an earlier deletion of the backup it is kept in.
+    pub unfinished_deletion: bool,
 }
 
 /// What a delete run is given, copied out of the Backups list before the
@@ -61,70 +71,58 @@ pub struct BackupDeleteGroup {
 pub struct BackupDeleteRun {
     /// The REAPER resource folder whose backups go.
     pub resource_path: PathBuf,
-    /// What the engine is given: each set once, with the fingerprint the
-    /// list read, so a set that changed since is refused.
+    /// What the engine is given: every ticked row's items, row after row,
+    /// in list order. The report gives one item back for each, in the same
+    /// order.
     pub items: Vec<DeleteItem>,
-    /// The ticked rows, in list order, by what the run takes together.
-    pub groups: Vec<BackupDeleteGroup>,
+    /// The ticked rows, in list order.
+    pub rows: Vec<BackupDeleteRow>,
 }
 
 impl BackupDeleteRun {
     /// The backups ticked to delete, counted as Review and the question
     /// count them: one for each ticked row.
     pub fn backups(&self) -> usize {
-        self.groups.iter().map(|group| group.names.len()).sum()
+        self.rows.len()
+    }
+
+    /// The sets the run goes through, each once, for the progress gauge:
+    /// the engine starts and ends each set once, however many of its rows
+    /// are ticked.
+    pub fn set_count(&self) -> usize {
+        let mut ids: Vec<&str> = self.items.iter().map(|item| item.set_id.as_str()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids.len()
     }
 }
 
 /// What a delete of the rows ticked for Delete in `list`, in the REAPER at
-/// `resource_path`, takes: the engine's items with their fingerprints, and
-/// the ticked rows grouped by what goes together.
+/// `resource_path`, takes: each ticked row with its own items and the
+/// fingerprints the list read, and all their items for the engine.
 pub fn backup_delete_run(
     localizer: &Localizer,
     resource_path: &Path,
     list: &WizardBackupList,
 ) -> BackupDeleteRun {
-    let lists: Vec<&[String]> = list.rows.iter().map(|row| row.set_ids.as_slice()).collect();
     // The rows the question counts, so Done counts the same ones.
-    let ticked: Vec<usize> = list.ticked_indices(BackupChoice::Delete).collect();
-    let mut grouped: BTreeSet<usize> = BTreeSet::new();
-    let mut groups = Vec::new();
-    for &index in &ticked {
-        if grouped.contains(&index) {
-            continue;
-        }
-        let mut members = vec![index];
-        members.extend(
-            tied_indices(&lists, index)
-                .into_iter()
-                .filter(|other| ticked.contains(other)),
-        );
-        members.sort_unstable();
-        grouped.extend(members.iter().copied());
-        let rows: Vec<&BackupRow> = members.iter().map(|&member| &list.rows[member]).collect();
-        let mut set_ids: Vec<String> = Vec::new();
-        for id in rows.iter().flat_map(|row| row.set_ids.iter()) {
-            if !set_ids.contains(id) {
-                set_ids.push(id.clone());
-            }
-        }
-        groups.push(BackupDeleteGroup {
-            names: rows.iter().map(|row| row.name.clone()).collect(),
-            references: rows
-                .iter()
-                .map(|row| row_reference(localizer, row))
-                .collect(),
-            labels: rows
-                .iter()
-                .map(|row| row_label(localizer, list, row, BackupChoice::Delete))
-                .collect(),
-            set_ids,
-        });
-    }
+    let rows: Vec<BackupDeleteRow> = list
+        .ticked_rows(BackupChoice::Delete)
+        .map(|row| BackupDeleteRow {
+            name: row.name.clone(),
+            reference: row_reference(localizer, row),
+            label: row_label(localizer, list, row, BackupChoice::Delete),
+            items: row_delete_items(row, &list.sets),
+            unfinished_deletion: row
+                .entry
+                .as_ref()
+                .is_some_and(|entry| matches!(entry.item, BackupItem::Deleting { .. })),
+        })
+        .collect();
     BackupDeleteRun {
         resource_path: resource_path.to_path_buf(),
-        items: backup_delete_items(list),
-        groups,
+        items: rows.iter().flat_map(|row| row.items.clone()).collect(),
+        rows,
     }
 }
 
@@ -170,22 +168,23 @@ pub fn backup_delete_progress_details_for_start(
     lines.join("\n")
 }
 
-/// What the progress page calls one group of ticked rows while a delete
-/// runs, and how many sets the group takes.
+/// What the progress page calls the ticked rows of one set while a delete
+/// runs, or the one row that stands for several sets, and how many sets
+/// they are in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DeletingBackups {
     /// The rows' labels, joined in a sentence.
     names: String,
     /// How many rows there are.
     count: usize,
-    /// How many sets the run deletes for them.
+    /// How many sets the run deletes from for them.
     sets: usize,
 }
 
 /// What the progress page knows of a delete while it runs, for its status
-/// and log lines: what each group of ticked rows is called, the group each
-/// set belongs to, the group whose start it said last, and what came of
-/// each group's sets so far. Empty for every other run.
+/// and log lines: what the ticked rows of each set are called, the group of
+/// rows each set belongs to, the group whose start it said last, and what
+/// came of each group's sets so far. Empty for every other run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BackupDeleteProgress {
     groups: Vec<DeletingBackups>,
@@ -202,33 +201,53 @@ struct SetsEnded {
 }
 
 /// What the progress page knows of the delete `run` before it starts (see
-/// [`ProgressUiState::with_backup_delete`]).
+/// [`ProgressUiState::with_backup_delete`]). The engine starts and ends
+/// each set once, for every ticked row of it together, so the rows of one
+/// set are one group here, said by all their labels; the row for the old
+/// copies of RABBIT's records is a group of its own, of several sets.
 pub fn backup_delete_progress(
     localizer: &Localizer,
     run: &BackupDeleteRun,
 ) -> BackupDeleteProgress {
     let mut progress = BackupDeleteProgress::default();
-    for (index, group) in run.groups.iter().enumerate() {
+    let mut labels: Vec<Vec<String>> = Vec::new();
+    let mut sets: Vec<usize> = Vec::new();
+    for row in &run.rows {
+        let group = row
+            .items
+            .iter()
+            .find_map(|item| progress.group_of.get(&item.set_id).copied())
+            .unwrap_or_else(|| {
+                labels.push(Vec::new());
+                sets.push(0);
+                labels.len() - 1
+            });
+        labels[group].push(row.label.clone());
+        for item in &row.items {
+            if !progress.group_of.contains_key(&item.set_id) {
+                progress.group_of.insert(item.set_id.clone(), group);
+                sets[group] += 1;
+            }
+        }
+    }
+    for (labels, sets) in labels.iter().zip(sets) {
         progress.groups.push(DeletingBackups {
-            names: and_list(localizer, &group.labels),
-            count: group.labels.len(),
-            sets: group.set_ids.len(),
+            names: and_list(localizer, labels),
+            count: labels.len(),
+            sets,
         });
         progress.ended.push(SetsEnded::default());
-        for set_id in &group.set_ids {
-            progress.group_of.insert(set_id.clone(), index);
-        }
     }
     progress
 }
 
 /// The status line and the log line a delete's `event` adds to the
 /// progress page, once [`ProgressUiState::record`] has counted it in:
-/// "Deleting the backup: …" when the first set of a group of ticked rows
-/// starts, and in the log only, what came of the group once the run is done
-/// with its last set. The row for the old copies of RABBIT's records stands
-/// for several sets, and is said once at its start and once at its end.
-/// Two rows of the same name are each said, since they are two groups.
+/// "Deleting the backup: …" when a set starts, naming every ticked row of
+/// it, and in the log only, what came of them once the run is done with
+/// the set. The row for the old copies of RABBIT's records stands for
+/// several sets, and is said once at its start and once at its end. Two
+/// rows of the same name in two sets are each said with their dates.
 /// Neither line for any other event.
 pub fn backup_delete_progress_lines(
     localizer: &Localizer,
@@ -265,7 +284,7 @@ pub fn backup_delete_progress_lines(
             bytes_freed,
         } => {
             let Some(group) = progress.group_of.get(set_id).copied() else {
-                let end = GroupStatus::of(&[*status]);
+                let end = EndStatus::of(&[*status]);
                 return (None, delete_log_line(localizer, set_id, end, *bytes_freed));
             };
             let ended = &mut progress.ended[group];
@@ -274,7 +293,7 @@ pub fn backup_delete_progress_lines(
             if ended.statuses.len() < progress.groups[group].sets {
                 return (None, None);
             }
-            let end = GroupStatus::of(&ended.statuses);
+            let end = EndStatus::of(&ended.statuses);
             let line = delete_log_line(localizer, &progress.groups[group].names, end, ended.freed);
             (None, line)
         }
@@ -287,18 +306,24 @@ pub fn backup_delete_progress_lines(
 fn delete_log_line(
     localizer: &Localizer,
     names: &str,
-    end: GroupStatus,
+    end: EndStatus,
     freed: u64,
 ) -> Option<String> {
     let key = match end.said() {
-        DeleteStatus::Deleted => "wizard-progress-log-delete-deleted",
+        // A backup taken out of a set that stays is deleted too.
+        DeleteStatus::Deleted | DeleteStatus::DeletedFromSet => {
+            "wizard-progress-log-delete-deleted"
+        }
         DeleteStatus::FinishedEarlierDeletion => "wizard-progress-log-delete-finished",
         DeleteStatus::AlreadyGone => "wizard-progress-log-delete-already-gone",
         DeleteStatus::PartlyDeleted => "wizard-progress-log-delete-partly",
-        DeleteStatus::NotDeleted | DeleteStatus::Refused => "wizard-progress-log-delete-failed",
+        DeleteStatus::NotDeleted | DeleteStatus::NotDeletedFromSet | DeleteStatus::Refused => {
+            "wizard-progress-log-delete-failed"
+        }
         // A real run never reports these for a set it worked on.
         DeleteStatus::WouldDelete
         | DeleteStatus::WouldFinishEarlierDeletion
+        | DeleteStatus::WouldDeleteFromSet
         | DeleteStatus::NotReached => return None,
     };
     let size = backup_size_text(localizer, freed);
@@ -368,31 +393,34 @@ pub struct WizardBackupDeleteOutcome {
     pub report_path: Option<PathBuf>,
 }
 
-/// What came of a group of ticked rows as a whole, from the status each set
-/// it takes ended with.
+/// What came of a row as a whole, or in the progress log of the rows of one
+/// set, from the status each of its items, or sets, ended with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GroupStatus {
-    /// The first of these any set has, in this order, so one set that
-    /// wasn't deleted keeps the group from counting as deleted. A group
-    /// none of whose sets the report names wasn't reached.
+struct EndStatus {
+    /// The first of these any of them has, in this order, so one set that
+    /// wasn't deleted keeps a row from counting as deleted. A row the
+    /// report says nothing of wasn't reached.
     status: DeleteStatus,
-    /// Some of the group's sets went in this run, wholly or in part, while
-    /// another wasn't deleted or wasn't reached. Only a group with the row
-    /// for the old copies of RABBIT's records, which stands for several
-    /// sets, can end so.
+    /// Some of the row's sets went in this run, wholly or in part, while
+    /// another wasn't deleted or wasn't reached. Only the row for the old
+    /// copies of RABBIT's records, which stands for several sets, can end
+    /// so.
     part_went: bool,
 }
 
-impl GroupStatus {
+impl EndStatus {
     fn of(statuses: &[DeleteStatus]) -> Self {
-        const ORDER: [DeleteStatus; 8] = [
+        const ORDER: [DeleteStatus; 11] = [
             DeleteStatus::Refused,
             DeleteStatus::NotDeleted,
+            DeleteStatus::NotDeletedFromSet,
             DeleteStatus::PartlyDeleted,
             DeleteStatus::NotReached,
             DeleteStatus::WouldDelete,
             DeleteStatus::WouldFinishEarlierDeletion,
+            DeleteStatus::WouldDeleteFromSet,
             DeleteStatus::Deleted,
+            DeleteStatus::DeletedFromSet,
             DeleteStatus::FinishedEarlierDeletion,
         ];
         let status = if statuses.is_empty() {
@@ -408,6 +436,7 @@ impl GroupStatus {
                 matches!(
                     status,
                     DeleteStatus::Deleted
+                        | DeleteStatus::DeletedFromSet
                         | DeleteStatus::FinishedEarlierDeletion
                         | DeleteStatus::PartlyDeleted
                 )
@@ -415,8 +444,8 @@ impl GroupStatus {
         Self { status, part_went }
     }
 
-    /// The status Show details and the log give the group: partly deleted
-    /// when part of it went, never "not deleted" or "not reached" then.
+    /// The status Show details and the log give: partly deleted when part
+    /// of it went, never "not deleted" or "not reached" then.
     fn said(self) -> DeleteStatus {
         if self.part_went {
             DeleteStatus::PartlyDeleted
@@ -426,51 +455,200 @@ impl GroupStatus {
     }
 }
 
-/// What came of one group of ticked rows: of every set it takes.
-struct GroupOutcome<'a> {
-    group: &'a BackupDeleteGroup,
-    /// The group's sets as the report lists them.
-    sets: Vec<&'a DeleteReportItem>,
-    end: GroupStatus,
-    /// Bytes the run removed of the group's sets.
+/// What came of one ticked row: of each item it gave the engine.
+struct RowOutcome<'a> {
+    row: &'a BackupDeleteRow,
+    /// What the report says of each of the row's items, found by set and
+    /// part (see [`report_item`]).
+    items: Vec<&'a DeleteReportItem>,
+    end: EndStatus,
+    /// Bytes the run removed for the row's items.
     freed: u64,
+    /// Whether those bytes are the row's own. Not when the row shares the
+    /// deletion of a whole set with other ticked rows, as when they name
+    /// every backup of it: the engine gives the set's bytes to the first of
+    /// them, but they are every row's. Only the total says them then.
+    own_bytes: bool,
 }
 
-impl<'a> GroupOutcome<'a> {
-    fn of(group: &'a BackupDeleteGroup, report: &'a DeleteReport) -> Self {
-        let sets: Vec<&DeleteReportItem> = group
-            .set_ids
+impl<'a> RowOutcome<'a> {
+    /// What came of each row of `run`, in its order, as `report` says.
+    fn of_run(run: &'a BackupDeleteRun, report: &'a DeleteReport) -> Vec<Self> {
+        let mut at = 0;
+        let found: Vec<Vec<&DeleteReportItem>> = run
+            .rows
             .iter()
-            .filter_map(|id| report.sets.iter().find(|set| &set.set_id == id))
+            .map(|row| {
+                row.items
+                    .iter()
+                    .filter_map(|item| {
+                        let found = report_item(report, at, item);
+                        at += 1;
+                        found
+                    })
+                    .collect()
+            })
             .collect();
-        let statuses: Vec<DeleteStatus> = sets.iter().map(|set| set.status).collect();
-        Self {
-            group,
-            end: GroupStatus::of(&statuses),
-            freed: sets.iter().map(|set| set.bytes_freed).sum(),
-            sets,
+        run.rows
+            .iter()
+            .zip(found)
+            .enumerate()
+            .map(|(index, (row, items))| {
+                let statuses: Vec<DeleteStatus> = items.iter().map(|item| item.status).collect();
+                // A set that went whole, or would, for several ticked rows.
+                let shares_a_whole_set = items.iter().any(|ended| {
+                    !takes_a_part(ended.status)
+                        && run.rows.iter().enumerate().any(|(other, other_row)| {
+                            other != index
+                                && other_row
+                                    .items
+                                    .iter()
+                                    .any(|item| item.set_id == ended.set_id)
+                        })
+                });
+                Self {
+                    row,
+                    end: EndStatus::of(&statuses),
+                    freed: items.iter().map(|item| item.bytes_freed).sum(),
+                    own_bytes: !shares_a_whole_set,
+                    items,
+                }
+            })
+            .collect()
+    }
+
+    /// The row's items whose status is the row's: those that say why it
+    /// came out as it did.
+    fn telling_items(&self) -> impl Iterator<Item = &&'a DeleteReportItem> {
+        self.items
+            .iter()
+            .filter(move |item| item.status == self.end.status)
+    }
+
+    /// Why the row wasn't deleted, when nothing of it went, and whether
+    /// that is about its set's record of what it holds: a package or the
+    /// key map stays in its set when that record couldn't be saved without
+    /// it.
+    fn not_deleted(&self) -> Option<(NotDeletedReason, bool)> {
+        let from_set = match self.end.status {
+            DeleteStatus::NotDeleted => false,
+            DeleteStatus::NotDeletedFromSet => true,
+            _ => return None,
+        };
+        if self.end.part_went {
+            return None;
+        }
+        let reason = self
+            .telling_items()
+            .find_map(|item| item.not_deleted)
+            .unwrap_or(NotDeletedReason::Other);
+        Some((reason, from_set))
+    }
+
+    /// Whether nothing of the row went only because the engine refused, or
+    /// couldn't check, another ticked backup of the same set right before
+    /// that set's turn: it then leaves every backup of the set as it was,
+    /// and goes on with the next set, so the run didn't stop.
+    fn kept_with_another(&self, report: &DeleteReport) -> bool {
+        !report.refused
+            && self.end.status == DeleteStatus::NotReached
+            && !self.end.part_went
+            && self.items.iter().any(|item| {
+                item.status == DeleteStatus::NotReached
+                    && report.sets.iter().any(|other| {
+                        other.set_id == item.set_id
+                            && matches!(
+                                other.status,
+                                DeleteStatus::Refused | DeleteStatus::NotDeleted
+                            )
+                    })
+            })
+    }
+
+    /// The set whose one outcome the row's status and why are, when they
+    /// are the set's rather than the row's own: a whole set that wasn't
+    /// deleted or was deleted only in part, or a set whose record of what
+    /// it holds couldn't be saved without its parts. Ticked rows of one
+    /// such set share all of it, so Show details says it below the first
+    /// of them only.
+    fn shared_set(&self) -> Option<&'a str> {
+        if self.end.part_went
+            || !matches!(
+                self.end.status,
+                DeleteStatus::NotDeleted
+                    | DeleteStatus::NotDeletedFromSet
+                    | DeleteStatus::PartlyDeleted
+            )
+        {
+            return None;
+        }
+        let mut sets = self
+            .items
+            .iter()
+            .copied()
+            .filter(|item| item.status == self.end.status)
+            .map(|item| item.set_id.as_str());
+        let first = sets.next()?;
+        sets.all(|set| set == first).then_some(first)
+    }
+
+    /// Done's sentence for the row when it wasn't deleted, which Done
+    /// counts among the rows of the same reason (see [`done_reason`]).
+    fn done_reason(&self, report: &DeleteReport) -> Option<(u8, &'static str)> {
+        match self.not_deleted() {
+            Some((reason, from_set)) => Some(done_reason(reason, from_set)),
+            // Show details says which other backup kept it.
+            None if self.kept_with_another(report) => {
+                Some(done_reason(NotDeletedReason::Other, false))
+            }
+            None => None,
         }
     }
+}
 
-    fn rows(&self) -> usize {
-        self.group.names.len()
-    }
+/// Whether `status` is that of a package or the key map going out of a set
+/// that stays, or in a dry run would.
+fn takes_a_part(status: DeleteStatus) -> bool {
+    matches!(
+        status,
+        DeleteStatus::DeletedFromSet
+            | DeleteStatus::WouldDeleteFromSet
+            | DeleteStatus::NotDeletedFromSet
+    )
+}
 
-    /// The sets whose status is the group's: those that say why the group
-    /// came out as it did.
-    fn telling_sets(&self) -> impl Iterator<Item = &&'a DeleteReportItem> {
-        self.sets
-            .iter()
-            .filter(move |set| set.status == self.end.status)
-    }
+/// The report's item for `item`, the `at`-th item the run was given, found
+/// by its set and its part, never by its set alone: ticked rows of one set
+/// name the same set with other parts. The report lists one item for each
+/// the run was given, in that order, so it is the one at `at` when that
+/// names the same set and part; otherwise the first that does.
+fn report_item<'a>(
+    report: &'a DeleteReport,
+    at: usize,
+    item: &DeleteItem,
+) -> Option<&'a DeleteReportItem> {
+    let same = |ended: &&DeleteReportItem| ended.set_id == item.set_id && ended.part == item.part;
+    report
+        .sets
+        .get(at)
+        .filter(same)
+        .or_else(|| report.sets.iter().find(same))
+}
 
-    /// Why the group wasn't deleted, when nothing of it went.
-    fn not_deleted_reason(&self) -> Option<NotDeletedReason> {
-        (self.end.status == DeleteStatus::NotDeleted && !self.end.part_went).then(|| {
-            self.telling_sets()
-                .find_map(|set| set.not_deleted)
-                .unwrap_or(NotDeletedReason::Other)
-        })
+/// Done's sentence for rows not deleted for `reason`, with its place among
+/// the others, as Done says them in the order of those numbers: for a
+/// package or the key map that stayed in its set, `from_set`, about the
+/// set's record of what it holds rather than the set.
+fn done_reason(reason: NotDeletedReason, from_set: bool) -> (u8, &'static str) {
+    match (reason, from_set) {
+        (NotDeletedReason::InUse, false) => (0, "wizard-done-delete-in-use"),
+        (NotDeletedReason::InUse, true) => (1, "wizard-done-delete-record-in-use"),
+        (NotDeletedReason::Permission, false) => (2, "wizard-done-delete-permission"),
+        (NotDeletedReason::Permission, true) => (3, "wizard-done-delete-record-permission"),
+        (NotDeletedReason::EarlierDeletionLeft, _) => {
+            (4, "wizard-done-delete-earlier-deletion-left")
+        }
+        (NotDeletedReason::Other, _) => (5, "wizard-done-delete-other"),
     }
 }
 
@@ -485,22 +663,16 @@ pub fn wizard_backup_delete_outcome(
         Err(error) => return backup_delete_outcome_from_error(localizer, run, error),
     };
     let total = run.backups();
-    let outcomes: Vec<GroupOutcome<'_>> = run
-        .groups
-        .iter()
-        .map(|group| GroupOutcome::of(group, report))
-        .collect();
-    let rows = |wanted: &dyn Fn(&GroupOutcome<'_>) -> bool| -> usize {
-        outcomes
-            .iter()
-            .filter(|outcome| wanted(outcome))
-            .map(GroupOutcome::rows)
-            .sum()
+    let outcomes = RowOutcome::of_run(run, report);
+    let rows = |wanted: &dyn Fn(&RowOutcome<'_>) -> bool| -> usize {
+        outcomes.iter().filter(|outcome| wanted(outcome)).count()
     };
     let deleted = rows(&|outcome| {
         matches!(
             outcome.end.status,
-            DeleteStatus::Deleted | DeleteStatus::FinishedEarlierDeletion
+            DeleteStatus::Deleted
+                | DeleteStatus::DeletedFromSet
+                | DeleteStatus::FinishedEarlierDeletion
         )
     });
     let gone_before = rows(&|outcome| outcome.end.status == DeleteStatus::AlreadyGone);
@@ -583,27 +755,19 @@ pub fn wizard_backup_delete_outcome(
             &[("count", gone_before.into())],
         ));
     }
-    let reasons_by_count = [
-        (NotDeletedReason::InUse, "wizard-done-delete-in-use"),
-        (
-            NotDeletedReason::Permission,
-            "wizard-done-delete-permission",
-        ),
-        (
-            NotDeletedReason::EarlierDeletionLeft,
-            "wizard-done-delete-earlier-deletion-left",
-        ),
-        (NotDeletedReason::Other, "wizard-done-delete-other"),
-    ];
-    for (reason, key) in reasons_by_count {
-        let count = rows(&|outcome| outcome.not_deleted_reason() == Some(reason));
-        if count > 0 {
-            reasons.push(say(
-                localizer,
-                key,
-                &[("count", count.into()), ("total", total.into())],
-            ));
-        }
+    let mut by_reason: BTreeMap<(u8, &str), usize> = BTreeMap::new();
+    for reason in outcomes
+        .iter()
+        .filter_map(|outcome| outcome.done_reason(report))
+    {
+        *by_reason.entry(reason).or_default() += 1;
+    }
+    for ((_, key), count) in by_reason {
+        reasons.push(say(
+            localizer,
+            key,
+            &[("count", count.into()), ("total", total.into())],
+        ));
     }
     let counted = [
         (
@@ -622,6 +786,18 @@ pub fn wizard_backup_delete_outcome(
             }),
             "wizard-done-delete-stopped-partway",
         ),
+        // A package or the key map that went out of its set, though files
+        // of it stay there and still take up room, which no row lists any
+        // more: said here, as the first line counts it as deleted.
+        (
+            rows(&|outcome| {
+                outcome.end.status == DeleteStatus::DeletedFromSet
+                    && outcome
+                        .telling_items()
+                        .any(|item| !item.files_left.is_empty())
+            }),
+            "wizard-done-delete-files-left",
+        ),
     ];
     for (count, key) in counted {
         if count > 0 {
@@ -636,20 +812,16 @@ pub fn wizard_backup_delete_outcome(
         .iter()
         .filter(|outcome| outcome.end.status == DeleteStatus::Refused)
     {
-        for refusal in outcome
-            .telling_sets()
-            .filter_map(|set| set.refusal.as_ref())
+        for reason in outcome
+            .telling_items()
+            .filter_map(|item| item_refusal_text(localizer, outcome.row, item))
         {
             let line = say(
                 localizer,
                 "wizard-done-delete-refused-backup",
                 &[
-                    (
-                        "backup",
-                        (&and_list(localizer, &outcome.group.references)).into(),
-                    ),
-                    ("count", outcome.rows().into()),
-                    ("reason", (&delete_refusal_text(localizer, refusal)).into()),
+                    ("backup", (&outcome.row.reference).into()),
+                    ("reason", (&reason).into()),
                 ],
             );
             if !reasons.contains(&line) {
@@ -708,12 +880,12 @@ fn backup_delete_outcome_from_error(
     };
     let not_deleted = delete_status_label(localizer, DeleteStatus::NotDeleted);
     let mut detail_lines = vec![target_line(localizer, &run.resource_path)];
-    detail_lines.extend(run.groups.iter().map(|group| {
+    detail_lines.extend(run.rows.iter().map(|row| {
         say(
             localizer,
             "wizard-summary-delete-backup",
             &[
-                ("backups", (&and_list(localizer, &group.labels)).into()),
+                ("backup", (&row.label).into()),
                 ("status", (&not_deleted).into()),
             ],
         )
@@ -755,26 +927,34 @@ pub(super) fn unreadable_folder<'a>(
     folders.contains(path).then_some(path.as_path())
 }
 
-/// "Show details" after a delete: the target, then for each group of
-/// ticked backups what came of it, with what it freed and, for one that
-/// didn't go, why and what is left where; then what the run freed in all
-/// and where its report is.
+/// "Show details" after a delete: the target, then for each ticked backup
+/// what came of it, with what it freed when that is its own and, for one
+/// that didn't go, why and what is left where; then what the run freed in
+/// all and where its report is.
 fn summarize_backup_delete(
     localizer: &Localizer,
     run: &BackupDeleteRun,
     report: &DeleteReport,
-    outcomes: &[GroupOutcome<'_>],
+    outcomes: &[RowOutcome<'_>],
 ) -> Vec<String> {
     let mut lines = vec![target_line(localizer, &run.resource_path)];
+    // The sets whose unfinished deletion a ticked row of its own finishes,
+    // and then those whose finishing the line below a row said already.
+    let mut finished_said: BTreeSet<&str> = run
+        .rows
+        .iter()
+        .filter(|row| row.unfinished_deletion)
+        .flat_map(|row| row.items.iter().map(|item| item.set_id.as_str()))
+        .collect();
+    // The sets whose one outcome a row's lines said already (see
+    // [`RowOutcome::shared_set`]), with that outcome and the row's name.
+    let mut explained: Vec<(&str, DeleteStatus, &str)> = Vec::new();
     for outcome in outcomes {
         lines.push(say(
             localizer,
             "wizard-summary-delete-backup",
             &[
-                (
-                    "backups",
-                    (&and_list(localizer, &outcome.group.labels)).into(),
-                ),
+                ("backup", (&outcome.row.label).into()),
                 (
                     "status",
                     (&delete_status_label(localizer, outcome.end.said())).into(),
@@ -784,7 +964,7 @@ fn summarize_backup_delete(
         // The explanation sits indented below the backup's line. The indent
         // isn't in the messages: Fluent drops blanks at the start of a value.
         let mut below: Vec<String> = Vec::new();
-        if outcome.freed > 0 {
+        if outcome.own_bytes && outcome.freed > 0 {
             let size = backup_size_text(localizer, outcome.freed);
             below.push(say(
                 localizer,
@@ -792,13 +972,38 @@ fn summarize_backup_delete(
                 &[("size", (&size).into())],
             ));
         }
-        let explanation = explain(localizer, report, outcome);
-        // Rows that go together are one backup on disk, which the lines
-        // after this call "it".
-        if outcome.rows() > 1 && !explanation.is_empty() {
-            below.push(text(localizer, "wizard-summary-delete-together"));
+        let shared = outcome.shared_set();
+        let said_above = shared.and_then(|set| {
+            explained
+                .iter()
+                .find(|(other, status, _)| *other == set && *status == outcome.end.status)
+        });
+        match said_above {
+            Some((_, _, first)) => below.push(say(
+                localizer,
+                "wizard-summary-delete-same-as-above",
+                &[("backup", (*first).into())],
+            )),
+            None => {
+                below.extend(explain(localizer, report, outcome));
+                if let Some(set) = shared {
+                    explained.push((set, outcome.end.status, &outcome.row.label));
+                }
+            }
         }
-        below.extend(explanation);
+        // A set that goes whole takes an unfinished deletion of its id with
+        // it, though no ticked row may name that: said once, below the
+        // first row of the set, so nothing goes unsaid.
+        if outcome
+            .items
+            .iter()
+            .any(|item| item.finished_earlier_deletion && finished_said.insert(&item.set_id))
+        {
+            below.push(text(
+                localizer,
+                "wizard-summary-delete-finished-earlier-deletion-too",
+            ));
+        }
         lines.extend(below.into_iter().map(|line| format!("  {line}")));
     }
     if !report.refused {
@@ -819,22 +1024,19 @@ fn summarize_backup_delete(
     lines
 }
 
-/// Why a group came out as it did and what is left of it where, one
-/// sentence a line, each once: what happened to the backup first, then
-/// why, then the error as the computer gave it. Nothing for a group that is
-/// gone.
-fn explain(
-    localizer: &Localizer,
-    report: &DeleteReport,
-    outcome: &GroupOutcome<'_>,
-) -> Vec<String> {
+/// Why a row came out as it did and what is left of it where, one sentence
+/// a line, each once: what happened to the backup first, then why, then the
+/// error as the computer gave it. For a package or the key map that went
+/// out of its set, the files of it that couldn't be removed. Nothing else
+/// for a backup that is gone.
+fn explain(localizer: &Localizer, report: &DeleteReport, outcome: &RowOutcome<'_>) -> Vec<String> {
     let path = |path: &Option<PathBuf>| {
         path.as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_default()
     };
-    let error = |set: &DeleteReportItem| {
-        set.error.as_ref().map(|error| {
+    let error = |item: &DeleteReportItem| {
+        item.error.as_ref().map(|error| {
             say(
                 localizer,
                 "wizard-summary-error",
@@ -844,53 +1046,81 @@ fn explain(
     };
     let mut lines: Vec<String> = Vec::new();
     match outcome.end.status {
-        DeleteStatus::NotDeleted => {
+        // A backup that couldn't go out of its set left the set as it was,
+        // as a set that couldn't be moved does; what stopped it is the
+        // set's record of what it holds, which couldn't be saved without it.
+        DeleteStatus::NotDeleted | DeleteStatus::NotDeletedFromSet => {
+            let from_set = outcome.end.status == DeleteStatus::NotDeletedFromSet;
             let state = if outcome.end.part_went {
                 "wizard-summary-delete-part-left"
             } else {
                 "wizard-summary-delete-nothing-changed"
             };
             push_once(&mut lines, Some(text(localizer, state)));
-            for set in outcome.telling_sets() {
-                let reason = match set.not_deleted.unwrap_or(NotDeletedReason::Other) {
-                    NotDeletedReason::InUse => {
+            for item in outcome.telling_items() {
+                let reason = match (
+                    item.not_deleted.unwrap_or(NotDeletedReason::Other),
+                    from_set,
+                ) {
+                    (NotDeletedReason::InUse, false) => {
                         Some(text(localizer, "wizard-summary-delete-in-use"))
                     }
-                    NotDeletedReason::Permission => {
+                    (NotDeletedReason::InUse, true) => {
+                        Some(text(localizer, "wizard-summary-delete-record-in-use"))
+                    }
+                    (NotDeletedReason::Permission, false) => {
                         Some(text(localizer, "wizard-summary-delete-permission"))
                     }
-                    NotDeletedReason::EarlierDeletionLeft => Some(say(
+                    (NotDeletedReason::Permission, true) => {
+                        Some(text(localizer, "wizard-summary-delete-record-permission"))
+                    }
+                    (NotDeletedReason::EarlierDeletionLeft, _) => Some(say(
                         localizer,
                         "wizard-summary-delete-earlier-deletion-left",
-                        &[("path", (&path(&set.left_in)).into())],
+                        &[("path", (&path(&item.left_in)).into())],
                     )),
                     // The error below says what went wrong.
-                    NotDeletedReason::Other => None,
+                    (NotDeletedReason::Other, _) => None,
                 };
                 push_once(&mut lines, reason);
-                push_once(&mut lines, error(set));
+                push_once(&mut lines, error(item));
             }
         }
         DeleteStatus::PartlyDeleted => {
-            for set in outcome.telling_sets() {
+            for item in outcome.telling_items() {
                 push_once(
                     &mut lines,
                     Some(say(
                         localizer,
                         "wizard-summary-delete-left-in",
-                        &[("path", (&path(&set.left_in)).into())],
+                        &[("path", (&path(&item.left_in)).into())],
                     )),
                 );
-                push_once(&mut lines, error(set));
+                push_once(&mut lines, error(item));
+            }
+        }
+        // Gone out of its set, though files of it that couldn't be removed
+        // stay there, with no entry naming them, until the rest of the set
+        // goes.
+        DeleteStatus::DeletedFromSet => {
+            for item in outcome
+                .telling_items()
+                .filter(|item| !item.files_left.is_empty())
+            {
+                push_once(
+                    &mut lines,
+                    Some(say(
+                        localizer,
+                        "wizard-summary-delete-files-left",
+                        &[("count", item.files_left.len().into())],
+                    )),
+                );
+                push_once(&mut lines, error(item));
             }
         }
         DeleteStatus::Refused => {
-            for set in outcome.telling_sets() {
-                let refusal = set
-                    .refusal
-                    .as_ref()
-                    .map(|refusal| delete_refusal_text(localizer, refusal));
-                push_once(&mut lines, refusal);
+            for item in outcome.telling_items() {
+                push_once(&mut lines, item_refusal_text(localizer, outcome.row, item));
             }
         }
         DeleteStatus::NotReached => push_once(
@@ -899,6 +1129,8 @@ fn explain(
                 localizer,
                 if report.refused {
                     "wizard-summary-delete-not-reached-refused"
+                } else if outcome.kept_with_another(report) {
+                    "wizard-summary-delete-not-reached-kept-with"
                 } else if outcome.end.part_went {
                     "wizard-summary-delete-stopped-partway"
                 } else {
@@ -910,7 +1142,8 @@ fn explain(
         | DeleteStatus::FinishedEarlierDeletion
         | DeleteStatus::AlreadyGone
         | DeleteStatus::WouldDelete
-        | DeleteStatus::WouldFinishEarlierDeletion => {}
+        | DeleteStatus::WouldFinishEarlierDeletion
+        | DeleteStatus::WouldDeleteFromSet => {}
     }
     lines
 }
@@ -929,14 +1162,20 @@ pub(super) fn push_once(lines: &mut Vec<String>, line: Option<String>) {
 /// "Show details".
 pub fn delete_status_label(localizer: &Localizer, status: DeleteStatus) -> String {
     let key = match status {
-        DeleteStatus::Deleted => "wizard-delete-status-deleted",
+        // A backup taken out of a set that stays is deleted, or would be,
+        // as far as its row goes.
+        DeleteStatus::Deleted | DeleteStatus::DeletedFromSet => "wizard-delete-status-deleted",
         DeleteStatus::FinishedEarlierDeletion => "wizard-delete-status-finished-earlier-deletion",
         DeleteStatus::AlreadyGone => "wizard-delete-status-already-gone",
-        DeleteStatus::WouldDelete => "wizard-delete-status-would-delete",
+        DeleteStatus::WouldDelete | DeleteStatus::WouldDeleteFromSet => {
+            "wizard-delete-status-would-delete"
+        }
         DeleteStatus::WouldFinishEarlierDeletion => {
             "wizard-delete-status-would-finish-earlier-deletion"
         }
-        DeleteStatus::NotDeleted => "wizard-delete-status-not-deleted",
+        DeleteStatus::NotDeleted | DeleteStatus::NotDeletedFromSet => {
+            "wizard-delete-status-not-deleted"
+        }
         DeleteStatus::PartlyDeleted => "wizard-delete-status-partly-deleted",
         DeleteStatus::Refused => "wizard-delete-status-refused",
         DeleteStatus::NotReached => "wizard-delete-status-not-reached",
@@ -944,13 +1183,40 @@ pub fn delete_status_label(localizer: &Localizer, status: DeleteStatus) -> Strin
     text(localizer, key)
 }
 
+/// Why the engine refused `item` of `row`, as a sentence (see
+/// [`delete_refusal_text`]). The engine refuses every item of an id whose
+/// unfinished deletion belongs to another account, also a package or the
+/// key map kept in the set beside it: that is said of the unfinished
+/// deletion, never as if the row's backup were another account's.
+fn item_refusal_text(
+    localizer: &Localizer,
+    row: &BackupDeleteRow,
+    item: &DeleteReportItem,
+) -> Option<String> {
+    let refusal = item.refusal.as_ref()?;
+    let earlier_deletion_not_yours = matches!(refusal, RestoreRefusal::NotYours { .. })
+        && item.set_path.is_none()
+        && item.unfinished_deletion.is_some()
+        && !row.unfinished_deletion;
+    Some(if earlier_deletion_not_yours {
+        text(
+            localizer,
+            "wizard-delete-refusal-not-yours-earlier-deletion",
+        )
+    } else {
+        delete_refusal_text(localizer, refusal)
+    })
+}
+
 /// A delete's refusal as a sentence in the user's language: of one backup,
 /// which the sentence calls "it", or of the whole run. These are the
-/// refusals a delete gives; they mean what
+/// refusals a delete gives, those of a package or the key map that can't
+/// go out of its set alone among them; they mean what
 /// [`RestoreRefusal::delete_text`] says for the command line, without its
 /// command-line syntax.
 pub fn delete_refusal_text(localizer: &Localizer, refusal: &RestoreRefusal) -> String {
     let key = format!("wizard-delete-refusal-{}", refusal.code());
+    let package = |package_id: &str| localized_package_display_name(localizer, package_id);
     match refusal {
         RestoreRefusal::InvalidId { .. }
         | RestoreRefusal::DiffersInCase { .. }
@@ -958,12 +1224,24 @@ pub fn delete_refusal_text(localizer: &Localizer, refusal: &RestoreRefusal) -> S
         | RestoreRefusal::NotYours { .. }
         | RestoreRefusal::ChangedSinceListed { .. }
         | RestoreRefusal::LockHeld { .. }
-        | RestoreRefusal::AsRoot => text(localizer, &key),
+        | RestoreRefusal::AsRoot
+        | RestoreRefusal::BeingDeleted { .. }
+        | RestoreRefusal::NoKeymapInSet { .. } => text(localizer, &key),
         RestoreRefusal::IsLink { path } => say(
             localizer,
             &key,
             &[("path", (&path.display().to_string()).into())],
         ),
+        RestoreRefusal::NoManifest { package_id, .. }
+        | RestoreRefusal::NoPackageRecords { package_id, .. }
+        | RestoreRefusal::PackageNotInSet { package_id, .. } => say(
+            localizer,
+            &key,
+            &[("package", (&package(package_id)).into())],
+        ),
+        RestoreRefusal::DamagedManifest { detail, .. } => {
+            say(localizer, &key, &[("detail", detail.into())])
+        }
         // A delete refuses for no other reason. Should one come, it is said
         // as a restore says it, as the command line's text does.
         _ => restore_refusal_text(localizer, refusal),

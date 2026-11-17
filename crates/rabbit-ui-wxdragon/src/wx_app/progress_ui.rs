@@ -274,10 +274,11 @@ pub(crate) fn apply_progress_event_to_ui(
             status_line = Some(line.clone());
             log_line = Some(line);
         }
-        // A delete holds the status line with the backup it is deleting,
-        // said once for each group of ticked rows, however many sets it
-        // takes, and logs what came of the group once its last set is done
-        // with; see `backup_delete_progress_lines`.
+        // A delete holds the status line with the backups it is deleting,
+        // said once for the ticked rows of each set, and once for the row
+        // of RABBIT's old records however many sets it stands for, and logs
+        // what came of them once their last set is done with; see
+        // `backup_delete_progress_lines`.
         ProgressEvent::DeleteStarted { .. } | ProgressEvent::DeleteCompleted { .. } => {
             let (status, log) = backup_delete_progress_lines(localizer, &mut state, &event);
             status_line = status;

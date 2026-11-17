@@ -442,11 +442,22 @@ again)".
   nothing. Each backup comes back whole or not at all.
 - **Delete:** deletes the ticked backups for good, not to the Recycle Bin or
   the Trash, to free the room they take. Review says what each one loses and
-  how much room the delete frees. Enter doesn't start it; press **Delete**,
-  and RABBIT asks once more with **No** selected. A delete takes whole backup
-  sets, so rows from one set, such as two packages one uninstall removed, are
-  ticked together, and the text below the list and Review say so. REAPER may
-  stay open.
+  how much room the delete frees, "about" when a package or key map goes out
+  of a backup that keeps others; the last page says what it really freed.
+  Enter doesn't start it; press **Delete**, and RABBIT asks once more with
+  **No** selected. Each row is ticked on its own, and a package or key map
+  is deleted on its own: of two packages one uninstall removed, you can
+  delete one and keep the other, which can still be restored. A file of it
+  that can't be removed, such as one open in another program, stays in the
+  backup it was kept in until the rest of that backup is deleted, and the
+  last page says so. Two kinds of row can only be deleted together with
+  other rows: a row under **Other backups** for files no other row brings
+  back (its size counts only those files), and an unfinished deletion of a
+  backup that is still listed. The text below the list names the rows each
+  one goes with, and Review asks you to tick them too, or to untick it when
+  one of them can't be deleted, such as another account's. When every row
+  kept in one backup goes, RABBIT also finishes an unfinished deletion of
+  that backup, and Show details says so. REAPER may stay open.
 - **Nothing is deleted by itself.** A backup stays until you delete it, here
   or with `rabbit delete-backup`.
 - **Another account's backups (Mac):** a backup another account made, such
@@ -454,7 +465,8 @@ again)".
   the list says how to remove it in Finder.
 - **While it runs:** the progress page names each backup. Closing RABBIT
   asks first, with **No** selected, then stops once the backup it is on is
-  done. The last page says what came back or was deleted, and **Show
+  done; a delete also finishes the other ticked backups kept with it. The
+  last page says what came back or was deleted, and **Show
   details** what happened to each backup. A restore or delete that gets
   past its checks saves a report under `RABBIT\logs`. After the run, start
   RABBIT again for the next one.
@@ -1017,8 +1029,8 @@ the resource folder or into `RABBIT`.
 
 ### Delete backups
 
-`delete-backup` deletes backup sets for good, to free the room they take, as
-**Delete** on the wizard's **Backups** tab does. Name each set with
+`delete-backup` deletes backups for good, to free the room they take, as
+**Delete** on the wizard's **Backups** tab does. Name each backup set with
 `--backup-id`, exactly as `rabbit backups` lists it, upper and lower case
 included. Like the other commands, it only shows what it would do until you
 add `--apply`:
@@ -1031,15 +1043,50 @@ RABBIT delete-backup --resource-path "%APPDATA%\REAPER" \
 # Delete two backup sets:
 RABBIT delete-backup --resource-path "%APPDATA%\REAPER" \
      --backup-id uninstall-unix-1234567890 --backup-id unix-1234567890 --apply
+
+# Delete only SWS out of a backup set that also holds FFmpeg:
+RABBIT delete-backup --resource-path "%APPDATA%\REAPER" \
+     --backup-id uninstall-unix-1234567890 --package sws --apply
+
+# Delete only the key map out of a backup set:
+RABBIT delete-backup --resource-path "%APPDATA%\REAPER" \
+     --backup-id unix-1234567890 --key-map --apply
 ```
 
-- **Whole sets, for good.** Each set goes whole, in the order you named them.
-  When it holds several backups, such as two packages one uninstall removed,
-  they all go. Deleted backups don't go to the Recycle Bin or the Trash, and
-  can't be restored. A set goes even when it holds the only copy of
-  something, such as a package you uninstalled or the key map you had before
-  OSARA's replaced it: the dry run says when it does.
-- **Moved first, then removed.** RABBIT first moves the set into
+- **Whole sets, for good.** Without `--package` or `--key-map`, each set goes
+  whole, in the order you named them. When it holds several backups, such as
+  two packages one uninstall removed, they all go. Deleted backups don't go
+  to the Recycle Bin or the Trash, and can't be restored. A backup goes even
+  when it is the only copy of something, such as a package you uninstalled
+  or the key map you had before OSARA's replaced it: the dry run says when
+  it is.
+- **One backup out of a set.** `--package` deletes one package's backup out of
+  the set you name, its files and what the set records of it, and `--key-map`
+  deletes the set's key map. Both take exactly one `--backup-id`, and can't be
+  given together. The set's other backups stay, and can still be restored.
+  When it is the last backup in the set, the whole set goes, as without the
+  option; if part of it then stays as an unfinished deletion, the output
+  gives the command that finishes it, which names the set without
+  `--package` or `--key-map`. A set that also holds files no package or key
+  map of it holds, which `rabbit backups` lists as the set's own backup,
+  stays with those files.
+  `rabbit backups` prints the command for each package and key map, without
+  `--apply`, so it first shows what would go. A package or key map the set
+  doesn't hold is refused with exit code 2, also when you run the same command
+  again after it went and the set stays. So is one out of a set that can't say
+  which of its files belong to it, and one out of an unfinished deletion; for
+  a set without a manifest, or with one RABBIT can't read, delete the whole
+  set instead. RABBIT first takes the backup out of the set's records, then
+  removes its files and the folders they leave empty, but never a copy another
+  backup of the set still uses, nor the set's own records, whatever spelling
+  names them, and never what a link in the set leads to. A file it can't
+  remove, such as one open in another program, stays in the set and is named
+  in the output; the set's size in `rabbit backups` still counts it, and it
+  goes when you delete the whole set. A run stopped at once, by a second
+  Ctrl+C, right after the backup left the set's records can leave its files
+  there the same way. If another program has the set's records open, nothing
+  changes and the command exits with 1: close the program and run it again.
+- **Moved first, then removed.** RABBIT first moves a whole set into
   `RABBIT\backups-deleting`, so no restore finds it any more, then removes
   what is in it. It never follows a symbolic link or junction: a link in a set
   is removed, not what it leads to. Nothing outside `RABBIT\backups` and
@@ -1056,7 +1103,8 @@ RABBIT delete-backup --resource-path "%APPDATA%\REAPER" \
   Another RABBIT working on the same REAPER stops it before anything changes.
 - **Ctrl+C stops between sets.** The set being deleted finishes, and the rest
   stay as they are. Press Ctrl+C again to stop at once; what is left of that
-  set stays as an unfinished deletion.
+  set stays as an unfinished deletion, and what is left of a backup out of a
+  set stays in the set until you delete the whole set.
 - **Reports.** `--apply` saves a report under `RABBIT\logs`, also when a set
   couldn't be deleted, the run was stopped or every set was already gone. A
   run that a check stopped before anything changed saves none: one with exit
@@ -1077,9 +1125,9 @@ and `--apply`:
 
 | Exit code | Meaning |
 |---|---|
-| 0 | Every backup set you named is gone: deleted now, an unfinished deletion finished, or already gone, so a script can run twice. In a dry run: every one can be deleted. |
-| 1 | A backup set couldn't be deleted, or the run was stopped; the report names what went before it. Also when an error stopped RABBIT before anything changed, such as another RABBIT working on the same REAPER, `--apply` run as root on a Mac, or no folder at `--resource-path`; the message says which. |
-| 2 | A backup set you named can't be deleted: its id isn't one RABBIT gives a backup set, it is a symbolic link or junction, or it belongs to another account. Nothing changed. |
+| 0 | Every backup you named is gone: deleted now, out of its set, an unfinished deletion finished, or already gone, so a script that deletes whole sets can run twice. A backup out of a set counts as gone when a file of it stayed behind. In a dry run: every one can be deleted. |
+| 1 | A backup couldn't be deleted, or the run was stopped; the report names what went before it. Also when an error stopped RABBIT before anything changed, such as another RABBIT working on the same REAPER, `--apply` run as root on a Mac, or no folder at `--resource-path`; the message says which. |
+| 2 | A backup you named can't be deleted: its set's id isn't one RABBIT gives a backup set, it is a symbolic link or junction, it belongs to another account, or the set doesn't hold the package or key map you named, as when it went out of the set before and the set stays, or can't give it up alone. Nothing changed. |
 
 On a Mac, run `delete-backup` as yourself: run as root, as with `sudo`,
 `--apply` refuses and changes nothing. A backup set that belongs to another
@@ -1102,6 +1150,8 @@ RABBIT restore-backup --resource-path "%APPDATA%\REAPER" \
      --backup-id uninstall-unix-1234567890 --apply         # restore one set
 RABBIT delete-backup --resource-path "%APPDATA%\REAPER" \
      --backup-id uninstall-unix-1234567890 --apply         # delete one set
+RABBIT delete-backup --resource-path "%APPDATA%\REAPER" \
+     --backup-id uninstall-unix-1234567890 --package sws --apply   # one backup of it
 ```
 
 `rabbit backups` lists the backup sets newest first. For each set it says its
@@ -1125,7 +1175,11 @@ true. Listing
 changes nothing and hashes no file. It reads only the backup sets' manifests,
 RABBIT's records and file sizes, never a backed-up file, so it is quick even
 with FFmpeg's backups. A restore command is printed only for a set whose name
-needs no quotes, as RABBIT's own names don't. The listing ends with the
+needs no quotes, as RABBIT's own names don't. Each package and key map also
+gets the `delete-backup` command that deletes only it, with `--package` or
+`--key-map`, after a "To delete only this backup, first see what would go:".
+It is printed without `--apply`, so it shows what would go, and whether the
+whole set would; add `--apply` to delete it. The listing ends with the
 `delete-backup` command that deletes a set (see "Delete backups" above), and an
 unfinished deletion's line gives the command that finishes it. When a backup
 set of the same name is listed too, that command would delete the set as well,

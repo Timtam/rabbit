@@ -6,8 +6,8 @@
 //! tick a group. Space on a heading, on the placeholder of an empty list or
 //! on a row that can't be ticked for the choice below the list does
 //! nothing. What a tick does lives in the wx-free model
-//! (`apply_backup_checkbox`): for Delete it ticks the rows of the same set
-//! too, and the tree shows each row it changed.
+//! (`apply_backup_checkbox`): it ticks only that row, for either choice, and
+//! the tree shows the row as it changed.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -398,11 +398,11 @@ fn set_item_text_if_changed(tree: &TreeCtrl, item: &TreeItemId, text: &str) {
 }
 
 /// Bring the list in line with the checkbox the native control just
-/// flipped: the row and every row a Delete tick took with it get their tick
-/// and their text, and the details follow when the selected row is among
-/// them. A row that can't be ticked, a heading or the placeholder goes back
-/// to how it was. Applying the same state twice changes nothing, so a toggle
-/// that reaches both the click and the key handler is harmless.
+/// flipped: the row gets its tick and its text, and the details follow when
+/// it is the selected row. A row that can't be ticked, a heading or the
+/// placeholder goes back to how it was. Applying the same state twice
+/// changes nothing, so a toggle that reaches both the click and the key
+/// handler is harmless.
 fn reconcile_toggle(
     tree: &TreeCtrl,
     items: &BackupsStateCell,
@@ -428,31 +428,22 @@ fn reconcile_toggle(
             // Take what the widgets need and let the borrows go before
             // touching them: a widget call can run another handler that
             // reads the list or the items.
-            let changed: Vec<(Option<TreeItemId>, bool, String, String)> = {
+            let changed: Option<(bool, String, String)> = {
                 let mut list = list.borrow_mut();
                 let choice = list.choice;
-                let change = apply_backup_checkbox(&mut list.rows, index, choice, checked);
-                let items = items.borrow();
-                std::iter::once(index)
-                    .chain(change.tied)
-                    .filter_map(|row_index| {
-                        let row = list.rows.get(row_index)?;
-                        Some((
-                            items.nodes.get(row_index).cloned().flatten(),
-                            row.is_ticked(choice),
-                            row.summary.clone(),
-                            row.details.clone(),
-                        ))
-                    })
-                    .collect()
+                apply_backup_checkbox(&mut list.rows, index, choice, checked);
+                list.rows.get(index).map(|row| {
+                    (
+                        row.is_ticked(choice),
+                        row.summary.clone(),
+                        row.details.clone(),
+                    )
+                })
             };
-            for (node, ticked, summary, row_details) in changed {
-                let Some(node) = node else {
-                    continue;
-                };
-                native_tree_checkboxes::set_check_state(hwnd, &node, ticked);
-                set_item_text_if_changed(tree, &node, &summary);
-                if is_selected(tree, &node) {
+            if let Some((ticked, summary, row_details)) = changed {
+                native_tree_checkboxes::set_check_state(hwnd, item, ticked);
+                set_item_text_if_changed(tree, item, &summary);
+                if is_selected(tree, item) {
                     set_text_if_changed(details, &row_details);
                 }
             }

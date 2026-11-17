@@ -532,7 +532,6 @@ wizard-backups-unavailable-not-a-backup = RABBIT no lo toca
 wizard-backups-unavailable-receipt-in-set = contiene una copia de los registros de RABBIT
 wizard-backups-unavailable-file-refused = RABBIT no devuelve uno de sus archivos
 wizard-backups-unavailable-cannot-restore = RABBIT no puede restaurarla
-wizard-backups-unavailable-tied = va con una copia de seguridad que RABBIT no puede eliminar
 # The details text of a Backups row, a sentence or two per line, in this
 # order: what the backup is; when it was made; what it holds and how big;
 # whether it is the only copy; what restoring does, or why it can't; what
@@ -627,17 +626,22 @@ wizard-backups-details-delete-keymap = Si eliminas esta copia de seguridad, RABB
 wizard-backups-details-delete-already-back = Sus archivos también están en el disco, así que al eliminarla no se pierde nada.
 wizard-backups-details-delete-other = Si la eliminas, desaparece para siempre.
 wizard-backups-details-delete-deleting = Al eliminarla, se termina esa eliminación.
-# For rows that go together until a later version of RABBIT: one backup
-# holds them all, and RABBIT deletes whole backups. $backups is a list of
-# what the other rows call their backups, $count how many there are, a
-# number, and $origin uninstall, update or other, for what made the backup.
-wizard-backups-details-together = { $origin ->
-    [uninstall] La copia de seguridad de esta desinstalación también contiene { $backups }.
-    [update] La copia de seguridad de esta actualización también contiene { $backups }.
-   *[other] La misma copia de seguridad también contiene { $backups }.
-} Hasta una versión posterior, RABBIT las elimina juntas.
-# After the sentence above, when one of those rows can't be deleted.
-wizard-backups-details-tied = Una de ellas no se puede eliminar, así que RABBIT tampoco puede eliminar esta.
+# For a backup RABBIT can only delete together with the whole backup set it
+# is in, such as the files of a set that no other row brings back, after
+# the sentence above: the other rows of that set, which go with it. They
+# come after a colon, so a name like "Your key map" keeps its capital.
+# $backups is a list of what they call their backups, joined as
+# wizard-backups-list-and joins them, and $count how many there are, a
+# number. The -undeletable form names only those RABBIT can't delete, such
+# as another account's, so this one can't be deleted either.
+wizard-backups-details-delete-only-with = RABBIT solo puede eliminarla junto con { $count ->
+    [one] otra copia de seguridad
+   *[other] otras { $count } copias de seguridad
+}: { $backups }.
+wizard-backups-details-delete-only-with-undeletable = RABBIT solo puede eliminarla junto con { $count ->
+    [one] otra copia de seguridad
+   *[other] otras { $count } copias de seguridad
+} que RABBIT no puede eliminar: { $backups }.
 # The choice below the Backups list: its label, which screen readers read
 # with the choice, then the two choices, Restore and Delete. Restore is
 # where the tab starts. The choices have no access keys.
@@ -659,27 +663,6 @@ wizard-backups-ticked-macos = { $choice ->
        *[other] { $count } copias de seguridad marcadas para restaurar.
     }
 }
-# Said by VoiceOver on macOS after "Checked" or "Unchecked", when ticking a
-# row to delete ticks or unticks the rows from the same backup too, such as
-# "SWS 2.14.0.7 from the same uninstall is ticked too." $backups is a list
-# of what those rows call their backups, $count how many there are, a
-# number, and $origin uninstall, update or other, for what made the backup.
-wizard-backups-also-ticked-macos = { $count ->
-    [one] También marcado
-   *[other] También marcados
-}, de la misma { $origin ->
-    [uninstall] desinstalación
-    [update] actualización
-   *[other] copia de seguridad
-}: { $backups }.
-wizard-backups-also-unticked-macos = { $count ->
-    [one] También desmarcado
-   *[other] También desmarcados
-}, de la misma { $origin ->
-    [uninstall] desinstalación
-    [update] actualización
-   *[other] copia de seguridad
-}: { $backups }.
 # Why a restore of a backup is refused, a sentence or two each, about the
 # backup, which they call "it". Review puts one after "Can't restore
 # <backup> yet." or "Can't restore yet:", the Done page after "RABBIT
@@ -755,7 +738,8 @@ wizard-restore-target-keymap-among-version-files = es el mapa de teclado de REAP
 # each, as the Done page and Show details say it. Those about one backup
 # call it "it": the Done page puts them after "RABBIT can't delete
 # <backup>.". $path is a folder as the computer writes it, keep it as it
-# is. sudo and root are never translated.
+# is, $package a localized package name, and $detail an error message in
+# English. sudo and root are never translated.
 wizard-delete-refusal-invalid-id = Su nombre no es uno que RABBIT dé a una copia de seguridad.
 wizard-delete-refusal-differs-in-case = RABBIT solo la encuentra con un nombre con otras mayúsculas y minúsculas.
 wizard-delete-refusal-ends-in-dot-or-space = RABBIT solo la encuentra con un nombre sin el punto o el espacio del final.
@@ -764,6 +748,20 @@ wizard-delete-refusal-not-yours = Pertenece a otra cuenta, así que RABBIT no la
 wizard-delete-refusal-changed-since-listed = Cambió desde que RABBIT la mostró. Vuelve a abrir RABBIT para ver las copias de seguridad tal como están ahora.
 wizard-delete-refusal-lock-held = Otra copia de RABBIT está trabajando en este REAPER. Espera a que termine y vuelve a ejecutar RABBIT.
 wizard-delete-refusal-as-root = RABBIT se está ejecutando como root, como ocurre con sudo, y así no elimina copias de seguridad. Sal de RABBIT y ábrelo con tu propia cuenta.
+# Why RABBIT doesn't delete one package or the key map out of the backup set
+# it is kept in on its own, as above. They call the package or key map
+# "it", as the Done page puts them after its name, and that set "the backup
+# it is kept in", or "was kept in" where the set no longer holds it.
+wizard-delete-refusal-being-deleted = La eliminación de la copia de seguridad donde se guarda empezó y no terminó, así que RABBIT solo puede terminar de eliminar esa copia de seguridad entera.
+wizard-delete-refusal-no-manifest = La copia de seguridad donde se guarda no registra cuáles de sus archivos pertenecen a { $package }, así que RABBIT no los elimina por separado.
+wizard-delete-refusal-damaged-manifest = RABBIT no puede leer el registro de contenido de la copia de seguridad donde se guarda ({ $detail }), así que no elimina nada de esa copia de seguridad.
+wizard-delete-refusal-no-keymap-in-set = La copia de seguridad donde se guarda no contiene ningún mapa de teclado que RABBIT pueda eliminar por separado.
+wizard-delete-refusal-no-package-records = La copia de seguridad donde se guarda no registra ningún paquete, así que RABBIT no puede saber cuáles de sus archivos pertenecen a { $package }.
+wizard-delete-refusal-package-not-in-set = La copia de seguridad donde se guardaba ya no contiene ninguna copia de { $package } que RABBIT pueda eliminar.
+# Instead of wizard-delete-refusal-not-yours, when what belongs to another
+# account is an unfinished deletion of the backup set the package, key map
+# or files are kept in, which has the same name as that set.
+wizard-delete-refusal-not-yours-earlier-deletion = Una eliminación sin terminar de la copia de seguridad donde se guarda pertenece a otra cuenta, así que RABBIT no cambia esa copia de seguridad.
 
 # $package is the localized package name the configuration step depends on.
 wizard-configuration-row-unavailable = No está disponible: Se requiere instalar { $package }.
@@ -982,6 +980,13 @@ wizard-review-delete-intro = { $count ->
     [one] Esta copia de seguridad se elimina para siempre y libera { $size }:
    *[other] Estas copias de seguridad se eliminan para siempre y liberan { $size }:
 }
+# As above, when $size is about what the delete frees: a package or key map
+# goes out of the backup set it is kept in, and RABBIT knows its size only
+# from that set's record of what it holds.
+wizard-review-delete-intro-estimate = { $count ->
+    [one] Esta copia de seguridad se elimina para siempre y libera unos { $size }:
+   *[other] Estas copias de seguridad se eliminan para siempre y liberan unos { $size }:
+}
 # One line per ticked backup, saying what is lost with it. $backup is what
 # its row calls it, and $date a date and time (backup-date-time).
 wizard-review-delete-uninstalled = { $backup }, desinstalado el { $date }: la única copia.
@@ -992,23 +997,6 @@ wizard-review-delete-already-back = { $backup }: sus archivos también están en
 wizard-review-delete-records = { $backup }: no cambia nada de lo que está instalado.
 wizard-review-delete-deleting = { $backup }: termina una eliminación que empezó antes.
 wizard-review-delete-other = { $backup }: desaparece para siempre.
-# Until a later version, backups from one set go together. $backups is a
-# list of what their rows call them, $count how many there are, a number, 2
-# or more, $origin uninstall, update or other, for what made the backup, and
-# $date a date and time (backup-date-time). The -undated form is for a
-# backup whose date RABBIT can't tell.
-wizard-review-delete-together = { $origin ->
-    [uninstall] { $backups }, de la desinstalación del { $date }, van juntas
-    [update] { $backups }, de la actualización del { $date }, van juntas
-   *[other] { $backups }, del { $date }, van juntas
-}: { $count ->
-    [2] una sola copia de seguridad contiene ambas.
-   *[other] una sola copia de seguridad contiene las { $count }.
-}
-wizard-review-delete-together-undated = { $count ->
-    [2] { $backups } van juntas: una sola copia de seguridad contiene ambas.
-   *[other] { $backups } van juntas: una sola copia de seguridad contiene las { $count }.
-}
 # $count is a number.
 wizard-review-delete-other-choice-note = { $count ->
     [one] Una copia de seguridad marcada para restaurar no forma parte de esta operación.
@@ -1017,6 +1005,28 @@ wizard-review-delete-other-choice-note = { $count ->
 # Why the Delete button is disabled. $reason is a sentence.
 wizard-review-delete-blocked = Todavía no se puede eliminar: { $reason }
 wizard-review-delete-nothing-ticked = No hay nada marcado para eliminar.
+# Why the Delete button is disabled, as $reason above: a ticked backup that
+# RABBIT can only delete together with the whole backup set it is in, such
+# as the set's own files, while other rows of that set aren't ticked. The
+# -undeletable form is for rows of that set RABBIT can't delete, such as
+# another account's, so the ticked backup can only be unticked. $backup is
+# the ticked row, a set's own files or an unfinished deletion, named as
+# wizard-backups-row-reference names it. It comes after a colon, so its
+# capital stays. $backups names rows as wizard-backups-row-reference does,
+# or a key map as wizard-done-restore-keymap-in-sentence says it, so it may
+# start in lower case; $backups joins several as wizard-backups-list-and
+# joins them, after a colon, and $count is how many it names, a number.
+wizard-review-delete-only-with = RABBIT no puede eliminar esta copia de seguridad por separado: { $backup }. Solo puede eliminarla junto con { $count ->
+    [one] otra copia de seguridad
+   *[other] otras { $count } copias de seguridad
+}: { $backups }. Para eliminarla, marca también { $count ->
+    [one] la otra
+   *[other] las otras
+}.
+wizard-review-delete-only-with-undeletable = RABBIT no puede eliminar esta copia de seguridad por separado: { $backup }. Solo puede eliminarla junto con { $count ->
+    [one] otra copia de seguridad
+   *[other] otras { $count } copias de seguridad
+} que RABBIT no puede eliminar: { $backups }. Desmarca esta copia de seguridad.
 
 wizard-progress-heading = Progreso de la instalación
 wizard-progress-status-idle = Listo para instalar.
@@ -1042,13 +1052,13 @@ wizard-progress-status-uninstall-cancelling = Deteniendo. RABBIT termina el paso
 wizard-progress-delete-heading = Eliminando copias de seguridad
 wizard-progress-status-delete-running = Eliminando las copias de seguridad marcadas.
 wizard-progress-details-delete-starting = Iniciando la eliminación de copias de seguridad.
-# The status and log line when RABBIT starts deleting a backup, which is
-# spoken, then the log line when it is done with it. $backups is what the
-# rows call the backups that go together, one name or several joined as
-# wizard-backups-list-and joins them, each with when it was made, as
-# wizard-backups-row-reference says it, when another ticked backup has the
-# same name. $count is how many there are, a number, and $size a size, such
-# as "4 MB".
+# The status and log line when RABBIT starts deleting from a backup set,
+# which is spoken, then the log line when it is done with it. $backups is
+# what the rows call the ticked backups in that set, one name or several
+# joined as wizard-backups-list-and joins them, each with when it was made,
+# as wizard-backups-row-reference says it, when another ticked backup has
+# the same name. $count is how many there are, a number, and $size a size,
+# such as "4 MB".
 wizard-progress-status-deleting = { $count ->
     [one] Eliminando la copia de seguridad: { $backups }…
    *[other] Eliminando las copias de seguridad: { $backups }…
@@ -1353,6 +1363,12 @@ wizard-confirm-delete-backups-body = RABBIT elimina { $count ->
     [one] una copia de seguridad
    *[other] { $count } copias de seguridad
 } y libera { $size }.
+# As above, when $size is about what the delete frees, as for
+# wizard-review-delete-intro-estimate.
+wizard-confirm-delete-backups-body-estimate = RABBIT elimina { $count ->
+    [one] una copia de seguridad
+   *[other] { $count } copias de seguridad
+} y libera unos { $size }.
 wizard-confirm-delete-backups-only-copy = { $only ->
     [one] Una de ellas es la única copia de lo que contiene.
    *[other] { $only } de ellas son la única copia de lo que contienen.
@@ -1536,6 +1552,24 @@ wizard-done-delete-permission = { $total ->
        *[other] { $count } no se pudieron eliminar porque RABBIT no tiene permiso para moverlas. Se quedan como estaban.
     }
 }
+# For a package or key map RABBIT couldn't take out of the backup set it is
+# in, because the set's own record of what it holds was open in another
+# program, or RABBIT isn't allowed to change it. Nothing of that set
+# changed. $total and $count as above.
+wizard-done-delete-record-in-use = { $total ->
+    [1] Su registro de contenido está abierto en otro programa. Cierra ese programa y vuelve a ejecutar RABBIT para eliminarla.
+   *[other] { $count ->
+        [one] Una no se pudo eliminar porque su registro de contenido está abierto en otro programa. Cierra ese programa y vuelve a ejecutar RABBIT para eliminarla.
+       *[other] { $count } no se pudieron eliminar porque su registro de contenido está abierto en otro programa. Cierra ese programa y vuelve a ejecutar RABBIT para eliminarlas.
+    }
+}
+wizard-done-delete-record-permission = { $total ->
+    [1] RABBIT no tiene permiso para cambiar su registro de contenido. Se queda como estaba.
+   *[other] { $count ->
+        [one] Una no se pudo eliminar porque RABBIT no tiene permiso para cambiar su registro de contenido. Se queda como estaba.
+       *[other] { $count } no se pudieron eliminar porque RABBIT no tiene permiso para cambiar su registro de contenido. Se quedan como estaban.
+    }
+}
 wizard-done-delete-earlier-deletion-left = { $total ->
     [1] Una eliminación anterior de esta copia de seguridad no terminó y RABBIT tampoco ha podido terminarla ahora, así que la copia de seguridad se queda como estaba. Vuelve a ejecutar RABBIT para intentarlo otra vez.
    *[other] { $count ->
@@ -1575,6 +1609,19 @@ wizard-done-delete-stopped-partway = { $total ->
        *[other] { $count } solo se eliminaron en parte antes de que RABBIT se detuviera. El resto se conserva.
     }
 }
+# After the first line, for packages or key maps RABBIT deleted out of the
+# backup set they were kept in, when some of their files couldn't be
+# removed, for example because another program had one open. Those files
+# stay in that set with nothing naming them, so no row lists them, and they
+# still take up room until the rest of the set is deleted. $total and
+# $count as above.
+wizard-done-delete-files-left = { $total ->
+    [1] No se pudieron quitar todos sus archivos. Los que no se pudieron quitar siguen en la copia de seguridad donde se guardaba y ocupan espacio allí hasta que se elimine el resto de esa copia de seguridad.
+   *[other] { $count ->
+        [one] Una se eliminó, pero no se pudieron quitar todos sus archivos. Los que no se pudieron quitar siguen en la copia de seguridad donde se guardaba y ocupan espacio allí hasta que se elimine el resto de esa copia de seguridad.
+       *[other] { $count } se eliminaron, pero no se pudieron quitar todos sus archivos. Los que no se pudieron quitar siguen en las copias de seguridad donde se guardaban y ocupan espacio allí hasta que se elimine el resto de esas copias de seguridad.
+    }
+}
 # After the first line, when some of the ticked backups were gone before the
 # run. $count is a number, fewer than the backups ticked.
 wizard-done-delete-already-gone = { $count ->
@@ -1585,16 +1632,10 @@ wizard-done-delete-already-gone = { $count ->
 # refuses the whole run; said only when more than one backup was ticked.
 wizard-done-delete-refused-run = RABBIT solo elimina las copias de seguridad marcadas si puede eliminarlas todas.
 # Why a backup can't be deleted. $backup is what its row calls it with when
-# it was made, as wizard-backups-row-reference says it, or several such
-# joined as wizard-backups-list-and joins them when one backup on disk holds
-# them together; $count is how many, a number. $reason is one of the
-# wizard-delete-refusal-* sentences, which calls that one backup "it". With
-# one backup, $backup comes after a colon, so a name like "Your key map"
-# keeps its capital.
-wizard-done-delete-refused-backup = { $count ->
-    [one] RABBIT no puede eliminar esta copia de seguridad: { $backup }. { $reason }
-   *[other] RABBIT no puede eliminar { $backup }, que van juntas en una sola copia de seguridad. { $reason }
-}
+# it was made, as wizard-backups-row-reference says it. It comes after a
+# colon, so a name like "Your key map" keeps its capital. $reason is one of
+# the wizard-delete-refusal-* sentences, which calls that backup "it".
+wizard-done-delete-refused-backup = RABBIT no puede eliminar esta copia de seguridad: { $backup }. { $reason }
 # When RABBIT couldn't read REAPER's resource folder, or a folder of its own
 # backups in it, so it deleted nothing. $path is that folder as the computer
 # writes it, keep it as it is.
@@ -1602,19 +1643,28 @@ wizard-done-delete-folder-unreadable = RABBIT no pudo leer la carpeta { $path }.
 # When something else went wrong before RABBIT deleted anything. $error is
 # the error message, in English.
 wizard-done-delete-error = Algo salió mal antes de que RABBIT eliminara nada: { $error }
-# Show details after a delete of backups: one line per ticked backup, or per
-# backups that went together, then lines indented below it. $backups is
-# what the rows call them, joined as wizard-backups-list-and joins names,
-# each with when it was made, as wizard-backups-row-reference says it, when
-# another ticked backup has the same name. $status is one of the
-# wizard-delete-status-* labels, $size a size, such as "4 MB", and $path a
-# folder as the computer writes it, keep it as it is. Name the Backups tab
-# as wizard-packages-tab-backups does. The lines below say "it" of the
-# backup; for backups that go together, wizard-summary-delete-together
-# comes first and says that one backup holds them.
-wizard-summary-delete-backup = { $backups }: { $status }
+# Show details after a delete of backups: one line per ticked backup, then
+# lines indented below it. $backup is what its row calls it, with when it
+# was made, as wizard-backups-row-reference says it, when another ticked
+# backup has the same name. $status is one of the wizard-delete-status-*
+# labels, $size a size, such as "4 MB", and $path a folder as the computer
+# writes it, keep it as it is. Name the Backups tab as
+# wizard-packages-tab-backups does. The lines below say "it" of the backup.
+wizard-summary-delete-backup = { $backup }: { $status }
 wizard-summary-delete-freed = Espacio liberado: { $size }
-wizard-summary-delete-together = Van juntas: una sola copia de seguridad las guarda.
+# Below a package or key map RABBIT deleted, when some of its files
+# couldn't be removed: they stay in the backup set it was in, with nothing
+# naming them, and go when the rest of that set is deleted. $count is how
+# many, a number.
+wizard-summary-delete-files-left = { $count ->
+    [one] Uno de sus archivos no se pudo quitar y se queda en la copia de seguridad donde se guardaba. Desaparece cuando se elimine el resto de esa copia de seguridad.
+   *[other] { $count } de sus archivos no se pudieron quitar y se quedan en la copia de seguridad donde se guardaban. Desaparecen cuando se elimine el resto de esa copia de seguridad.
+}
+# Below a backup RABBIT deleted, or tried to, when deleting the whole backup
+# set it was kept in also finished an unfinished deletion of that set,
+# which wasn't ticked: the Backups tab listed it as an unfinished deletion.
+# Said once for each set.
+wizard-summary-delete-finished-earlier-deletion-too = RABBIT también completó una eliminación sin terminar de la copia de seguridad donde se guardaba.
 # What happened to a backup that wasn't deleted, then why, in a line of
 # its own. Part of the row for the old copies of RABBIT's records, which
 # stands for several backups on disk, may have gone though the rest didn't.
@@ -1622,11 +1672,27 @@ wizard-summary-delete-nothing-changed = No ha cambiado nada de ella.
 wizard-summary-delete-part-left = RABBIT eliminó una parte. El resto no se pudo eliminar y se queda como estaba.
 wizard-summary-delete-in-use = Un archivo suyo está abierto en otro programa, así que no se pudo mover.
 wizard-summary-delete-permission = RABBIT no tiene permiso para moverla.
+# Why a package or key map couldn't be taken out of the backup set it is
+# in: the set's own record of what it holds was open in another program, or
+# RABBIT isn't allowed to change it.
+wizard-summary-delete-record-in-use = Su registro de contenido está abierto en otro programa, así que no se pudo cambiar.
+wizard-summary-delete-record-permission = RABBIT no tiene permiso para cambiar su registro de contenido.
 wizard-summary-delete-earlier-deletion-left = Una eliminación anterior suya no terminó y RABBIT tampoco ha podido terminarla ahora. Lo que queda de esa eliminación está en { $path }.
 wizard-summary-delete-left-in = Lo que RABBIT no pudo quitar se queda en { $path }. La pestaña «Copias de seguridad» lo muestra como una eliminación sin terminar, que ya no usa ninguna restauración; si lo eliminas allí, se termina.
 wizard-summary-delete-not-reached-stopped = RABBIT se detuvo antes de llegar a ella, así que se conserva.
 wizard-summary-delete-stopped-partway = RABBIT eliminó una parte y luego se detuvo. El resto se conserva.
 wizard-summary-delete-not-reached-refused = RABBIT no ha eliminado nada en esta operación, así que se conserva.
+# For a backup RABBIT didn't get to, because it couldn't delete, or check,
+# another ticked backup kept in the same backup set: RABBIT then leaves
+# every backup of that set as it was, and goes on with the next set.
+wizard-summary-delete-not-reached-kept-with = RABBIT la dejó como estaba, porque no pudo eliminar otra copia de seguridad marcada que se guarda con ella.
+# Below a ticked backup kept in the same backup set as a ticked backup
+# above it, when RABBIT couldn't delete that set, deleted it only in part,
+# or couldn't change its record of what it holds: what happened, and why,
+# is the same for both, and is said only below the first. $backup is what
+# that one's line calls it, as wizard-summary-delete-backup names it. It
+# comes after a colon, so its capital stays.
+wizard-summary-delete-same-as-above = Lo que le pasó, y por qué, se indica más arriba, en la copia de seguridad que se guardaba con ella: { $backup }.
 wizard-summary-delete-freed-total = Espacio liberado en total: { $size }
 # $path is the full path of the report RABBIT saved.
 wizard-summary-delete-report = Informe: { $path }

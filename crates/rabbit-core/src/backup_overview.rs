@@ -129,9 +129,11 @@ impl BackupItem {
     }
 
     /// Every set the backup is in: its one set, or, for the records, each
-    /// set that holds only a copy of RABBIT's records. A delete takes whole
-    /// sets, so deleting this backup deletes each of them, each as an item
-    /// of its own (see [`crate::backup_delete::DeleteItem`]).
+    /// set that holds only a copy of RABBIT's records. A delete of this
+    /// backup takes one item per set (see
+    /// [`crate::backup_delete::DeleteItem::for_backup`]): a package or a key
+    /// map goes out of its set alone, and every other backup takes its sets
+    /// whole.
     pub fn set_ids(&self) -> Vec<&str> {
         match self {
             Self::Records { set_ids } => set_ids.iter().map(String::as_str).collect(),
@@ -273,8 +275,9 @@ pub struct BackupEntry {
     /// and key maps. Uninstalled software that is already back is not, so
     /// deleting it loses nothing.
     pub only_copy: bool,
-    /// The other backups in the same set. Deleting takes whole sets, so
-    /// they go together.
+    /// The other backups in the same set. A package or a key map can be
+    /// deleted out of its set alone; deleting every backup of a set, or the
+    /// set's own backup, deletes the set whole.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shares_set_with: Vec<BackupItem>,
     /// How `rabbit restore-backup` takes this backup, if it does.
@@ -1996,8 +1999,10 @@ fn places_looked_at_on_this_thread() -> Vec<PathBuf> {
 /// Whether a restore of `item` takes `entry` of `manifest`, as far as the
 /// set's layout goes: a package's own files (in an update's or restore's
 /// set, neither the key map nor a copy of RABBIT's receipt, which are no
-/// file of a version), the key map, or every file of a whole set.
-fn restores_entry(
+/// file of a version), the key map, or every file of a whole set. These are
+/// also the files a backup's row counts, and those a delete of one package
+/// or the key map out of the set takes (see [`crate::backup_delete`]).
+pub(crate) fn restores_entry(
     resource_path: &Path,
     manifest: &BackupManifest,
     item: &BackupItem,
