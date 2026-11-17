@@ -752,7 +752,7 @@ wizard-delete-refusal-as-root = RABBIT läuft als root, wie unter sudo, und lös
 # it is kept in on its own, as above. They call the package or key map
 # "it", as the Done page puts them after its name, and that set "the backup
 # it is kept in", or "was kept in" where the set no longer holds it.
-wizard-delete-refusal-being-deleted = Das Löschen der Sicherung, in der sie aufbewahrt wird, hat begonnen und wurde nicht abgeschlossen, daher kann RABBIT diese Sicherung nur noch ganz löschen.
+wizard-delete-refusal-being-deleted = Das Löschen der Sicherung, in der sie aufbewahrt wird, hat begonnen und wurde nicht abgeschlossen, daher kann RABBIT nur noch das Löschen der ganzen Sicherung abschließen.
 wizard-delete-refusal-no-manifest = Die Sicherung, in der sie aufbewahrt wird, verzeichnet nicht, welche ihrer Dateien zu { $package } gehören, daher löscht RABBIT sie nicht einzeln.
 wizard-delete-refusal-damaged-manifest = RABBIT kann das Inhaltsverzeichnis der Sicherung, in der sie aufbewahrt wird, nicht lesen ({ $detail }), daher löscht es nichts aus dieser Sicherung.
 wizard-delete-refusal-no-keymap-in-set = Die Sicherung, in der sie aufbewahrt wird, enthält keine Tastenzuordnung, die RABBIT einzeln löschen kann.
@@ -1009,22 +1009,24 @@ wizard-review-delete-nothing-ticked = Zum Löschen ist nichts ausgewählt.
 # RABBIT can only delete together with the whole backup set it is in, such
 # as the set's own files, while other rows of that set aren't ticked. The
 # -undeletable form is for rows of that set RABBIT can't delete, such as
-# another account's, so the ticked backup can only be unticked. $backup and
-# $backups name rows as wizard-backups-row-reference does, or a key map as
-# wizard-done-restore-keymap-in-sentence says it, so they may start in lower
-# case; $backups joins several as wizard-backups-list-and joins them, after
-# a colon, and $count is how many it names, a number.
-wizard-review-delete-only-with = RABBIT kann { $backup } nur zusammen mit { $count ->
+# another account's, so the ticked backup can only be unticked. $backup is
+# the ticked row, a set's own files or an unfinished deletion, named as
+# wizard-backups-row-reference names it. It comes after a colon, so its
+# capital stays. $backups names rows as wizard-backups-row-reference does,
+# or a key map as wizard-done-restore-keymap-in-sentence says it, so it may
+# start in lower case; $backups joins several as wizard-backups-list-and
+# joins them, after a colon, and $count is how many it names, a number.
+wizard-review-delete-only-with = RABBIT kann diese Sicherung nicht allein löschen: { $backup }. Sie lässt sich nur zusammen mit { $count ->
     [one] einer weiteren Sicherung
    *[other] { $count } weiteren Sicherungen
 } löschen: { $backups }. Um sie zu löschen, wählen Sie { $count ->
     [one] die andere
    *[other] die anderen
 } ebenfalls aus.
-wizard-review-delete-only-with-undeletable = RABBIT kann { $backup } nur zusammen mit { $count ->
+wizard-review-delete-only-with-undeletable = RABBIT kann diese Sicherung nicht allein löschen: { $backup }. Sie lässt sich nur zusammen mit { $count ->
     [one] einer weiteren Sicherung
    *[other] { $count } weiteren Sicherungen
-} löschen, die RABBIT nicht löschen kann: { $backups }. Wählen Sie { $backup } daher ab.
+} löschen, die RABBIT nicht löschen kann: { $backups }. Wählen Sie diese Sicherung daher ab.
 
 wizard-progress-heading = Installationsfortschritt
 wizard-progress-status-idle = Bereit zur Installation.
@@ -1607,6 +1609,19 @@ wizard-done-delete-stopped-partway = { $total ->
        *[other] { $count } wurden nur zum Teil gelöscht, bevor RABBIT angehalten hat. Der Rest davon bleibt erhalten.
     }
 }
+# After the first line, for packages or key maps RABBIT deleted out of the
+# backup set they were kept in, when some of their files couldn't be
+# removed, for example because another program had one open. Those files
+# stay in that set with nothing naming them, so no row lists them, and they
+# still take up room until the rest of the set is deleted. $total and
+# $count as above.
+wizard-done-delete-files-left = { $total ->
+    [1] Nicht alle ihrer Dateien ließen sich entfernen. Die nicht entfernten bleiben in der Sicherung, in der sie aufbewahrt wurde, und belegen dort Platz, bis der Rest dieser Sicherung gelöscht wird.
+   *[other] { $count ->
+        [one] Eine wurde gelöscht, aber nicht alle ihrer Dateien ließen sich entfernen. Die nicht entfernten bleiben in der Sicherung, in der sie aufbewahrt wurde, und belegen dort Platz, bis der Rest dieser Sicherung gelöscht wird.
+       *[other] { $count } wurden gelöscht, aber nicht alle ihrer Dateien ließen sich entfernen. Die nicht entfernten bleiben in den Sicherungen, in denen sie aufbewahrt wurden, und belegen dort Platz, bis der Rest dieser Sicherungen gelöscht wird.
+    }
+}
 # After the first line, when some of the ticked backups were gone before the
 # run. $count is a number, fewer than the backups ticked.
 wizard-done-delete-already-gone = { $count ->
@@ -1671,6 +1686,13 @@ wizard-summary-delete-not-reached-refused = RABBIT hat bei diesem Durchlauf nich
 # another ticked backup kept in the same backup set: RABBIT then leaves
 # every backup of that set as it was, and goes on with the next set.
 wizard-summary-delete-not-reached-kept-with = RABBIT hat sie unverändert gelassen, weil es eine andere ausgewählte Sicherung nicht löschen konnte, die mit ihr zusammen aufbewahrt wird.
+# Below a ticked backup kept in the same backup set as a ticked backup
+# above it, when RABBIT couldn't delete that set, deleted it only in part,
+# or couldn't change its record of what it holds: what happened, and why,
+# is the same for both, and is said only below the first. $backup is what
+# that one's line calls it, as wizard-summary-delete-backup names it. It
+# comes after a colon, so its capital stays.
+wizard-summary-delete-same-as-above = Was mit ihr geschah und warum, steht weiter oben bei der Sicherung, mit der sie zusammen aufbewahrt wurde: { $backup }.
 wizard-summary-delete-freed-total = Insgesamt freigegeben: { $size }
 # $path is the full path of the report RABBIT saved.
 wizard-summary-delete-report = Bericht: { $path }

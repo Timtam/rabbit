@@ -744,8 +744,11 @@ user can finish the install by pressing Next a few times.
      then the action, then when the backup was made and how big it is ("SWS
      Extension 2.14.0.7: Won't touch. Uninstalled November 9, 2026, 2:05 PM,
      4 MB"), and its details say what it holds, whether it is the only copy,
-     what restoring does or why it can't, and what deleting loses. Neither
-     shows a set id. A path shows only where a sentence is about it: a
+     what restoring does or why it can't, and what deleting loses. A set's
+     own row beside a package or the key map of that set says only what
+     those rows don't take up of the set, so the rows of a set add up to
+     it; Review still counts the whole set its delete takes. Neither shows a
+     set id. A path shows only where a sentence is about it: a
      refusal's own sentence, such as a file RABBIT won't put back or a link
      it never follows, the error when the backups folder can't be read, and
      the Finder steps in the details of another account's backup on macOS,
@@ -902,7 +905,8 @@ user can finish the install by pressing Next a few times.
      can't go back to it after this"), the ticks left out, and the blockers,
      each starting "Can't delete yet": nothing ticked, and a ticked row that
      takes its whole set while other rows of that set aren't ticked ("To
-     delete it, tick the other one too.") or can't be ("Untick it."), so no
+     delete it, tick the other one too.") or can't be ("Untick this
+     backup."), named after a colon so its row name keeps its capital, so no
      backup a restore could use goes unless it is ticked; an unfinished
      deletion of the same id is finished with its set. The Delete button
      checks the same blockers again. Both name backups as the tab does, with
@@ -972,11 +976,13 @@ user can finish the install by pressing Next a few times.
      share a set are one step and the old copies of RABBIT's records are
      several, and the work runs on a worker thread, its events coming back
      through `call_after`, as for an uninstall. The status line names each
-     backup as it starts, which macOS speaks, and the log says how each
-     ended. Closing the window asks "Stop restoring?" or "Stop deleting
-     backups?" with No focused, and the run stops after the backup it is
-     on: a restore is all or nothing per backup, so a stop never leaves half
-     of one.
+     backup as it starts, for a delete every ticked row of the set it starts
+     on together, which macOS speaks, and the log says how each ended.
+     Closing the window asks "Stop restoring?" or "Stop deleting backups?"
+     with No focused, and the run stops after the backup it is on, a delete
+     after the set it is on: a restore is all or nothing per backup and a
+     delete takes a set's ticked rows in one step, so a stop never leaves
+     half of one.
 
 7. Done
    - One sentence summarizing success or failure.
@@ -1061,16 +1067,21 @@ user can finish the install by pressing Next a few times.
      deleted when everything it names is gone, out of its set or with it.
      A package or key map that stayed in its set because the set's record
      of what it holds couldn't be saved says so, not that a file of the
-     backup was open. Show details goes per ticked row, with what it freed
-     when that is its own (rows that went with their whole set share its
-     bytes, which only the total says), the files of it that couldn't be
-     removed and stay in the set until the rest of it goes, the total, and
-     the report's path. It also says when a set went whole and finished an
-     unfinished deletion of its id that no row ticked, and when a row
-     stayed as it was because the core refused, or couldn't check, another
-     ticked row of its set right before that set's turn. The progress page
-     names a set's ticked rows when the core starts on that set, and the
-     gauge counts each set once.
+     backup was open. A package or key map that went out of its set while
+     files of it couldn't be removed counts as deleted, and the status says,
+     counted among the rows, that those files stay in the set and take up
+     room until the rest of it goes, since no row lists them after the
+     rescan. Show details goes per ticked row, with what it freed when that
+     is its own (rows that went with their whole set share its bytes, which
+     only the total says), how many files of it couldn't be removed, the
+     total, and the report's path. Rows of one set that share its one
+     outcome that isn't a plain success (not deleted, partly deleted, or
+     its record of what it holds not saved) have it explained below the
+     first only; the others name that row. It also says when a set went
+     whole and finished an unfinished deletion of its id that no row
+     ticked, and when a row stayed as it was because the core refused, or
+     couldn't check, another ticked row of its set right before that set's
+     turn.
    - Both save no report of the wizard's own: the core saves
      `restore-backup-unix-<s>` or `delete-backup-unix-<s>`, as `.json` and
      `.txt` in `RABBIT/logs`, for every run that gets past its checks, never
@@ -2289,10 +2300,12 @@ Extension files:
   `not-deleted` (`in-use`, `permission`, `earlier-deletion-left`, `other`;
   nothing of the set changed), `partly-deleted` (what the walk couldn't
   remove stays in `RABBIT/backups-deleting`, listed as an unfinished
-  deletion, and the next delete of the id finishes it), `refused` and
-  `not-reached`; a dry run says `would-delete` or
-  `would-finish-earlier-deletion`. Windows 11 refuses to rename a folder
-  while any file in it is open, whatever the sharing, with "access denied",
+  deletion, and the next delete of the whole id finishes it; a part of it
+  is refused, `being-deleted`), `refused` and `not-reached`, and for a part
+  out of a set that stays `deleted-from-set` and `not-deleted-from-set`
+  (below); a dry run says `would-delete`, `would-finish-earlier-deletion`
+  or `would-delete-from-set`. Windows 11 refuses to rename a folder while
+  any file in it is open, whatever the sharing, with "access denied",
   so a set in use is `not-deleted` with nothing changed; that error counts
   as in use when RABBIT may open the set's folder with delete access, and
   as permission otherwise. Parts out of a set that stays: the set's
@@ -2302,25 +2315,33 @@ Extension files:
   `keymap_origin`), changed as its file holds it, so fields this RABBIT
   doesn't know, as a newer one may write, stay; it is written in full to
   its staging file, made new and never through a link, then renamed over
-  the manifest, so a crash leaves the old manifest or the new one. On Unix
-  the set's folder is then flushed to disk, so after a power cut the rename
-  is there before any copy's removal is; NTFS writes changes to names in
-  order. The entries are those a restore of the part takes, the same ones
-  its row counts. Only then do the parts' copies go, each one no remaining
-  entry uses (two entries can name one copy), with the `.rabbit-origin`
+  the manifest, so a crash leaves the old manifest or the new one. The
+  set's folder is then flushed to disk, and on Windows the manifest too
+  (`FlushFileBuffers` on handles that share everything, so the run's own
+  holds don't refuse them), so after a power cut or a drive pulled out the
+  rename is there before any copy's removal is; NTFS and ReFS keep changes
+  to names in order anyway, FAT and exFAT don't. The entries are those a
+  restore of the part takes, the same ones its row counts. Only then do the
+  parts' copies go, each one no remaining entry uses (two entries can name
+  one copy), with the `.rabbit-origin`
   note beside a copy under `external/<n>`, then the folders they leave
   empty, deepest first, never the set's folder. The set's own files stay
   too: its manifest, the staging file and an older set's copy of RABBIT's
   records. Each file about to go is compared with those and with every copy
   and note an entry that stays uses, by name as the file system tells
   places apart (`same_place`) and by what it is on disk
-  (`rabbit_platform::file_identity`: the volume and file index on Windows,
-  the device and inode on Unix), so another spelling of one, such as a name
-  in another case, a Windows short name or another Unicode form, never
-  removes it. Paths are checked against a guard of the set
-  (`DeleteGuard::in_backups`, the set's folder itself excluded) and a name
-  that may open another file than it names is never used. Nothing is
-  followed: a link where a copy should be is removed as a link, and a
+  (`rabbit_platform::file_identity`: on Windows the volume and the 128-bit
+  file id from `FileIdInfo`, which ReFS and Dev Drives need, or the 64-bit
+  file index where a file system has no 128-bit ids; the device and inode
+  on Unix), so another spelling of one, such as a name in another case, a
+  Windows short name or another Unicode form, never removes it. An id of 0
+  or all ones, as some network shares give every file, is no identity: the
+  file stays and is named as one that couldn't be removed. Paths are
+  checked against a guard of the set (`DeleteGuard::in_backups`, the set's
+  folder itself excluded) and a name that may open another file or folder
+  than it names, as `Sub.` does on Windows, is never used, neither for a
+  file nor for a folder it left empty. Nothing is followed: a link where a
+  copy should be is removed as a link, and a
   folder on the way that is a link is left with what is below it. On
   Windows `RABBIT`, `RABBIT/backups`, the set and the folders on the way to
   each file are held open as the walk holds them; read-only files lose the
@@ -2336,8 +2357,10 @@ Extension files:
   (`not-deleted-from-set`: `in-use` when another program holds the
   manifest, which on Windows refuses its replacement with "access denied"
   and is told from a lack of permission by opening the manifest with delete
-  access, or `permission`). An unfinished deletion of the same id is no
-  part of the set and stays. The cancel token is read between sets, never
+  access, `permission`, or `other` when the set or a folder above it is no
+  longer a real folder or its manifest is gone or unreadable). An
+  unfinished deletion of the same id is no part of the set and stays. The
+  cancel token is read between sets, never
   while one set's parts go; each set sends `DeleteStarted` and
   `DeleteCompleted` once, however many of its items the run names, from
   which the wizard's progress page names each backup and logs how it ended.

@@ -1020,22 +1020,24 @@ wizard-review-delete-nothing-ticked = Nada está marcado para excluir.
 # RABBIT can only delete together with the whole backup set it is in, such
 # as the set's own files, while other rows of that set aren't ticked. The
 # -undeletable form is for rows of that set RABBIT can't delete, such as
-# another account's, so the ticked backup can only be unticked. $backup and
-# $backups name rows as wizard-backups-row-reference does, or a key map as
-# wizard-done-restore-keymap-in-sentence says it, so they may start in lower
-# case; $backups joins several as wizard-backups-list-and joins them, after
-# a colon, and $count is how many it names, a number.
-wizard-review-delete-only-with = O RABBIT só pode excluir { $backup } junto com { $count ->
+# another account's, so the ticked backup can only be unticked. $backup is
+# the ticked row, a set's own files or an unfinished deletion, named as
+# wizard-backups-row-reference names it. It comes after a colon, so its
+# capital stays. $backups names rows as wizard-backups-row-reference does,
+# or a key map as wizard-done-restore-keymap-in-sentence says it, so it may
+# start in lower case; $backups joins several as wizard-backups-list-and
+# joins them, after a colon, and $count is how many it names, a number.
+wizard-review-delete-only-with = O RABBIT não pode excluir este backup separadamente: { $backup }. Ele só pode ser excluído junto com { $count ->
     [one] outro backup
    *[other] outros { $count } backups
 }: { $backups }. Para excluí-lo, marque também { $count ->
     [one] o outro
    *[other] os outros
 }.
-wizard-review-delete-only-with-undeletable = O RABBIT só pode excluir { $backup } junto com { $count ->
+wizard-review-delete-only-with-undeletable = O RABBIT não pode excluir este backup separadamente: { $backup }. Ele só pode ser excluído junto com { $count ->
     [one] outro backup
    *[other] outros { $count } backups
-} que o RABBIT não pode excluir: { $backups }. Desmarque-o.
+} que o RABBIT não pode excluir: { $backups }. Desmarque este backup.
 
 wizard-progress-heading = Progresso da instalação
 wizard-progress-status-idle = Pronto para instalar.
@@ -1634,6 +1636,19 @@ wizard-done-delete-stopped-partway = { $total ->
        *[other] { $count } foram excluídos só em parte antes de o RABBIT parar. O resto deles é mantido.
     }
 }
+# After the first line, for packages or key maps RABBIT deleted out of the
+# backup set they were kept in, when some of their files couldn't be
+# removed, for example because another program had one open. Those files
+# stay in that set with nothing naming them, so no row lists them, and they
+# still take up room until the rest of the set is deleted. $total and
+# $count as above.
+wizard-done-delete-files-left = { $total ->
+    [1] Nem todos os arquivos dele puderam ser removidos. Os que sobraram ficam no backup em que ele era guardado e ocupam espaço lá até que o resto desse backup seja excluído.
+   *[other] { $count ->
+        [one] Um foi excluído, mas nem todos os arquivos dele puderam ser removidos. Os que sobraram ficam no backup em que ele era guardado e ocupam espaço lá até que o resto desse backup seja excluído.
+       *[other] { $count } foram excluídos, mas nem todos os arquivos deles puderam ser removidos. Os que sobraram ficam nos backups em que eles eram guardados e ocupam espaço lá até que o resto desses backups seja excluído.
+    }
+}
 # After the first line, when some of the ticked backups were gone before the
 # run. $count is a number, fewer than the backups ticked.
 wizard-done-delete-already-gone = { $count ->
@@ -1676,7 +1691,7 @@ wizard-summary-delete-files-left = { $count ->
 # set it was kept in also finished an unfinished deletion of that set,
 # which wasn't ticked: the Backups tab listed it as an unfinished deletion.
 # Said once for each set.
-wizard-summary-delete-finished-earlier-deletion-too = O RABBIT também concluiu uma exclusão anterior, que tinha ficado pela metade, do backup em que ele era guardado.
+wizard-summary-delete-finished-earlier-deletion-too = O RABBIT também terminou uma exclusão não concluída do backup em que ele era guardado.
 # What happened to a backup that wasn't deleted, then why, in a line of
 # its own. Part of the row for the old copies of RABBIT's records, which
 # stands for several backups on disk, may have gone though the rest didn't.
@@ -1698,6 +1713,13 @@ wizard-summary-delete-not-reached-refused = O RABBIT não excluiu nada nesta exe
 # another ticked backup kept in the same backup set: RABBIT then leaves
 # every backup of that set as it was, and goes on with the next set.
 wizard-summary-delete-not-reached-kept-with = O RABBIT o deixou como estava, porque não conseguiu excluir outro backup marcado guardado junto com ele.
+# Below a ticked backup kept in the same backup set as a ticked backup
+# above it, when RABBIT couldn't delete that set, deleted it only in part,
+# or couldn't change its record of what it holds: what happened, and why,
+# is the same for both, and is said only below the first. $backup is what
+# that one's line calls it, as wizard-summary-delete-backup names it. It
+# comes after a colon, so its capital stays.
+wizard-summary-delete-same-as-above = O que aconteceu com ele, e por quê, está indicado acima, abaixo do backup guardado junto com ele: { $backup }.
 wizard-summary-delete-freed-total = Espaço liberado no total: { $size }
 # $path is the full path of the report RABBIT saved.
 wizard-summary-delete-report = Relatório: { $path }

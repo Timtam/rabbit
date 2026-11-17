@@ -477,8 +477,11 @@ pub fn backup_list_from_source(
             .then_with(|| newest_first(left.created_unix).cmp(&newest_first(right.created_unix)))
     });
     let mut drafts: Vec<RowDraft> = entries
-        .into_iter()
-        .map(|entry| RowDraft::new(localizer, source, entry, local_offset))
+        .iter()
+        .map(|entry| {
+            let size = shown_size(entry, &entries);
+            RowDraft::new(localizer, source, entry, size, local_offset)
+        })
         .collect();
     name_backups_deleted_with(localizer, &mut drafts);
 
@@ -1369,17 +1372,20 @@ struct RowDraft {
 }
 
 impl RowDraft {
+    /// The draft of the row for `entry`, which says it takes up `size`
+    /// bytes (see [`shown_size`]).
     fn new(
         localizer: &Localizer,
         source: &BackupListSource,
         entry: &BackupEntry,
+        size: u64,
         local_offset: &dyn Fn(u64) -> i32,
     ) -> Self {
         let date = entry
             .created_unix
             .and_then(|unix| backup_date_text(localizer, unix, local_offset(unix)));
         let name = backup_name(localizer, entry);
-        let size = backup_size_text(localizer, entry.size);
+        let size = backup_size_text(localizer, size);
         let restore_item = restorable(entry)
             .then(|| restore_item_of(entry, &source.sets))
             .flatten();
@@ -1590,6 +1596,24 @@ fn row_group(row: &BackupRow) -> BackupGroup {
 
 fn is_records(entry: &BackupEntry) -> bool {
     matches!(entry.item, BackupItem::Records { .. })
+}
+
+/// How big the row for `entry`, one of `entries`, says its backup is: the
+/// overview's size, but for a set's own backup listed beside a package or
+/// the key map of that set, only what those rows don't take up of the
+/// set. The overview gives that row the whole set's size, which deleting
+/// it frees, as Review says; the row and its details speak of the files
+/// no other row holds, and the rows of a set add up to the set.
+fn shown_size(entry: &BackupEntry, entries: &[&BackupEntry]) -> u64 {
+    if !matches!(entry.item, BackupItem::Set { .. }) {
+        return entry.size;
+    }
+    let others: u64 = entries
+        .iter()
+        .filter(|other| deletes_too(&entry.item, &other.item))
+        .map(|other| other.size)
+        .sum();
+    entry.size.saturating_sub(others)
 }
 
 /// A key that sorts the newest first and those without a date last.

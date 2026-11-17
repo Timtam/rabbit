@@ -17,17 +17,22 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FileIdentity {
     volume: u64,
-    index: u64,
+    index: u128,
 }
 
 /// What the file or folder at `path` itself is, never what a link there
 /// leads to: a symbolic link or a junction is a file of its own. Folders on
 /// the way are followed as usual.
 ///
-/// On Windows that is the volume's serial number and the file's index on
-/// it, read through a handle that asks only for its attributes, which no
-/// other program's sharing refuses. On Unix it is the device and inode
-/// numbers from `lstat`. Elsewhere `Unsupported`.
+/// On Windows that is the volume's serial number and the file's 128-bit
+/// id on it, read through a handle that asks only for its attributes,
+/// which no other program's sharing refuses. ReFS, Dev Drives included,
+/// needs all 128 bits: the older 64-bit file index isn't unique there. A
+/// file system that has no 128-bit ids gives the 64-bit index instead,
+/// for every file on it alike. A number of 0 or all ones, as some network
+/// shares give every file, says nothing of which file it is, and is an
+/// error, so two files never count as one. On Unix it is the device and
+/// inode numbers from `lstat`. Elsewhere `Unsupported`.
 pub fn file_identity(path: &Path) -> io::Result<FileIdentity> {
     platform_file_identity(path)
 }
@@ -37,10 +42,35 @@ fn platform_file_identity(path: &Path) -> io::Result<FileIdentity> {
     use std::os::windows::io::AsRawHandle;
 
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, FILE_READ_ATTRIBUTES, GetFileInformationByHandle,
+        BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FileIdInfo,
+        GetFileInformationByHandle, GetFileInformationByHandleEx,
     };
 
     let file = crate::win_util::open_no_follow(path, FILE_READ_ATTRIBUTES)?;
+    let mut id = FILE_ID_INFO::default();
+    // SAFETY: `id` is a FILE_ID_INFO and the size passed is its size; the
+    // handle is open for the whole call.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            (&raw mut id).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if ok != 0 {
+        return numbered(
+            id.VolumeSerialNumber,
+            u128::from_le_bytes(id.FileId.Identifier),
+            u128::MAX,
+        );
+    }
+    // Only a file system that has no 128-bit ids at all gets the 64-bit
+    // index, so the two kinds of number never meet for one file system.
+    let error = io::Error::last_os_error();
+    if !has_no_128_bit_ids(&error) {
+        return Err(error);
+    }
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: `info` is a BY_HANDLE_FILE_INFORMATION Windows fills in, and
     // the handle is open for the whole call.
@@ -48,10 +78,46 @@ fn platform_file_identity(path: &Path) -> io::Result<FileIdentity> {
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(FileIdentity {
-        volume: u64::from(info.dwVolumeSerialNumber),
-        index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
-    })
+    numbered(
+        u64::from(info.dwVolumeSerialNumber),
+        (u128::from(info.nFileIndexHigh) << 32) | u128::from(info.nFileIndexLow),
+        u128::from(u64::MAX),
+    )
+}
+
+/// Whether `error`, from asking a file for its 128-bit id, says that its
+/// file system has none, as FAT and some network shares say.
+#[cfg(windows)]
+fn has_no_128_bit_ids(error: &io::Error) -> bool {
+    const ERROR_INVALID_FUNCTION: i32 = 1;
+    const ERROR_NOT_SUPPORTED: i32 = 50;
+    const ERROR_INVALID_PARAMETER: i32 = 87;
+    const ERROR_CALL_NOT_IMPLEMENTED: i32 = 120;
+    const ERROR_INVALID_LEVEL: i32 = 124;
+    matches!(
+        error.raw_os_error(),
+        Some(
+            ERROR_INVALID_FUNCTION
+                | ERROR_NOT_SUPPORTED
+                | ERROR_INVALID_PARAMETER
+                | ERROR_CALL_NOT_IMPLEMENTED
+                | ERROR_INVALID_LEVEL
+        )
+    )
+}
+
+/// The identity of the file numbered `index` on the volume `volume`, or an
+/// error when the number is 0 or `none`, all ones, which a file system
+/// gives a file it has no number for.
+#[cfg(windows)]
+fn numbered(volume: u64, index: u128, none: u128) -> io::Result<FileIdentity> {
+    if index == 0 || index == none {
+        return Err(io::Error::other(
+            "the file system gives this file no number of its own, so it can't be told apart \
+             from other files",
+        ));
+    }
+    Ok(FileIdentity { volume, index })
 }
 
 #[cfg(unix)]
@@ -61,7 +127,7 @@ fn platform_file_identity(path: &Path) -> io::Result<FileIdentity> {
     let metadata = std::fs::symlink_metadata(path)?;
     Ok(FileIdentity {
         volume: metadata.dev(),
-        index: metadata.ino(),
+        index: u128::from(metadata.ino()),
     })
 }
 
@@ -95,6 +161,36 @@ mod tests {
         assert_eq!(file_identity(&twin).unwrap(), identity);
         assert_ne!(file_identity(&other).unwrap(), identity);
         assert!(file_identity(&dir.path().join("missing.dll")).is_err());
+    }
+
+    /// A number of 0 or all ones names no file of its own, as some network
+    /// shares give every file, so it is an error rather than an identity
+    /// two files could share; any other number is one.
+    #[cfg(windows)]
+    #[test]
+    fn a_number_of_0_or_all_ones_is_no_identity() {
+        use super::numbered;
+
+        for (index, none) in [
+            (0, u128::MAX),
+            (u128::MAX, u128::MAX),
+            (0, u128::from(u64::MAX)),
+            (u128::from(u64::MAX), u128::from(u64::MAX)),
+        ] {
+            assert!(numbered(7, index, none).is_err(), "{index:#x}");
+        }
+        assert_eq!(
+            numbered(7, 1 << 64, u128::MAX).unwrap(),
+            numbered(7, 1 << 64, u128::MAX).unwrap()
+        );
+        assert_ne!(
+            numbered(7, (1 << 64) | 5, u128::MAX).unwrap(),
+            numbered(7, 5, u128::MAX).unwrap()
+        );
+        assert_ne!(
+            numbered(7, 5, u128::MAX).unwrap(),
+            numbered(8, 5, u128::MAX).unwrap()
+        );
     }
 
     /// Where the file system ignores case, a name in another case is the

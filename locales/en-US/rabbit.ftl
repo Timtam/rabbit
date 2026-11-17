@@ -1020,22 +1020,24 @@ wizard-review-delete-nothing-ticked = Nothing is ticked to delete.
 # RABBIT can only delete together with the whole backup set it is in, such
 # as the set's own files, while other rows of that set aren't ticked. The
 # -undeletable form is for rows of that set RABBIT can't delete, such as
-# another account's, so the ticked backup can only be unticked. $backup and
-# $backups name rows as wizard-backups-row-reference does, or a key map as
-# wizard-done-restore-keymap-in-sentence says it, so they may start in lower
-# case; $backups joins several as wizard-backups-list-and joins them, after
-# a colon, and $count is how many it names, a number.
-wizard-review-delete-only-with = RABBIT can only delete { $backup } together with { $count ->
+# another account's, so the ticked backup can only be unticked. $backup is
+# the ticked row, a set's own files or an unfinished deletion, named as
+# wizard-backups-row-reference names it. It comes after a colon, so its
+# capital stays. $backups names rows as wizard-backups-row-reference does,
+# or a key map as wizard-done-restore-keymap-in-sentence says it, so it may
+# start in lower case; $backups joins several as wizard-backups-list-and
+# joins them, after a colon, and $count is how many it names, a number.
+wizard-review-delete-only-with = RABBIT can't delete this backup on its own: { $backup }. It can only go together with { $count ->
     [one] another backup
    *[other] { $count } other backups
 }: { $backups }. To delete it, tick { $count ->
     [one] the other one
    *[other] the others
 } too.
-wizard-review-delete-only-with-undeletable = RABBIT can only delete { $backup } together with { $count ->
+wizard-review-delete-only-with-undeletable = RABBIT can't delete this backup on its own: { $backup }. It can only go together with { $count ->
     [one] another backup
    *[other] { $count } other backups
-} that RABBIT can't delete: { $backups }. Untick it.
+} that RABBIT can't delete: { $backups }. Untick this backup.
 
 wizard-progress-heading = Installation progress
 wizard-progress-status-idle = Ready to install.
@@ -1592,7 +1594,7 @@ wizard-done-delete-record-permission = { $total ->
     [1] RABBIT isn't allowed to change its record of what it holds. It stays as it was.
    *[other] { $count ->
         [one] One couldn't be deleted, because RABBIT isn't allowed to change its record of what it holds. It stays as it was.
-       *[other] { $count } couldn't be deleted, because RABBIT isn't allowed to change its record of what they hold. They stay as they were.
+       *[other] { $count } couldn't be deleted, because RABBIT isn't allowed to change their record of what they hold. They stay as they were.
     }
 }
 wizard-done-delete-earlier-deletion-left = { $total ->
@@ -1632,6 +1634,19 @@ wizard-done-delete-stopped-partway = { $total ->
    *[other] { $count ->
         [one] One was deleted only in part before RABBIT stopped. The rest of it is kept.
        *[other] { $count } were deleted only in part before RABBIT stopped. What is left of them is kept.
+    }
+}
+# After the first line, for packages or key maps RABBIT deleted out of the
+# backup set they were kept in, when some of their files couldn't be
+# removed, for example because another program had one open. Those files
+# stay in that set with nothing naming them, so no row lists them, and they
+# still take up room until the rest of the set is deleted. $total and
+# $count as above.
+wizard-done-delete-files-left = { $total ->
+    [1] Not all of its files could be removed. Those left stay in the backup it was kept in, and take up room there until the rest of that backup is deleted.
+   *[other] { $count ->
+        [one] One was deleted, but not all of its files could be removed. Those left stay in the backup it was kept in, and take up room there until the rest of that backup is deleted.
+       *[other] { $count } were deleted, but not all of their files could be removed. Those left stay in the backups they were kept in, and take up room there until what is left of those backups is deleted.
     }
 }
 # After the first line, when some of the ticked backups were gone before the
@@ -1698,6 +1713,13 @@ wizard-summary-delete-not-reached-refused = RABBIT deleted nothing in this run, 
 # another ticked backup kept in the same backup set: RABBIT then leaves
 # every backup of that set as it was, and goes on with the next set.
 wizard-summary-delete-not-reached-kept-with = It stays as it was, because RABBIT couldn't delete another ticked backup kept with it.
+# Below a ticked backup kept in the same backup set as a ticked backup
+# above it, when RABBIT couldn't delete that set, deleted it only in part,
+# or couldn't change its record of what it holds: what happened, and why,
+# is the same for both, and is said only below the first. $backup is what
+# that one's line calls it, as wizard-summary-delete-backup names it. It
+# comes after a colon, so its capital stays.
+wizard-summary-delete-same-as-above = What happened to it, and why, is said above, below the backup it was kept with: { $backup }.
 wizard-summary-delete-freed-total = Freed in all: { $size }
 # $path is the full path of the report RABBIT saved.
 wizard-summary-delete-report = Report: { $path }

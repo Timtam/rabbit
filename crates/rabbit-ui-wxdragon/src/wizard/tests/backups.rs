@@ -1499,10 +1499,10 @@ fn a_sets_own_row_beside_two_rows_names_both() {
     assert_eq!(
         review.lines.last().map(String::as_str),
         Some(
-            "Can't delete yet: RABBIT can only delete Other files an update replaced (Made on \
-             October 2, 2026, 11:00 AM) together with 2 other backups: ReaPack 1.2.4 (Replaced by \
-             1.2.5 on October 2, 2026, 11:00 AM) and the key map from October 2, 2026, 11:00 AM. \
-             To delete it, tick the others too."
+            "Can't delete yet: RABBIT can't delete this backup on its own: Other files an update \
+             replaced (Made on October 2, 2026, 11:00 AM). It can only go together with 2 other \
+             backups: ReaPack 1.2.4 (Replaced by 1.2.5 on October 2, 2026, 11:00 AM) and the key \
+             map from October 2, 2026, 11:00 AM. To delete it, tick the others too."
         )
     );
     // With ReaPack ticked, only the key map is left to name.
@@ -1518,6 +1518,56 @@ fn a_sets_own_row_beside_two_rows_names_both() {
     );
     tick(&mut list, "Key map", BackupChoice::Delete);
     assert!(can_delete_backups(&list));
+}
+
+/// A set's own row beside a package and the key map of that set says only
+/// what those rows don't take up of the set, in its row and its details,
+/// so the rows of a set add up to the set, as the list's total counts it.
+/// Deleting it still takes the whole set, and Review counts all of it.
+#[test]
+fn a_sets_own_row_beside_others_says_only_its_own_size() {
+    let mut entries = keymap_version_and_their_sets_files();
+    let whole = 3 * MB + 25 * KB;
+    entries[0].size = 3 * MB;
+    entries[1].size = 20 * KB;
+    // The overview gives the set's own row the whole set's size.
+    entries[2].size = whole;
+    let mut source = source(entries);
+    source.sets[0].size = whole;
+    source.total_size = whole;
+    let mut list = backup_list_from_source(&en(), &source, &utc);
+    let files = index_of(&list, "Other files an update replaced");
+    assert!(
+        list.rows[files].summary.contains(", 5 KB"),
+        "{}",
+        list.rows[files].summary
+    );
+    assert!(
+        list.rows[files].details.contains("\nIt takes up 5 KB.\n"),
+        "{}",
+        list.rows[files].details
+    );
+    // A set's own row alone says the whole set.
+    let alone = backup_list_from_source(
+        &en(),
+        &BackupListSource {
+            entries: vec![source.entries[2].clone()],
+            ..source.clone()
+        },
+        &utc,
+    );
+    assert!(
+        alone.rows[1].summary.contains(", 3 MB"),
+        "{}",
+        alone.rows[1].summary
+    );
+
+    for name in ["Other files an update replaced", "ReaPack 1.2.4", "Key map"] {
+        tick(&mut list, name, BackupChoice::Delete);
+    }
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(review.can_delete, "{:#?}", review.lines);
+    assert_eq!(review.bytes_freed, whole);
 }
 
 /// An unfinished deletion whose id names a set RABBIT can't delete, another
@@ -1577,9 +1627,9 @@ fn an_unfinished_deletion_beside_a_set_rabbit_cant_delete_can_only_be_unticked()
             review.lines.last().map(String::as_str),
             Some(
                 format!(
-                    "Can't delete yet: RABBIT can only delete Unfinished deletion (Made on \
-                     November 9, 2026, 2:05 PM) together with another backup that RABBIT can't \
-                     delete: {name}. Untick it."
+                    "Can't delete yet: RABBIT can't delete this backup on its own: Unfinished \
+                     deletion (Made on November 9, 2026, 2:05 PM). It can only go together with \
+                     another backup that RABBIT can't delete: {name}. Untick this backup."
                 )
                 .as_str()
             )
@@ -1883,9 +1933,10 @@ fn an_unfinished_deletion_of_a_listed_sets_id_goes_only_with_that_set() {
     assert_eq!(
         review.lines.last().map(String::as_str),
         Some(
-            "Can't delete yet: RABBIT can only delete Unfinished deletion (Made on November 9, \
-             2026, 2:05 PM) together with another backup: SWS Extension 2.14.0.7 (Uninstalled \
-             November 9, 2026, 2:05 PM). To delete it, tick the other one too."
+            "Can't delete yet: RABBIT can't delete this backup on its own: Unfinished deletion \
+             (Made on November 9, 2026, 2:05 PM). It can only go together with another backup: \
+             SWS Extension 2.14.0.7 (Uninstalled November 9, 2026, 2:05 PM). To delete it, tick \
+             the other one too."
         )
     );
 
@@ -3195,9 +3246,10 @@ fn delete_review_blocks_a_backup_that_takes_unticked_rows_with_it() {
     assert_eq!(
         review.lines.last().map(String::as_str),
         Some(
-            "Can't delete yet: RABBIT can only delete Files a restore replaced (Made on October \
-             2, 2026, 11:00 AM) together with another backup: the key map from October 2, 2026, \
-             11:00 AM. To delete it, tick the other one too."
+            "Can't delete yet: RABBIT can't delete this backup on its own: Files a restore \
+             replaced (Made on October 2, 2026, 11:00 AM). It can only go together with another \
+             backup: the key map from October 2, 2026, 11:00 AM. To delete it, tick the other one \
+             too."
         )
     );
 
@@ -3758,7 +3810,8 @@ fn every_row_review_and_question_reads_in_every_locale() {
                 "RABBIT deletes one backup and frees 1 MB.",
                 // A set's own row beside a key map, and beside two rows.
                 "RABBIT can only delete it together with another backup: Key map.",
-                "Can't delete yet: RABBIT can only delete Files a restore replaced",
+                "Can't delete yet: RABBIT can't delete this backup on its own: Files a restore \
+                 replaced",
                 "To delete it, tick the other one too.",
                 "RABBIT can only delete it together with 2 other backups: ReaPack 1.2.4 and Key \
                  map.",
@@ -3769,10 +3822,10 @@ fn every_row_review_and_question_reads_in_every_locale() {
                 "RABBIT can only delete it together with 2 other backups that RABBIT can't delete: \
                  Key map and Files a restore replaced.",
                 "that RABBIT can't delete: SWS Extension 2.14.0.7 (Uninstalled November 9, 2026, \
-                 2:05 PM). Untick it.",
+                 2:05 PM). Untick this backup.",
                 "together with 2 other backups that RABBIT can't delete: the key map from October \
                  2, 2026, 11:00 AM and Files a restore replaced (Made on October 2, 2026, 11:00 \
-                 AM). Untick it.",
+                 AM). Untick this backup.",
             ] {
                 assert!(all.contains(reached), "not reached: {reached}\n{all}");
             }

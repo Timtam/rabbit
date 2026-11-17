@@ -2117,16 +2117,20 @@ fn remove_parts(
             if in_use.contains(&place) || !gone.insert(place) {
                 continue;
             }
-            folders.extend(
-                relative
-                    .ancestors()
-                    .skip(1)
-                    .filter(|folder| !folder.as_os_str().is_empty())
-                    .map(Path::to_path_buf),
-            );
             let removal = &mut removals[part];
             match remove_from_set(set, &relative, &guard, &needed) {
-                Ok(freed) => removal.freed += freed,
+                Ok(freed) => {
+                    removal.freed += freed;
+                    // Only a name `remove_from_set` used, so the folders
+                    // above it open as they are named.
+                    folders.extend(
+                        relative
+                            .ancestors()
+                            .skip(1)
+                            .filter(|folder| !folder.as_os_str().is_empty())
+                            .map(Path::to_path_buf),
+                    );
+                }
                 Err((path, error)) => {
                     removal
                         .first_error
@@ -2236,10 +2240,12 @@ fn hold_way_down(
 /// and frees nothing, and a folder there is left alone, since a copy is a
 /// file. Nothing there is nothing to remove, and so is a file that is one
 /// of `needed`, the files the set still needs, by what it is on disk: it
-/// stays, as a copy another entry names does. A name on the way that may
-/// open another file than it names, as `copy.dll.` does on Windows, is
-/// never used, nor a path the guard refuses. `Err` names the path that
-/// stopped it, and why.
+/// stays, as a copy another entry names does. A file whose identity can't
+/// be read, as on a file system that gives files no number of their own,
+/// can't be told from those, so it stays too, and is named as one that
+/// couldn't be removed. A name on the way that may open another file than
+/// it names, as `copy.dll.` does on Windows, is never used, nor a path the
+/// guard refuses. `Err` names the path that stopped it, and why.
 fn remove_from_set(
     set: &Path,
     relative: &Path,
@@ -2287,15 +2293,21 @@ fn remove_from_set(
 
 /// Remove each of `folders`, plain paths in the set at `set`, that is a
 /// real folder with nothing in it, deepest first. The folders on the way
-/// to each are checked and held as for a file (see [`hold_way_down`]). The
-/// set's own folder is never one of them. A folder that can't be removed
-/// holds nothing of a part, so it is only left.
+/// to each are checked and held as for a file (see [`hold_way_down`]), and
+/// as for a file, a name that may open another folder than it names, as
+/// `Sub.` opens `Sub` on Windows, is never used. The set's own folder is
+/// never one of them. A folder that can't be removed holds nothing of a
+/// part, so it is only left.
 fn remove_empty_folders(set: &Path, folders: &BTreeSet<PathBuf>, guard: &DeleteGuard) {
     let mut deepest_first: Vec<&PathBuf> = folders.iter().collect();
     deepest_first.sort_by_key(|folder| Reverse(folder.components().count()));
     for relative in deepest_first {
         let path = set.join(relative);
-        if !guard.allows_inside(&path) {
+        if !guard.allows_inside(&path)
+            || !relative
+                .components()
+                .all(|name| opens_as_written(name.as_os_str()))
+        {
             continue;
         }
         let Ok(held) = hold_way_down(set, relative.parent().unwrap_or(Path::new(""))) else {
@@ -2318,11 +2330,12 @@ fn remove_empty_folders(set: &Path, folders: &BTreeSet<PathBuf>, guard: &DeleteG
 /// never written through a link; one an earlier crash left, a file or a
 /// link, is removed as itself first. A failure leaves the old manifest.
 ///
-/// On Unix the set's folder is then flushed to disk, so that after a power
-/// cut the rename is there before any copy's removal is: the old manifest
-/// never comes back naming copies that are gone. NTFS writes its changes to
-/// names in order, so Windows needs no such step. A folder that can't be
-/// flushed doesn't undo the save, which is done by then.
+/// The set's folder is then flushed to disk, and on Windows the manifest
+/// too, so that after a power cut or a drive pulled out the rename is there
+/// before any copy's removal is: the old manifest never comes back naming
+/// copies that are gone. NTFS and ReFS keep changes to names in order
+/// anyway, but FAT and exFAT, as on a USB drive, don't. A folder that
+/// can't be flushed doesn't undo the save, which is done by then.
 fn save_manifest_in_place(set: &Path, manifest: &serde_json::Value) -> io::Result<()> {
     use std::io::Write as _;
 
@@ -2359,7 +2372,38 @@ fn save_manifest_in_place(set: &Path, manifest: &serde_json::Value) -> io::Resul
     if let Ok(folder) = fs::File::open(set) {
         let _ = folder.sync_all();
     }
+    #[cfg(windows)]
+    let _ = flush_saved_manifest(set);
     Ok(())
+}
+
+/// Ask Windows to write the manifest just renamed into place in the set at
+/// `set`, and the set's folder, which names it, to disk now, each opened
+/// as itself, never through a link, and sharing everything, so the
+/// folders a run holds don't stand in the way. The first that couldn't be
+/// flushed, and why.
+#[cfg(windows)]
+fn flush_saved_manifest(set: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    let mut first_error = None;
+    for (path, flags) in [
+        (set.join(BACKUP_MANIFEST_FILE), FILE_FLAG_OPEN_REPARSE_POINT),
+        (
+            set.to_path_buf(),
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        ),
+    ] {
+        let flushed = fs::OpenOptions::new()
+            .write(true)
+            .share_mode(SHARE_EVERYTHING)
+            .custom_flags(flags)
+            .open(&path)
+            .and_then(|file| file.sync_all());
+        if let Err(error) = flushed {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Why the manifest of the set at `set` couldn't be saved without a part,

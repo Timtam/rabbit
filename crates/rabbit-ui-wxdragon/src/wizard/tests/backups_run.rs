@@ -958,10 +958,11 @@ fn a_backup_that_couldnt_go_out_of_its_set_says_its_record_couldnt_be_changed() 
 }
 
 /// A package gone out of its set whose files couldn't all be removed: Done
-/// counts it deleted, and Show details says how many stayed and when they
-/// go.
+/// counts it deleted, and says that files of it stay and take up room,
+/// since no row lists them after the rescan; Show details says how many
+/// stayed and when they go.
 #[test]
-fn files_left_in_the_set_are_said_in_show_details() {
+fn files_left_in_the_set_are_said_on_done_and_in_show_details() {
     let mut list = backup_list(vec![sws(), ffmpeg()]);
     tick(&mut list, FFMPEG, BackupChoice::Delete);
     let run = run_of(&en(), &list);
@@ -973,7 +974,9 @@ fn files_left_in_the_set_are_said_in_show_details() {
     assert_eq!(outcome.status, BackupDeleteOutcomeStatus::Deleted);
     assert_eq!(
         outcome.status_text,
-        "RABBIT deleted one backup and freed 249 MB."
+        "RABBIT deleted one backup and freed 249 MB.\n\nNot all of its files could be removed. \
+         Those left stay in the backup it was kept in, and take up room there until the rest of \
+         that backup is deleted."
     );
     assert_eq!(
         outcome.detail_lines,
@@ -1005,6 +1008,10 @@ fn files_left_in_the_set_are_said_in_show_details() {
         &Ok(report(vec![deleted_from_set(&run.items[0], 250 * MB, 0)])),
     );
     assert_eq!(
+        outcome.status_text,
+        "RABBIT deleted one backup and freed 250 MB."
+    );
+    assert_eq!(
         outcome.detail_lines[1..3],
         [
             "FFmpeg for Improved Video Support 7.1: Deleted",
@@ -1012,6 +1019,30 @@ fn files_left_in_the_set_are_said_in_show_details() {
         ]
     );
     assert_eq!(outcome.detail_lines.len(), 5);
+}
+
+/// Two packages out of one set, both gone, one with files of it left:
+/// Done counts the one among the ticked backups.
+#[test]
+fn files_left_by_one_of_several_are_counted_on_done() {
+    let mut list = backup_list(vec![sws(), ffmpeg(), reapack()]);
+    tick(&mut list, SWS, BackupChoice::Delete);
+    tick(&mut list, REAPACK, BackupChoice::Delete);
+    let run = run_of(&en(), &list);
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(vec![
+            deleted_from_set(&run.items[0], 2 * MB, 1),
+            ended(&run.items[1], DeleteStatus::Deleted, 2 * MB),
+        ])),
+    );
+    assert_eq!(
+        outcome.status_text,
+        "RABBIT deleted 2 backups and freed 4 MB.\n\nOne was deleted, but not all of its files \
+         could be removed. Those left stay in the backup it was kept in, and take up room there \
+         until the rest of that backup is deleted."
+    );
 }
 
 /// A package refused because an unfinished deletion of its set's id is
@@ -1406,6 +1437,91 @@ fn a_partly_deleted_backup_says_what_is_left_and_where() {
              there finishes it.",
             "Error: reaper_sws-x64.dll: Access is denied. (os error 5)",
         ]
+    );
+}
+
+/// Two ticked rows of one set that went whole, and so came out as one: a
+/// set not deleted, deleted only in part, or whose record of what it holds
+/// couldn't be changed. Show details says what happened, and why, below
+/// the first only, and the second names it; Done counts both rows.
+#[test]
+fn rows_that_share_their_sets_outcome_say_why_once() {
+    let mut list = backup_list(vec![sws(), ffmpeg()]);
+    tick(&mut list, SWS, BackupChoice::Delete);
+    tick(&mut list, FFMPEG, BackupChoice::Delete);
+    let run = run_of(&en(), &list);
+    let both = |whole: DeleteReportItem| -> DeleteReport {
+        report(
+            run.items
+                .iter()
+                .enumerate()
+                .map(|(nth, delete)| DeleteReportItem {
+                    part: delete.part.clone(),
+                    bytes_freed: if nth == 0 { whole.bytes_freed } else { 0 },
+                    ..whole.clone()
+                })
+                .collect(),
+        )
+    };
+    let same = format!(
+        "What happened to it, and why, is said above, below the backup it was kept with: {SWS}."
+    );
+
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(both(not_deleted(BOTH_SET, NotDeletedReason::InUse))),
+    );
+    assert_eq!(
+        below(&outcome, SWS),
+        [
+            "Nothing of it changed.".to_string(),
+            "A file in it is open in another program, so it couldn't be moved.".to_string(),
+            format!("Error: C:/REAPER/RABBIT/backups/{BOTH_SET}: Access is denied. (os error 5)"),
+        ]
+    );
+    assert_eq!(below(&outcome, FFMPEG), [same.as_str()]);
+    assert_eq!(
+        outcome.status_text,
+        "RABBIT couldn't delete the backups.\n\n2 couldn't be deleted, because a file in them is \
+         open in another program. Close that program, then run RABBIT again to delete them."
+    );
+
+    let outcome =
+        wizard_backup_delete_outcome(&en(), &run, &Ok(both(partly_deleted(BOTH_SET, KB))));
+    assert_eq!(below(&outcome, SWS).len(), 2, "{:#?}", outcome.detail_lines);
+    assert_eq!(below(&outcome, FFMPEG), [same.as_str()]);
+
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(
+            run.items
+                .iter()
+                .map(|delete| not_deleted_from_set(delete, NotDeletedReason::Permission))
+                .collect(),
+        )),
+    );
+    assert_eq!(below(&outcome, SWS).len(), 3, "{:#?}", outcome.detail_lines);
+    assert_eq!(below(&outcome, FFMPEG), [same.as_str()]);
+
+    // Each part's own outcome, files left of both, is said below each.
+    let outcome = wizard_backup_delete_outcome(
+        &en(),
+        &run,
+        &Ok(report(
+            run.items
+                .iter()
+                .map(|delete| deleted_from_set(delete, MB, 1))
+                .collect(),
+        )),
+    );
+    assert!(
+        below(&outcome, FFMPEG)
+            .iter()
+            .all(|line| !line.starts_with("What happened")),
+        "{:#?}",
+        outcome.detail_lines
     );
 }
 
@@ -2154,6 +2270,7 @@ fn every_done_page_and_show_details_reads_in_every_locale() {
             })
             .collect();
         alone.push(partly_deleted(&id, KB));
+        alone.push(deleted_from_set(&run_one.items[0], KB, 1));
         alone.push(item(&id, DeleteStatus::AlreadyGone, 0));
         alone.push(item(&id, DeleteStatus::Deleted, KB));
         for set in alone {
@@ -2231,6 +2348,41 @@ fn every_done_page_and_show_details_reads_in_every_locale() {
             vec![
                 ended(&run_pair.items[0], DeleteStatus::Deleted, MB),
                 ended(&run_pair.items[1], DeleteStatus::Deleted, 0),
+            ],
+            false,
+        );
+        // The set not deleted, or deleted only in part, for both, and the
+        // record of what it holds that couldn't be changed for both: said
+        // below the first, and named below the second. Files left of one.
+        let pair_set = run_pair.items[0].set_id.clone();
+        for whole in [
+            not_deleted(&pair_set, NotDeletedReason::InUse),
+            partly_deleted(&pair_set, KB),
+        ] {
+            pair_outcome(
+                run_pair
+                    .items
+                    .iter()
+                    .map(|delete| DeleteReportItem {
+                        part: delete.part.clone(),
+                        ..whole.clone()
+                    })
+                    .collect(),
+                false,
+            );
+        }
+        pair_outcome(
+            run_pair
+                .items
+                .iter()
+                .map(|delete| not_deleted_from_set(delete, NotDeletedReason::Permission))
+                .collect(),
+            false,
+        );
+        pair_outcome(
+            vec![
+                deleted_from_set(&run_pair.items[0], MB, 1),
+                deleted_from_set(&run_pair.items[1], MB, 0),
             ],
             false,
         );

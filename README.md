@@ -442,16 +442,22 @@ again)".
   nothing. Each backup comes back whole or not at all.
 - **Delete:** deletes the ticked backups for good, not to the Recycle Bin or
   the Trash, to free the room they take. Review says what each one loses and
-  how much room the delete frees. Enter doesn't start it; press **Delete**,
-  and RABBIT asks once more with **No** selected. Each row is ticked and
-  deleted on its own: of two packages one uninstall removed, you can delete
-  one and keep the other, which can still be restored. Two kinds of row can
-  only be deleted together with other rows: a row under **Other backups**
-  for files no other row brings back, and an unfinished deletion of a
+  how much room the delete frees, "about" when a package or key map goes out
+  of a backup that keeps others; the last page says what it really freed.
+  Enter doesn't start it; press **Delete**, and RABBIT asks once more with
+  **No** selected. Each row is ticked on its own, and a package or key map
+  is deleted on its own: of two packages one uninstall removed, you can
+  delete one and keep the other, which can still be restored. A file of it
+  that can't be removed, such as one open in another program, stays in the
+  backup it was kept in until the rest of that backup is deleted, and the
+  last page says so. Two kinds of row can only be deleted together with
+  other rows: a row under **Other backups** for files no other row brings
+  back (its size counts only those files), and an unfinished deletion of a
   backup that is still listed. The text below the list names the rows each
-  one goes with, and Review asks you to tick them too. When every row kept
-  in one backup goes, RABBIT also finishes an unfinished deletion of that
-  backup, and Show details says so. REAPER may stay open.
+  one goes with, and Review asks you to tick them too, or to untick it when
+  one of them can't be deleted, such as another account's. When every row
+  kept in one backup goes, RABBIT also finishes an unfinished deletion of
+  that backup, and Show details says so. REAPER may stay open.
 - **Nothing is deleted by itself.** A backup stays until you delete it, here
   or with `rabbit delete-backup`.
 - **Another account's backups (Mac):** a backup another account made, such
@@ -459,7 +465,8 @@ again)".
   the list says how to remove it in Finder.
 - **While it runs:** the progress page names each backup. Closing RABBIT
   asks first, with **No** selected, then stops once the backup it is on is
-  done. The last page says what came back or was deleted, and **Show
+  done; a delete also finishes the other ticked backups kept with it. The
+  last page says what came back or was deleted, and **Show
   details** what happened to each backup. A restore or delete that gets
   past its checks saves a report under `RABBIT\logs`. After the run, start
   RABBIT again for the next one.
@@ -1058,8 +1065,11 @@ RABBIT delete-backup --resource-path "%APPDATA%\REAPER" \
   deletes the set's key map. Both take exactly one `--backup-id`, and can't be
   given together. The set's other backups stay, and can still be restored.
   When it is the last backup in the set, the whole set goes, as without the
-  option. A set that also holds files no package or key map of it holds, which
-  `rabbit backups` lists as the set's own backup, stays with those files.
+  option; if part of it then stays as an unfinished deletion, the output
+  gives the command that finishes it, which names the set without
+  `--package` or `--key-map`. A set that also holds files no package or key
+  map of it holds, which `rabbit backups` lists as the set's own backup,
+  stays with those files.
   `rabbit backups` prints the command for each package and key map, without
   `--apply`, so it first shows what would go. A package or key map the set
   doesn't hold is refused with exit code 2, also when you run the same command

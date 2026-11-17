@@ -565,6 +565,33 @@ impl<'a> RowOutcome<'a> {
             })
     }
 
+    /// The set whose one outcome the row's status and why are, when they
+    /// are the set's rather than the row's own: a whole set that wasn't
+    /// deleted or was deleted only in part, or a set whose record of what
+    /// it holds couldn't be saved without its parts. Ticked rows of one
+    /// such set share all of it, so Show details says it below the first
+    /// of them only.
+    fn shared_set(&self) -> Option<&'a str> {
+        if self.end.part_went
+            || !matches!(
+                self.end.status,
+                DeleteStatus::NotDeleted
+                    | DeleteStatus::NotDeletedFromSet
+                    | DeleteStatus::PartlyDeleted
+            )
+        {
+            return None;
+        }
+        let mut sets = self
+            .items
+            .iter()
+            .copied()
+            .filter(|item| item.status == self.end.status)
+            .map(|item| item.set_id.as_str());
+        let first = sets.next()?;
+        sets.all(|set| set == first).then_some(first)
+    }
+
     /// Done's sentence for the row when it wasn't deleted, which Done
     /// counts among the rows of the same reason (see [`done_reason`]).
     fn done_reason(&self, report: &DeleteReport) -> Option<(u8, &'static str)> {
@@ -759,6 +786,18 @@ pub fn wizard_backup_delete_outcome(
             }),
             "wizard-done-delete-stopped-partway",
         ),
+        // A package or the key map that went out of its set, though files
+        // of it stay there and still take up room, which no row lists any
+        // more: said here, as the first line counts it as deleted.
+        (
+            rows(&|outcome| {
+                outcome.end.status == DeleteStatus::DeletedFromSet
+                    && outcome
+                        .telling_items()
+                        .any(|item| !item.files_left.is_empty())
+            }),
+            "wizard-done-delete-files-left",
+        ),
     ];
     for (count, key) in counted {
         if count > 0 {
@@ -907,6 +946,9 @@ fn summarize_backup_delete(
         .filter(|row| row.unfinished_deletion)
         .flat_map(|row| row.items.iter().map(|item| item.set_id.as_str()))
         .collect();
+    // The sets whose one outcome a row's lines said already (see
+    // [`RowOutcome::shared_set`]), with that outcome and the row's name.
+    let mut explained: Vec<(&str, DeleteStatus, &str)> = Vec::new();
     for outcome in outcomes {
         lines.push(say(
             localizer,
@@ -930,7 +972,25 @@ fn summarize_backup_delete(
                 &[("size", (&size).into())],
             ));
         }
-        below.extend(explain(localizer, report, outcome));
+        let shared = outcome.shared_set();
+        let said_above = shared.and_then(|set| {
+            explained
+                .iter()
+                .find(|(other, status, _)| *other == set && *status == outcome.end.status)
+        });
+        match said_above {
+            Some((_, _, first)) => below.push(say(
+                localizer,
+                "wizard-summary-delete-same-as-above",
+                &[("backup", (*first).into())],
+            )),
+            None => {
+                below.extend(explain(localizer, report, outcome));
+                if let Some(set) = shared {
+                    explained.push((set, outcome.end.status, &outcome.row.label));
+                }
+            }
+        }
         // A set that goes whole takes an unfinished deletion of its id with
         // it, though no ticked row may name that: said once, below the
         // first row of the set, so nothing goes unsaid.

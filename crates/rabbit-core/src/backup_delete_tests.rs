@@ -3375,3 +3375,238 @@ fn what_this_rabbit_doesnt_know_of_a_manifest_stays_in_it() {
     assert_eq!(files[0]["newer_entry"], "ffmpeg");
     assert_eq!(listed_backups(&resource, id), [package(id, "ffmpeg")]);
 }
+
+/// On Windows, the last package of a set takes the set whole, and when a
+/// file of it is opened right after the rename, the walk leaves part of
+/// it: the package's item says so as the set's, partly deleted, with its
+/// own part and the set's folders, so the CLI and the tab can tell the
+/// whole set went. Naming the same package again is refused, since only a
+/// delete of the whole id finishes such a deletion, which it then does.
+#[cfg(windows)]
+#[test]
+fn a_last_part_that_leaves_its_set_partly_deleted_says_so_as_the_set() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    let id = "uninstall-unix-1";
+    let set = sws_and_ffmpeg(&resource, id);
+    let report = run_items(&resource, &[DeleteItem::package(id, "sws")], &APPLY);
+    assert_eq!(statuses(&report), [DeleteStatus::DeletedFromSet]);
+    let held: std::rc::Rc<std::cell::RefCell<Option<fs::File>>> = std::rc::Rc::default();
+    let holder = std::rc::Rc::clone(&held);
+    let seam = delete_seam::install(move |step, folder| {
+        if step == Step::Renamed {
+            *holder.borrow_mut() = Some(hold_open(&folder.join("UserPlugins/avcodec-61.dll"), 0));
+        }
+    });
+
+    let report = run_items(&resource, &[DeleteItem::package(id, "ffmpeg")], &APPLY);
+    drop(seam);
+
+    assert_eq!(statuses(&report), [DeleteStatus::PartlyDeleted]);
+    let left = deleting_path(&resource, id);
+    let ended = &report.sets[0];
+    assert_eq!(
+        ended.part,
+        DeletePart::Package {
+            package_id: "ffmpeg".to_string()
+        }
+    );
+    assert_eq!(ended.set_path.as_deref(), Some(set.as_path()));
+    assert_eq!(ended.left_in.as_deref(), Some(left.as_path()));
+    assert!(!set.exists());
+
+    let again = run_items(&resource, &[DeleteItem::package(id, "ffmpeg")], &APPLY);
+    assert!(again.refused);
+    assert!(
+        matches!(
+            &again.sets[0].refusal,
+            Some(RestoreRefusal::BeingDeleted { backup_id }) if backup_id == id
+        ),
+        "{again:#?}"
+    );
+    held.borrow_mut().take();
+
+    let report = run(&resource, &[id], &APPLY);
+
+    assert_eq!(statuses(&report), [DeleteStatus::FinishedEarlierDeletion]);
+    assert!(!left.exists());
+}
+
+/// On Windows, a name that ends in a dot or a space opens the folder
+/// without it, so a part's entry under `Sub.` or `Other ` that RABBIT
+/// leaves never has `Sub` or `Other` removed as a folder it left empty,
+/// though both are empty. The entries' files are named as ones that stay.
+#[cfg(windows)]
+#[test]
+fn a_folder_name_that_opens_another_folder_is_never_removed() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    let id = "uninstall-unix-1";
+    let set = sws_and_ffmpeg(&resource, id);
+    fs::create_dir_all(set.join("Sub")).unwrap();
+    fs::create_dir_all(set.join("Other")).unwrap();
+    let mut manifest = load_backup_manifest(&set).unwrap().unwrap();
+    let sws_entry = manifest
+        .files
+        .iter()
+        .find(|entry| entry.package_id.as_deref() == Some("sws"))
+        .cloned()
+        .unwrap();
+    for (nth, folder) in ["Sub.", "Other "].into_iter().enumerate() {
+        let mut entry = sws_entry.clone();
+        entry.original_path = PathBuf::from(format!("UserPlugins/odd-{nth}.dll"));
+        entry.backup_path = set.join(folder).join("x.dll");
+        manifest.files.push(entry);
+    }
+    save_backup_manifest(&set, &manifest).unwrap();
+
+    let report = run_items(&resource, &[DeleteItem::package(id, "sws")], &APPLY);
+
+    assert_eq!(statuses(&report), [DeleteStatus::DeletedFromSet]);
+    assert!(set.join("Sub").is_dir());
+    assert!(set.join("Other").is_dir());
+    assert!(!set.join("UserPlugins/reaper_sws-x64.dll").exists());
+    assert_eq!(report.sets[0].files_left.len(), 2, "{report:#?}");
+}
+
+/// On Windows, the manifest a part's delete saved and the set's folder are
+/// flushed to disk while the run holds the set and the folders above it,
+/// so the save is on disk before any copy goes, also on FAT or exFAT.
+#[cfg(windows)]
+#[test]
+fn the_saved_manifest_and_its_set_are_flushed_while_held() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    let id = "uninstall-unix-1";
+    let set = sws_and_ffmpeg(&resource, id);
+    let held = super::hold_way_to_set(&resource, id).unwrap();
+
+    super::flush_saved_manifest(&set).unwrap();
+    drop(held);
+}
+
+/// An update's set `id` as RABBIT 0.4.x wrote one: the earlier versions of
+/// ReaPack and SWS it replaced, 13 and 8 bytes, a copy of RABBIT's records
+/// with an entry for it, under `receipt_of` when given, and the manifest's
+/// `receipt_backup_path` naming that copy.
+fn older_update_set(resource: &Path, id: &str, receipt_of: Option<&str>) -> PathBuf {
+    let mut writer = BackupSetWriter::new(resource, id, UPDATE_BACKUP_REASON);
+    for (package_id, file, contents) in [
+        (
+            "reapack",
+            "UserPlugins/reaper_reapack-x64.dll",
+            &b"reapack 1.0.0"[..],
+        ),
+        ("sws", "UserPlugins/reaper_sws-x64.dll", &b"sws 2.13"[..]),
+    ] {
+        let original = resource.join(file);
+        write(&original, contents);
+        writer.copy_file(Some(package_id), &original).unwrap();
+    }
+    let set = writer.path().to_path_buf();
+    let copy = set.join("RABBIT").join("install-state.json");
+    write(&copy, b"records of 0.4.4");
+    let mut manifest = load_backup_manifest(&set).unwrap().unwrap();
+    manifest.files.push(crate::rollback::BackupManifestFile {
+        package_id: receipt_of.map(ToString::to_string),
+        original_path: PathBuf::from("RABBIT").join("install-state.json"),
+        backup_path: copy.clone(),
+        size: 16,
+        sha256: crate::hash::sha256_bytes(b"records of 0.4.4"),
+        state: crate::rollback::BackupEntryState::Done,
+    });
+    manifest.receipt_backup_path = Some(copy);
+    save_backup_manifest(&set, &manifest).unwrap();
+    set
+}
+
+/// One package out of an older update's set, which holds a copy of
+/// RABBIT's records, keeps that copy, also when its entry was recorded
+/// under that package: the copy is the set's own, never a part of the
+/// package's backup. The manifest still names it, and the other earlier
+/// version stays listed.
+#[test]
+fn a_part_out_of_an_older_update_set_keeps_its_receipt_copy() {
+    for receipt_of in [None, Some("sws")] {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let id = "unix-1";
+        let set = older_update_set(&resource, id, receipt_of);
+        let copy = set.join("RABBIT").join("install-state.json");
+        assert_eq!(
+            listed_backups(&resource, id),
+            [package(id, "reapack"), package(id, "sws")]
+        );
+
+        let report = run_items(&resource, &[DeleteItem::package(id, "sws")], &APPLY);
+
+        assert_eq!(
+            statuses(&report),
+            [DeleteStatus::DeletedFromSet],
+            "{receipt_of:?}"
+        );
+        assert!(report.sets[0].files_left.is_empty(), "{report:#?}");
+        assert_eq!(fs::read(&copy).unwrap(), b"records of 0.4.4");
+        assert!(!set.join("UserPlugins/reaper_sws-x64.dll").exists());
+        assert_eq!(
+            fs::read(set.join("UserPlugins/reaper_reapack-x64.dll")).unwrap(),
+            b"reapack 1.0.0"
+        );
+        let manifest = load_backup_manifest(&set).unwrap().unwrap();
+        assert_eq!(
+            manifest.receipt_backup_path.as_deref(),
+            Some(copy.as_path())
+        );
+        assert!(
+            manifest.files.iter().any(|entry| entry.backup_path == copy),
+            "{receipt_of:?}"
+        );
+        assert_eq!(listed_backups(&resource, id), [package(id, "reapack")]);
+    }
+}
+
+/// A part's delete changes nothing outside its own set: not the resource
+/// folder, not another set, not even a file a manifest entry of the part
+/// names outside the set, nor one it names in another set's folder, which
+/// is read as the same place in this set.
+#[test]
+fn a_part_changes_nothing_outside_its_set() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    let id = "uninstall-unix-1";
+    let set = sws_and_ffmpeg(&resource, id);
+    let other = sws_and_ffmpeg(&resource, "uninstall-unix-2");
+    let live = resource.join("UserPlugins/live.dll");
+    write(&live, b"in use by REAPER");
+    let mut manifest = load_backup_manifest(&set).unwrap().unwrap();
+    let sws_entry = manifest
+        .files
+        .iter()
+        .find(|entry| entry.package_id.as_deref() == Some("sws"))
+        .cloned()
+        .unwrap();
+    for (nth, backup_path) in [
+        live.clone(),
+        other.join("UserPlugins").join("reaper_sws-x64.dll"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut entry = sws_entry.clone();
+        entry.original_path = PathBuf::from(format!("UserPlugins/outside-{nth}.dll"));
+        entry.backup_path = backup_path;
+        manifest.files.push(entry);
+    }
+    save_backup_manifest(&set, &manifest).unwrap();
+    let outside = everything_else(&resource);
+    let other_before = snapshot(&other);
+
+    let report = run_items(&resource, &[DeleteItem::package(id, "sws")], &APPLY);
+
+    assert_eq!(statuses(&report), [DeleteStatus::DeletedFromSet]);
+    assert!(!set.join("UserPlugins/reaper_sws-x64.dll").exists());
+    assert_eq!(everything_else(&resource), outside);
+    assert_eq!(snapshot(&other), other_before);
+    assert_eq!(fs::read(&live).unwrap(), b"in use by REAPER");
+    assert_eq!(listed_backups(&resource, id), [package(id, "ffmpeg")]);
+}
