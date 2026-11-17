@@ -755,14 +755,22 @@ user can finish the install by pressing Next a few times.
      picks Restore (the default) or Delete, each with its own ticks, kept in
      one wx-free model (`WizardBackupList`). With Restore, a row the core
      would refuse can't be ticked and its suffix says why; with Delete,
-     every row can be ticked except another account's on macOS, a link or a
-     folder RABBIT didn't make, and a row that goes with one of those. A
-     delete takes whole sets, so ticking a row for Delete ticks the rows
-     from the same set too, and the details say which go together; on macOS,
-     VoiceOver says "Checked" or "Unchecked" and names the rows that went
-     with it. Nothing is ticked by default, and the version check clears
-     both choices' ticks and sets the choice back to Restore. Everything
-     below describes the Install or update tab.
+     every row can be ticked except another account's on macOS and a link
+     or a folder RABBIT didn't make, each by its own status. A tick, for
+     either choice, changes only its row, and on macOS VoiceOver says only
+     "Checked" or "Unchecked". A delete takes each ticked row as the core
+     maps it (`DeleteItem::for_backup`): a package or the key map goes out
+     of its set, which keeps its other backups, and the core deletes the
+     set whole when the ticked rows are every backup it lists. A set's own
+     row, for files no other row brings back, and an unfinished deletion
+     whose id also names a set take that set whole; their details name the
+     rows that go with them, or those of them RABBIT can't delete, such as
+     another account's, which leave the row only to be unticked. A set that
+     goes whole also finishes an unfinished deletion of its id, ticked or
+     not; that loses nothing a restore could use, and Show details says so.
+     Nothing is ticked by default, and the version check clears both
+     choices' ticks and sets the choice back to Restore. Everything below
+     describes the Install or update tab.
    - Tree view with two top-level groups: **Packages** and
      **Configuration**. Packages contains REAPER, OSARA, SWS, ReaPack,
      ReaKontrol, FFmpeg (Windows only), JAWS scripts (Windows only), and
@@ -888,14 +896,19 @@ user can finish the install by pressing Next a few times.
      or covers other backups than the ticked ones, so Restore is never
      enabled for backups nothing checked. Before a delete the heading says
      "Ready to delete backups", and the summary says the ticked backups go
-     for good and how much room that frees, then one line per backup with
-     what is lost ("the only copy", "you can't go back to it after this"),
-     one line for each group that goes together because one set holds it,
-     the ticks left out, and "Can't delete yet" when nothing is ticked. Both
-     name backups as the tab does, with no set ids, and a path only in a
-     refusal's own sentence. As for an uninstall, focus goes to the summary,
-     the run button is not the default, and Back returns to the Backups
-     list.
+     for good and how much room that frees, "about" when a package or key
+     map goes out of its set, whose size comes from the set's record, then
+     one line per ticked backup with what is lost ("the only copy", "you
+     can't go back to it after this"), the ticks left out, and the blockers,
+     each starting "Can't delete yet": nothing ticked, and a ticked row that
+     takes its whole set while other rows of that set aren't ticked ("To
+     delete it, tick the other one too.") or can't be ("Untick it."), so no
+     backup a restore could use goes unless it is ticked; an unfinished
+     deletion of the same id is finished with its set. The Delete button
+     checks the same blockers again. Both name backups as the tab does, with
+     no set ids, and a path only in a refusal's own sentence. As for an
+     uninstall, focus goes to the summary, the run button is not the
+     default, and Back returns to the Backups list.
 
 6. Progress
    - Single progress bar plus one current-step line. A "Show details" toggle
@@ -1043,10 +1056,21 @@ user can finish the install by pressing Next a few times.
      freed ("RABBIT deleted 3 backups and freed 520 MB."), and for any that
      didn't, why: a file open in another program, no permission, or only
      part deleted, which stays as an unfinished deletion to finish from the
-     Backups tab in a new run. A row counts as deleted only when every set
-     it takes is gone, and rows from one set share its result. Show details
-     goes per group of rows that share a set, with what each freed, the
-     total, and the report's path.
+     Backups tab in a new run. Each ticked row is counted once, by what the
+     core reports of its own items, found by set and part. A row counts as
+     deleted when everything it names is gone, out of its set or with it.
+     A package or key map that stayed in its set because the set's record
+     of what it holds couldn't be saved says so, not that a file of the
+     backup was open. Show details goes per ticked row, with what it freed
+     when that is its own (rows that went with their whole set share its
+     bytes, which only the total says), the files of it that couldn't be
+     removed and stay in the set until the rest of it goes, the total, and
+     the report's path. It also says when a set went whole and finished an
+     unfinished deletion of its id that no row ticked, and when a row
+     stayed as it was because the core refused, or couldn't check, another
+     ticked row of its set right before that set's turn. The progress page
+     names a set's ticked rows when the core starts on that set, and the
+     gauge counts each set once.
    - Both save no report of the wizard's own: the core saves
      `restore-backup-unix-<s>` or `delete-backup-unix-<s>`, as `.json` and
      `.txt` in `RABBIT/logs`, for every run that gets past its checks, never

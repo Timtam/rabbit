@@ -6,6 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use rabbit_core::RabbitError;
+use rabbit_core::backup_delete::{DeleteItem, DeletePart};
 use rabbit_core::backup_overview::{
     BackupEntry, BackupGroup, BackupItem, BackupSetKind, BackupStatus, ModifiedTime, RestoreScope,
     SetFingerprint, backup_overview,
@@ -37,7 +38,7 @@ use crate::wizard::*;
 // ---------------------------------------------------------------------------
 
 /// November 9, 2026, 14:05 UTC.
-const NOV_9_1405: u64 = 1_794_233_100;
+pub(super) const NOV_9_1405: u64 = 1_794_233_100;
 /// November 3, 2026, 09:12 UTC.
 const NOV_3_0912: u64 = 1_793_697_120;
 /// November 1, 2026, 18:40 UTC.
@@ -61,7 +62,11 @@ pub(super) fn version(text: &str) -> Version {
 
 /// A backup as the overview gives one, of `item` in `group`, made when
 /// `created_unix` says, with nothing against restoring it.
-fn backup(item: BackupItem, group: BackupGroup, created_unix: Option<u64>) -> BackupEntry {
+pub(super) fn backup(
+    item: BackupItem,
+    group: BackupGroup,
+    created_unix: Option<u64>,
+) -> BackupEntry {
     let (set_kind, restore_scope) = match (&item, group) {
         (BackupItem::Package { .. }, BackupGroup::UninstalledSoftware) => {
             (BackupSetKind::Uninstall, Some(RestoreScope::Package))
@@ -247,11 +252,7 @@ pub(super) fn index_of(list: &WizardBackupList, name: &str) -> usize {
         .unwrap_or_else(|| panic!("no row named {name}"))
 }
 
-pub(super) fn tick(
-    list: &mut WizardBackupList,
-    name: &str,
-    choice: BackupChoice,
-) -> BackupTickChange {
+pub(super) fn tick(list: &mut WizardBackupList, name: &str, choice: BackupChoice) -> bool {
     let index = index_of(list, name);
     apply_backup_checkbox(&mut list.rows, index, choice, true)
 }
@@ -796,7 +797,7 @@ fn links_unfinished_deletions_and_other_sets_are_other_backups() {
     // An unfinished deletion can't be restored, and Delete finishes it.
     assert!(!list.rows[deleting].can_tick(BackupChoice::Restore));
     set_backup_choice(&mut list, BackupChoice::Delete);
-    assert!(tick(&mut list, "Unfinished deletion", BackupChoice::Delete).changed);
+    assert!(tick(&mut list, "Unfinished deletion", BackupChoice::Delete));
     assert_eq!(
         list.rows[deleting].summary,
         "Unfinished deletion: Will delete. Made on October 2, 2026, 11:00 AM, 4 MB"
@@ -1337,19 +1338,286 @@ fn the_records_row_says_deleting_changes_nothing_that_is_installed() {
 }
 
 #[test]
-fn rows_of_one_set_say_which_others_they_go_with() {
+fn rows_of_one_set_say_nothing_of_each_other() {
     let list = backup_list(vec![sws(), ffmpeg()]);
-    let sws = &list.rows[index_of(&list, "SWS Extension 2.14.0.7")];
+    for name in [
+        "SWS Extension 2.14.0.7",
+        "FFmpeg for Improved Video Support 7.1",
+    ] {
+        let details = &list.rows[index_of(&list, name)].details;
+        assert!(
+            !details.contains("together") && !details.contains("also holds"),
+            "{details}"
+        );
+        assert!(
+            details.ends_with("If you delete this backup, RABBIT can't bring this copy back."),
+            "{details}"
+        );
+    }
+    // Neither names the other.
     assert!(
-        sws.details.ends_with(
-            "This uninstall's backup also holds FFmpeg for Improved Video Support 7.1. Until a \
-             later version, RABBIT deletes them together."
+        !list.rows[index_of(&list, "SWS Extension 2.14.0.7")]
+            .details
+            .contains("FFmpeg")
+    );
+}
+
+/// A restore's backup that holds a key map and other files it replaced,
+/// from October 2: a key map row, and the set's own row for the files no
+/// other row brings back.
+fn keymap_and_its_sets_files() -> Vec<BackupEntry> {
+    let id = "restore-unix-1790938800-before-restore";
+    let keymap = BackupEntry {
+        item: BackupItem::Keymap {
+            set_id: id.to_string(),
+        },
+        set_kind: BackupSetKind::BeforeRestore,
+        keymap_origin: None,
+        created_unix: Some(OCT_2_1100),
+        ..keymap()
+    };
+    let files = BackupEntry {
+        set_kind: BackupSetKind::BeforeRestore,
+        restore_scope: None,
+        ..backup(
+            BackupItem::Set {
+                set_id: id.to_string(),
+            },
+            BackupGroup::Other,
+            Some(OCT_2_1100),
+        )
+    };
+    vec![keymap, files]
+}
+
+/// An update's backup from October 2 that holds an earlier ReaPack, the key
+/// map it replaced and other files: a row for each of the two, and the
+/// set's own row for the files no other row brings back.
+fn keymap_version_and_their_sets_files() -> Vec<BackupEntry> {
+    let id = "unix-1790938800";
+    let version = BackupEntry {
+        item: package(id, "reapack"),
+        created_unix: Some(OCT_2_1100),
+        ..reapack()
+    };
+    let keymap = BackupEntry {
+        item: BackupItem::Keymap {
+            set_id: id.to_string(),
+        },
+        set_kind: BackupSetKind::Update,
+        keymap_origin: None,
+        created_unix: Some(OCT_2_1100),
+        ..keymap()
+    };
+    let files = BackupEntry {
+        set_kind: BackupSetKind::Update,
+        restore_scope: None,
+        ..backup(
+            BackupItem::Set {
+                set_id: id.to_string(),
+            },
+            BackupGroup::Other,
+            Some(OCT_2_1100),
+        )
+    };
+    vec![version, keymap, files]
+}
+
+/// `entries`, each another account's.
+fn not_yours(entries: Vec<BackupEntry>) -> Vec<BackupEntry> {
+    entries
+        .into_iter()
+        .map(|entry| with_status(entry, BackupStatus::NotYours))
+        .collect()
+}
+
+/// `entries`, with an unfinished deletion of the id the first of them is
+/// in, from November 9, which is the user's own.
+fn deleting_beside(mut entries: Vec<BackupEntry>) -> Vec<BackupEntry> {
+    let set_id = entries[0].item.set_ids()[0].to_string();
+    entries.push(BackupEntry {
+        restore_scope: None,
+        ..backup(
+            BackupItem::Deleting { set_id },
+            BackupGroup::Other,
+            Some(NOV_9_1405),
+        )
+    });
+    entries
+}
+
+/// A set from October 2 with no record of what it holds.
+fn no_manifest_set() -> BackupEntry {
+    backup(
+        BackupItem::Set {
+            set_id: "unix-1790938800".to_string(),
+        },
+        BackupGroup::Other,
+        Some(OCT_2_1100),
+    )
+}
+
+#[test]
+fn a_sets_own_row_says_which_rows_go_with_it_and_the_others_say_nothing() {
+    let list = backup_list(keymap_and_its_sets_files());
+    // A delete of the set's own row takes the whole set, its key map too.
+    let files = &list.rows[index_of(&list, "Files a restore replaced")];
+    assert!(
+        files
+            .details
+            .ends_with("RABBIT can only delete it together with another backup: Key map."),
+        "{}",
+        files.details
+    );
+    // The key map goes out of the set alone, and says nothing of the files.
+    let keymap = &list.rows[index_of(&list, "Key map")];
+    assert!(!keymap.details.contains("together"), "{}", keymap.details);
+    // Both can be ticked on their own status.
+    assert!(files.can_tick(BackupChoice::Delete) && keymap.can_tick(BackupChoice::Delete));
+}
+
+/// A set's own row beside two rows names both, and Review asks to tick
+/// both, or those of them that aren't ticked.
+#[test]
+fn a_sets_own_row_beside_two_rows_names_both() {
+    let mut list = backup_list(keymap_version_and_their_sets_files());
+    let files = index_of(&list, "Other files an update replaced");
+    assert!(
+        list.rows[files].details.ends_with(
+            "RABBIT can only delete it together with 2 other backups: ReaPack 1.2.4 and Key map."
         ),
         "{}",
-        sws.details
+        list.rows[files].details
     );
-    let single = backup_list(vec![reapack()]);
-    assert!(!single.rows[1].details.contains("together"));
+    tick(
+        &mut list,
+        "Other files an update replaced",
+        BackupChoice::Delete,
+    );
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(!review.can_delete);
+    assert_eq!(
+        review.lines.last().map(String::as_str),
+        Some(
+            "Can't delete yet: RABBIT can only delete Other files an update replaced (Made on \
+             October 2, 2026, 11:00 AM) together with 2 other backups: ReaPack 1.2.4 (Replaced by \
+             1.2.5 on October 2, 2026, 11:00 AM) and the key map from October 2, 2026, 11:00 AM. \
+             To delete it, tick the others too."
+        )
+    );
+    // With ReaPack ticked, only the key map is left to name.
+    tick(&mut list, "ReaPack 1.2.4", BackupChoice::Delete);
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(
+        review.lines.last().is_some_and(|line| line.ends_with(
+            "together with another backup: the key map from October 2, 2026, 11:00 AM. To \
+             delete it, tick the other one too."
+        )),
+        "{:#?}",
+        review.lines
+    );
+    tick(&mut list, "Key map", BackupChoice::Delete);
+    assert!(can_delete_backups(&list));
+}
+
+/// An unfinished deletion whose id names a set RABBIT can't delete, another
+/// account's or what is no backup, can be ticked on its own status, but
+/// Review never asks to tick what can't be: it says the deletion can't go,
+/// and to untick it.
+#[test]
+fn an_unfinished_deletion_beside_a_set_rabbit_cant_delete_can_only_be_unticked() {
+    let not_a_backup = with_status(
+        backup(
+            BackupItem::Set {
+                set_id: "uninstall-unix-1794233100".to_string(),
+            },
+            BackupGroup::Other,
+            None,
+        ),
+        BackupStatus::NotABackup,
+    );
+    for (entries, name) in [
+        (
+            deleting_beside(not_yours(vec![sws()])),
+            "SWS Extension 2.14.0.7 (Uninstalled November 9, 2026, 2:05 PM)",
+        ),
+        (
+            deleting_beside(vec![not_a_backup]),
+            "Not a backup RABBIT made (Date unknown)",
+        ),
+    ] {
+        let mut list = backup_list(entries);
+        let deleting = index_of(&list, "Unfinished deletion");
+        assert!(list.rows[deleting].can_tick(BackupChoice::Delete));
+        let other = list.rows.iter().position(|row| {
+            row.entry
+                .as_ref()
+                .is_some_and(|entry| !matches!(entry.item, BackupItem::Deleting { .. }))
+        });
+        let other = other.unwrap();
+        assert!(!list.rows[other].can_tick(BackupChoice::Delete));
+        let short = name.split(" (").next().unwrap();
+        assert!(
+            list.rows[deleting].details.ends_with(&format!(
+                "RABBIT can only delete it together with another backup that RABBIT can't \
+                 delete: {short}."
+            )),
+            "{}",
+            list.rows[deleting].details
+        );
+
+        tick(&mut list, "Unfinished deletion", BackupChoice::Delete);
+        // The row that can't be ticked stays unticked, and isn't asked for.
+        apply_backup_checkbox(&mut list.rows, other, BackupChoice::Delete, true);
+        assert!(!list.rows[other].delete_ticked);
+        let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+        assert!(!review.can_delete);
+        assert!(!can_delete_backups(&list));
+        assert_eq!(
+            review.lines.last().map(String::as_str),
+            Some(
+                format!(
+                    "Can't delete yet: RABBIT can only delete Unfinished deletion (Made on \
+                     November 9, 2026, 2:05 PM) together with another backup that RABBIT can't \
+                     delete: {name}. Untick it."
+                )
+                .as_str()
+            )
+        );
+        assert!(review.lines.iter().all(|line| !line.contains("tick the")));
+    }
+}
+
+/// The Delete button checks what Review checks: nothing ticked, a backup
+/// that takes unticked rows with it, or one that takes rows RABBIT can't
+/// delete, and nothing else.
+#[test]
+fn the_delete_button_checks_what_review_blocks() {
+    let mut lists = Vec::new();
+    let nothing = backup_list(vec![sws(), ffmpeg()]);
+    lists.push(nothing.clone());
+    let mut one = nothing;
+    tick(&mut one, "SWS Extension 2.14.0.7", BackupChoice::Delete);
+    lists.push(one);
+    let mut takes = backup_list(keymap_and_its_sets_files());
+    tick(&mut takes, "Files a restore replaced", BackupChoice::Delete);
+    lists.push(takes.clone());
+    tick(&mut takes, "Key map", BackupChoice::Delete);
+    lists.push(takes);
+    let mut cant = backup_list(deleting_beside(not_yours(vec![sws()])));
+    tick(&mut cant, "Unfinished deletion", BackupChoice::Delete);
+    lists.push(cant);
+    let enabled: Vec<bool> = lists.iter().map(can_delete_backups).collect();
+    assert_eq!(enabled, [false, true, false, true, false]);
+    for list in &lists {
+        let review = build_backup_delete_review(&en(), Some(&target(true)), list, &[]);
+        assert_eq!(
+            review.can_delete,
+            can_delete_backups(list),
+            "{:#?}",
+            review.lines
+        );
+    }
 }
 
 #[test]
@@ -1426,157 +1694,108 @@ fn untick_and_check_one(list: &mut WizardBackupList) {
 }
 
 #[test]
-fn a_delete_tick_ties_the_rows_of_one_set_both_ways() {
-    let mut list = backup_list(vec![sws(), ffmpeg(), reapack()]);
+fn a_delete_tick_changes_only_its_row() {
+    let reakontrol = BackupEntry {
+        item: package("uninstall-unix-1794233100", "reakontrol"),
+        version: Some(version("1.0")),
+        ..sws()
+    };
+    // Two packages of one uninstall, a third of it, and ReaPack alone.
+    let mut list = backup_list(vec![sws(), ffmpeg(), reakontrol, reapack()]);
     let sws = index_of(&list, "SWS Extension 2.14.0.7");
     let ffmpeg = index_of(&list, "FFmpeg for Improved Video Support 7.1");
     set_backup_choice(&mut list, BackupChoice::Delete);
+    let before = list.rows.clone();
 
-    let change = apply_backup_checkbox(&mut list.rows, ffmpeg, BackupChoice::Delete, true);
-    assert_eq!(
-        change,
-        BackupTickChange {
-            changed: true,
-            tied: vec![sws],
-        }
-    );
-    assert!(list.rows[sws].delete_ticked && list.rows[ffmpeg].delete_ticked);
+    assert!(apply_backup_checkbox(
+        &mut list.rows,
+        ffmpeg,
+        BackupChoice::Delete,
+        true
+    ));
+    assert!(list.rows[ffmpeg].delete_ticked);
     assert!(
-        list.rows[sws]
+        list.rows[ffmpeg]
             .summary
-            .starts_with("SWS Extension 2.14.0.7: Will delete the only copy.")
+            .starts_with("FFmpeg for Improved Video Support 7.1: Will delete the only copy.")
     );
-    assert_eq!(
-        backups_also_ticked_announcement(&en(), &list.rows, ffmpeg, &change).as_deref(),
-        Some("SWS Extension 2.14.0.7 from the same uninstall is ticked too.")
-    );
+    // Every other row is as it was, its label and details included.
+    for (index, row) in list.rows.iter().enumerate() {
+        if index != ffmpeg {
+            assert_eq!(row, &before[index], "row {index}");
+        }
+    }
+    assert_eq!(list.ticked_rows(BackupChoice::Delete).count(), 1);
+
+    // Ticking it again changes nothing.
+    assert!(!apply_backup_checkbox(
+        &mut list.rows,
+        ffmpeg,
+        BackupChoice::Delete,
+        true
+    ));
+
+    // Its set mate ticks alone too, and unticking one leaves the other.
+    assert!(apply_backup_checkbox(
+        &mut list.rows,
+        sws,
+        BackupChoice::Delete,
+        true
+    ));
+    assert!(apply_backup_checkbox(
+        &mut list.rows,
+        ffmpeg,
+        BackupChoice::Delete,
+        false
+    ));
+    assert!(list.rows[sws].delete_ticked && !list.rows[ffmpeg].delete_ticked);
+    assert!(!list.rows[index_of(&list, "ReaKontrol 1.0")].delete_ticked);
     assert!(!list.rows[index_of(&list, "ReaPack 1.2.4")].delete_ticked);
-
-    // Ticking it again changes nothing, so nothing is refreshed or said.
-    let again = apply_backup_checkbox(&mut list.rows, ffmpeg, BackupChoice::Delete, true);
-    assert_eq!(again, BackupTickChange::default());
-    assert_eq!(
-        backups_also_ticked_announcement(&en(), &list.rows, ffmpeg, &again),
-        None
-    );
-
-    // Unticking the other one unticks both.
-    let change = apply_backup_checkbox(&mut list.rows, sws, BackupChoice::Delete, false);
-    assert_eq!(
-        change,
-        BackupTickChange {
-            changed: true,
-            tied: vec![ffmpeg],
-        }
-    );
-    assert!(!list.rows[sws].delete_ticked && !list.rows[ffmpeg].delete_ticked);
-    assert_eq!(
-        backups_also_ticked_announcement(&en(), &list.rows, sws, &change).as_deref(),
-        Some("FFmpeg for Improved Video Support 7.1 from the same uninstall is unticked too.")
-    );
-    let again = apply_backup_checkbox(&mut list.rows, sws, BackupChoice::Delete, false);
-    assert_eq!(again, BackupTickChange::default());
-
-    // A row on its own ticks alone, and says nothing more.
-    let reapack = index_of(&list, "ReaPack 1.2.4");
-    let change = apply_backup_checkbox(&mut list.rows, reapack, BackupChoice::Delete, true);
-    assert_eq!(
-        change,
-        BackupTickChange {
-            changed: true,
-            tied: Vec::new(),
-        }
-    );
-    assert_eq!(
-        backups_also_ticked_announcement(&en(), &list.rows, reapack, &change),
-        None
-    );
+    assert!(!apply_backup_checkbox(
+        &mut list.rows,
+        ffmpeg,
+        BackupChoice::Delete,
+        false
+    ));
 }
 
+/// VoiceOver says only "Checked" or "Unchecked" after a tick: no other row
+/// changes with it, so the sentences that named those are gone from every
+/// language.
 #[test]
-fn a_delete_tick_names_every_other_row_it_ticks() {
-    let reakontrol = BackupEntry {
-        item: package("uninstall-unix-1794233100", "reakontrol"),
-        version: Some(version("1.0")),
-        ..sws()
-    };
-    let mut list = backup_list(vec![sws(), ffmpeg(), reakontrol]);
-    let first = index_of(&list, "SWS Extension 2.14.0.7");
-    let change = apply_backup_checkbox(&mut list.rows, first, BackupChoice::Delete, true);
-    assert_eq!(change.tied.len(), 2);
-    assert_eq!(
-        backups_also_ticked_announcement(&en(), &list.rows, first, &change).as_deref(),
-        Some(
-            "FFmpeg for Improved Video Support 7.1 and ReaKontrol 1.0 from the same uninstall are \
-             ticked too."
-        )
-    );
-}
-
-/// Where a language's participle agrees with how many rows a delete tick
-/// takes along, the macOS announcement says it in the plural for several.
-#[test]
-fn the_tie_announcement_agrees_with_how_many_rows_it_names() {
-    let reakontrol = BackupEntry {
-        item: package("uninstall-unix-1794233100", "reakontrol"),
-        version: Some(version("1.0")),
-        ..sws()
-    };
-    for (locale, one, several, several_unticked) in [
-        (
-            "es-ES",
-            "También marcado,",
-            "También marcados,",
-            "También desmarcados,",
-        ),
-        ("fr-FR", "Aussi coché,", "Aussi cochés,", "Aussi décochés,"),
-        (
-            "it-IT",
-            "Selezionato anche,",
-            "Selezionati anche,",
-            "Deselezionati anche,",
-        ),
-        (
-            "pt-BR",
-            "Também marcado,",
-            "Também marcados,",
-            "Também desmarcados,",
-        ),
-    ] {
+fn no_language_names_rows_ticked_along() {
+    for &locale in embedded_locales() {
         let localizer = Localizer::embedded(locale).unwrap();
-        let said = |list: &mut WizardBackupList, ticked: bool| {
-            // The first row under the heading.
-            let change = apply_backup_checkbox(&mut list.rows, 1, BackupChoice::Delete, ticked);
-            backups_also_ticked_announcement(&localizer, &list.rows, 1, &change).unwrap()
-        };
-        let mut two = list_in(&localizer, vec![sws(), ffmpeg()]);
-        let text = said(&mut two, true);
-        assert!(text.starts_with(one), "{locale}: {text}");
-        let mut three = list_in(&localizer, vec![sws(), ffmpeg(), reakontrol.clone()]);
-        let text = said(&mut three, true);
-        assert!(text.starts_with(several), "{locale}: {text}");
-        let text = said(&mut three, false);
-        assert!(text.starts_with(several_unticked), "{locale}: {text}");
+        for key in [
+            "wizard-backups-also-ticked-macos",
+            "wizard-backups-also-unticked-macos",
+            "wizard-backups-unavailable-tied",
+            "wizard-backups-details-tied",
+            "wizard-backups-details-together",
+            "wizard-review-delete-together",
+            "wizard-review-delete-together-undated",
+            "wizard-summary-delete-together",
+        ] {
+            assert!(localizer.text(key).missing, "{locale}: {key}");
+        }
     }
 }
 
 #[test]
-fn restore_ticks_are_never_tied() {
+fn restore_ticks_are_the_rows_own_too() {
     let mut list = backup_list(vec![sws(), ffmpeg()]);
-    let change = tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Restore);
-    assert_eq!(
-        change,
-        BackupTickChange {
-            changed: true,
-            tied: Vec::new(),
-        }
-    );
+    assert!(tick(
+        &mut list,
+        "SWS Extension 2.14.0.7",
+        BackupChoice::Restore
+    ));
     assert!(!list.rows[index_of(&list, "FFmpeg for Improved Video Support 7.1")].restore_ticked);
     // Ticking it again changes nothing.
-    assert_eq!(
-        tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Restore),
-        BackupTickChange::default()
-    );
+    assert!(!tick(
+        &mut list,
+        "SWS Extension 2.14.0.7",
+        BackupChoice::Restore
+    ));
     // And a delete tick leaves the restore ticks alone.
     tick(
         &mut list,
@@ -1599,14 +1818,16 @@ fn headings_and_rows_that_cant_be_ticked_stay_unticked() {
         mine_not,
     ]);
     for choice in [BackupChoice::Restore, BackupChoice::Delete] {
-        let change = apply_backup_checkbox(&mut list.rows, 0, choice, true);
-        assert_eq!(change, BackupTickChange::default());
+        assert!(!apply_backup_checkbox(&mut list.rows, 0, choice, true));
         assert!(!list.rows[0].is_ticked(choice));
     }
     let installed_again = index_of(&list, "SWS Extension 2.14.0.7");
-    let change =
-        apply_backup_checkbox(&mut list.rows, installed_again, BackupChoice::Restore, true);
-    assert_eq!(change, BackupTickChange::default());
+    assert!(!apply_backup_checkbox(
+        &mut list.rows,
+        installed_again,
+        BackupChoice::Restore,
+        true
+    ));
     assert!(!list.rows[installed_again].restore_ticked);
     assert!(
         list.rows[installed_again]
@@ -1614,20 +1835,27 @@ fn headings_and_rows_that_cant_be_ticked_stay_unticked() {
             .contains(": Won't touch.")
     );
     let not_yours = index_of(&list, "ReaKontrol 1.0");
-    assert_eq!(
-        apply_backup_checkbox(&mut list.rows, not_yours, BackupChoice::Delete, true),
-        BackupTickChange::default()
-    );
+    assert!(!apply_backup_checkbox(
+        &mut list.rows,
+        not_yours,
+        BackupChoice::Delete,
+        true
+    ));
     assert!(!list.rows[not_yours].delete_ticked);
     // An index past the end changes nothing.
-    assert_eq!(
-        apply_backup_checkbox(&mut list.rows, 99, BackupChoice::Delete, true),
-        BackupTickChange::default()
-    );
+    assert!(!apply_backup_checkbox(
+        &mut list.rows,
+        99,
+        BackupChoice::Delete,
+        true
+    ));
 }
 
+/// An unfinished deletion whose id also names a set: a delete of it takes
+/// that set whole too, so it ticks alone, says so, and Review won't start
+/// until the set's rows are ticked too.
 #[test]
-fn an_unfinished_deletion_goes_with_the_set_of_the_same_id() {
+fn an_unfinished_deletion_of_a_listed_sets_id_goes_only_with_that_set() {
     let deleting = BackupEntry {
         restore_scope: None,
         ..backup(
@@ -1639,20 +1867,50 @@ fn an_unfinished_deletion_goes_with_the_set_of_the_same_id() {
         )
     };
     let mut list = backup_list(vec![sws(), deleting]);
-    let change = tick(&mut list, "Unfinished deletion", BackupChoice::Delete);
-    assert_eq!(change.tied, vec![index_of(&list, "SWS Extension 2.14.0.7")]);
-    // One delete of the id takes both; it carries the fingerprint of the
-    // set in RABBIT/backups, as a delete checks that one.
+    let row = index_of(&list, "Unfinished deletion");
+    assert!(
+        list.rows[row].details.ends_with(
+            "RABBIT can only delete it together with another backup: SWS Extension 2.14.0.7."
+        ),
+        "{}",
+        list.rows[row].details
+    );
+    assert!(tick(&mut list, "Unfinished deletion", BackupChoice::Delete));
+    assert!(!list.rows[index_of(&list, "SWS Extension 2.14.0.7")].delete_ticked);
+
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(!review.can_delete);
+    assert_eq!(
+        review.lines.last().map(String::as_str),
+        Some(
+            "Can't delete yet: RABBIT can only delete Unfinished deletion (Made on November 9, \
+             2026, 2:05 PM) together with another backup: SWS Extension 2.14.0.7 (Uninstalled \
+             November 9, 2026, 2:05 PM). To delete it, tick the other one too."
+        )
+    );
+
+    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Delete);
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(review.can_delete, "{:#?}", review.lines);
+    // One item each: SWS out of its set, and the id whole. Both carry the
+    // fingerprint of the set in RABBIT/backups, as a delete checks that one.
     let items = backup_delete_items(&list);
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].set_id, "uninstall-unix-1794233100");
-    assert_eq!(items[0].fingerprint, Some(fingerprint(1)));
+    assert_eq!(
+        items,
+        [
+            DeleteItem::package("uninstall-unix-1794233100", "sws")
+                .with_fingerprint(fingerprint(1)),
+            DeleteItem::listed("uninstall-unix-1794233100", fingerprint(1)),
+        ]
+    );
     // Both folders are freed.
     assert_eq!(backup_delete_bytes(&list), 2 * MB);
 }
 
+/// Another account's unfinished deletion of a set's id doesn't hold back
+/// the set's rows: each row's Delete goes by its own status alone.
 #[test]
-fn a_row_that_goes_with_another_accounts_backup_cant_be_deleted() {
+fn a_row_beside_another_accounts_backup_ticks_by_its_own_status() {
     let deleting = BackupEntry {
         restore_scope: None,
         ..with_status(
@@ -1668,20 +1926,16 @@ fn a_row_that_goes_with_another_accounts_backup_cant_be_deleted() {
     };
     let mut list = backup_list(vec![sws(), deleting]);
     let sws = index_of(&list, "SWS Extension 2.14.0.7");
-    assert!(!list.rows[sws].can_tick(BackupChoice::Delete));
-    assert!(list.rows[sws].can_tick(BackupChoice::Restore));
+    assert!(list.rows[sws].can_tick(BackupChoice::Delete));
+    assert!(!list.rows[index_of(&list, "Unfinished deletion")].can_tick(BackupChoice::Delete));
     set_backup_choice(&mut list, BackupChoice::Delete);
     assert!(
-        list.rows[sws]
-            .summary
-            .ends_with("(not available: goes with a backup RABBIT can't delete)"),
+        !list.rows[sws].summary.contains("not available"),
         "{}",
         list.rows[sws].summary
     );
     assert!(
-        list.rows[sws]
-            .details
-            .contains("One of them can't be deleted, so RABBIT can't delete this one either."),
+        !list.rows[sws].details.contains("Unfinished"),
         "{}",
         list.rows[sws].details
     );
@@ -1732,11 +1986,116 @@ fn the_runs_get_what_is_ticked_with_the_listed_fingerprints() {
         BackupChoice::Delete,
     );
     let items = backup_delete_items(&list);
-    // SWS and FFmpeg share a set; the records stand for 23.
+    // SWS goes out of the set it shares with FFmpeg; the records stand for
+    // 23 sets, which go whole.
     assert_eq!(items.len(), 1 + 23);
-    assert_eq!(items[0].set_id, "uninstall-unix-1794233100");
-    assert!(items.iter().all(|item| item.fingerprint.is_some()));
-    assert_eq!(backup_delete_bytes(&list), 24 * MB);
+    assert_eq!(
+        items[0],
+        DeleteItem::package("uninstall-unix-1794233100", "sws").with_fingerprint(fingerprint(1))
+    );
+    assert!(
+        items[1..]
+            .iter()
+            .all(|item| item.part == DeletePart::WholeSet && item.fingerprint.is_some())
+    );
+    // SWS's own 4 MB, and the 23 sets of 1 MB each.
+    assert_eq!(backup_delete_bytes(&list), 4 * MB + 23 * MB);
+}
+
+/// What a delete run is given for each kind of row: a package or the key
+/// map out of its set, and the set's own row, an unfinished deletion and
+/// the records whole, each with the fingerprint the list read.
+#[test]
+fn each_kind_of_row_gives_the_delete_its_own_items() {
+    let deleting = BackupEntry {
+        restore_scope: None,
+        ..backup(
+            BackupItem::Deleting {
+                set_id: "uninstall-unix-1790938800".to_string(),
+            },
+            BackupGroup::Other,
+            Some(OCT_2_1100),
+        )
+    };
+    let no_manifest = backup(
+        BackupItem::Set {
+            set_id: "unix-1790000000".to_string(),
+        },
+        BackupGroup::Other,
+        Some(OCT_2_1100),
+    );
+    let entries = vec![sws(), ffmpeg(), keymap(), no_manifest, deleting, records()];
+    let source = source(entries.clone());
+    let fingerprint_of = |id: &str| {
+        source
+            .sets
+            .iter()
+            .find(|set| set.id == id)
+            .and_then(|set| set.fingerprint.clone())
+            .unwrap()
+    };
+    let items_of = |name: &str| {
+        let mut list = backup_list(entries.clone());
+        tick(&mut list, name, BackupChoice::Delete);
+        backup_delete_items(&list)
+    };
+    let uninstall = "uninstall-unix-1794233100";
+    assert_eq!(
+        items_of("SWS Extension 2.14.0.7"),
+        [DeleteItem::package(uninstall, "sws").with_fingerprint(fingerprint_of(uninstall))]
+    );
+    let keymap_set = "unattended-unix-1793558400-000000001";
+    assert_eq!(
+        items_of("Your key map"),
+        [DeleteItem::keymap(keymap_set).with_fingerprint(fingerprint_of(keymap_set))]
+    );
+    assert_eq!(
+        items_of("Backup with no record of what it holds"),
+        [DeleteItem::listed(
+            "unix-1790000000",
+            fingerprint_of("unix-1790000000")
+        )]
+    );
+    // An unfinished deletion with no set of its id carries its own
+    // fingerprint.
+    assert_eq!(
+        items_of("Unfinished deletion"),
+        [DeleteItem::listed(
+            "uninstall-unix-1790938800",
+            fingerprint_of("uninstall-unix-1790938800")
+        )]
+    );
+    let records = items_of("Old copies of RABBIT's records");
+    assert_eq!(records.len(), 23);
+    for item in &records {
+        assert_eq!(
+            item,
+            &DeleteItem::listed(&item.set_id, fingerprint_of(&item.set_id))
+        );
+    }
+    // Two rows of one set give one item each, in list order.
+    let mut list = backup_list(entries.clone());
+    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Delete);
+    tick(
+        &mut list,
+        "FFmpeg for Improved Video Support 7.1",
+        BackupChoice::Delete,
+    );
+    let parts: Vec<DeletePart> = backup_delete_items(&list)
+        .into_iter()
+        .map(|item| item.part)
+        .collect();
+    assert_eq!(
+        parts,
+        [
+            DeletePart::Package {
+                package_id: "sws".to_string()
+            },
+            DeletePart::Package {
+                package_id: "ffmpeg".to_string()
+            },
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1991,15 +2350,29 @@ fn the_rows_come_from_a_real_uninstall_set() {
         list.rows[sws].summary
     );
 
-    // The two go together for Delete, as one set holds both.
-    let change = tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Delete);
-    assert_eq!(change.tied.len(), 1);
+    // SWS ticks alone for Delete, though one set holds both, and goes out
+    // of it alone.
+    assert!(tick(
+        &mut list,
+        "SWS Extension 2.14.0.7",
+        BackupChoice::Delete
+    ));
+    assert_eq!(list.ticked_rows(BackupChoice::Delete).count(), 1);
     let items = backup_delete_items(&list);
     assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0].part,
+        DeletePart::Package {
+            package_id: "sws".to_string()
+        }
+    );
     // The set has a fingerprint, so the run gets one to compare.
     assert!(overview.sets[0].fingerprint.is_some());
     assert_eq!(items[0].fingerprint, overview.sets[0].fingerprint);
-    assert_eq!(backup_delete_bytes(&list), overview.sets[0].size);
+    // What its row counts, not the whole set.
+    let sws_size = list.rows[sws].entry.as_ref().unwrap().size;
+    assert_eq!(backup_delete_bytes(&list), sws_size);
+    assert!(sws_size < overview.sets[0].size);
 
     tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Restore);
     let items = backup_restore_items(&list);
@@ -2748,89 +3121,104 @@ fn delete_review_says_what_goes_and_what_it_frees() {
 
     let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
     assert_eq!(review.heading, "Ready to delete backups");
+    // FFmpeg goes alone, without SWS from the same uninstall, and nothing
+    // says the two belong together.
     assert_eq!(
         review.lines,
         [
             "Target: C:/REAPER",
             "",
-            "These backups go for good and free 27 MB:",
-            "SWS Extension 2.14.0.7, uninstalled November 9, 2026, 2:05 PM: the only copy.",
+            "These backups go for good and free about 276 MB:",
             "FFmpeg for Improved Video Support 7.1, uninstalled November 9, 2026, 2:05 PM: the \
              only copy.",
             "ReaPack 1.2.4: you can't go back to it after this.",
             "Your key map from November 1, 2026, 6:40 PM: the only copy.",
             "Backup with no record of what it holds: it is gone for good.",
             "Old copies of RABBIT's records: nothing that is installed changes.",
-            "SWS Extension 2.14.0.7 and FFmpeg for Improved Video Support 7.1, uninstalled \
-             November 9, 2026, 2:05 PM, go together: one backup holds both.",
             "",
             "Notes",
             "One backup ticked to restore isn't part of this run.",
         ]
     );
     assert!(review.can_delete);
-    assert_eq!(review.bytes_freed, 27 * MB);
+    // FFmpeg's 250 MB, ReaPack's 2 MB and the key map's 38 KB as their rows
+    // say them; the set without a record and the records' 23 sets as the
+    // walk measured them, 1 MB each.
+    assert_eq!(review.bytes_freed, 250 * MB + 2 * MB + 38 * KB + 24 * MB);
     assert_eq!(review.items.len(), 4 + 23);
 }
 
 #[test]
-fn delete_review_says_what_made_backups_that_go_together_and_when() {
-    let together = |entries: Vec<BackupEntry>| {
-        let mut list = backup_list(entries);
-        let first = list.rows.iter().position(|row| !row.is_heading()).unwrap();
-        apply_backup_checkbox(&mut list.rows, first, BackupChoice::Delete, true);
-        let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
-        review
-            .lines
-            .iter()
-            .find(|line| line.contains("go together"))
-            .cloned()
-            .unwrap_or_else(|| panic!("{:#?}", review.lines))
-    };
-    // An update that replaced two packages.
-    let earlier_sws = BackupEntry {
-        item: package("unix-1793697120", "sws"),
-        version: Some(version("2.13")),
-        ..reapack()
-    };
+fn delete_review_lists_each_ticked_backup_of_a_set_on_its_own() {
+    let mut list = backup_list(vec![sws(), ffmpeg(), reapack()]);
+    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Delete);
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
     assert_eq!(
-        together(vec![reapack(), earlier_sws]),
-        "ReaPack 1.2.4 and SWS Extension 2.13, replaced November 3, 2026, 9:12 AM, go together: \
-         one backup holds both."
+        review.lines,
+        [
+            "Target: C:/REAPER",
+            "",
+            "This backup goes for good and frees about 4 MB:",
+            "SWS Extension 2.14.0.7, uninstalled November 9, 2026, 2:05 PM: the only copy.",
+        ]
     );
-    // A restore's backup, of a version and a key map.
-    let restored = BackupEntry {
-        item: package("restore-unix-1790938800-before-restore", "reapack"),
-        set_kind: BackupSetKind::BeforeRestore,
-        created_unix: Some(OCT_2_1100),
-        ..reapack()
-    };
-    let restored_keymap = BackupEntry {
-        item: BackupItem::Keymap {
-            set_id: "restore-unix-1790938800-before-restore".to_string(),
-        },
-        set_kind: BackupSetKind::BeforeRestore,
-        keymap_origin: None,
-        created_unix: Some(OCT_2_1100),
-        ..keymap()
-    };
+    // Both packages of the uninstall: still one line each, and no line on
+    // what they share.
+    tick(
+        &mut list,
+        "FFmpeg for Improved Video Support 7.1",
+        BackupChoice::Delete,
+    );
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(review.can_delete);
     assert_eq!(
-        together(vec![restored, restored_keymap]),
-        "ReaPack 1.2.4 and Key map, from October 2, 2026, 11:00 AM, go together: one backup \
-         holds both."
+        review.lines[2..],
+        [
+            "These backups go for good and free about 254 MB:",
+            "SWS Extension 2.14.0.7, uninstalled November 9, 2026, 2:05 PM: the only copy.",
+            "FFmpeg for Improved Video Support 7.1, uninstalled November 9, 2026, 2:05 PM: the \
+             only copy.",
+        ]
     );
-    // Without a date, and three at once.
-    let undated = |package_id: &str| BackupEntry {
-        item: package("uninstall-unix-1", package_id),
-        version: None,
-        created_unix: None,
-        ..sws()
-    };
+    assert!(review.lines.iter().all(|line| !line.contains("together")));
+}
+
+/// A set's own row goes only with the whole set, its key map too: Review
+/// won't start until the key map is ticked as well. The key map alone goes
+/// out of the set and keeps the set's own row.
+#[test]
+fn delete_review_blocks_a_backup_that_takes_unticked_rows_with_it() {
+    let mut list = backup_list(keymap_and_its_sets_files());
+    tick(&mut list, "Files a restore replaced", BackupChoice::Delete);
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(!review.can_delete);
     assert_eq!(
-        together(vec![undated("sws"), undated("ffmpeg"), undated("reapack")]),
-        "SWS Extension, FFmpeg for Improved Video Support and ReaPack go together: one backup \
-         holds all 3."
+        review.lines.last().map(String::as_str),
+        Some(
+            "Can't delete yet: RABBIT can only delete Files a restore replaced (Made on October \
+             2, 2026, 11:00 AM) together with another backup: the key map from October 2, 2026, \
+             11:00 AM. To delete it, tick the other one too."
+        )
     );
+
+    tick(&mut list, "Key map", BackupChoice::Delete);
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(review.can_delete, "{:#?}", review.lines);
+    // The set's own row counts the whole set, so the key map in it isn't
+    // counted again.
+    assert_eq!(review.bytes_freed, MB);
+
+    // The key map alone: nothing blocks, and only it goes.
+    let mut list = backup_list(keymap_and_its_sets_files());
+    tick(&mut list, "Key map", BackupChoice::Delete);
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(review.can_delete, "{:#?}", review.lines);
+    assert_eq!(
+        review.items,
+        [DeleteItem::keymap("restore-unix-1790938800-before-restore")
+            .with_fingerprint(fingerprint(1))]
+    );
+    assert_eq!(review.bytes_freed, 38 * KB);
 }
 
 #[test]
@@ -2860,19 +3248,22 @@ fn the_delete_question_counts_backups_space_and_only_copies() {
     tick(&mut list, "ReaPack 1.2.4", BackupChoice::Delete);
     let (title, body) = delete_backups_question(&en(), &list);
     assert_eq!(title, "Delete backups for good?");
+    // SWS goes out of its set alone, without FFmpeg: SWS's 4 MB and
+    // ReaPack's 2 MB.
     assert_eq!(
         body,
-        "RABBIT deletes 3 backups and frees 2 MB. 2 of them are the only copy of what they \
-         hold. A deleted backup can't be brought back. Delete now?"
+        "RABBIT deletes 2 backups and frees about 6 MB. One of them is the only copy of what \
+         it holds. A deleted backup can't be brought back. Delete now?"
     );
 
+    // A key map, as its row counts it.
     let mut one = backup_list(vec![keymap()]);
     apply_backup_checkbox(&mut one.rows, 1, BackupChoice::Delete, true);
     let (_, body) = delete_backups_question(&en(), &one);
     assert_eq!(
         body,
-        "RABBIT deletes one backup and frees 1 MB. It is the only copy of what it holds. A \
-         deleted backup can't be brought back. Delete now?"
+        "RABBIT deletes one backup and frees about 38 KB. It is the only copy of what it \
+         holds. A deleted backup can't be brought back. Delete now?"
     );
 
     let mut none_only = backup_list(vec![reapack()]);
@@ -2880,9 +3271,32 @@ fn the_delete_question_counts_backups_space_and_only_copies() {
     let (_, body) = delete_backups_question(&en(), &none_only);
     assert_eq!(
         body,
-        "RABBIT deletes one backup and frees 1 MB. A deleted backup can't be brought back. \
+        "RABBIT deletes one backup and frees about 2 MB. A deleted backup can't be brought \
+         back. Delete now?"
+    );
+
+    // Whole sets only: the walk measured them, so the size is exact.
+    let mut whole = backup_list(vec![sws(), records()]);
+    tick(
+        &mut whole,
+        "Old copies of RABBIT's records",
+        BackupChoice::Delete,
+    );
+    assert!(!backup_delete_size_is_estimate(&whole));
+    let (_, body) = delete_backups_question(&en(), &whole);
+    assert_eq!(
+        body,
+        "RABBIT deletes one backup and frees 23 MB. A deleted backup can't be brought back. \
          Delete now?"
     );
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &whole, &[]);
+    assert_eq!(
+        review.lines[2],
+        "This backup goes for good and frees 23 MB:"
+    );
+    // A package beside them is about.
+    tick(&mut whole, "SWS Extension 2.14.0.7", BackupChoice::Delete);
+    assert!(backup_delete_size_is_estimate(&whole));
 }
 
 // ---------------------------------------------------------------------------
@@ -3156,10 +3570,7 @@ fn every_row_review_and_question_reads_in_every_locale() {
         }
         set_backup_choice(&mut list, BackupChoice::Delete);
         for index in 0..list.rows.len() {
-            let change = apply_backup_checkbox(&mut list.rows, index, BackupChoice::Delete, true);
-            said.extend(backups_also_ticked_announcement(
-                &localizer, &list.rows, index, &change,
-            ));
+            apply_backup_checkbox(&mut list.rows, index, BackupChoice::Delete, true);
         }
         for row in &list.rows {
             said.push(row.summary.clone());
@@ -3175,14 +3586,7 @@ fn every_row_review_and_question_reads_in_every_locale() {
         said.push(body);
 
         let first_deleted = list.rows.iter().position(|row| row.delete_ticked).unwrap();
-        let change =
-            apply_backup_checkbox(&mut list.rows, first_deleted, BackupChoice::Delete, false);
-        said.extend(backups_also_ticked_announcement(
-            &localizer,
-            &list.rows,
-            first_deleted,
-            &change,
-        ));
+        apply_backup_checkbox(&mut list.rows, first_deleted, BackupChoice::Delete, false);
         set_backup_choice(&mut list, BackupChoice::Restore);
         for row in &list.rows {
             said.push(row.summary.clone());
@@ -3252,6 +3656,47 @@ fn every_row_review_and_question_reads_in_every_locale() {
                 .unwrap();
         said.extend([label, details]);
         said.push(localizer.text("wizard-packages-tab-backups").value);
+        // A set's own row ticked without the key map it holds, or without
+        // a key map and an earlier version, and an unfinished deletion
+        // beside one set RABBIT can't delete and beside two: its details and
+        // Review's blocker name them, in each form.
+        for (entries, ticked) in [
+            (keymap_and_its_sets_files(), "set"),
+            (keymap_version_and_their_sets_files(), "set"),
+            (deleting_beside(not_yours(vec![sws()])), "deleting"),
+            (
+                deleting_beside(not_yours(keymap_and_its_sets_files())),
+                "deleting",
+            ),
+        ] {
+            let mut whole = list_in(&localizer, entries);
+            let row = whole
+                .rows
+                .iter()
+                .position(|row| {
+                    row.entry.as_ref().is_some_and(|entry| match entry.item {
+                        BackupItem::Set { .. } => ticked == "set",
+                        BackupItem::Deleting { .. } => ticked == "deleting",
+                        _ => false,
+                    })
+                })
+                .unwrap();
+            apply_backup_checkbox(&mut whole.rows, row, BackupChoice::Delete, true);
+            said.push(whole.rows[row].details.clone());
+            let review = build_backup_delete_review(&localizer, Some(&target(true)), &whole, &[]);
+            assert!(!review.can_delete, "{locale}");
+            said.extend(review.lines.into_iter().filter(|line| !line.is_empty()));
+        }
+        // Whole sets only, whose size is exact.
+        let mut exact = list_in(&localizer, vec![no_manifest_set()]);
+        apply_backup_checkbox(&mut exact.rows, 1, BackupChoice::Delete, true);
+        said.push(delete_backups_question(&localizer, &exact).1);
+        said.extend(
+            build_backup_delete_review(&localizer, Some(&target(true)), &exact, &[])
+                .lines
+                .into_iter()
+                .filter(|line| !line.is_empty()),
+        );
         for single in [1, 2] {
             let mut few = list_in(&localizer, vec![keymap(), sws(), ffmpeg()]);
             for index in 1..=single {
@@ -3283,9 +3728,6 @@ fn every_row_review_and_question_reads_in_every_locale() {
                 "\nRestoring puts them back.\n",
                 "is at this version already. Restoring puts its files back again.",
                 "Restoring puts this copy back and keeps the version you have now as a backup",
-                // The tie announcements.
-                "from the same uninstall is ticked too.",
-                "from the same uninstall is unticked too.",
                 // Restore's Review.
                 "goes back from 1.2.5 to 1.2.4.",
                 "ReaKontrol goes back to 1.2.4. RABBIT keeps the version you have now",
@@ -3310,10 +3752,27 @@ fn every_row_review_and_question_reads_in_every_locale() {
                 ": this finishes a deletion that started earlier.",
                 ": nothing that is installed changes.",
                 "ReaKontrol 2.14.0.7: the only copy.",
-                ", uninstalled November 9, 2026, 2:05 PM, go together",
-                ", replaced November 3, 2026, 9:12 AM, go together",
-                ", from November 3, 2026, 9:12 AM, go together",
-                "ReaKontrol 2.14.0.7 and SWS Extension 2.14.0.7 go together",
+                "These backups go for good and free about",
+                "and frees about",
+                "This backup goes for good and frees 1 MB:",
+                "RABBIT deletes one backup and frees 1 MB.",
+                // A set's own row beside a key map, and beside two rows.
+                "RABBIT can only delete it together with another backup: Key map.",
+                "Can't delete yet: RABBIT can only delete Files a restore replaced",
+                "To delete it, tick the other one too.",
+                "RABBIT can only delete it together with 2 other backups: ReaPack 1.2.4 and Key \
+                 map.",
+                "To delete it, tick the others too.",
+                // An unfinished deletion beside a set RABBIT can't delete.
+                "RABBIT can only delete it together with another backup that RABBIT can't delete: \
+                 SWS Extension 2.14.0.7.",
+                "RABBIT can only delete it together with 2 other backups that RABBIT can't delete: \
+                 Key map and Files a restore replaced.",
+                "that RABBIT can't delete: SWS Extension 2.14.0.7 (Uninstalled November 9, 2026, \
+                 2:05 PM). Untick it.",
+                "together with 2 other backups that RABBIT can't delete: the key map from October \
+                 2, 2026, 11:00 AM and Files a restore replaced (Made on October 2, 2026, 11:00 \
+                 AM). Untick it.",
             ] {
                 assert!(all.contains(reached), "not reached: {reached}\n{all}");
             }

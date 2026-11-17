@@ -50,13 +50,12 @@ from this file and posts it as the GitHub release body.
   backup that can't be restored can't be ticked for Restore and says why,
   such as a package you installed again since. **Delete** removes backups
   for good, to free the room they take; RABBIT asks first, with **No**
-  selected.
-  Backups RABBIT kept together, such as two packages one uninstall removed,
-  are ticked and deleted together. Both go through Review, the progress
-  page and the Done page, like an install or an uninstall: Enter never
-  starts either, a restore asks you to close REAPER first, and closing
-  RABBIT during one asks first, then stops after the backup it is on.
-  RABBIT never deletes a backup by itself.
+  selected. Each backup is ticked and deleted on its own: of two packages
+  one uninstall removed, you can delete one and keep the other. Both go
+  through Review, the progress page and the Done page, like an install or
+  an uninstall: Enter never starts either, a restore asks you to close
+  REAPER first, and closing RABBIT during one asks first, then stops after
+  the backup it is on. RABBIT never deletes a backup by itself.
 - The wizard can now uninstall: the **Packages** page has an **Uninstall**
   tab beside **Install or update**. The page opens on **Install or update**
   with focus on the tabs, so screen readers read "Install or update, tab, 1

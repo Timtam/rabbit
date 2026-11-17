@@ -443,10 +443,15 @@ again)".
 - **Delete:** deletes the ticked backups for good, not to the Recycle Bin or
   the Trash, to free the room they take. Review says what each one loses and
   how much room the delete frees. Enter doesn't start it; press **Delete**,
-  and RABBIT asks once more with **No** selected. A delete takes whole backup
-  sets, so rows from one set, such as two packages one uninstall removed, are
-  ticked together, and the text below the list and Review say so. REAPER may
-  stay open.
+  and RABBIT asks once more with **No** selected. Each row is ticked and
+  deleted on its own: of two packages one uninstall removed, you can delete
+  one and keep the other, which can still be restored. Two kinds of row can
+  only be deleted together with other rows: a row under **Other backups**
+  for files no other row brings back, and an unfinished deletion of a
+  backup that is still listed. The text below the list names the rows each
+  one goes with, and Review asks you to tick them too. When every row kept
+  in one backup goes, RABBIT also finishes an unfinished deletion of that
+  backup, and Show details says so. REAPER may stay open.
 - **Nothing is deleted by itself.** A backup stays until you delete it, here
   or with `rabbit delete-backup`.
 - **Another account's backups (Mac):** a backup another account made, such

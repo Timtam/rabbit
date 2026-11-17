@@ -27,8 +27,8 @@ use wxdragon::widgets::dataview::{
 };
 
 use crate::{
-    WizardBackupList, WizardModel, apply_backup_checkbox, backups_also_ticked_announcement,
-    backups_ticked_announcement, set_backup_choice,
+    WizardBackupList, WizardModel, apply_backup_checkbox, backups_ticked_announcement,
+    set_backup_choice,
 };
 
 use super::{
@@ -96,16 +96,14 @@ impl BackupsTreeData {
     }
 }
 
-/// Tick or untick a row, with every side effect: the row and every row a
-/// Delete tick took with it, in the view, and the details when the selected
-/// row is among them, as the Windows tree's toggle does. `None` when
-/// nothing could change, because the row can't be ticked for the choice;
-/// otherwise what VoiceOver should hear beyond the checkbox, which is the
-/// rows from the same set that were ticked or unticked too, if any were.
-/// Shared by the model's `set_value` (a click, or VO+Space while
-/// interacting with the list) and the Space handler, which wx never routes
-/// through `set_value` on macOS, so the two can't drift apart.
-type BackupsToggle = Rc<dyn Fn(&BackupsTreeData, usize, bool) -> Option<Option<String>>>;
+/// Tick or untick a row, with every side effect: the row in the view, and
+/// the details when it is the selected row, as the Windows tree's toggle
+/// does. A tick is the row's alone, for either choice. `false` when nothing
+/// could change, because the row can't be ticked for the choice. Shared by
+/// the model's `set_value` (a click, or VO+Space while interacting with the
+/// list) and the Space handler, which wx never routes through `set_value`
+/// on macOS, so the two can't drift apart.
+type BackupsToggle = Rc<dyn Fn(&BackupsTreeData, usize, bool) -> bool>;
 
 /// The details text below the list. It is created after the list, because
 /// creation order is tab order, so the toggle reaches it through this cell
@@ -118,47 +116,36 @@ fn new_backups_toggle(
     details: DetailsCell,
 ) -> BackupsToggle {
     Rc::new(
-        move |data: &BackupsTreeData, index: usize, checked: bool| -> Option<Option<String>> {
+        move |data: &BackupsTreeData, index: usize, checked: bool| -> bool {
             // Let the list go before notifying the view, which reads it back.
-            let (changed, note) = {
+            let row_details = {
                 let mut list = data.list.borrow_mut();
                 let choice = list.choice;
-                if !list.rows.get(index)?.can_tick(choice) {
-                    return None;
+                if !list.rows.get(index).is_some_and(|row| row.can_tick(choice)) {
+                    return false;
                 }
-                let change = apply_backup_checkbox(&mut list.rows, index, choice, checked);
-                let mut note = None;
-                with_ui_localizer(|localizer| {
-                    note = backups_also_ticked_announcement(localizer, &list.rows, index, &change);
-                });
-                let changed: Vec<(usize, String)> = std::iter::once(index)
-                    .chain(change.tied)
-                    .filter_map(|row| Some((row, list.rows.get(row)?.details.clone())))
-                    .collect();
-                (changed, note)
+                apply_backup_checkbox(&mut list.rows, index, choice, checked);
+                list.rows[index].details.clone()
             };
+            if index >= data.nodes.len() {
+                return true;
+            }
             let selected = tree
                 .get_selection()
                 .and_then(|item| item.get_id::<BackupNode>());
-            for (row, row_details) in changed {
-                if row >= data.nodes.len() {
-                    continue;
-                }
-                let row_ptr = data.node_ptr(row);
-                if let Some(model) = model_cell.borrow().as_ref() {
-                    // The toggle cell refreshes by itself after `set_value`,
-                    // the label, which starts with the action, doesn't, and
-                    // neither do the rows a Delete tick took with it.
-                    model.item_value_changed(row_ptr, BACKUPS_COL_LABEL);
-                    model.item_value_changed(row_ptr, BACKUPS_COL_TOGGLE);
-                }
-                if selected.is_some_and(|selected| std::ptr::eq(selected, row_ptr))
-                    && let Some(details) = details.get()
-                {
-                    set_text_if_changed(&details, &row_details);
-                }
+            let row_ptr = data.node_ptr(index);
+            if let Some(model) = model_cell.borrow().as_ref() {
+                // The toggle cell refreshes by itself after `set_value`; the
+                // label, which starts with the action, doesn't.
+                model.item_value_changed(row_ptr, BACKUPS_COL_LABEL);
+                model.item_value_changed(row_ptr, BACKUPS_COL_TOGGLE);
             }
-            Some(note)
+            if selected.is_some_and(|selected| std::ptr::eq(selected, row_ptr))
+                && let Some(details) = details.get()
+            {
+                set_text_if_changed(&details, &row_details);
+            }
+            true
         },
     )
 }
@@ -220,16 +207,9 @@ fn build_backups_tree_model(
                 if data.is_heading(index) {
                     return false;
                 }
-                let Some(note) = toggle(data, index, var.get_bool().unwrap_or(false)) else {
-                    return false;
-                };
                 // A click, or VO+Space: VoiceOver reads the checkbox itself,
-                // so only the rows from the same set are left to say, after
-                // it.
-                if let Some(note) = note {
-                    announce(&note, AnnouncePriority::Polite);
-                }
-                true
+                // and no other row changed, so there is nothing more to say.
+                toggle(data, index, var.get_bool().unwrap_or(false))
             },
         ),
         // is_enabled: a row that can't be ticked for the choice is drawn,
@@ -290,10 +270,10 @@ pub(crate) fn reset_backups_list_caret_on_focus() {}
 
 /// Non-Windows: build the Backups tab: the label naming the tab and the
 /// total, the list, a read-only details text, and the choice below them,
-/// Restore or Delete. Ticking a row changes its text, the rows a Delete
-/// tick takes with it, and the details; switching the choice relabels every
-/// row without moving focus and says how many are ticked for it. Review
-/// reads the ticks when Next is pressed.
+/// Restore or Delete. Ticking a row changes its text and the details, and
+/// no other row; switching the choice relabels every row without moving
+/// focus and says how many are ticked for it. Review reads the ticks when
+/// Next is pressed.
 pub(crate) fn build_backups_tab(
     page: &Panel,
     model: &WizardModel,
@@ -443,23 +423,18 @@ pub(crate) fn build_backups_tab(
                     .is_some_and(|row| row.is_ticked(list.choice))
             };
             let checked = is_ticked(data);
-            let Some(note) = toggle(data, index, !checked) else {
+            if !toggle(data, index, !checked) {
                 return;
-            };
+            }
             // The row VoiceOver is on changed behind it, so it says nothing
-            // on its own: say the state the row ended up in, then the rows
-            // from the same set that went with it. One announcement, not
-            // two: a second would cut the first off.
+            // on its own: say the state the row ended up in, and only that,
+            // as no other row changed with it.
             let state = if is_ticked(data) {
                 &model_text.packages_row_checked
             } else {
                 &model_text.packages_row_unchecked
             };
-            let message = std::iter::once(state.as_str())
-                .chain(note.as_deref())
-                .collect::<Vec<_>>()
-                .join(". ");
-            announce(&message, AnnouncePriority::Interrupt);
+            announce(state, AnnouncePriority::Interrupt);
         });
     }
 

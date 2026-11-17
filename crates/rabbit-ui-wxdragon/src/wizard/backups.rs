@@ -6,9 +6,12 @@
 //!
 //! A backup set is one folder in `RABBIT/backups`. A backup, here, is one
 //! thing that can come back: one package from a set, or one key map. One set
-//! can hold several backups, so it can give several rows. Until a later
-//! version, a delete takes whole sets, so rows from one set tick together
-//! for Delete; ticks for Restore never do.
+//! can hold several backups, so it can give several rows. A tick, for either
+//! choice, is the row's alone. A delete takes each ticked row as the core
+//! maps it (`DeleteItem::for_backup`): a package or the key map goes out of
+//! its set, which stays with its other backups, and a set's own row, an
+//! unfinished deletion and the old copies of RABBIT's records go whole. The
+//! core deletes a set whole when the ticked rows name every backup it lists.
 //!
 //! The rows come from `rabbit-core`'s overview of the backups, the one
 //! `rabbit backups` prints, and carry its verdicts: a row can be ticked for
@@ -186,7 +189,7 @@ pub struct BackupRow {
     /// overview found nothing against can, so the run agrees.
     pub can_restore: bool,
     /// The row can be ticked while Delete is chosen: every backup but
-    /// another account's, what is no backup, and what goes with either.
+    /// another account's and what is no backup.
     pub can_delete: bool,
     /// Ticked to restore. Kept while Delete is chosen.
     pub restore_ticked: bool,
@@ -204,9 +207,6 @@ pub struct BackupRow {
     /// When the backup was made, as the user's language writes a date.
     /// `None` without a date, and for a heading.
     pub(crate) date: Option<String>,
-    /// The sets a delete of this backup takes, by id: its own, or the
-    /// records' several.
-    pub(crate) set_ids: Vec<String>,
     /// The files a restore of it writes.
     pub(crate) targets: Vec<PathBuf>,
     /// What a restore run is given for it, when it can be restored.
@@ -234,11 +234,6 @@ impl BackupRow {
             BackupChoice::Restore => self.restore_ticked,
             BackupChoice::Delete => self.delete_ticked,
         }
-    }
-
-    /// The sets a delete of this backup takes, by id.
-    pub fn set_ids(&self) -> &[String] {
-        &self.set_ids
     }
 
     /// The files a restore of this backup writes.
@@ -485,7 +480,7 @@ pub fn backup_list_from_source(
         .into_iter()
         .map(|entry| RowDraft::new(localizer, source, entry, local_offset))
         .collect();
-    tie_drafts(localizer, &mut drafts);
+    name_backups_deleted_with(localizer, &mut drafts);
 
     let mut rows = Vec::new();
     for draft in drafts {
@@ -503,61 +498,25 @@ pub fn backup_list_from_source(
     }
 }
 
-/// What changed when a row was ticked or unticked, for the two list
-/// implementations to refresh.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct BackupTickChange {
-    /// The row asked for changed.
-    pub changed: bool,
-    /// The other rows whose tick changed with it, by index, in list order:
-    /// rows from the same set, which a delete takes together.
-    pub tied: Vec<usize>,
-}
-
-/// Tick or untick the row at `index` for `choice`. A heading, or a row that
-/// can't be ticked for `choice`, stays unticked. For Delete, every row from
-/// the same set ticks and unticks with it, since a delete takes whole sets;
-/// ticks for Restore are never tied. Every row ends up labelled for
-/// `choice` as it is ticked, so the list can show it as it is.
+/// Tick or untick the row at `index` for `choice`, and only that row: for
+/// Delete as for Restore, each row goes alone. A heading, or a row that
+/// can't be ticked for `choice`, stays unticked. The row ends up labelled
+/// for `choice` as it is ticked, so the list can show it as it is. `true`
+/// when its tick changed.
 pub fn apply_backup_checkbox(
     rows: &mut [BackupRow],
     index: usize,
     choice: BackupChoice,
     checked: bool,
-) -> BackupTickChange {
-    let Some(row) = rows.get(index) else {
-        return BackupTickChange::default();
+) -> bool {
+    let Some(row) = rows.get_mut(index) else {
+        return false;
     };
-    if !row.can_tick(choice) {
-        rows[index].set_ticked(choice, false);
-        rows[index].relabel(choice);
-        return BackupTickChange::default();
-    }
-    let tied = match choice {
-        BackupChoice::Restore => Vec::new(),
-        BackupChoice::Delete => {
-            let lists: Vec<&[String]> = rows.iter().map(|row| row.set_ids.as_slice()).collect();
-            tied_indices(&lists, index)
-        }
-    };
-    let mut change = BackupTickChange {
-        changed: rows[index].is_ticked(choice) != checked,
-        tied: Vec::new(),
-    };
-    rows[index].set_ticked(choice, checked);
-    rows[index].relabel(choice);
-    for other in tied {
-        let row = &mut rows[other];
-        if !row.can_tick(choice) {
-            continue;
-        }
-        if row.is_ticked(choice) != checked {
-            change.tied.push(other);
-        }
-        row.set_ticked(choice, checked);
-        row.relabel(choice);
-    }
-    change
+    let checked = checked && row.can_tick(choice);
+    let changed = row.is_ticked(choice) != checked;
+    row.set_ticked(choice, checked);
+    row.relabel(choice);
+    changed
 }
 
 /// Switch the choice below the list. The ticks of both choices stay as
@@ -596,46 +555,6 @@ pub fn backups_ticked_announcement(localizer: &Localizer, list: &WizardBackupLis
     )
 }
 
-/// What VoiceOver adds after "Checked" or "Unchecked" when a Delete tick on
-/// the row at `index` ticked or unticked rows from the same set too, such
-/// as "SWS Extension 2.14.0.7 from the same uninstall is ticked too.".
-/// `None` when no other row changed.
-pub fn backups_also_ticked_announcement(
-    localizer: &Localizer,
-    rows: &[BackupRow],
-    index: usize,
-    change: &BackupTickChange,
-) -> Option<String> {
-    if change.tied.is_empty() {
-        return None;
-    }
-    let names: Vec<String> = change
-        .tied
-        .iter()
-        .filter_map(|&other| rows.get(other))
-        .map(|row| row.name.clone())
-        .collect();
-    let ticked = rows.get(index).is_some_and(|row| row.delete_ticked);
-    let origin = rows
-        .get(index)
-        .and_then(|row| row.entry.as_ref())
-        .map_or("other", |entry| origin_of(entry.set_kind));
-    let backups = and_list(localizer, &names);
-    Some(say(
-        localizer,
-        if ticked {
-            "wizard-backups-also-ticked-macos"
-        } else {
-            "wizard-backups-also-unticked-macos"
-        },
-        &[
-            ("backups", (&backups).into()),
-            ("count", names.len().into()),
-            ("origin", origin.into()),
-        ],
-    ))
-}
-
 /// What a restore run is given: each row ticked for Restore, in list order,
 /// as the backup and part of its set it restores, with the set's
 /// fingerprint from the overview, so a set that changed since is refused.
@@ -645,40 +564,175 @@ pub fn backup_restore_items(list: &WizardBackupList) -> Vec<RestoreItem> {
         .collect()
 }
 
-/// What a delete run is given: each set the rows ticked for Delete take,
-/// once, in list order, with its fingerprint from the overview. An id that
-/// names a set in `RABBIT/backups` carries that set's fingerprint, also when
-/// only its unfinished deletion was ticked, since a delete takes both.
+/// What a delete run is given: the items of each row ticked for Delete, in
+/// list order (see [`row_delete_items`]). Several rows of one set go in one
+/// run; the core deletes the set whole when they name every backup it
+/// lists, and otherwise takes only their packages and key map out of it.
 pub fn backup_delete_items(list: &WizardBackupList) -> Vec<DeleteItem> {
-    let mut seen = BTreeSet::new();
-    let mut items = Vec::new();
-    for row in list.ticked_rows(BackupChoice::Delete) {
-        for set_id in &row.set_ids {
-            if seen.insert(set_id.clone()) {
-                items.push(DeleteItem {
-                    set_id: set_id.clone(),
-                    part: DeletePart::WholeSet,
-                    fingerprint: set_fingerprint(&list.sets, set_id),
-                });
-            }
-        }
-    }
-    items
+    list.ticked_rows(BackupChoice::Delete)
+        .flat_map(|row| row_delete_items(row, &list.sets))
+        .collect()
 }
 
-/// The bytes a delete of the rows ticked for Delete frees: every folder of
-/// each set they take, unfinished deletions included, as the overview's
-/// walk measured them.
+/// What a delete run is given for `row`, as the core maps a backup to its
+/// items (`DeleteItem::for_backup`): a package or the key map out of its
+/// set, which stays with its other backups, or for a set's own backup, an
+/// unfinished deletion and the old copies of RABBIT's records, their sets
+/// whole. Each item carries its set's fingerprint from the overview, so a
+/// set that changed since is refused: that of the set in `RABBIT/backups`
+/// when the id names one, also for an unfinished deletion of the same id,
+/// as the core compares that one. Nothing for a heading.
+pub(super) fn row_delete_items(row: &BackupRow, sets: &[BackupSetFacts]) -> Vec<DeleteItem> {
+    let Some(entry) = &row.entry else {
+        return Vec::new();
+    };
+    DeleteItem::for_backup(&entry.item)
+        .into_iter()
+        .map(|item| match set_fingerprint(sets, &item.set_id) {
+            Some(fingerprint) => item.with_fingerprint(fingerprint),
+            None => item,
+        })
+        .collect()
+}
+
+/// What a delete of the rows ticked for Delete frees, for Review and the
+/// question: every folder of each set a ticked row takes whole, unfinished
+/// deletions included, as the overview's walk measured them, and the size
+/// of each other ticked row, as the row says it. That figure is exact only
+/// for sets that go whole (see [`backup_delete_size_is_estimate`]). Done
+/// says what the run freed.
 pub fn backup_delete_bytes(list: &WizardBackupList) -> u64 {
-    let ids: BTreeSet<&str> = list
+    delete_size(list).0
+}
+
+/// Whether [`backup_delete_bytes`] is only about what the delete frees: a
+/// ticked package or key map goes out of its set, and its row's size is
+/// what the set's record says its files take. Copies already missing, or
+/// shared with a package that stays, free less; when the ticked rows name
+/// every backup of a set, the core deletes the set whole, which frees a
+/// little more, such as that record. Review and the question then say
+/// "about", unless the size reads "under 1 KB".
+pub fn backup_delete_size_is_estimate(list: &WizardBackupList) -> bool {
+    delete_size(list).1
+}
+
+/// [`backup_delete_bytes`] and [`backup_delete_size_is_estimate`].
+fn delete_size(list: &WizardBackupList) -> (u64, bool) {
+    let ticked: Vec<(&BackupRow, Vec<DeleteItem>)> = list
         .ticked_rows(BackupChoice::Delete)
-        .flat_map(|row| row.set_ids.iter().map(String::as_str))
+        .map(|row| (row, row_delete_items(row, &list.sets)))
         .collect();
-    list.sets
+    let whole: BTreeSet<&str> = ticked
         .iter()
-        .filter(|set| ids.contains(set.id.as_str()))
+        .flat_map(|(_, items)| items)
+        .filter(|item| item.part == DeletePart::WholeSet)
+        .map(|item| item.set_id.as_str())
+        .collect();
+    let sets: u64 = list
+        .sets
+        .iter()
+        .filter(|set| whole.contains(set.id.as_str()))
         .map(|set| set.size)
-        .sum()
+        .sum();
+    let parts: Vec<&BackupRow> = ticked
+        .iter()
+        .filter(|(_, items)| {
+            items
+                .iter()
+                .all(|item| !whole.contains(item.set_id.as_str()))
+        })
+        .map(|(row, _)| *row)
+        .collect();
+    let part_bytes: u64 = parts
+        .iter()
+        .filter_map(|row| row.entry.as_ref().map(|entry| entry.size))
+        .sum();
+    let bytes = sets + part_bytes;
+    // "Under 1 KB" says itself that it isn't exact.
+    let estimate = !parts.is_empty() && BackupSize::of(bytes) != BackupSize::UnderOneKb;
+    (bytes, estimate)
+}
+
+/// Whether deleting the backup `item` deletes `other` too: a set's own
+/// backup and an unfinished deletion take their set whole (see
+/// [`row_delete_items`]), and so every backup listed in it. An unfinished
+/// deletion of the same id goes with the set too, but isn't counted here:
+/// finishing it loses nothing a restore could use, and Show details says
+/// when a run finished one (see `wizard_backup_delete_outcome`).
+fn deletes_too(item: &BackupItem, other: &BackupItem) -> bool {
+    item != other
+        && !matches!(
+            other,
+            BackupItem::Deleting { .. } | BackupItem::Records { .. }
+        )
+        && DeleteItem::for_backup(item).iter().any(|whole| {
+            whole.part == DeletePart::WholeSet && other.set_id() == Some(whole.set_id.as_str())
+        })
+}
+
+/// The other rows a delete of the row at `index` takes too, in list order
+/// (see [`deletes_too`]). None for a package or a key map, which goes alone.
+fn rows_deleted_with(rows: &[BackupRow], index: usize) -> Vec<usize> {
+    let Some(item) = rows.get(index).and_then(|row| row.entry.as_ref()) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .enumerate()
+        .filter(|(_, other)| {
+            other
+                .entry
+                .as_ref()
+                .is_some_and(|other| deletes_too(&item.item, &other.item))
+        })
+        .map(|(other, _)| other)
+        .collect()
+}
+
+/// A ticked row whose delete would take rows that aren't ticked (see
+/// [`rows_deleted_with`]). Review names them and keeps Delete disabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeleteBlocker {
+    /// Where the ticked row is in the list.
+    pub(crate) row: usize,
+    /// The rows it would take that can't be ticked for Delete, such as
+    /// another account's backup: RABBIT can't delete the row then, and
+    /// unticking it is the only way on.
+    pub(crate) undeletable: Vec<usize>,
+    /// The rows it would take that can be ticked and aren't.
+    pub(crate) unticked: Vec<usize>,
+}
+
+/// What stops a delete of the rows ticked for Delete in `list`, besides
+/// nothing being ticked, in list order: each ticked row whose delete would
+/// take rows that aren't ticked, so no backup a restore could use goes
+/// unless it is ticked.
+pub(crate) fn backup_delete_blockers(list: &WizardBackupList) -> Vec<DeleteBlocker> {
+    list.ticked_indices(BackupChoice::Delete)
+        .filter_map(|row| {
+            let (deletable, undeletable): (Vec<usize>, Vec<usize>) =
+                rows_deleted_with(&list.rows, row)
+                    .into_iter()
+                    .partition(|&other| list.rows[other].can_tick(BackupChoice::Delete));
+            let unticked: Vec<usize> = deletable
+                .into_iter()
+                .filter(|&other| !list.rows[other].delete_ticked)
+                .collect();
+            (!undeletable.is_empty() || !unticked.is_empty()).then_some(DeleteBlocker {
+                row,
+                undeletable,
+                unticked,
+            })
+        })
+        .collect()
+}
+
+/// Whether a delete of the rows ticked for Delete in `list` can start: one
+/// is ticked at least, and nothing else stops it (see
+/// [`backup_delete_blockers`]). Review enables Delete just then, and the
+/// button checks it again when pressed.
+pub fn can_delete_backups(list: &WizardBackupList) -> bool {
+    list.ticked_indices(BackupChoice::Delete).next().is_some()
+        && backup_delete_blockers(list).is_empty()
 }
 
 /// How the quick plan before Review runs: a dry run that hashes nothing,
@@ -897,24 +951,29 @@ pub fn build_backup_restore_review(
 pub struct WizardDeleteReviewPreview {
     pub heading: String,
     pub lines: Vec<String>,
-    /// A target and at least one row ticked to delete.
+    /// A target, at least one row ticked to delete, and no blocker.
     pub can_delete: bool,
     /// The run's input, copied out of the list (see
     /// [`backup_delete_items`]).
     pub items: Vec<DeleteItem>,
-    /// What the delete frees (see [`backup_delete_bytes`]).
+    /// About what the delete frees (see [`backup_delete_bytes`]).
     pub bytes_freed: u64,
 }
 
 /// Review's text for deleting what is ticked for Delete in `list`:
 /// 1. the target folder;
-/// 2. "These backups go for good and free 520 MB:", then one line per
-///    ticked backup saying what is lost, and one line for each group of
-///    backups from one set, which go together, with what made the set and
-///    when;
+/// 2. "These backups go for good and free 520 MB:", or "free about" when
+///    that is an estimate (see [`backup_delete_size_is_estimate`]), then
+///    one line per ticked backup saying what is lost;
 /// 3. the notes: `other_tab_notes` (what is ticked on the other tabs), and
 ///    the backups ticked for Restore, which this run leaves out;
-/// 4. the blocker "Can't delete yet" when nothing is ticked.
+/// 4. the blockers, each starting "Can't delete yet": nothing ticked, and a
+///    ticked backup that goes only with its whole set, a set's own backup
+///    or an unfinished deletion, while backups of that set aren't ticked,
+///    or can't be (see [`backup_delete_blockers`]). The delete would take
+///    those too, so no backup a restore could use goes unless it is
+///    ticked. An unfinished deletion of the same id isn't one: it is
+///    finished with its set.
 pub fn build_backup_delete_review(
     localizer: &Localizer,
     target: Option<&TargetRow>,
@@ -933,12 +992,7 @@ pub fn build_backup_delete_review(
             bytes_freed,
         };
     };
-    let ticked: Vec<(usize, &BackupRow)> = list
-        .rows
-        .iter()
-        .enumerate()
-        .filter(|(_, row)| row.can_tick(BackupChoice::Delete) && row.delete_ticked)
-        .collect();
+    let ticked: Vec<usize> = list.ticked_indices(BackupChoice::Delete).collect();
     let mut lines = vec![say(
         localizer,
         "wizard-review-target",
@@ -946,54 +1000,19 @@ pub fn build_backup_delete_review(
     )];
     if !ticked.is_empty() {
         let size = backup_size_text(localizer, bytes_freed);
+        let intro = if backup_delete_size_is_estimate(list) {
+            "wizard-review-delete-intro-estimate"
+        } else {
+            "wizard-review-delete-intro"
+        };
         lines.push(String::new());
         lines.push(say(
             localizer,
-            "wizard-review-delete-intro",
+            intro,
             &[("count", ticked.len().into()), ("size", (&size).into())],
         ));
-        for (_, row) in &ticked {
-            lines.push(delete_line(localizer, row));
-        }
-        // One line for each set whose rows go together, after the rows'
-        // own lines: the rows of one set can sit in different groups.
-        let lists: Vec<&[String]> = list.rows.iter().map(|row| row.set_ids.as_slice()).collect();
-        let mut said: BTreeSet<usize> = BTreeSet::new();
-        for (index, _) in &ticked {
-            if said.contains(index) {
-                continue;
-            }
-            let mut together = vec![*index];
-            together.extend(tied_indices(&lists, *index));
-            together.sort_unstable();
-            said.extend(together.iter().copied());
-            if together.len() < 2 {
-                continue;
-            }
-            let names: Vec<String> = together
-                .iter()
-                .map(|&other| list.rows[other].name.clone())
-                .collect();
-            let backups = and_list(localizer, &names);
-            // The rows of one set share its date; the first row says what
-            // made the set.
-            let first = &list.rows[together[0]];
-            let origin = first
-                .entry
-                .as_ref()
-                .map_or("other", |entry| origin_of(entry.set_kind));
-            let mut args: Vec<(&str, FluentArgument<'_>)> = vec![
-                ("backups", (&backups).into()),
-                ("count", names.len().into()),
-                ("origin", origin.into()),
-            ];
-            lines.push(match first.date.as_deref() {
-                Some(date) => {
-                    args.push(("date", date.into()));
-                    say(localizer, "wizard-review-delete-together", &args)
-                }
-                None => say(localizer, "wizard-review-delete-together-undated", &args),
-            });
+        for &index in &ticked {
+            lines.push(delete_line(localizer, &list.rows[index]));
         }
     }
 
@@ -1016,21 +1035,58 @@ pub fn build_backup_delete_review(
         lines.push(text(localizer, "wizard-review-notes-heading"));
         lines.extend(notes);
     }
-    if ticked.is_empty() {
-        lines.push(String::new());
-        lines.push(say(
+
+    let blocked = |reason: String| {
+        say(
             localizer,
             "wizard-review-delete-blocked",
-            &[(
-                "reason",
-                (&text(localizer, "wizard-review-delete-nothing-ticked")).into(),
-            )],
-        ));
+            &[("reason", (&reason).into())],
+        )
+    };
+    let mut blockers = Vec::new();
+    if ticked.is_empty() {
+        blockers.push(blocked(text(
+            localizer,
+            "wizard-review-delete-nothing-ticked",
+        )));
+    }
+    // A row whose delete would take rows RABBIT can't delete can only be
+    // unticked; one that would take rows that aren't ticked can have them
+    // ticked too.
+    for blocker in backup_delete_blockers(list) {
+        let (key, others) = if blocker.undeletable.is_empty() {
+            ("wizard-review-delete-only-with", &blocker.unticked)
+        } else {
+            (
+                "wizard-review-delete-only-with-undeletable",
+                &blocker.undeletable,
+            )
+        };
+        let names: Vec<String> = others
+            .iter()
+            .map(|&other| backup_in_sentence(localizer, &list.rows[other]))
+            .collect();
+        blockers.push(blocked(say(
+            localizer,
+            key,
+            &[
+                (
+                    "backup",
+                    (&backup_in_sentence(localizer, &list.rows[blocker.row])).into(),
+                ),
+                ("backups", (&and_list(localizer, &names)).into()),
+                ("count", names.len().into()),
+            ],
+        )));
+    }
+    if !blockers.is_empty() {
+        lines.push(String::new());
+        lines.extend(blockers.iter().cloned());
     }
     WizardDeleteReviewPreview {
         heading,
         lines,
-        can_delete: !ticked.is_empty(),
+        can_delete: blockers.is_empty(),
         items,
         bytes_freed,
     }
@@ -1038,18 +1094,25 @@ pub fn build_backup_delete_review(
 
 /// The title and the text of the Yes/No question asked before a delete,
 /// whose No is the focused button: how many backups go, what that frees,
-/// how many of them are the only copy of what they hold, and that a deleted
-/// backup can't be brought back.
+/// or about what when Review says "about" too, how many of them are the
+/// only copy of what they hold, and that a deleted backup can't be brought
+/// back.
 pub fn delete_backups_question(localizer: &Localizer, list: &WizardBackupList) -> (String, String) {
     let ticked: Vec<&BackupRow> = list.ticked_rows(BackupChoice::Delete).collect();
     let only = ticked
         .iter()
         .filter(|row| row.entry.as_ref().is_some_and(|entry| entry.only_copy))
         .count();
-    let size = backup_size_text(localizer, backup_delete_bytes(list));
+    let (bytes, estimate) = delete_size(list);
+    let size = backup_size_text(localizer, bytes);
+    let body_key = if estimate {
+        "wizard-confirm-delete-backups-body-estimate"
+    } else {
+        "wizard-confirm-delete-backups-body"
+    };
     let mut body = vec![say(
         localizer,
-        "wizard-confirm-delete-backups-body",
+        body_key,
         &[("count", ticked.len().into()), ("size", (&size).into())],
     )];
     if only > 0 {
@@ -1301,7 +1364,6 @@ struct RowDraft {
     delete_unavailable: Unavailable,
     /// The details text's sentences, one per line.
     lines: Vec<String>,
-    set_ids: Vec<String>,
     targets: Vec<PathBuf>,
     restore_item: Option<RestoreItem>,
 }
@@ -1350,12 +1412,6 @@ impl RowDraft {
         );
         Self {
             when: when_text(localizer, entry, date.as_deref()),
-            set_ids: entry
-                .item
-                .set_ids()
-                .into_iter()
-                .map(ToString::to_string)
-                .collect(),
             targets: source.targets.get(&entry.item).cloned().unwrap_or_default(),
             entry: entry.clone(),
             name,
@@ -1428,7 +1484,6 @@ impl RowDraft {
             name: self.name,
             date: self.date,
             when: self.when,
-            set_ids: self.set_ids,
             targets: self.targets,
             restore_item: self.restore_item,
             entry: Some(self.entry),
@@ -1438,77 +1493,53 @@ impl RowDraft {
     }
 }
 
-/// What depends on the other rows of a row's set: rows of one set go
-/// together for Delete, so each says which others it goes with, and when
-/// one of them can't be deleted, none of them can.
-fn tie_drafts(localizer: &Localizer, drafts: &mut [RowDraft]) {
-    let ties: Vec<Vec<usize>> = {
-        let lists: Vec<&[String]> = drafts
-            .iter()
-            .map(|draft| draft.set_ids.as_slice())
-            .collect();
-        (0..drafts.len())
-            .map(|index| tied_indices(&lists, index))
-            .collect()
-    };
-    for (index, tied) in ties.iter().enumerate() {
-        if tied.is_empty() {
+/// What a row whose delete takes its whole set says of the other rows of
+/// that set, which go with it (see [`deletes_too`]): a set's own backup
+/// beside a package or a key map of it, and an unfinished deletion whose id
+/// also names a set in `RABBIT/backups`. When some of those can't be
+/// deleted, such as another account's set, it names only them, as the row
+/// then can't be deleted either. Every other row deletes alone, and its
+/// details say nothing of other rows.
+fn name_backups_deleted_with(localizer: &Localizer, drafts: &mut [RowDraft]) {
+    // The names of the rows each would take, and of those that can't be
+    // deleted.
+    let deleted_with: Vec<(Vec<String>, Vec<String>)> = drafts
+        .iter()
+        .map(|draft| {
+            let taken: Vec<&RowDraft> = drafts
+                .iter()
+                .filter(|other| deletes_too(&draft.entry.item, &other.entry.item))
+                .collect();
+            let undeletable = taken
+                .iter()
+                .filter(|other| other.delete_unavailable.is_some())
+                .map(|other| other.name.clone())
+                .collect();
+            let names = taken.iter().map(|other| other.name.clone()).collect();
+            (names, undeletable)
+        })
+        .collect();
+    for (draft, (names, undeletable)) in drafts.iter_mut().zip(deleted_with) {
+        if names.is_empty() || draft.delete_unavailable.is_some() {
             continue;
         }
-        let names: Vec<String> = tied
-            .iter()
-            .map(|&other| drafts[other].name.clone())
-            .collect();
-        let held_back = drafts[index].delete_unavailable.is_none()
-            && tied
-                .iter()
-                .any(|&other| drafts[other].delete_unavailable.is_some());
-        let draft = &mut drafts[index];
-        let origin = origin_of(draft.entry.set_kind);
+        let (key, names) = if undeletable.is_empty() {
+            ("wizard-backups-details-delete-only-with", names)
+        } else {
+            (
+                "wizard-backups-details-delete-only-with-undeletable",
+                undeletable,
+            )
+        };
         draft.lines.push(say(
             localizer,
-            "wizard-backups-details-together",
+            key,
             &[
                 ("backups", (&and_list(localizer, &names)).into()),
                 ("count", names.len().into()),
-                ("origin", origin.into()),
             ],
         ));
-        if held_back {
-            draft.delete_unavailable = Some(text(localizer, "wizard-backups-unavailable-tied"));
-            draft
-                .lines
-                .push(text(localizer, "wizard-backups-details-tied"));
-        }
     }
-}
-
-/// The other rows that go with the row at `index` for Delete, in list
-/// order: those whose sets, in `lists`, share an id with it, and so on, as a
-/// delete of one takes every set of the others too. Headings, with no set,
-/// go with nothing.
-pub(super) fn tied_indices(lists: &[&[String]], index: usize) -> Vec<usize> {
-    let Some(own) = lists.get(index) else {
-        return Vec::new();
-    };
-    let mut ids: BTreeSet<&str> = own.iter().map(String::as_str).collect();
-    let mut members = BTreeSet::from([index]);
-    loop {
-        let mut grew = false;
-        for (other, list) in lists.iter().enumerate() {
-            if members.contains(&other) || !list.iter().any(|id| ids.contains(id.as_str())) {
-                continue;
-            }
-            members.insert(other);
-            ids.extend(list.iter().map(String::as_str));
-            grew = true;
-        }
-        if !grew {
-            break;
-        }
-    }
-    members.remove(&index);
-    members.into_iter().collect()
 }
 
 fn heading_row(localizer: &Localizer, group: BackupGroup) -> BackupRow {
@@ -1546,7 +1577,6 @@ fn heading_row(localizer: &Localizer, group: BackupGroup) -> BackupRow {
         explanation,
         name,
         date: None,
-        set_ids: Vec::new(),
         targets: Vec::new(),
         restore_item: None,
     }
@@ -1568,15 +1598,6 @@ fn newest_first(created_unix: Option<u64>) -> (bool, std::cmp::Reverse<u64>) {
         created_unix.is_none(),
         std::cmp::Reverse(created_unix.unwrap_or(0)),
     )
-}
-
-/// What made a set, for the sentences that say rows go together.
-fn origin_of(kind: BackupSetKind) -> &'static str {
-    match kind {
-        BackupSetKind::Uninstall => "uninstall",
-        BackupSetKind::Update => "update",
-        _ => "other",
-    }
 }
 
 /// Whether the overview found nothing against restoring `entry` through

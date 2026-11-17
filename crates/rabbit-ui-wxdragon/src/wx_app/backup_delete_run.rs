@@ -11,8 +11,8 @@ use wxdragon::prelude::*;
 
 use crate::{
     BackupDeleteRun, ProgressUiState, WizardBackupList, WizardMode, backup_delete_progress,
-    backup_delete_progress_details_for_start, backup_delete_run, delete_backups_question,
-    run_backup_delete, wizard_backup_delete_outcome,
+    backup_delete_progress_details_for_start, backup_delete_run, can_delete_backups,
+    delete_backups_question, run_backup_delete, wizard_backup_delete_outcome,
 };
 
 use crate::wx_app::backup_run::{BackupRunDone, BackupRunJob, run_backup_job};
@@ -63,15 +63,17 @@ pub(crate) fn start_backup_delete(ui: &BackupDeleteRunUi) {
                 backup_delete_run(localizer, &target.path, &list),
                 delete_backups_question(localizer, &list),
                 backup_delete_progress_details_for_start(localizer, &target.path, &list),
+                can_delete_backups(&list),
             ));
         });
     }
-    let Some((run, (title, body), details)) = copied else {
+    let Some((run, (title, body), details, can_delete)) = copied else {
         return;
     };
-    // The button is disabled with nothing ticked; a stale press changes
-    // nothing either.
-    if run.items.is_empty() {
+    // The button is disabled with nothing ticked, or while Review blocks
+    // the delete, as when a ticked backup would take unticked ones with it;
+    // a stale press changes nothing either.
+    if run.items.is_empty() || !can_delete {
         return;
     }
     if !confirm_delete_backups(&title, &body) {
@@ -118,7 +120,9 @@ fn run_delete(ui: &BackupDeleteRunUi, run: BackupDeleteRun, details: String) {
         heading: text.progress_delete_heading.clone(),
         status: text.progress_status_delete_running.clone(),
         details,
-        state: ProgressUiState::new(WizardMode::DeleteBackups, run.items.len(), 0)
+        // One phase per set: the engine starts and ends each set once,
+        // however many of its rows are ticked.
+        state: ProgressUiState::new(WizardMode::DeleteBackups, run.set_count(), 0)
             .with_backup_delete(backups.unwrap_or_default()),
         run,
         work: run_backup_delete,
