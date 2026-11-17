@@ -1277,6 +1277,65 @@ mod tests {
         assert!(!reaper.installed, "{reaper:?}");
     }
 
+    /// A receipt from RABBIT 0.4.2 or earlier still records reaper.ini's
+    /// size. REAPER rewrites that file whenever it runs, so its size
+    /// changes, and the receipt must still count: a used portable REAPER
+    /// stays installed with the receipt's version, or `rabbit setup` would
+    /// reinstall it on every run.
+    #[test]
+    fn an_older_receipt_with_the_size_of_reaper_ini_still_finds_reaper() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("reaper.exe"), b"reaper binary").unwrap();
+        fs::write(root.join("reaper.ini"), b"[REAPER]\r\n").unwrap();
+        // As 0.4.2 wrote it: both files with their sizes then.
+        let state: crate::receipt::InstallState = serde_json::from_str(
+            r#"{
+                "schema_version": 1,
+                "packages": {
+                    "reaper": {
+                        "id": "reaper",
+                        "version": "7.80",
+                        "source_url": null,
+                        "source_sha256": null,
+                        "installed_files": [
+                            { "path": "reaper.exe", "sha256": null, "size": 13 },
+                            { "path": "reaper.ini", "sha256": null, "size": 10 }
+                        ],
+                        "installed_at": null,
+                        "rabbit_version": "0.4.2",
+                        "architecture": null
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let specs = package_specs_by_id(Platform::Windows);
+        let spec = specs.get(crate::package::PACKAGE_REAPER).unwrap();
+        let detect = || {
+            super::detect_component_with_probes(root, Platform::Windows, spec, Some(&state), |_| {
+                None
+            })
+            .unwrap()
+        };
+        assert!(detect().installed, "the receipt matches as written");
+
+        // REAPER runs and rewrites its configuration.
+        fs::write(
+            root.join("reaper.ini"),
+            b"[REAPER]\r\nlast_project=demo.rpp\r\n",
+        )
+        .unwrap();
+
+        let reaper = detect();
+        assert!(reaper.installed, "{reaper:?}");
+        assert_eq!(reaper.detector, "rabbit-receipt");
+        assert_eq!(
+            reaper.version,
+            Some(crate::version::Version::parse("7.80").unwrap())
+        );
+    }
+
     /// A pull-request build's binary holds its own version *and*, further
     /// on, the help text "For example: 2024.3.6.1332,13560ef7" — which looks
     /// exactly like a snapshot version. Checked against the real
