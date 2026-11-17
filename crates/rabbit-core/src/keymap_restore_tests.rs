@@ -768,6 +768,7 @@ fn a_key_map_in_an_update_s_set_comes_back_alone() {
             ReplacedPackageRecord {
                 receipt: Some(reapack_old()),
                 replaced_by: Some(Version::parse("1.2.5").unwrap()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -839,6 +840,7 @@ fn a_key_map_and_an_earlier_version_of_one_set_come_back_in_one_run() {
             ReplacedPackageRecord {
                 receipt: Some(reapack_old()),
                 replaced_by: Some(Version::parse("1.2.5").unwrap()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -935,6 +937,7 @@ fn a_version_file_that_is_the_key_map_is_refused() {
             ReplacedPackageRecord {
                 receipt: Some(reapack_old()),
                 replaced_by: Some(Version::parse("1.2.5").unwrap()),
+                ..Default::default()
             },
         )
         .unwrap();

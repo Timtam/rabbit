@@ -169,6 +169,7 @@ fn update_set(
                 ReplacedPackageRecord {
                     receipt: earlier.clone(),
                     replaced_by: Some(version(newer)),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -340,6 +341,7 @@ fn each_kind_goes_to_its_group() {
         ReplacedPackageRecord {
             receipt: Some(entry("reapack", "1.2.5", &[])),
             replaced_by: Some(version("1.2.4")),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -2120,4 +2122,131 @@ fn places_outside_are_looked_at_only_where_a_restore_writes() {
     );
     let row = find(&listed, &package(id, "stray"));
     assert_eq!(row.refusal.as_ref(), Some(refusal(&error)));
+}
+
+/// A package that comes in variants names the variant of each version: the
+/// one its entry recorded, the default for an entry that recorded none,
+/// and the one the set records for the version that replaced it. So two
+/// Spanish packs of the same version read apart. A package without
+/// variants names none, and a set from before the field names no variant
+/// of the version that replaced it.
+#[test]
+fn a_package_that_comes_in_variants_names_them() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path();
+    let es_es: (&str, &[u8]) = ("LangPack/es_ES.ReaperLangPack", b"spanish");
+    let es_mx: (&str, &[u8]) = ("LangPack/es_MX.ReaperLangPack", b"spanish");
+    let reapack: (&str, &[u8]) = ("UserPlugins/reaper_reapack-x64.dll", b"reapack 1.2.4");
+    for (path, contents) in [es_es, reapack] {
+        write(&resource.join(path), contents);
+    }
+    let mut mexico = entry("langpack-es", "1.0", &[es_mx]);
+    mexico.variant = Some("pma".to_string());
+    save_receipt(resource, vec![mexico]);
+    let mut writer = BackupSetWriter::new(resource, "unix-1793697120", UPDATE_BACKUP_REASON);
+    writer
+        .record_replaced(
+            "langpack-es",
+            ReplacedPackageRecord {
+                receipt: Some(entry("langpack-es", "1.0", &[es_es])),
+                replaced_by: Some(version("1.0")),
+                replaced_by_variant: Some("pma".to_string()),
+                langpack_before: None,
+            },
+        )
+        .unwrap();
+    writer
+        .copy_file(Some("langpack-es"), &resource.join(es_es.0))
+        .unwrap();
+    writer
+        .record_replaced(
+            "reapack",
+            ReplacedPackageRecord {
+                receipt: Some(entry("reapack", "1.2.4", &[reapack])),
+                replaced_by: Some(version("1.2.5")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    writer
+        .copy_file(Some("reapack"), &resource.join(reapack.0))
+        .unwrap();
+    let set = writer.path().to_path_buf();
+
+    let listed = overview(resource);
+    let spanish = find(&listed, &package("unix-1793697120", "langpack-es"));
+    assert_eq!(spanish.version, Some(version("1.0")));
+    assert_eq!(spanish.replaced_by, Some(version("1.0")));
+    assert_eq!(spanish.variant.as_deref(), Some("rae"), "the default");
+    assert_eq!(spanish.replaced_by_variant.as_deref(), Some("pma"));
+    let plain = find(&listed, &package("unix-1793697120", "reapack"));
+    assert_eq!(plain.variant, None);
+    assert_eq!(plain.replaced_by_variant, None);
+    let json = serde_json::to_value(plain).unwrap();
+    assert!(json.get("variant").is_none(), "{json}");
+    assert!(json.get("replaced_by_variant").is_none(), "{json}");
+
+    // A set written before the field: the version that replaced it has no
+    // variant, and the earlier one still has its own.
+    edit_manifest(&set, |manifest| {
+        let record = manifest.replaced.get_mut("langpack-es").unwrap();
+        record.replaced_by_variant = None;
+        let mut earlier = record.receipt.clone().unwrap();
+        earlier.variant = Some("pma".to_string());
+        record.receipt = Some(earlier);
+    });
+    let manifest_text = fs::read_to_string(set.join("backup-manifest.json")).unwrap();
+    assert!(
+        !manifest_text.contains("replaced_by_variant"),
+        "{manifest_text}"
+    );
+    assert!(
+        !manifest_text.contains("langpack_before"),
+        "{manifest_text}"
+    );
+    let listed = overview(resource);
+    let spanish = find(&listed, &package("unix-1793697120", "langpack-es"));
+    assert_eq!(spanish.variant.as_deref(), Some("pma"));
+    assert_eq!(spanish.replaced_by_variant, None);
+
+    // A row saved before the fields reads with no variant.
+    let mut saved = serde_json::to_value(spanish).unwrap();
+    let object = saved.as_object_mut().unwrap();
+    object.remove("variant");
+    object.remove("replaced_by_variant");
+    let read: BackupEntry = serde_json::from_value(saved).unwrap();
+    assert_eq!(read.variant, None);
+    assert_eq!(read.replaced_by_variant, None);
+}
+
+/// An uninstall's backup of a package that comes in variants names the
+/// variant its entry recorded.
+#[test]
+fn uninstalled_software_names_its_variant() {
+    let dir = tempdir().unwrap();
+    let resource = dir.path();
+    write(&resource.join("LangPack/es_MX.ReaperLangPack"), b"spanish");
+    let mut mexico = entry(
+        "langpack-es",
+        "1.0",
+        &[("LangPack/es_MX.ReaperLangPack", b"spanish")],
+    );
+    mexico.variant = Some("pma".to_string());
+    uninstall_set(
+        resource,
+        "uninstall-unix-1794233100",
+        &[(
+            "langpack-es",
+            Some(mexico),
+            &["LangPack/es_MX.ReaperLangPack"],
+        )],
+    );
+
+    let listed = overview(resource);
+    let row = find(
+        &listed,
+        &package("uninstall-unix-1794233100", "langpack-es"),
+    );
+    assert_eq!(row.variant.as_deref(), Some("pma"));
+    assert_eq!(row.replaced_by_variant, None);
 }

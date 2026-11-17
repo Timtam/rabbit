@@ -186,12 +186,14 @@ pub enum RestoreRefusal {
     )]
     PartMissing { backup_id: String, path: PathBuf },
 
-    /// An earlier version a file of which is neither in the set nor on
-    /// disk with that version's hash, by its path in RABBIT's records.
-    /// Going back to it would leave RABBIT's records claiming a file that
-    /// isn't there.
+    /// An earlier version a file of which is neither in the set nor, as
+    /// RABBIT's records list it now, on disk with that version's hash, by
+    /// its path in RABBIT's records. Going back to it would leave RABBIT's
+    /// records claiming a file that isn't there. A file on disk that the
+    /// records no longer list, such as one an update left where it was,
+    /// doesn't count: RABBIT doesn't keep track of it.
     #[error(
-        "{package_id} in the backup {backup_id} isn't complete: {} is neither in the backup nor on disk as that version had it, so RABBIT doesn't restore it",
+        "{package_id} in the backup {backup_id} isn't complete: {} isn't in the backup, and RABBIT's records don't list it on disk as that version had it, so RABBIT doesn't restore it",
         .path.display()
     )]
     NotComplete {

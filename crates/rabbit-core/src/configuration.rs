@@ -327,14 +327,26 @@ fn installed_lang_pack_file(resource_path: &Path, package_id: &str) -> Result<Op
     let Some(state) = crate::receipt::load_install_state(resource_path)? else {
         return Ok(None);
     };
-    Ok(state.packages.get(package_id).and_then(|receipt| {
-        receipt.installed_files.iter().find_map(|file| {
-            let name = file.path.file_name()?.to_str()?;
-            name.to_ascii_lowercase()
-                .ends_with(".reaperlangpack")
-                .then(|| name.to_string())
-        })
-    }))
+    Ok(state.packages.get(package_id).and_then(lang_pack_file_of))
+}
+
+/// The name of the first `.ReaperLangPack` file `receipt` lists, as the
+/// language step writes it into `langpack=`.
+fn lang_pack_file_of(receipt: &crate::receipt::PackageReceipt) -> Option<String> {
+    receipt
+        .installed_files
+        .iter()
+        .find_map(|file| lang_pack_file_name(&file.path))
+}
+
+/// `path`'s file name, when it is a `.ReaperLangPack` file, in any case.
+/// A restore that goes back to an earlier version of a language pack names
+/// that version's file by this too.
+pub(crate) fn lang_pack_file_name(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    name.to_ascii_lowercase()
+        .ends_with(".reaperlangpack")
+        .then(|| name.to_string())
 }
 
 /// `true` when the on-disk state under `resource_path` already

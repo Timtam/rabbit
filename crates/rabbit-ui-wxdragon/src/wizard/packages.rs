@@ -10,8 +10,8 @@ use rabbit_core::model::{Architecture, Platform};
 use rabbit_core::operation::{PackageAutomationSupport, package_automation_support};
 use rabbit_core::osara_keymap::{OsaraKeymapState, replace_by_default};
 use rabbit_core::package::{
-    HostCapabilities, PACKAGE_OSARA, PackageSpec, builtin_package_specs, detect_host_capabilities,
-    host_supports_package,
+    HostCapabilities, PACKAGE_OSARA, PackageKind, PackageSpec, builtin_package_specs,
+    detect_host_capabilities, host_supports_package,
 };
 use rabbit_core::plan::{AvailablePackage, PlanAction, PlanActionKind, build_install_plan};
 
@@ -394,6 +394,62 @@ pub fn localized_package_display_name(localizer: &Localizer, package_id: &str) -
     } else {
         text.value
     }
+}
+
+/// What the Backups tab needs to know of a package the embedded package
+/// manifests describe.
+struct KnownPackage {
+    /// It is a REAPER language pack.
+    language_pack: bool,
+    /// Each variant's display-name key, by the variant's id.
+    variant_keys: BTreeMap<String, String>,
+}
+
+/// The packages the embedded package manifests describe, by id, read once.
+fn known_packages() -> &'static BTreeMap<String, KnownPackage> {
+    static KNOWN: std::sync::OnceLock<BTreeMap<String, KnownPackage>> = std::sync::OnceLock::new();
+    KNOWN.get_or_init(|| {
+        rabbit_core::package::embedded_package_manifest()
+            .packages
+            .into_iter()
+            .map(|spec| {
+                let known = KnownPackage {
+                    language_pack: spec.package_kind == PackageKind::LanguagePack,
+                    variant_keys: spec
+                        .variants
+                        .into_iter()
+                        .map(|variant| (variant.id, variant.display_name_key))
+                        .collect(),
+                };
+                (spec.id, known)
+            })
+            .collect()
+    })
+}
+
+/// Whether `package_id` is a REAPER language pack, whose file REAPER's
+/// language setting names. `false` for a package RABBIT doesn't know.
+pub fn is_language_pack(package_id: &str) -> bool {
+    known_packages()
+        .get(package_id)
+        .is_some_and(|known| known.language_pack)
+}
+
+/// The localized name of `variant_id`, a variant of `package_id`, such as
+/// one of the Spanish language pack's two OSARA translations, by the
+/// display-name key the package manifest gives it. A variant RABBIT
+/// doesn't know, or one without a translation, is named by its id.
+pub fn localized_variant_display_name(
+    localizer: &Localizer,
+    package_id: &str,
+    variant_id: &str,
+) -> String {
+    known_packages()
+        .get(package_id)
+        .and_then(|known| known.variant_keys.get(variant_id))
+        .map(|key| localizer.text(key))
+        .filter(|text| !text.missing)
+        .map_or_else(|| variant_id.to_string(), |text| text.value)
 }
 
 /// List of package ids the wizard cares about for a given platform — exposed

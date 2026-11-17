@@ -66,7 +66,11 @@ available today, and all of them translate the SWS extension as well:
   get *REAPER Accesible español*, and as `es_MX.ReaperLangPack` you get
   *Team PMA*'s. Pick one from the **Spanish OSARA translation** dropdown on
   the packages page (enabled once the Spanish pack is selected), or pass
-  `--package-variant langpack-es=pma` on the command line. Switching reinstalls under the new name and removes the old file.
+  `--package-variant langpack-es=pma` on the command line. Switching
+  reinstalls under the new name and moves the old file into a backup
+  instead of deleting it. While REAPER uses the Spanish pack, its language
+  setting follows the new file, so REAPER and OSARA stay in Spanish. To
+  switch back, pick the other translation the same way.
 - **German** — maintained by MrData and published in the
   [REAPER Stash](https://stash.reaper.fm/v/26248/), installed as
   `de_DE.ReaperLangPack`.
@@ -212,7 +216,16 @@ Launch the downloaded executable. The wizard walks you through:
    without further prompts.
 
 When it finishes, you can launch REAPER straight from the wizard or open the
-saved report.
+saved report. If an update couldn't move a file the new version no longer
+installs into its backup, for example because another program had it open,
+the last page says how many stayed where they were: RABBIT no longer keeps
+track of them and can't restore that earlier version. **Show details** names,
+under each package, each file an update moved into its backup, and each that
+stayed, with why, and says when REAPER's language followed a language pack
+file that moved, such as after a switch between the Spanish translations.
+Once you no longer need it, you can remove a file that stayed because another
+program had it open or RABBIT couldn't read it; leave the others where they
+are.
 
 ### Uninstalling from the wizard
 
@@ -376,10 +389,14 @@ ticked. The rows come in up to four groups:
 - **Software you uninstalled:** the files an uninstall moved away, and the
   settings it removed with them. Each is the only copy until you restore
   it.
-- **Earlier versions:** the files an update replaced. Only updates RABBIT
-  installs file by file keep them: ReaPack, ReaKontrol, FFmpeg, app2clap,
-  the language packs, and SWS on a Mac. A package's own installer, such as
-  REAPER's, keeps none.
+- **Earlier versions:** the files an update replaced, and the files of the
+  earlier version that the new one no longer installs, such as FFmpeg's
+  libraries when an update gives them new names, or the Spanish language
+  pack's old file after you switch between es_ES and es_MX. RABBIT moves
+  those into the backup instead of deleting them, so the earlier version
+  stays whole. Only updates RABBIT installs file by file keep them:
+  ReaPack, ReaKontrol, FFmpeg, app2clap, the language packs, and SWS on a
+  Mac. A package's own installer, such as REAPER's, keeps none.
 - **Key maps:** your key map from before OSARA's key map replaced it.
   Usually only the oldest is your own.
 - **Other backups:** what RABBIT can't restore here, such as the other
@@ -391,10 +408,16 @@ ticked. The rows come in up to four groups:
 
 Each row says what it is, what RABBIT will do with it, when it was made and
 how big it is, such as "SWS Extension 2.14.0.7: Won't touch. Uninstalled
-November 9, 2026, 2:05 PM, 4 MB". The list's label gives the size of all
-of them together. The text below the list follows the row you are on: what
-the backup holds, whether it is the only copy, what restoring it does or
-why it can't be restored, and what deleting it loses.
+November 9, 2026, 2:05 PM, 4 MB". A package that comes in variants, such as
+the Spanish language pack's two OSARA translations, names the variant with
+each version, so the same version in two variants reads apart; the version
+that replaced it, when only its variant differs, is named by the variant
+alone: "REAPER in Spanish h3fa9b2c4d1e0, REAPER Accesible español (es_ES):
+Won't touch. Replaced by Team PMA (es_MX) on November 17, 2026, 9:12 AM,
+4 KB". The list's label gives the size of all of them together. The text
+below the list follows the row you are on: what the backup holds, whether it
+is the only copy, what restoring it does or why it can't be restored, and
+what deleting it loses.
 
 Below that, **What to do with the ticked backups** decides what Next does:
 **Restore**, the default, or **Delete**. Press Tab from the list past the
@@ -414,7 +437,16 @@ again)".
   another language since, REAPER's language goes back too. An earlier
   version takes the package back to the version before an update, and only
   that package's entry in RABBIT's records changes; the version you have now
-  goes into a backup, so you can go forward again. A key map comes back as
+  goes into a backup, so you can go forward again. A package you uninstalled
+  since comes back at that version instead, and no version goes into a
+  backup. Going back to an earlier version of a language pack, such as the
+  other Spanish translation, sets REAPER's language to that version's file
+  too, while REAPER uses the newer one's; going forward again from the
+  backup it made sets it back the same way. If you picked another language
+  since, or none, REAPER's language stays as it is, and Review says so. The
+  same goes for an update that switches the Spanish translation: while
+  REAPER uses the Spanish pack, its language follows the new file, and
+  going back to the earlier translation sets it back. A key map comes back as
   REAPER's key map, and the scripts installed since stay in REAPER's
   Actions list. Whatever a restore replaces goes into a new backup first.
   After an earlier version or a key map, the tab lists that backup as one
@@ -427,12 +459,14 @@ again)".
   scripts), what a package's own uninstaller removed (REAPER and Surge XT
   on Windows), what went to the Trash or was deleted with an
   administrator's password, the JAWS scripts' uninstaller folder and
-  registry entry, OSARA's entry in Windows' list of installed programs, and
-  files an update deleted because the new version doesn't have them.
+  registry entry, and OSARA's entry in Windows' list of installed programs.
   Uninstalling OSARA, SWS or the JAWS scripts with RABBIT does keep their
   files, so those come back. A package you installed again since can't be
   restored from the old backup until you uninstall it, and an earlier
-  version is refused when part of it isn't in the backup. RABBIT never
+  version is refused when part of it isn't in the backup: after an update
+  by an earlier version of RABBIT, which deleted the files the new version
+  no longer had, or when an update couldn't move such a file into the
+  backup, for example because another program had it open. RABBIT never
   restores a copy of its records.
 - **Starting a restore:** Review says what comes back and what else
   changes, and, while REAPER is open, to close it first, or every copy of
@@ -577,6 +611,24 @@ own, as the wizard does), and `--stage-unsupported`
 downloads the packages RABBIT can't install automatically and leaves them
 in the cache for you to run yourself instead of skipping them. Every flag
 is documented in `RABBIT <command> --help`.
+
+An update RABBIT installs file by file keeps the version it replaces in a
+backup set: a copy of each file it replaces, and each file of the old
+version that the new one no longer installs, which it moves there instead
+of deleting it. The output names where each one went (`Backup:`), and a
+dry run where each would go. When one of them is the language pack file
+REAPER's language names, as after a switch between the Spanish
+translations, REAPER's language is set to the new version's file too, the
+backup set records the value it replaced, and the output says so; with
+`--allow-reaper-running` it stays, and the output says which file to
+choose in REAPER's preferences once REAPER is closed. A file that can't be
+moved, for example because another program has it open, stays where it
+is, and the output says why (`Warning:`); the update itself still
+finishes. RABBIT then no longer keeps track of that file, and can't
+restore that earlier version. Once you no longer need it, you can remove a
+file that stayed because another program had it open or RABBIT couldn't
+read it; leave any other file a `Warning:` line names where it is, such as
+REAPER's key map, a folder or a link.
 
 `setup` also accepts `--config-step <id>` (repeatable) and
 `--skip-config-step <id>` for the post-install configuration tweaks.
@@ -933,29 +985,43 @@ RABBIT restore-backup --resource-path "%APPDATA%\REAPER" \
      --backup-id unix-1234567890 --package reapack --apply
 ```
 
-The files the update replaced come back, and only ReaPack's entry in RABBIT's
-records changes: it becomes the one from before the update, on the channel
-ReaPack is on now, and if you had uninstalled or turned down ReaPack, it is no
-longer skipped. Files of the newer version that the earlier one doesn't have
-move into a new backup set, with the files the restore replaces. The command
-names that set, and restoring ReaPack from it goes forward again the same way.
-A file of the newer version that you edited since stays where it is, and the
-command says so. If the update replaced a copy RABBIT hadn't installed,
-ReaPack's entry goes instead, and the newer version's other files stay where
-they are, with a copy of each in the new backup set, because RABBIT can't tell
-which of them your copy had too; the command lists them. A package whose
-uninstall needs RABBIT's records, such as FFmpeg, then can't be uninstalled
-with RABBIT until you install it again, and the command says so. Without
-`--package`, every package of the set goes back in turn, each all or nothing on
-its own: if one fails, the others stay back, and the command exits with 1 and
-says which. RABBIT refuses, and changes nothing, when part of the earlier
-version is neither in the backup set nor on disk (an update deletes files the
-new version no longer has, without a backup), when the set doesn't say which
-version it holds, when a file of the newer version is somewhere RABBIT couldn't
-put it back to from the new backup set, while another package whose install
-removes this one is installed, or when the set's record of the earlier version
-is one RABBIT would never write, such as one that lists a file outside the
-folders it installs into.
+The files the update replaced come back, and so do the files of the earlier
+version that the newer one no longer installs: an update moves those into its
+backup set instead of deleting them, such as FFmpeg's libraries when their
+names change, or the Spanish language pack's old file after a switch between
+es_ES and es_MX. Only ReaPack's entry in RABBIT's records changes: it becomes
+the one from before the update, on the channel ReaPack is on now, and if you
+had uninstalled or turned down ReaPack, it is no longer skipped. Going back to
+the other Spanish translation, or any earlier version of a language pack whose
+file has another name, sets REAPER's language to that version's file too, while
+REAPER's language setting names the newer version's file, and the new backup
+set records the value it replaced, so restoring that set puts it back the same
+way. If you picked another language since, or none, the setting stays as it is,
+and the command says so; choose it in REAPER's preferences. With
+`--allow-reaper-running` the setting stays as it is too, because an open REAPER
+writes its own setting back when it quits; the command says which language pack
+to choose once REAPER is closed. Files of the newer version that
+the earlier one doesn't have move into a new backup set, with the files the
+restore replaces. The command names that set, and restoring ReaPack from it
+goes forward again the same way. A file of the newer version that you edited
+since stays where it is, and the command says so. If the update replaced a copy
+RABBIT hadn't installed, ReaPack's entry goes instead, and the newer version's
+other files stay where they are, with a copy of each in the new backup set,
+because RABBIT can't tell which of them your copy had too; the command lists
+them. A package whose uninstall needs RABBIT's records, such as FFmpeg, then
+can't be uninstalled with RABBIT until you install it again, and the command
+says so. Without `--package`, every package of the set goes back in turn, each
+all or nothing on its own: if one fails, the others stay back, and the command
+exits with 1 and says which. RABBIT refuses, and changes nothing, when part of
+the earlier version is neither in the backup set nor recorded on disk (as after
+an update by an earlier version of RABBIT, which deleted the files the new
+version no longer had, when an update couldn't move such a file into the backup
+and RABBIT stopped keeping track of it, or when you changed such a file before
+the update), when the set doesn't say which version it holds, when a file of
+the newer version is somewhere RABBIT couldn't put it back to from the new
+backup set, while another package whose install removes this one is installed,
+or when the set's record of the earlier version is one RABBIT would never
+write, such as one that lists a file outside the folders it installs into.
 
 Only updates RABBIT installs file by file make such a backup: ReaPack,
 ReaKontrol, FFmpeg, app2clap, the language packs, and SWS on a Mac. REAPER,
@@ -1005,8 +1071,10 @@ backup set it made of them. Restoring that set undoes the restore. After an
 uninstall's backup, it puts back the files the restore replaced, while files
 the restore added, RABBIT's records and REAPER's language stay as they are.
 After an update's backup, it goes forward to the newer version again, records
-included, and after a key map's, it puts the key map the restore replaced back,
-again keeping the scripts registered since, both as above.
+included, and so does REAPER's language while it still names the earlier
+version's language pack file; after a key map's, it puts the key map the
+restore replaced back, again keeping the scripts registered since, both as
+above.
 
 A restore is all or nothing. If a file can't be restored, for example because
 another program holds the file it replaces open, or RABBIT's records can't be
@@ -1158,7 +1226,11 @@ RABBIT delete-backup --resource-path "%APPDATA%\REAPER" \
 id, when it was made, in local time and in UTC, what made it (an uninstall, an
 update, OSARA's key map, a restore), and its size. Then it lists each backup in
 the set: the package and its version, or the key map, and whether it can be
-restored. For a backup that can be, the next line is the exact
+restored. A package that comes in variants names the variant with each
+version, and the version that replaced it, when only its variant differs, by
+the variant alone, such as "REAPER en español h3fa9b2c4d1e0 as REAPER
+Accesible español (es_ES), replaced by Team PMA (es_MX)". For a backup that
+can be, the next line is the exact
 `rabbit restore-backup` command, with `--package` for a package and
 `--key-map` for a key map; otherwise it says why not in one line, such as
 "You have SWS Extension again" or "Part of it isn't in this backup". For an

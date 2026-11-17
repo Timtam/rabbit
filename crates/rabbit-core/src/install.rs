@@ -1,7 +1,10 @@
+use std::cell::OnceCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rabbit_platform::{FileIdentity, file_identity};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
@@ -16,16 +19,25 @@ use crate::model::{InstallationKind, Platform};
 use crate::package::{
     InstallDestination, PACKAGE_FFMPEG, PackageSpec, builtin_package_specs, package_specs_by_id,
 };
-use crate::preflight::{PreflightOptions, PreflightReport, run_install_preflight};
+use crate::preflight::{
+    PreflightOptions, PreflightReport, RunningProcess, run_install_preflight_with_processes,
+    running_reaper_processes,
+};
 use crate::progress::{ProgressEvent, ProgressReporter};
+use crate::reaper_ini::{lang_pack_is_one_of, lang_pack_setting, switch_lang_pack_if_selected};
 use crate::receipt::{
-    InstallState, PackageReceiptParams, load_install_state, save_install_state,
+    InstallState, PackageReceipt, PackageReceiptParams, load_install_state, save_install_state,
     upsert_package_receipt,
 };
+use crate::restore_refusal::TargetRefusal;
 use crate::rollback::{
-    BackupSetWriter, OutsideRestoreRules, ReplacedPackageRecord, UPDATE_BACKUP_REASON,
+    BackupSetWriter, FileDigest, KEYMAP_FILE, MoveFileError, MovedFile, OutsideRestoreRules,
+    ReplacedPackageRecord, UPDATE_BACKUP_REASON, absolute_without_dots, is_keymap_place,
+    lang_pack_file_at, lang_pack_names_ignore_case, link_at_place, receipt_file_path,
+    receipt_place_by_text, same_place, update_backup_place,
 };
 use crate::uninstall::paths::{UninstallRoots, resolve_pattern};
+use crate::version::Version;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallOptions {
@@ -52,17 +64,107 @@ pub struct InstallReport {
     pub receipt_backup_path: Option<PathBuf>,
     pub backup_manifest_path: Option<PathBuf>,
     pub actions: Vec<InstallFileReport>,
+    /// What became of REAPER's language for each package whose update moved
+    /// a language pack file into its backup set while the new version
+    /// installs one of its own, such as the Spanish pack's
+    /// `es_ES.ReaperLangPack` after a switch to es_MX (see
+    /// [`ReaperLanguageReport`]). Empty for every other install, and in
+    /// reports from earlier versions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reaper_language: Vec<ReaperLanguageReport>,
 }
 
+/// REAPER's language after an update moved a language pack file into its
+/// backup set, or in a dry run would. REAPER picks its language pack by
+/// the file name `langpack=` under `[REAPER]` in `reaper.ini` gives, and
+/// OSARA its own translation by that name too. So while the line names a
+/// file that moved, it is set to the new version's own file, as going back
+/// to an earlier version sets it, and the update's set records the value it
+/// replaced (see [`ReplacedPackageRecord::langpack_before`]), so restoring
+/// that earlier version puts it back. Another pack, `<>` or no line stays
+/// as it is, and then there is no report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaperLanguageReport {
+    pub package_id: String,
+    /// The new version's language pack file, by name, as the language step
+    /// writes it: what `langpack=` is set to.
+    pub langpack: String,
+    /// The `langpack=` value, exactly as written, that named a file that
+    /// moved into the backup: the value [`Self::langpack`] replaced, or in a
+    /// dry run would replace, or the one that stays. `None` when RABBIT
+    /// couldn't read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub langpack_before: Option<String>,
+    /// Whether `langpack=` was set to [`Self::langpack`], or in a dry run
+    /// would be.
+    #[serde(default)]
+    pub switched: bool,
+    /// Why RABBIT couldn't read or set `langpack=`. The new version is in
+    /// place all the same, and the user can pick the language in REAPER's
+    /// preferences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The install let the target's REAPER run (`allow_reaper_running`),
+    /// so `langpack=` stays as it is, or in a dry run would: REAPER may
+    /// write its own setting back when it quits. The user picks
+    /// [`Self::langpack`] in REAPER's preferences once REAPER is closed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reaper_may_run: bool,
+}
+
+/// What an install did with one file, or in a dry run would do. Most
+/// actions are about a file the new version installs. The ones
+/// [`InstallFileAction::is_superseded_file`] names are about a file the
+/// package's previous version installed and the new one doesn't: then
+/// `source_path` and `target_path` are both where that file was, and `size`
+/// and `sha256` describe it as far as RABBIT read it. Both are empty for a
+/// file it didn't read, such as a link at its place, and `sha256` is empty
+/// for one it couldn't hash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallFileReport {
     pub package_id: String,
     pub source_path: PathBuf,
     pub target_path: PathBuf,
+    /// Where the file the install replaced, or moved out of the way, is in
+    /// the update's backup set.
     pub backup_path: Option<PathBuf>,
     pub action: InstallFileAction,
     pub size: u64,
     pub sha256: String,
+    /// Why a file of the package's previous version stays where it is
+    /// ([`InstallFileAction::LeftInPlace`]). `None` for every other action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+    /// The same reason as a code, for the wizard to say in the user's
+    /// language: `warning` is English. `None` for every other action, and
+    /// in reports from earlier versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_reason: Option<LeftInPlaceReason>,
+}
+
+/// Why a file of a package's previous version stays where it is
+/// ([`InstallFileAction::LeftInPlace`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LeftInPlaceReason {
+    /// A symbolic link or junction stands at its place, which RABBIT never
+    /// follows.
+    Link,
+    /// A folder stands at its place.
+    Folder,
+    /// It is REAPER's key map, which an update never moves.
+    Keymap,
+    /// No restore of the update's set could put it back at its place, such
+    /// as one outside every folder RABBIT installs into.
+    Refused,
+    /// Another program has it open.
+    InUse,
+    /// RABBIT couldn't read it.
+    Unreadable,
+    /// It couldn't be moved for another reason. A reason a later version
+    /// adds reads as this too.
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +176,32 @@ pub enum InstallFileAction {
     Installed,
     Replaced,
     Kept,
+    /// A dry run: a file the package's previous version installed, which
+    /// the new version doesn't, would move into the update's backup set.
+    WouldMoveToBackup,
+    /// A file the package's previous version installed, which the new
+    /// version doesn't, moved into the update's backup set, so the earlier
+    /// version stays whole there and can be restored.
+    MovedToBackup,
+    /// Such a file stays where it is, and `warning` says why: a link or a
+    /// folder is at its place, it is REAPER's key map, a restore couldn't
+    /// put it back from the set, or it couldn't be moved, as when another
+    /// program holds it open. The package's new receipt entry doesn't list
+    /// it, so RABBIT no longer keeps track of it, and the earlier version
+    /// can't be restored. In a dry run, a file a real run would leave there
+    /// too.
+    LeftInPlace,
+}
+
+impl InstallFileAction {
+    /// Whether the action is about a file the package's previous version
+    /// installed and the new one doesn't, rather than a file it installs.
+    pub fn is_superseded_file(self) -> bool {
+        matches!(
+            self,
+            Self::WouldMoveToBackup | Self::MovedToBackup | Self::LeftInPlace
+        )
+    }
 }
 
 pub fn install_cached_artifacts(
@@ -94,19 +222,53 @@ pub fn install_cached_artifacts(
 /// iteration so a UI can render a "now copying X" line. The no-op
 /// overload above keeps existing callers (tests, the CLI) on the
 /// untouched call signature.
+///
+/// An update keeps the version it replaces in one backup set (see
+/// [`BackupSetWriter`]): each file it replaces is copied in just before the
+/// new one takes its place, and each file the package's previous version
+/// installed that the new one doesn't is moved in once the new version's
+/// files are all in place (see [`UpdateRun::back_up_superseded_files`]).
+/// The package's receipt entry from before the update is recorded in the
+/// set before its first file goes in either way.
 pub fn install_cached_artifacts_with_progress(
     resource_path: &Path,
     artifacts: &[CachedArtifact],
     options: &InstallOptions,
     progress: &ProgressReporter,
 ) -> Result<InstallReport> {
-    let preflight = run_install_preflight(
+    install_cached_artifacts_within(
+        resource_path,
+        artifacts,
+        options,
+        progress,
+        &outside_install_roots,
+        &|| running_reaper_processes(Platform::current()),
+    )
+}
+
+/// [`install_cached_artifacts_with_progress`], with `outside_roots` as the
+/// folders outside the resource folder that RABBIT installs into, and
+/// `reapers` as every REAPER running on this computer, which the preflight
+/// checks the target's among. The folders are asked only when a file of a
+/// previous version is outside the resource folder. Tests give their own
+/// of both, so they never touch the real CLAP folder and never depend on
+/// what runs on the computer that tests them.
+pub(crate) fn install_cached_artifacts_within(
+    resource_path: &Path,
+    artifacts: &[CachedArtifact],
+    options: &InstallOptions,
+    progress: &ProgressReporter,
+    outside_roots: &dyn Fn() -> Vec<PathBuf>,
+    reapers: &dyn Fn() -> Vec<RunningProcess>,
+) -> Result<InstallReport> {
+    let preflight = run_install_preflight_with_processes(
         resource_path,
         &PreflightOptions {
             dry_run: options.dry_run,
             allow_reaper_running: options.allow_reaper_running,
             target_app_path: options.target_app_path.clone(),
         },
+        &reapers(),
     );
     if !preflight.passed {
         return Err(RabbitError::PreflightFailed {
@@ -123,26 +285,30 @@ pub fn install_cached_artifacts_with_progress(
         receipt_backup_path: None,
         backup_manifest_path: None,
         actions: Vec::new(),
+        reaper_language: Vec::new(),
     };
 
     let mut state = load_install_state(resource_path)?.unwrap_or_default();
-    // Created on the first file this run replaces, so a run that only adds
-    // files leaves no empty set behind. A dry run plans the same paths
-    // without writing anything. One set holds every package this call
-    // replaces files of, and records each of them (see `UpdateBackup`).
+    // Created on the first file this run replaces or moves out of the way,
+    // so a run that only adds files leaves no empty set behind. A dry run
+    // plans the same paths without writing anything. One set holds every
+    // package this call keeps files of, and records each of them (see
+    // `UpdateBackup`).
     let mut replacement_backups: Option<BackupSetWriter> = None;
-    let new_backup_set = || {
-        if options.dry_run {
-            BackupSetWriter::planning(resource_path, &timestamp, UPDATE_BACKUP_REASON)
-        } else {
-            BackupSetWriter::new(resource_path, &timestamp, UPDATE_BACKUP_REASON)
-        }
-    };
+    let run = UpdateRun::new(resource_path, &timestamp, options.dry_run, outside_roots);
+    let new_backup_set = || run.new_backup_set();
+    // What the packages before each one did this run, so a dry run judges
+    // each package as the real run would.
+    let mut places = RunPlaces::default();
 
     for artifact in artifacts {
         progress.report(ProgressEvent::InstallStarted {
             package_id: artifact.descriptor.package_id.clone(),
         });
+        let package_id = artifact.descriptor.package_id.as_str();
+        // The package's entry from before this install. The update's set
+        // records it before the first file of the package goes in.
+        let previous = state.packages.get(package_id).cloned();
         let prepared = prepare_install_source(artifact)?;
         let mut artifact_target_paths = Vec::with_capacity(prepared.files.len());
         // Install destination is per-package data: the package's root-level
@@ -178,6 +344,13 @@ pub fn install_cached_artifacts_with_progress(
                 crate::package::resolved_install_as(spec, effective_variant.as_deref())
             })
             .filter(|_| prepared.files.len() == 1);
+        // The variant this install puts in place, for a package that comes
+        // in variants: the update's set records it with the version, so a
+        // switch of variant at the same version reads apart.
+        let new_variant = install_spec
+            .as_ref()
+            .and_then(|spec| crate::package::recorded_variant(spec, effective_variant.as_deref()))
+            .map(|variant| variant.id.clone());
 
         for file in &prepared.files {
             let target_path = resolve_install_target(
@@ -186,10 +359,13 @@ pub fn install_cached_artifacts_with_progress(
                 resource_path,
                 install_as.as_deref().unwrap_or(&file.target_file_name),
             )?;
-            let target_exists = target_path.is_file();
+            // In a dry run, a file an earlier package of the run would have
+            // moved into the set is still there, but the real run finds it
+            // gone and installs this one as a new file.
+            let moved_earlier = options.dry_run && places.moved.contains(&run.place(&target_path));
+            let target_exists = !moved_earlier && target_path.is_file();
             let target_matches = target_exists && sha256_file(&target_path)? == file.source_sha256;
             let replaces = target_exists && !target_matches;
-            let package_id = artifact.descriptor.package_id.as_str();
 
             let backup_path = if options.dry_run {
                 if replaces {
@@ -205,12 +381,11 @@ pub fn install_cached_artifacts_with_progress(
                     Some(UpdateBackup {
                         writer: replacement_backups.get_or_insert_with(new_backup_set),
                         package_id,
-                        // The package's own entry is updated only after all
-                        // of its files, so `state` still holds the one from
-                        // before this install.
                         replaced: ReplacedPackageRecord {
-                            receipt: state.packages.get(package_id).cloned(),
+                            receipt: previous.clone(),
                             replaced_by: Some(artifact.descriptor.version.clone()),
+                            replaced_by_variant: new_variant.clone(),
+                            langpack_before: None,
                         },
                     })
                 } else {
@@ -232,33 +407,13 @@ pub fn install_cached_artifacts_with_progress(
                 action: classify_action(options.dry_run, target_exists, target_matches),
                 size: file.source_size,
                 sha256: file.source_sha256.clone(),
+                warning: None,
+                left_reason: None,
             });
             artifact_target_paths.push(target_path);
         }
 
         if !options.dry_run {
-            // Files this package installed LAST time. Anything still listed
-            // there but absent from the new set is stale — most visibly when
-            // a language pack is reinstalled under a different name because
-            // the user switched variant (es_ES -> es_MX), where the content
-            // is identical and only the name changes.
-            let previous_paths: Vec<PathBuf> = state
-                .packages
-                .get(&artifact.descriptor.package_id)
-                .map(|receipt| {
-                    receipt
-                        .installed_files
-                        .iter()
-                        .map(|file| {
-                            if file.path.is_absolute() {
-                                file.path.clone()
-                            } else {
-                                resource_path.join(&file.path)
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
             upsert_package_receipt(
                 &mut state,
                 resource_path,
@@ -274,11 +429,39 @@ pub fn install_cached_artifacts_with_progress(
                     architecture: Some(artifact.descriptor.architecture),
                 },
             )?;
-            remove_superseded_own_files(&previous_paths, &artifact_target_paths);
+        }
+        // The new version's files are all in place now, so the files only
+        // the previous version had go into the set; a dry run plans it.
+        // They come after the package's own install actions, which the
+        // package operation relies on (see `operation::mod`).
+        let superseded = run.back_up_superseded_files(
+            &UpdatedPackage {
+                package_id,
+                previous: previous.as_ref(),
+                version: &artifact.descriptor.version,
+                variant: new_variant.as_deref(),
+                installed: &artifact_target_paths,
+            },
+            &state,
+            &places,
+            &mut replacement_backups,
+        );
+        places.record(&run, package_id, &artifact_target_paths, &superseded);
+        // REAPER's language follows a language pack file that moved, while
+        // it names it, as the files on disk are now.
+        report.reaper_language.extend(run.follow_language(
+            package_id,
+            &artifact_target_paths,
+            &superseded,
+            options.allow_reaper_running,
+            &mut replacement_backups,
+        ));
+        report.actions.extend(superseded);
+        if !options.dry_run {
             remove_exclusive_group_siblings(
                 &mut state,
                 resource_path,
-                &artifact.descriptor.package_id,
+                package_id,
                 &artifact_target_paths,
             );
         }
@@ -289,8 +472,11 @@ pub fn install_cached_artifacts_with_progress(
 
     // No copy of the receipt joins the set: it records each replaced
     // package's own entry from before, and a restore never copies a receipt
-    // back, which would undo every change to it since.
-    if let Some(backups) = &replacement_backups {
+    // back, which would undo every change to it since. A set whose only
+    // file couldn't be moved in after all is gone again, and isn't named.
+    if let Some(backups) = &replacement_backups
+        && backups.holds_files()
+    {
         report.backup_manifest_path = Some(backups.manifest_path());
     }
     if !options.dry_run && !artifacts.is_empty() {
@@ -301,27 +487,550 @@ pub fn install_cached_artifacts_with_progress(
     Ok(report)
 }
 
-/// Remove files a package installed previously that it no longer installs.
-/// Keeps a rename from orphaning the old file — switching the Spanish
-/// language pack between its es_ES and es_MX variants reinstalls identical
-/// content under a new name, so without this both would sit in `LangPack/`.
-/// Best-effort and conservative: only paths the package's own receipt
-/// recorded are considered, and anything in the new set is kept.
-fn remove_superseded_own_files(previous: &[PathBuf], current: &[PathBuf]) {
-    for path in previous {
-        if current.iter().any(|kept| kept == path) {
-            continue;
+/// What one install call shares between its packages for the update's
+/// backup set.
+struct UpdateRun<'a> {
+    resource_path: &'a Path,
+    /// `resource_path` made absolute, with no `.` or `..` in it, so places
+    /// compare by any spelling also when it was given as `.` (see
+    /// [`Self::place`]).
+    resource: PathBuf,
+    /// The id the set asks for (see [`BackupSetWriter::new`]).
+    timestamp: &'a str,
+    dry_run: bool,
+    /// The folders outside the resource folder that RABBIT installs into
+    /// (see [`outside_install_roots`]).
+    outside_roots: &'a dyn Fn() -> Vec<PathBuf>,
+    /// Where outside the resource folder a file of a previous version may
+    /// come back to from the set, read the first time one is outside it.
+    outside: OnceCell<OutsideRestoreRules>,
+}
+
+/// One package of an install, as moving the files of its previous version
+/// out of the way needs it.
+struct UpdatedPackage<'a> {
+    package_id: &'a str,
+    /// The package's receipt entry from before this install.
+    previous: Option<&'a PackageReceipt>,
+    /// The version this install puts in place.
+    version: &'a Version,
+    /// Its variant, by id, for a package that comes in variants.
+    variant: Option<&'a str>,
+    /// Where this install put the new version's files, or in a dry run
+    /// would.
+    installed: &'a [PathBuf],
+}
+
+/// What the packages an install call handled so far did to places, each
+/// as [`UpdateRun::place`] gives it. A real run has the new versions'
+/// entries in RABBIT's records in memory and finds the moved files gone; a
+/// dry run changes neither, so both judge the next package by this.
+#[derive(Default)]
+struct RunPlaces {
+    /// Each package handled so far, with the places of its new version's
+    /// files.
+    installed: BTreeMap<String, BTreeSet<Vec<String>>>,
+    /// The places of files moved into the set, or in a dry run planned to,
+    /// that no package installed again since.
+    moved: BTreeSet<Vec<String>>,
+}
+
+impl RunPlaces {
+    /// Note what the install of `package_id` did: it put its new version's
+    /// files at `installed`, and `superseded` says which files of its
+    /// previous version went into the set.
+    fn record(
+        &mut self,
+        run: &UpdateRun<'_>,
+        package_id: &str,
+        installed: &[PathBuf],
+        superseded: &[InstallFileReport],
+    ) {
+        let installed: BTreeSet<Vec<String>> =
+            installed.iter().map(|path| run.place(path)).collect();
+        self.moved.retain(|place| !installed.contains(place));
+        self.moved.extend(
+            superseded
+                .iter()
+                .filter(|action| {
+                    matches!(
+                        action.action,
+                        InstallFileAction::MovedToBackup | InstallFileAction::WouldMoveToBackup
+                    )
+                })
+                .map(|action| run.place(&action.target_path)),
+        );
+        self.installed.insert(package_id.to_string(), installed);
+    }
+}
+
+impl<'a> UpdateRun<'a> {
+    fn new(
+        resource_path: &'a Path,
+        timestamp: &'a str,
+        dry_run: bool,
+        outside_roots: &'a dyn Fn() -> Vec<PathBuf>,
+    ) -> Self {
+        Self {
+            resource_path,
+            resource: absolute_without_dots(resource_path)
+                .unwrap_or_else(|_| resource_path.to_path_buf()),
+            timestamp,
+            dry_run,
+            outside_roots,
+            outside: OnceCell::new(),
         }
-        match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                eprintln!(
-                    "warning: could not remove superseded {}: {error}",
-                    path.display()
+    }
+}
+
+impl UpdateRun<'_> {
+    /// The update's set, made on its first file: a planning writer in a dry
+    /// run, which writes nothing.
+    fn new_backup_set(&self) -> BackupSetWriter {
+        if self.dry_run {
+            BackupSetWriter::planning(self.resource_path, self.timestamp, UPDATE_BACKUP_REASON)
+        } else {
+            BackupSetWriter::new(self.resource_path, self.timestamp, UPDATE_BACKUP_REASON)
+        }
+    }
+
+    /// The places outside the resource folder that a restore of the set
+    /// would put a file back to: below a folder RABBIT installs into, for
+    /// any package. Only those, since only RABBIT's own file installs come
+    /// here, never a vendor installer's files.
+    fn outside(&self) -> &OutsideRestoreRules {
+        self.outside.get_or_init(|| OutsideRestoreRules {
+            shared_roots: (self.outside_roots)(),
+            vendor_added: Vec::new(),
+        })
+    }
+
+    /// `path` as places are compared: made absolute, with no `.` or `..`,
+    /// then by [`same_place`], so two spellings of one place are equal.
+    fn place(&self, path: &Path) -> Vec<String> {
+        same_place(&absolute_without_dots(path).unwrap_or_else(|_| path.to_path_buf()))
+    }
+
+    /// [`Self::place`] of a path a receipt records: a relative one is
+    /// inside the resource folder.
+    fn receipt_place(&self, path: &Path) -> Vec<String> {
+        self.place(&receipt_file_path(&self.resource, path))
+    }
+
+    /// Move each file `package`'s previous version installed, and the new
+    /// version doesn't, into the update's set, `backups`, so the earlier
+    /// version stays whole there and a restore can bring it back: an FFmpeg
+    /// update whose DLLs have new names, or the Spanish language pack
+    /// installed under another name after a switch from es_ES to es_MX. A
+    /// dry run plans the same moves and changes nothing. Returns what
+    /// became of each such file that is still there.
+    ///
+    /// Only files the package's own previous receipt entry lists with a
+    /// hash are looked at: one recorded without a hash, such as
+    /// `reaper.ini` or a folder, is the user's, as a restore treats it (see
+    /// [`crate::rollback::files_only_in_newer`]). Never a file the new
+    /// version installs, by any spelling of its place, nor one another
+    /// package lists, as `places` and `state` say the run leaves them (see
+    /// [`RunPlaces`]). A file the user changed since goes in too: it is the
+    /// only copy. The set records the previous entry before the package's
+    /// first file, exactly as for a file it replaces (see
+    /// [`UpdateBackup`]), so a set that holds only moved files is a whole
+    /// earlier version too.
+    ///
+    /// Called once the new version's files are all in place and its entry
+    /// changed in memory, before the receipt is saved. So whatever happens
+    /// from here, the package's new files are there and its old ones are
+    /// on disk or in the set: each move saves its manifest entry as pending
+    /// first and marks it done once the file is in the set (see
+    /// [`BackupSetWriter::move_file`]). Should RABBIT stop before the
+    /// receipt is saved, the receipt still lists the moved files, and the
+    /// next update finds them gone. A file that isn't moved stays where it
+    /// is, with a warning in its action, and never fails the install: the
+    /// new version is in place already. The new entry doesn't list it, so
+    /// RABBIT no longer keeps track of it, and that earlier version isn't
+    /// complete.
+    fn back_up_superseded_files(
+        &self,
+        package: &UpdatedPackage<'_>,
+        state: &InstallState,
+        places: &RunPlaces,
+        backups: &mut Option<BackupSetWriter>,
+    ) -> Vec<InstallFileReport> {
+        let Some(previous) = package.previous else {
+            return Vec::new();
+        };
+        let mut skipped: BTreeSet<Vec<String>> = package
+            .installed
+            .iter()
+            .map(|path| self.place(path))
+            .collect();
+        // Every other package's files as the run leaves them: the new
+        // version's of a package it handled already, else the ones its
+        // receipt entry lists.
+        for (id, entry) in &state.packages {
+            if id != package.package_id && !places.installed.contains_key(id) {
+                skipped.extend(
+                    entry
+                        .installed_files
+                        .iter()
+                        .map(|file| self.receipt_place(&file.path)),
                 );
             }
         }
+        for (id, installed) in &places.installed {
+            if id != package.package_id {
+                skipped.extend(installed.iter().cloned());
+            }
+        }
+        let new_files: Vec<FileIdentity> = package
+            .installed
+            .iter()
+            .filter_map(|path| file_identity(path).ok())
+            .collect();
+        let mut actions = Vec::new();
+        for file in &previous.installed_files {
+            // Each place once: it is skipped from now on.
+            if file.sha256.is_none() || !skipped.insert(self.receipt_place(&file.path)) {
+                continue;
+            }
+            actions.extend(self.back_up_superseded_file(package, &file.path, &new_files, backups));
+        }
+        actions
+    }
+
+    /// Move the file a package's previous receipt entry records at `path`
+    /// into the set, as [`Self::back_up_superseded_files`] says. `None`
+    /// when nothing is there, or the file there is one of `new_files`.
+    fn back_up_superseded_file(
+        &self,
+        package: &UpdatedPackage<'_>,
+        path: &Path,
+        new_files: &[FileIdentity],
+        backups: &mut Option<BackupSetWriter>,
+    ) -> Option<InstallFileReport> {
+        let recorded = receipt_file_path(self.resource_path, path);
+        let left = |place: &Path, digest: Option<FileDigest>, reason, why: &str| {
+            let mut action = superseded_action(
+                package.package_id,
+                place,
+                None,
+                InstallFileAction::LeftInPlace,
+                digest.unwrap_or(FileDigest {
+                    size: 0,
+                    sha256: String::new(),
+                }),
+                Some(format!("{why} {UNTRACKED_NOTE}")),
+            );
+            action.left_reason = Some(reason);
+            Some(action)
+        };
+        let nowhere_outside = OutsideRestoreRules::default();
+        let outside = || {
+            if path.is_absolute() {
+                self.outside()
+            } else {
+                &nowhere_outside
+            }
+        };
+        // The place must be one a restore of the set could write the file
+        // back to, so the set never holds what it can't bring back. First
+        // by the text alone, so a place no restore writes to, such as one
+        // outside every folder RABBIT installs into or on another computer,
+        // is never opened.
+        if let Err(reason) =
+            receipt_place_by_text(self.resource_path, path, package.package_id, outside)
+        {
+            return left(
+                &recorded,
+                None,
+                LeftInPlaceReason::Refused,
+                &refused_warning(&reason),
+            );
+        }
+        let place =
+            match update_backup_place(self.resource_path, path, package.package_id, outside()) {
+                Ok(place) => place,
+                // A link at the place is no file of the version, and it is
+                // never followed: it stays, and the action says so.
+                Err(reason) if link_at_place(&reason, self.resource_path, path) => {
+                    return left(&recorded, None, LeftInPlaceReason::Link, LINK_WARNING);
+                }
+                // Refused by what is on the way, such as a link folder that
+                // leads out of the resource folder.
+                Err(reason) => {
+                    return match fs::symlink_metadata(&recorded) {
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        _ => left(
+                            &recorded,
+                            None,
+                            LeftInPlaceReason::Refused,
+                            &refused_warning(&reason),
+                        ),
+                    };
+                }
+            };
+        let metadata = match fs::symlink_metadata(&place) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => {
+                return left(
+                    &place,
+                    None,
+                    LeftInPlaceReason::Unreadable,
+                    &unreadable_warning(&error),
+                );
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            return left(&place, None, LeftInPlaceReason::Link, LINK_WARNING);
+        }
+        if !metadata.is_file() {
+            return left(
+                &place,
+                None,
+                LeftInPlaceReason::Folder,
+                "It is a folder, not a file, so it isn't moved.",
+            );
+        }
+        // REAPER's key map is never a file of a version: only a restore of
+        // the key map puts it back, keeping the scripts registered since.
+        if self.is_keymap(path, &place) {
+            return left(&place, None, LeftInPlaceReason::Keymap, KEYMAP_WARNING);
+        }
+        // The same file as one the new version installs, under another
+        // name, such as a short name on Windows. The spelling check above
+        // already finds a name in another case.
+        if file_identity(&place).is_ok_and(|identity| new_files.contains(&identity)) {
+            return None;
+        }
+        let digest = match FileDigest::of(&place) {
+            Ok(digest) => digest,
+            Err(error) => {
+                let size = FileDigest {
+                    size: metadata.len(),
+                    sha256: String::new(),
+                };
+                return left(
+                    &place,
+                    Some(size),
+                    LeftInPlaceReason::Unreadable,
+                    &unreadable_warning(&error),
+                );
+            }
+        };
+        let backup = UpdateBackup {
+            writer: backups.get_or_insert_with(|| self.new_backup_set()),
+            package_id: package.package_id,
+            replaced: ReplacedPackageRecord {
+                receipt: package.previous.cloned(),
+                replaced_by: Some(package.version.clone()),
+                replaced_by_variant: package.variant.map(str::to_string),
+                langpack_before: None,
+            },
+        };
+        match backup.move_in(&place, digest.clone()) {
+            Ok(moved) => Some(superseded_action(
+                package.package_id,
+                &place,
+                Some(moved.backup_path),
+                if self.dry_run {
+                    InstallFileAction::WouldMoveToBackup
+                } else {
+                    InstallFileAction::MovedToBackup
+                },
+                digest,
+                None,
+            )),
+            Err(MoveFileError::InUse { .. }) => left(
+                &place,
+                Some(digest),
+                LeftInPlaceReason::InUse,
+                IN_USE_WARNING,
+            ),
+            Err(MoveFileError::NotMoved(error)) => left(
+                &place,
+                Some(digest),
+                LeftInPlaceReason::Other,
+                &format!("RABBIT couldn't move it into the backup: {error}."),
+            ),
+        }
+    }
+
+    /// Whether `place`, where a receipt records `path`, is REAPER's key
+    /// map: by a name the file system reads as `reaper-kb.ini` in the
+    /// resource folder, or as that same file under another name or
+    /// through a link folder.
+    fn is_keymap(&self, path: &Path, place: &Path) -> bool {
+        (path.is_relative() && is_keymap_place(path))
+            || file_identity(&self.resource_path.join(KEYMAP_FILE))
+                .is_ok_and(|keymap| file_identity(place).is_ok_and(|identity| identity == keymap))
+    }
+
+    /// Make REAPER's language follow `package_id`'s language pack, as the
+    /// files on disk are now (see [`ReaperLanguageReport`]): when
+    /// `superseded` moved a language pack file out of REAPER's `LangPack`
+    /// folder into the update's set, `installed` put one of the new
+    /// version's there, and `langpack=` names a file that moved, the line is
+    /// set to the new file, as going back to an earlier version sets it.
+    /// Otherwise REAPER would point at a file that is only in the backup,
+    /// and start without the language. The value it replaces goes into the
+    /// package's record in `backups` first, so restoring that earlier
+    /// version puts it back exactly as it was written, and it goes again
+    /// when the line didn't change. With `allow_reaper_running` the line
+    /// stays, as a REAPER that may run writes its own setting back when it
+    /// quits; a dry run plans the same and writes nothing. `None` when the
+    /// language has nothing to do with it.
+    fn follow_language(
+        &self,
+        package_id: &str,
+        installed: &[PathBuf],
+        superseded: &[InstallFileReport],
+        allow_reaper_running: bool,
+        backups: &mut Option<BackupSetWriter>,
+    ) -> Option<ReaperLanguageReport> {
+        let moved: Vec<String> = superseded
+            .iter()
+            .filter(|action| {
+                matches!(
+                    action.action,
+                    InstallFileAction::MovedToBackup | InstallFileAction::WouldMoveToBackup
+                )
+            })
+            .filter_map(|action| lang_pack_file_at(self.resource_path, &action.target_path))
+            .collect();
+        if moved.is_empty() {
+            return None;
+        }
+        // A name with a control character in it would break the line.
+        let langpack = installed
+            .iter()
+            .find_map(|path| lang_pack_file_at(self.resource_path, path))
+            .filter(|name| !name.chars().any(char::is_control))?;
+        let mut report = ReaperLanguageReport {
+            package_id: package_id.to_string(),
+            langpack,
+            langpack_before: None,
+            switched: false,
+            error: None,
+            reaper_may_run: false,
+        };
+        let ignore_case = lang_pack_names_ignore_case();
+        let current = match lang_pack_setting(self.resource_path) {
+            Ok(current) => current,
+            Err(error) => {
+                report.error = Some(error.to_string());
+                return Some(report);
+            }
+        };
+        let current =
+            current.filter(|current| lang_pack_is_one_of(current, &moved, ignore_case))?;
+        report.langpack_before = Some(current.clone());
+        if allow_reaper_running {
+            report.reaper_may_run = true;
+            return Some(report);
+        }
+        if self.dry_run {
+            report.switched = true;
+            return Some(report);
+        }
+        // The set holds the moved file, so it has the package's record.
+        let Some(writer) = backups.as_mut() else {
+            report.error = Some(format!(
+                "the update's backup has no record of {package_id} to keep REAPER's language \
+                 setting in"
+            ));
+            return Some(report);
+        };
+        if let Err(error) = writer.set_replaced_langpack_before(package_id, Some(current.clone())) {
+            report.error = Some(error.to_string());
+            return Some(report);
+        }
+        match switch_lang_pack_if_selected(
+            self.resource_path,
+            &moved,
+            &report.langpack,
+            ignore_case,
+        ) {
+            Ok(Some(replaced)) => {
+                // The value recorded just before is the same, unless the
+                // line changed in between: then the record takes what was
+                // replaced, as far as it can be saved. Either names a file
+                // that moved.
+                let _ = writer.set_replaced_langpack_before(package_id, Some(replaced.clone()));
+                report.langpack_before = Some(replaced);
+                report.switched = true;
+            }
+            // The line changed in between and names no file that moved.
+            Ok(None) => {
+                let _ = writer.set_replaced_langpack_before(package_id, None);
+                return None;
+            }
+            Err(error) => {
+                // Nothing to put back while the line is as it was. A write
+                // that failed partway may have changed it, and then the
+                // record keeps the value.
+                if lang_pack_setting(self.resource_path).ok().flatten() == Some(current) {
+                    let _ = writer.set_replaced_langpack_before(package_id, None);
+                }
+                report.error = Some(error.to_string());
+            }
+        }
+        Some(report)
+    }
+}
+
+/// Said after why a file of a package's previous version stays where it
+/// is: the new receipt entry doesn't list it, and the update's set doesn't
+/// hold it.
+const UNTRACKED_NOTE: &str = "After the update, RABBIT no longer keeps track of it, and that earlier version can't be restored.";
+
+/// Why a file of a package's previous version stays where it is, when a
+/// symbolic link or junction stands at its place.
+const LINK_WARNING: &str =
+    "It is a symbolic link or junction, which RABBIT never follows, so it isn't moved.";
+
+/// Why REAPER's key map stays where it is, should a package's previous
+/// receipt entry list it.
+const KEYMAP_WARNING: &str = "It is REAPER's key map, which an update never moves.";
+
+/// Why a file of a package's previous version stays where it is, when
+/// another program has it open.
+const IN_USE_WARNING: &str =
+    "Another program has it open, so RABBIT couldn't move it into the backup.";
+
+/// Why a file of a package's previous version stays where it is, when no
+/// restore of the set could put it back there, for `reason`.
+fn refused_warning(reason: &TargetRefusal) -> String {
+    format!(
+        "RABBIT doesn't move it, because no restore of the backup could put it back there: {reason}."
+    )
+}
+
+/// Why a file of a package's previous version that RABBIT couldn't read
+/// stays where it is.
+fn unreadable_warning(error: &dyn std::fmt::Display) -> String {
+    format!("RABBIT couldn't read it, so it isn't moved: {error}.")
+}
+
+/// The action of a file of a package's previous version at `place`.
+fn superseded_action(
+    package_id: &str,
+    place: &Path,
+    backup_path: Option<PathBuf>,
+    action: InstallFileAction,
+    digest: FileDigest,
+    warning: Option<String>,
+) -> InstallFileReport {
+    InstallFileReport {
+        package_id: package_id.to_string(),
+        source_path: place.to_path_buf(),
+        target_path: place.to_path_buf(),
+        backup_path,
+        action,
+        size: digest.size,
+        sha256: digest.sha256,
+        warning,
+        left_reason: None,
     }
 }
 
@@ -338,6 +1047,12 @@ fn remove_superseded_own_files(previous: &[PathBuf], current: &[PathBuf]) {
 /// there. Best-effort — a file that won't delete (locked, already gone)
 /// leaves the receipt alone so a later run retries, and never fails the
 /// install that already succeeded.
+///
+/// Unlike the files of the package's own previous version, which go into
+/// the update's set (see [`UpdateRun::back_up_superseded_files`]), a
+/// sibling's files are deleted with no backup. No package declares an
+/// exclusive group any more: the language packs coexist, and a switch
+/// between the Spanish variants is the same package's own previous file.
 fn remove_exclusive_group_siblings(
     state: &mut InstallState,
     resource_path: &Path,
@@ -623,8 +1338,9 @@ fn lookup_install_spec(package_id: &str, platform: crate::model::Platform) -> Re
         })
 }
 
-/// Where an update keeps a file it is about to replace, and what it records
-/// about the file's package first.
+/// Where an update keeps a file it is about to replace, or one of the
+/// package's previous version that it moves out of the way, and what it
+/// records about the file's package first.
 struct UpdateBackup<'a> {
     writer: &'a mut BackupSetWriter,
     package_id: &'a str,
@@ -635,17 +1351,45 @@ struct UpdateBackup<'a> {
 
 impl UpdateBackup<'_> {
     /// Record the package, if the set hasn't yet, then copy `target_path`
-    /// into the set. When the copy fails before the set noted it, the
-    /// record goes again, and so does a set left empty.
+    /// into the set. When the record or the copy fails before the set
+    /// noted the file, the record goes again, and so does a set left empty.
     fn copy(self, target_path: &Path) -> Result<PathBuf> {
         let Self {
             writer,
             package_id,
             replaced,
         } = self;
-        writer.record_replaced(package_id, replaced)?;
+        writer
+            .record_replaced(package_id, replaced)
+            .inspect_err(|_| writer.forget_replaced_without_entry(package_id))?;
         writer
             .copy_file(Some(package_id), target_path)
+            .inspect_err(|_| writer.forget_replaced_without_entry(package_id))
+    }
+
+    /// Record the package, if the set hasn't yet, then move `place`, a file
+    /// of the package's previous version whose size and hash are `digest`,
+    /// into the set (see [`BackupSetWriter::move_file`]). Across volumes it
+    /// goes as a checked copy, and the original is removed only after. When
+    /// the record or the move fails, the file is still where it was; the
+    /// record goes again if the set holds no file of the package, and so
+    /// does a set left empty.
+    fn move_in(
+        self,
+        place: &Path,
+        digest: FileDigest,
+    ) -> std::result::Result<MovedFile, MoveFileError> {
+        let Self {
+            writer,
+            package_id,
+            replaced,
+        } = self;
+        writer
+            .record_replaced(package_id, replaced)
+            .inspect_err(|_| writer.forget_replaced_without_entry(package_id))
+            .map_err(MoveFileError::NotMoved)?;
+        writer
+            .move_file(Some(package_id), place, Some(digest), false)
             .inspect_err(|_| writer.forget_replaced_without_entry(package_id))
     }
 }
@@ -1063,6 +1807,7 @@ mod tests {
             ReplacedPackageRecord {
                 receipt: Some(packages[PACKAGE_REAPACK].clone()),
                 replaced_by: Some(Version::parse("1.2.6").unwrap()),
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -1201,6 +1946,7 @@ mod tests {
             ReplacedPackageRecord {
                 receipt: None,
                 replaced_by: Some(Version::parse("1.2.6").unwrap()),
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -1277,6 +2023,7 @@ mod tests {
                     ReplacedPackageRecord {
                         receipt: Some(reapack_before),
                         replaced_by: version.clone(),
+                        ..Default::default()
                     }
                 ),
                 (
@@ -1284,6 +2031,7 @@ mod tests {
                     ReplacedPackageRecord {
                         receipt: None,
                         replaced_by: version,
+                        ..Default::default()
                     }
                 ),
             ])
@@ -1312,6 +2060,7 @@ mod tests {
         ReplacedPackageRecord {
             receipt: None,
             replaced_by: Some(Version::parse("1.2.6").unwrap()),
+            ..Default::default()
         }
     }
 
@@ -1687,3 +2436,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "install_superseded_tests.rs"]
+mod superseded_tests;

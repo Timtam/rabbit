@@ -1896,6 +1896,7 @@ fn update_set_with_keymap(resource: &Path, id: &str) -> PathBuf {
             ReplacedPackageRecord {
                 receipt: Some(receipt_entry("reapack")),
                 replaced_by: Some(crate::version::Version::parse("1.2.5").unwrap()),
+                ..Default::default()
             },
         )
         .unwrap();

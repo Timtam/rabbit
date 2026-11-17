@@ -48,7 +48,9 @@ use rabbit_core::version::Version;
 
 use super::bootstrap::localizer_from_options;
 use super::model::{TargetRow, WizardModel};
-use super::packages::localized_package_display_name;
+use super::packages::{
+    is_language_pack, localized_package_display_name, localized_variant_display_name,
+};
 use super::uninstall::details_text;
 
 /// What Next does with the ticked backups: the choice below the list.
@@ -113,11 +115,17 @@ pub struct BackupListSource {
     pub targets: BTreeMap<BackupItem, Vec<PathBuf>>,
     /// Bytes on disk of every set.
     pub total_size: u64,
+    /// The packages RABBIT's records list now, so an earlier version of a
+    /// package that isn't installed says restoring installs it again
+    /// rather than keeping the version you have. `None` when RABBIT can't
+    /// tell, and then every package counts as installed.
+    pub installed_packages: Option<BTreeSet<String>>,
 }
 
 impl BackupListSource {
     pub fn from_overview(overview: &BackupOverview) -> Self {
         Self {
+            installed_packages: overview.installed_packages.clone(),
             entries: overview.entries.clone(),
             sets: overview
                 .sets
@@ -900,13 +908,21 @@ pub fn build_backup_restore_review(
     // The first restore in list order that puts REAPER's language back
     // sets it; the later ones then find a language chosen and leave it.
     let mut language_set = false;
+    let mut planned_notes = Vec::new();
     for row in &ticked {
         if let Some(item) = planned(row) {
-            restore_notes(localizer, item, &mut language_set)
-                .into_iter()
-                .for_each(&mut add_note);
+            planned_notes.extend(restore_notes(localizer, item, &mut language_set));
         }
     }
+    keep_one_language_note(
+        &mut planned_notes,
+        language_set,
+        &[
+            text(localizer, "wizard-review-restore-language-stays"),
+            text(localizer, "wizard-review-restore-language-unchanged"),
+        ],
+    );
+    planned_notes.into_iter().for_each(&mut add_note);
     if let Some(report) = report.filter(|_| !ticked.is_empty()) {
         let running = |name: &str| {
             report
@@ -1399,22 +1415,14 @@ impl RowDraft {
             }
             _ => None,
         };
-        let folder = source
-            .sets
-            .iter()
-            .find(|set| {
-                Some(set.id.as_str()) == entry.item.set_id()
-                    && set.deleting == matches!(entry.item, BackupItem::Deleting { .. })
-            })
-            .map(|set| set.path.as_path());
         let lines = explanation_lines(
             localizer,
+            source,
             entry,
             &name,
             date.as_deref(),
             &size,
             restore_item.is_some(),
-            folder,
         );
         Self {
             when: when_text(localizer, entry, date.as_deref()),
@@ -1667,22 +1675,147 @@ fn package_name(localizer: &Localizer, entry: &BackupEntry) -> Option<String> {
         .map(|package_id| localized_package_display_name(localizer, package_id))
 }
 
+/// A version of `package_id` as the Backups tab, its Review and Done say
+/// it: the version number, and for a package that comes in variants, such
+/// as the Spanish language pack's two OSARA translations, the variant with
+/// it (`wizard-backups-version-variant`), so the same number in another
+/// variant reads apart. `None` without a version.
+pub(super) fn version_with_variant_text(
+    localizer: &Localizer,
+    package_id: &str,
+    version: Option<&Version>,
+    variant: Option<&str>,
+) -> Option<String> {
+    let version = version?.to_string();
+    Some(match variant {
+        Some(variant) => say(
+            localizer,
+            "wizard-backups-version-variant",
+            &[
+                ("version", (&version).into()),
+                (
+                    "variant",
+                    (&localized_variant_display_name(localizer, package_id, variant)).into(),
+                ),
+            ],
+        ),
+        None => version,
+    })
+}
+
+/// A version of a package, and its variant by id for a package that comes
+/// in variants.
+pub(super) type VersionInVariant<'a> = (Option<&'a Version>, Option<&'a str>);
+
+/// Whether `one` and `other` are the same version in two variants, as
+/// after a switch of the Spanish language pack from es_ES to es_MX: then
+/// the variants alone tell them apart, and the version, which for that
+/// pack is a long digest, isn't said twice.
+pub(super) fn same_version_other_variant(one: VersionInVariant, other: VersionInVariant) -> bool {
+    one.0.is_some() && one.0 == other.0 && one.1.is_some() && other.1.is_some() && one.1 != other.1
+}
+
+/// `version` of `package_id` as it reads beside `other`, the version on the
+/// other side of a switch: the variant's localized name alone when both
+/// are the same version in two variants (see [`same_version_other_variant`]),
+/// otherwise as [`version_with_variant_text`] says it.
+pub(super) fn version_beside_text(
+    localizer: &Localizer,
+    package_id: &str,
+    version: VersionInVariant,
+    other: VersionInVariant,
+) -> Option<String> {
+    match version.1 {
+        Some(variant) if same_version_other_variant(version, other) => Some(
+            localized_variant_display_name(localizer, package_id, variant),
+        ),
+        _ => version_with_variant_text(localizer, package_id, version.0, version.1),
+    }
+}
+
+/// `side` of a switch between two versions of `package_id` as it reads
+/// beside `other`, the version on the other side: within one variant the
+/// version alone, within one version the variant alone (see
+/// [`version_beside_text`]), and otherwise both, so only what tells the two
+/// apart is said, and the Spanish pack's long digest or its variant's name
+/// isn't said twice.
+pub(super) fn switch_side_text(
+    localizer: &Localizer,
+    package_id: &str,
+    side: VersionInVariant,
+    other: VersionInVariant,
+) -> Option<String> {
+    if side.1.is_some() && side.1 == other.1 {
+        return side.0.map(ToString::to_string);
+    }
+    version_beside_text(localizer, package_id, side, other)
+}
+
+/// What a row calls a backup of `package_id` at `version` in `variant`:
+/// its localized name with the version, and the variant for a package that
+/// comes in variants (see [`version_with_variant_text`]). Without a
+/// version, its name with only the variant, or only its name.
+pub(super) fn package_backup_name(
+    localizer: &Localizer,
+    package_id: &str,
+    version: Option<&Version>,
+    variant: Option<&str>,
+) -> String {
+    let package = localized_package_display_name(localizer, package_id);
+    match (
+        version_with_variant_text(localizer, package_id, version, variant),
+        variant,
+    ) {
+        (Some(version), _) => say(
+            localizer,
+            "wizard-backups-name-package",
+            &[
+                ("package", (&package).into()),
+                ("version", (&version).into()),
+            ],
+        ),
+        (None, Some(variant)) => say(
+            localizer,
+            "wizard-backups-name-package-variant",
+            &[
+                ("package", (&package).into()),
+                (
+                    "variant",
+                    (&localized_variant_display_name(localizer, package_id, variant)).into(),
+                ),
+            ],
+        ),
+        (None, None) => package,
+    }
+}
+
+/// The version that replaced `entry`'s, as its row and details say it:
+/// with its variant only where that differs from `entry`'s own, and the
+/// variant alone when the same version came in another variant.
+fn replaced_by_text(localizer: &Localizer, entry: &BackupEntry) -> Option<String> {
+    let package_id = entry.item.package_id()?;
+    let variant = entry
+        .replaced_by_variant
+        .as_deref()
+        .filter(|variant| entry.variant.as_deref() != Some(*variant));
+    version_beside_text(
+        localizer,
+        package_id,
+        (entry.replaced_by.as_ref(), variant),
+        (entry.version.as_ref(), entry.variant.as_deref()),
+    )
+}
+
 /// What the row calls the backup.
 fn backup_name(localizer: &Localizer, entry: &BackupEntry) -> String {
     let key = match &entry.item {
         BackupItem::Package { package_id, .. } => {
-            let package = localized_package_display_name(localizer, package_id);
-            return match &entry.version {
-                Some(version) => say(
-                    localizer,
-                    "wizard-backups-name-package",
-                    &[
-                        ("package", (&package).into()),
-                        ("version", (&version.to_string()).into()),
-                    ],
-                ),
-                None => package,
-            };
+            return package_backup_name(
+                localizer,
+                package_id,
+                entry.version.as_ref(),
+                entry.variant.as_deref(),
+            );
         }
         BackupItem::Keymap { .. } => match entry.keymap_origin {
             Some(KeymapOrigin::OwnKeymap) => "wizard-backups-name-keymap-own",
@@ -1727,16 +1860,14 @@ fn when_text(localizer: &Localizer, entry: &BackupEntry, date: Option<&str>) -> 
     let Some(date) = date else {
         return text(localizer, "backup-date-unknown");
     };
-    let key = match (entry.group, &entry.replaced_by, entry.set_kind) {
+    let replaced_by = replaced_by_text(localizer, entry);
+    let key = match (entry.group, &replaced_by, entry.set_kind) {
         (BackupGroup::UninstalledSoftware, ..) => "wizard-backups-when-uninstalled",
         (BackupGroup::EarlierVersions, Some(version), _) => {
             return say(
                 localizer,
                 "wizard-backups-when-replaced-by",
-                &[
-                    ("version", (&version.to_string()).into()),
-                    ("date", date.into()),
-                ],
+                &[("version", version.into()), ("date", date.into())],
             );
         }
         (BackupGroup::EarlierVersions, None, _) => "wizard-backups-when-replaced",
@@ -1788,18 +1919,48 @@ fn restore_reason(localizer: &Localizer, entry: &BackupEntry) -> String {
 /// The details text's sentences, in the order backup plan 3.5 gives: what
 /// the backup is; when it was made; what it holds and how big; whether it
 /// is the only copy; what restoring does, or why it can't; what deleting
-/// loses. For another account's set, then how to remove it in Finder.
+/// loses. For another account's set, then how to remove it in Finder, the
+/// folder `source` lists it in.
 fn explanation_lines(
     localizer: &Localizer,
+    source: &BackupListSource,
     entry: &BackupEntry,
     name: &str,
     date: Option<&str>,
     size: &str,
     can_restore: bool,
-    folder: Option<&Path>,
 ) -> Vec<String> {
+    let folder = source
+        .sets
+        .iter()
+        .find(|set| {
+            Some(set.id.as_str()) == entry.item.set_id()
+                && set.deleting == matches!(entry.item, BackupItem::Deleting { .. })
+        })
+        .map(|set| set.path.as_path());
+    // Whether RABBIT's records list the package now, as far as RABBIT can
+    // tell: an earlier version of one they don't list replaces nothing.
+    let installed_now = entry.item.package_id().is_none_or(|package_id| {
+        source
+            .installed_packages
+            .as_ref()
+            .is_none_or(|installed| installed.contains(package_id))
+    });
     let package = package_name(localizer, entry).unwrap_or_else(|| name.to_string());
-    let version = entry.version.as_ref().map(ToString::to_string);
+    // With its variant, for a package that comes in variants, beside the
+    // version that replaced it: within one variant the version alone, and
+    // within one version the variant alone.
+    let version = entry.item.package_id().and_then(|package_id| {
+        switch_side_text(
+            localizer,
+            package_id,
+            (entry.version.as_ref(), entry.variant.as_deref()),
+            (
+                entry.replaced_by.as_ref(),
+                entry.replaced_by_variant.as_deref(),
+            ),
+        )
+    });
     let sentence = |key: &str| {
         say(
             localizer,
@@ -1837,13 +1998,13 @@ fn explanation_lines(
             BackupStatus::NotYours | BackupStatus::NotABackup
         );
     lines.push(if by_status {
-        sentence(status_key(entry))
+        sentence(status_key(entry, installed_now))
     } else if let Some(refusal) = &entry.refusal {
         restore_refusal_text(localizer, refusal)
     } else if entry.status.can_restore() {
         text(localizer, "wizard-backups-details-cannot-restore")
     } else {
-        sentence(status_key(entry))
+        sentence(status_key(entry, installed_now))
     });
     if let Some(key) = delete_key(entry) {
         lines.push(sentence(key));
@@ -1913,7 +2074,7 @@ fn when_sentence(localizer: &Localizer, entry: &BackupEntry, date: Option<&str>)
     let Some(date) = date else {
         return text(localizer, "wizard-backups-details-when-unknown");
     };
-    let replaced_by = entry.replaced_by.as_ref().map(Version::to_string);
+    let replaced_by = replaced_by_text(localizer, entry);
     let key = match (&entry.item, entry.group, entry.set_kind, &replaced_by) {
         (BackupItem::Records { .. }, ..) => "wizard-backups-details-when-records",
         (_, BackupGroup::UninstalledSoftware, ..) => "wizard-backups-details-when-uninstalled",
@@ -1969,7 +2130,11 @@ fn holds_key(entry: &BackupEntry) -> Option<&'static str> {
 /// shows it: a version means the uninstall recorded the package's entry,
 /// which a restore puts back. Without a version the entry may be missing,
 /// and for an earlier version Review's quick plan says what happens to it.
-fn status_key(entry: &BackupEntry) -> &'static str {
+/// An earlier version of a package RABBIT's records don't list now, as
+/// after it was uninstalled (`installed_now` false), installs it again and
+/// keeps no version as a backup.
+fn status_key(entry: &BackupEntry, installed_now: bool) -> &'static str {
+    let language_pack = entry.item.package_id().is_some_and(is_language_pack);
     match entry.status {
         _ if entry.group == BackupGroup::Other && entry.status.can_restore() => {
             "wizard-backups-details-not-here"
@@ -1980,6 +2145,20 @@ fn status_key(entry: &BackupEntry) -> &'static str {
             }
             (BackupGroup::UninstalledSoftware, None, _) => {
                 "wizard-backups-details-restore-uninstalled-files"
+            }
+            (BackupGroup::EarlierVersions, Some(_), _) if !installed_now && language_pack => {
+                "wizard-backups-details-restore-earlier-again-language-pack"
+            }
+            (BackupGroup::EarlierVersions, Some(_), _) if !installed_now => {
+                "wizard-backups-details-restore-earlier-again"
+            }
+            (BackupGroup::EarlierVersions, None, _) if !installed_now => {
+                "wizard-backups-details-restore-earlier-copy-again"
+            }
+            // REAPER's language follows a language pack's earlier version,
+            // so its settings don't all stay as they are.
+            (BackupGroup::EarlierVersions, Some(_), _) if language_pack => {
+                "wizard-backups-details-restore-earlier-language-pack"
             }
             (BackupGroup::EarlierVersions, Some(_), _) => "wizard-backups-details-restore-earlier",
             (BackupGroup::EarlierVersions, None, _) => {
@@ -2078,18 +2257,65 @@ fn restore_line(
         }
         _ if entry.group == BackupGroup::EarlierVersions => {
             let swap = planned.and_then(|item| item.swap.as_ref());
-            let earlier = swap
-                .map(|swap| swap.version.clone())
-                .unwrap_or_else(|| entry.version.clone());
-            let current = swap.and_then(|swap| swap.replaced_version.clone());
+            let package_id = entry.item.package_id().unwrap_or_default();
+            // Each version as it reads beside the other: with its variant,
+            // for a package that comes in variants, but only what tells the
+            // two apart (see `switch_side_text`).
+            let earlier = match swap {
+                Some(swap) => switch_side_text(
+                    localizer,
+                    package_id,
+                    (swap.version.as_ref(), swap.variant.as_deref()),
+                    (
+                        swap.replaced_version.as_ref(),
+                        swap.replaced_variant.as_deref(),
+                    ),
+                ),
+                None => version_with_variant_text(
+                    localizer,
+                    package_id,
+                    entry.version.as_ref(),
+                    entry.variant.as_deref(),
+                ),
+            };
+            let current = swap.and_then(|swap| {
+                switch_side_text(
+                    localizer,
+                    package_id,
+                    (
+                        swap.replaced_version.as_ref(),
+                        swap.replaced_variant.as_deref(),
+                    ),
+                    (swap.version.as_ref(), swap.variant.as_deref()),
+                )
+            });
+            // Nothing of the package is installed now, as after it was
+            // uninstalled: it comes back, and no version goes into a
+            // backup.
+            let installs_again = swap.is_some_and(|swap| {
+                matches!(swap.entry, SwappedEntry::Added | SwappedEntry::StillNone)
+            });
             match (earlier, current) {
+                (Some(earlier), _) if installs_again => say(
+                    localizer,
+                    "wizard-review-restore-earlier-again",
+                    &[
+                        ("package", (&package).into()),
+                        ("version", (&earlier).into()),
+                    ],
+                ),
+                (None, _) if installs_again => say(
+                    localizer,
+                    "wizard-review-restore-earlier-copy-again",
+                    &[("package", (&package).into())],
+                ),
                 (Some(earlier), Some(current)) => say(
                     localizer,
                     "wizard-review-restore-earlier",
                     &[
                         ("package", (&package).into()),
-                        ("version", (&earlier.to_string()).into()),
-                        ("current", (&current.to_string()).into()),
+                        ("version", (&earlier).into()),
+                        ("current", (&current).into()),
                     ],
                 ),
                 (Some(earlier), None) => say(
@@ -2097,7 +2323,7 @@ fn restore_line(
                     "wizard-review-restore-earlier-to",
                     &[
                         ("package", (&package).into()),
-                        ("version", (&earlier.to_string()).into()),
+                        ("version", (&earlier).into()),
                     ],
                 ),
                 (None, _) => say(
@@ -2172,6 +2398,40 @@ fn restore_notes(
         .iter()
         .chain(item.swaps.iter().filter_map(|swap| swap.swap.as_ref()));
     for swap in swaps {
+        // Going back to an earlier version of a language pack: REAPER's
+        // language follows its file while REAPER uses the newer one's, and
+        // otherwise stays. When the quick plan couldn't read REAPER's
+        // settings, the run reads them again, and may not be able to set
+        // it, while the newer file moves out all the same.
+        if let Some(file) = &swap.langpack
+            && !*language_set
+        {
+            notes.push(if swap.langpack_error.is_some() {
+                say(
+                    localizer,
+                    "wizard-review-restore-language-unreadable",
+                    &[("file", file.into())],
+                )
+            } else if swap.langpack_restored {
+                *language_set = true;
+                say(
+                    localizer,
+                    "wizard-review-restore-language-back",
+                    &[("file", file.into())],
+                )
+            } else {
+                text(localizer, "wizard-review-restore-language-unchanged")
+            });
+        }
+        // A language pack that isn't installed now comes back, and REAPER's
+        // language stays as the uninstall left it.
+        if swap.langpack.is_none()
+            && swap.entry == SwappedEntry::Added
+            && is_language_pack(&swap.package_id)
+            && !*language_set
+        {
+            notes.push(text(localizer, "wizard-review-restore-language-unchanged"));
+        }
         if swap.entry != SwappedEntry::Removed {
             continue;
         }
@@ -2190,6 +2450,25 @@ fn restore_notes(
         }
     }
     notes
+}
+
+/// Leave at most one of the notes in `stays`, each saying REAPER's language
+/// stays as it is, among `notes`, the notes of every ticked backup: each
+/// backup's note is said as if it were the only one. When one of them sets
+/// the language (`language_set`), none is left, as it would contradict
+/// that; otherwise only the first, as two would say it twice.
+pub(super) fn keep_one_language_note(
+    notes: &mut Vec<String>,
+    language_set: bool,
+    stays: &[String],
+) {
+    let mut said = language_set;
+    notes.retain(|note| {
+        if !stays.contains(note) {
+            return true;
+        }
+        !std::mem::replace(&mut said, true)
+    });
 }
 
 /// Why a restore of the ticked rows can't start, each line starting "Can't

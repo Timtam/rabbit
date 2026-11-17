@@ -1207,6 +1207,35 @@ pub fn resolved_install_as(spec: &PackageSpec, chosen: Option<&str>) -> Option<S
     spec.install_as.clone()
 }
 
+/// The variant a receipt entry of `spec` describes, by the variant id the
+/// entry recorded: that variant, or the default one when it recorded none
+/// or one the manifest no longer has, as [`resolved_install_as`] falls
+/// back. An install records no id when the user chose none, so the default
+/// is the variant it installed. `None` for a package without variants.
+pub fn recorded_variant<'a>(
+    spec: &'a PackageSpec,
+    recorded: Option<&str>,
+) -> Option<&'a PackageVariant> {
+    recorded
+        .and_then(|id| spec.variants.iter().find(|variant| variant.id == id))
+        .or_else(|| spec.variants.iter().find(|variant| variant.default))
+}
+
+/// The id of the variant `package_id`'s receipt entry describes, among
+/// `specs`, by the variant id it recorded (see [`recorded_variant`]).
+/// `None` for a package `specs` don't list or that has no variants.
+pub fn recorded_variant_id(
+    specs: &[PackageSpec],
+    package_id: &str,
+    recorded: Option<&str>,
+) -> Option<String> {
+    specs
+        .iter()
+        .find(|spec| spec.id == package_id)
+        .and_then(|spec| recorded_variant(spec, recorded))
+        .map(|variant| variant.id.clone())
+}
+
 /// The variant id that should be used for `package_id`: the user's explicit
 /// choice for this run, else the one their last install recorded, else the
 /// manifest default. Remembering matters because both Spanish variants come
@@ -1666,6 +1695,26 @@ mod tests {
             resolved_install_as(german, Some("pma")).as_deref(),
             Some("de_DE.ReaperLangPack")
         );
+    }
+
+    /// A receipt entry names the variant it recorded, and one that
+    /// recorded none, or an id the manifest doesn't know, names the
+    /// default, as an install without a choice installs it. A package
+    /// without variants names none.
+    #[test]
+    fn a_receipt_entry_names_its_variant_or_the_default() {
+        use super::{builtin_package_specs, recorded_variant_id};
+        use crate::model::Platform;
+
+        let specs = builtin_package_specs(Platform::Windows);
+        let variant = |package_id: &str, recorded: Option<&str>| {
+            recorded_variant_id(&specs, package_id, recorded)
+        };
+        assert_eq!(variant("langpack-es", Some("pma")).as_deref(), Some("pma"));
+        assert_eq!(variant("langpack-es", None).as_deref(), Some("rae"));
+        assert_eq!(variant("langpack-es", Some("nope")).as_deref(), Some("rae"));
+        assert_eq!(variant("langpack-de", Some("pma")), None);
+        assert_eq!(variant("no-such-package", Some("pma")), None);
     }
 
     /// A language pack must declare the locale-shaped file name REAPER (and

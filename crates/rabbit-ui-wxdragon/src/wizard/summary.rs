@@ -1,6 +1,9 @@
 //! Renders a finished [`SetupReport`] into the done page's summary text.
 
-use rabbit_core::localization::Localizer;
+use rabbit_core::install::{
+    InstallFileAction, InstallFileReport, LeftInPlaceReason, ReaperLanguageReport,
+};
+use rabbit_core::localization::{FluentArgument, Localizer};
 use rabbit_core::operation::{PackageOperationStatus, PlannedExecutionKind, PlannedExecutionPlan};
 use rabbit_core::resource::ResourceInitActionKind;
 use rabbit_core::setup::SetupReport;
@@ -152,6 +155,21 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
                 ));
             }
         }
+        // A file of a package the run has no item for, which it always has
+        // for a package it installed, still gets its line, here.
+        detail_lines.extend(
+            install_report
+                .actions
+                .iter()
+                .filter(|action| {
+                    !report
+                        .package_operation
+                        .items
+                        .iter()
+                        .any(|item| item.package_id == action.package_id)
+                })
+                .filter_map(|action| superseded_file_line(localizer.as_ref(), action)),
+        );
     }
 
     let item_backup_paths = report
@@ -245,6 +263,26 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
                 &[("version", installed_version.clone())],
                 format!("  Installed version: {installed_version}"),
             ));
+        }
+        // Right after the package's own lines, so each says whose it is:
+        // each file of its earlier version that the new one no longer
+        // installs, and, after a real run, REAPER's language when one of
+        // them was the language pack file it named.
+        if let Some(install_report) = &report.package_operation.install_report {
+            let languages = install_report
+                .reaper_language
+                .iter()
+                .filter(|_| !report.dry_run)
+                .filter(|language| language.package_id == item.package_id)
+                .map(|language| reaper_language_line(localizer.as_ref(), language));
+            detail_lines.extend(
+                install_report
+                    .actions
+                    .iter()
+                    .filter(|action| action.package_id == item.package_id)
+                    .filter_map(|action| superseded_file_line(localizer.as_ref(), action))
+                    .chain(languages),
+            );
         }
         if let Some(plan) = &item.planned_execution {
             detail_lines.push(format_localized_message(
@@ -397,6 +435,140 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
         ),
         detail_lines,
     }
+}
+
+/// Show details' line for a file of a package's earlier version that the
+/// new version no longer installs: where it was, when it moved into the
+/// update's backup, or, when it stayed where it was, why, in the user's
+/// language. The core's own `warning` is English, so it isn't shown. `None`
+/// for every other file.
+fn superseded_file_line(
+    localizer: Option<&Localizer>,
+    action: &InstallFileReport,
+) -> Option<String> {
+    let path = action.target_path.display().to_string();
+    let (key, fallback) = match action.action {
+        InstallFileAction::MovedToBackup => (
+            "wizard-summary-moved-to-backup",
+            "Moved into the backup, because the new version no longer installs it",
+        ),
+        InstallFileAction::LeftInPlace => match action.left_reason {
+            Some(LeftInPlaceReason::InUse) => (
+                "wizard-summary-left-in-place-in-use",
+                "Stays where it is, because another program has it open",
+            ),
+            Some(LeftInPlaceReason::Link) => (
+                "wizard-summary-left-in-place-link",
+                "Stays where it is, because it is a link RABBIT never follows",
+            ),
+            Some(LeftInPlaceReason::Folder) => (
+                "wizard-summary-left-in-place-folder",
+                "Stays where it is, because it is a folder",
+            ),
+            Some(LeftInPlaceReason::Keymap) => (
+                "wizard-summary-left-in-place-keymap",
+                "Stays where it is, because it is REAPER's key map",
+            ),
+            Some(LeftInPlaceReason::Refused) => (
+                "wizard-summary-left-in-place-refused",
+                "Stays where it is, because no restore could put it back there",
+            ),
+            Some(LeftInPlaceReason::Unreadable) => (
+                "wizard-summary-left-in-place-unreadable",
+                "Stays where it is, because RABBIT couldn't read it",
+            ),
+            Some(LeftInPlaceReason::Other) | None => (
+                "wizard-summary-left-in-place-other",
+                "Stays where it is, because RABBIT couldn't move it into the backup",
+            ),
+        },
+        _ => return None,
+    };
+    Some(format_localized_message(
+        localizer,
+        key,
+        &[("path", path.clone())],
+        format!("{fallback}: {path}"),
+    ))
+}
+
+/// Show details' line for what became of REAPER's language after an update
+/// moved the language pack file it named into the backup, in the user's
+/// language: set to the new version's file, or why it wasn't. The core's
+/// own error is English, so it isn't shown.
+fn reaper_language_line(localizer: Option<&Localizer>, language: &ReaperLanguageReport) -> String {
+    let file = language.langpack.clone();
+    let before = language
+        .langpack_before
+        .clone()
+        .unwrap_or_else(|| file.clone());
+    if language.error.is_none() && language.switched {
+        format_localized_message(
+            localizer,
+            "wizard-summary-language-switched",
+            &[("file", file.clone()), ("before", before.clone())],
+            format!("REAPER's language now uses {file}, because {before} moved into the backup."),
+        )
+    } else if language.error.is_none() && language.reaper_may_run {
+        format_localized_message(
+            localizer,
+            "wizard-summary-language-reaper-may-run",
+            &[("file", file.clone()), ("before", before.clone())],
+            format!(
+                "REAPER's language still names {before}, which moved into the backup, because \
+                 REAPER may be open. Once REAPER is closed, choose {file} in REAPER's preferences."
+            ),
+        )
+    } else {
+        format_localized_message(
+            localizer,
+            "wizard-summary-language-failed",
+            &[("file", file.clone())],
+            format!(
+                "RABBIT couldn't set REAPER's language to {file}. Choose it in REAPER's preferences."
+            ),
+        )
+    }
+}
+
+/// The sentences Done adds after an install that left files of a package's
+/// earlier version where they were, instead of moving them into the
+/// update's backup: how many, that RABBIT no longer keeps track of them and
+/// can't restore that earlier version, and that Show details says which
+/// and why. `None` when it left none, and
+/// after a dry run, which moved nothing.
+pub(crate) fn left_in_place_hint(
+    localizer: Option<&Localizer>,
+    report: &SetupReport,
+) -> Option<String> {
+    if report.dry_run {
+        return None;
+    }
+    let count = report
+        .package_operation
+        .install_report
+        .as_ref()?
+        .actions
+        .iter()
+        .filter(|action| action.action == InstallFileAction::LeftInPlace)
+        .count();
+    if count == 0 {
+        return None;
+    }
+    Some(match localizer {
+        Some(localizer) => {
+            localizer
+                .format_with(
+                    "wizard-summary-left-in-place-hint",
+                    &[("count", FluentArgument::from(count))],
+                )
+                .value
+        }
+        None => format!(
+            "{count} file(s) of earlier versions stayed where they were. RABBIT no longer keeps \
+             track of them and can't restore those versions. Show details says which and why."
+        ),
+    })
 }
 
 /// The summary's "Program" line for a planned execution. An installer that

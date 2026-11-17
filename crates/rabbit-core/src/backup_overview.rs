@@ -31,6 +31,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{IoPathContext, RabbitError, Result};
+use crate::model::Platform;
+use crate::package::PackageSpec;
 use crate::receipt::{InstallState, PackageReceipt, load_install_state};
 use crate::restore_refusal::{RestoreRefusal, TargetRefusal};
 use crate::rollback::{
@@ -248,6 +250,18 @@ pub struct BackupEntry {
     /// written from this version on record it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaced_by: Option<Version>,
+    /// For a package that comes in variants, such as the two Spanish OSARA
+    /// translations of the Spanish language pack: the variant of the
+    /// version in it, by its id, from the same receipt entry as
+    /// [`Self::version`] (see [`crate::package::recorded_variant`]). `None`
+    /// for a package without variants, and when RABBIT can't tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    /// For an earlier version of a package that comes in variants, the
+    /// variant of the version that replaced it, by its id. Only sets written
+    /// from this version on record it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_by_variant: Option<String>,
     /// For uninstalled software, whether the uninstall moved its settings
     /// into the set. `None` in sets from earlier versions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -420,6 +434,10 @@ pub struct BackupOverview {
     pub unreadable: Vec<UnreadableSet>,
     /// Why RABBIT's receipt couldn't be read, when it couldn't.
     pub receipt_error: Option<String>,
+    /// The packages RABBIT's receipt lists now, by id, so an earlier version
+    /// of one it doesn't list, as after an uninstall, can say that restoring
+    /// installs it again. `None` when the receipt couldn't be read.
+    pub installed_packages: Option<BTreeSet<String>>,
     /// The files a restore of each backup would write, for those that
     /// write any (see [`Self::restore_targets`]).
     targets: BTreeMap<BackupItem, Vec<PathBuf>>,
@@ -865,6 +883,7 @@ fn build_overview(
         receipt: &receipt,
         groups: OnceCell::new(),
         outside: OnceCell::new(),
+        specs: OnceCell::new(),
     };
     let mut entries = Vec::new();
     let mut targets = BTreeMap::new();
@@ -920,6 +939,10 @@ fn build_overview(
         sets,
         entries,
         unreadable,
+        installed_packages: receipt
+            .as_ref()
+            .ok()
+            .map(|state| state.packages.keys().cloned().collect()),
         receipt_error: receipt.err(),
         targets,
     }
@@ -1182,6 +1205,8 @@ fn new_entry(
         size: 0,
         version: None,
         replaced_by: None,
+        variant: None,
+        replaced_by_variant: None,
         with_settings: None,
         keymap_origin: None,
         status,
@@ -1215,6 +1240,9 @@ struct Judge<'a> {
     /// Where outside the resource folder a restore may put files back,
     /// asked the first time a set names such a place.
     outside: OnceCell<OutsideRestoreRules>,
+    /// The packages RABBIT knows on this platform, read the first time a
+    /// package's variant is needed.
+    specs: OnceCell<Vec<PackageSpec>>,
 }
 
 impl Judge<'_> {
@@ -1228,6 +1256,19 @@ impl Judge<'_> {
             self.outside
                 .get_or_init(|| (self.environment.outside_rules)(self.resource_path))
         })
+    }
+
+    /// The variant `entry`, a receipt entry of `package_id`, describes, by
+    /// its id, for a package that comes in variants (see
+    /// [`crate::package::recorded_variant`]). `None` without an entry.
+    fn variant_of(&self, package_id: &str, entry: Option<&PackageReceipt>) -> Option<String> {
+        let entry = entry?;
+        let specs = self.specs.get_or_init(|| {
+            Platform::current()
+                .map(|platform| (self.environment.package_specs)(platform))
+                .unwrap_or_default()
+        });
+        crate::package::recorded_variant_id(specs, package_id, entry.variant.as_deref())
     }
 
     /// The backups in `set`, as backup plan 3.1 maps sets to backups. Every
@@ -1538,6 +1579,7 @@ impl Judge<'_> {
                 .receipt
                 .as_ref()
                 .and_then(|entry| entry.version.clone()),
+            variant: self.variant_of(package_id, record.receipt.as_ref()),
             with_settings: record.with_settings,
             restore_scope: matches!(plan, Some(Ok(_))).then_some(RestoreScope::Package),
             refused_path: refused.as_ref().and_then(refused_path_of),
@@ -1701,6 +1743,11 @@ impl Judge<'_> {
                 _ => None,
             },
             replaced_by: replaced.and_then(|record| record.replaced_by.clone()),
+            variant: match &earlier {
+                EarlierEntry::Known(entry) => self.variant_of(package_id, *entry),
+                EarlierEntry::Unknown => None,
+            },
+            replaced_by_variant: replaced.and_then(|record| record.replaced_by_variant.clone()),
             refusal,
             missing_path,
             restore_scope: matches!(plan, Some(Ok(()))).then_some(RestoreScope::Package),
@@ -1831,6 +1878,7 @@ impl Judge<'_> {
                 package_id,
                 earlier,
                 state,
+                &|entry| comes_back(&set.path, entry),
                 &on_disk,
             )
         }) {

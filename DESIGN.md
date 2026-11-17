@@ -744,7 +744,25 @@ user can finish the install by pressing Next a few times.
      then the action, then when the backup was made and how big it is ("SWS
      Extension 2.14.0.7: Won't touch. Uninstalled November 9, 2026, 2:05 PM,
      4 MB"), and its details say what it holds, whether it is the only copy,
-     what restoring does or why it can't, and what deleting loses. A set's
+     what restoring does or why it can't, and what deleting loses. A package
+     that comes in variants, such as the Spanish language pack's two OSARA
+     translations, names the variant with each version, by the variant's
+     own Fluent key ("1.0, Team PMA (es_MX)", no nested brackets), and the
+     version that replaced it names its variant where that differs; the
+     same version in another variant is named by its variant alone, so a
+     switch within one version never reads as "1.0 replaced by 1.0" and the
+     Spanish pack's version, a long digest, is said once. The details'
+     restore and delete sentences, Review and Done name each side of a
+     switch by what tells it from the other: the variant alone within one
+     version, the version alone within one variant, otherwise both. The
+     details of an earlier version of a language pack say that REAPER's
+     language follows it. An earlier version of a package RABBIT's records
+     don't list now, as after an uninstall (the overview's
+     `installed_packages`), says restoring installs it again and keeps no
+     version as a backup, and for a language pack that REAPER's language
+     stays as it is; Review does the same when the quick plan adds the
+     entry (`added` or `still-none`), and Review and Done then say the
+     language stays. A set's
      own row beside a package or the key map of that set says only what
      those rows don't take up of the set, so the rows of a set add up to
      it; Review still counts the whole set its delete takes. Neither shows a
@@ -990,6 +1008,25 @@ user can finish the install by pressing Next a few times.
      report button: every run saves its report under `<resource>/RABBIT/logs/`
      by itself. The signature-verification counts, lock-file paths, and
      similar diagnostics stay in that saved report.
+   - After an install that left files of a package's earlier version where
+     they were, which the new version no longer installs, the status adds
+     how many, that RABBIT no longer keeps track of them and can't restore
+     that version, and that Show details says which and why. Show details
+     names each such file with its reason in the user's words, by the
+     report's `left_reason` (a report without one reads as another reason),
+     never the core's English warning, and each file the update moved into
+     its set, with why, right after the lines of the package it belongs to,
+     so a screen reader has named the package first. After them, when the
+     update moved the language pack file REAPER's language named, it says
+     that the language now uses the new file, still names the old one
+     because REAPER may be open, or couldn't be set (by the report's
+     `reaper_language`, never its English error; not after a dry run). No
+     sentence advises removing such a file: it may be REAPER's key map, a
+     folder, or outside REAPER's folders.
+   - Review and Done of a restore say what became of REAPER's language
+     once: each backup's note is written as if it were the only one, so
+     when one sets the language every note that it stays goes, and
+     otherwise only the first one that it stays is kept.
    - After an uninstall the status names the packages that went, says why
      any stayed (in the user's language for REAPER or another RABBIT being
      open, a file in use, too little room for the backup, every way a
@@ -1838,6 +1875,76 @@ Extension files:
   in it, and the CLI adds that `--package` restores them one at a time. An
   entry whose copy doesn't come back is left out and never refused, since
   nothing is written for it.
+- An update keeps the version it replaces whole in its set. Each file it
+  replaces is copied in just before the new file takes its place. Each
+  file the package's previous receipt entry lists that the new version
+  doesn't install, such as FFmpeg's libraries after they were renamed, or
+  the Spanish language pack's old name after a switch from es_ES to es_MX,
+  is moved in, never deleted. Only that package's own previous entry is
+  read, and only the files it records with a hash: `reaper.ini`, folders
+  and other files recorded without one are the user's, as a restore treats
+  them. A file the new version installs stays, by any spelling of its place
+  (both made absolute, with no `.` or `..`, so `--resource-path .` changes
+  nothing) or as the same file by its identity, such as a short name on
+  Windows, and so does one another package lists. In an install of several
+  packages, each is judged by what the run did before it: the new files of
+  the packages it installed and the files it moved, the same way in a dry
+  run, which changes neither. A file the user changed since moves too: the
+  set is its only copy. Its place must be one a restore of the set could
+  write back to, by the restore's rules above, judged first from the text
+  alone, so a place outside every folder RABBIT installs into, or on
+  another computer, is never opened. A symbolic link or junction at the
+  place, a folder, REAPER's key map, and a place a restore refuses stay
+  where they are, never followed, and the install's action for each is
+  `left-in-place` with a `warning` and a `left_reason` code (`link`,
+  `folder`, `keymap`, `refused`, `in-use`, `unreadable`, `other`), which
+  the wizard says in the user's language: Done adds one sentence when an
+  install left any, and Show details names each with its reason, and each
+  file that moved into the set. A file outside the resource folder goes
+  under `external/<n>/` like any other. The order keeps a whole version on
+  disk or in the set at every moment: the moves come after every new file
+  is in place and the package's entry changed in memory, and before the
+  receipt is saved. Each move saves its manifest entry as pending first
+  and marks it done once the file is in the set; across volumes the file
+  is copied, checked, and only then removed. An entry left pending with a
+  whole copy, because RABBIT stopped or couldn't save it as done, still
+  counts as in the set, for the restore and for the completeness rule.
+  Should RABBIT stop before the receipt is saved, the receipt still lists
+  the moved files, and the next update finds them gone. A file that can't
+  be moved, because another program holds it open or its folder may not
+  be changed, stays where it is with a warning, and the install still
+  succeeds, since the new version is in place; a set left with nothing in
+  it goes again, record and all, also when the record or the first entry
+  couldn't be saved. A file left in place this way is in no receipt entry
+  any more: RABBIT no longer keeps track of it, no later update or
+  uninstall touches it, and the earlier version isn't complete, so it
+  can't be restored. The warning says so. Keeping the file in the new
+  entry would let the next update try again, but the language step sets
+  the first `.ReaperLangPack` file a pack's entry lists, and a variant
+  switch is found by any name there that isn't the chosen variant's, so an
+  old name kept there would be activated, or reinstalled on every run. A
+  dry run plans the same moves with a planning writer, reports where each
+  file would go (`would-move-to-backup`), and writes nothing. REAPER's
+  language follows a language pack file that moved, as the swap's does
+  (below): when a moved file is a `.ReaperLangPack` file right in
+  `<resource>/LangPack`, the new version installs one there, and
+  `langpack=` names a moved file (in any case on Windows), the value goes
+  into P's `replaced` record in the update's set (`langpack_before`) and
+  then the line is set to the new version's first such file, right after
+  the moves, so REAPER never points at a file that is only in the backup.
+  The wizard's and the CLI's language step can't cover this: it counts as
+  already applied before the run, when the receipt's only pack is the one
+  REAPER uses, and `install-extension` runs none. Another pack, `<>` or no
+  line stays, and the report says nothing; with `allow_reaper_running` the
+  line stays and the report says so, a dry run plans it, and a failure is
+  reported and leaves the new version in place. The install report's
+  `reaper_language` holds each such outcome (`package_id`, `langpack`,
+  `langpack_before`, `switched`, `error`, `reaper_may_run`); the CLI prints
+  it under the package and Show details says it. Going back to the
+  earlier version from that set sets the recorded value again. Files of
+  another package of the same exclusive group, which an install removes
+  with its receipt entry, still go with no backup; no package declares
+  such a group now.
 - Restore uses a set id only when it is one plain name, with no `:`,
   slash or NUL, and on Windows no trailing dot or space and no device name
   such as `CON`. It must also equal, byte for byte, a folder `read_dir`
@@ -1893,10 +2000,17 @@ Extension files:
   - An update's set (`install-replacement`): `replaced`, for each package
     whose files it holds, the package's receipt entry from before the
     update, or none when the receipt had none (a copy RABBIT didn't
-    install), and the version that replaced it. Each record is saved before
-    the package's first file is copied in, so the set never holds a file
-    without it; when that first copy fails, the record goes again, and so
-    does a set left empty. One install call writes one set: the wizard one
+    install), the version that replaced it, and for a package that comes in
+    variants, such as the Spanish language pack, the variant that replaced
+    it (`replaced_by_variant`), so the same version in another variant
+    reads apart, and `langpack_before`, the `langpack=` value the update
+    replaced when it set REAPER's language to the new version's file
+    (above). Each record is saved before the package's first file is
+    copied or moved in, so the set never holds a file without it, also
+    when the update replaced none of the package's files and only moved
+    files of its previous version in; when that first copy or move fails,
+    the record goes again, and so does a set left empty. One install call
+    writes one set: the wizard one
     per package, `install-extension` one for all its packages. The records
     aren't in `packages`, which older versions read as an uninstall's
     whatever the set's reason: they would merge the old entry back while
@@ -1915,7 +2029,9 @@ Extension files:
     writes reads as `unknown`.
   - A before-restore set: its files, and when the restore went back to an
     earlier version, `replaced` for that package, as an update's set has
-    it: the entry the package had, and the version that replaced it.
+    it: the entry the package had, the version and variant that replaced
+    it, and `langpack_before`, the `langpack=` value the restore replaced
+    when it set REAPER's language to the earlier version's file (below).
 - Restoring a set an uninstall wrote merges each package's recorded entry
   into the current receipt instead, the package comes off
   `declined_packages`, and the `langpack=` value its uninstall replaced goes
@@ -1946,9 +2062,12 @@ Extension files:
   comes back (`nothing-of-it-in-set`). Under the lock, the receipt is read
   (`receipt-unreadable`), another installed member of P's exclusive group
   refuses it (`other-language-pack-installed`), and so does a file E_old
-  lists with a hash that is neither in the set, as a finished file of P's
-  version with that hash at that place, which the restore puts back, nor on
-  disk with it (`not-complete`): only a place the current receipt lists
+  lists with a hash that is neither in the set, as a file of P's version
+  with that hash at that place which the restore puts back (a finished
+  entry, or a pending one whose copy is whole), nor on disk with it
+  (`not-complete`, whose sentence says the receipt doesn't list it on disk,
+  as a file an update left in place is on disk but untracked): only a
+  place the current receipt lists
   with that hash is looked at, hashed in a real run and checked by size in
   the quick plan. The plan takes P's files of the set, never the key map or
   a receipt copy; a file of P's that is the key map by its real place all
@@ -1971,16 +2090,40 @@ Extension files:
   files back, each file they replace copied into it first, and only then
   makes P's entry exactly E_old, keeping E_cur's channel, or removes it
   when there is no E_old, and takes P off `declined_packages`; nothing else
-  in the receipt changes. The report says what happened to the entry
-  (`replaced`, `added`, `removed`, `still-none`), whether P came off
-  `declined_packages`, and, for a removed entry, whether P's uninstall
-  needs it (`requires_receipt`, as FFmpeg's does), so that RABBIT can't
-  uninstall P until it is installed again. On any failure the files put
-  back go back as before, then the moved files go back to their places,
-  the copies go with the before-restore set, and the receipt is untouched;
-  a moved file that can't go back stays in the kept set (`still-in-backup`,
-  and the backup is `files-left`). The before-restore set lists as an
-  earlier version of P, so the swap is undone the same way.
+  in the receipt changes. REAPER's language follows, after the receipt is
+  saved: when a file that moved out of `<resource>/LangPack` (both made
+  absolute, with no `.` or `..`, so `--resource-path ../REAPER` finds it
+  too) is a
+  `.ReaperLangPack` file, E_old lists one there with a hash, and `langpack=`
+  under `[REAPER]` still names a file that moved out (in any case on
+  Windows, as an uninstall compares it), the line gets the value P's
+  `replaced` record in the set gives, when it names one of E_old's language
+  pack files exactly (or in another ASCII case on Windows), as an undo of an
+  earlier swap does, or else the name of E_old's first `.ReaperLangPack`
+  file, as the language step writes it; never a value with a control
+  character, and only once that file is in `LangPack`. The value it replaces
+  goes into the before-restore set's record (`langpack_before`) before
+  `reaper.ini` changes, and a set without P's record refuses it, so the line
+  never changes without it; the value goes again when the line didn't
+  change, also after a failed write that left the line as it was. Only that
+  line changes, through the same writer as the language step and the
+  uninstall's reset. Another pack, `<>` or no line stays, and the report
+  says so (`langpack`, `langpack_before`, `langpack_restored`); a failure
+  there is reported (`langpack_error`, in a dry run only for a `reaper.ini`
+  it couldn't read) and leaves P back. With `allow_reaper_running` the line
+  stays too (`langpack_reaper_may_run`), as an open REAPER writes its own
+  setting back when it quits, the reason the key map is refused then; the
+  CLI says which pack to choose once REAPER is closed. The wizard never lets
+  REAPER run. The report says what happened to the entry (`replaced`,
+  `added`, `removed`, `still-none`), whether P came off `declined_packages`,
+  and, for a removed entry, whether P's uninstall needs it
+  (`requires_receipt`, as FFmpeg's does), so that RABBIT can't uninstall P
+  until it is installed again. On any failure the files put back go back as
+  before, then the moved files go back to their places, the copies go with
+  the before-restore set, and the receipt is untouched; a moved file that
+  can't go back stays in the kept set (`still-in-backup`, and the backup is
+  `files-left`). The before-restore set lists as an earlier version of P, so
+  the swap is undone the same way.
   A whole set plans every package before any changes, so any refusal
   refuses them all, leaves out packages with nothing in the set, and then
   runs them in turn, each all or nothing with a set of its own (`swaps` in
@@ -2175,6 +2318,9 @@ Extension files:
   included. Its size comes from a walk by each entry's own metadata, which
   follows no link and counts files with no entry, so it is what deleting it
   frees; a backup's size adds up its manifest entries. Each backup gets a
+  variant for a package that comes in variants (`variant`, from the same
+  receipt entry as the version, the default variant when the entry
+  recorded none; `replaced_by_variant`, from the set's record), a
   status (can restore, stopped partway, already back, installed again, not
   complete, nothing in it, version unknown, another of its exclusive group
   installed, part missing, records unreadable, not here, not yours, not a

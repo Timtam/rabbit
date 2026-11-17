@@ -117,18 +117,19 @@ from this file and posts it as the GitHub release body.
   `--package <id>`, or each package of that backup in turn without it,
   each all or nothing. Only updates RABBIT installs file by file make such
   a backup, not those by a vendor's installer, such as REAPER's, or by
-  OSARA's archive on a Mac. Only that package's entry in RABBIT's records
-  changes, to the one from before the update, on the package's current
-  channel. Files of the newer version that the earlier one lacks move into
-  a new backup with the files the restore replaces, so restoring that
-  backup goes forward again. A newer file you edited since stays, and the
-  command says so. If RABBIT hadn't installed the copy the update replaced,
-  the package's entry goes and the newer files stay, each copied into the
-  new backup; for a package whose uninstall needs that entry, such as
-  FFmpeg, the command then says RABBIT can't uninstall it until it is
-  installed again. RABBIT refuses, and changes nothing, when part of the
-  earlier version is neither in the backup nor on disk, when it can't tell
-  which version the backup holds, when a newer file is somewhere it
+  OSARA's archive on a Mac. A restore changes only that package's entry in
+  RABBIT's records, to the one from before the update, on the package's
+  current channel. Files of the newer version that the earlier one lacks
+  move into a new backup with the files the restore replaces, so restoring
+  that backup goes forward again. A newer file you edited since stays, and
+  the command says so. If RABBIT hadn't installed the copy the update
+  replaced, the package's entry goes and the newer files stay, each copied
+  into the new backup; for a package whose uninstall needs that entry,
+  such as FFmpeg, the command then says RABBIT can't uninstall it until it
+  is installed again. RABBIT refuses, and changes nothing, when part of
+  the earlier version is neither in the backup nor on disk as RABBIT's
+  records list it, when it can't
+  tell which version the backup holds, when a newer file is somewhere it
   couldn't put back from the new backup, while another package whose
   install removes this one is installed, or when the backup's record of
   the earlier version lists a file outside the folders RABBIT installs
@@ -137,6 +138,46 @@ from this file and posts it as the GitHub release body.
   `before_restore_set_id`; the top-level `actions` is then empty, and the
   top-level `status` is `partly-restored` when some packages went back and
   others didn't.
+- An update RABBIT installs file by file now moves the files of the earlier
+  version that the new one no longer installs into its backup instead of
+  deleting them, such as FFmpeg's libraries when their names change, or the
+  Spanish language pack's old file after a switch between es_ES and es_MX,
+  so that version can be restored whole. A file that can't be moved, such
+  as one another program has open, stays where it is; RABBIT then no longer
+  keeps track of it, and that version can't be restored. The command's
+  output says where each file went, or why it stayed; with `--json` and in
+  the saved report its `action` is `moved-to-backup` (`would-move-to-backup`
+  in a dry run) or `left-in-place`, with a `warning` and a `left_reason`
+  code. When files stayed, the wizard's last page says how many, and
+  **Show details** names, under each package, each file that moved or
+  stayed, and why.
+- Switching the Spanish OSARA translation while REAPER uses the Spanish
+  pack now sets REAPER's language to the new file too, so REAPER and OSARA
+  stay in Spanish instead of naming a file that moved into the backup. The
+  update's backup records the value it replaced, so going back to the
+  other translation sets it again. Another language, or none, stays, and
+  so does any language with `--allow-reaper-running`, where the output says
+  which file to choose once REAPER is closed. The command's output and
+  **Show details** say what became of the language; with `--json` and in
+  the saved report, the install's `reaper_language` holds it
+  (`package_id`, `langpack`, `langpack_before`, `switched`, `error`,
+  `reaper_may_run`).
+- Going back to an earlier version of a language pack whose file has
+  another name, such as the other Spanish translation, also sets REAPER's
+  language to that version's file while REAPER uses the newer one's, and
+  restoring the backup that restore made sets it back as it was. Another
+  language, or none, stays, and so does any language with
+  `--allow-reaper-running`; the command and the wizard say so, and
+  `restore-backup --json` reports it in each package's `swap` (`langpack`,
+  `langpack_before`, `langpack_restored`, `langpack_error`,
+  `langpack_reaper_may_run`, with the variants in `variant` and
+  `replaced_variant`). `rabbit backups` and the **Backups** tab name the
+  variant with each version of a package that comes in variants, so the
+  same version in two variants reads apart, and name only what tells the
+  two versions of a switch apart; `rabbit backups --json` adds `variant`
+  and `replaced_by_variant` to each backup. An earlier version of a package
+  you uninstalled since says that restoring installs it again, not that
+  RABBIT keeps the version you have now.
 - Restoring a key map from a backup now puts your old key map back and
   keeps the scripts ReaPack registered since in REAPER's Actions list: the
   script lines of the key map it replaces that the old one doesn't have go

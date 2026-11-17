@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
-use crate::reaper_ini::{clear_lang_pack_if_selected, lang_pack_setting};
+use crate::reaper_ini::{clear_lang_pack_if_selected, lang_pack_is_one_of, lang_pack_setting};
 use crate::rollback::BackupSetWriter;
 
 use super::paths::same_ignoring_case;
@@ -41,14 +41,7 @@ pub(crate) fn reset_reaper_langpack_if_selected(
     let Some(current) = lang_pack_setting(resource)? else {
         return Ok(None);
     };
-    let names_it = names.iter().any(|name| {
-        if ignore_case {
-            name.to_lowercase() == current.to_lowercase()
-        } else {
-            *name == current
-        }
-    });
-    if !names_it {
+    if !lang_pack_is_one_of(&current, &names, ignore_case) {
         return Ok(None);
     }
     backups.set_langpack_before(package_id, Some(current))?;

@@ -18,7 +18,7 @@ use super::model::{
     WizardOutcomeReport, WizardOutcomeStatus,
 };
 use super::packages::{osara_keymap_review_line, package_display_name};
-use super::summary::summarize_setup_report;
+use super::summary::{left_in_place_hint, summarize_setup_report};
 
 pub fn wizard_outcome_report_from_success(
     model: &WizardModel,
@@ -27,6 +27,14 @@ pub fn wizard_outcome_report_from_success(
 ) -> WizardOutcomeReport {
     let summary = summarize_setup_report(model, report);
     let mut status_line = summary.status_line;
+    // Files of an earlier version that stayed where they were: RABBIT no
+    // longer keeps track of them, and that version can't be restored.
+    // Show details lists each one with why.
+    let localizer = localizer_from_options(&model.bootstrap_options).ok();
+    if let Some(hint) = left_in_place_hint(localizer.as_ref(), report) {
+        status_line.push_str("\n\n");
+        status_line.push_str(&hint);
+    }
     if osara_keymap_needs_merge(request, report) {
         // In the status line, which the Done page shows and reads out, not
         // in the details behind "Show details": it is the one thing left
