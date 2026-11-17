@@ -9,8 +9,9 @@
 //! The only edits are selecting a language pack, which REAPER stores as
 //! `langpack=<file name>` under `[REAPER]` (verified against real installs;
 //! `<>` is REAPER's "no language pack" sentinel), setting it back to `<>`
-//! when an uninstall removed the selected pack, and putting the old value
-//! back when that pack is restored.
+//! when an uninstall removed the selected pack, putting the old value back
+//! when that pack is restored, and switching it to an earlier version's
+//! own file when a restore goes back to that version of the selected pack.
 
 use std::fs;
 use std::path::Path;
@@ -119,6 +120,25 @@ pub fn clear_lang_pack_if_selected(
     file_names: &[String],
     ignore_case: bool,
 ) -> Result<Option<String>> {
+    switch_lang_pack_if_selected(resource_path, file_names, LANGPACK_NONE, ignore_case)
+}
+
+/// Set `langpack=` to `value` when it names one of `file_names`, language
+/// pack files that are about to leave `LangPack/`: an uninstall sets it to
+/// `<>` (see [`clear_lang_pack_if_selected`]), and going back to an earlier
+/// version of a language pack sets it to that version's own file. Returns
+/// the value it replaced, exactly as written, or `None` when it changed
+/// nothing because the file or the line is missing, says `<>`, or names
+/// another pack: a pack the user picked is theirs.
+///
+/// Lossless like [`select_lang_pack`]: only that one line changes. On
+/// Windows, whose file names ignore case, `ignore_case` should be set.
+pub fn switch_lang_pack_if_selected(
+    resource_path: &Path,
+    file_names: &[String],
+    value: &str,
+    ignore_case: bool,
+) -> Result<Option<String>> {
     let ini_path = resource_path.join(REAPER_INI_RELATIVE_PATH);
     if !ini_path.is_file() {
         return Ok(None);
@@ -127,14 +147,7 @@ pub fn clear_lang_pack_if_selected(
     let Some(current) = current_lang_pack(&decoded.text) else {
         return Ok(None);
     };
-    let removed = file_names.iter().any(|name| {
-        if ignore_case {
-            name.to_lowercase() == current.to_lowercase()
-        } else {
-            *name == current
-        }
-    });
-    if !removed {
+    if !lang_pack_is_one_of(&current, file_names, ignore_case) {
         return Ok(None);
     }
     let newline = if decoded.text.contains("\r\n") {
@@ -142,11 +155,28 @@ pub fn clear_lang_pack_if_selected(
     } else {
         "\n"
     };
-    let Some((text, _)) = rewrite_with_lang_pack(&decoded.text, LANGPACK_NONE, newline) else {
+    let Some((text, _)) = rewrite_with_lang_pack(&decoded.text, value, newline) else {
         return Ok(None);
     };
     write_text_file_lossless(&ini_path, &text, decoded.encoding)?;
     Ok(raw_lang_pack(&decoded.text).map(str::to_string))
+}
+
+/// Whether `value`, a `langpack=` value, names one of `file_names`. Case
+/// counts unless `ignore_case` is set, as on Windows. `<>` and an empty
+/// value name no pack.
+pub fn lang_pack_is_one_of(value: &str, file_names: &[String], ignore_case: bool) -> bool {
+    let value = value.trim();
+    if value.is_empty() || value == LANGPACK_NONE {
+        return false;
+    }
+    file_names.iter().any(|name| {
+        if ignore_case {
+            name.to_lowercase() == value.to_lowercase()
+        } else {
+            name == value
+        }
+    })
 }
 
 /// Put `value` back as the `langpack=` value, but only while the line still
@@ -422,6 +452,58 @@ mod tests {
             clear_lang_pack_if_selected(resource, &["<>".to_string()], true).unwrap(),
             None
         );
+    }
+
+    /// Going back to an earlier version of a language pack switches REAPER
+    /// to that version's file only while the setting names a file that
+    /// leaves: another pack, "none" and a missing line or file stay, and
+    /// only that line changes.
+    #[test]
+    fn switches_the_language_only_when_it_names_a_file_that_leaves() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path();
+        let ini = resource.join(REAPER_INI_RELATIVE_PATH);
+        let leaving = vec!["es_MX.ReaperLangPack".to_string()];
+        let switch = |ignore_case| {
+            switch_lang_pack_if_selected(resource, &leaving, "es_ES.ReaperLangPack", ignore_case)
+                .unwrap()
+        };
+        assert_eq!(switch(true), None, "no reaper.ini");
+        assert!(!ini.exists(), "no reaper.ini is created");
+
+        let original = "[REAPER]\r\nwnd_state=1\r\nlangpack=ES_mx.reaperlangpack\r\nlast=x\r\n";
+        std::fs::write(&ini, original).unwrap();
+        assert_eq!(switch(false), None, "case counts where file names do");
+        assert_eq!(std::fs::read_to_string(&ini).unwrap(), original);
+        assert_eq!(switch(true).as_deref(), Some("ES_mx.reaperlangpack"));
+        assert_eq!(
+            std::fs::read_to_string(&ini).unwrap(),
+            "[REAPER]\r\nwnd_state=1\r\nlangpack=es_ES.ReaperLangPack\r\nlast=x\r\n"
+        );
+
+        for kept in [
+            "[REAPER]\nlangpack=de_DE.ReaperLangPack\n",
+            "[REAPER]\nlangpack=<>\n",
+            "[REAPER]\nwnd_state=1\n",
+            "[other]\nlangpack=es_MX.ReaperLangPack\n",
+        ] {
+            std::fs::write(&ini, kept).unwrap();
+            assert_eq!(switch(true), None, "{kept:?}");
+            assert_eq!(std::fs::read_to_string(&ini).unwrap(), kept);
+        }
+    }
+
+    /// A `langpack=` value names a file by its name, in any case where
+    /// file names ignore it; `<>` and an empty value name none.
+    #[test]
+    fn a_setting_names_a_file_by_its_name() {
+        let names = vec!["es_MX.ReaperLangPack".to_string(), "<>".to_string()];
+        assert!(lang_pack_is_one_of("es_MX.ReaperLangPack", &names, false));
+        assert!(!lang_pack_is_one_of("ES_MX.reaperlangpack", &names, false));
+        assert!(lang_pack_is_one_of("ES_MX.reaperlangpack", &names, true));
+        assert!(!lang_pack_is_one_of("<>", &names, true));
+        assert!(!lang_pack_is_one_of("", &names, true));
+        assert!(!lang_pack_is_one_of("es_ES.ReaperLangPack", &names, true));
     }
 
     /// A restore puts the value back only while REAPER still says "no

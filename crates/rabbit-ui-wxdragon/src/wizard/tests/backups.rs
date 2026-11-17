@@ -90,6 +90,8 @@ pub(super) fn backup(
         size: 4 * MB,
         version: None,
         replaced_by: None,
+        variant: None,
+        replaced_by_variant: None,
         with_settings: None,
         keymap_origin: None,
         status,
@@ -457,12 +459,19 @@ fn swap(package_id: &str, earlier: Option<&str>, current: Option<&str>) -> Swapp
         package_id: package_id.to_string(),
         version: earlier.map(version),
         replaced_version: current.map(version),
+        variant: None,
+        replaced_variant: None,
         entry: SwappedEntry::Replaced,
         uninstall_needs_reinstall: false,
         undeclined: false,
         moved_out: Vec::new(),
         changed_left: Vec::new(),
         left_in_place: Vec::new(),
+        langpack: None,
+        langpack_before: None,
+        langpack_restored: false,
+        langpack_error: None,
+        langpack_reaper_may_run: false,
     }
 }
 
@@ -630,8 +639,9 @@ fn headings_explain_what_each_group_is_for() {
             "Software you uninstalled\n\nWhen RABBIT uninstalls a package, it moves the files here \
              instead of deleting them. Each one is the only copy. What a package's own \
              uninstaller, the Trash or an administrator's password removed isn't here.",
-            "Earlier versions\n\nWhen an update replaces a package's files, RABBIT keeps the old \
-             ones here. Updates by a package's own installer, such as REAPER's, keep none.",
+            "Earlier versions\n\nWhen an update replaces a package's files, or no longer installs \
+             some of them, RABBIT keeps the old ones here. Updates by a package's own installer, \
+             such as REAPER's, keep none.",
             "Key maps\n\nWhen OSARA's key map replaces yours, RABBIT keeps the old one here. \
              Usually only the oldest is your own.",
             "Other backups\n\nRABBIT can't restore these here. You can delete them.",
@@ -921,7 +931,7 @@ fn details_say_why_for_every_status_in_both_choices() {
     let sws_lost = "If you delete this backup, RABBIT can't bring this copy back.";
     let reapack_start = "ReaPack 1.2.4, an earlier version.\n\
                          An update to 1.2.5 replaced it on November 3, 2026, 9:12 AM.\n\
-                         It holds the files that were replaced, 2 MB.\n";
+                         It holds the files of this version that were replaced or are no longer installed, 2 MB.\n";
     let other_start = "A backup with no record of what it holds, as an earlier RABBIT left one \
                        when it stopped early.\n\
                        RABBIT can't tell when this backup was made.\n\
@@ -962,13 +972,13 @@ fn details_say_why_for_every_status_in_both_choices() {
             ),
             BackupStatus::VersionUnknown => "ReaPack, an earlier version.\n\
                  An update replaced it on November 3, 2026, 9:12 AM.\n\
-                 It holds the files that were replaced, 2 MB.\n\
+                 It holds the files of this version that were replaced or are no longer installed, 2 MB.\n\
                  RABBIT doesn't know which version of ReaPack it holds.\n\
                  If you delete this backup, you can't go back to this copy."
                 .to_string(),
             BackupStatus::OtherLanguagePack => "REAPER in German 1.0, an earlier version.\n\
                  An update to 1.1 replaced it on November 3, 2026, 9:12 AM.\n\
-                 It holds the files that were replaced, 4 MB.\n\
+                 It holds the files of this version that were replaced or are no longer installed, 4 MB.\n\
                  RABBIT doesn't bring REAPER in German back while this is installed: REAPER in \
                  French. Installing one of them removes the other.\n\
                  If you delete this backup, you can't go back to 1.0."
@@ -1270,7 +1280,7 @@ fn details_say_what_when_what_it_holds_and_what_restoring_and_deleting_do() {
         details(&list, "ReaPack 1.2.4"),
         "ReaPack 1.2.4, an earlier version.\n\
          An update to 1.2.5 replaced it on November 3, 2026, 9:12 AM.\n\
-         It holds the files that were replaced, 2 MB.\n\
+         It holds the files of this version that were replaced or are no longer installed, 2 MB.\n\
          Restoring goes back to 1.2.4 and keeps the version you have now as a backup, so you \
          can go forward again. Your settings stay as they are.\n\
          If you delete this backup, you can't go back to 1.2.4."
@@ -4083,5 +4093,444 @@ fn both_backup_reviews_name_the_ticks_on_the_other_two_tabs() {
             !lines.iter().any(|line| line.contains("Backups tab")),
             "{lines:#?}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Variants.
+// ---------------------------------------------------------------------------
+
+/// The Spanish language pack 1.0 in its es_ES variant, which a switch to the
+/// es_MX variant of the same version replaced on November 3.
+pub(super) fn spanish_es() -> BackupEntry {
+    BackupEntry {
+        version: Some(version("1.0")),
+        replaced_by: Some(version("1.0")),
+        variant: Some("rae".to_string()),
+        replaced_by_variant: Some("pma".to_string()),
+        ..backup(
+            package("unix-1793697120", "langpack-es"),
+            BackupGroup::EarlierVersions,
+            Some(NOV_3_0912),
+        )
+    }
+}
+
+/// The Spanish pack's es_MX variant, which going back to es_ES replaced on
+/// November 9.
+fn spanish_mx() -> BackupEntry {
+    BackupEntry {
+        version: Some(version("1.0")),
+        replaced_by: Some(version("1.0")),
+        variant: Some("pma".to_string()),
+        replaced_by_variant: Some("rae".to_string()),
+        set_kind: BackupSetKind::BeforeRestore,
+        ..backup(
+            package("restore-unix-1794233100-before-restore", "langpack-es"),
+            BackupGroup::EarlierVersions,
+            Some(NOV_9_1405),
+        )
+    }
+}
+
+/// The explanation below a row's heading in its details.
+fn explanation_of(list: &WizardBackupList, name: &str) -> String {
+    let row = &list.rows[index_of(list, name)];
+    row.details
+        .split_once("\n\n")
+        .map(|(_, explanation)| explanation.to_string())
+        .unwrap()
+}
+
+/// A package that comes in variants names the variant of each version in
+/// its row and details, so the same version in two variants doesn't read
+/// as "1.0 replaced by 1.0": the version that replaced it is named by its
+/// variant alone. Restoring an earlier language pack says REAPER's
+/// language follows it. A package without variants reads as before.
+#[test]
+fn rows_and_details_name_the_variant_of_a_package_that_comes_in_variants() {
+    let list = backup_list(vec![spanish_es(), spanish_mx(), reapack()]);
+    let es = "REAPER in Spanish 1.0, REAPER Accesible español (es_ES)";
+    let mx = "REAPER in Spanish 1.0, Team PMA (es_MX)";
+
+    assert_eq!(
+        list.rows[index_of(&list, es)].summary,
+        "REAPER in Spanish 1.0, REAPER Accesible español (es_ES): Won't touch. Replaced by Team \
+         PMA (es_MX) on November 3, 2026, 9:12 AM, 4 MB"
+    );
+    assert_eq!(
+        list.rows[index_of(&list, mx)].summary,
+        "REAPER in Spanish 1.0, Team PMA (es_MX): Won't touch. Replaced by REAPER Accesible \
+         español (es_ES) on November 9, 2026, 2:05 PM, 4 MB"
+    );
+    assert_eq!(
+        explanation_of(&list, es),
+        "REAPER in Spanish 1.0, REAPER Accesible español (es_ES), an earlier version.\n\
+         An update to Team PMA (es_MX) replaced it on November 3, 2026, 9:12 AM.\n\
+         It holds the files of this version that were replaced or are no longer installed, \
+         4 MB.\n\
+         Restoring goes back to 1.0, REAPER Accesible español (es_ES) and keeps the version you \
+         have now as a backup, so you can go forward again. If REAPER uses the version you have \
+         now for its language, it uses this one instead.\n\
+         If you delete this backup, you can't go back to 1.0, REAPER Accesible español (es_ES)."
+    );
+    assert!(
+        explanation_of(&list, mx).contains(
+            "Going back to REAPER Accesible español (es_ES) replaced it on November 9, 2026, \
+             2:05 PM."
+        ),
+        "{}",
+        explanation_of(&list, mx)
+    );
+    assert_eq!(
+        list.rows[index_of(&list, "ReaPack 1.2.4")].summary,
+        "ReaPack 1.2.4: Won't touch. Replaced by 1.2.5 on November 3, 2026, 9:12 AM, 2 MB"
+    );
+    assert!(
+        explanation_of(&list, "ReaPack 1.2.4").contains("Your settings stay as they are."),
+        "{}",
+        explanation_of(&list, "ReaPack 1.2.4")
+    );
+}
+
+/// The Spanish pack's real versions are digests of its download, the same
+/// for both variants. A switch between them says the digest once, in the
+/// row's own name, and names the other side by its variant alone, in the
+/// row, Review and Done alike.
+#[test]
+fn a_switch_within_one_digest_version_says_the_digest_once() {
+    let digest = "h3fa9b2c4d1e0";
+    let entry = BackupEntry {
+        version: Some(version(digest)),
+        replaced_by: Some(version(digest)),
+        ..spanish_es()
+    };
+    let mut list = backup_list(vec![entry]);
+    let name = "REAPER in Spanish h3fa9b2c4d1e0, REAPER Accesible español (es_ES)";
+    assert_eq!(
+        list.rows[1].summary,
+        format!(
+            "{name}: Won't touch. Replaced by Team PMA (es_MX) on November 3, 2026, 9:12 AM, 4 MB"
+        )
+    );
+
+    tick(&mut list, name, BackupChoice::Restore);
+    let items = backup_restore_items(&list);
+    let mut plan = spanish_plan(&items[0], PlannedLanguage::Set);
+    if let Some(swap) = &mut plan.swap {
+        swap.version = Some(version(digest));
+        swap.replaced_version = Some(version(digest));
+    }
+    let plan = quick_plan(vec![plan], Vec::new());
+    let review = build_backup_restore_review(&en(), Some(&target(true)), &list, Some(&plan), &[]);
+    let line = "REAPER in Spanish goes back from Team PMA (es_MX) to REAPER Accesible español \
+                (es_ES). RABBIT keeps Team PMA (es_MX) as a backup.";
+    assert!(
+        review.lines.iter().any(|candidate| candidate == line),
+        "{:#?}",
+        review.lines
+    );
+    assert!(
+        review.lines.iter().all(|line| !line.contains(digest)),
+        "{:#?}",
+        review.lines
+    );
+}
+
+/// The version that replaced it names its variant only where that differs,
+/// as after an update within one variant, and with its version where that
+/// differs too; a set from before the variants were recorded names none
+/// for the version that replaced it; and a version RABBIT can't tell still
+/// names its variant.
+#[test]
+fn the_replacing_variant_is_named_only_where_it_differs() {
+    let same_variant = BackupEntry {
+        replaced_by: Some(version("1.1")),
+        replaced_by_variant: Some("rae".to_string()),
+        ..spanish_es()
+    };
+    let list = backup_list(vec![same_variant]);
+    assert_eq!(
+        list.rows[1].summary,
+        "REAPER in Spanish 1.0, REAPER Accesible español (es_ES): Won't touch. Replaced by 1.1 \
+         on November 3, 2026, 9:12 AM, 4 MB"
+    );
+
+    let both_differ = BackupEntry {
+        replaced_by: Some(version("1.1")),
+        ..spanish_es()
+    };
+    let list = backup_list(vec![both_differ]);
+    assert_eq!(
+        list.rows[1].summary,
+        "REAPER in Spanish 1.0, REAPER Accesible español (es_ES): Won't touch. Replaced by 1.1, \
+         Team PMA (es_MX) on November 3, 2026, 9:12 AM, 4 MB"
+    );
+
+    let older_set = BackupEntry {
+        replaced_by_variant: None,
+        ..spanish_es()
+    };
+    let list = backup_list(vec![older_set]);
+    assert_eq!(
+        list.rows[1].summary,
+        "REAPER in Spanish 1.0, REAPER Accesible español (es_ES): Won't touch. Replaced by 1.0 \
+         on November 3, 2026, 9:12 AM, 4 MB"
+    );
+
+    let unknown_version = BackupEntry {
+        version: None,
+        replaced_by: None,
+        variant: Some("pma".to_string()),
+        replaced_by_variant: None,
+        ..spanish_es()
+    };
+    let list = backup_list(vec![unknown_version]);
+    assert_eq!(list.rows[1].name, "REAPER in Spanish, Team PMA (es_MX)");
+}
+
+/// In every language, the rows of the same version in two variants read
+/// apart, each names its own variant and the one that replaced it in that
+/// language's words, the details say that REAPER's language follows the
+/// earlier version, and rows and details read whole.
+#[test]
+fn variants_are_named_in_every_locale() {
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let list = list_in(&localizer, vec![spanish_es(), spanish_mx()]);
+        let rows: Vec<&BackupRow> = list.rows.iter().filter(|row| row.entry.is_some()).collect();
+        assert_eq!(rows.len(), 2, "{locale}");
+        assert_ne!(rows[0].name, rows[1].name, "{locale}");
+        assert_ne!(rows[0].summary, rows[1].summary, "{locale}");
+        let rae = localizer.text("package-langpack-es-variant-rae").value;
+        let pma = localizer.text("package-langpack-es-variant-pma").value;
+        for row in rows {
+            assert!(
+                row.name.contains(&rae) || row.name.contains(&pma),
+                "{locale}"
+            );
+            assert!(row.summary.contains(&rae), "{locale}: {}", row.summary);
+            assert!(row.summary.contains(&pma), "{locale}: {}", row.summary);
+            assert!(row.details.contains(&rae), "{locale}: {}", row.details);
+            assert!(row.details.contains(&pma), "{locale}: {}", row.details);
+            assert_reads_here(locale, &row.summary);
+            assert_reads_here(locale, &row.details);
+        }
+        let version = say(
+            &localizer,
+            "wizard-backups-version-variant",
+            &[("version", "1.0".into()), ("variant", (&rae).into())],
+        );
+        let restoring = say(
+            &localizer,
+            "wizard-backups-details-restore-earlier-language-pack",
+            &[("version", (&version).into())],
+        );
+        assert_reads_here(locale, &restoring);
+        let es = list
+            .rows
+            .iter()
+            .find(|row| row.name.contains(&rae))
+            .unwrap();
+        assert!(es.details.contains(&restoring), "{locale}: {}", es.details);
+        if locale != DEFAULT_LOCALE {
+            assert_ne!(
+                localizer
+                    .text("wizard-backups-details-restore-earlier-language-pack")
+                    .value,
+                en().text("wizard-backups-details-restore-earlier-language-pack")
+                    .value,
+                "{locale}"
+            );
+        }
+    }
+}
+
+/// The texts on earlier versions say, in every language, that they hold
+/// what an update no longer installs too, not only what it replaced: each
+/// reads, is that language's own, and has that language's words for "no
+/// longer installs".
+#[test]
+fn the_earlier_versions_texts_read_in_every_locale() {
+    let english = en();
+    let keys = [
+        "wizard-backups-group-versions-details",
+        "wizard-backups-empty-details",
+        "wizard-backups-details-holds-replaced",
+    ];
+    // Each language's words for what an update no longer installs.
+    let no_longer = |locale: &str| -> &[&str] {
+        match locale {
+            "de-DE" => &["nicht mehr installiert"],
+            "es-ES" => &["deja de instalar", "ya no se instalan"],
+            "fr-FR" => &["n'en installe plus", "ne sont plus installés"],
+            "it-IT" => &["non ne installa più", "non vengono più installati"],
+            "pt-BR" => &["deixa de instalar", "não são mais instalados"],
+            _ => &["no longer install"],
+        }
+    };
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let list = list_in(&localizer, vec![spanish_es()]);
+        let heading = &list.rows[0];
+        assert!(heading.entry.is_none());
+        assert_reads_here(locale, &heading.details);
+        let size = backup_size_text(&localizer, 4 * MB);
+        let holds = say(
+            &localizer,
+            "wizard-backups-details-holds-replaced",
+            &[("size", (&size).into())],
+        );
+        assert_reads_here(locale, &holds);
+        assert!(list.rows[1].details.contains(&holds), "{locale}");
+        let empty = list_in(&localizer, Vec::new());
+        let (_, details) = empty.placeholder(&localizer).unwrap();
+        assert_reads_here(locale, &details);
+        for key in keys {
+            let value = localizer.text(key).value;
+            assert!(
+                no_longer(locale).iter().any(|words| value.contains(words)),
+                "{locale}: {key}: {value}"
+            );
+            if locale != DEFAULT_LOCALE {
+                assert_ne!(value, english.text(key).value, "{locale}: {key}");
+            }
+        }
+    }
+}
+
+/// What a quick plan said of REAPER's language for going back from the
+/// es_MX variant to es_ES.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PlannedLanguage {
+    /// It goes to es_ES with the file.
+    Set,
+    /// It stays, as REAPER uses another pack.
+    Unchanged,
+    /// The quick plan couldn't read REAPER's settings.
+    Unreadable,
+}
+
+/// What a quick plan of going back from the es_MX variant to es_ES reports:
+/// the variants, and REAPER's language as `language` says.
+fn spanish_plan(item: &RestoreItem, language: PlannedLanguage) -> RestoreReportItem {
+    let mut plan = planned(item);
+    let set = language == PlannedLanguage::Set;
+    plan.swap = Some(SwappedPackage {
+        variant: Some("rae".to_string()),
+        replaced_variant: Some("pma".to_string()),
+        langpack: Some("es_ES.ReaperLangPack".to_string()),
+        langpack_before: set.then(|| "es_MX.ReaperLangPack".to_string()),
+        langpack_restored: set,
+        langpack_error: (language == PlannedLanguage::Unreadable)
+            .then(|| "C:/REAPER/reaper.ini: Access is denied. (os error 5)".to_string()),
+        ..swap("langpack-es", Some("1.0"), Some("1.0"))
+    });
+    plan
+}
+
+/// The lines Review lists under "Notes".
+fn notes_of(review: &WizardRestoreReviewPreview) -> Vec<String> {
+    review
+        .lines
+        .iter()
+        .skip_while(|line| *line != "Notes")
+        .skip(1)
+        .cloned()
+        .collect()
+}
+
+/// Review names both variants of going back within one version, and says
+/// REAPER's language goes to the earlier variant's file, stays as it is
+/// when REAPER doesn't use the newer one's, or may stay when RABBIT
+/// couldn't read REAPER's settings, in every language.
+#[test]
+fn restore_review_names_the_variants_and_reapers_language() {
+    let mut list = backup_list(vec![spanish_es()]);
+    let es = "REAPER in Spanish 1.0, REAPER Accesible español (es_ES)";
+    tick(&mut list, es, BackupChoice::Restore);
+    let items = backup_restore_items(&list);
+
+    let plan = quick_plan(
+        vec![spanish_plan(&items[0], PlannedLanguage::Set)],
+        Vec::new(),
+    );
+    let review = build_backup_restore_review(&en(), Some(&target(true)), &list, Some(&plan), &[]);
+    assert!(
+        review.lines.iter().any(|line| line
+            == "REAPER in Spanish goes back from Team PMA (es_MX) to REAPER Accesible español \
+                (es_ES). RABBIT keeps Team PMA (es_MX) as a backup."),
+        "{:#?}",
+        review.lines
+    );
+    assert_eq!(
+        notes_of(&review),
+        ["REAPER's language goes back to es_ES.ReaperLangPack."]
+    );
+    assert!(review.can_restore);
+
+    for (language, note) in [
+        (
+            PlannedLanguage::Unchanged,
+            "REAPER's language stays as it is.",
+        ),
+        (
+            PlannedLanguage::Unreadable,
+            "RABBIT can't read REAPER's settings now, so REAPER's language may stay as it is.",
+        ),
+    ] {
+        let plan = quick_plan(vec![spanish_plan(&items[0], language)], Vec::new());
+        let review =
+            build_backup_restore_review(&en(), Some(&target(true)), &list, Some(&plan), &[]);
+        assert_eq!(notes_of(&review), [note], "{language:?}");
+        assert!(review.can_restore, "{language:?}");
+    }
+
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let mut list = list_in(&localizer, vec![spanish_es()]);
+        apply_backup_checkbox(&mut list.rows, 1, BackupChoice::Restore, true);
+        let items = backup_restore_items(&list);
+        let pma = localizer.text("package-langpack-es-variant-pma").value;
+        for language in [
+            PlannedLanguage::Set,
+            PlannedLanguage::Unchanged,
+            PlannedLanguage::Unreadable,
+        ] {
+            let plan = quick_plan(vec![spanish_plan(&items[0], language)], Vec::new());
+            let review = build_backup_restore_review(
+                &localizer,
+                Some(&target(true)),
+                &list,
+                Some(&plan),
+                &[],
+            );
+            assert!(
+                review.lines.iter().any(|line| line.contains(&pma)),
+                "{locale}: {:#?}",
+                review.lines
+            );
+            let key = match language {
+                PlannedLanguage::Set => "wizard-review-restore-language-back",
+                PlannedLanguage::Unchanged => "wizard-review-restore-language-unchanged",
+                PlannedLanguage::Unreadable => "wizard-review-restore-language-unreadable",
+            };
+            let note = say(&localizer, key, &[("file", "es_ES.ReaperLangPack".into())]);
+            assert!(
+                review.lines.contains(&note),
+                "{locale}: {:#?}",
+                review.lines
+            );
+            if locale != DEFAULT_LOCALE {
+                assert_ne!(
+                    localizer.text(key).value,
+                    en().text(key).value,
+                    "{locale}: {key}"
+                );
+            }
+            for line in review.lines.iter().filter(|line| !line.is_empty()) {
+                assert_reads_here(locale, line);
+            }
+        }
     }
 }

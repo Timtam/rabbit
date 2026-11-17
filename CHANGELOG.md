@@ -142,7 +142,16 @@ from this file and posts it as the GitHub release body.
   when their names change, or the Spanish language pack's old file after a
   switch between es_ES and es_MX, so that version comes back whole; the
   install's output says where each went, or why one that couldn't be
-  moved stayed where it was.
+  moved stayed where it was. The wizard's last page says how many files
+  stayed, and **Show details** names each file that moved or stayed, and
+  why. Going back to the other Spanish translation, or any earlier version
+  of a language pack whose file has another name, sets REAPER's language
+  to that version's file too, while REAPER used the newer one's, and going
+  forward again sets it back; a language you picked since, or none, stays,
+  and so does the language with `--allow-reaper-running`; the command and
+  the wizard say so. `rabbit backups` and the **Backups** tab name the
+  variant of each version of a package that comes in variants, so the same
+  version in two variants reads apart.
 - Restoring a key map from a backup now puts your old key map back and
   keeps the scripts ReaPack registered since in REAPER's Actions list: the
   script lines of the key map it replaces that the old one doesn't have go

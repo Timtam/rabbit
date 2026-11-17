@@ -3731,6 +3731,32 @@ fn write_backup_overview_footer(out: &mut String, overview: &BackupOverview) {
     }
 }
 
+/// A variant of `package_id`, such as one of the Spanish language pack's
+/// two OSARA translations, by its English name, for the backups listing
+/// and a restore's output. One RABBIT doesn't know is named by its id.
+fn variant_name(package_id: &str, variant_id: &str) -> String {
+    static NAMES: std::sync::OnceLock<std::collections::BTreeMap<(String, String), String>> =
+        std::sync::OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        let english = Localizer::embedded(DEFAULT_LOCALE).ok();
+        embedded_package_manifest()
+            .packages
+            .into_iter()
+            .flat_map(|spec| {
+                let english = english.as_ref();
+                spec.variants.into_iter().filter_map(move |variant| {
+                    let name = english?.text(&variant.display_name_key);
+                    (!name.missing).then(|| ((spec.id.clone(), variant.id), name.value))
+                })
+            })
+            .collect()
+    });
+    names
+        .get(&(package_id.to_string(), variant_id.to_string()))
+        .cloned()
+        .unwrap_or_else(|| one_line(variant_id))
+}
+
 /// Each package's name, by its id, for the backups listing. A package
 /// RABBIT no longer knows is named by its id.
 fn package_names() -> std::collections::BTreeMap<String, String> {
@@ -3771,8 +3797,8 @@ fn backup_set_kind_text(set: &BackupSetOverview) -> String {
     }
 }
 
-/// What a backup holds: the package and its version, the key map, or the
-/// whole set.
+/// What a backup holds: the package and its version, with its variant for
+/// a package that comes in variants, the key map, or the whole set.
 fn backup_label(entry: &BackupEntry, names: &std::collections::BTreeMap<String, String>) -> String {
     match &entry.item {
         BackupItem::Package { package_id, .. } => {
@@ -3785,11 +3811,32 @@ fn backup_label(entry: &BackupEntry, names: &std::collections::BTreeMap<String, 
             if let Some(version) = &entry.version {
                 let _ = write!(label, " {}", one_line(&version.to_string()));
             }
+            if let Some(variant) = &entry.variant {
+                let _ = write!(label, " as {}", variant_name(package_id, variant));
+            }
             if entry.with_settings == Some(true) {
                 label.push_str(" with its settings");
             }
             if let Some(newer) = &entry.replaced_by {
-                let _ = write!(label, ", replaced by {}", one_line(&newer.to_string()));
+                // The variant of the version that replaced it, where it
+                // differs; alone when the same version came in another
+                // variant, so the same version isn't said twice.
+                let newer_variant = entry
+                    .replaced_by_variant
+                    .as_ref()
+                    .filter(|variant| entry.variant.as_ref() != Some(*variant))
+                    .map(|variant| variant_name(package_id, variant));
+                let _ = match newer_variant {
+                    Some(variant) if entry.version.as_ref() == Some(newer) => {
+                        write!(label, ", replaced by {variant}")
+                    }
+                    Some(variant) => write!(
+                        label,
+                        ", replaced by {} as {variant}",
+                        one_line(&newer.to_string())
+                    ),
+                    None => write!(label, ", replaced by {}", one_line(&newer.to_string())),
+                };
             }
             label
         }
@@ -4215,14 +4262,30 @@ fn write_swapped_package(
     } else {
         ("Went", "changed", "got")
     };
+    // A package that comes in variants names them, so the same version
+    // number in another variant reads apart. Going back between two
+    // variants of the same version names only the variants.
+    let with_variant = |version: &rabbit_core::version::Version, variant: Option<&String>| {
+        let version = one_line(&version.to_string());
+        match variant.map(|variant| variant_name(&swap.package_id, variant)) {
+            Some(variant) if variants_only(swap) => variant,
+            Some(variant) => format!("{version} as {variant}"),
+            None => version,
+        }
+    };
     let from = swap
         .replaced_version
         .as_ref()
-        .map_or_else(String::new, |version| format!(" from {version}"));
-    let version = swap
-        .version
-        .as_ref()
-        .map_or_else(|| "its earlier version".to_string(), ToString::to_string);
+        .map_or_else(String::new, |version| {
+            format!(
+                " from {}",
+                with_variant(version, swap.replaced_variant.as_ref())
+            )
+        });
+    let version = swap.version.as_ref().map_or_else(
+        || "its earlier version".to_string(),
+        |version| with_variant(version, swap.variant.as_ref()),
+    );
     if done {
         let text = match swap.entry {
             SwappedEntry::Replaced => format!(
@@ -4260,6 +4323,9 @@ fn write_swapped_package(
                 "  It {} off the list of packages you uninstalled or turned down.",
                 if dry_run { "would come" } else { "came" }
             );
+        }
+        if let Some(line) = swapped_language_text(swap, dry_run) {
+            let _ = writeln!(out, "  {line}");
         }
     }
     for file in &swap.moved_out {
@@ -4305,6 +4371,75 @@ fn write_swapped_package(
             );
         }
     }
+}
+
+/// Whether `swap` goes back between two variants of the same version, so
+/// the variants alone tell the two apart.
+fn variants_only(swap: &SwappedPackage) -> bool {
+    swap.version.is_some()
+        && swap.version == swap.replaced_version
+        && swap.variant.is_some()
+        && swap.replaced_variant.is_some()
+        && swap.variant != swap.replaced_variant
+}
+
+/// What going back to an earlier version of a language pack did to
+/// REAPER's language, or in a dry run would do, when it moved a language
+/// pack file of the newer version out: set it to the earlier version's
+/// file, or leave it, because it named another pack, `<>` or nothing, or
+/// because REAPER may be open. Each names the files it is about.
+fn swapped_language_text(swap: &SwappedPackage, dry_run: bool) -> Option<String> {
+    let value = one_line(swap.langpack.as_deref()?);
+    // The language pack files that moved out, one of which the setting
+    // had to name.
+    let mut leaving: Vec<String> = swap
+        .moved_out
+        .iter()
+        .filter_map(|file| file.path.file_name()?.to_str())
+        .filter(|name| name.to_ascii_lowercase().ends_with(".reaperlangpack"))
+        .map(one_line)
+        .collect();
+    leaving.dedup();
+    let leaving = if leaving.is_empty() {
+        "the language pack file".to_string()
+    } else {
+        leaving.join(" or ")
+    };
+    let before = swap
+        .langpack_before
+        .as_deref()
+        .map_or_else(|| leaving.clone(), one_line);
+    Some(match &swap.langpack_error {
+        // In a dry run, only reading the setting can have failed.
+        Some(error) if dry_run => format!(
+            "RABBIT couldn't read REAPER's settings ({}), so it can't tell whether REAPER's \
+             language would be set to {value}.",
+            one_line(error)
+        ),
+        Some(error) => format!(
+            "REAPER's language could not be set to {value} ({}). Choose it in REAPER's \
+             preferences.",
+            one_line(error)
+        ),
+        None if swap.langpack_reaper_may_run => format!(
+            "REAPER's language {} as it is, since an open REAPER writes its own setting back \
+             when it quits. Once REAPER is closed, choose {value} in REAPER's preferences.",
+            if dry_run { "would stay" } else { "stays" }
+        ),
+        None if swap.langpack_restored && dry_run => format!(
+            "REAPER's language would be set to {value}: it is {before}, which would move out."
+        ),
+        None if swap.langpack_restored => {
+            format!("REAPER's language is set to {value}: it was {before}, which moved out.")
+        }
+        None if dry_run => format!(
+            "REAPER's language would stay as it is, because it doesn't name {leaving}, which \
+             would move out."
+        ),
+        None => format!(
+            "REAPER's language stays as it is, because it didn't name {leaving}, which moved out."
+        ),
+    })
 }
 
 /// Why a restore of a whole set left a package out, or in a dry run would,
@@ -6364,6 +6499,7 @@ mod tests {
                     ReplacedPackageRecord {
                         receipt: Some(before[package_id].clone()),
                         replaced_by: Some(rabbit_core::version::Version::parse(newer).unwrap()),
+                        ..Default::default()
                     },
                 )
                 .unwrap();
@@ -6501,6 +6637,267 @@ mod tests {
         );
     }
 
+    /// The Spanish language pack switched from its es_ES variant to es_MX at
+    /// the same version, in the folder `resource`, as an update leaves it:
+    /// es_ES in the update's backup set `unix-200`, es_MX installed, and
+    /// REAPER's language set to `langpack`.
+    fn switched_spanish_pack(resource: &std::path::Path, langpack: &str) {
+        use rabbit_core::receipt::{InstallState, InstalledFileReceipt, PackageReceipt};
+        use rabbit_core::rollback::{BackupSetWriter, ReplacedPackageRecord};
+
+        let packs = resource.join("LangPack");
+        std::fs::create_dir_all(&packs).unwrap();
+        let entry = |name: &str, variant: Option<&str>| PackageReceipt {
+            id: "langpack-es".to_string(),
+            version: Some(rabbit_core::version::Version::parse("1.0").unwrap()),
+            source_url: None,
+            source_sha256: None,
+            variant: variant.map(ToString::to_string),
+            channel: None,
+            installed_files: vec![InstalledFileReceipt {
+                path: std::path::Path::new("LangPack").join(name),
+                sha256: Some(rabbit_core::hash::sha256_bytes(b"spanish")),
+                size: Some(7),
+            }],
+            installed_at: None,
+            rabbit_version: None,
+            architecture: None,
+            vendor_added_files: Vec::new(),
+        };
+        std::fs::write(packs.join("es_ES.ReaperLangPack"), b"spanish").unwrap();
+        let mut writer = BackupSetWriter::new(resource, "unix-200", "install-replacement");
+        writer
+            .record_replaced(
+                "langpack-es",
+                ReplacedPackageRecord {
+                    receipt: Some(entry("es_ES.ReaperLangPack", None)),
+                    replaced_by: Some(rabbit_core::version::Version::parse("1.0").unwrap()),
+                    replaced_by_variant: Some("pma".to_string()),
+                    langpack_before: None,
+                },
+            )
+            .unwrap();
+        writer
+            .move_file(
+                Some("langpack-es"),
+                &packs.join("es_ES.ReaperLangPack"),
+                None,
+                false,
+            )
+            .unwrap();
+        std::fs::write(packs.join("es_MX.ReaperLangPack"), b"spanish").unwrap();
+        let mut state = InstallState::default();
+        state.packages.insert(
+            "langpack-es".to_string(),
+            entry("es_MX.ReaperLangPack", Some("pma")),
+        );
+        rabbit_core::receipt::save_install_state(resource, &state).unwrap();
+        std::fs::write(
+            resource.join("reaper.ini"),
+            format!("[REAPER]\r\nlangpack={langpack}\r\nwnd_state=1\r\n"),
+        )
+        .unwrap();
+    }
+
+    /// `rabbit backups` names the variant of each Spanish pack, so the same
+    /// version in two variants reads apart, and the version that replaced
+    /// one by its variant alone. `restore-backup` names the variants too.
+    /// With REAPER allowed to run, as these tests restore, REAPER's language
+    /// stays, and the output says to choose es_ES once REAPER is closed.
+    /// Going forward again while REAPER uses another pack leaves that pack,
+    /// and the output names the file that moved out.
+    #[test]
+    fn backups_and_restore_backup_name_the_variant_and_reapers_language() {
+        use rabbit_core::rollback::RestoreBackupOptions;
+
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        switched_spanish_pack(&resource, "es_MX.ReaperLangPack");
+        let ini = resource.join("reaper.ini");
+        let es_mx = "[REAPER]\r\nlangpack=es_MX.ReaperLangPack\r\nwnd_state=1\r\n";
+
+        let listed =
+            super::backups_text(&rabbit_core::backup_overview::backup_overview(&resource).unwrap());
+        let expected = "  REAPER en español 1.0 as REAPER Accesible español (es_ES), replaced by \
+                        Team PMA (es_MX): can be restored.";
+        assert!(
+            listed.lines().any(|line| line == expected),
+            "{expected:?} missing from:\n{listed}"
+        );
+
+        let options = |dry_run| RestoreBackupOptions {
+            dry_run,
+            allow_reaper_running: true,
+            package_id: Some("langpack-es".to_string()),
+        };
+        let preview =
+            rabbit_core::rollback::restore_backup_set(&resource, "unix-200", &options(true))
+                .unwrap();
+        let text = super::restore_backup_report_text(&preview);
+        for expected in [
+            "  Would go back from Team PMA (es_MX) to REAPER Accesible español (es_ES). Only its \
+             entry in RABBIT's records would change.",
+            "  REAPER's language would stay as it is, since an open REAPER writes its own \
+             setting back when it quits. Once REAPER is closed, choose es_ES.ReaperLangPack in \
+             REAPER's preferences.",
+        ] {
+            assert!(
+                text.lines().any(|line| line == expected),
+                "{expected:?} missing from:\n{text}"
+            );
+        }
+
+        let back =
+            rabbit_core::rollback::restore_backup_set(&resource, "unix-200", &options(false))
+                .unwrap();
+        let text = super::restore_backup_report_text(&back);
+        assert!(
+            text.lines().any(|line| line
+                == "  REAPER's language stays as it is, since an open REAPER writes its own \
+                    setting back when it quits. Once REAPER is closed, choose \
+                    es_ES.ReaperLangPack in REAPER's preferences."),
+            "{text}"
+        );
+        assert_eq!(std::fs::read_to_string(&ini).unwrap(), es_mx);
+        assert!(resource.join("LangPack/es_ES.ReaperLangPack").is_file());
+
+        // Another pack chosen since stays, and the text says so.
+        std::fs::write(&ini, "[REAPER]\r\nlangpack=de_DE.ReaperLangPack\r\n").unwrap();
+        let newer = back.before_restore_set_id.clone().unwrap();
+        let forward =
+            rabbit_core::rollback::restore_backup_set(&resource, &newer, &options(false)).unwrap();
+        let text = super::restore_backup_report_text(&forward);
+        for expected in [
+            "  Went back from REAPER Accesible español (es_ES) to Team PMA (es_MX). Only its \
+             entry in RABBIT's records changed.",
+            "  REAPER's language stays as it is, because it didn't name es_ES.ReaperLangPack, \
+             which moved out.",
+        ] {
+            assert!(
+                text.lines().any(|line| line == expected),
+                "{expected:?} missing from:\n{text}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&ini).unwrap(),
+            "[REAPER]\r\nlangpack=de_DE.ReaperLangPack\r\n"
+        );
+        assert!(resource.join("LangPack/es_MX.ReaperLangPack").is_file());
+    }
+
+    /// Every line `restore-backup` gives on REAPER's language after going
+    /// back to another Spanish variant, in a dry run and a real one: set,
+    /// with the value it replaced; staying, with the file that moved out;
+    /// staying while REAPER may run; and a setting that couldn't be read
+    /// in a dry run, or set in a real one.
+    #[test]
+    fn restore_backup_says_what_happens_to_reapers_language() {
+        use rabbit_core::rollback::{MoveOutAction, MovedOutFile, SwappedEntry, SwappedPackage};
+
+        let swap = SwappedPackage {
+            package_id: "langpack-es".to_string(),
+            version: None,
+            replaced_version: None,
+            variant: None,
+            replaced_variant: None,
+            entry: SwappedEntry::Replaced,
+            uninstall_needs_reinstall: false,
+            undeclined: false,
+            moved_out: vec![MovedOutFile {
+                path: PathBuf::from("REAPER")
+                    .join("LangPack")
+                    .join("es_MX.ReaperLangPack"),
+                backup_path: None,
+                size: 7,
+                sha256: "abc".to_string(),
+                action: MoveOutAction::MovedOut,
+                error: None,
+            }],
+            changed_left: Vec::new(),
+            left_in_place: Vec::new(),
+            langpack: Some("es_ES.ReaperLangPack".to_string()),
+            langpack_before: None,
+            langpack_restored: false,
+            langpack_error: None,
+            langpack_reaper_may_run: false,
+        };
+        let set = SwappedPackage {
+            langpack_before: Some("es_MX.ReaperLangPack".to_string()),
+            langpack_restored: true,
+            ..swap.clone()
+        };
+        let failed = SwappedPackage {
+            langpack_error: Some("access denied".to_string()),
+            ..swap.clone()
+        };
+        let reaper_open = SwappedPackage {
+            langpack_reaper_may_run: true,
+            ..swap.clone()
+        };
+        for (swap, dry_run, expected) in [
+            (
+                &set,
+                true,
+                "REAPER's language would be set to es_ES.ReaperLangPack: it is \
+                 es_MX.ReaperLangPack, which would move out.",
+            ),
+            (
+                &set,
+                false,
+                "REAPER's language is set to es_ES.ReaperLangPack: it was es_MX.ReaperLangPack, \
+                 which moved out.",
+            ),
+            (
+                &swap,
+                true,
+                "REAPER's language would stay as it is, because it doesn't name \
+                 es_MX.ReaperLangPack, which would move out.",
+            ),
+            (
+                &swap,
+                false,
+                "REAPER's language stays as it is, because it didn't name es_MX.ReaperLangPack, \
+                 which moved out.",
+            ),
+            (
+                &reaper_open,
+                true,
+                "REAPER's language would stay as it is, since an open REAPER writes its own \
+                 setting back when it quits. Once REAPER is closed, choose es_ES.ReaperLangPack \
+                 in REAPER's preferences.",
+            ),
+            (
+                &reaper_open,
+                false,
+                "REAPER's language stays as it is, since an open REAPER writes its own setting \
+                 back when it quits. Once REAPER is closed, choose es_ES.ReaperLangPack in \
+                 REAPER's preferences.",
+            ),
+            (
+                &failed,
+                true,
+                "RABBIT couldn't read REAPER's settings (access denied), so it can't tell \
+                 whether REAPER's language would be set to es_ES.ReaperLangPack.",
+            ),
+            (
+                &failed,
+                false,
+                "REAPER's language could not be set to es_ES.ReaperLangPack (access denied). \
+                 Choose it in REAPER's preferences.",
+            ),
+        ] {
+            assert_eq!(
+                super::swapped_language_text(swap, dry_run).as_deref(),
+                Some(expected)
+            );
+        }
+        let other_package = SwappedPackage {
+            langpack: None,
+            ..swap.clone()
+        };
+        assert_eq!(super::swapped_language_text(&other_package, false), None);
+    }
+
     /// A whole update's backup set goes back package by package. When one
     /// package fails, here because another program holds SWS's plug-in
     /// open with no sharing, the others stay restored, and the command
@@ -6562,7 +6959,9 @@ mod tests {
     /// and the install command, shows the same under its package.
     #[test]
     fn install_text_says_where_a_file_the_new_version_no_longer_has_went() {
-        use rabbit_core::install::{InstallFileAction, InstallFileReport, InstallReport};
+        use rabbit_core::install::{
+            InstallFileAction, InstallFileReport, InstallReport, LeftInPlaceReason,
+        };
         use rabbit_core::operation::PackageOperationReport;
         use rabbit_core::preflight::PreflightReport;
 
@@ -6594,6 +6993,7 @@ mod tests {
                     size: 13,
                     sha256: "new".to_string(),
                     warning: None,
+                    left_reason: None,
                 },
                 InstallFileReport {
                     package_id: "reapack".to_string(),
@@ -6604,6 +7004,7 @@ mod tests {
                     size: 13,
                     sha256: "old".to_string(),
                     warning: None,
+                    left_reason: None,
                 },
                 InstallFileReport {
                     package_id: "reapack".to_string(),
@@ -6617,6 +7018,7 @@ mod tests {
                         "Another program has it open, so RABBIT couldn't move it into the backup."
                             .to_string(),
                     ),
+                    left_reason: Some(LeftInPlaceReason::InUse),
                 },
             ],
         };
@@ -10913,6 +11315,7 @@ mod tests {
                 ReplacedPackageRecord {
                     receipt: Some(receipt("reapack", "1.2.4")),
                     replaced_by: Some(rabbit_core::version::Version::parse("1.2.5").unwrap()),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -11575,6 +11978,8 @@ mod tests {
             size: 0,
             version: None,
             replaced_by: None,
+            variant: None,
+            replaced_by_variant: None,
             with_settings: None,
             keymap_origin: None,
             status,

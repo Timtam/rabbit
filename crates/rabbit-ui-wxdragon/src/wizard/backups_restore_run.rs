@@ -33,7 +33,8 @@ use rabbit_core::version::Version;
 
 use super::backups::{
     BackupChoice, BackupRow, RestoreFn, WizardBackupList, and_list, backup_date_text,
-    keymap_origin_selector, local_utc_offset_at, restore_refusal_text, say, text,
+    keymap_origin_selector, local_utc_offset_at, package_backup_name, restore_refusal_text,
+    same_version_other_variant, say, text, version_beside_text,
 };
 use super::backups_run::{push_once, row_label, target_line, unreadable_folder};
 use super::packages::localized_package_display_name;
@@ -682,19 +683,29 @@ fn one_restored_heading(
             &[("backup", (&row.in_sentence).into())],
         ),
         RestoredBackupKind::Earlier { version } => {
-            // The version the run went back to, as RABBIT's records now say.
-            let version = item
+            // The version the run went back to, as RABBIT's records now say,
+            // with its variant for a package that comes in variants, or the
+            // variant alone after going back within one version.
+            let version = match item
                 .and_then(|item| item.swap.as_ref())
-                .and_then(|swap| swap.version.clone())
-                .or_else(|| version.clone());
+                .filter(|swap| swap.version.is_some())
+            {
+                Some(swap) => version_beside_text(
+                    localizer,
+                    &swap.package_id,
+                    (swap.version.as_ref(), swap.variant.as_deref()),
+                    (
+                        swap.replaced_version.as_ref(),
+                        swap.replaced_variant.as_deref(),
+                    ),
+                ),
+                None => version.as_ref().map(ToString::to_string),
+            };
             match version {
                 Some(version) => say(
                     localizer,
                     "wizard-done-restore-status-earlier",
-                    &[
-                        ("package", package.into()),
-                        ("version", (&version.to_string()).into()),
-                    ],
+                    &[("package", package.into()), ("version", (&version).into())],
                 ),
                 None => say(
                     localizer,
@@ -732,6 +743,14 @@ fn restore_notes(
     if item.status == RestoreStatus::Restored {
         notes.extend(language_lines(localizer, item, language_set));
     }
+    // Each package of a whole set of earlier versions that went back.
+    for swap in item
+        .swaps
+        .iter()
+        .filter(|swap| swap.status == RestoreStatus::Restored)
+    {
+        notes.extend(language_lines(localizer, swap, language_set));
+    }
     for swap in restored_swaps(item) {
         notes.extend(swap_lines(localizer, swap));
     }
@@ -755,13 +774,38 @@ fn restored_swaps(item: &RestoreReportItem) -> impl Iterator<Item = &SwappedPack
     )
 }
 
-/// The lines on REAPER's language for a backup that came back.
+/// The lines on REAPER's language for a backup that came back: for a
+/// package an uninstall removed, whether its language went back, and for
+/// an earlier version of a language pack, whether REAPER's language
+/// followed its file.
 fn language_lines(
     localizer: &Localizer,
     item: &RestoreReportItem,
     language_set: &mut bool,
 ) -> Vec<String> {
     let mut lines = Vec::new();
+    if let Some(swap) = &item.swap
+        && let Some(file) = &swap.langpack
+        && !*language_set
+    {
+        let file_argument = [("file", file.into())];
+        lines.push(if swap.langpack_restored {
+            *language_set = true;
+            say(
+                localizer,
+                "wizard-done-restore-language-back",
+                &file_argument,
+            )
+        } else if swap.langpack_error.is_some() {
+            say(
+                localizer,
+                "wizard-done-restore-language-failed",
+                &file_argument,
+            )
+        } else {
+            text(localizer, "wizard-done-restore-language-unchanged")
+        });
+    }
     for package in &item.packages {
         let Some(file) = &package.langpack_before else {
             continue;
@@ -1042,17 +1086,25 @@ fn explain(
     if item.status == RestoreStatus::Restored {
         lines.extend(language_lines(localizer, item, language_set));
     }
-    for package in &item.packages {
-        if let Some(error) = &package.langpack_error {
-            push_once(
-                &mut lines,
-                Some(say(
-                    localizer,
-                    "wizard-summary-error",
-                    &[("message", error.into())],
-                )),
-            );
-        }
+    let language_errors = item
+        .packages
+        .iter()
+        .filter_map(|package| package.langpack_error.as_ref())
+        .chain(
+            item.swap
+                .iter()
+                .filter(|_| item.status == RestoreStatus::Restored)
+                .filter_map(|swap| swap.langpack_error.as_ref()),
+        );
+    for error in language_errors {
+        push_once(
+            &mut lines,
+            Some(say(
+                localizer,
+                "wizard-summary-error",
+                &[("message", error.into())],
+            )),
+        );
     }
     if let Some(line) = left_out_line(localizer, item) {
         lines.push(line);
@@ -1117,18 +1169,21 @@ fn kept_backup_name(
         return text(localizer, "wizard-backups-name-keymap");
     }
     if let Some(swap) = &item.swap {
-        let package = localized_package_display_name(localizer, &swap.package_id);
-        return match &swap.replaced_version {
-            Some(version) => say(
-                localizer,
-                "wizard-backups-name-package",
-                &[
-                    ("package", (&package).into()),
-                    ("version", (&version.to_string()).into()),
-                ],
-            ),
-            None => package,
+        let replaced = (
+            swap.replaced_version.as_ref(),
+            swap.replaced_variant.as_deref(),
+        );
+        // After going back within one version, the variant alone tells the
+        // backup apart.
+        let version = if same_version_other_variant(
+            replaced,
+            (swap.version.as_ref(), swap.variant.as_deref()),
+        ) {
+            None
+        } else {
+            replaced.0
         };
+        return package_backup_name(localizer, &swap.package_id, version, replaced.1);
     }
     text(localizer, "wizard-backups-name-before-restore")
 }

@@ -137,6 +137,7 @@ fn updated_reapack(resource: &Path, earlier: Option<PackageReceipt>) {
             ReplacedPackageRecord {
                 receipt: earlier,
                 replaced_by: Some(version("1.2.5")),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -349,6 +350,7 @@ fn an_earlier_version_comes_back_and_the_newer_one_too() {
         ReplacedPackageRecord {
             receipt: Some(reapack_new()),
             replaced_by: Some(version("1.2.4")),
+            ..Default::default()
         }
     );
     let listed = overview_with(&resource, &BackupEnvironment::AS_USER).unwrap();
@@ -1150,6 +1152,7 @@ fn updated_both(resource: &Path, records: bool) {
                     ReplacedPackageRecord {
                         receipt: Some(earlier),
                         replaced_by: Some(version(newer)),
+                        ..Default::default()
                     },
                 )
                 .unwrap();
@@ -1320,6 +1323,7 @@ fn a_failure_partway_puts_the_newer_version_back_whole() {
                     ],
                 )),
                 replaced_by: Some(version("1.2.5")),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1522,6 +1526,7 @@ fn packages_a_set_of_earlier_versions_cant_put_back_are_refused() {
         ReplacedPackageRecord {
             receipt: None,
             replaced_by: Some(version("2026.1")),
+            ..Default::default()
         },
     );
     save_backup_manifest(&set, &manifest).unwrap();

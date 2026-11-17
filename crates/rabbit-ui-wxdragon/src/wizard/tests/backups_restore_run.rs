@@ -209,6 +209,8 @@ fn reapack_swap(entry: SwappedEntry) -> SwappedPackage {
         package_id: "reapack".to_string(),
         version: Some(version("1.2.4")),
         replaced_version: Some(version("1.2.5")),
+        variant: None,
+        replaced_variant: None,
         entry,
         uninstall_needs_reinstall: removed,
         undeclined: false,
@@ -219,6 +221,11 @@ fn reapack_swap(entry: SwappedEntry) -> SwappedPackage {
         } else {
             Vec::new()
         },
+        langpack: None,
+        langpack_before: None,
+        langpack_restored: false,
+        langpack_error: None,
+        langpack_reaper_may_run: false,
     }
 }
 
@@ -2336,4 +2343,192 @@ fn a_set_changed_since_listing_is_refused_and_nothing_changes() {
          since RABBIT listed it. Start RABBIT again to see the backups as they are now."
     );
     assert_eq!(outcome.report_path, None);
+}
+
+// ---------------------------------------------------------------------------
+// Variants and REAPER's language.
+// ---------------------------------------------------------------------------
+
+/// How REAPER's language ended after going back to the Spanish pack's es_ES
+/// variant.
+#[derive(Clone, Copy, Debug)]
+enum SpanishLanguage {
+    /// Set to es_ES, as REAPER used es_MX.
+    Set,
+    /// Left as it was, as REAPER used another pack, or none.
+    Unchanged,
+    /// Setting it failed.
+    Failed,
+}
+
+/// Going back from the Spanish pack's es_MX variant to es_ES, at the same
+/// version: es_ES came back, es_MX moved into the new backup, and REAPER's
+/// language ended as `language` says.
+fn spanish_restored(restore: &RestoreItem, language: SpanishLanguage) -> RestoreReportItem {
+    let set = matches!(language, SpanishLanguage::Set);
+    RestoreReportItem {
+        actions: vec![action(
+            "LangPack/es_ES.ReaperLangPack",
+            RestoreBackupActionKind::Restored,
+            None,
+        )],
+        before_restore_set_id: Some(BEFORE_RESTORE.to_string()),
+        swap: Some(SwappedPackage {
+            package_id: "langpack-es".to_string(),
+            version: Some(version("1.0")),
+            replaced_version: Some(version("1.0")),
+            variant: Some("rae".to_string()),
+            replaced_variant: Some("pma".to_string()),
+            entry: SwappedEntry::Replaced,
+            uninstall_needs_reinstall: false,
+            undeclined: false,
+            moved_out: vec![MovedOutFile {
+                path: PathBuf::from(format!("{RESOURCE}/LangPack/es_MX.ReaperLangPack")),
+                backup_path: Some(PathBuf::from(
+                    "C:/REAPER/RABBIT/backups/b/LangPack/es_MX.ReaperLangPack",
+                )),
+                size: 7,
+                sha256: "0".repeat(64),
+                action: MoveOutAction::MovedOut,
+                error: None,
+            }],
+            changed_left: Vec::new(),
+            left_in_place: Vec::new(),
+            langpack: Some("es_ES.ReaperLangPack".to_string()),
+            langpack_before: set.then(|| "es_MX.ReaperLangPack".to_string()),
+            langpack_restored: set,
+            langpack_error: matches!(language, SpanishLanguage::Failed)
+                .then(|| "C:/REAPER/reaper.ini: Access is denied. (os error 5)".to_string()),
+            langpack_reaper_may_run: false,
+        }),
+        ..item(restore, RestoreStatus::Restored)
+    }
+}
+
+/// Done names the variant the Spanish pack went back to, alone as both
+/// variants are the same version, says what became of REAPER's language,
+/// and Show details names the variant kept as a backup and why the language
+/// couldn't be set.
+#[test]
+fn going_back_to_another_variant_says_the_variant_and_reapers_language() {
+    let run = one(super::backups::spanish_es());
+    let heading = "REAPER in Spanish is back to REAPER Accesible español (es_ES).";
+    let outcome = |language| {
+        done(
+            &run,
+            Ok(report(vec![spanish_restored(&run.items[0], language)])),
+        )
+    };
+
+    let set = outcome(SpanishLanguage::Set);
+    assert_eq!(set.status, BackupRestoreOutcomeStatus::Restored);
+    assert_eq!(
+        set.status_text,
+        format!("{heading}\n\nREAPER's language is back to es_ES.ReaperLangPack.")
+    );
+    for line in [
+        "  REAPER's language is back to es_ES.ReaperLangPack.".to_string(),
+        "  Moved into the new backup, because the earlier version doesn't have it: \
+         C:/REAPER/LangPack/es_MX.ReaperLangPack"
+            .to_string(),
+        format!(
+            "  What it replaced is kept as a backup on the Backups tab: REAPER in Spanish, Team \
+             PMA (es_MX), from {BEFORE_RESTORE_DATE}."
+        ),
+    ] {
+        assert!(
+            set.detail_lines.contains(&line),
+            "{line:?} not in {:#?}",
+            set.detail_lines
+        );
+    }
+
+    let unchanged = outcome(SpanishLanguage::Unchanged);
+    assert_eq!(
+        unchanged.status_text,
+        format!("{heading}\n\nREAPER's language stays as it is.")
+    );
+
+    let failed = outcome(SpanishLanguage::Failed);
+    assert_eq!(
+        failed.status_text,
+        format!(
+            "{heading}\n\nRABBIT couldn't set REAPER's language back to es_ES.ReaperLangPack. \
+             Show details says why."
+        )
+    );
+    assert!(
+        failed
+            .detail_lines
+            .contains(&"  Error: C:/REAPER/reaper.ini: Access is denied. (os error 5)".to_string()),
+        "{:#?}",
+        failed.detail_lines
+    );
+}
+
+/// A whole set of earlier versions says what became of REAPER's language
+/// for the language pack that went back with it.
+#[test]
+fn a_whole_set_says_reapers_language_for_its_language_pack() {
+    let run = one(super::backups::spanish_es());
+    let mut whole = item(&run.items[0], RestoreStatus::Restored);
+    whole.package_id = None;
+    whole.swaps = vec![spanish_restored(&run.items[0], SpanishLanguage::Set)];
+    let outcome = done(&run, Ok(report(vec![whole])));
+    assert!(
+        outcome
+            .status_text
+            .ends_with("\n\nREAPER's language is back to es_ES.ReaperLangPack."),
+        "{}",
+        outcome.status_text
+    );
+}
+
+/// Every way REAPER's language can end after going back to another variant
+/// reads in every language, Done and Show details, and names the variant.
+#[test]
+fn reapers_language_after_another_variant_reads_in_every_locale() {
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let run = run_of(
+            &localizer,
+            &all_ticked(&localizer, vec![super::backups::spanish_es()]),
+        );
+        let rae = localizer.text("package-langpack-es-variant-rae").value;
+        for (language, key) in [
+            (SpanishLanguage::Set, "wizard-done-restore-language-back"),
+            (
+                SpanishLanguage::Unchanged,
+                "wizard-done-restore-language-unchanged",
+            ),
+            (
+                SpanishLanguage::Failed,
+                "wizard-done-restore-language-failed",
+            ),
+        ] {
+            let outcome = wizard_backup_restore_outcome_at(
+                &localizer,
+                &run,
+                &Ok(report(vec![spanish_restored(&run.items[0], language)])),
+                &utc,
+            );
+            let line = localizer
+                .format(key, &[("file", "es_ES.ReaperLangPack")])
+                .value;
+            assert!(
+                outcome.status_text.contains(&line),
+                "{locale} {language:?}: {}",
+                outcome.status_text
+            );
+            assert!(
+                outcome.heading.contains(&rae),
+                "{locale}: {}",
+                outcome.heading
+            );
+            assert_reads(locale, &outcome.status_text);
+            for line in &outcome.detail_lines {
+                assert_reads(locale, line);
+            }
+        }
+    }
 }

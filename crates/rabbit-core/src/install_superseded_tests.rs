@@ -13,7 +13,7 @@ use tempfile::tempdir;
 
 use super::{
     InstallFileAction, InstallFileReport, InstallOptions, InstallReport, KEYMAP_WARNING,
-    LINK_WARNING, UNTRACKED_NOTE, install_cached_artifacts_within,
+    LINK_WARNING, LeftInPlaceReason, UNTRACKED_NOTE, install_cached_artifacts_within,
 };
 use crate::artifact::{ArtifactDescriptor, ArtifactKind, CachedArtifact};
 use crate::backup_delete::{DeleteItem, DeleteRunOptions, DeleteStatus, delete_backups_with};
@@ -29,6 +29,7 @@ use crate::receipt::{
     InstallState, InstalledFileReceipt, PackageReceipt, load_install_state, save_install_state,
 };
 use crate::rollback::restore_run_tests::snapshot;
+use crate::rollback::restore_seam::{self, Step};
 use crate::rollback::{
     BackupEntryState, BackupEnvironment, BackupManifest, ORIGIN_SIDECAR_SUFFIX,
     OutsideRestoreRules, ReplacedPackageRecord, RestoreBackupOptions, RestoreBackupReport,
@@ -367,6 +368,7 @@ fn an_ffmpeg_update_that_renames_its_dlls_moves_the_old_ones_into_its_backup() {
             ReplacedPackageRecord {
                 receipt: Some(before),
                 replaced_by: Some(version("8.0")),
+                ..Default::default()
             }
         )])
     );
@@ -389,6 +391,7 @@ fn an_ffmpeg_update_that_renames_its_dlls_moves_the_old_ones_into_its_backup() {
     assert_eq!(moved.size, 11);
     assert_eq!(moved.sha256, sha256_bytes(b"avcodec 7.1"));
     assert_eq!(moved.warning, None);
+    assert_eq!(moved.left_reason, None);
 
     let state = load_install_state(&resource).unwrap().unwrap();
     let mut listed: Vec<PathBuf> = state.packages[PACKAGE_FFMPEG]
@@ -462,6 +465,7 @@ fn an_update_that_replaces_nothing_still_records_a_set_for_the_moved_files() {
         ReplacedPackageRecord {
             receipt: Some(before),
             replaced_by: Some(version("1.2.6")),
+            ..Default::default()
         }
     );
     assert_eq!(
@@ -715,16 +719,22 @@ fn a_file_that_cant_be_moved_stays_with_a_warning_and_the_install_succeeds() {
     assert_eq!(left.sha256, sha256_bytes(b"helper"));
     let warning = left.warning.as_deref().unwrap();
     #[cfg(windows)]
-    assert_eq!(
-        warning,
-        format!("{} {UNTRACKED_NOTE}", super::IN_USE_WARNING)
-    );
+    {
+        assert_eq!(
+            warning,
+            format!("{} {UNTRACKED_NOTE}", super::IN_USE_WARNING)
+        );
+        assert_eq!(left.left_reason, Some(LeftInPlaceReason::InUse));
+    }
     #[cfg(unix)]
-    assert!(
-        warning.starts_with("RABBIT couldn't move it into the backup: ")
-            && warning.ends_with(UNTRACKED_NOTE),
-        "{warning}"
-    );
+    {
+        assert!(
+            warning.starts_with("RABBIT couldn't move it into the backup: ")
+                && warning.ends_with(UNTRACKED_NOTE),
+            "{warning}"
+        );
+        assert_eq!(left.left_reason, Some(LeftInPlaceReason::Other));
+    }
     assert_eq!(fs::read(&held_place).unwrap(), b"helper");
     // The other file of the old version moved, and the new one is there.
     assert_eq!(
@@ -954,6 +964,7 @@ fn an_outside_file_goes_under_external_with_its_origin_note() {
         ) && warning.ends_with(UNTRACKED_NOTE),
         "{warning}"
     );
+    assert_eq!(left.left_reason, Some(LeftInPlaceReason::Refused));
     assert!(stray.is_file());
     let link = action_at(&report, &linked);
     assert_eq!(link.action, InstallFileAction::LeftInPlace);
@@ -961,6 +972,7 @@ fn an_outside_file_goes_under_external_with_its_origin_note() {
         link.warning.as_deref(),
         Some(format!("{LINK_WARNING} {UNTRACKED_NOTE}").as_str())
     );
+    assert_eq!(link.left_reason, Some(LeftInPlaceReason::Link));
 }
 
 /// A symbolic link or junction where the previous version had a file is
@@ -1018,6 +1030,7 @@ fn a_link_where_a_recorded_file_was_is_never_followed() {
         let action = action_at(&report, &resource.join(link));
         assert_eq!(action.action, InstallFileAction::LeftInPlace);
         assert_eq!(action.warning.as_deref(), Some(link_warning.as_str()));
+        assert_eq!(action.left_reason, Some(LeftInPlaceReason::Link));
         assert_eq!((action.size, action.sha256.as_str()), (0, ""));
         assert!(
             fs::symlink_metadata(resource.join(link))
@@ -1032,6 +1045,7 @@ fn a_link_where_a_recorded_file_was_is_never_followed() {
         kept.warning.as_deref(),
         Some(format!("It is a folder, not a file, so it isn't moved. {UNTRACKED_NOTE}").as_str())
     );
+    assert_eq!(kept.left_reason, Some(LeftInPlaceReason::Folder));
     assert_eq!(report.backup_manifest_path, None);
     assert!(sets_in(&resource).is_empty());
     // Nothing changed but RABBIT's records, either way.
@@ -1078,6 +1092,15 @@ fn a_language_pack_variant_switch_moves_the_old_name_into_the_backup() {
         manifest.replaced[LANGPACK_ES].receipt.as_ref(),
         Some(&switched.before.packages[LANGPACK_ES])
     );
+    // The set names the variant that replaced it, so the same version
+    // number reads apart.
+    assert_eq!(
+        manifest.replaced[LANGPACK_ES]
+            .replaced_by_variant
+            .as_deref(),
+        Some("pma")
+    );
+    assert_eq!(manifest.replaced[LANGPACK_ES].langpack_before, None);
     assert_eq!(
         files_held(&manifest, LANGPACK_ES),
         [(es_es, b"spanish".to_vec())]
@@ -1140,19 +1163,28 @@ fn package_row(resource: &Path, set_id: &str, package_id: &str) -> BackupEntry {
         .unwrap()
 }
 
-/// Restore `package_id` from the set `set_id` in `resource`, as the user.
+/// Restore `package_id` from the set `set_id` in `resource`, as the user,
+/// on a computer where no REAPER runs.
 fn restore(resource: &Path, set_id: &str, package_id: &str) -> RestoreBackupReport {
-    restore_backup_set_within(
+    restore_with(
         resource,
         set_id,
         &RestoreBackupOptions {
             dry_run: false,
-            allow_reaper_running: true,
+            allow_reaper_running: false,
             package_id: Some(package_id.to_string()),
         },
-        &OutsideRestoreRules::default(),
     )
-    .unwrap()
+}
+
+/// Restore from the set `set_id` in `resource` with `options`, as the user,
+/// on a computer where no REAPER runs.
+fn restore_with(
+    resource: &Path,
+    set_id: &str,
+    options: &RestoreBackupOptions,
+) -> RestoreBackupReport {
+    restore_backup_set_within(resource, set_id, options, &OutsideRestoreRules::default()).unwrap()
 }
 
 /// After the switch, the Backups overview lists the es_ES pack as an
@@ -1174,6 +1206,11 @@ fn the_moved_files_make_the_earlier_version_whole_and_restorable() {
     assert_eq!(row.restore_scope, Some(RestoreScope::Package));
     assert_eq!(row.size, b"spanish".len() as u64);
     assert_eq!(row.missing_path, None);
+    // The same version in two variants.
+    assert_eq!(row.version, Some(version("1.0")));
+    assert_eq!(row.replaced_by, Some(version("1.0")));
+    assert_eq!(row.variant.as_deref(), Some("rae"));
+    assert_eq!(row.replaced_by_variant.as_deref(), Some("pma"));
 
     let back = restore(&resource, &set_id, LANGPACK_ES);
 
@@ -1194,6 +1231,391 @@ fn the_moved_files_make_the_earlier_version_whole_and_restorable() {
     assert!(!es_es.exists());
     let state = load_install_state(&resource).unwrap().unwrap();
     assert_eq!(state.packages, switched.after.packages);
+}
+
+/// `reaper.ini` with REAPER's language set to `langpack`, or with no
+/// `langpack=` line for `None`, among other lines and sections, with the
+/// line endings REAPER writes on Windows.
+fn reaper_ini(langpack: Option<&str>) -> String {
+    let line = langpack.map_or_else(String::new, |value| format!("langpack={value}\r\n"));
+    format!(
+        "[REAPER]\r\nlastproject=C:\\Musik\\song.rpp\r\n{line}wnd_state=1\r\n\r\n\
+         [other]\r\nlangpack=leave-me\r\n"
+    )
+}
+
+/// The record of the Spanish pack in the before-restore set `set_id`.
+fn spanish_record(resource: &Path, set_id: &str) -> ReplacedPackageRecord {
+    let set = resource.join("RABBIT").join("backups").join(set_id);
+    load_backup_manifest(&set).unwrap().unwrap().replaced[LANGPACK_ES].clone()
+}
+
+/// Going back from the es_MX variant to es_ES, while REAPER uses es_MX,
+/// sets REAPER's language to es_ES too, as the language step names the
+/// file, and changes no other byte of `reaper.ini`. The before-restore set
+/// records the value it replaced, so restoring that set goes forward to
+/// es_MX in both: the file and the language.
+#[test]
+fn going_back_to_another_variant_sets_reapers_language_and_undoing_puts_it_back() {
+    let (dir, resource) = resource_folder();
+    let switched = switched_spanish_pack(dir.path(), &resource);
+    let set_id = set_id(&switched.report);
+    let ini = resource.join("reaper.ini");
+    fs::write(&ini, reaper_ini(Some("es_MX.ReaperLangPack"))).unwrap();
+    let es_es = resource.join("LangPack").join("es_ES.ReaperLangPack");
+    let es_mx = resource.join("LangPack").join("es_MX.ReaperLangPack");
+
+    // A dry run says so, and writes nothing.
+    let before = snapshot(dir.path());
+    let planned = restore_with(
+        &resource,
+        &set_id,
+        &RestoreBackupOptions {
+            dry_run: true,
+            allow_reaper_running: false,
+            package_id: Some(LANGPACK_ES.to_string()),
+        },
+    );
+    let swap = planned.swap.as_ref().unwrap();
+    assert_eq!(swap.langpack.as_deref(), Some("es_ES.ReaperLangPack"));
+    assert_eq!(
+        swap.langpack_before.as_deref(),
+        Some("es_MX.ReaperLangPack")
+    );
+    assert!(swap.langpack_restored);
+    assert!(!swap.langpack_reaper_may_run);
+    assert_eq!(swap.variant.as_deref(), Some("rae"));
+    assert_eq!(swap.replaced_variant.as_deref(), Some("pma"));
+    assert_eq!(snapshot(dir.path()), before);
+
+    let back = restore(&resource, &set_id, LANGPACK_ES);
+
+    assert_eq!(back.status, RestoreStatus::Restored, "{back:?}");
+    assert_eq!(fs::read(&es_es).unwrap(), b"spanish");
+    assert!(!es_mx.exists());
+    assert_eq!(
+        fs::read_to_string(&ini).unwrap(),
+        reaper_ini(Some("es_ES.ReaperLangPack"))
+    );
+    let swap = back.swap.as_ref().unwrap();
+    assert_eq!(swap.langpack.as_deref(), Some("es_ES.ReaperLangPack"));
+    assert_eq!(
+        swap.langpack_before.as_deref(),
+        Some("es_MX.ReaperLangPack")
+    );
+    assert!(swap.langpack_restored);
+    assert_eq!(swap.langpack_error, None);
+    let newer = back.before_restore_set_id.clone().unwrap();
+    let record = spanish_record(&resource, &newer);
+    assert_eq!(
+        record.langpack_before.as_deref(),
+        Some("es_MX.ReaperLangPack")
+    );
+    assert_eq!(record.replaced_by_variant.as_deref(), Some("rae"));
+    assert_eq!(
+        record.receipt.as_ref(),
+        Some(&switched.after.packages[LANGPACK_ES])
+    );
+
+    let forward = restore(&resource, &newer, LANGPACK_ES);
+
+    assert_eq!(forward.status, RestoreStatus::Restored, "{forward:?}");
+    assert_eq!(fs::read(&es_mx).unwrap(), b"spanish");
+    assert!(!es_es.exists());
+    assert_eq!(
+        fs::read_to_string(&ini).unwrap(),
+        reaper_ini(Some("es_MX.ReaperLangPack"))
+    );
+    let swap = forward.swap.as_ref().unwrap();
+    assert_eq!(swap.langpack.as_deref(), Some("es_MX.ReaperLangPack"));
+    assert_eq!(
+        swap.langpack_before.as_deref(),
+        Some("es_ES.ReaperLangPack")
+    );
+    assert!(swap.langpack_restored);
+    let state = load_install_state(&resource).unwrap().unwrap();
+    assert_eq!(state.packages, switched.after.packages);
+    // That restore's own backup can go back again, the same way.
+    let again = forward.before_restore_set_id.clone().unwrap();
+    assert_eq!(
+        spanish_record(&resource, &again).langpack_before.as_deref(),
+        Some("es_ES.ReaperLangPack")
+    );
+}
+
+/// The value a restore recorded goes back exactly as it was written, in
+/// its own case, where file names ignore case, as they do on Windows.
+#[cfg(windows)]
+#[test]
+fn undoing_puts_the_language_back_exactly_as_it_was_written() {
+    let (dir, resource) = resource_folder();
+    let switched = switched_spanish_pack(dir.path(), &resource);
+    let set_id = set_id(&switched.report);
+    let ini = resource.join("reaper.ini");
+    fs::write(&ini, reaper_ini(Some("ES_mx.reaperlangpack"))).unwrap();
+
+    let back = restore(&resource, &set_id, LANGPACK_ES);
+    assert_eq!(
+        fs::read_to_string(&ini).unwrap(),
+        reaper_ini(Some("es_ES.ReaperLangPack"))
+    );
+    let newer = back.before_restore_set_id.clone().unwrap();
+    restore(&resource, &newer, LANGPACK_ES);
+
+    assert_eq!(
+        fs::read_to_string(&ini).unwrap(),
+        reaper_ini(Some("ES_mx.reaperlangpack"))
+    );
+}
+
+/// REAPER's language stays as it is when it isn't the pack that moves out:
+/// another pack, "none" (`<>`), no `langpack=` line, or no `reaper.ini` at
+/// all. The files still go back, the report says the language stays, and
+/// the before-restore set records no value to put back.
+#[test]
+fn a_language_that_isnt_the_moved_pack_stays_as_it_is() {
+    let cases = [
+        Some(Some("de_DE.ReaperLangPack")),
+        Some(Some("<>")),
+        Some(None),
+        None,
+    ];
+    for langpack in cases {
+        let (dir, resource) = resource_folder();
+        let switched = switched_spanish_pack(dir.path(), &resource);
+        let set_id = set_id(&switched.report);
+        let ini = resource.join("reaper.ini");
+        if let Some(langpack) = langpack {
+            fs::write(&ini, reaper_ini(langpack)).unwrap();
+        }
+
+        let back = restore(&resource, &set_id, LANGPACK_ES);
+
+        assert_eq!(back.status, RestoreStatus::Restored, "{back:?}");
+        assert!(
+            resource
+                .join("LangPack")
+                .join("es_ES.ReaperLangPack")
+                .is_file()
+        );
+        match langpack {
+            Some(langpack) => assert_eq!(fs::read_to_string(&ini).unwrap(), reaper_ini(langpack)),
+            None => assert!(!ini.exists(), "no reaper.ini is created"),
+        }
+        let swap = back.swap.as_ref().unwrap();
+        assert_eq!(swap.langpack.as_deref(), Some("es_ES.ReaperLangPack"));
+        assert_eq!(swap.langpack_before, None, "{langpack:?}");
+        assert!(!swap.langpack_restored, "{langpack:?}");
+        assert_eq!(swap.langpack_error, None);
+        let newer = back.before_restore_set_id.clone().unwrap();
+        assert_eq!(spanish_record(&resource, &newer).langpack_before, None);
+    }
+}
+
+/// A language chosen after the restore is the user's: undoing the restore
+/// puts es_MX back, and leaves REAPER's language alone.
+#[test]
+fn undoing_leaves_a_language_chosen_since_alone() {
+    let (dir, resource) = resource_folder();
+    let switched = switched_spanish_pack(dir.path(), &resource);
+    let set_id = set_id(&switched.report);
+    let ini = resource.join("reaper.ini");
+    fs::write(&ini, reaper_ini(Some("es_MX.ReaperLangPack"))).unwrap();
+    let back = restore(&resource, &set_id, LANGPACK_ES);
+    let newer = back.before_restore_set_id.clone().unwrap();
+    fs::write(&ini, reaper_ini(Some("de_DE.ReaperLangPack"))).unwrap();
+
+    let forward = restore(&resource, &newer, LANGPACK_ES);
+
+    assert_eq!(forward.status, RestoreStatus::Restored, "{forward:?}");
+    assert!(
+        resource
+            .join("LangPack")
+            .join("es_MX.ReaperLangPack")
+            .is_file()
+    );
+    assert_eq!(
+        fs::read_to_string(&ini).unwrap(),
+        reaper_ini(Some("de_DE.ReaperLangPack"))
+    );
+    let swap = forward.swap.as_ref().unwrap();
+    assert_eq!(swap.langpack.as_deref(), Some("es_MX.ReaperLangPack"));
+    assert!(!swap.langpack_restored);
+}
+
+/// Going back to a version with the same file name, as after an update
+/// within one variant, moves no language pack file out, so REAPER's
+/// language isn't touched and the report says nothing of it.
+#[test]
+fn an_update_within_one_variant_leaves_the_language_alone() {
+    let (dir, resource) = resource_folder();
+    let cache = dir.path().join("cache");
+    let pack = |at: &str, contents: &[u8]| {
+        artifact(&cache, LANGPACK_ES, at, "spanish.ReaperLangPack", contents)
+    };
+    install(&resource, &[pack("1.0", b"spanish 1.0")], &APPLY);
+    let report = install(&resource, &[pack("1.1", b"spanish 1.1")], &APPLY);
+    let ini = resource.join("reaper.ini");
+    fs::write(&ini, reaper_ini(Some("es_ES.ReaperLangPack"))).unwrap();
+
+    let back = restore(&resource, &set_id(&report), LANGPACK_ES);
+
+    assert_eq!(back.status, RestoreStatus::Restored, "{back:?}");
+    assert_eq!(
+        fs::read(resource.join("LangPack").join("es_ES.ReaperLangPack")).unwrap(),
+        b"spanish 1.0"
+    );
+    assert_eq!(
+        fs::read_to_string(&ini).unwrap(),
+        reaper_ini(Some("es_ES.ReaperLangPack"))
+    );
+    let swap = back.swap.as_ref().unwrap();
+    assert_eq!(swap.langpack, None);
+    assert_eq!(swap.langpack_before, None);
+    assert!(!swap.langpack_restored);
+    // One variant: the same on both sides.
+    assert_eq!(swap.variant.as_deref(), Some("rae"));
+    assert_eq!(swap.replaced_variant.as_deref(), Some("rae"));
+}
+
+/// With the target's REAPER allowed to run, going back to es_ES puts the
+/// files back but leaves REAPER's language at es_MX, since a running REAPER
+/// writes its own setting back when it quits. The report says so, in a dry
+/// run too, and the before-restore set records no value to put back.
+#[test]
+fn with_reaper_allowed_to_run_the_language_stays_as_it_is() {
+    let (dir, resource) = resource_folder();
+    let switched = switched_spanish_pack(dir.path(), &resource);
+    let set_id = set_id(&switched.report);
+    let ini = resource.join("reaper.ini");
+    let es_mx = reaper_ini(Some("es_MX.ReaperLangPack"));
+    fs::write(&ini, &es_mx).unwrap();
+    let options = |dry_run| RestoreBackupOptions {
+        dry_run,
+        allow_reaper_running: true,
+        package_id: Some(LANGPACK_ES.to_string()),
+    };
+
+    let planned = restore_with(&resource, &set_id, &options(true));
+    let back = restore_with(&resource, &set_id, &options(false));
+
+    for report in [&planned, &back] {
+        let swap = report.swap.as_ref().unwrap();
+        assert_eq!(swap.langpack.as_deref(), Some("es_ES.ReaperLangPack"));
+        assert!(swap.langpack_reaper_may_run, "{swap:?}");
+        assert_eq!(swap.langpack_before, None);
+        assert!(!swap.langpack_restored);
+        assert_eq!(swap.langpack_error, None);
+    }
+    assert_eq!(back.status, RestoreStatus::Restored, "{back:?}");
+    assert!(
+        resource
+            .join("LangPack")
+            .join("es_ES.ReaperLangPack")
+            .is_file()
+    );
+    assert_eq!(fs::read_to_string(&ini).unwrap(), es_mx);
+    let newer = back.before_restore_set_id.clone().unwrap();
+    assert_eq!(spanish_record(&resource, &newer).langpack_before, None);
+}
+
+/// When `reaper.ini` can't be written, the earlier version is back all the
+/// same: es_ES is in place, the report says why REAPER's language couldn't
+/// be set, `reaper.ini` is as it was, and the before-restore set keeps no
+/// value to put back, since the line never changed.
+#[test]
+fn a_language_that_cant_be_set_leaves_the_earlier_version_back() {
+    let (dir, resource) = resource_folder();
+    let switched = switched_spanish_pack(dir.path(), &resource);
+    let set_id = set_id(&switched.report);
+    let ini = resource.join("reaper.ini");
+    let es_mx = reaper_ini(Some("es_MX.ReaperLangPack"));
+    fs::write(&ini, &es_mx).unwrap();
+    let mut read_only = fs::metadata(&ini).unwrap().permissions();
+    read_only.set_readonly(true);
+    fs::set_permissions(&ini, read_only.clone()).unwrap();
+
+    let back = restore(&resource, &set_id, LANGPACK_ES);
+
+    #[allow(clippy::permissions_set_readonly_false)]
+    read_only.set_readonly(false);
+    fs::set_permissions(&ini, read_only).unwrap();
+    assert_eq!(back.status, RestoreStatus::Restored, "{back:?}");
+    assert_eq!(
+        fs::read(resource.join("LangPack").join("es_ES.ReaperLangPack")).unwrap(),
+        b"spanish"
+    );
+    assert!(
+        !resource
+            .join("LangPack")
+            .join("es_MX.ReaperLangPack")
+            .exists()
+    );
+    assert_eq!(fs::read_to_string(&ini).unwrap(), es_mx);
+    let swap = back.swap.as_ref().unwrap();
+    assert_eq!(swap.langpack.as_deref(), Some("es_ES.ReaperLangPack"));
+    assert!(swap.langpack_error.is_some(), "{swap:?}");
+    assert!(!swap.langpack_restored);
+    assert_eq!(swap.langpack_before, None);
+    let newer = back.before_restore_set_id.clone().unwrap();
+    assert_eq!(spanish_record(&resource, &newer).langpack_before, None);
+    let state = load_install_state(&resource).unwrap().unwrap();
+    assert_eq!(state.packages, switched.before.packages);
+}
+
+/// A swap that fails, while moving es_MX out or while saving RABBIT's
+/// records, puts everything back as it was, and REAPER's language is never
+/// touched: `reaper.ini` keeps every byte, the report says nothing of it
+/// changed, and no set keeps a value to put back.
+#[test]
+fn a_swap_that_fails_leaves_reapers_language_alone() {
+    for failing in [Step::MovingOut, Step::SavingRecords] {
+        let (dir, resource) = resource_folder();
+        let switched = switched_spanish_pack(dir.path(), &resource);
+        let set_id = set_id(&switched.report);
+        let ini = resource.join("reaper.ini");
+        let es_mx = reaper_ini(Some("es_MX.ReaperLangPack"));
+        fs::write(&ini, &es_mx).unwrap();
+        let _hook = restore_seam::install(move |step, _| {
+            if step == failing {
+                return Err(std::io::Error::other("the disk is full"));
+            }
+            Ok(())
+        });
+
+        let failed = restore(&resource, &set_id, LANGPACK_ES);
+
+        assert_eq!(
+            failed.status,
+            RestoreStatus::NotRestored,
+            "{failing:?}: {failed:?}"
+        );
+        assert_eq!(fs::read_to_string(&ini).unwrap(), es_mx, "{failing:?}");
+        assert!(
+            resource
+                .join("LangPack")
+                .join("es_MX.ReaperLangPack")
+                .is_file()
+        );
+        let swap = failed.swap.as_ref().unwrap();
+        assert_eq!(swap.langpack_before, None, "{failing:?}");
+        assert!(!swap.langpack_restored, "{failing:?}");
+        assert_eq!(swap.langpack_error, None, "{failing:?}");
+        if let Some(kept) = &failed.before_restore_set_id {
+            let set = resource.join("RABBIT").join("backups").join(kept);
+            if let Some(manifest) = load_backup_manifest(&set).unwrap() {
+                assert!(
+                    manifest
+                        .replaced
+                        .values()
+                        .all(|record| record.langpack_before.is_none()),
+                    "{failing:?}"
+                );
+            }
+        }
+        let state = load_install_state(&resource).unwrap().unwrap();
+        assert_eq!(state.packages, switched.after.packages, "{failing:?}");
+    }
 }
 
 /// Deleting one package out of an update's set takes the files the update
@@ -1353,6 +1775,7 @@ fn files_recorded_without_a_hash_and_the_key_map_never_move() {
         let left = action_at(&report, &place);
         assert_eq!(left.action, InstallFileAction::LeftInPlace);
         assert_eq!(left.warning.as_deref(), Some(keymap_warning.as_str()));
+        assert_eq!(left.left_reason, Some(LeftInPlaceReason::Keymap));
     }
     assert_eq!(report.actions.len(), 3, "{:?}", report.actions);
     assert_eq!(report.backup_manifest_path, None);
@@ -1611,6 +2034,7 @@ fn an_install_report_keeps_its_json_shape() {
         size: 3,
         sha256: "abc".to_string(),
         warning: None,
+        left_reason: None,
     };
     let saved = serde_json::json!({
         "package_id": PACKAGE_REAPACK,
@@ -1630,15 +2054,42 @@ fn an_install_report_keeps_its_json_shape() {
     let left = InstallFileReport {
         action: InstallFileAction::LeftInPlace,
         warning: Some("It is a folder.".to_string()),
+        left_reason: Some(LeftInPlaceReason::Folder),
         ..installed
     };
     let json = serde_json::to_value(&left).unwrap();
     assert_eq!(json["action"], "left-in-place");
     assert_eq!(json["warning"], "It is a folder.");
+    assert_eq!(json["left_reason"], "folder");
     for (action, text) in [
         (InstallFileAction::WouldMoveToBackup, "would-move-to-backup"),
         (InstallFileAction::MovedToBackup, "moved-to-backup"),
     ] {
         assert_eq!(serde_json::to_value(action).unwrap(), text);
     }
+    // Each reason's code, both ways, and a code a later version adds reads
+    // as another reason.
+    for (reason, code) in [
+        (LeftInPlaceReason::Link, "link"),
+        (LeftInPlaceReason::Folder, "folder"),
+        (LeftInPlaceReason::Keymap, "keymap"),
+        (LeftInPlaceReason::Refused, "refused"),
+        (LeftInPlaceReason::InUse, "in-use"),
+        (LeftInPlaceReason::Unreadable, "unreadable"),
+        (LeftInPlaceReason::Other, "other"),
+    ] {
+        assert_eq!(serde_json::to_value(reason).unwrap(), code);
+        assert_eq!(
+            serde_json::from_value::<LeftInPlaceReason>(serde_json::json!(code)).unwrap(),
+            reason
+        );
+    }
+    let mut later = serde_json::to_value(&left).unwrap();
+    later["left_reason"] = serde_json::json!("something-new");
+    assert_eq!(
+        serde_json::from_value::<InstallFileReport>(later)
+            .unwrap()
+            .left_reason,
+        Some(LeftInPlaceReason::Other)
+    );
 }

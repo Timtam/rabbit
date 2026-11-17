@@ -20,7 +20,10 @@ use crate::preflight::{
     running_processes_named, running_reaper_for_target_with_processes, running_reaper_processes,
 };
 use crate::progress::{ProgressEvent, ProgressReporter};
-use crate::reaper_ini::{lang_pack_setting, restore_lang_pack_if_cleared};
+use crate::reaper_ini::{
+    lang_pack_is_one_of, lang_pack_setting, restore_lang_pack_if_cleared,
+    switch_lang_pack_if_selected,
+};
 use crate::receipt::{
     InstallState, InstalledFileReceipt, PackageReceipt, RECEIPT_RELATIVE_PATH, load_install_state,
     merge_package_receipt, save_install_state,
@@ -28,7 +31,7 @@ use crate::receipt::{
 use crate::report::{SavedReportPaths, default_report_path, save_new_json_and_text_reports};
 use crate::restore_refusal::{RestoreRefusal, TargetRefusal};
 use crate::text_file::read_text_file_lossless;
-use crate::uninstall::paths::{ResolvedPattern, pattern_matches};
+use crate::uninstall::paths::{ResolvedPattern, pattern_matches, same_ignoring_case};
 use crate::uninstall::preflight::{
     ANY_REAPER_PROCESS_CHECK, NO_REAPER_ANYWHERE, PROGRAMS_RUNNING_CHECK,
     none_of_these_programs_running,
@@ -203,6 +206,22 @@ pub struct ReplacedPackageRecord {
     /// The version that replaced it, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaced_by: Option<Version>,
+    /// For a package that comes in variants, such as the two Spanish OSARA
+    /// translations of the Spanish language pack: the variant of the
+    /// version that replaced it, by its id, so the same version number in
+    /// another variant still reads apart. `None` for a package without
+    /// variants, and in sets from earlier versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_by_variant: Option<String>,
+    /// The `langpack=` value under `[REAPER]` in `reaper.ini` that a
+    /// restore replaced when it went back to an earlier version of this
+    /// language pack: it named a file of `receipt` that the restore moved
+    /// into this set, and the restore set it to the earlier version's own
+    /// file. Restoring this set puts the value back, while the line still
+    /// names the file that restore set. Only a before-restore set records
+    /// it; `reaper.ini` itself never goes into a set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub langpack_before: Option<String>,
 }
 
 /// What `reaper-kb.ini` was before OSARA's key map replaced it, as RABBIT
@@ -709,6 +728,14 @@ pub struct SwappedPackage {
     /// The version it had, as RABBIT's records said before the restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaced_version: Option<Version>,
+    /// For a package that comes in variants: the variant of the version it
+    /// goes back to, by its id (see [`crate::package::recorded_variant`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    /// For a package that comes in variants: the variant of the version it
+    /// had, by its id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_variant: Option<String>,
     /// What happens to the package's entry in RABBIT's records.
     pub entry: SwappedEntry,
     /// The package's entry goes, and its uninstall needs that entry, as
@@ -738,6 +765,40 @@ pub struct SwappedPackage {
     /// that set finds the newer version whole.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub left_in_place: Vec<PathBuf>,
+    /// Going back moves a language pack file of the newer version out of
+    /// REAPER's `LangPack` folder, and the earlier version has one of its
+    /// own there: the value `langpack=` under `[REAPER]` in `reaper.ini`
+    /// gets when the line names a file that moves out. That is the earlier
+    /// version's file name, as the language step writes it, or on an undo
+    /// the value the set recorded, exactly as it was written (see
+    /// [`ReplacedPackageRecord::langpack_before`]). `None` for every other
+    /// package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub langpack: Option<String>,
+    /// The `langpack=` value the restore replaced with [`Self::langpack`],
+    /// exactly as written, or in a dry run would replace: only a value
+    /// that names a file that moves out. The before-restore set records it
+    /// (see [`ReplacedPackageRecord::langpack_before`]), so restoring that
+    /// set puts it back. `None` when the line named another pack, said
+    /// `<>`, or was missing, which stays as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub langpack_before: Option<String>,
+    /// Whether [`Self::langpack`] went into `reaper.ini`, or in a dry run
+    /// would.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub langpack_restored: bool,
+    /// Why setting `langpack=` failed, or in a dry run why RABBIT couldn't
+    /// read it. The package is back at the earlier version all the same,
+    /// and the user can pick the language in REAPER's preferences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub langpack_error: Option<String>,
+    /// `langpack=` names a file that moves out, but the restore let the
+    /// target's REAPER run (`allow_reaper_running`), so the line stays as
+    /// it is, or in a dry run would: REAPER may write its own setting back
+    /// when it quits, as it may its key map. The user picks
+    /// [`Self::langpack`] in REAPER's preferences once REAPER is closed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub langpack_reaper_may_run: bool,
 }
 
 /// What going back to an earlier version does to the package's entry in
@@ -1211,6 +1272,38 @@ impl BackupSetWriter {
         let Some(record) = self.manifest.packages.get_mut(package_id) else {
             return Ok(());
         };
+        record.langpack_before = value;
+        self.save()
+    }
+
+    /// Record the `langpack=` value going back to an earlier version of
+    /// `package_id` is about to replace, in the package's record of what
+    /// this set replaced (see [`Self::record_replaced`]), or forget it again
+    /// with `None`. Saved before `reaper.ini` changes, so the value is never
+    /// lost. A value for a package the set has no record of is refused, so
+    /// the line is never changed without it.
+    pub(crate) fn set_replaced_langpack_before(
+        &mut self,
+        package_id: &str,
+        value: Option<String>,
+    ) -> Result<()> {
+        if self.planning {
+            return Ok(());
+        }
+        let Some(record) = self.manifest.replaced.get_mut(package_id) else {
+            return match value {
+                None => Ok(()),
+                Some(_) => Err(RabbitError::BackupSetWriteRefused {
+                    path: self.set_path.clone(),
+                    reason: format!(
+                        "the set has no record of {package_id} to keep REAPER's language setting in"
+                    ),
+                }),
+            };
+        };
+        if record.langpack_before == value {
+            return Ok(());
+        }
         record.langpack_before = value;
         self.save()
     }
@@ -3528,8 +3621,69 @@ struct PlannedSwap {
     entry: Option<PackageReceipt>,
     /// The entry it has now, which the before-restore set records.
     current: Option<PackageReceipt>,
+    /// The language pack files of the current entry that move out of
+    /// REAPER's `LangPack` folder, by name: `langpack=` changes only while
+    /// it names one of them.
+    langpack_leaving: Vec<String>,
+    /// The restore lets the target's REAPER run (`allow_reaper_running`),
+    /// so `langpack=` stays as it is (see
+    /// [`SwappedPackage::langpack_reaper_may_run`]).
+    reaper_may_run: bool,
     /// What the report says of it, the files to move out included.
     report: SwappedPackage,
+}
+
+/// Whether `langpack=` values compare file names without case here, as
+/// an uninstall compares them on Windows.
+fn lang_pack_names_ignore_case() -> bool {
+    Platform::current() == Some(Platform::Windows)
+}
+
+/// The name of the language pack file at `place`, when it sits right in the
+/// `LangPack` folder of the resource folder at `resource_path`, where REAPER
+/// looks for the file `langpack=` names.
+fn lang_pack_file_at(resource_path: &Path, place: &Path) -> Option<String> {
+    let in_lang_packs = place
+        .parent()
+        .is_some_and(|folder| same_ignoring_case(folder, &resource_path.join("LangPack")));
+    in_lang_packs
+        .then(|| crate::configuration::lang_pack_file_name(place))
+        .flatten()
+}
+
+/// What `langpack=` becomes when going back to `earlier` moves a language
+/// pack file out of the way: the value a restore replaced, when the set
+/// records one (see [`ReplacedPackageRecord::langpack_before`]) that names
+/// a language pack file of `earlier` exactly, or in another ASCII case
+/// where file names ignore case, so undoing a restore puts it back exactly
+/// as it was; otherwise the name of `earlier`'s first language pack file,
+/// as the language step writes it. Only files RABBIT's records give a hash
+/// and that sit right in REAPER's `LangPack` folder count, as a restore
+/// puts those back. `None` when `earlier` has none, or the value would hold
+/// a control character, which would break the line.
+fn lang_pack_after_going_back(
+    resource_path: &Path,
+    earlier: &PackageReceipt,
+    recorded: Option<&str>,
+    ignore_case: bool,
+) -> Option<String> {
+    let own: Vec<String> = earlier
+        .installed_files
+        .iter()
+        .filter(|file| file.sha256.is_some())
+        .filter_map(|file| {
+            lang_pack_file_at(resource_path, &receipt_file_path(resource_path, &file.path))
+        })
+        .collect();
+    let fits = |value: &str| !value.chars().any(char::is_control);
+    let names_own = |value: &str| {
+        own.iter()
+            .any(|name| name == value || (ignore_case && name.eq_ignore_ascii_case(value)))
+    };
+    recorded
+        .filter(|value| fits(value) && names_own(value))
+        .map(str::to_string)
+        .or_else(|| own.into_iter().next().filter(|value| fits(value)))
 }
 
 /// What [`plan_found_set`] planned.
@@ -3646,7 +3800,7 @@ fn plan_found_set(
                     &state,
                     &groups,
                     context,
-                    options.dry_run,
+                    options,
                 )
             })
             .collect::<Result<Vec<PlannedBackup>>>()?;
@@ -3993,6 +4147,10 @@ struct SwapSource<'a> {
 /// can't tell which of those files that copy had too, so none of them
 /// moves: each stays, and a copy of it goes into the before-restore set, so
 /// going forward again finds them (see [`SwappedPackage::left_in_place`]).
+///
+/// REAPER's language follows a language pack file that moves out, while
+/// `langpack=` names it (see [`SwappedPackage::langpack`]), except with
+/// `options.allow_reaper_running`, which leaves the line as it is.
 fn plan_swap(
     resource_path: &Path,
     source: SwapSource<'_>,
@@ -4000,13 +4158,14 @@ fn plan_swap(
     state: &InstallState,
     groups: &BTreeMap<String, String>,
     context: &RunContext<'_>,
-    dry_run: bool,
+    options: &RestoreBackupOptions,
 ) -> Result<PlannedBackup> {
     let SwapSource {
         backup_id,
         backup_path,
         manifest,
     } = source;
+    let dry_run = options.dry_run;
     let package_id = swap.package_id.as_str();
     let installed = others_of_its_group_installed(groups, package_id, state);
     if !installed.is_empty() {
@@ -4080,6 +4239,10 @@ fn plan_swap(
     let mut to_move = Vec::new();
     let mut left_in_place = Vec::new();
     let mut changed_left = Vec::new();
+    // The language pack files of the newer version that move out of
+    // REAPER's `LangPack` folder, where `langpack=` can name them, by the
+    // name RABBIT's records give them, as the language step writes it.
+    let mut langpack_leaving = Vec::new();
     if let Some(current) = &current {
         for file in files_only_in_newer(resource_path, current, swap.earlier.as_ref(), &written) {
             let Some(place) = newer_file_place(
@@ -4095,6 +4258,7 @@ fn plan_swap(
             };
             match recorded_file_on_disk(&place, file, context.check)? {
                 OnDisk::AsRecorded(digest) if swap.earlier.is_some() => {
+                    langpack_leaving.extend(lang_pack_file_at(resource_path, &place));
                     to_move.push((place, digest));
                 }
                 OnDisk::AsRecorded(_) => left_in_place.push(place),
@@ -4161,6 +4325,49 @@ fn plan_swap(
         (Some(_), None) => SwappedEntry::Removed,
         (None, None) => SwappedEntry::StillNone,
     };
+    // REAPER's language: when a language pack file of the newer version
+    // moves out and the earlier version has one, `langpack=` follows, but
+    // only while it names a file that moves out. The run checks the line
+    // again right before it writes it.
+    let ignore_case = lang_pack_names_ignore_case();
+    let langpack = swap
+        .earlier
+        .as_ref()
+        .filter(|_| !langpack_leaving.is_empty())
+        .and_then(|earlier| {
+            let recorded = manifest
+                .replaced
+                .get(package_id)
+                .and_then(|record| record.langpack_before.as_deref());
+            lang_pack_after_going_back(resource_path, earlier, recorded, ignore_case)
+        });
+    // A `reaper.ini` that can't be read refuses nothing: the language is
+    // set after the package is back, and a failure there leaves the
+    // package back all the same.
+    let (names_leaving, langpack_error) = match langpack.as_ref().map(|_| {
+        lang_pack_setting(resource_path).map(|value| {
+            value.filter(|value| lang_pack_is_one_of(value, &langpack_leaving, ignore_case))
+        })
+    }) {
+        Some(Ok(value)) => (value, None),
+        Some(Err(error)) => (None, Some(error.to_string())),
+        None => (None, None),
+    };
+    // A REAPER that may run writes its own setting back when it quits, so
+    // the line stays as it is then.
+    let reaper_may_run = options.allow_reaper_running;
+    let langpack_reaper_may_run = reaper_may_run && names_leaving.is_some();
+    let langpack_before = names_leaving.filter(|_| !reaper_may_run);
+    // The variants, for a package that comes in some, so the same version
+    // number in another variant reads apart.
+    let specs = Platform::current()
+        .map(|platform| (context.environment.package_specs)(platform))
+        .unwrap_or_default();
+    let variant_of = |entry: Option<&PackageReceipt>| {
+        entry.and_then(|entry| {
+            crate::package::recorded_variant_id(&specs, package_id, entry.variant.as_deref())
+        })
+    };
     let report = SwappedPackage {
         package_id: package_id.to_string(),
         version: swap
@@ -4168,6 +4375,8 @@ fn plan_swap(
             .as_ref()
             .and_then(|entry| entry.version.clone()),
         replaced_version: current.as_ref().and_then(|entry| entry.version.clone()),
+        variant: variant_of(swap.earlier.as_ref()),
+        replaced_variant: variant_of(current.as_ref()),
         entry: change,
         uninstall_needs_reinstall: change == SwappedEntry::Removed
             && uninstall_needs_receipt(package_id, context.environment),
@@ -4175,6 +4384,11 @@ fn plan_swap(
         moved_out,
         changed_left,
         left_in_place,
+        langpack_restored: langpack_before.is_some(),
+        langpack,
+        langpack_before,
+        langpack_error,
+        langpack_reaper_may_run,
     };
     Ok(PlannedBackup {
         backup_id: backup_id.to_string(),
@@ -4191,6 +4405,8 @@ fn plan_swap(
             package_id: package_id.to_string(),
             entry,
             current,
+            langpack_leaving,
+            reaper_may_run,
             report,
         }),
         // A version's files never include the key map (above).
@@ -4420,6 +4636,12 @@ fn run_planned_restore(
     let mut swap = swap;
     let mut moved: Vec<MovedFile> = Vec::new();
     if let Some(swap) = &mut swap {
+        // What the plan said of REAPER's language holds only once the line
+        // is written (see `switch_language`).
+        swap.report.langpack_before = None;
+        swap.report.langpack_restored = false;
+        swap.report.langpack_error = None;
+        swap.report.langpack_reaper_may_run = false;
         failure = move_newer_files_out(swap, &mut backups, &mut moved).err();
     }
     let actions = if failure.is_none() {
@@ -4482,6 +4704,14 @@ fn run_planned_restore(
             Ok(restored) => report.packages = restored,
             Err(error) => failure = Some(error),
         }
+    }
+    // The earlier version is back, files and records, so REAPER's language
+    // follows its language pack file. A failure here is reported and
+    // leaves the version back, as for an uninstall's language.
+    if failure.is_none()
+        && let Some(swap) = &mut swap
+    {
+        switch_language(resource_path, swap, &mut backups);
     }
 
     match failure {
@@ -4555,6 +4785,10 @@ fn move_newer_files_out(
         ReplacedPackageRecord {
             receipt: swap.current.clone(),
             replaced_by: swap.report.version.clone(),
+            replaced_by_variant: swap.report.variant.clone(),
+            // Recorded once the restore is about to change the line (see
+            // `switch_language`).
+            langpack_before: None,
         },
     )?;
     for place in &swap.report.left_in_place {
@@ -4591,6 +4825,75 @@ fn move_newer_files_out(
         }
     }
     Ok(())
+}
+
+/// Set `langpack=` in `reaper.ini` to the earlier version's language pack
+/// file, as `swap` planned it (see [`SwappedPackage::langpack`]), while it
+/// still names a language pack file of the newer version that moved out.
+/// Anything else, a pack the user picked, `<>` or no line, stays, and the
+/// report says so. With the target's REAPER allowed to run, the line stays
+/// too (see [`SwappedPackage::langpack_reaper_may_run`]). It is set only to
+/// a file that is in REAPER's `LangPack` folder now. The value it replaces
+/// goes into the before-restore set `backups` first, in the package's
+/// record, so restoring that set puts it back; it goes again when the line
+/// didn't change.
+fn switch_language(resource_path: &Path, swap: &mut PlannedSwap, backups: &mut BackupSetWriter) {
+    let report = &mut swap.report;
+    let Some(value) = report.langpack.clone() else {
+        return;
+    };
+    let ignore_case = lang_pack_names_ignore_case();
+    let leaving = &swap.langpack_leaving;
+    let current = match lang_pack_setting(resource_path) {
+        Ok(current) => current,
+        Err(error) => {
+            report.langpack_error = Some(error.to_string());
+            return;
+        }
+    };
+    let Some(current) =
+        current.filter(|current| lang_pack_is_one_of(current, leaving, ignore_case))
+    else {
+        return;
+    };
+    if swap.reaper_may_run {
+        report.langpack_reaper_may_run = true;
+        return;
+    }
+    // A set RABBIT didn't write may name a file that didn't come back.
+    let lang_packs = resource_path.join("LangPack");
+    if !lang_packs.join(&value).is_file() {
+        report.langpack_error = Some(format!("{value} isn't in {}", lang_packs.display()));
+        return;
+    }
+    if let Err(error) =
+        backups.set_replaced_langpack_before(&swap.package_id, Some(current.clone()))
+    {
+        report.langpack_error = Some(error.to_string());
+        return;
+    }
+    match switch_lang_pack_if_selected(resource_path, leaving, &value, ignore_case) {
+        Ok(Some(replaced)) => {
+            // The value recorded just before is the same, unless the line
+            // changed in between: then the record takes what was replaced,
+            // as far as it can be saved. Either names a file that moved out.
+            let _ = backups.set_replaced_langpack_before(&swap.package_id, Some(replaced.clone()));
+            report.langpack_before = Some(replaced);
+            report.langpack_restored = true;
+        }
+        Ok(None) => {
+            let _ = backups.set_replaced_langpack_before(&swap.package_id, None);
+        }
+        Err(error) => {
+            // Nothing to put back while the line is as it was. A write that
+            // failed partway may have changed it, and then the record keeps
+            // the value.
+            if lang_pack_setting(resource_path).ok().flatten() == Some(current) {
+                let _ = backups.set_replaced_langpack_before(&swap.package_id, None);
+            }
+            report.langpack_error = Some(error.to_string());
+        }
+    }
 }
 
 /// Move the files [`move_newer_files_out`] moved back to their places,
@@ -7337,6 +7640,7 @@ mod tests {
         ReplacedPackageRecord {
             receipt: Some(receipt_entry("reapack")),
             replaced_by: Some(crate::version::Version::parse("1.2.5").unwrap()),
+            ..Default::default()
         }
     }
 
@@ -7626,6 +7930,163 @@ mod tests {
             architecture: None,
             vendor_added_files: Vec::new(),
         }
+    }
+
+    /// What `langpack=` becomes when going back to an earlier version of a
+    /// language pack: the recorded value only when it names the earlier
+    /// version's file exactly, or in another ASCII case where file names
+    /// ignore case, and otherwise that file's own name. Only files with a
+    /// hash right in REAPER's `LangPack` folder count, and a value with a
+    /// control character is never written.
+    #[test]
+    fn going_back_names_the_earlier_language_pack_file_or_the_value_recorded() {
+        use super::{lang_pack_after_going_back, lang_pack_file_at};
+        use crate::receipt::InstalledFileReceipt;
+
+        let resource = Path::new("/r/REAPER");
+        let file = |path: &str, hashed: bool| InstalledFileReceipt {
+            path: PathBuf::from(path),
+            sha256: hashed.then(|| "abc".to_string()),
+            size: Some(1),
+        };
+        let earlier = |files: Vec<InstalledFileReceipt>| PackageReceipt {
+            installed_files: files,
+            ..receipt_entry("langpack-es")
+        };
+        let es_es = earlier(vec![file("LangPack/es_ES.ReaperLangPack", true)]);
+        let after = |entry: &PackageReceipt, recorded: Option<&str>, ignore_case: bool| {
+            lang_pack_after_going_back(resource, entry, recorded, ignore_case)
+        };
+        let own = Some("es_ES.ReaperLangPack".to_string());
+
+        assert_eq!(after(&es_es, None, false), own);
+        assert_eq!(
+            after(&es_es, Some("es_ES.ReaperLangPack"), false),
+            own,
+            "recorded as it is"
+        );
+        assert_eq!(
+            after(&es_es, Some("ES_es.reaperlangpack"), true).as_deref(),
+            Some("ES_es.reaperlangpack"),
+            "recorded in its own case where case doesn't count"
+        );
+        for recorded in [
+            "ES_es.reaperlangpack",
+            "es_MX.ReaperLangPack",
+            "<>",
+            "",
+            "es_ES.ReaperLangPack\nlangpack=x",
+            "es_ES.ReaperLangPack\r",
+            // A Kelvin sign is a `k` only by Unicode's case rules.
+            "es_ES.ReaperLangPac\u{212A}",
+            "../es_ES.ReaperLangPack",
+        ] {
+            for ignore_case in [false, true] {
+                if ignore_case && recorded == "ES_es.reaperlangpack" {
+                    continue;
+                }
+                assert_eq!(
+                    after(&es_es, Some(recorded), ignore_case),
+                    own,
+                    "{recorded:?}, {ignore_case}"
+                );
+            }
+        }
+
+        // Only a hashed file right in `LangPack` counts.
+        let elsewhere = earlier(vec![
+            file("LangPack/old.ReaperLangPack", false),
+            file("LangPack/sub/deep.ReaperLangPack", true),
+            file("UserPlugins/stray.ReaperLangPack", true),
+            file("LangPack/readme.txt", true),
+            file("LangPack/es_ES.ReaperLangPack", true),
+        ]);
+        assert_eq!(after(&elsewhere, None, true), own);
+        assert_eq!(
+            after(&elsewhere, Some("old.ReaperLangPack"), true),
+            own,
+            "a file with no hash isn't the earlier version's"
+        );
+        assert_eq!(
+            after(
+                &earlier(vec![file("UserPlugins/stray.ReaperLangPack", true)]),
+                None,
+                true
+            ),
+            None
+        );
+        assert_eq!(after(&earlier(Vec::new()), None, true), None);
+        assert_eq!(
+            after(
+                &earlier(vec![
+                    file("LangPack/bad\u{7}.ReaperLangPack", true),
+                    file("LangPack/es_ES.ReaperLangPack", true),
+                ]),
+                None,
+                true
+            ),
+            None,
+            "the first file's name would break the line"
+        );
+
+        // Where the files sit: right in `LangPack`, in any case of the
+        // folder's name.
+        assert_eq!(
+            lang_pack_file_at(resource, &resource.join("langpack/es_MX.ReaperLangPack")).as_deref(),
+            Some("es_MX.ReaperLangPack")
+        );
+        assert_eq!(
+            lang_pack_file_at(
+                resource,
+                &resource.join("LangPack/sub/es_MX.ReaperLangPack")
+            ),
+            None
+        );
+        assert_eq!(
+            lang_pack_file_at(resource, &resource.join("es_MX.ReaperLangPack")),
+            None
+        );
+        assert_eq!(
+            lang_pack_file_at(resource, &resource.join("LangPack/notes.txt")),
+            None
+        );
+    }
+
+    /// A before-restore set keeps REAPER's language setting only in the
+    /// record of a package it holds: a value for another is refused, so the
+    /// setting never changes with nothing to put it back.
+    #[test]
+    fn a_language_setting_needs_the_packages_record() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let mut writer =
+            BackupSetWriter::new(&resource, "unix-1-before-restore", BEFORE_RESTORE_REASON);
+        writer
+            .record_replaced(
+                "langpack-es",
+                ReplacedPackageRecord {
+                    receipt: Some(receipt_entry("langpack-es")),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            writer.set_replaced_langpack_before("langpack-de", Some("de_DE.ReaperLangPack".into())),
+            Err(RabbitError::BackupSetWriteRefused { .. })
+        ));
+        writer
+            .set_replaced_langpack_before("langpack-de", None)
+            .unwrap();
+        writer
+            .set_replaced_langpack_before("langpack-es", Some("es_MX.ReaperLangPack".into()))
+            .unwrap();
+        let manifest = load_backup_manifest(writer.path()).unwrap().unwrap();
+        assert_eq!(
+            manifest.replaced["langpack-es"].langpack_before.as_deref(),
+            Some("es_MX.ReaperLangPack")
+        );
+        assert!(!manifest.replaced.contains_key("langpack-de"));
     }
 
     /// An uninstall's set holds no receipt copy. Restoring it merges the
@@ -11544,6 +12005,7 @@ mod tests {
         let by_hand = ReplacedPackageRecord {
             receipt: None,
             replaced_by: Some(crate::version::Version::parse("2.14").unwrap()),
+            ..Default::default()
         };
         let mut writer = BackupSetWriter::new(&resource, "unix-1", UPDATE_BACKUP_REASON);
 

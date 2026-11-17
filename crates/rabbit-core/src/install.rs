@@ -84,6 +84,36 @@ pub struct InstallFileReport {
     /// ([`InstallFileAction::LeftInPlace`]). `None` for every other action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// The same reason as a code, for the wizard to say in the user's
+    /// language: `warning` is English. `None` for every other action, and
+    /// in reports from earlier versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_reason: Option<LeftInPlaceReason>,
+}
+
+/// Why a file of a package's previous version stays where it is
+/// ([`InstallFileAction::LeftInPlace`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LeftInPlaceReason {
+    /// A symbolic link or junction stands at its place, which RABBIT never
+    /// follows.
+    Link,
+    /// A folder stands at its place.
+    Folder,
+    /// It is REAPER's key map, which an update never moves.
+    Keymap,
+    /// No restore of the update's set could put it back at its place, such
+    /// as one outside every folder RABBIT installs into.
+    Refused,
+    /// Another program has it open.
+    InUse,
+    /// RABBIT couldn't read it.
+    Unreadable,
+    /// It couldn't be moved for another reason. A reason a later version
+    /// adds reads as this too.
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,6 +286,13 @@ pub(crate) fn install_cached_artifacts_within(
                 crate::package::resolved_install_as(spec, effective_variant.as_deref())
             })
             .filter(|_| prepared.files.len() == 1);
+        // The variant this install puts in place, for a package that comes
+        // in variants: the update's set records it with the version, so a
+        // switch of variant at the same version reads apart.
+        let new_variant = install_spec
+            .as_ref()
+            .and_then(|spec| crate::package::recorded_variant(spec, effective_variant.as_deref()))
+            .map(|variant| variant.id.clone());
 
         for file in &prepared.files {
             let target_path = resolve_install_target(
@@ -289,6 +326,8 @@ pub(crate) fn install_cached_artifacts_within(
                         replaced: ReplacedPackageRecord {
                             receipt: previous.clone(),
                             replaced_by: Some(artifact.descriptor.version.clone()),
+                            replaced_by_variant: new_variant.clone(),
+                            langpack_before: None,
                         },
                     })
                 } else {
@@ -311,6 +350,7 @@ pub(crate) fn install_cached_artifacts_within(
                 size: file.source_size,
                 sha256: file.source_sha256.clone(),
                 warning: None,
+                left_reason: None,
             });
             artifact_target_paths.push(target_path);
         }
@@ -341,6 +381,7 @@ pub(crate) fn install_cached_artifacts_within(
                 package_id,
                 previous: previous.as_ref(),
                 version: &artifact.descriptor.version,
+                variant: new_variant.as_deref(),
                 installed: &artifact_target_paths,
             },
             &state,
@@ -406,6 +447,8 @@ struct UpdatedPackage<'a> {
     previous: Option<&'a PackageReceipt>,
     /// The version this install puts in place.
     version: &'a Version,
+    /// Its variant, by id, for a package that comes in variants.
+    variant: Option<&'a str>,
     /// Where this install put the new version's files, or in a dry run
     /// would.
     installed: &'a [PathBuf],
@@ -599,8 +642,8 @@ impl UpdateRun<'_> {
         backups: &mut Option<BackupSetWriter>,
     ) -> Option<InstallFileReport> {
         let recorded = receipt_file_path(self.resource_path, path);
-        let left = |place: &Path, digest: Option<FileDigest>, why: &str| {
-            Some(superseded_action(
+        let left = |place: &Path, digest: Option<FileDigest>, reason, why: &str| {
+            let mut action = superseded_action(
                 package.package_id,
                 place,
                 None,
@@ -610,7 +653,9 @@ impl UpdateRun<'_> {
                     sha256: String::new(),
                 }),
                 Some(format!("{why} {UNTRACKED_NOTE}")),
-            ))
+            );
+            action.left_reason = Some(reason);
+            Some(action)
         };
         let nowhere_outside = OutsideRestoreRules::default();
         let outside = || {
@@ -628,7 +673,12 @@ impl UpdateRun<'_> {
         if let Err(reason) =
             receipt_place_by_text(self.resource_path, path, package.package_id, outside)
         {
-            return left(&recorded, None, &refused_warning(&reason));
+            return left(
+                &recorded,
+                None,
+                LeftInPlaceReason::Refused,
+                &refused_warning(&reason),
+            );
         }
         let place =
             match update_backup_place(self.resource_path, path, package.package_id, outside()) {
@@ -636,36 +686,49 @@ impl UpdateRun<'_> {
                 // A link at the place is no file of the version, and it is
                 // never followed: it stays, and the action says so.
                 Err(reason) if link_at_place(&reason, self.resource_path, path) => {
-                    return left(&recorded, None, LINK_WARNING);
+                    return left(&recorded, None, LeftInPlaceReason::Link, LINK_WARNING);
                 }
                 // Refused by what is on the way, such as a link folder that
                 // leads out of the resource folder.
                 Err(reason) => {
                     return match fs::symlink_metadata(&recorded) {
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                        _ => left(&recorded, None, &refused_warning(&reason)),
+                        _ => left(
+                            &recorded,
+                            None,
+                            LeftInPlaceReason::Refused,
+                            &refused_warning(&reason),
+                        ),
                     };
                 }
             };
         let metadata = match fs::symlink_metadata(&place) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-            Err(error) => return left(&place, None, &unreadable_warning(&error)),
+            Err(error) => {
+                return left(
+                    &place,
+                    None,
+                    LeftInPlaceReason::Unreadable,
+                    &unreadable_warning(&error),
+                );
+            }
         };
         if metadata.file_type().is_symlink() {
-            return left(&place, None, LINK_WARNING);
+            return left(&place, None, LeftInPlaceReason::Link, LINK_WARNING);
         }
         if !metadata.is_file() {
             return left(
                 &place,
                 None,
+                LeftInPlaceReason::Folder,
                 "It is a folder, not a file, so it isn't moved.",
             );
         }
         // REAPER's key map is never a file of a version: only a restore of
         // the key map puts it back, keeping the scripts registered since.
         if self.is_keymap(path, &place) {
-            return left(&place, None, KEYMAP_WARNING);
+            return left(&place, None, LeftInPlaceReason::Keymap, KEYMAP_WARNING);
         }
         // The same file as one the new version installs, under another
         // name, such as a short name on Windows. The spelling check above
@@ -680,7 +743,12 @@ impl UpdateRun<'_> {
                     size: metadata.len(),
                     sha256: String::new(),
                 };
-                return left(&place, Some(size), &unreadable_warning(&error));
+                return left(
+                    &place,
+                    Some(size),
+                    LeftInPlaceReason::Unreadable,
+                    &unreadable_warning(&error),
+                );
             }
         };
         let backup = UpdateBackup {
@@ -689,6 +757,8 @@ impl UpdateRun<'_> {
             replaced: ReplacedPackageRecord {
                 receipt: package.previous.cloned(),
                 replaced_by: Some(package.version.clone()),
+                replaced_by_variant: package.variant.map(str::to_string),
+                langpack_before: None,
             },
         };
         match backup.move_in(&place, digest.clone()) {
@@ -704,10 +774,16 @@ impl UpdateRun<'_> {
                 digest,
                 None,
             )),
-            Err(MoveFileError::InUse { .. }) => left(&place, Some(digest), IN_USE_WARNING),
+            Err(MoveFileError::InUse { .. }) => left(
+                &place,
+                Some(digest),
+                LeftInPlaceReason::InUse,
+                IN_USE_WARNING,
+            ),
             Err(MoveFileError::NotMoved(error)) => left(
                 &place,
                 Some(digest),
+                LeftInPlaceReason::Other,
                 &format!("RABBIT couldn't move it into the backup: {error}."),
             ),
         }
@@ -775,6 +851,7 @@ fn superseded_action(
         size: digest.size,
         sha256: digest.sha256,
         warning,
+        left_reason: None,
     }
 }
 
@@ -1551,6 +1628,7 @@ mod tests {
             ReplacedPackageRecord {
                 receipt: Some(packages[PACKAGE_REAPACK].clone()),
                 replaced_by: Some(Version::parse("1.2.6").unwrap()),
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -1689,6 +1767,7 @@ mod tests {
             ReplacedPackageRecord {
                 receipt: None,
                 replaced_by: Some(Version::parse("1.2.6").unwrap()),
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -1765,6 +1844,7 @@ mod tests {
                     ReplacedPackageRecord {
                         receipt: Some(reapack_before),
                         replaced_by: version.clone(),
+                        ..Default::default()
                     }
                 ),
                 (
@@ -1772,6 +1852,7 @@ mod tests {
                     ReplacedPackageRecord {
                         receipt: None,
                         replaced_by: version,
+                        ..Default::default()
                     }
                 ),
             ])
@@ -1800,6 +1881,7 @@ mod tests {
         ReplacedPackageRecord {
             receipt: None,
             replaced_by: Some(Version::parse("1.2.6").unwrap()),
+            ..Default::default()
         }
     }
 
