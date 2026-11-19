@@ -330,6 +330,9 @@ pub struct PackageRow {
     pub available_channel: Option<String>,
     /// The channel the installed build came from, as its receipt recorded it.
     pub installed_channel: Option<String>,
+    /// The available version's What's-New notes, kept so `details` can be
+    /// rebuilt when the row is ticked or unticked.
+    pub whats_new: Option<String>,
 }
 
 /// Wizard-side row for a single [`crate::configuration::ConfigurationStep`]

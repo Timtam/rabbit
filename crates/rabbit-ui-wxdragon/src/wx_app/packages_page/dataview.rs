@@ -428,6 +428,8 @@ pub(crate) fn build_packages_page(
     // work. This runs before `page.set_sizer`, i.e. before the user can
     // interact with anything.
     *side_widgets.borrow_mut() = Some(PackagesSideWidgets {
+        tree,
+        details,
         osara_checkbox: osara_keymap_replace,
         osara_note: osara_keymap_note,
         spanish_choice: spanish_variant_choice,
@@ -576,6 +578,11 @@ pub(crate) fn build_packages_page(
 /// `PackagesStateCell`.
 #[derive(Clone, Copy)]
 pub(crate) struct PackagesSideWidgets {
+    /// The list, to find the row the details pane shows.
+    pub(crate) tree: DataViewCtrl,
+    /// The details pane under the list, rewritten when the row it shows
+    /// is ticked or unticked.
+    pub(crate) details: TextCtrl,
     pub(crate) osara_checkbox: CheckBox,
     pub(crate) osara_note: TextCtrl,
     pub(crate) spanish_choice: Choice,
@@ -728,6 +735,27 @@ pub(crate) fn build_packages_tree_model(
                     && matches!(row.action, PlanActionKind::Install | PlanActionKind::Update)
             });
             can_install.set(any_install_or_update);
+
+            // The details pane shows the selected package, whose text
+            // follows its action. A toggle doesn't change the selection, so
+            // `on_selection_changed` won't refresh the pane: do it here,
+            // also when a group's box ticked the selected package.
+            if let Some(widgets) = *side_widgets_for_set_value.borrow()
+                && let Some(node_ptr) = widgets
+                    .tree
+                    .get_selection()
+                    .and_then(|item| item.get_id::<Node>())
+                && !node_ptr.is_null()
+            {
+                // SAFETY: as in `on_selection_changed`: the pointer comes
+                // from a Box<Node> the tree model owns for its lifetime.
+                let selected = unsafe { &*node_ptr };
+                if let NodeKind::Package(idx) = selected.kind
+                    && let Some(row) = rows_for_set_value.borrow().get(idx)
+                {
+                    widgets.details.set_value(&package_details(row));
+                }
+            }
 
             // Recompute configuration row availability whenever a
             // package toggle could have flipped a dependency state.
