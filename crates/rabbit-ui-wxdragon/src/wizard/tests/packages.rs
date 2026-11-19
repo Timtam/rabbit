@@ -81,6 +81,10 @@ fn toggling_a_package_row_updates_its_action_label_and_summary() {
     assert!(!row.selected);
     assert!(summary.contains("Won't touch"));
     assert!(row.summary.contains("Won't touch"));
+    // The details pane follows the tick too, and keeps the description.
+    assert!(row.details.starts_with(&row.summary), "{}", row.details);
+    assert!(!row.details.contains("Will install"), "{}", row.details);
+    assert!(row.details.contains(&row.description), "{}", row.details);
 
     // Re-checking restores the original install action because the
     // package was originally not installed.
@@ -89,6 +93,7 @@ fn toggling_a_package_row_updates_its_action_label_and_summary() {
     assert_eq!(row.action_label, "Will install");
     assert!(row.selected);
     assert!(summary.contains("Will install"));
+    assert!(row.details.starts_with(&row.summary), "{}", row.details);
 }
 
 #[test]
@@ -636,6 +641,21 @@ fn whats_new_notes_render_in_the_package_details_pane() {
         !reaper.details.contains("What's new"),
         "a package without resolved notes must keep its plain details"
     );
+
+    // Ticking or unticking the row rebuilds its details: the notes stay.
+    let mut osara = osara.clone();
+    let untick = !osara.selected;
+    apply_checkbox_state_to_package_row(&model, &mut osara, untick).unwrap();
+    assert!(
+        osara.details.starts_with(&osara.summary),
+        "{}",
+        osara.details
+    );
+    assert!(
+        osara.details.contains("• Fix the slider."),
+        "{}",
+        osara.details
+    );
 }
 
 #[test]
@@ -845,12 +865,19 @@ fn ticking_a_row_keeps_its_channel_tag() {
     );
     let mut row = reaper_row(PlanActionKind::Update, Some("dev"), None);
     apply_checkbox_state_to_package_row(&model, &mut row, false).unwrap();
+    // Unticked, the row installs nothing, so its details stop promising it.
+    assert!(
+        !row.details.contains("will be installed"),
+        "{}",
+        row.details
+    );
     apply_checkbox_state_to_package_row(&model, &mut row, true).unwrap();
     assert!(
         row.summary.contains("(development build)"),
         "{}",
         row.summary
     );
+    assert!(row.details.contains("unsupported"), "{}", row.details);
 
     // The way back is only announced while the row actually takes it.
     let mut back = reaper_row(PlanActionKind::Update, None, Some("dev"));

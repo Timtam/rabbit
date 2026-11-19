@@ -485,6 +485,11 @@ from this file and posts it as the GitHub release body.
 - RABBIT no longer misses a running REAPER whose location Windows only
   reports as an empty path. It now asks you to close it, as it already did
   when Windows reported no location at all.
+- The text below the **Packages** list now follows a package's tick. Before,
+  it kept saying what RABBIT first planned: untick a package and the list
+  said "Won't touch" while the text below still said "Will install". It now
+  says what the row says, also when a group's checkbox ticks the package,
+  and keeps the package's description and What's-New notes.
 - On macOS, the group rows in the **Packages** list (**Packages**,
   **Additional software**, **Language packs**, **Configuration**) now show
   their names, and VoiceOver reads them. Before, a group row had only its
