@@ -521,6 +521,11 @@ from this file and posts it as the GitHub release body.
   replaces it, it leaves your key map as it is, as before, but no longer
   says that it replaced it. It now says only that OSARA was installed, and
   its records no longer list your key map as one of OSARA's files.
+- The French language pack can be installed and updated again. RABBIT
+  reads its version from ReaperAccessible's package list, whose description
+  changed from "V7.80.1 par ReaperAccessible" to "Français V7.85.1" in
+  November 2026, so RABBIT no longer found the version and stopped with
+  "version pattern ... did not match".
 
 ### Security
 
