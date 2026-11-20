@@ -27,7 +27,7 @@
   "version": {
     "html": {
       "url": "https://raw.githubusercontent.com/reaperaccessible/rap_fr/main/index.xml",
-      "pattern": "V([0-9][0-9.]*) par ReaperAccessible"
+      "pattern": "name=\"REAPER_SWS_FRC\\.ReaperLangPack\" type=\"langpack\" desc=\"[^\"]*?V([0-9][0-9.]*)"
     }
   },
   "detectors": [
