@@ -347,6 +347,13 @@ pub struct PackageRow {
     /// ticked and says why, and a failed version check leaves it as it is:
     /// RABBIT wouldn't install or update the package either way.
     pub left_to_reapack: bool,
+    /// What Review says when the row is ticked while a copy of the package
+    /// sits in a folder every REAPER loads, such as an app2clap in the CLAP
+    /// folder: on the standard REAPER that the copy moves into the backup,
+    /// on a portable REAPER without the package that it will load two
+    /// copies. `None` otherwise (see
+    /// `packages::note_copies_in_former_outside_folders`).
+    pub former_copy_review_note: Option<String>,
 }
 
 /// Wizard-side row for a single [`crate::configuration::ConfigurationStep`]

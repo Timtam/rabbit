@@ -2526,27 +2526,33 @@ mod tests {
         assert_eq!(validate_package_spec(&ljuno), Ok(()));
 
         type Change = Box<dyn Fn(&mut super::EmbeddedPackageSpec)>;
-        let broken: Vec<(&str, Change)> = vec![
+        // Each change, and what the refusal says, so a check of its own
+        // that went missing can't hide behind another one that refuses too.
+        let broken: Vec<(&str, Change, &str)> = vec![
             (
                 "no detector",
                 Box::new(|spec| {
                     spec.detectors
                         .retain(|d| *d != PackageDetector::PluginBundle)
                 }),
+                "needs the plugin_bundle detector",
             ),
             (
                 "another step",
                 Box::new(|spec| spec.install_steps = vec![InstallStep::CopyUserPluginBinary]),
+                "needs install_steps",
             ),
             (
                 "outside the resource folder",
                 Box::new(|spec| spec.install_destination = InstallDestination::WindowsClapDir),
+                "needs an install folder inside the resource folder",
             ),
             (
                 "a path for a name",
                 Box::new(|spec| {
                     spec.plugin_bundle.as_mut().unwrap().name = "FX/LJuno-116.vst3".to_string()
                 }),
+                "must be one plain file name",
             ),
             (
                 "climbing out",
@@ -2554,6 +2560,7 @@ mod tests {
                     spec.plugin_bundle.as_mut().unwrap().binary =
                         "Contents/../../evil.dll".to_string()
                 }),
+                "must be plain names separated by /",
             ),
             (
                 "an empty folder name",
@@ -2561,6 +2568,7 @@ mod tests {
                     spec.plugin_bundle.as_mut().unwrap().binary =
                         "Contents//LJuno-116.vst3".to_string()
                 }),
+                "must be plain names separated by /",
             ),
             (
                 "a bare binary",
@@ -2568,19 +2576,35 @@ mod tests {
                     spec.github_release.as_mut().unwrap().artifact_kind =
                         Some(GithubArtifactKind::ExtensionBinary)
                 }),
+                "needs every download to be an archive",
             ),
             (
                 "renamed",
                 Box::new(|spec| spec.install_as = Some("Other.vst3".to_string())),
+                "can't be renamed by install_as or variants",
             ),
-            ("no bundle", Box::new(|spec| spec.plugin_bundle = None)),
+            (
+                "no bundle",
+                Box::new(|spec| spec.plugin_bundle = None),
+                "need a plugin_bundle",
+            ),
             (
                 "removable without a receipt",
                 Box::new(|spec| spec.uninstall.requires_receipt = false),
+                "needs uninstall.requires_receipt",
             ),
             (
                 "not the receipt's files",
-                Box::new(|spec| spec.uninstall.plans[0].remove.receipt_files = false),
+                Box::new(|spec| {
+                    let remove = &mut spec.uninstall.plans[0].remove;
+                    remove.receipt_files = false;
+                    // Something else to remove, or a plan with nothing to
+                    // remove is refused before the bundle's own check.
+                    remove.paths = vec![super::uninstall::UninstallPath::new(
+                        "{resource}/UserPlugins/FX/LJuno-116.vst3/desktop.ini",
+                    )];
+                }),
+                "needs receipt_files in its remove_files plans",
             ),
             (
                 "another folder's tree",
@@ -2590,16 +2614,19 @@ mod tests {
                             "{resource}/UserPlugins/FX/LJuno-161.vst3",
                         )]
                 }),
+                "in the trees_if_empty of its remove_files plans",
             ),
             (
                 "no tree",
                 Box::new(|spec| spec.uninstall.plans[0].remove.trees_if_empty.clear()),
+                "in the trees_if_empty of its remove_files plans",
             ),
         ];
-        for (what, change) in broken {
+        for (what, change, says) in broken {
             let mut spec = ljuno.clone();
             change(&mut spec);
-            assert!(validate_package_spec(&spec).is_err(), "{what} passed");
+            let error = validate_package_spec(&spec).expect_err(what);
+            assert!(error.contains(says), "{what}: {error}");
         }
     }
 

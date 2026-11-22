@@ -18,7 +18,7 @@ use crate::backup_overview::{BackupGroup, BackupItem, BackupStatus, overview_wit
 use crate::error::{RabbitError, Result};
 use crate::hash::sha256_file;
 use crate::model::{Architecture, Platform};
-use crate::package::PACKAGE_LJUNO_116;
+use crate::package::{PACKAGE_LB_303, PACKAGE_LJUNO_116};
 use crate::progress::ProgressReporter;
 use crate::receipt::load_install_state;
 use crate::rollback::restore_run_tests::snapshot;
@@ -49,12 +49,25 @@ const BINARY: &str = "Contents/x86_64-win/LJuno-116.vst3";
 /// folder, each by its path there with `/`, beside a file outside the
 /// bundle that RABBIT ignores, in `cache`.
 pub(crate) fn ljuno(cache: &Path, at: &str, files: &[(&str, &[u8])]) -> CachedArtifact {
-    let file_name = format!("LJuno-116.{at}.vst3.zip");
+    bundle_release(cache, PACKAGE_LJUNO_116, "LJuno-116", at, files)
+}
+
+/// `package_id`'s release `at` as Lo-lo's zips come, with `files` in the
+/// bundle folder `<name>.vst3`, each by its path there with `/`, beside a
+/// file outside the bundle that RABBIT ignores, in `cache`.
+fn bundle_release(
+    cache: &Path,
+    package_id: &str,
+    name: &str,
+    at: &str,
+    files: &[(&str, &[u8])],
+) -> CachedArtifact {
+    let file_name = format!("{name}.{at}.vst3.zip");
     let path = cache.join(&file_name);
     fs::create_dir_all(cache).unwrap();
     let names: Vec<String> = files
         .iter()
-        .map(|(name, _)| format!("LJuno-116.vst3/{name}"))
+        .map(|(relative, _)| format!("{name}.vst3/{relative}"))
         .collect();
     let mut entries: Vec<(&str, &[u8])> = vec![("README.md", b"read me")];
     entries.extend(
@@ -66,7 +79,7 @@ pub(crate) fn ljuno(cache: &Path, at: &str, files: &[(&str, &[u8])]) -> CachedAr
     write_test_zip(&path, &entries);
     CachedArtifact {
         descriptor: ArtifactDescriptor {
-            package_id: PACKAGE_LJUNO_116.to_string(),
+            package_id: package_id.to_string(),
             version: Version::parse(at).unwrap(),
             platform: Platform::Windows,
             architecture: Architecture::X64,
@@ -630,6 +643,226 @@ fn an_update_that_fails_to_put_its_binary_in_place_puts_the_earlier_bundle_back(
         earlier_state
     );
     assert_eq!(sets_in(&resource), 0);
+}
+
+/// Should a later package of one install call fail, as LB-303's release
+/// without its binary does, the packages before it stay in place, and the
+/// receipt is saved with their entries before the error ends the run, so
+/// RABBIT keeps track of them: LJuno-116's entry lists every file of its
+/// bundle, which its uninstall needs. Nothing of LB-303 is written, and it
+/// has no entry.
+#[test]
+fn a_later_package_that_fails_leaves_the_earlier_ones_recorded() {
+    let (dir, resource) = resource_folder();
+    let cache = dir.path().join("cache");
+    let without_binary = bundle_release(
+        &cache,
+        PACKAGE_LB_303,
+        "LB-303",
+        "1.0.0",
+        &[("desktop.ini", b"[.ShellClassInfo]")],
+    );
+
+    let error = try_install(
+        &resource,
+        &[ljuno(&cache, "0.99.66", V1), without_binary],
+        &APPLY,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(error, RabbitError::ArchiveMissingBundleBinary { .. }),
+        "{error}"
+    );
+    assert_eq!(snapshot(&bundle(&resource)), bundle_tree(&resource, V1));
+    assert!(!fx(&resource).join("LB-303.vst3").exists());
+    let state = load_install_state(&resource)
+        .unwrap()
+        .expect("the receipt is saved");
+    let entry = &state.packages[PACKAGE_LJUNO_116];
+    assert_eq!(entry.version, Some(Version::parse("0.99.66").unwrap()));
+    let mut expected: Vec<PathBuf> = V1.iter().map(|(relative, _)| recorded(relative)).collect();
+    expected.sort();
+    let paths: Vec<PathBuf> = entry
+        .installed_files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect();
+    assert_eq!(paths, expected);
+    assert!(!state.packages.contains_key(PACKAGE_LB_303));
+}
+
+/// Should a file the update replaces fail to be copied into the update's
+/// set, as one that can't be read would, nothing changes: no file went
+/// into its place yet, so the staged copies go again, with the folder
+/// staging made, and so do the copies already in the set, and the set with
+/// them. The bundle is the earlier version, file for file, and the receipt
+/// still says so.
+#[test]
+fn an_update_whose_copy_into_its_set_fails_changes_nothing() {
+    let (dir, resource) = resource_folder();
+    install(
+        &resource,
+        &[ljuno(&dir.path().join("cache"), "0.99.66", V1)],
+        &APPLY,
+    );
+    let earlier = snapshot(&bundle(&resource));
+    let earlier_state = load_install_state(&resource).unwrap().unwrap();
+    let binary = below(&bundle(&resource), BINARY);
+    let copied = Rc::new(RefCell::new(Vec::new()));
+    let noted = Rc::clone(&copied);
+    let backing_up = super::install_seam::backing_up(move |place| {
+        noted.borrow_mut().push(place.to_path_buf());
+        if place == binary {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "it can't be read",
+            ));
+        }
+        Ok(())
+    });
+    let (placing, placed) = note_places();
+
+    let error = try_install(
+        &resource,
+        &[ljuno(&dir.path().join("cache"), "0.99.67", V2)],
+        &APPLY,
+    )
+    .unwrap_err();
+
+    drop(backing_up);
+    drop(placing);
+    assert!(matches!(error, RabbitError::Io { .. }), "{error}");
+    assert_eq!(
+        *copied.borrow(),
+        [
+            below(&bundle(&resource), "Contents/Resources/moduleinfo.json"),
+            below(&bundle(&resource), BINARY),
+        ],
+        "the binary's copy fails after another file's went into the set"
+    );
+    assert!(placed.borrow().is_empty());
+    assert_eq!(snapshot(&bundle(&resource)), earlier);
+    assert_eq!(
+        load_install_state(&resource).unwrap().unwrap(),
+        earlier_state
+    );
+    assert_eq!(sets_in(&resource), 0);
+}
+
+/// Update LJuno-116 from 0.99.66 to 0.99.67 in `resource`, with `fail`
+/// called on the binary's place right before it would go in there, as the
+/// binary fails to; the other files go in before it. Returns the error,
+/// and the bundle and receipt from before the update.
+fn update_failing_at_the_binary(
+    dir: &Path,
+    resource: &Path,
+    fail: impl Fn(&Path) + 'static,
+) -> (
+    RabbitError,
+    Vec<(PathBuf, crate::rollback::restore_run_tests::Node)>,
+    crate::receipt::InstallState,
+) {
+    install(
+        resource,
+        &[ljuno(&dir.join("cache"), "0.99.66", V1)],
+        &APPLY,
+    );
+    let earlier = snapshot(&bundle(resource));
+    let earlier_state = load_install_state(resource).unwrap().unwrap();
+    let binary = below(&bundle(resource), BINARY);
+    let seam = super::install_seam::install(move |place| {
+        if place != binary {
+            return Ok(());
+        }
+        fail(place);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the binary can't take its place",
+        ))
+    });
+    let error = try_install(
+        resource,
+        &[ljuno(&dir.join("cache"), "0.99.67", V2)],
+        &APPLY,
+    )
+    .unwrap_err();
+    drop(seam);
+    (error, earlier, earlier_state)
+}
+
+/// Should the file at the binary's place be removed before its new copy
+/// fails to take the place, as when Windows renames over it only after
+/// removing it first, the earlier binary comes back from its copy in the
+/// update's set, with the files that went in before it: the bundle is the
+/// earlier version, file for file, the receipt still says so, and the set
+/// goes again.
+#[test]
+fn a_binary_removed_before_its_copy_failed_comes_back_from_the_set() {
+    let (dir, resource) = resource_folder();
+
+    let (error, earlier, earlier_state) =
+        update_failing_at_the_binary(dir.path(), &resource, |place| {
+            fs::remove_file(place).unwrap();
+        });
+
+    assert!(matches!(error, RabbitError::Io { .. }), "{error}");
+    assert_eq!(snapshot(&bundle(&resource)), earlier);
+    assert_eq!(
+        load_install_state(&resource).unwrap().unwrap(),
+        earlier_state
+    );
+    assert_eq!(sets_in(&resource), 0);
+}
+
+/// Should the binary's place hold anything but the earlier binary after
+/// its new copy failed to take it, such as a file only marked for deletion
+/// on a FAT32 or exFAT drive, which vanishes once the program that holds
+/// it open lets go, RABBIT can't vouch for that place. So the update's set
+/// keeps its copy of the earlier binary, with the record of the version it
+/// was, for a restore to bring back; the files that went in before it are
+/// put back as they were, and the receipt still names the earlier version.
+#[test]
+fn a_binary_whose_place_cant_be_vouched_for_keeps_its_copy_in_the_set() {
+    let (dir, resource) = resource_folder();
+
+    let (error, earlier, earlier_state) =
+        update_failing_at_the_binary(dir.path(), &resource, |place| {
+            fs::write(place, b"about to vanish").unwrap();
+        });
+
+    assert!(matches!(error, RabbitError::Io { .. }), "{error}");
+    let binary = below(&bundle(&resource), BINARY);
+    let mut expected = earlier;
+    for (path, node) in &mut expected {
+        if *path == binary {
+            *node = crate::rollback::restore_run_tests::Node::File(b"about to vanish".to_vec());
+        }
+    }
+    assert_eq!(snapshot(&bundle(&resource)), expected);
+    assert_eq!(
+        load_install_state(&resource).unwrap().unwrap(),
+        earlier_state
+    );
+    assert_eq!(sets_in(&resource), 1);
+    let set = fs::read_dir(resource.join("RABBIT").join("backups"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let manifest: BackupManifest = serde_json::from_str(
+        &fs::read_to_string(set.join(crate::rollback::BACKUP_MANIFEST_FILE)).unwrap(),
+    )
+    .unwrap();
+    let copy = manifest
+        .files
+        .iter()
+        .find(|file| file.original_path == recorded(BINARY))
+        .expect("the set keeps the earlier binary");
+    assert_eq!(copy.state, BackupEntryState::Done);
+    assert_eq!(fs::read(&copy.backup_path).unwrap(), b"binary 0.99.66");
+    assert!(manifest.replaced.contains_key(PACKAGE_LJUNO_116));
 }
 
 /// A folder inside the bundle that a symbolic link or junction stands for

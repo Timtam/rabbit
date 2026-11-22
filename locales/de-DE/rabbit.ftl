@@ -48,13 +48,17 @@ package-jaws-scripts-description = Die JAWS-Skripte für REAPER ergänzen den Sc
 package-ffmpeg-description = Die gemeinsam genutzten Laufzeitbibliotheken von FFmpeg ermöglichen es dem Videodecoder von REAPER, gängige Video- und Audioformate zu importieren und abzuspielen. RABBIT installiert den Inhalt des `bin`-Ordners aus dem GPL-Shared-Build von BtbN in `UserPlugins`. Die genaue Patch-Version lässt sich aus den DLL-Dateinamen allein nicht ableiten — extern installierte FFmpeg-Versionen werden deshalb als `<major>.0.0` gemeldet.
 package-surge-xt-description = Surge XT ist ein freier, quelloffener Hybrid-Synthesizer. RABBIT führt das Installationsprogramm des Herstellers für Sie aus — es installiert die Formate VST3, CLAP, AU (nur macOS) und Standalone systemweit, sodass REAPER und andere DAWs Surge XT laden können. RABBIT verfolgt den fortlaufenden Nightly-Kanal, weil die letzte stabile Veröffentlichung (1.3.4) aus dem August 2024 stammt und das Projekt inzwischen praktisch ausschließlich über Nightly-Builds ausgeliefert wird. Nur in Standard-REAPER-Installationen verfügbar: Die mitgelieferten Daten liegen außerhalb eines portablen REAPER-Ordners.
 # Lo-lo's four instruments, VST3 plug-ins that RABBIT installs into REAPER's
-# own plug-in folder. Keep UserPlugins\FX and Common Files\VST3 as they are:
-# they are the folders' names.
-package-ljuno-116-description = LJuno-116 ist ein polyphoner Open-Source-Synthesizer von Lo-lo, den Sie mit einem Screenreader spielen und bearbeiten können. RABBIT installiert ihn ohne Administratorrechte in REAPERs eigenen Plug-in-Ordner UserPlugins\FX, und REAPER findet ihn nach dem nächsten Start oder einer erneuten Suche nach Plug-ins. Wenn Sie ihn selbst nach Common Files\VST3 kopiert haben, entfernen Sie diese Kopie, damit REAPER ihn nicht doppelt findet. Nur für Windows.
-package-lb-303-description = LB-303 ist ein Open-Source-Bassline-Synthesizer von Lo-lo mit Step-Sequencer. Sie spielen und bearbeiten ihn mit einem Screenreader. RABBIT installiert ihn ohne Administratorrechte in REAPERs eigenen Plug-in-Ordner UserPlugins\FX, und REAPER findet ihn nach dem nächsten Start oder einer erneuten Suche nach Plug-ins. Wenn Sie ihn selbst nach Common Files\VST3 kopiert haben, entfernen Sie diese Kopie, damit REAPER ihn nicht doppelt findet. Nur für Windows.
-package-lr-608-description = LR-608 ist eine Open-Source-Drum-Machine von Lo-lo, die ihre Klänge synthetisiert und deshalb keine Sample-Bibliothek braucht. Sie spielen sie mit der Tastatur und einem Screenreader. RABBIT installiert sie ohne Administratorrechte in REAPERs eigenen Plug-in-Ordner UserPlugins\FX, und REAPER findet sie nach dem nächsten Start oder einer erneuten Suche nach Plug-ins. Wenn Sie sie selbst nach Common Files\VST3 kopiert haben, entfernen Sie diese Kopie, damit REAPER sie nicht doppelt findet. Nur für Windows.
-package-lsampler-24-description = LSampler-24 ist ein Sampler von Lo-lo mit 24 Slots für Ihre eigenen Samples, den Sie mit einem Screenreader bedienen können. RABBIT installiert ihn ohne Administratorrechte in REAPERs eigenen Plug-in-Ordner UserPlugins\FX, und REAPER findet ihn nach dem nächsten Start oder einer erneuten Suche nach Plug-ins. Wenn Sie ihn selbst nach Common Files\VST3 kopiert haben, entfernen Sie diese Kopie, damit REAPER ihn nicht doppelt findet. Nur für Windows.
-package-app2clap-description = app2clap ist ein CLAP-Plugin für Windows, das Audio aus anderen Anwendungen erfasst und es in REAPER als Plug-in einspeist, das Sie in eine Spur einfügen — praktisch, um Ton aus einem Browser, Mediaplayer oder anderen Programm aufzunehmen oder zu bearbeiten. RABBIT lädt die neueste Version herunter und installiert app2clap.clap in REAPERs eigenen Plug-in-Ordner UserPlugins\FX, sodass es nur diesem REAPER zur Verfügung steht. Es sind keine Administratorrechte nötig, und das funktioniert auch mit einem portablen REAPER. Nur für Windows.
+# own plug-in folder. Keep UserPlugins\FX and
+# C:\Program Files\Common Files\VST3 as they are: they are the folders'
+# names, and the full path works in File Explorer's address bar in any
+# language. Where Windows in your language shows Program Files and Common
+# Files under other names, add the path as File Explorer shows it in
+# parentheses.
+package-ljuno-116-description = LJuno-116 ist ein polyphoner Open-Source-Synthesizer von Lo-lo, den Sie mit einem Screenreader spielen und bearbeiten können. RABBIT installiert ihn ohne Administratorrechte in REAPERs eigenen Plug-in-Ordner UserPlugins\FX, und REAPER findet ihn nach dem nächsten Start oder einer erneuten Suche nach Plug-ins. Wenn Sie ihn selbst nach C:\Program Files\Common Files\VST3 kopiert haben (im Explorer: Programme\Gemeinsame Dateien\VST3), entfernen Sie diese Kopie, damit REAPER nur die verwendet, die RABBIT aktuell hält. Nur für Windows.
+package-lb-303-description = LB-303 ist ein Open-Source-Bassline-Synthesizer mit Step-Sequencer von Lo-lo. Er ist dafür gemacht, mit einem Screenreader gespielt und bearbeitet zu werden. RABBIT installiert ihn ohne Administratorrechte in REAPERs eigenen Plug-in-Ordner UserPlugins\FX, und REAPER findet ihn nach dem nächsten Start oder einer erneuten Suche nach Plug-ins. Wenn Sie ihn selbst nach C:\Program Files\Common Files\VST3 kopiert haben (im Explorer: Programme\Gemeinsame Dateien\VST3), entfernen Sie diese Kopie, damit REAPER nur die verwendet, die RABBIT aktuell hält. Nur für Windows.
+package-lr-608-description = LR-608 ist eine Open-Source-Drum-Machine von Lo-lo, die dafür gemacht ist, mit der Tastatur und einem Screenreader gespielt zu werden. Sie synthetisiert ihre Klänge selbst und braucht deshalb keine Sample-Bibliothek. RABBIT installiert sie ohne Administratorrechte in REAPERs eigenen Plug-in-Ordner UserPlugins\FX, und REAPER findet sie nach dem nächsten Start oder einer erneuten Suche nach Plug-ins. Wenn Sie sie selbst nach C:\Program Files\Common Files\VST3 kopiert haben (im Explorer: Programme\Gemeinsame Dateien\VST3), entfernen Sie diese Kopie, damit REAPER nur die verwendet, die RABBIT aktuell hält. Nur für Windows.
+package-lsampler-24-description = LSampler-24 ist ein Sampler von Lo-lo mit 24 Slots für Ihre eigenen Samples, den Sie mit einem Screenreader bedienen können. RABBIT installiert ihn ohne Administratorrechte in REAPERs eigenen Plug-in-Ordner UserPlugins\FX, und REAPER findet ihn nach dem nächsten Start oder einer erneuten Suche nach Plug-ins. Wenn Sie ihn selbst nach C:\Program Files\Common Files\VST3 kopiert haben (im Explorer: Programme\Gemeinsame Dateien\VST3), entfernen Sie diese Kopie, damit REAPER nur die verwendet, die RABBIT aktuell hält. Nur für Windows.
+package-app2clap-description = app2clap ist ein CLAP-Plug-in für Windows, das Audio aus anderen Anwendungen erfasst und es in REAPER als Plug-in einspeist, das Sie in eine Spur einfügen — praktisch, um Ton aus einem Browser, Mediaplayer oder anderen Programm aufzunehmen oder zu bearbeiten. RABBIT lädt die neueste Version herunter und installiert app2clap.clap in REAPERs eigenen Plug-in-Ordner UserPlugins\FX, sodass es nur diesem REAPER zur Verfügung steht. Es sind keine Administratorrechte nötig, und das funktioniert auch mit einem portablen REAPER. Nur für Windows.
 package-lreaparams-description = LReaParams ist eine Open-Source-Erweiterung von Lo-lo, mit der Sie FX- und Spurparameter in REAPER barrierefrei über die Tastatur steuern. Die Erweiterung arbeitet mit OSARA zusammen. Nur für Windows.
 package-langpack-es-description = Übersetzt die Oberfläche von REAPER ins Spanische, einschließlich der SWS-Erweiterung. Betreut von Javier Robledo für die spanische REAPER-Community und über reaperespa.com veröffentlicht — RABBIT lädt die aktuelle Fassung herunter und installiert sie als es_ES.ReaperLangPack. OSARA wählt anhand dieses Dateinamens seine eigene spanische Übersetzung. Stellen Sie die Sprache anschließend in den REAPER-Einstellungen ein (oder lassen Sie RABBIT das übernehmen).
 package-langpack-de-description = Übersetzt die Oberfläche von REAPER ins Deutsche, einschließlich der SWS-Erweiterung. Betreut von MrData und im REAPER-Stash veröffentlicht — RABBIT lädt die aktuelle Fassung herunter und installiert sie als de_DE.ReaperLangPack. Stellen Sie die Sprache anschließend in den REAPER-Einstellungen ein (oder lassen Sie RABBIT das übernehmen).
@@ -79,8 +83,10 @@ uninstall-summary-ffmpeg-keeps = FFmpeg-Dateien, über die RABBIT nichts aufgeze
 uninstall-summary-app2clap-removes = Entfernt app2clap aus dem Ordner UserPlugins\FX von REAPER.
 # The same on the standard REAPER, which also removes any app2clap in the
 # per-user CLAP folder, whoever put it there: earlier versions of RABBIT
-# installed it there. Keep UserPlugins\FX as it is: it is the folder's name.
-uninstall-summary-app2clap-removes-standard = Entfernt app2clap aus dem Ordner UserPlugins\FX von REAPER und jedes app2clap in Ihrem CLAP-Ordner, etwa eines, das eine frühere Version von RABBIT dort installiert hat. Alle Programme, in denen Sie CLAP-Plug-ins verwenden, verlieren die Kopie im CLAP-Ordner, nicht nur REAPER.
+# installed it there. Only when there is such a copy, a sentence of its own
+# says that every program using CLAP plug-ins loses it, so this one doesn't.
+# Keep UserPlugins\FX as it is: it is the folder's name.
+uninstall-summary-app2clap-removes-standard = Entfernt app2clap aus dem Ordner UserPlugins\FX von REAPER und jedes app2clap in Ihrem CLAP-Ordner, etwa eines, das eine frühere Version von RABBIT dort installiert hat.
 uninstall-summary-app2clap-keeps = Ihre anderen Plug-ins bleiben erhalten.
 uninstall-summary-lreaparams-removes = Entfernt die LReaParams-Erweiterung.
 uninstall-summary-lreaparams-keeps = Ihre LReaParams-Einstellungen und -Profile bleiben erhalten, ebenso die Anleitung.
@@ -240,7 +246,14 @@ wizard-package-details-reapack-check-failed = RABBIT konnte die Einträge von Re
 # loads the plug-ins in the CLAP folder, so this one would load two copies.
 # Updating or reinstalling the package in the standard REAPER moves the copy
 # out of the CLAP folder. $package is the localized package name.
-wizard-package-details-clap-copy-portable = Dieses REAPER lädt bereits die Kopie von { $package } in Ihrem CLAP-Ordner, wie jedes REAPER auf diesem Computer. Wird es hier zusätzlich installiert, lädt dieses REAPER zwei Kopien. Damit es eine eigene Kopie bekommt, aktualisieren Sie { $package } zuerst in der Standardinstallation von REAPER oder installieren Sie es dort neu: Dadurch wird die Kopie im CLAP-Ordner in eine Sicherung verschoben.
+wizard-package-details-clap-copy-portable = Dieses REAPER lädt bereits die Kopie von { $package } in Ihrem CLAP-Ordner, wie jedes REAPER auf diesem Computer. Wird { $package } hier zusätzlich installiert, lädt dieses REAPER zwei Kopien. Damit dieses REAPER eine eigene Kopie bekommt, aktualisieren Sie { $package } zuerst in der Standardinstallation von REAPER oder installieren Sie es dort neu: Dadurch wird die Kopie im CLAP-Ordner in eine Sicherung verschoben.
+# A sentence the package details add on a portable REAPER that has its own copy
+# of a package already, while the per-user CLAP folder holds another one, such
+# as app2clap: every REAPER on the computer loads the plug-ins in the CLAP
+# folder, so this one loads two copies. Updating or reinstalling the package
+# in the standard REAPER moves the copy out of the CLAP folder. $package is the
+# localized package name.
+wizard-package-details-clap-copy-portable-installed = Dieses REAPER lädt zwei Kopien von { $package }: seine eigene und die in Ihrem CLAP-Ordner, die jedes REAPER auf diesem Computer lädt. Um die Kopie im CLAP-Ordner zu entfernen, aktualisieren Sie { $package } in der Standardinstallation von REAPER oder installieren Sie es dort neu: Dadurch wird sie in eine Sicherung verschoben.
 # The same on the standard REAPER: updating or reinstalling the package there
 # moves the copy out of the CLAP folder into a backup, so portable REAPERs and
 # every other program that loaded it from there lose it. $package is the
@@ -380,6 +393,13 @@ wizard-uninstall-row-unavailable-by-hand-macos = im Finder in den Papierkorb leg
 wizard-uninstall-details-reapack = ReaPack verwaltet { $package }: Es hat { $path } als { $reapack_package } installiert. Deinstallieren Sie es stattdessen in ReaPack.
 wizard-uninstall-details-reapack-check-failed = RABBIT konnte die Einträge von ReaPack zu { $path } nicht prüfen ({ $reason }) und lässt { $package } deshalb unverändert.
 wizard-uninstall-details-portable = { $package } dient jedem REAPER auf diesem Computer. RABBIT entfernt es deshalb nur aus der Standardinstallation von REAPER, nicht aus einer portablen.
+# A sentence the Uninstall details add on a portable REAPER while the per-user
+# CLAP folder holds a copy of the package, such as app2clap, which every REAPER
+# on the computer loads: the uninstall removes only this REAPER's own copy, so
+# it still loads that one. Uninstalling, updating or reinstalling the package
+# in the standard REAPER takes that copy away. $package is the localized
+# package name.
+wizard-uninstall-details-clap-copy-portable = Nach der Deinstallation lädt dieses REAPER weiterhin die Kopie von { $package } in Ihrem CLAP-Ordner, wie jedes REAPER auf diesem Computer. Diese Kopie verschwindet erst, wenn Sie { $package } in der Standardinstallation von REAPER deinstallieren, aktualisieren oder neu installieren.
 wizard-uninstall-details-no-receipt = RABBIT hat diese Kopie von { $package } nicht installiert. Sie ist also höchstwahrscheinlich Ihre eigene, und RABBIT lässt sie unverändert.
 wizard-uninstall-details-no-trusted-uninstaller = RABBIT hat für { $package } kein Deinstallationsprogramm gefunden, dem es vertrauen kann.
 wizard-uninstall-details-unsafe-path = RABBIT entfernt { $path } nicht. Es lässt { $package } lieber ganz unverändert, als es nur zum Teil zu entfernen.
@@ -944,6 +964,16 @@ wizard-review-no-package = Kein Paket ausgewählt.
 
 # $package is the localized package display name and $action is the localized planned action.
 wizard-review-package = { $package }: { $action }
+# Review, under its notes, for a package ticked on the standard REAPER while
+# the per-user CLAP folder holds a copy of it, such as app2clap: the install
+# moves that copy into the update's backup, so portable REAPERs and other
+# programs that use CLAP plug-ins lose it. $package is the localized package
+# name.
+wizard-review-clap-copy-moves = { $package }: Die Kopie in Ihrem CLAP-Ordner wird in die Sicherung verschoben. Portable REAPER und andere Programme, die CLAP-Plug-ins verwenden, finden sie danach nicht mehr.
+# Review, under its notes, for a package ticked to install on a portable REAPER
+# while the per-user CLAP folder holds a copy of it, which every REAPER loads:
+# this REAPER will load two copies. $package is the localized package name.
+wizard-review-clap-copy-twice = { $package }: Dieses REAPER lädt auch die Kopie in Ihrem CLAP-Ordner und damit zwei Kopien.
 
 # Review in uninstall mode. The heading names the mode, so it is the first
 # thing read.
@@ -1565,11 +1595,12 @@ wizard-summary-left-in-place-keymap = Bleibt, wo sie ist, weil sie die Tastenzuo
 wizard-summary-left-in-place-refused = Bleibt, wo sie ist, weil RABBIT sie aus einer Sicherung nicht dorthin zurücklegen könnte: { $path }
 wizard-summary-left-in-place-unreadable = Bleibt, wo sie ist, weil RABBIT sie nicht lesen konnte: { $path }
 wizard-summary-left-in-place-other = Bleibt, wo sie ist, weil RABBIT sie nicht in die Sicherung verschieben konnte: { $path }
-# Show details' line right after wizard-summary-moved-to-backup, for a file
-# that was outside REAPER's own folder, in a folder other programs read too,
-# such as the per-user CLAP folder: they no longer find it there. $path is the
-# file's path.
-wizard-summary-moved-from-shared-folder = Portable REAPER und andere Programme, die sie von dort geladen haben, finden sie nicht mehr: { $path }
+# Show details, instead of wizard-summary-moved-to-backup, for a file an
+# update moved into its backup from a folder outside REAPER's own folder that
+# other programs read too, such as the per-user CLAP folder: the new version
+# installs it into REAPER's own folder instead, and they no longer find it
+# there. $path is the file's path.
+wizard-summary-moved-from-shared-folder = In die Sicherung verschoben, weil die neue Version sie stattdessen in den eigenen Ordner von REAPER installiert. Portable REAPER und andere Programme, die sie von dort geladen haben, finden sie nicht mehr: { $path }
 # Show details after an update that moved the language pack file REAPER's
 # language named into the backup, such as after a switch between the two
 # Spanish variants: REAPER's language now names the new version's file;
@@ -2048,6 +2079,11 @@ wizard-restore-status-partly-restored = Teilweise wiederhergestellt
 # `wizard-summary-package-message` setzt den Paketnamen bereits voran, daher
 # enthält jeder dieser Strings nur den eigentlichen Meldungstext.
 package-status-extension-binary-installed = Einzelne Erweiterungsbinärdatei wurde von RABBIT installiert.
+# Show details after RABBIT put a plug-in into REAPER's own plug-in folder,
+# such as one of Lo-lo's instruments or app2clap, after the package's name.
+# Keep UserPlugins\FX as it is: it is the folder's name. Word it so it fits
+# any package name.
+package-status-plugin-installed = In den Ordner UserPlugins\FX von REAPER installiert. REAPER findet das Plug-in nach dem nächsten Start oder einer erneuten Suche nach Plug-ins.
 # $installed ist die installierte Version; $available ist die neueste verfügbare Version.
 package-status-skipped-current = Installierte Version { $installed } ist aktuell oder neuer als die verfügbare Version { $available }.
 package-status-skipped-content-unchanged = Die installierte Fassung ist identisch mit der beim Herausgeber veröffentlichten.

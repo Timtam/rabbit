@@ -150,9 +150,18 @@ pub fn build_review_preview_for_package_rows(
         ));
     }
 
-    if !notes.is_empty() {
+    // What a ticked row does to a copy in a folder every REAPER loads, such
+    // as an app2clap in the CLAP folder, is said here too: the details pane
+    // isn't the one place a screen reader user is sure to hear.
+    let copy_notes: Vec<String> = selected_package_indices
+        .iter()
+        .filter_map(|index| package_rows.get(*index))
+        .filter_map(|package| package.former_copy_review_note.clone())
+        .collect();
+    if !notes.is_empty() || !copy_notes.is_empty() {
         lines.push(String::new());
         lines.push(model.text.review_notes_heading.clone());
+        lines.extend(copy_notes);
         lines.extend(notes.iter().cloned());
     }
 

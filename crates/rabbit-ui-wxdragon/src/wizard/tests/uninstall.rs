@@ -1378,6 +1378,109 @@ fn an_uninstall_review_names_the_ticks_on_both_other_tabs() {
     assert!(text.contains("Backups tab"), "{text}");
 }
 
+/// On a portable REAPER, app2clap's Uninstall row says that this REAPER
+/// still loads the copy in the CLAP folder after the uninstall, and what
+/// takes that copy away, after what the uninstall itself does. The standard
+/// REAPER's row doesn't: its uninstall removes that copy too. Without a
+/// copy, neither says it. The copy is made up through the wizard's test
+/// seam, so the real CLAP folder is never looked at. In every language.
+#[test]
+fn a_portable_uninstall_of_app2clap_says_the_copy_in_the_clap_folder_stays() {
+    let dir = tempdir().unwrap();
+    let (_, model) = langpack_model(rabbit_core::plan::PlanActionKind::Install);
+    let fx = dir
+        .path()
+        .join("UserPlugins")
+        .join("FX")
+        .join("app2clap.clap");
+    std::fs::create_dir_all(fx.parent().unwrap()).unwrap();
+    std::fs::write(&fx, b"app2clap").unwrap();
+    let mut state = InstallState::default();
+    rabbit_core::receipt::upsert_package_receipt(
+        &mut state,
+        dir.path(),
+        rabbit_core::receipt::PackageReceiptParams {
+            variant: None,
+            channel: None,
+            package_id: "app2clap",
+            version: Some(Version::parse("2026.5.17.34").unwrap()),
+            source_url: None,
+            source_sha256: None,
+            installed_paths: std::slice::from_ref(&fx),
+            installed_at: None,
+            architecture: None,
+        },
+    )
+    .unwrap();
+    rabbit_core::receipt::save_install_state(dir.path(), &state).unwrap();
+    let detections: Vec<ComponentDetection> = builtin_package_specs(model.platform)
+        .iter()
+        .map(|spec| ComponentDetection {
+            installed: spec.id == "app2clap",
+            ..ComponentDetection::not_installed(&spec.id, &spec.display_name)
+        })
+        .collect();
+    let row_for = |portable: bool| {
+        let target = TargetRow {
+            path: dir.path().to_path_buf(),
+            portable,
+            ..model.target_rows[0].clone()
+        };
+        let list = uninstall_list_with_roots(
+            &model,
+            &target,
+            &fixture_roots(model.platform, &target.path, dir.path()),
+            &detections,
+            &NothingListed,
+            &NoMacosObjects,
+        );
+        list.rows
+            .into_iter()
+            .find(|row| row.package_id == "app2clap")
+            .expect("an app2clap row")
+    };
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let sentence = localizer
+        .format(
+            "wizard-uninstall-details-clap-copy-portable",
+            &[("package", "app2clap")],
+        )
+        .value;
+    let without_copy = row_for(true);
+    assert!(!without_copy.details.contains(&sentence));
+
+    let seam = crate::wizard::packages::former_copies_seam::install(|spec| {
+        if spec.id == "app2clap" {
+            vec![PathBuf::from("C:/CLAP/app2clap.clap")]
+        } else {
+            Vec::new()
+        }
+    });
+    let portable = row_for(true);
+    let standard = row_for(false);
+    drop(seam);
+
+    assert_eq!(
+        portable.details,
+        format!("{}\n{sentence}", without_copy.details),
+        "the sentence follows the rest"
+    );
+    assert!(
+        !standard.details.contains(&sentence),
+        "{}",
+        standard.details
+    );
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let text = localizer.format(
+            "wizard-uninstall-details-clap-copy-portable",
+            &[("package", "app2clap")],
+        );
+        assert!(!text.missing, "{locale}");
+        assert_reads(locale, &text.value);
+    }
+}
+
 /// app2clap on the standard REAPER, with an older copy in the CLAP folder
 /// that every program using CLAP plug-ins may load.
 #[test]

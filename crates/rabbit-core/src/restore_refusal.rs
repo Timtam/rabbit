@@ -733,8 +733,8 @@ pub fn sample_refusals() -> Vec<RestoreRefusal> {
             puts_keymap_back: true,
         },
         RestoreRefusal::ReaperRunning {
-            every_reaper_for: vec!["jaws-scripts".to_string()],
-            package_names: vec!["JAWS scripts".to_string()],
+            every_reaper_for: vec!["app2clap".to_string(), "jaws-scripts".to_string()],
+            package_names: vec!["app2clap".to_string(), "JAWS scripts".to_string()],
             processes: vec![reaper],
             puts_keymap_back: false,
         },

@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 use super::{
-    InstallFileAction, InstallFileReport, InstallOptions, InstallReport, KEYMAP_WARNING,
-    LINK_WARNING, LeftInPlaceReason, ReaperLanguageReport, UNTRACKED_NOTE,
+    FORMER_COPY_NOTE, InstallFileAction, InstallFileReport, InstallOptions, InstallReport,
+    KEYMAP_WARNING, LINK_WARNING, LeftInPlaceReason, ReaperLanguageReport, UNTRACKED_NOTE,
     install_cached_artifacts_within,
 };
 use crate::artifact::{ArtifactDescriptor, ArtifactKind, CachedArtifact};
@@ -32,13 +32,15 @@ use crate::progress::ProgressReporter;
 use crate::receipt::{
     InstallState, InstalledFileReceipt, PackageReceipt, load_install_state, save_install_state,
 };
+use crate::restore_refusal::{RestoreRefusal, refusal};
 use crate::rollback::restore_run_tests::snapshot;
 use crate::rollback::restore_seam::{self, Step};
 use crate::rollback::{
     BackupEntryState, BackupEnvironment, BackupManifest, ORIGIN_SIDECAR_SUFFIX,
     OutsideRestoreRules, ReplacedPackageRecord, RestoreBackupOptions, RestoreBackupReport,
     RestoreItem, RestoreRunOptions, RestoreStatus, UPDATE_BACKUP_REASON, load_backup_manifest,
-    restore_backup_set_within, restore_backups_with, save_backup_manifest,
+    restore_backup_set_with, restore_backup_set_within, restore_backups_with,
+    restore_running_refusal_with, save_backup_manifest,
 };
 use crate::version::Version;
 
@@ -1264,6 +1266,10 @@ fn an_update_moves_app2clap_out_of_the_clap_folder_and_can_be_undone() {
         allow_reaper_running: false,
         package_id: Some(PACKAGE_APP2CLAP.to_string()),
     };
+    // Going back puts the copy back into the CLAP folder, which any REAPER
+    // may load, so while another REAPER runs it is refused, as an uninstall
+    // that removes it from there is.
+    refused_while_another_reaper_runs(dir.path(), &resource, &set_id, &clap);
     let back = restore_backup_set_within(&resource, &set_id, &options, &clap_rules()).unwrap();
 
     assert_eq!(back.status, RestoreStatus::Restored, "{back:?}");
@@ -1290,6 +1296,9 @@ fn an_update_moves_app2clap_out_of_the_clap_folder_and_can_be_undone() {
     );
     assert_eq!(outside_of(dir.path(), &resource), outside_before);
 
+    // Going forward again moves the copy out of the CLAP folder, by
+    // RABBIT's records, so it is refused the same way.
+    refused_while_another_reaper_runs(dir.path(), &resource, &newer, &clap);
     let forward = restore_backup_set_within(&resource, &newer, &options, &clap_rules()).unwrap();
 
     assert_eq!(forward.status, RestoreStatus::Restored, "{forward:?}");
@@ -1299,6 +1308,67 @@ fn an_update_moves_app2clap_out_of_the_clap_folder_and_can_be_undone() {
         load_install_state(&resource).unwrap().unwrap().packages,
         after.packages
     );
+}
+
+/// A restore of app2clap from `set_id` into `resource` that puts a file
+/// back into, or moves one out of, `clap`, standing in for the CLAP folder,
+/// is refused while a REAPER other than the target's runs, a portable one
+/// in `dir`, whether or not REAPER may run, and the wizard's check before a
+/// run refuses it too: every REAPER must be closed for app2clap. Nothing
+/// below `dir` changes.
+fn refused_while_another_reaper_runs(dir: &Path, resource: &Path, set_id: &str, clap: &Path) {
+    let elsewhere = crate::preflight::RunningProcess {
+        pid: "200".to_string(),
+        name: "reaper.exe".to_string(),
+        executable_path: Some(dir.join("Elsewhere").join("reaper.exe")),
+    };
+    let running = {
+        let elsewhere = elsewhere.clone();
+        move || vec![elsewhere.clone()]
+    };
+    let clap_rules = || OutsideRestoreRules {
+        shared_roots: vec![clap.to_path_buf()],
+        vendor_added: Vec::new(),
+    };
+    let rules_for = |_: &Path| clap_rules();
+    let environment = BackupEnvironment {
+        reaper_processes: &running,
+        outside_rules: &rules_for,
+        ..BackupEnvironment::AS_USER
+    };
+    let every_reaper_for_app2clap = |refused: &RestoreRefusal| {
+        matches!(refused, RestoreRefusal::ReaperRunning {
+            every_reaper_for,
+            processes,
+            ..
+        } if every_reaper_for == &[PACKAGE_APP2CLAP]
+            && processes == std::slice::from_ref(&elsewhere))
+    };
+    let before = snapshot(dir);
+
+    for allow_reaper_running in [false, true] {
+        let options = RestoreBackupOptions {
+            dry_run: false,
+            allow_reaper_running,
+            package_id: Some(PACKAGE_APP2CLAP.to_string()),
+        };
+        let error = restore_backup_set_with(resource, set_id, &options, &environment, clap_rules)
+            .unwrap_err();
+        assert!(
+            every_reaper_for_app2clap(refusal(&error)),
+            "{allow_reaper_running}: {error:?}"
+        );
+    }
+    let checked = restore_running_refusal_with(
+        resource,
+        &[RestoreItem::new(set_id, Some(PACKAGE_APP2CLAP))],
+        &environment,
+    );
+    assert!(
+        checked.as_ref().is_some_and(every_reaper_for_app2clap),
+        "{checked:?}"
+    );
+    assert_eq!(snapshot(dir), before);
 }
 
 /// Paths `before` lists that `after` doesn't.
@@ -1452,10 +1522,12 @@ fn an_update_moves_a_copy_in_the_clap_folder_with_no_receipt_into_its_backup() {
 /// An old app2clap in the CLAP folder, a temporary one here, that the
 /// update can't move, because another program holds it open on Windows, or
 /// its folder may not be changed on Unix, stays there with a warning, and
-/// the new version is in UserPlugins\FX all the same. RABBIT's records then
-/// list only the new file, but the next update or reinstall on the
-/// standard REAPER finds the copy in the CLAP folder by its name, and moves
-/// it into its own backup set then.
+/// the new version is in UserPlugins\FX all the same. The warning doesn't say
+/// RABBIT no longer keeps track of it, as for any other file left where it
+/// is: RABBIT's records then list only the new file, but the next update or
+/// reinstall on the standard REAPER finds the copy in the CLAP folder by its
+/// name, and moves it into its own backup set then, and until then REAPER
+/// loads both, which the warning says.
 #[test]
 fn a_copy_in_the_clap_folder_that_cant_be_moved_goes_at_the_next_update() {
     let (dir, resource) = resource_folder();
@@ -1494,6 +1566,11 @@ fn a_copy_in_the_clap_folder_that_cant_be_moved_goes_at_the_next_update() {
         assert_eq!(left.left_reason, Some(LeftInPlaceReason::InUse));
         #[cfg(unix)]
         assert_eq!(left.left_reason, Some(LeftInPlaceReason::Other));
+        let warning = left.warning.as_deref().unwrap();
+        assert!(
+            warning.ends_with(FORMER_COPY_NOTE) && !warning.contains(UNTRACKED_NOTE),
+            "{warning}"
+        );
         assert_eq!(fs::read(&fx).unwrap(), b"app2clap 34");
     }
     assert_eq!(fs::read(&old).unwrap(), b"old app2clap");

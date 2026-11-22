@@ -963,10 +963,11 @@ fn files_an_update_moved_are_told_under_their_own_package() {
 }
 
 /// An update that moved a file into the backup from outside REAPER's own
-/// folder, such as an old app2clap from the CLAP folder, says right after
-/// that file's line that portable REAPERs and other programs that loaded it
-/// from there no longer find it. A file moved from inside REAPER's folder
-/// gets no such line. In every language.
+/// folder, such as an old app2clap from the CLAP folder, says in one line,
+/// which names its path once, that the new version installs it in REAPER's
+/// own folder instead, and that portable REAPERs and other programs that
+/// loaded it from there no longer find it. A file moved from inside
+/// REAPER's folder gets the usual line instead. In every language.
 #[test]
 fn a_file_moved_out_of_the_clap_folder_says_other_programs_lose_it() {
     let english = Localizer::embedded(DEFAULT_LOCALE).unwrap();
@@ -1001,25 +1002,26 @@ fn a_file_moved_out_of_the_clap_folder_says_other_programs_lose_it() {
         .insert(0, updated_item(PACKAGE_APP2CLAP, "2026.5.17.34"));
 
     let lines = summarize_setup_report(&model, &report).detail_lines;
-    let moved =
-        format!("Moved into the backup, because the new version no longer installs it: {clap}");
-    let at = lines
-        .iter()
-        .position(|line| *line == moved)
-        .unwrap_or_else(|| panic!("{moved:?} not in {lines:#?}"));
-    assert_eq!(
-        lines[at + 1],
-        format!(
-            "Portable REAPERs and other programs that loaded it from there no longer find it: \
-             {clap}"
-        )
+    let shared = format!(
+        "Moved into the backup, because the new version installs it in REAPER's own folder \
+         instead. Portable REAPERs and other programs that loaded it from there no longer find \
+         it: {clap}"
     );
     assert_eq!(
-        lines
-            .iter()
-            .filter(|line| line.starts_with("Portable REAPERs"))
-            .count(),
+        lines.iter().filter(|line| **line == shared).count(),
         1,
+        "{lines:#?}"
+    );
+    assert_eq!(
+        lines.iter().filter(|line| line.contains(clap)).count(),
+        1,
+        "the path is said once: {lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            line.starts_with("Moved into the backup, because the new version no longer installs it")
+                && line.contains("reaper_reapack64.dll")
+        }),
         "{lines:#?}"
     );
 
@@ -1034,12 +1036,16 @@ fn a_file_moved_out_of_the_clap_folder_says_other_programs_lose_it() {
             .format("wizard-summary-moved-from-shared-folder", &[("path", clap)])
             .value;
         assert_reads(locale, &shared);
-        let at = lines.iter().position(|line| *line == moved).unwrap();
-        assert_eq!(lines[at + 1], shared, "{locale}");
+        assert!(!lines.contains(&moved), "{locale}: {lines:#?}");
         assert_eq!(
             lines.iter().filter(|line| **line == shared).count(),
             1,
             "{locale}"
+        );
+        assert_eq!(
+            lines.iter().filter(|line| line.contains(clap)).count(),
+            1,
+            "{locale}: {lines:#?}"
         );
     }
 }

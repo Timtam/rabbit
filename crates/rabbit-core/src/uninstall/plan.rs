@@ -162,7 +162,9 @@ fn blocking_programs_of(plan: Option<&UninstallPlanSpec>) -> Vec<String> {
 /// package checks the same (backup plan 4.4). Only an uninstall of REAPER
 /// itself that needs the administrator command adds every REAPER besides,
 /// which takes detection; no backup set holds REAPER's app. So does one
-/// that removes a file from the CLAP folder, which takes the files found.
+/// that removes a file from the CLAP folder, which takes the files found;
+/// a restore adds the same for a file it puts back there, or moves out of
+/// there, by the set (see `rollback::restore_process_rules`).
 pub(crate) fn uninstall_process_rules(
     spec: &PackageSpec,
     platform: Platform,

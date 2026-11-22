@@ -31,8 +31,8 @@ RABBIT installs and keeps up to date:
   REAPER and other DAWs to pick up. Tracks the
   [rolling nightly channel](https://github.com/surge-synthesizer/surge/releases/tag/Nightly)
   rather than the official 1.3.4 release (which is from August 2024
-  and the project effectively ships through nightlies). Hidden on
-  portable REAPER targets because Surge XT's factory data lives at
+  and the project effectively ships through nightlies). Can't be ticked
+  on a portable REAPER target, because Surge XT's factory data lives at
   fixed system paths outside any portable REAPER folder. On Windows, close
   Surge XT before you install or update it: RABBIT doesn't start its
   installer while Surge XT is open, and says so.
@@ -51,16 +51,16 @@ RABBIT installs and keeps up to date:
   works with a portable REAPER too. REAPER finds a new instrument after its
   next start, or after a rescan of its plug-ins in its preferences. If you
   copied one into `C:\Program Files\Common Files\VST3` yourself, remove that
-  copy, so REAPER doesn't find the instrument twice; RABBIT doesn't look
-  there. They are 64-bit plug-ins, so they are for a 64-bit REAPER,
-  REAPER's ARM64EC build on Windows on ARM included. An update replaces the
-  files of the bundle that changed and moves the ones the new version no
-  longer has into the update's backup, and an uninstall removes the
-  bundle's files and then its folder. RABBIT uninstalls only a copy it
-  installed, or installed over. Your presets and samples stay: LJuno-116's, LB-303's and LR-608's in the
-  folder of their name in your Documents, and LSampler-24's library in
-  `Documents\LSampler-24` and the audio it extracted in
-  `%APPDATA%\Lo-lo78\LSampler-24`, even with **Also remove settings**.
+  copy, so REAPER only uses the one RABBIT keeps up to date; RABBIT doesn't
+  look there. They are 64-bit plug-ins, for a 64-bit REAPER. An update
+  replaces the files of the bundle that changed and moves the ones the new
+  version no longer has into the update's backup, and an uninstall removes
+  the bundle's files and then its folder. RABBIT uninstalls only a copy it
+  installed, or installed over. Your presets and samples stay: LJuno-116's,
+  LB-303's and LR-608's in the folder of their name in your Documents, and
+  LSampler-24's library in `Documents\LSampler-24` and the audio it
+  extracted in `%APPDATA%\Lo-lo78\LSampler-24`, even with **Also remove
+  settings**.
 - **app2clap** *(Windows only, opt-in)* —
   [app2clap](https://app2clap.jantrid.net/), a CLAP plugin by Jamie Teh
   (jcsteh, of OSARA/NVDA fame) that captures audio from other applications
@@ -116,9 +116,7 @@ RABBIT installs and keeps up to date:
 The wizard's package list shows Surge XT, LJuno-116, LB-303, LR-608 and
 LSampler-24 under **Instruments** and app2clap and LReaParams under
 **Tools**, after the main **Packages** group and before **Language packs**;
-the Uninstall tab uses the same groups. Surge XT is
-disabled on portable REAPER targets, since it installs to fixed system
-locations rather than into the portable REAPER folder.
+the Uninstall tab uses the same groups.
 
 ### Language packs
 
@@ -467,9 +465,9 @@ ticked. The rows come in up to four groups:
   earlier version that the new one no longer installs, such as FFmpeg's
   libraries when an update gives them new names, the Spanish language
   pack's old file after you switch between es_ES and es_MX, or an app2clap
-  in the CLAP folder, where earlier versions of RABBIT installed it. RABBIT moves
-  those into the backup instead of deleting them, so the earlier version
-  stays whole. Only updates RABBIT installs file by file keep them:
+  in the CLAP folder, where earlier versions of RABBIT installed it. RABBIT
+  moves those into the backup instead of deleting them, so the earlier
+  version stays whole. Only updates RABBIT installs file by file keep them:
   ReaPack, ReaKontrol, FFmpeg, app2clap, LReaParams, Lo-lo's instruments,
   the language packs, and SWS on a Mac. A package's own installer, such as
   REAPER's, keeps none.
@@ -701,7 +699,9 @@ choose in REAPER's preferences once REAPER is closed. A file that can't be
 moved, for example because another program has it open, stays where it
 is, and the output says why (`Warning:`); the update itself still
 finishes. RABBIT then no longer keeps track of that file, and can't
-restore that earlier version. Once you no longer need it, you can remove a
+restore that earlier version. An app2clap left in the CLAP folder is the
+exception: REAPER loads it beside the new one until app2clap's next update
+or reinstall, which moves it. Once you no longer need it, you can remove a
 file that stayed because another program had it open or RABBIT couldn't
 read it; leave any other file a `Warning:` line names where it is, such as
 REAPER's key map, a folder or a link.
@@ -1109,9 +1109,10 @@ write, such as one that lists a file outside the folders it installs into.
 
 Only updates RABBIT installs file by file make such a backup: ReaPack,
 ReaKontrol, FFmpeg, app2clap, LReaParams, Lo-lo's instruments, the language
-packs, and SWS on a Mac. REAPER, OSARA, SWS on Windows, Surge XT and the JAWS scripts are updated
-by their own installers, or for OSARA on a Mac its own archive, which
-overwrite files with no backup, so they can't go back this way.
+packs, and SWS on a Mac. REAPER, OSARA, SWS on Windows, Surge XT and the
+JAWS scripts are updated by their own installers, or for OSARA on a Mac its
+own archive, which overwrite files with no backup, so they can't go back
+this way.
 
 To get back the key map you had before OSARA's key map replaced it, restore
 only the key map from the backup set `rabbit backups` lists it in:

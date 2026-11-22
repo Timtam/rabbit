@@ -105,6 +105,33 @@ fn a_package_left_to_reapack_reads_in_every_language() {
     }
 }
 
+/// What an install run says of a plug-in it put into REAPER's own plug-in
+/// folder, such as one of Lo-lo's instruments, reads in every language and
+/// names the folder as it is called, not a single extension binary.
+#[test]
+fn a_plugin_installed_into_the_fx_folder_reads_in_every_language() {
+    use rabbit_core::localization::embedded_locales;
+    use rabbit_core::operation::PackageOperationMessage as Msg;
+
+    use super::support::assert_reads;
+
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let installed = localized_package_operation_message(
+            &localizer,
+            &Msg::PluginInstalled,
+            "LJuno-116",
+            "the English fallback",
+        );
+        assert_reads(locale, &installed);
+        assert!(
+            installed.contains("UserPlugins\\FX"),
+            "{locale}: {installed}"
+        );
+        assert!(!installed.contains("fallback"), "{locale}: {installed}");
+    }
+}
+
 #[test]
 fn configuration_step_messages_localize_into_german() {
     use rabbit_core::configuration::{ConfigurationMessage as Msg, ConfigurationStatus};

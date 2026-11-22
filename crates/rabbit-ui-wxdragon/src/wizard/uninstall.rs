@@ -10,7 +10,7 @@
 //! file's contents, so the UI thread can afford it: the version check's
 //! handler builds the rows from the detection it has just run.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rabbit_core::Result;
 use rabbit_core::localization::Localizer;
@@ -28,7 +28,7 @@ use super::backups::{BackupChoice, and_list};
 use super::bootstrap::localizer_from_options;
 use super::labels::version_text;
 use super::model::{ConfigurationRow, PackageRow, TargetRow, WizardModel, WizardText};
-use super::packages::localized_package_display_name;
+use super::packages::{former_outside_copies, localized_package_display_name};
 
 /// The Packages page's tabs, in the notebook's order.
 pub const PACKAGES_INSTALL_TAB: usize = 0;
@@ -317,7 +317,17 @@ pub(crate) fn uninstall_list_with_roots(
     };
     match uninstall_plan_with_roots(model, target, roots, detections, vendor_lookup, objects) {
         Ok(plan) => {
-            uninstall_list_from_plan(&localizer, &builtin_package_specs(model.platform), &plan)
+            let specs = builtin_package_specs(model.platform);
+            let mut list = uninstall_list_from_plan(&localizer, &specs, &plan);
+            if target.portable {
+                note_copies_left_in_former_outside_folders(
+                    &localizer,
+                    &mut list.rows,
+                    &specs,
+                    &former_outside_copies,
+                );
+            }
+            list
         }
         Err(error) => WizardUninstallList {
             rows: Vec::new(),
@@ -350,6 +360,41 @@ pub fn uninstall_list_from_plan(
             .collect(),
         unreadable: None,
         plan: Some(plan.clone()),
+    }
+}
+
+/// On a portable REAPER, add a sentence to the details of each row whose
+/// package has a copy in a folder it installed into before, outside every
+/// resource folder, such as an app2clap an earlier RABBIT put into the CLAP
+/// folder: this REAPER, as every REAPER on the computer, still loads that
+/// copy after the uninstall, which only the standard REAPER's uninstall,
+/// update or reinstall of the package takes away. `copies` gives a
+/// package's copies there; the wizard passes [`former_outside_copies`].
+pub(crate) fn note_copies_left_in_former_outside_folders(
+    localizer: &Localizer,
+    rows: &mut [UninstallRow],
+    specs: &[PackageSpec],
+    copies: &dyn Fn(&PackageSpec) -> Vec<PathBuf>,
+) {
+    for row in rows {
+        let Some(spec) = specs.iter().find(|spec| spec.id == row.package_id) else {
+            continue;
+        };
+        if spec.former_install_destinations.is_empty() || copies(spec).is_empty() {
+            continue;
+        }
+        let sentence = localizer
+            .format(
+                "wizard-uninstall-details-clap-copy-portable",
+                &[("package", row.display_name.as_str())],
+            )
+            .value;
+        row.explanation = if row.explanation.is_empty() {
+            sentence
+        } else {
+            format!("{}\n{sentence}", row.explanation)
+        };
+        row.details = details_text(&row.summary, &row.explanation);
     }
 }
 

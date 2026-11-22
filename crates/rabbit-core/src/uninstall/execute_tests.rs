@@ -17,6 +17,7 @@ use rabbit_platform::{RegistryValue, UninstallEntry};
 
 use super::execute::{
     SurveyedDigest, UNINSTALL_BACKUP_REASON, UninstallEnvironment, execute_uninstall_in,
+    target_kind_with,
 };
 use super::preflight::VolumeProbe;
 use super::tests::{
@@ -2560,5 +2561,47 @@ fn what_isnt_the_packages_keeps_its_folders_in_the_bundle() {
             "UserPlugins/FX/LJuno-116.vst3/Contents/x86_64-win/LJuno-116.vst3"
         )
         .exists()
+    );
+}
+
+/// The standard REAPER's resource folder reads as the standard REAPER by
+/// any spelling: in another case, and through a junction, or on macOS a
+/// symbolic link, to it, as `--resource-path` may name it. Read as a
+/// portable one, app2clap would leave the copy in the CLAP folder that the
+/// standard REAPER loads beside its own. Another folder, and a folder with
+/// no standard REAPER at all, read as a portable REAPER.
+#[test]
+fn the_standard_reaper_reads_as_standard_by_any_spelling() {
+    let dir = tempfile::tempdir().unwrap();
+    let standard = dir.path().join("REAPER");
+    fs::create_dir_all(&standard).unwrap();
+    let linked = dir.path().join("Linked");
+    super::paths::link_folder(&linked, &standard);
+    let other = dir.path().join("Portable");
+    fs::create_dir_all(&other).unwrap();
+
+    for spelling in [standard.clone(), linked, standard.join(".")] {
+        assert_eq!(
+            target_kind_with(Some(&standard), &spelling),
+            InstallationKind::Standard,
+            "{}",
+            spelling.display()
+        );
+    }
+    #[cfg(windows)]
+    assert_eq!(
+        target_kind_with(
+            Some(&standard),
+            Path::new(&standard.to_string_lossy().to_uppercase())
+        ),
+        InstallationKind::Standard
+    );
+    assert_eq!(
+        target_kind_with(Some(&standard), &other),
+        InstallationKind::Portable
+    );
+    assert_eq!(
+        target_kind_with(None, &standard),
+        InstallationKind::Portable
     );
 }

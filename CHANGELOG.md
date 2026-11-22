@@ -69,12 +69,14 @@ from this file and posts it as the GitHub release body.
   VoiceOver's tab navigation. VoiceOver mentions Ctrl+Tab the first time
   the page opens. The **Uninstall** tab lists what
   is installed in the chosen REAPER, with nothing ticked. RABBIT can remove
-  SWS, ReaPack, ReaKontrol, FFmpeg, app2clap and the language packs, and a
-  row it can't tick says why. Your settings stay unless you tick **Also
-  remove settings**. Next goes to a Review that says what each package
-  loses and keeps. Enter never starts an uninstall there: press
-  **Uninstall** to go ahead. If REAPER is open, RABBIT asks you to close it
-  first. Removed files move into a backup rather than being deleted. The
+  SWS, ReaPack, ReaKontrol, FFmpeg, app2clap, LReaParams, Lo-lo's
+  instruments and the language packs, and a row it can't tick says why.
+  Your settings stay unless you tick **Also remove settings**. Next goes to
+  a Review that says what each package loses and keeps. Enter never starts
+  an uninstall there: press **Uninstall** to go ahead. If REAPER is open,
+  RABBIT asks you to close it first, and for app2clap, while a copy of it
+  in the CLAP folder goes too, every REAPER on the computer. Removed files
+  move into a backup rather than being deleted. The
   progress page names each package as it goes and says whether it went,
   and closing RABBIT during an
   uninstall asks first, then stops after the step it is on: one package, or
@@ -84,25 +86,26 @@ from this file and posts it as the GitHub release body.
   longer ticked by itself, or, when RABBIT kept its files, restore it on
   the **Backups** tab. **Show details** lists the files, and names each
   package that can be restored there.
-- `rabbit uninstall` removes SWS, ReaPack, ReaKontrol, FFmpeg, app2clap and
-  the language packs. Name each package with `--package`. Without `--apply`
-  it only lists what would go, what stays and what would stop it, and with
-  `--apply` it changes nothing at all if any package you named can't be
-  uninstalled, or one of its files can't be read. Removed files move into a
-  backup set rather than being deleted, your settings stay unless you add
-  `--remove-settings`, and if REAPER used the language pack you removed, it
-  goes back to English. REAPER must be closed; there is deliberately no
-  `--allow-reaper-running`. Ctrl+C stops the run once the step it is on is
-  done: a package, or on macOS the administrator command, which can remove
-  several. For a portable REAPER on Windows, which RABBIT can't remove, it
-  prints how to remove it by hand. The exit code is 0 when everything you
-  named is gone or wasn't installed, 2 when something can't be uninstalled,
-  and 1 when a removal failed. The wizard's **Uninstall** tab removes the
-  same packages. A run that moved no file leaves no backup set, and the
-  report names the set only for packages whose files went into it. While
-  `RABBIT` or its `backups` folder is a symbolic link or junction, an
-  uninstall changes nothing and says why: RABBIT never restores a backup
-  from behind one, and the backup would be the only copy of what it removes.
+- `rabbit uninstall` removes SWS, ReaPack, ReaKontrol, FFmpeg, app2clap,
+  LReaParams, Lo-lo's instruments and the language packs. Name each package
+  with `--package`. Without `--apply` it only lists what would go, what
+  stays and what would stop it, and with `--apply` it changes nothing at all
+  if any package you named can't be uninstalled, or one of its files can't
+  be read. Removed files move into a backup set rather than being deleted,
+  your settings stay unless you add `--remove-settings`, and if REAPER used
+  the language pack you removed, it goes back to English. REAPER must be
+  closed; there is deliberately no `--allow-reaper-running`. Ctrl+C stops
+  the run once the step it is on is done: a package, or on macOS the
+  administrator command, which can remove several. For a portable REAPER on
+  Windows, which RABBIT can't remove, it prints how to remove it by hand.
+  The exit code is 0 when everything you named is gone or wasn't installed,
+  2 when something can't be uninstalled, and 1 when a removal failed. The
+  wizard's **Uninstall** tab removes the same packages. A run that moved no
+  file leaves no backup set, and the report names the set only for packages
+  whose files went into it. While `RABBIT` or its `backups` folder is a
+  symbolic link or junction, an uninstall changes nothing and says why:
+  RABBIT never restores a backup from behind one, and the backup would be
+  the only copy of what it removes.
 - `rabbit restore-backup --package <id>` brings one uninstalled package back
   from its backup set: its files, its entry in RABBIT's records, and REAPER's
   language if the uninstall reset it and no other language was picked since.
@@ -481,25 +484,21 @@ from this file and posts it as the GitHub release body.
   `RABBIT\backups-deleting`. `rabbit backups` and `rabbit restore-backup`
   now have help text.
 - The package list's **Additional software** group is now two groups:
-  **Instruments**, with Surge XT, and **Tools**, with app2clap. The
-  Uninstall tab groups its rows the same way. `rabbit packages --json` and
+  **Instruments**, with Surge XT and Lo-lo's instruments, and **Tools**,
+  with app2clap and LReaParams. The Uninstall tab groups its rows the same
+  way. `rabbit packages --json` and
   `rabbit packages --manifest --json` now give their `category` as
   `instruments` and `tools` instead of `additional`.
 - app2clap now installs into REAPER's own plug-in folder, `UserPlugins\FX`,
   instead of the per-user CLAP folder, so it works with a portable REAPER
-  too, and RABBIT installs it for REAPER only, not for other CLAP hosts. The
-  next update or reinstall of app2clap in the standard REAPER moves the copy
-  in the CLAP folder into its backup, whether an earlier RABBIT or you put
-  it there, so the standard REAPER doesn't load two copies. Portable REAPERs
-  and other programs that loaded app2clap from the CLAP folder no longer
-  find it then, and the wizard says so; RABBIT can install it into each
-  portable REAPER. Until then every REAPER loads that copy, so a portable
-  REAPER that gets its own app2clap loads both: update app2clap in the
-  standard REAPER first. While your app2clap is already the latest version,
-  no update runs, and the copy stays in the CLAP folder until app2clap's
-  next release, unless you tick app2clap on the **Install or update** tab
-  to reinstall it. Uninstalling app2clap needs only that REAPER closed,
-  unless it removes a copy from the CLAP folder too.
+  too; only REAPER loads it there, not other CLAP hosts. In the standard
+  REAPER, the next update of app2clap, or a reinstall when you tick it on
+  the **Install or update** tab, moves the copy in the CLAP folder into its
+  backup, whether an earlier RABBIT or you put it there, so REAPER doesn't
+  load two copies; portable REAPERs and other programs that loaded it from
+  there then no longer find it, and the wizard says so. Until then every
+  REAPER loads that copy, so update app2clap in the standard REAPER before
+  you install it into a portable one.
 
 ### Fixed
 

@@ -1220,7 +1220,7 @@ should rely on. Detection must be package-specific and confidence-scored.
 | ReaPack | RABBIT receipt; Windows PE `ProductVersion`; ReaPack self-entry in `ReaPack/registry.db` after first launch | presence of `reaper_reapack*` | The registry DB may not exist until ReaPack has run inside REAPER. |
 | ReaKontrol | RABBIT receipt after RABBIT-managed install | best-effort binary metadata if available; presence of `reaper_kontrol*` | No installer or registry-based detector is expected; validate binary metadata quality during implementation. |
 | LReaParams | RABBIT receipt; ReaPack registry if installed by ReaPack | presence of `reaper_lreaparams*.dll`, version unknown | The DLL has no version resource. A copy ReaPack manages is left to ReaPack (`leave_to_reapack`). |
-| Lo-lo's instruments | RABBIT receipt, while the bundle folder and its binary are still real | the `<Product>.vst3` bundle in `UserPlugins/FX` with its binary `Contents/x86_64-win/<Product>.vst3`, version from the binary's version resource, else unknown | JUCE should write the version resource from the project version, which matches the release tag; the hardware pass confirms it. Without one the version is unknown. A link, or a file named like the bundle, is never the package (`plugin_bundle` detector). |
+| Lo-lo's instruments | RABBIT receipt, while the bundle folder and its binary are still real | the `<Product>.vst3` bundle in `UserPlugins/FX` with its binary `Contents/x86_64-win/<Product>.vst3`, version from the binary's version resource, else unknown | The binary's version resource is assumed to match the release tag (JUCE writes it from the project version); unverified, and it matters only for a copy without a receipt. Without one the version is unknown. A link, or a file named like the bundle, is never the package (`plugin_bundle` detector). |
 | FFmpeg | RABBIT receipt after RABBIT-managed install; `ffmpeg.exe -version` parsed from stdout's first line | StringFileInfo `ProductVersion` of an FFmpeg executable (only present when a vendor patches it in); libavformat-major filename heuristic (`avformat-62.dll` → FFmpeg 8.0.0, mapped via `lib_major - 54`) | Vanilla FFmpeg attaches only a manifest to its binaries; `VS_FIXEDFILEINFO` of `ffmpeg.exe` carries libavutil's version, not the FFmpeg release. Spawning `ffmpeg.exe -version` is the only reliable vendor-independent way to recover the patch level for an externally-installed copy; the libavformat-major fallback recovers only the major when no executable is present. |
 | Surge XT | RABBIT receipt after RABBIT-managed install (records the `NIGHTLY-YYYY-MM-DD-sha` token verbatim) | `read_file_version_parts` on the system VST3 bundle — Windows PE `VERSIONINFO` of `Contents\x86_64-win\Surge XT.vst3` inside `<CommonProgramFiles>\VST3\Surge Synth Team\Surge XT.vst3\`; macOS `CFBundleShortVersionString` of `/Library/Audio/Plug-Ins/VST3/Surge XT.vst3/Contents/Info.plist` | The vendor-installed binary still carries the most recent *stable* semver (e.g. `1.3.4`) — Surge XT doesn't stamp nightlies with their date+sha. Receipt-driven detection produces the exact nightly token; the file-metadata fallback reports the stable semver, which compares lower than any `NIGHTLY-…` under `Version::cmp_lenient` so the planner naturally schedules an Update. On macOS a VST3 bundle whose version can't be read still counts as installed, with no version and low confidence: the uninstall deletes that bundle last with `rm -R`, which may take its `Info.plist` before it stops, so a removal stopped there leaves Surge XT detected and offered again. On Windows a bundle without a version is still not detected. |
 | ReaPack packages | `ReaPack/registry.db` table `entries.version` | none | This is the best source for packages ReaPack knows about. |
@@ -1406,23 +1406,33 @@ resource folder; the manifest check refuses anything else.
 
   A failure in the first two steps changes nothing: the staged copies, the
   folders staging made and the package's copies in the set go again. On
-  Windows the rename replaces the file there in one step, so no place is
-  ever empty; only when that rename fails is the file removed first and the
-  rename tried again, which is how macOS always does it. Should a file fail
-  to go into its place, such as a binary Windows won't replace while REAPER
-  or a plug-in scanner has it loaded, the files that went in before it go
-  back as they were, last first: each replaced file from its copy in the
-  set, through a checked copy beside its place, and each new file is
-  removed, with the folders staging made. Once every one is back, the
-  package's copies and record leave the set again, so the bundle, the
-  receipt and the set all still say the earlier version; a file that
-  couldn't be put back keeps its copy in the set, which a restore brings
-  back. Only a crash can leave a mixed bundle: because the binary goes
-  last, a REAPER that scans the bundle then finds the binary of the version
-  before (with some of the new resources beside it), or no binary at all
-  on a first install. The receipt is saved only after the whole run, so it
-  still lists the earlier version's files, detection reads the bundle as
-  not matching it, and the next run offers the update again. The receipt
+  Windows the rename replaces the file there in one step; only when that
+  rename fails is the file removed first and the rename tried again, which
+  is how macOS always does it, so a place is empty only between those two
+  steps. Should a file fail to go into its place, such as a binary Windows
+  won't replace while REAPER or a plug-in scanner has it loaded, the files
+  that went in before it go back as they were, last first: each replaced
+  file from its copy in the set, through a checked copy beside its place,
+  and each new file is removed, with the folders staging made. The file
+  that failed comes back from its copy only when its place is empty;
+  otherwise it counts as back only while its place still holds the very
+  file the set has a copy of, by its hash. A file only marked for deletion,
+  as one another program holds open on a FAT32 or exFAT drive, still has
+  its name, can't be read, and vanishes once that program lets go. Once
+  every one is back, the package's copies and record leave the set again,
+  so the bundle, the receipt and the set all still say the earlier version;
+  a file that couldn't be put back, or vouched for, keeps its copy in the
+  set, which a restore brings back. Only a crash, or a file that couldn't
+  be put back, can leave a mixed bundle: because the binary goes last, a
+  REAPER that scans the bundle then finds the binary of the version before
+  (with some of the new resources beside it), or no binary at all on a
+  first install. The receipt is saved only once the run ends, so after a
+  crash it still lists the earlier version's files, detection reads the
+  bundle as not matching it, and the next run offers the update again. An
+  error that ends a run of several packages, as `rabbit install-extension`
+  makes one, saves it first with the packages that went in before it, so
+  RABBIT keeps track of them; the one that failed keeps its entry from
+  before. The receipt
   lists every file by its path below the resource folder, such as
   `UserPlugins/FX/LJuno-116.vst3/Contents/x86_64-win/LJuno-116.vst3`, and
   the update's set holds each copy at the same relative path.
@@ -1494,12 +1504,20 @@ that every program loses it, unless the manifest turns that warning off.
 
 Every REAPER, portable ones included, and every other CLAP host loads what
 is in the CLAP folder. So the wizard says what a copy there means in the
-package's details. On a portable REAPER: installing the package there too
-loads two copies, until the standard REAPER's update or reinstall moves
-the shared copy. On the standard REAPER: that update or reinstall moves it,
-and portable REAPERs and other programs then no longer find it. Show
-details says the same after an install, under each file it moved from
-outside the resource folder.
+package's details. On a portable REAPER without the package: installing
+the package there too loads two copies, until the standard REAPER's update
+or reinstall moves the shared copy; on one that has its own copy already:
+that it loads both, and how the shared one goes; and its Uninstall details
+say that this REAPER still loads the shared copy afterwards. On the
+standard REAPER: that update or reinstall moves it, and portable REAPERs
+and other programs then no longer find it. Review says it too, under its
+notes, for a ticked row, since the details pane isn't the one place a
+screen reader user is sure to hear: on the standard REAPER that the copy
+moves into the backup, on a portable REAPER without the package that it
+will load two copies. Show details says it after an install, in the one
+line, naming the path once, for each file it moved from outside the
+resource folder. The wizard's tests find no copy there unless they give
+one (`former_copies_seam`), so they never look in the real CLAP folder.
 
 Every package also carries a required `uninstall` block saying what removing
 it means. It holds a list of plans, and the first plan matching the platform
@@ -1889,11 +1907,15 @@ strategies:
     VST3 bundle there after its next start or a plug-in rescan.
   - x64 plug-ins, offered for x64 and, on Windows on ARM, for `arm64` and
     `arm64-ec`, as LReaParams: REAPER's ARM64EC build loads x64 plug-ins.
-    The hardware pass confirms it for these VST3 bundles, whose only binary
-    is in `x86_64-win`. Never for x86 or macOS.
+    Unverified for these VST3 bundles, whose only binary is in
+    `x86_64-win`: REAPER's ARM64EC build has to fall back to that folder.
+    Never for x86 or macOS.
   - detection looks only in `UserPlugins/FX`. A copy the user put into
-    `<CommonProgramFiles>\VST3` by hand isn't seen, and REAPER would load
-    both, so each description asks the user to remove such a copy.
+    `<CommonProgramFiles>\VST3` by hand isn't seen, and REAPER, which knows
+    a VST3 plug-in by its file name, may use that copy instead of the one
+    RABBIT keeps up to date, so each description asks the user to remove
+    such a copy, by its full path, which File Explorer's address bar takes
+    in any language.
   - the uninstall needs a receipt (`requires_receipt`), takes the receipt's
     files and the emptied bundle folder, and keeps each instrument's own
     data, which its project names:
@@ -2181,9 +2203,14 @@ Extension files:
   succeeds, since the new version is in place; a set left with nothing in
   it goes again, record and all, also when the record or the first entry
   couldn't be saved. A file left in place this way is in no receipt entry
-  any more: RABBIT no longer keeps track of it, no later update or
-  uninstall touches it, and the earlier version isn't complete, so it
-  can't be restored. The warning says so. Keeping the file in the new
+  any more, and the earlier version isn't complete, so it can't be
+  restored. RABBIT no longer keeps track of it, and no later update or
+  uninstall touches it, except a copy in a folder the package installed
+  into before (`former_install_destinations`), such as an app2clap the
+  update couldn't move out of the CLAP folder: detection still counts it,
+  so the next update or reinstall moves it and the standard REAPER's
+  uninstall removes it, and until then REAPER loads both copies. The
+  warning says so. Keeping the file in the new
   entry would let the next update try again, but the language step sets
   the first `.ReaperLangPack` file a pack's entry lists, and a variant
   switch is found by any name there that isn't the chosen variant's, so an
@@ -2547,24 +2574,29 @@ Extension files:
   uninstall plan uses too): the target's REAPER, through the install
   preflight with a restore wording; every REAPER on the computer when the
   package serves every REAPER (`requires_standard_install`) or a vendor's
-  uninstaller removes it; and the programs its uninstall plan names. The
+  uninstaller removes it, and, as an uninstall that removes a file from the
+  CLAP folder, when the restore puts a file of the package back into a
+  folder outside every resource folder that RABBIT installs into
+  (`outside_install_roots`), by the set's manifest, or, going back to an
+  earlier version, moves one out of there, by RABBIT's records: any REAPER
+  may have that file loaded; and the programs its uninstall plan names. The
   packages are those whose files come back, by the manifest; a set without
   one checks only the target's REAPER. `--allow-reaper-running` lets only
   the target's REAPER run. A real restore is refused (`reaper-running`,
-  `program-running`) with nothing changed, and the process checks run
-  again under the lock, as an uninstall's do before each package. A
-  refusal names one reason: what `--allow-reaper-running` never lets
-  through first, then a place it can't write to (`not-writable`), and the
-  target's REAPER last, so the CLI's hint to add that flag comes only when
-  nothing else stands in the way, and never for a run that puts the key map
-  back, which that flag can't let through either: such a refusal says so
-  (`puts_keymap_back`), and the CLI says only to close REAPER. A dry run makes the same checks and
-  reports what runs as warnings, refusing nothing for it, as the install
-  preflight's dry run does, so its report names everything that must be
-  closed. The scans and the package manifests come through the restore's
-  environment, so tests give their own. Any restore, a dry run too,
-  refuses a set that belongs to another account than `RABBIT/backups`
-  (`not-yours`), as the overview lists it.
+  `program-running`) with nothing changed, and the process checks run again
+  under the lock, as an uninstall's do before each package. A refusal names
+  one reason: what `--allow-reaper-running` never lets through first, then a
+  place it can't write to (`not-writable`), and the target's REAPER last, so
+  the CLI's hint to add that flag comes only when nothing else stands in the
+  way, and never for a run that puts the key map back, which that flag can't
+  let through either: such a refusal says so (`puts_keymap_back`), and the
+  CLI says only to close REAPER. A dry run makes the same checks and reports
+  what runs as warnings, refusing nothing for it, as the install preflight's
+  dry run does, so its report names everything that must be closed. The
+  scans and the package manifests come through the restore's environment, so
+  tests give their own. Any restore, a dry run too, refuses a set that
+  belongs to another account than `RABBIT/backups` (`not-yours`), as the
+  overview lists it.
 - `rabbit backups` lists the sets through one overview in the core
   (`backup_overview`), which the wizard's Backups tab shares. It turns
   sets into backups: one per package an uninstall recorded; one per package

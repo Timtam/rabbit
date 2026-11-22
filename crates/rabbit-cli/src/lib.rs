@@ -336,9 +336,10 @@ enum Command {
         /// may fail to be replaced, so prefer closing it first. It never
         /// lets a restore past what a package's own uninstall needs closed:
         /// every REAPER on the computer for a package such as the JAWS
-        /// scripts, and the programs its uninstall names. A restore that
-        /// puts a key map back is refused with it, since REAPER may save its
-        /// own key map when it quits.
+        /// scripts, or for one that puts a file back in the CLAP folder, as
+        /// an earlier app2clap, and the programs its uninstall names. A
+        /// restore that puts a key map back is refused with it, since REAPER
+        /// may save its own key map when it quits.
         #[arg(long)]
         allow_reaper_running: bool,
         /// Write the JSON run report to exactly this path.
@@ -2243,6 +2244,49 @@ fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Err
     let package = without_packages_left_to_reapack(&resource_path, platform, package);
     if package.is_empty() {
         eprintln!("note: nothing left to install.");
+        // `--json` and a report path still get the run's report, with
+        // nothing in it: a script reading it must find JSON.
+        let report_path = selected_report_path(
+            Some(&resource_path),
+            report_path,
+            save_report,
+            "install-extension",
+        )?;
+        let report = if apply {
+            serde_json::to_value(InstallReport {
+                resource_path,
+                dry_run: false,
+                // Nothing was going to change, so nothing was checked.
+                preflight: PreflightReport {
+                    passed: true,
+                    checks: Vec::new(),
+                },
+                receipt_written: false,
+                receipt_backup_path: None,
+                backup_manifest_path: None,
+                actions: Vec::new(),
+                reaper_language: Vec::new(),
+            })?
+        } else {
+            let preflight = run_install_preflight(
+                &resource_path,
+                &PreflightOptions {
+                    dry_run: true,
+                    allow_reaper_running,
+                    target_app_path,
+                },
+            );
+            serde_json::to_value(PlannedInstall {
+                resource_path,
+                dry_run: true,
+                preflight,
+                artifacts: Vec::new(),
+            })?
+        };
+        save_optional_report(report_path.as_deref(), &report)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         return Ok(());
     }
     let channels = effective_package_channels(Some(&resource_path), &package, &package_channel)?;
@@ -8335,21 +8379,33 @@ mod tests {
         let cache = dir.path().join("cache");
 
         for apply in [false, true] {
-            super::run_install_extension(super::Command::InstallExtension {
-                resource_path: resource.clone(),
-                target_app_path: None,
-                package: vec!["lreaparams".to_string()],
-                architecture: None,
-                cache_dir: Some(cache.clone()),
-                apply,
-                allow_reaper_running: true,
-                accept_reapack_donation_notice: false,
-                report_path: None,
-                save_report: false,
-                json: false,
-                package_channel: Vec::new(),
-            })
-            .unwrap();
+            for json in [false, true] {
+                // A report path still gets the run's report, with nothing in
+                // it, as `--json` prints it.
+                let report = dir.path().join(format!("report-{apply}-{json}.json"));
+                super::run_install_extension(super::Command::InstallExtension {
+                    resource_path: resource.clone(),
+                    target_app_path: None,
+                    package: vec!["lreaparams".to_string()],
+                    architecture: None,
+                    cache_dir: Some(cache.clone()),
+                    apply,
+                    allow_reaper_running: true,
+                    accept_reapack_donation_notice: false,
+                    report_path: Some(report.clone()),
+                    save_report: false,
+                    json,
+                    package_channel: Vec::new(),
+                })
+                .unwrap();
+
+                let saved: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+                let run = &saved["report"];
+                assert_eq!(run["dry_run"], serde_json::json!(!apply), "{saved}");
+                let nothing = if apply { "actions" } else { "artifacts" };
+                assert_eq!(run[nothing], serde_json::json!([]), "{saved}");
+            }
         }
 
         assert_eq!(std::fs::read(&dll).unwrap(), b"LReaParams from ReaPack");

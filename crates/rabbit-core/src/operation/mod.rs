@@ -171,6 +171,10 @@ pub enum PackageOperationMessage {
     /// `extension_binary` install path completed: a single user-plugin
     /// DLL was placed into `UserPlugins`.
     ExtensionBinaryInstalled,
+    /// RABBIT put a plug-in into REAPER's own plug-in folder,
+    /// `UserPlugins\FX`, itself, as it does Lo-lo's instruments and
+    /// app2clap: REAPER finds it after its next start or a plug-in rescan.
+    PluginInstalled,
     /// Plan kept the installed version because it's current or newer
     /// than the latest upstream release.
     SkippedCurrent {
@@ -1176,6 +1180,7 @@ fn execute_operation_with(
             progress,
         ) {
             Ok(report) => {
+                let (message, message_code) = direct_install_message(&cached.descriptor);
                 items.push(PackageOperationItem {
                     package_id: cached.descriptor.package_id.clone(),
                     plan_action: planned.plan_action,
@@ -1187,8 +1192,8 @@ fn execute_operation_with(
                     backup_manifest_path: None,
                     planned_execution: None,
                     manual_instruction: None,
-                    message: "Single extension binary handled by RABBIT installer.".to_string(),
-                    message_code: PackageOperationMessage::ExtensionBinaryInstalled,
+                    message: message.to_string(),
+                    message_code,
                 });
                 merge_install_report(&mut install_report, report);
             }
@@ -1224,6 +1229,30 @@ fn execute_operation_with(
         receipt_backup_manifest_path: None,
         items,
     })
+}
+
+/// What a package RABBIT installed itself, file by file, says once its
+/// files are in place, in English and as its code: a plug-in in REAPER's
+/// own plug-in folder, `UserPlugins\FX`, says where it went and when REAPER
+/// finds it; any other package is an extension's binary.
+fn direct_install_message(
+    artifact: &ArtifactDescriptor,
+) -> (&'static str, PackageOperationMessage) {
+    let destination = package_specs_by_id(artifact.platform)
+        .remove(&artifact.package_id)
+        .map(|spec| spec.install_destination);
+    if destination == Some(crate::package::InstallDestination::UserPluginsFx) {
+        (
+            "Installed into REAPER's UserPlugins\\FX folder. REAPER finds it after its next \
+             start or a plug-in rescan.",
+            PackageOperationMessage::PluginInstalled,
+        )
+    } else {
+        (
+            "Single extension binary handled by RABBIT installer.",
+            PackageOperationMessage::ExtensionBinaryInstalled,
+        )
+    }
 }
 
 /// The install action that stands for the package in its item: its first
@@ -4918,6 +4947,45 @@ mod tests {
                 &source.display().to_string(),
             )
         }
+    }
+
+    /// A package RABBIT installs into REAPER's own plug-in folder,
+    /// UserPlugins\FX, says so once it is in place, and when REAPER finds
+    /// it: a VST3 bundle is a folder of many files, not a single extension
+    /// binary. Any other package that RABBIT installs file by file is an
+    /// extension's binary.
+    #[test]
+    fn a_plugin_in_the_fx_folder_says_where_it_went() {
+        for package_id in [
+            crate::package::PACKAGE_APP2CLAP,
+            crate::package::PACKAGE_LJUNO_116,
+            crate::package::PACKAGE_LB_303,
+            crate::package::PACKAGE_LR_608,
+            crate::package::PACKAGE_LSAMPLER_24,
+        ] {
+            let artifact =
+                artifact_with_url(package_id, ArtifactKind::Archive, "plug-in.zip", "unused");
+            let (message, code) = super::direct_install_message(&artifact);
+            assert_eq!(
+                code,
+                PackageOperationMessage::PluginInstalled,
+                "{package_id}"
+            );
+            assert!(
+                message.contains("UserPlugins\\FX"),
+                "{package_id}: {message}"
+            );
+        }
+        let artifact = artifact_with_url(
+            PACKAGE_LREAPARAMS,
+            ArtifactKind::ExtensionBinary,
+            "reaper_lreaparams.dll",
+            "unused",
+        );
+        assert_eq!(
+            super::direct_install_message(&artifact).1,
+            PackageOperationMessage::ExtensionBinaryInstalled
+        );
     }
 
     /// LReaParams' bare DLL goes straight into UserPlugins under its own

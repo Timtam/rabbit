@@ -718,13 +718,18 @@ fn portable_target_offers_app2clap() {
 
 /// A copy of app2clap in the CLAP folder, which every REAPER on the computer
 /// loads, adds a sentence to app2clap's details, right after its summary.
-/// On a portable REAPER it says that installing app2clap there too would
-/// load two copies, and to update or reinstall it in the standard REAPER
-/// first. On the standard REAPER it says that its update or reinstall moves
-/// the copy into a backup, and that portable REAPERs and other programs
-/// then no longer find it. No other row changes, and without a copy
-/// nothing does. The copies are made up here, so the real CLAP folder is
-/// never looked at. In every language.
+/// On a portable REAPER without app2clap, it says that installing app2clap
+/// there too would load two copies, and to update or reinstall it in the
+/// standard REAPER first; on one that has its own app2clap already, that it
+/// loads both, and how the shared one goes. On the standard REAPER it says
+/// that its update or reinstall moves the copy into a backup, and that
+/// portable REAPERs and other programs then no longer find it. The row also
+/// carries what Review says should it be ticked: on the standard REAPER
+/// that the copy moves, on a portable one without app2clap that it will
+/// load two copies, and nothing on a portable one with its own. No other row
+/// changes, and without a copy nothing does. The plan finds the copy
+/// through the wizard's test seam, so the real CLAP folder is never looked
+/// at. In every language.
 #[test]
 fn a_copy_in_the_clap_folder_is_told_in_app2claps_details() {
     let dir = tempdir().unwrap();
@@ -742,61 +747,133 @@ fn a_copy_in_the_clap_folder_is_told_in_app2claps_details() {
         },
     );
     let target = custom_portable_target_row(&model, dir.path().join("PortableREAPER"), true);
-    let mut rows = wizard_package_plan_for_target(&model, Some(&target))
+    let rows = wizard_package_plan_for_target(&model, Some(&target))
         .unwrap()
         .package_rows;
-    // Details as the rows had them before any note, whatever the real CLAP
-    // folder of the computer that tests this holds.
-    for row in &mut rows {
-        row.details = format!("{}\n\nWhat it is.", row.summary);
-    }
+    assert!(
+        rows.iter().all(|row| row.former_copy_review_note.is_none()),
+        "without a copy, no row has a note"
+    );
+    let index = rows
+        .iter()
+        .position(|row| row.package_id == PACKAGE_APP2CLAP)
+        .unwrap();
     let specs = builtin_package_specs(Platform::Windows);
     let copy = std::path::PathBuf::from("C:/CLAP/app2clap.clap");
-    let in_clap = |spec: &rabbit_core::package::PackageSpec| {
+    let in_clap = move |spec: &rabbit_core::package::PackageSpec| {
         if spec.id == PACKAGE_APP2CLAP {
             vec![copy.clone()]
         } else {
             Vec::new()
         }
     };
+    let with_sentence = |row: &PackageRow, sentence: &str| {
+        let (summary, rest) = row.details.split_once("\n\n").unwrap();
+        format!("{summary}\n\n{sentence}\n\n{rest}")
+    };
+
+    // The plan itself finds the copy, and app2clap isn't in this portable
+    // REAPER yet.
+    {
+        let _seam = crate::wizard::packages::former_copies_seam::install(in_clap.clone());
+        let planned = wizard_package_plan_for_target(&model, Some(&target))
+            .unwrap()
+            .package_rows;
+        let package = [("package", planned[index].display_name.as_str())];
+        let sentence = localizer
+            .format("wizard-package-details-clap-copy-portable", &package)
+            .value;
+        assert_eq!(
+            planned[index].details,
+            with_sentence(&rows[index], &sentence)
+        );
+        assert_eq!(
+            planned[index].former_copy_review_note,
+            Some(
+                localizer
+                    .format("wizard-review-clap-copy-twice", &package)
+                    .value
+            )
+        );
+        for (row, before) in planned.iter().zip(&rows) {
+            if row.package_id != PACKAGE_APP2CLAP {
+                assert_eq!(row, before);
+            }
+        }
+    }
 
     for &locale in embedded_locales() {
         let localizer = Localizer::embedded(locale).unwrap();
-        for (portable, key) in [
-            (true, "wizard-package-details-clap-copy-portable"),
-            (false, "wizard-package-details-clap-copy-standard"),
+        for (portable, action, key, review_key) in [
+            (
+                true,
+                PlanActionKind::Install,
+                "wizard-package-details-clap-copy-portable",
+                Some("wizard-review-clap-copy-twice"),
+            ),
+            (
+                true,
+                PlanActionKind::Update,
+                "wizard-package-details-clap-copy-portable-installed",
+                None,
+            ),
+            (
+                true,
+                PlanActionKind::Keep,
+                "wizard-package-details-clap-copy-portable-installed",
+                None,
+            ),
+            (
+                false,
+                PlanActionKind::Update,
+                "wizard-package-details-clap-copy-standard",
+                Some("wizard-review-clap-copy-moves"),
+            ),
+            (
+                false,
+                PlanActionKind::Keep,
+                "wizard-package-details-clap-copy-standard",
+                Some("wizard-review-clap-copy-moves"),
+            ),
         ] {
-            let mut noted = rows.clone();
+            let mut before = rows.clone();
+            before[index].original_action = action;
+            let mut noted = before.clone();
             crate::wizard::packages::note_copies_in_former_outside_folders(
                 &localizer, &mut noted, &specs, portable, &in_clap,
             );
-            let app2clap = noted
-                .iter()
-                .find(|row| row.package_id == PACKAGE_APP2CLAP)
-                .unwrap();
-            let sentence = localizer.format(key, &[("package", app2clap.display_name.as_str())]);
+            let app2clap = &noted[index];
+            let package = [("package", app2clap.display_name.as_str())];
+            let sentence = localizer.format(key, &package);
             assert!(!sentence.missing, "{locale}: {key}");
             assert_reads(locale, &sentence.value);
             assert_eq!(
                 app2clap.details,
-                format!("{}\n\n{}\n\nWhat it is.", app2clap.summary, sentence.value),
-                "{locale}"
+                with_sentence(&before[index], &sentence.value),
+                "{locale}: {key}"
             );
-            for (row, before) in noted.iter().zip(&rows) {
+            let review = review_key.map(|review_key| {
+                let review = localizer.format(review_key, &package);
+                assert!(!review.missing, "{locale}: {review_key}");
+                assert_reads(locale, &review.value);
+                review.value
+            });
+            assert_eq!(app2clap.former_copy_review_note, review, "{locale}");
+            for (row, before) in noted.iter().zip(&before) {
                 if row.package_id != PACKAGE_APP2CLAP {
                     assert_eq!(row, before, "{locale}");
                 }
             }
         }
     }
+    let english = |key: &str| localizer.format(key, &[("package", "app2clap")]).value;
     assert!(
-        localizer
-            .format(
-                "wizard-package-details-clap-copy-portable",
-                &[("package", "app2clap")]
-            )
-            .value
+        english("wizard-package-details-clap-copy-portable")
             .contains("first update or reinstall app2clap in the standard REAPER")
+    );
+    assert!(
+        english("wizard-package-details-clap-copy-portable-installed")
+            .starts_with("This REAPER loads two copies of app2clap")
     );
 
     let mut untouched = rows.clone();
@@ -808,6 +885,72 @@ fn a_copy_in_the_clap_folder_is_told_in_app2claps_details() {
         &|_| Vec::new(),
     );
     assert_eq!(untouched, rows);
+}
+
+/// Review says what a ticked row does to a copy in the CLAP folder, under
+/// its notes, before the plan's own: here, on the standard REAPER, that
+/// app2clap's copy moves into the backup. The details pane isn't the one
+/// place a screen reader user is sure to hear. Unticked, the row adds
+/// nothing.
+#[test]
+fn review_says_what_a_ticked_row_does_to_a_copy_in_the_clap_folder() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let installation = fake_standard_installation();
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        vec![installation.clone()],
+        Some(0),
+        InstallPlan {
+            target: Some(installation),
+            actions: vec![PlanAction {
+                package_id: PACKAGE_APP2CLAP.to_string(),
+                action: PlanActionKind::Update,
+                installed_version: None,
+                available_version: Some(Version::parse("2026.5.17.34").unwrap()),
+                reason: "test".to_string(),
+                left_to_reapack: None,
+            }],
+            notes: Vec::new(),
+        },
+    );
+    let mut rows = model.package_rows.clone();
+    let copy = std::path::PathBuf::from("C:/CLAP/app2clap.clap");
+    crate::wizard::packages::note_copies_in_former_outside_folders(
+        &localizer,
+        &mut rows,
+        &builtin_package_specs(Platform::Windows),
+        false,
+        &|_| vec![copy.clone()],
+    );
+    let note = localizer
+        .format("wizard-review-clap-copy-moves", &[("package", "app2clap")])
+        .value;
+    let plan_note = "A note from the plan.".to_string();
+    let review = |ticked: &[usize]| {
+        build_review_preview_for_package_rows(
+            &model,
+            model.target_rows.first(),
+            ticked,
+            &rows,
+            std::slice::from_ref(&plan_note),
+            OsaraKeymapChoice::ReplaceCurrent,
+            rabbit_core::osara_keymap::OsaraKeymapState::OwnChanges,
+        )
+        .lines
+    };
+
+    let lines = review(&[0]);
+    let heading = lines
+        .iter()
+        .position(|line| *line == model.text.review_notes_heading)
+        .expect("a notes heading");
+    assert_eq!(lines[heading + 1..], [note.clone(), plan_note.clone()]);
+    assert!(note.starts_with("app2clap: the copy in your CLAP folder moves into the backup"));
+
+    let lines = review(&[]);
+    assert!(!lines.contains(&note), "{lines:?}");
 }
 
 #[test]

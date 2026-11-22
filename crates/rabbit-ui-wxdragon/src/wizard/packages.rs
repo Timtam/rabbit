@@ -314,14 +314,14 @@ pub fn wizard_package_plan_for_target_with_available(
     }
     // A copy that every REAPER on the computer loads, in the CLAP folder an
     // earlier RABBIT installed app2clap into: the details say what it means
-    // for this REAPER.
+    // for this REAPER, and so does Review for a ticked row.
     if let Some(target) = target {
         note_copies_in_former_outside_folders(
             &localizer,
             &mut package_rows,
             &package_specs,
             target.portable,
-            &rabbit_core::detection::copies_in_former_outside_folders,
+            &former_outside_copies,
         );
     }
 
@@ -341,15 +341,19 @@ pub fn wizard_package_plan_for_target_with_available(
 /// Add a sentence to the details of each row whose package has a copy in a
 /// folder it installed into before, outside every resource folder: the
 /// CLAP folder, where earlier versions of RABBIT installed app2clap. Every
-/// REAPER on the computer loads that copy. On a `portable` REAPER, the
-/// sentence says that installing the package there too would load two
-/// copies, and that updating or reinstalling it in the standard REAPER
-/// first moves the shared copy into a backup. On the standard REAPER, it
-/// says that its update or reinstall does that, and that portable REAPERs
-/// and other programs that loaded the copy from there then no longer find
-/// it. The sentence follows the row's summary. `copies` gives a package's
-/// copies there; tests give their own, so they never look in the real CLAP
-/// folder.
+/// REAPER on the computer loads that copy. On a `portable` REAPER that
+/// doesn't have the package yet, the sentence says that installing it there
+/// too would load two copies, and that updating or reinstalling it in the
+/// standard REAPER first moves the shared copy into a backup; on one that
+/// has its own copy already, that it loads both, and how the shared one
+/// goes. On the standard REAPER, it says that its update or reinstall moves
+/// the copy, and that portable REAPERs and other programs that loaded it
+/// from there then no longer find it. The sentence follows the row's
+/// summary. The row also gets the sentence Review says should it be
+/// ticked: on the standard REAPER that the copy moves into the backup, on a
+/// portable REAPER without the package that it will load two copies.
+/// `copies` gives a package's copies there; the wizard passes
+/// [`former_outside_copies`].
 pub(crate) fn note_copies_in_former_outside_folders(
     localizer: &Localizer,
     rows: &mut [PackageRow],
@@ -357,11 +361,6 @@ pub(crate) fn note_copies_in_former_outside_folders(
     portable: bool,
     copies: &dyn Fn(&PackageSpec) -> Vec<PathBuf>,
 ) {
-    let key = if portable {
-        "wizard-package-details-clap-copy-portable"
-    } else {
-        "wizard-package-details-clap-copy-standard"
-    };
     for row in rows {
         let Some(spec) = specs.iter().find(|spec| spec.id == row.package_id) else {
             continue;
@@ -369,14 +368,44 @@ pub(crate) fn note_copies_in_former_outside_folders(
         if spec.former_install_destinations.is_empty() || copies(spec).is_empty() {
             continue;
         }
-        let sentence = localizer
-            .format(key, &[("package", row.display_name.as_str())])
-            .value;
+        let installs_here = row.original_action == PlanActionKind::Install;
+        let (key, review_key) = match (portable, installs_here) {
+            (true, true) => (
+                "wizard-package-details-clap-copy-portable",
+                Some("wizard-review-clap-copy-twice"),
+            ),
+            (true, false) => ("wizard-package-details-clap-copy-portable-installed", None),
+            (false, _) => (
+                "wizard-package-details-clap-copy-standard",
+                Some("wizard-review-clap-copy-moves"),
+            ),
+        };
+        let package = [("package", row.display_name.as_str())];
+        let sentence = localizer.format(key, &package).value;
+        row.former_copy_review_note =
+            review_key.map(|review_key| localizer.format(review_key, &package).value);
         row.details = match row.details.split_once("\n\n") {
             Some((summary, rest)) => format!("{summary}\n\n{sentence}\n\n{rest}"),
             None => format!("{}\n\n{sentence}", row.details),
         };
     }
+}
+
+/// A package's copies in the folders it installed into before, outside
+/// every resource folder, such as an app2clap in the CLAP folder (see
+/// [`rabbit_core::detection::copies_in_former_outside_folders`]). The
+/// wizard's own tests never look in the real CLAP folder: each finds the
+/// copies `former_copies_seam` gives it, none unless it says otherwise.
+#[cfg(not(test))]
+pub(crate) fn former_outside_copies(spec: &PackageSpec) -> Vec<PathBuf> {
+    rabbit_core::detection::copies_in_former_outside_folders(spec)
+}
+
+/// [`former_outside_copies`] in the wizard's tests: the copies
+/// [`former_copies_seam`] gives, never the real CLAP folder's.
+#[cfg(test)]
+pub(crate) fn former_outside_copies(spec: &PackageSpec) -> Vec<PathBuf> {
+    former_copies_seam::copies(spec)
 }
 
 /// Mark `row` as unavailable: force-uncheck it, record the localized reason,
@@ -852,6 +881,7 @@ pub(crate) fn package_rows(
                 available_channel,
                 installed_channel,
                 left_to_reapack: action.left_to_reapack.is_some(),
+                former_copy_review_note: None,
             };
             row.summary = package_row_summary(localizer, &row);
             // A package ReaPack looks after can't be ticked: the plan keeps
@@ -967,4 +997,46 @@ pub(crate) fn package_display_name(model: &WizardModel, package_id: &str) -> Str
         .find(|spec| spec.id == package_id)
         .map(|spec| spec.display_name)
         .unwrap_or_else(|| package_id.to_string())
+}
+
+/// What [`former_outside_copies`] finds in the wizard's tests: nothing,
+/// unless a test installs copies of its own. Each thread has its own, so
+/// tests running at once never see each other's.
+#[cfg(test)]
+pub(crate) mod former_copies_seam {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    use rabbit_core::package::PackageSpec;
+
+    type Copies = Box<dyn Fn(&PackageSpec) -> Vec<PathBuf>>;
+
+    thread_local! {
+        static COPIES: RefCell<Option<Copies>> = const { RefCell::new(None) };
+    }
+
+    /// Takes the copies away again when dropped.
+    pub(crate) struct Installed;
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            COPIES.with(|copies| copies.borrow_mut().take());
+        }
+    }
+
+    /// Have this thread's wizard find `copies` until what this returns is
+    /// dropped.
+    pub(crate) fn install(copies: impl Fn(&PackageSpec) -> Vec<PathBuf> + 'static) -> Installed {
+        COPIES.with(|slot| *slot.borrow_mut() = Some(Box::new(copies)));
+        Installed
+    }
+
+    pub(super) fn copies(spec: &PackageSpec) -> Vec<PathBuf> {
+        COPIES.with(|copies| {
+            copies
+                .borrow()
+                .as_ref()
+                .map_or_else(Vec::new, |copies| copies(spec))
+        })
+    }
 }

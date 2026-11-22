@@ -130,6 +130,7 @@ pub(crate) fn localized_package_operation_message(
         Msg::ExtensionBinaryInstalled => {
             localizer.text("package-status-extension-binary-installed")
         }
+        Msg::PluginInstalled => localizer.text("package-status-plugin-installed"),
         Msg::SkippedCurrent {
             installed_version,
             available_version,
