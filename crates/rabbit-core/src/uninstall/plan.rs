@@ -31,7 +31,10 @@ use crate::package::uninstall::{
     UninstallPlanSpec, UninstallStrategy,
 };
 use crate::package::{InstallDestination, PACKAGE_REAPACK, PACKAGE_REAPER, PackageSpec};
-use crate::reapack::{ReapackOwnership, reapack_ownership, reapack_packages_with_files_under};
+use crate::reapack::{
+    ReapackOwnership, reapack_counts_as_installed, reapack_ownership,
+    reapack_packages_with_files_under,
+};
 use crate::receipt::{InstallState, PackageReceipt, VendorAddedFile};
 
 use super::cleanup::CleanupJob;
@@ -89,16 +92,6 @@ pub fn build_uninstall_plan(input: &UninstallPlanInput<'_>) -> UninstallPlan {
         remove_settings: input.remove_settings,
         items,
     }
-}
-
-/// Whether ReaPack's records have their hold: while ReaPack is installed,
-/// nothing it installed may go behind its back. Without a detection for
-/// ReaPack, RABBIT can't tell that it is gone, so it counts as installed.
-pub(super) fn reapack_counts_as_installed(detections: &[ComponentDetection]) -> bool {
-    detections
-        .iter()
-        .find(|detection| detection.package_id == PACKAGE_REAPACK)
-        .is_none_or(|detection| detection.installed)
 }
 
 /// Whether ReaPack's records claim `path`, failing closed: a file RABBIT

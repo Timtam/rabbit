@@ -1130,6 +1130,7 @@ fn install_tab_model_with(actions: &[(&str, PlanActionKind, Option<&str>)]) -> W
                     installed_version: installed.map(|version| Version::parse(version).unwrap()),
                     available_version: Some(Version::parse("9.9").unwrap()),
                     reason: "test".to_string(),
+                    left_to_reapack: None,
                 })
                 .collect(),
             notes: Vec::new(),

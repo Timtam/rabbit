@@ -46,12 +46,29 @@ RABBIT installs and keeps up to date:
   (`%LOCALAPPDATA%\Programs\Common\CLAP`) with no elevation required, and
   keeps it up to date. Disabled on portable REAPER targets because the CLAP
   folder lives outside any portable REAPER folder.
+- **LReaParams** *(Windows only, opt-in)* —
+  [LReaParams](https://github.com/Lo-lo78/LReaParams), an accessible REAPER
+  extension by Lo-lo for controlling FX and track parameters from the
+  keyboard, which works alongside OSARA. RABBIT installs
+  `reaper_lreaparams.dll` from the project's latest GitHub release into
+  `UserPlugins` as a REAPER extension, without LReaParams' own installer, and
+  keeps it up to date. It is a 64-bit DLL, so it is for a 64-bit REAPER,
+  REAPER's ARM64EC build on Windows on ARM included, which loads 64-bit
+  extensions. LReaParams is also published through its own ReaPack
+  repository: if ReaPack installed your copy, RABBIT leaves it to ReaPack.
+  It doesn't install over it, update it or uninstall it while ReaPack is
+  installed, not even when you name it on the command line, and the package
+  list says so. Restoring one of RABBIT's own backups of LReaParams is the
+  one exception: you ask for the copy RABBIT had, so it comes back even over
+  one ReaPack installed since. Your LReaParams settings and profiles live in
+  the `LReaParams` folder of REAPER's resource folder, and an uninstall keeps
+  them unless you ask for settings to go too.
 
 The wizard's package list shows Surge XT under **Instruments** and app2clap
-under **Tools**, after the main **Packages** group and before **Language
-packs**; the Uninstall tab uses the same groups. Both are disabled on
-portable REAPER targets, since they install to fixed per-user/system
-locations rather than into the portable REAPER folder.
+and LReaParams under **Tools**, after the main **Packages** group and before
+**Language packs**; the Uninstall tab uses the same groups. Surge XT and
+app2clap are disabled on portable REAPER targets, since they install to
+fixed per-user/system locations rather than into the portable REAPER folder.
 
 ### Language packs
 
@@ -240,17 +257,19 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
   VoiceOver's own navigation of the tab group. VoiceOver mentions Ctrl+Tab
   the first time the page opens.
 - **What RABBIT can remove:** OSARA, SWS, ReaPack, ReaKontrol, FFmpeg,
-  app2clap and the JAWS scripts (all three Windows only), the language packs,
-  Surge XT and REAPER (see below). On Windows that means a standard REAPER;
-  on a Mac, the REAPER app of a standard or a portable REAPER. Every other
-  installed package is listed too, with the reason it can't be ticked.
+  app2clap, LReaParams and the JAWS scripts (all four Windows only), the
+  language packs, Surge XT and REAPER (see below). On Windows that means a
+  standard REAPER; on a Mac, the REAPER app of a standard or a portable
+  REAPER. Every other installed package is listed too, with the reason it
+  can't be ticked, such as an LReaParams that ReaPack manages.
 - **What is kept:** your settings, such as SWS's grooves, ReaPack's
-  repositories and ReaKontrol's FX maps, unless you tick **Also remove
-  settings** below the list. `reaper.ini`, `reaper-kb.ini`, your key maps and
-  everything ReaPack installed always stay, and so do the key map backups
-  OSARA made and OSARA's settings, which live in `reaper-extstate.ini` beside
-  every other extension's. Script files of the JAWS scripts that RABBIT can't
-  be sure the installer added, and those changed since, always stay too.
+  repositories, ReaKontrol's FX maps and LReaParams' settings and profiles,
+  unless you tick **Also remove settings** below the list. `reaper.ini`,
+  `reaper-kb.ini`, your key maps and everything ReaPack installed always
+  stay, and so do the key map backups OSARA made and OSARA's settings, which
+  live in `reaper-extstate.ini` beside every other extension's. Script files
+  of the JAWS scripts that RABBIT can't be sure the installer added, and
+  those changed since, always stay too.
   Everything that goes, settings removed with that option included, moves
   into a backup set under `RABBIT\backups` rather than being deleted, and
   stays there until you delete the backup. Surge XT and REAPER are the
@@ -396,8 +415,8 @@ ticked. The rows come in up to four groups:
   pack's old file after you switch between es_ES and es_MX. RABBIT moves
   those into the backup instead of deleting them, so the earlier version
   stays whole. Only updates RABBIT installs file by file keep them:
-  ReaPack, ReaKontrol, FFmpeg, app2clap, the language packs, and SWS on a
-  Mac. A package's own installer, such as REAPER's, keeps none.
+  ReaPack, ReaKontrol, FFmpeg, app2clap, LReaParams, the language packs, and
+  SWS on a Mac. A package's own installer, such as REAPER's, keeps none.
 - **Key maps:** your key map from before OSARA's key map replaced it.
   Usually only the oldest is your own.
 - **Other backups:** what RABBIT can't restore here, such as the other
@@ -719,12 +738,12 @@ GITHUB_TOKEN="<your token>" /Applications/Rabbit.app/Contents/MacOS/rabbit   # m
 ### Uninstall
 
 `uninstall` removes packages RABBIT knows how to take off again: today OSARA,
-SWS, ReaPack, ReaKontrol, FFmpeg, app2clap and the JAWS scripts (all three
-Windows only), the language packs, Surge XT and REAPER. On Windows, Surge XT
-and a standard REAPER come off through their own uninstallers, and the JAWS
-scripts only from a standard REAPER. On a Mac, RABBIT deletes Surge XT for
-good and moves the REAPER app of a standard or a portable REAPER to the Trash.
-`RABBIT components` says for each package whether RABBIT can
+SWS, ReaPack, ReaKontrol, FFmpeg, app2clap, LReaParams and the JAWS scripts
+(all four Windows only), the language packs, Surge XT and REAPER. On Windows,
+Surge XT and a standard REAPER come off through their own uninstallers, and
+the JAWS scripts only from a standard REAPER. On a Mac, RABBIT deletes Surge
+XT for good and moves the REAPER app of a standard or a portable REAPER to
+the Trash. `RABBIT components` says for each package whether RABBIT can
 uninstall it, and if not, why. Name every package with `--package`; there is
 no "remove everything". Like the other commands, it only shows what it would
 do until you add `--apply`:
@@ -754,8 +773,9 @@ RABBIT uninstall --resource-path "$HOME/Library/Application Support/REAPER" \
   recorded their installer adding, each script file only while it still
   holds what the installer wrote (see below).
 - **What stays:** your settings, such as SWS's grooves and `S&M.ini`,
-  ReaPack's repositories and its list of what it installed, and ReaKontrol's
-  FX maps. Add `--remove-settings` to remove those too. `reaper.ini`,
+  ReaPack's repositories and its list of what it installed, ReaKontrol's FX
+  maps, and the `LReaParams` folder with LReaParams' settings and profiles.
+  Add `--remove-settings` to remove those too. `reaper.ini`,
   `reaper-kb.ini`, your key maps and everything ReaPack installed always stay,
   even files ReaPack installed among a package's settings. So do the key map
   backups OSARA made, and OSARA's settings, which live in
@@ -1025,10 +1045,10 @@ or when the set's record of the earlier version is one RABBIT would never
 write, such as one that lists a file outside the folders it installs into.
 
 Only updates RABBIT installs file by file make such a backup: ReaPack,
-ReaKontrol, FFmpeg, app2clap, the language packs, and SWS on a Mac. REAPER,
-OSARA, SWS on Windows, Surge XT and the JAWS scripts are updated by their own
-installers, or for OSARA on a Mac its own archive, which overwrite files with
-no backup, so they can't go back this way.
+ReaKontrol, FFmpeg, app2clap, LReaParams, the language packs, and SWS on a
+Mac. REAPER, OSARA, SWS on Windows, Surge XT and the JAWS scripts are updated
+by their own installers, or for OSARA on a Mac its own archive, which
+overwrite files with no backup, so they can't go back this way.
 
 To get back the key map you had before OSARA's key map replaced it, restore
 only the key map from the backup set `rabbit backups` lists it in:

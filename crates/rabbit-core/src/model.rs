@@ -126,6 +126,12 @@ pub struct ComponentDetection {
     pub confidence: Confidence,
     pub files: Vec<PathBuf>,
     pub notes: Vec<String>,
+    /// Why RABBIT leaves this copy to ReaPack, for a package whose manifest
+    /// says `leave_to_reapack`. `None` when RABBIT may install, update and
+    /// uninstall it as usual. Only `detect_components` sets it, since it
+    /// alone knows whether ReaPack is installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_to_reapack: Option<LeftToReapack>,
 }
 
 impl ComponentDetection {
@@ -139,6 +145,21 @@ impl ComponentDetection {
             confidence: Confidence::High,
             files: Vec::new(),
             notes: Vec::new(),
+            left_to_reapack: None,
         }
     }
+}
+
+/// Why RABBIT leaves a package's copy to ReaPack: it doesn't install over
+/// it, update it or uninstall it. Only for a package whose manifest says
+/// `leave_to_reapack`, and only while ReaPack is installed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "reason")]
+pub enum LeftToReapack {
+    /// ReaPack's records name the package's plug-in: ReaPack installed it
+    /// as `reapack_package` and keeps it up to date.
+    Managed { reapack_package: String },
+    /// RABBIT couldn't read ReaPack's records, so it can't tell whether
+    /// ReaPack installed the package, and leaves it alone to be safe.
+    RecordsUnreadable { error: String },
 }

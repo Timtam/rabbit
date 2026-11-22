@@ -54,9 +54,9 @@ use crate::package::uninstall::{
     UninstallPath, UninstallPostStep, UninstallStrategy, VendorUninstallerKind,
 };
 use crate::package::{
-    PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_JAWS_SCRIPTS, PACKAGE_OSARA, PACKAGE_REAKONTROL,
-    PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS, PackageSpec,
-    builtin_package_specs, embedded_package_manifest, validate_package_spec,
+    PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_JAWS_SCRIPTS, PACKAGE_LREAPARAMS, PACKAGE_OSARA,
+    PACKAGE_REAKONTROL, PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS,
+    PackageSpec, builtin_package_specs, embedded_package_manifest, validate_package_spec,
 };
 use crate::preflight::{MACOS_REAPER_PROCESS_NAMES, RunningProcess};
 use crate::progress::ProgressReporter;
@@ -283,6 +283,7 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
                 (PACKAGE_FFMPEG, remove_files),
                 (PACKAGE_SURGE_XT, vendor),
                 (PACKAGE_APP2CLAP, remove_files),
+                (PACKAGE_LREAPARAMS, remove_files),
                 (LANGPACK_ES, remove_files),
                 (LANGPACK_DE, remove_files),
                 (LANGPACK_FR, remove_files),
@@ -304,6 +305,7 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
                 (PACKAGE_FFMPEG, remove_files),
                 (PACKAGE_SURGE_XT, None),
                 (PACKAGE_APP2CLAP, None),
+                (PACKAGE_LREAPARAMS, remove_files),
                 (LANGPACK_ES, remove_files),
                 (LANGPACK_DE, remove_files),
                 (LANGPACK_FR, remove_files),
@@ -800,6 +802,105 @@ fn reakontrol_removes_its_plugin_and_keeps_the_fx_maps() {
         assert_eq!(removed(reakontrol), sorted(vec![plugin, maps]));
         assert_eq!(reakontrol.dirs_if_empty, vec![folder]);
     }
+}
+
+/// LReaParams: one plug-in, found by name or through its receipt. Its
+/// folder in the resource folder, with the settings, profiles and guide,
+/// stays unless "Also remove settings" is ticked.
+#[test]
+fn lreaparams_removes_its_plugin_and_keeps_its_folder() {
+    let fixture = Fixture::new();
+    let plugin = fixture.file("UserPlugins/reaper_lreaparams.dll");
+    fixture.file("LReaParams/Settings/Preferences.ini");
+    fixture.file("LReaParams/ReaEQ.fx");
+    fixture.file("LReaParams/Guide/index.html");
+    let folder = fixture.resource.join("LReaParams");
+    let state = receipt(
+        &fixture,
+        &[(PACKAGE_LREAPARAMS, &["UserPlugins/reaper_lreaparams.dll"])],
+    );
+    let shipped = Shipped::new(&fixture, Platform::Windows);
+    let detections = shipped.detect(Some(&state), &[PACKAGE_LREAPARAMS]);
+
+    let plan = shipped.plan(&detections, Some(&state));
+    let lreaparams = item(&plan, PACKAGE_LREAPARAMS);
+    assert_eq!(lreaparams.removability, Removability::Removable);
+    assert_eq!(removed(lreaparams), vec![plugin.clone()]);
+    assert_eq!(
+        kept_data(lreaparams),
+        vec![(
+            folder.clone(),
+            "uninstall-kept-lreaparams-data".to_string(),
+            true
+        )]
+    );
+    assert!(
+        lreaparams
+            .kept
+            .iter()
+            .any(|kept| kept.path == folder && kept.removable_with_settings)
+    );
+    assert_eq!(
+        lreaparams
+            .summary
+            .as_ref()
+            .map(|summary| summary.removes_key.as_str()),
+        Some("uninstall-summary-lreaparams-removes")
+    );
+
+    // "Also remove settings" takes the whole folder too.
+    let plan = shipped.plan_with(&detections, Some(&state), InstallationKind::Standard, true);
+    let lreaparams = item(&plan, PACKAGE_LREAPARAMS);
+    assert_eq!(removed(lreaparams), sorted(vec![plugin.clone(), folder]));
+
+    // A copy RABBIT didn't install, found by its name, goes too.
+    let detections = shipped.detect(None, &[PACKAGE_LREAPARAMS]);
+    let plan = shipped.plan(&detections, None);
+    assert_eq!(removed(item(&plan, PACKAGE_LREAPARAMS)), vec![plugin]);
+}
+
+/// An LReaParams that ReaPack installed and still manages is ReaPack's to
+/// remove, as it is ReaPack's to update. Once ReaPack is gone, the copy may
+/// go.
+#[test]
+fn lreaparams_managed_by_reapack_is_reapacks_to_remove() {
+    let fixture = Fixture::new();
+    let plugin = fixture.file("UserPlugins/reaper_lreaparams.dll");
+    write_test_registry(
+        &fixture.resource,
+        &[(
+            "LReaParams.ext",
+            "0.0.75",
+            &["UserPlugins/reaper_lreaparams.dll"],
+        )],
+    );
+    let shipped = Shipped::new(&fixture, Platform::Windows);
+    let mut detections = shipped.detect(None, &[PACKAGE_LREAPARAMS]);
+    assert!(detections.iter().any(
+        |found| found.package_id == PACKAGE_LREAPARAMS && found.detector == "reapack-registry"
+    ));
+
+    detections.retain(|found| found.package_id != PACKAGE_REAPACK);
+    detections.push(detection(PACKAGE_REAPACK, true));
+    let plan = shipped.plan(&detections, None);
+    let lreaparams = item(&plan, PACKAGE_LREAPARAMS);
+    assert_eq!(
+        lreaparams.removability,
+        Removability::ManagedByReaPack {
+            path: plugin.clone(),
+            reapack_package: "LReaParams.ext".to_string()
+        }
+    );
+    assert!(lreaparams.files.is_empty());
+
+    let detections = shipped.detect(None, &[PACKAGE_LREAPARAMS]);
+    let plan = shipped.plan(&detections, None);
+    let lreaparams = item(&plan, PACKAGE_LREAPARAMS);
+    assert_eq!(
+        lreaparams.removability,
+        Removability::RemovableOrphanedFromReaPack
+    );
+    assert_eq!(removed(lreaparams), vec![plugin]);
 }
 
 /// FFmpeg: exactly the files its receipt lists. Files from installs that

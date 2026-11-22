@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{ComponentDetection, Installation};
+use crate::model::{ComponentDetection, Installation, LeftToReapack};
 use crate::package::PACKAGE_REAPER;
 use crate::version::Version;
 
@@ -40,6 +40,11 @@ pub struct PlanAction {
     pub installed_version: Option<Version>,
     pub available_version: Option<Version>,
     pub reason: String,
+    /// Why the package stays as it is because ReaPack looks after it, from
+    /// its detection. Such a package is always `Keep`, and the wizard says
+    /// why in its row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_to_reapack: Option<LeftToReapack>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,8 +115,13 @@ pub fn build_install_plan_with_installed_channels(
         // switch would never happen.
         let switching_channel =
             installed && available_version.is_some() && installed_channel != available_channel;
+        let left_to_reapack = detection.and_then(|detection| detection.left_to_reapack.clone());
 
-        let (action, reason) = if !installed {
+        // A copy ReaPack looks after is ReaPack's to install, update and
+        // remove, whatever the versions say.
+        let (action, reason) = if let Some(left) = &left_to_reapack {
+            (PlanActionKind::Keep, left_to_reapack_reason(left))
+        } else if !installed {
             (
                 PlanActionKind::Install,
                 "Package is not installed in the selected REAPER resource path.".to_string(),
@@ -169,6 +179,7 @@ pub fn build_install_plan_with_installed_channels(
             installed_version,
             available_version,
             reason,
+            left_to_reapack,
         });
     }
 
@@ -184,6 +195,20 @@ pub fn build_install_plan_with_installed_channels(
         target,
         actions,
         notes,
+    }
+}
+
+/// The plan reason for a package RABBIT leaves to ReaPack.
+pub fn left_to_reapack_reason(left: &LeftToReapack) -> String {
+    match left {
+        LeftToReapack::Managed { reapack_package } => format!(
+            "ReaPack's records say it installed this package as {reapack_package}, so RABBIT \
+             leaves it to ReaPack. Install, update or remove it in ReaPack."
+        ),
+        LeftToReapack::RecordsUnreadable { error } => format!(
+            "RABBIT couldn't read ReaPack's records ({error}), so it can't tell whether ReaPack \
+             installed this package, and doesn't install, update or remove it."
+        ),
     }
 }
 
@@ -229,6 +254,59 @@ mod tests {
     use crate::plan::{AvailablePackage, PlanActionKind, build_install_plan};
     use crate::version::Version;
 
+    /// A package ReaPack looks after stays as it is, however much newer the
+    /// release is, and whether or not its file is still there; the action
+    /// carries why, for the wizard to say.
+    #[test]
+    fn a_package_left_to_reapack_is_kept_whatever_the_versions_say() {
+        use crate::model::LeftToReapack;
+        use crate::package::PACKAGE_LREAPARAMS;
+
+        let managed = LeftToReapack::Managed {
+            reapack_package: "LReaParams.ext".to_string(),
+        };
+        let unreadable = LeftToReapack::RecordsUnreadable {
+            error: "file is not a database".to_string(),
+        };
+        let available = vec![AvailablePackage {
+            package_id: PACKAGE_LREAPARAMS.to_string(),
+            version: Some(Version::parse("0.0.75").unwrap()),
+            whats_new: None,
+            channel: None,
+        }];
+        let desired = vec![PACKAGE_LREAPARAMS.to_string()];
+        for (installed, version, left) in [
+            (true, Some("0.0.70"), managed.clone()),
+            (true, None, managed.clone()),
+            (false, None, managed),
+            (true, Some("0.0.70"), unreadable),
+        ] {
+            let detections = vec![ComponentDetection {
+                installed,
+                version: version.map(|version| Version::parse(version).unwrap()),
+                left_to_reapack: Some(left.clone()),
+                ..ComponentDetection::not_installed(PACKAGE_LREAPARAMS, "LReaParams")
+            }];
+
+            let plan = build_install_plan(None, &detections, &desired, &available);
+
+            let action = &plan.actions[0];
+            assert_eq!(action.action, PlanActionKind::Keep, "{left:?}");
+            assert_eq!(action.left_to_reapack, Some(left.clone()));
+            assert!(action.reason.contains("ReaPack"), "{}", action.reason);
+        }
+
+        // Without that, the same copy is updated as usual.
+        let detections = vec![ComponentDetection {
+            installed: true,
+            version: Some(Version::parse("0.0.70").unwrap()),
+            ..ComponentDetection::not_installed(PACKAGE_LREAPARAMS, "LReaParams")
+        }];
+        let plan = build_install_plan(None, &detections, &desired, &available);
+        assert_eq!(plan.actions[0].action, PlanActionKind::Update);
+        assert_eq!(plan.actions[0].left_to_reapack, None);
+    }
+
     #[test]
     fn plans_install_for_missing_package() {
         let desired = vec![PACKAGE_OSARA.to_string()];
@@ -248,6 +326,7 @@ mod tests {
             confidence: Confidence::High,
             files: Vec::new(),
             notes: Vec::new(),
+            left_to_reapack: None,
         }];
         let available = vec![AvailablePackage {
             package_id: PACKAGE_OSARA.to_string(),
@@ -277,6 +356,7 @@ mod tests {
             confidence: Confidence::Medium,
             files: Vec::new(),
             notes: Vec::new(),
+            left_to_reapack: None,
         }];
         let available = vec![AvailablePackage {
             package_id: PACKAGE_REAPACK.to_string(),

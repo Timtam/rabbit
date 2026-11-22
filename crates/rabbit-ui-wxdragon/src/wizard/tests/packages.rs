@@ -1,9 +1,9 @@
-use rabbit_core::localization::{DEFAULT_LOCALE, Localizer};
-use rabbit_core::model::{Architecture, Platform};
+use rabbit_core::localization::{DEFAULT_LOCALE, Localizer, embedded_locales};
+use rabbit_core::model::{Architecture, LeftToReapack, Platform};
 use rabbit_core::package::{
-    HostCapabilities, PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_OSARA, PACKAGE_REAKONTROL,
-    PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS, PackageCategory,
-    builtin_package_specs,
+    HostCapabilities, PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_LREAPARAMS, PACKAGE_OSARA,
+    PACKAGE_REAKONTROL, PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS,
+    PackageCategory, builtin_package_specs,
 };
 use rabbit_core::plan::{AvailablePackage, InstallPlan, PlanAction, PlanActionKind};
 use rabbit_core::version::Version;
@@ -67,6 +67,7 @@ fn toggling_a_package_row_updates_its_action_label_and_summary() {
                 installed_version: None,
                 available_version: Some(Version::parse("2026.1").unwrap()),
                 reason: "Missing".to_string(),
+                left_to_reapack: None,
             }],
             notes: Vec::new(),
         },
@@ -114,6 +115,7 @@ fn toggling_a_keep_row_to_checked_promotes_it_to_update() {
                 installed_version: Some(Version::parse("1.2.6").unwrap()),
                 available_version: Some(Version::parse("1.2.6").unwrap()),
                 reason: "Current".to_string(),
+                left_to_reapack: None,
             }],
             notes: Vec::new(),
         },
@@ -150,6 +152,7 @@ fn non_recommended_package_install_row_starts_unticked() {
                 installed_version: None,
                 available_version: Some(Version::parse("8.1.1").unwrap()),
                 reason: "Missing".to_string(),
+                left_to_reapack: None,
             }],
             notes: Vec::new(),
         },
@@ -161,6 +164,195 @@ fn non_recommended_package_install_row_starts_unticked() {
     assert_eq!(row.original_action, PlanActionKind::Install);
     assert_eq!(row.action, PlanActionKind::Keep);
     assert!(!row.selected);
+}
+
+/// The wizard model for a plan whose only action is LReaParams 0.0.70,
+/// with 0.0.75 out, kept because of `left`.
+fn lreaparams_left_to_reapack(localizer: &Localizer, left: LeftToReapack) -> WizardModel {
+    let installation = fake_installation();
+    model_from_plan(
+        localizer,
+        Platform::Windows,
+        Architecture::X64,
+        vec![installation.clone()],
+        Some(0),
+        InstallPlan {
+            target: Some(installation),
+            actions: vec![PlanAction {
+                package_id: PACKAGE_LREAPARAMS.to_string(),
+                action: PlanActionKind::Keep,
+                installed_version: Some(Version::parse("0.0.70").unwrap()),
+                available_version: Some(Version::parse("0.0.75").unwrap()),
+                reason: "ReaPack looks after it".to_string(),
+                left_to_reapack: Some(left),
+            }],
+            notes: Vec::new(),
+        },
+    )
+}
+
+/// A package ReaPack installed and keeps up to date can't be ticked, even
+/// with a newer release out: its row says ReaPack manages it, and its
+/// details say to update or remove it in ReaPack. So does a package whose
+/// ReaPack records RABBIT couldn't read, in its own words.
+#[test]
+fn a_package_reapack_looks_after_cant_be_ticked_and_says_why() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let model = lreaparams_left_to_reapack(
+        &localizer,
+        LeftToReapack::Managed {
+            reapack_package: "LReaParams.ext".to_string(),
+        },
+    );
+    let row = &model.package_rows[0];
+    assert!(!row.available_for_target);
+    assert!(!row.selected && !row.default_selected);
+    assert_eq!(row.action, PlanActionKind::Keep);
+    assert_eq!(row.category, PackageCategory::Tools);
+    assert!(!model.controls.can_install);
+    assert!(
+        row.summary.starts_with("LReaParams")
+            && row.summary.ends_with("(not available: managed by ReaPack)"),
+        "{}",
+        row.summary
+    );
+    assert_eq!(
+        row.unavailability_reason.as_deref(),
+        Some("managed by ReaPack")
+    );
+    // The ReaPack sentence comes once, before the description, which
+    // doesn't repeat it.
+    assert_eq!(
+        row.details,
+        format!(
+            "{}\n\nReaPack's records say it installed LReaParams as LReaParams.ext, so RABBIT \
+             leaves it to ReaPack. Install, update or remove it in ReaPack.\n\nLReaParams is an \
+             open source extension by Lo-lo that gives you accessible keyboard control of FX \
+             and track parameters in REAPER, and it works alongside OSARA. Windows only.",
+            row.summary
+        )
+    );
+
+    let model = lreaparams_left_to_reapack(
+        &localizer,
+        LeftToReapack::RecordsUnreadable {
+            error: "file is not a database".to_string(),
+        },
+    );
+    let row = &model.package_rows[0];
+    assert!(!row.available_for_target && !row.selected);
+    assert!(
+        row.summary
+            .ends_with("(not available: ReaPack's records couldn't be checked)"),
+        "{}",
+        row.summary
+    );
+    assert!(
+        row.details.contains(
+            "RABBIT couldn't read ReaPack's records (file is not a database), so it can't \
+             tell whether ReaPack installed LReaParams, and doesn't install, update or remove \
+             it."
+        ),
+        "{}",
+        row.details
+    );
+
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        for left in [
+            LeftToReapack::Managed {
+                reapack_package: "LReaParams.ext".to_string(),
+            },
+            LeftToReapack::RecordsUnreadable {
+                error: "file is not a database".to_string(),
+            },
+        ] {
+            let model = lreaparams_left_to_reapack(&localizer, left);
+            let row = &model.package_rows[0];
+            assert!(!row.available_for_target, "{locale}");
+            assert_reads(locale, &row.summary);
+            assert_reads(locale, &row.details);
+            assert!(
+                !row.details.contains("package-"),
+                "{locale}: {}",
+                row.details
+            );
+        }
+    }
+}
+
+/// Without ReaPack's say, an LReaParams with a newer release out is
+/// offered as an update like any package.
+#[test]
+fn lreaparams_not_left_to_reapack_is_offered_as_usual() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let installation = fake_installation();
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        vec![installation.clone()],
+        Some(0),
+        InstallPlan {
+            target: Some(installation),
+            actions: vec![PlanAction {
+                package_id: PACKAGE_LREAPARAMS.to_string(),
+                action: PlanActionKind::Update,
+                installed_version: Some(Version::parse("0.0.70").unwrap()),
+                available_version: Some(Version::parse("0.0.75").unwrap()),
+                reason: "Newer".to_string(),
+                left_to_reapack: None,
+            }],
+            notes: Vec::new(),
+        },
+    );
+    let row = &model.package_rows[0];
+    assert!(row.available_for_target && row.selected);
+    assert!(!row.left_to_reapack);
+    assert_eq!(row.action, PlanActionKind::Update);
+    assert!(!row.summary.contains("ReaPack"), "{}", row.summary);
+}
+
+/// A failed version check leaves a row ReaPack looks after as it was: its
+/// label keeps saying ReaPack manages it, as its details do, and Review
+/// gets no note that installing it is disabled for this run, since RABBIT
+/// wouldn't install or update it in any run. Another package's failure
+/// still counts as usual.
+#[test]
+fn a_failed_version_check_leaves_a_row_reapack_looks_after_as_it_was() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let mut model = lreaparams_left_to_reapack(
+        &localizer,
+        LeftToReapack::Managed {
+            reapack_package: "LReaParams.ext".to_string(),
+        },
+    );
+    assert!(model.package_rows[0].left_to_reapack);
+    let before = model.package_rows.clone();
+    let mut notes = Vec::new();
+
+    let can_install = apply_version_check_failures_to_rows(
+        &localizer,
+        &mut model.package_rows,
+        &mut notes,
+        &[
+            (
+                PACKAGE_LREAPARAMS.to_string(),
+                "GitHub's rate limit was reached".to_string(),
+            ),
+            (PACKAGE_SWS.to_string(), "the SWS site is down".to_string()),
+        ],
+    );
+
+    assert!(!can_install);
+    assert_eq!(model.package_rows, before);
+    assert!(
+        model.package_rows[0]
+            .summary
+            .ends_with("(not available: managed by ReaPack)")
+    );
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("the SWS site is down"), "{notes:?}");
 }
 
 #[test]
@@ -186,6 +378,7 @@ fn a_declined_language_pack_does_not_auto_tick_its_updates_either() {
                 installed_version: None,
                 available_version: None,
                 reason: "upstream file changed".to_string(),
+                left_to_reapack: None,
             }],
             &[],
             &HostCapabilities::default(),
@@ -236,6 +429,7 @@ fn sws_row(kind: PlanActionKind, declined: &[&str]) -> PackageRow {
             installed_version: None,
             available_version: None,
             reason: "test".to_string(),
+            left_to_reapack: None,
         }],
         &[],
         &HostCapabilities::default(),
@@ -303,6 +497,7 @@ fn reakontrol_install_row_starts_ticked_when_komplete_kontrol_is_detected() {
             installed_version: None,
             available_version: Some(Version::parse("2026.2").unwrap()),
             reason: "Missing".to_string(),
+            left_to_reapack: None,
         }],
         &[],
         &host,
@@ -329,6 +524,7 @@ fn reakontrol_install_row_starts_ticked_when_komplete_kontrol_is_detected() {
             installed_version: None,
             available_version: Some(Version::parse("2026.2").unwrap()),
             reason: "Missing".to_string(),
+            left_to_reapack: None,
         }],
         &[],
         &HostCapabilities::default(),
@@ -363,6 +559,7 @@ fn non_recommended_package_update_row_starts_ticked() {
                 installed_version: Some(Version::parse("8.0.0").unwrap()),
                 available_version: Some(Version::parse("8.1.1").unwrap()),
                 reason: "Older version on disk".to_string(),
+                left_to_reapack: None,
             }],
             notes: Vec::new(),
         },
@@ -803,6 +1000,7 @@ fn reaper_row(
             installed_version: Some(Version::parse("7.80").unwrap()),
             available_version: Some(Version::parse("7.80+dev0918").unwrap()),
             reason: "test".to_string(),
+            left_to_reapack: None,
         }],
         &[AvailablePackage {
             package_id: PACKAGE_REAPER.to_string(),
@@ -924,7 +1122,8 @@ fn expert_mode_env_values_and_channels_outside_expert_mode() {
 
 /// The Install tree's package groups, built from the real manifest: Packages,
 /// Instruments, Tools, Language packs, in that order, each with its own rows
-/// in row order. Surge XT is the instrument and app2clap the tool.
+/// in row order. Surge XT is the instrument, and app2clap and LReaParams the
+/// tools.
 #[test]
 fn the_install_tree_groups_packages_instruments_tools_and_language_packs() {
     let dir = tempdir().unwrap();
@@ -974,7 +1173,7 @@ fn the_install_tree_groups_packages_instruments_tools_and_language_packs() {
             .collect()
     };
     assert_eq!(ids(&groups[1]), [PACKAGE_SURGE_XT]);
-    assert_eq!(ids(&groups[2]), [PACKAGE_APP2CLAP]);
+    assert_eq!(ids(&groups[2]), [PACKAGE_APP2CLAP, PACKAGE_LREAPARAMS]);
     assert!(
         ids(&groups[3]).iter().all(|id| id.starts_with("langpack-")),
         "{:?}",

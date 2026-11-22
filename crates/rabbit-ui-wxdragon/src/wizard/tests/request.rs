@@ -29,6 +29,7 @@ fn builds_install_request_from_selected_rows() {
                     installed_version: None,
                     available_version: None,
                     reason: "Missing".to_string(),
+                    left_to_reapack: None,
                 },
                 PlanAction {
                     package_id: PACKAGE_REAPACK.to_string(),
@@ -36,6 +37,7 @@ fn builds_install_request_from_selected_rows() {
                     installed_version: None,
                     available_version: None,
                     reason: "Current".to_string(),
+                    left_to_reapack: None,
                 },
             ],
             notes: Vec::new(),
@@ -115,6 +117,7 @@ fn review_preview_includes_osara_keymap_choice() {
                 installed_version: None,
                 available_version: Some(Version::parse("2026.1").unwrap()),
                 reason: "Missing".to_string(),
+                left_to_reapack: None,
             }],
             notes: Vec::new(),
         },
@@ -169,6 +172,7 @@ fn the_key_map_is_replaced_only_when_nothing_of_the_users_is_lost() {
                         installed_version: None,
                         available_version: Some(Version::parse("2026.10.5").unwrap()),
                         reason: "test".to_string(),
+                        left_to_reapack: None,
                     })
                     .into_iter()
                     .collect(),

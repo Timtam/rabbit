@@ -343,6 +343,10 @@ pub struct PackageRow {
     pub available_channel: Option<String>,
     /// The channel the installed build came from, as its receipt recorded it.
     pub installed_channel: Option<String>,
+    /// `true` when the plan leaves this package to ReaPack. The row can't be
+    /// ticked and says why, and a failed version check leaves it as it is:
+    /// RABBIT wouldn't install or update the package either way.
+    pub left_to_reapack: bool,
 }
 
 /// Wizard-side row for a single [`crate::configuration::ConfigurationStep`]

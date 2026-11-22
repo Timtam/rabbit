@@ -5,6 +5,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{IoPathContext, Result, SqlitePathContext};
+use crate::model::ComponentDetection;
+use crate::package::PACKAGE_REAPACK;
 use crate::text_file::{TextFileEncoding, read_text_file_lossless, write_text_file_lossless};
 use crate::version::Version;
 
@@ -410,6 +412,51 @@ pub fn reapack_packages_with_files_under(
     Ok(packages)
 }
 
+/// The first ReaPack package, in name order, whose records name a file
+/// directly in `folder` (resource-relative, such as `UserPlugins`) whose
+/// name `matches`. Files in folders below it don't count. No database means
+/// no package; a database RABBIT can't read is an error, so the caller can
+/// fail closed. As in [`reapack_ownership`], that includes one RABBIT can't
+/// look at, and anything but a plain file where the database belongs.
+pub fn reapack_package_with_file_in(
+    resource_path: &Path,
+    folder: &str,
+    matches: impl Fn(&str) -> bool,
+) -> Result<Option<String>> {
+    let db_path = registry_path(resource_path);
+    match fs::symlink_metadata(&db_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_path(&db_path),
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(std::io::Error::other("not a file")).with_path(&db_path);
+        }
+        Ok(_) => {}
+    }
+    let folder = folder.trim_end_matches('/');
+    let packages = reapack_packages_with_files_under(resource_path, folder)?;
+    Ok(packages
+        .into_iter()
+        .find(|package| {
+            package.files.iter().any(|file| {
+                // The query matched `folder/` ignoring ASCII case, so the
+                // name starts right after it.
+                file.get(folder.len() + 1..)
+                    .is_some_and(|name| !name.contains('/') && matches(name))
+            })
+        })
+        .map(|package| package.package))
+}
+
+/// Whether ReaPack's records have their hold: while ReaPack is installed,
+/// nothing it installed may change behind its back. Without a detection for
+/// ReaPack, RABBIT can't tell that it is gone, so it counts as installed.
+pub(crate) fn reapack_counts_as_installed(detections: &[ComponentDetection]) -> bool {
+    detections
+        .iter()
+        .find(|detection| detection.package_id == PACKAGE_REAPACK)
+        .is_none_or(|detection| detection.installed)
+}
+
 pub fn list_entries(resource_path: &Path) -> Result<Vec<ReapackEntry>> {
     let db_path = registry_path(resource_path);
     if !db_path.is_file() {
@@ -805,9 +852,12 @@ mod tests {
 
 /// Write a ReaPack `registry.db` under `resource_path` holding `packages`,
 /// each as (package name, version text, resource-relative files), with the
-/// two tables laid out as ReaPack lays them out.
-#[cfg(test)]
-pub(crate) fn write_test_registry(resource_path: &Path, packages: &[(&str, &str, &[&str])]) {
+/// two tables laid out as ReaPack lays them out. Built for this crate's
+/// tests and, with the `test-support` feature, for those of the crates that
+/// use it. Never outside tests.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn write_test_registry(resource_path: &Path, packages: &[(&str, &str, &[&str])]) {
     let db_path = registry_path(resource_path);
     fs::create_dir_all(db_path.parent().unwrap()).unwrap();
     let connection = Connection::open(&db_path).unwrap();

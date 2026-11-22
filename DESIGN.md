@@ -803,8 +803,8 @@ user can finish the install by pressing Next a few times.
      Uninstall tab uses the same groups. Packages contains REAPER, OSARA,
      SWS, ReaPack, ReaKontrol, FFmpeg (Windows only) and JAWS scripts
      (Windows only); Instruments contains Surge XT; Tools contains
-     app2clap (Windows only); Language packs contains REAPER's
-     translations. Each row reads as plain text "OSARA — installed
+     app2clap and LReaParams (both Windows only); Language packs contains
+     REAPER's translations. Each row reads as plain text "OSARA — installed
      2024.3.6, latest 2026.2.16, will update". Configuration contains
      opt-in post-install tweaks (currently: "Add the REAPER Accessibility
      ReaPack repository to ReaPack"); rows that are already applied or
@@ -1217,6 +1217,7 @@ should rely on. Detection must be package-specific and confidence-scored.
 | SWS | RABBIT receipt; Windows PE `ProductVersion`; ReaPack registry if installed by ReaPack | binary metadata/string scan; presence of `reaper_sws*` | Prefer ReaPack registry for ReaPack-managed SWS. |
 | ReaPack | RABBIT receipt; Windows PE `ProductVersion`; ReaPack self-entry in `ReaPack/registry.db` after first launch | presence of `reaper_reapack*` | The registry DB may not exist until ReaPack has run inside REAPER. |
 | ReaKontrol | RABBIT receipt after RABBIT-managed install | best-effort binary metadata if available; presence of `reaper_kontrol*` | No installer or registry-based detector is expected; validate binary metadata quality during implementation. |
+| LReaParams | RABBIT receipt; ReaPack registry if installed by ReaPack | presence of `reaper_lreaparams*.dll`, version unknown | The DLL has no version resource. A copy ReaPack manages is left to ReaPack (`leave_to_reapack`). |
 | FFmpeg | RABBIT receipt after RABBIT-managed install; `ffmpeg.exe -version` parsed from stdout's first line | StringFileInfo `ProductVersion` of an FFmpeg executable (only present when a vendor patches it in); libavformat-major filename heuristic (`avformat-62.dll` → FFmpeg 8.0.0, mapped via `lib_major - 54`) | Vanilla FFmpeg attaches only a manifest to its binaries; `VS_FIXEDFILEINFO` of `ffmpeg.exe` carries libavutil's version, not the FFmpeg release. Spawning `ffmpeg.exe -version` is the only reliable vendor-independent way to recover the patch level for an externally-installed copy; the libavformat-major fallback recovers only the major when no executable is present. |
 | Surge XT | RABBIT receipt after RABBIT-managed install (records the `NIGHTLY-YYYY-MM-DD-sha` token verbatim) | `read_file_version_parts` on the system VST3 bundle — Windows PE `VERSIONINFO` of `Contents\x86_64-win\Surge XT.vst3` inside `<CommonProgramFiles>\VST3\Surge Synth Team\Surge XT.vst3\`; macOS `CFBundleShortVersionString` of `/Library/Audio/Plug-Ins/VST3/Surge XT.vst3/Contents/Info.plist` | The vendor-installed binary still carries the most recent *stable* semver (e.g. `1.3.4`) — Surge XT doesn't stamp nightlies with their date+sha. Receipt-driven detection produces the exact nightly token; the file-metadata fallback reports the stable semver, which compares lower than any `NIGHTLY-…` under `Version::cmp_lenient` so the planner naturally schedules an Update. On macOS a VST3 bundle whose version can't be read still counts as installed, with no version and low confidence: the uninstall deletes that bundle last with `rm -R`, which may take its `Info.plist` before it stops, so a removal stopped there leaves Surge XT detected and offered again. On Windows a bundle without a version is still not detected. |
 | ReaPack packages | `ReaPack/registry.db` table `entries.version` | none | This is the best source for packages ReaPack knows about. |
@@ -1365,11 +1366,12 @@ plan is reachable, each strategy has the fields it needs, removals that need
 administrator rights never go into the user's backups, and no path may reach
 into `{resource}/RABBIT`. `rabbit uninstall` carries out `remove_files`
 and `vendor_uninstaller` plans (see Safety Behavior), and so does the wizard's
-Uninstall tab. OSARA, SWS, ReaPack, ReaKontrol, FFmpeg, app2clap, the JAWS
-scripts and the language packs have `remove_files` plans. FFmpeg and the
-language packs set `requires_receipt`, because a copy RABBIT has no receipt
-for is most likely the user's own; the others name their files, so a copy
-without a receipt can go too, unless ReaPack still manages it. OSARA's
+Uninstall tab. OSARA, SWS, ReaPack, ReaKontrol, FFmpeg, app2clap,
+LReaParams, the JAWS scripts and the language packs have `remove_files`
+plans. FFmpeg and the language packs set `requires_receipt`, because a copy
+RABBIT has no receipt for is most likely the user's own; the others name
+their files, so a copy without a receipt can go too, unless ReaPack still
+manages it. OSARA's
 Windows plan also has a `registry_cleanup` entry: once the files are gone,
 the engine removes `HKCU\...\Uninstall\OSARA`, but only while its
 `UninstallString` names a program directly in this resource folder's `osara`
@@ -1517,6 +1519,40 @@ package-specific acknowledgement message in the GUI (a dedicated wizard
 page) or in the CLI (an interactive prompt or an explicit
 `--accept-<package>-notice` flag for unattended runs).
 
+`leave_to_reapack` is set on a package that is also published through
+ReaPack, so a user may have it from there: LReaParams today. Default is
+`false`. When set, and ReaPack's `registry.db` names a file of the package
+directly in its install folder (matched by `user_plugin_prefixes` and
+`user_plugin_suffixes`, ignoring case), that copy is ReaPack's to look after
+while ReaPack is installed: detection marks it (`left_to_reapack`), the plan
+keeps it whatever the versions say, the wizard's row can't be ticked and
+says "managed by ReaPack" with a sentence in its details, which a failed
+version check doesn't relabel, and the install pipeline skips it even when
+the user names it with `--package` or ticks it again (status
+`skipped-left-to-reapack`). `rabbit install-extension`, which installs
+without that pipeline, drops such a package before it resolves anything and
+says why. The uninstall already refuses it, through `reapack_owned: block`.
+A record whose file is gone still counts, since ReaPack still thinks it
+installed it. Records RABBIT can't read leave the copy alone too, and say
+so; that includes a `registry.db` RABBIT can't look at, or anything but a
+plain file in its place, as for the uninstall. When ReaPack installed over a
+copy RABBIT had, so that the files no longer match RABBIT's receipt, the
+detection comes from ReaPack's records instead of the receipt: their
+version, and no receipt-mismatch note. A copy that still matches the
+receipt is the one RABBIT installed, and keeps the receipt's version. Once
+ReaPack itself is gone, nothing keeps its records, and the copy is treated
+like any other, as the uninstall does. Restoring a backup set is the one
+exception while ReaPack is installed: a restore never asks ReaPack's
+records, so restoring LReaParams from one of RABBIT's backups puts back the
+copy RABBIT had, over one ReaPack installed since, because the user asked
+for exactly that copy. The manifest's validation requires the
+`reapack_registry` detector, `reapack_owned: block`, an install folder
+inside the resource folder, and non-empty `user_plugin_prefixes` and
+`user_plugin_suffixes` for each supported platform, without which the
+records could never match. ReaPack lists itself in its records, so the
+validation refuses the flag on ReaPack; SWS, OSARA and ReaKontrol don't set
+it either, and keep being updated over a ReaPack copy as before.
+
 Initial package kinds:
 
 - `reaper_app`: vendor installer, dmg/app copy, or portable creation.
@@ -1653,6 +1689,29 @@ strategies:
     `CREATE_NO_WINDOW` flag on Windows so users don't see a console
     flash) and parsing the first stdout line; falls back to the
     libavformat-major filename heuristic when no executable is present.
+- LReaParams (Windows only, opt-in, under Tools):
+  - latest-version + artifact provider: the `/releases/latest` of
+    `Lo-lo78/LReaParams` on GitHub. The version is the tag without its `v`
+    (`v0.0.75` is 0.0.75), and the download is the asset named exactly
+    `reaper_lreaparams.dll`. The NSIS installer zip beside it, whose name
+    changes from release to release, is never used. What's New is the
+    releases' own notes.
+  - install by copying the bare DLL into `UserPlugins`
+    (`extension_binary`), with a receipt and a backup of the copy it
+    replaces, as for ReaPack.
+  - an x64 DLL, offered for x64 and, on Windows on ARM, for `arm64` and
+    `arm64-ec`: REAPER for Windows on ARM is the ARM64EC build, which loads
+    x64 extensions, and an installed one probes as x64 anyway, since its
+    executable says AMD64. Never for x86 or macOS.
+  - the DLL has no version resource, so a copy without a receipt is found
+    by its file and reads as version unknown, unless ReaPack installed it,
+    when the version comes from ReaPack's records.
+  - `leave_to_reapack` (see above): LReaParams' own ReaPack repository
+    installs the same DLL as `UserPlugins/reaper_lreaparams.dll`, package
+    `LReaParams.ext`.
+  - the uninstall removes the DLL and keeps `{resource}/LReaParams`, with
+    LReaParams' settings, `.fx` and `.tp` profiles and the guide its own
+    installer puts there, unless "Also remove settings" is ticked.
 
 ## Configuration Steps
 

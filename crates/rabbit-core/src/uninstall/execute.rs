@@ -96,6 +96,7 @@ use crate::preflight::{
     running_reaper_processes,
 };
 use crate::progress::{ProgressEvent, ProgressReporter, RemovalMethod};
+use crate::reapack::reapack_counts_as_installed;
 use crate::receipt::{
     InstallState, RECEIPT_RELATIVE_PATH, load_install_state, remove_package_receipt,
     save_install_state,
@@ -112,9 +113,7 @@ use super::cleanup::{
 use super::helper::{ElevatedHelper, ElevatedRunRequest, ElevatedSession, ElevationStartError};
 use super::macos_objects::{MacosObjects, ObjectProbe, TreeRoute, tree_route};
 use super::paths::{UninstallRoots, absolute, inside_or_same, same_ignoring_case};
-use super::plan::{
-    UninstallPlanInput, build_uninstall_plan, installed_by_reapack, reapack_counts_as_installed,
-};
+use super::plan::{UninstallPlanInput, build_uninstall_plan, installed_by_reapack};
 use super::post::reset_reaper_langpack_if_selected;
 use super::preflight::{
     ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, PROGRAMS_RUNNING_CHECK, SystemVolumes,

@@ -61,6 +61,50 @@ fn package_operation_messages_localize_into_german() {
     );
 }
 
+/// What an install run says of a package it left to ReaPack reads in every
+/// language: the status after the package's name, and the message under
+/// it, with ReaPack's name for the package or the error filled in. A key
+/// missing from a locale would read as the key's own id.
+#[test]
+fn a_package_left_to_reapack_reads_in_every_language() {
+    use rabbit_core::localization::embedded_locales;
+    use rabbit_core::operation::{PackageOperationMessage as Msg, PackageOperationStatus};
+
+    use super::support::assert_reads;
+
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let status = status_label_for_summary(
+            Some(&localizer),
+            PackageOperationStatus::SkippedLeftToReapack,
+        );
+        assert_reads(locale, &status);
+        let managed = localized_package_operation_message(
+            &localizer,
+            &Msg::SkippedManagedByReapack {
+                reapack_package: "LReaParams.ext".to_string(),
+            },
+            "LReaParams",
+            "the English fallback",
+        );
+        assert_reads(locale, &managed);
+        assert!(managed.contains("LReaParams.ext"), "{locale}: {managed}");
+        let unreadable = localized_package_operation_message(
+            &localizer,
+            &Msg::SkippedReapackRecordsUnreadable {
+                error: "file is not a database".to_string(),
+            },
+            "LReaParams",
+            "the English fallback",
+        );
+        assert_reads(locale, &unreadable);
+        assert!(
+            unreadable.contains("file is not a database"),
+            "{locale}: {unreadable}"
+        );
+    }
+}
+
 #[test]
 fn configuration_step_messages_localize_into_german() {
     use rabbit_core::configuration::{ConfigurationMessage as Msg, ConfigurationStatus};

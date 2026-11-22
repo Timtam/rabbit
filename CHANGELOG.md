@@ -336,6 +336,16 @@ from this file and posts it as the GitHub release body.
   Português (Brasil), it ships in the macOS app bundle, and OS-language
   auto-detection on first launch covers Portuguese locales (any `pt-*`, which
   map to pt-BR).
+- **LReaParams** (Windows only), Lo-lo's accessible REAPER extension for
+  controlling FX and track parameters from the keyboard, under **Tools**,
+  unticked by default. Thanks to Lo-lo for asking. RABBIT installs
+  `reaper_lreaparams.dll` from the latest GitHub release into `UserPlugins`,
+  keeps it up to date and can uninstall it, keeping the `LReaParams` folder
+  with your settings and profiles unless you ask for settings to go too. A
+  copy ReaPack installed is left to ReaPack: RABBIT doesn't install over it,
+  update it or uninstall it, not even when you name it on the command line,
+  and its row says it is managed by ReaPack. Only restoring one of RABBIT's
+  own backups of LReaParams still puts back the copy RABBIT had.
 
 ### Changed
 

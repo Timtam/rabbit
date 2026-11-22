@@ -17,6 +17,7 @@ pub const PACKAGE_JAWS_SCRIPTS: &str = "jaws-scripts";
 pub const PACKAGE_FFMPEG: &str = "ffmpeg";
 pub const PACKAGE_SURGE_XT: &str = "surge-xt";
 pub const PACKAGE_APP2CLAP: &str = "app2clap";
+pub const PACKAGE_LREAPARAMS: &str = "lreaparams";
 
 /// Logical id of the embedded package manifest, reported by the portability
 /// self-check. It's no longer a single file — the packages live in
@@ -95,6 +96,9 @@ pub struct PackageSpec {
     /// CLAP folder). The wizard disables this package's row on a portable
     /// target. Replaces what used to be a hardcoded package-id list in the UI.
     pub requires_standard_install: bool,
+    /// When `true`, a copy ReaPack's records name is ReaPack's to look after;
+    /// see [`EmbeddedPackageSpec::leave_to_reapack`].
+    pub leave_to_reapack: bool,
     pub supported_platforms: Vec<SupportedPlatform>,
     pub supported_architectures: Vec<Architecture>,
     /// Data-driven latest-version rule. When set, the version is resolved by
@@ -200,6 +204,20 @@ pub struct EmbeddedPackageSpec {
     pub requires_user_acknowledgement: bool,
     #[serde(default)]
     pub requires_standard_install: bool,
+    /// When `true`, a copy of this package that ReaPack's records name is
+    /// ReaPack's to look after: while ReaPack is installed, RABBIT doesn't
+    /// install over it, update it or uninstall it, and the wizard says so.
+    /// Once ReaPack is gone, nothing keeps its records up to date, and RABBIT
+    /// treats the copy like any other, as uninstall already does. For an
+    /// extension that is also published through ReaPack, such as LReaParams.
+    /// ReaPack's records list ReaPack itself, so ReaPack can't set this.
+    /// Needs the `reapack_registry` detector, uninstall's default
+    /// `reapack_owned: block`, an install folder inside the resource folder,
+    /// the only place ReaPack installs to, and `user_plugin_prefixes` and
+    /// `user_plugin_suffixes` on each platform, by which RABBIT finds the
+    /// copy in ReaPack's records.
+    #[serde(default)]
+    pub leave_to_reapack: bool,
     #[serde(default = "all_supported_platforms")]
     pub supported_platforms: Vec<SupportedPlatform>,
     #[serde(default = "all_supported_architectures")]
@@ -1063,6 +1081,7 @@ pub fn validate_package_spec(spec: &EmbeddedPackageSpec) -> Result<(), String> {
     // Channels change where a build comes from, never how it comes off, so
     // the uninstall block is checked once, on the package itself.
     uninstall::validate_uninstall_spec(spec)?;
+    validate_leave_to_reapack(spec)?;
     // Pull-request builds need a pull request number, which only a channel
     // parameter supplies. On the package itself it could never resolve.
     if spec.github_actions_artifact.is_some() {
@@ -1110,6 +1129,51 @@ pub fn validate_package_spec(spec: &EmbeddedPackageSpec) -> Result<(), String> {
         // at most one artifact source, a valid What's-New pattern, and so on.
         validate_resolvable_spec(&spec.overlaid_with(channel, None))
             .map_err(|message| format!("channel {:?}: {message}", channel.id))?;
+    }
+    Ok(())
+}
+
+/// A package left to ReaPack must be able to tell when ReaPack installed it:
+/// its version comes from ReaPack's records, its uninstall refuses a copy
+/// ReaPack still manages, it installs where ReaPack can, inside the
+/// resource folder, and its plug-in names on each of its platforms find its
+/// file in ReaPack's records. Without those names the flag would never
+/// apply. ReaPack lists itself in its records, so on ReaPack the flag would
+/// stop RABBIT from ever updating it.
+fn validate_leave_to_reapack(spec: &EmbeddedPackageSpec) -> Result<(), String> {
+    if !spec.leave_to_reapack {
+        return Ok(());
+    }
+    if spec.id == PACKAGE_REAPACK {
+        return Err("leave_to_reapack can't be set on ReaPack itself".to_string());
+    }
+    if spec.user_plugin_prefixes.is_empty()
+        || spec
+            .user_plugin_prefixes
+            .iter()
+            .any(|prefix| prefix.is_empty())
+    {
+        return Err("leave_to_reapack needs user_plugin_prefixes, none of them empty".to_string());
+    }
+    if let Some(platform) = spec.supported_platforms.iter().find(|platform| {
+        spec.user_plugin_suffixes
+            .for_platform(platform.platform())
+            .is_empty()
+    }) {
+        return Err(format!(
+            "leave_to_reapack needs user_plugin_suffixes for {platform:?}"
+        ));
+    }
+    if !spec.detectors.contains(&PackageDetector::ReapackRegistry) {
+        return Err("leave_to_reapack needs the reapack_registry detector".to_string());
+    }
+    if spec.uninstall.reapack_owned != uninstall::ReapackOwnedPolicy::Block {
+        return Err("leave_to_reapack needs uninstall.reapack_owned: block".to_string());
+    }
+    if spec.install_destination == InstallDestination::WindowsClapDir {
+        return Err(
+            "leave_to_reapack needs an install folder inside the resource folder".to_string(),
+        );
     }
     Ok(())
 }
@@ -1405,6 +1469,7 @@ impl EmbeddedPackageSpec {
             recommended_when: self.recommended_when,
             requires_user_acknowledgement: self.requires_user_acknowledgement,
             requires_standard_install: self.requires_standard_install,
+            leave_to_reapack: self.leave_to_reapack,
             supported_platforms: self.supported_platforms.clone(),
             supported_architectures: self.supported_architectures.clone(),
             version: self.version.clone(),
@@ -1731,6 +1796,201 @@ mod tests {
         assert_eq!(variant("no-such-package", Some("pma")), None);
     }
 
+    /// LReaParams: a Windows-only REAPER extension under Tools, unticked by
+    /// default, whose bare DLL comes from the project's latest GitHub release
+    /// and whose copy is ReaPack's to look after when ReaPack installed it.
+    #[test]
+    fn lreaparams_is_a_windows_tool_from_its_latest_release() {
+        use super::{
+            AssetSelector, GithubArtifactKind, GithubReleaseSelector, InstallDestination,
+            InstallStep, PACKAGE_LREAPARAMS, PACKAGE_REAPER, PackageCategory, PackageDetector,
+            PackageKind, SupportedPlatform, VersionSource, WhatsNewRule, builtin_package_specs,
+            default_desired_package_ids_for_host, embedded_package_manifest,
+        };
+        use crate::model::{Architecture, Platform};
+
+        let manifest = embedded_package_manifest();
+        let spec = manifest
+            .packages
+            .iter()
+            .find(|spec| spec.id == PACKAGE_LREAPARAMS)
+            .expect("lreaparams is in the manifest");
+        assert_eq!(spec.display_name, "LReaParams");
+        assert_eq!(spec.display_name_key, "package-lreaparams");
+        assert_eq!(
+            spec.display_description_key,
+            "package-lreaparams-description"
+        );
+        assert_eq!(spec.category, PackageCategory::Tools);
+        assert_eq!(spec.package_kind, PackageKind::UserPluginBinary);
+        assert_eq!(spec.install_destination, InstallDestination::UserPlugins);
+        assert_eq!(spec.depends_on, vec![PACKAGE_REAPER.to_string()]);
+        assert!(!spec.required && !spec.recommended && spec.recommended_when.is_none());
+        assert!(spec.leave_to_reapack);
+        assert!(!spec.requires_standard_install);
+        assert_eq!(spec.supported_platforms, vec![SupportedPlatform::Windows]);
+        // An x64 DLL: an x64 REAPER loads it, and so does REAPER's ARM64EC
+        // build on Windows on ARM, which loads x64 code. A 32-bit REAPER
+        // can't.
+        assert_eq!(
+            spec.supported_architectures,
+            vec![
+                Architecture::X64,
+                Architecture::Arm64,
+                Architecture::Arm64Ec
+            ]
+        );
+        assert_eq!(
+            spec.detectors,
+            vec![
+                PackageDetector::RabbitReceipt,
+                PackageDetector::UserPluginFile,
+                PackageDetector::ReapackRegistry,
+            ]
+        );
+        assert_eq!(spec.install_steps, vec![InstallStep::CopyUserPluginBinary]);
+        assert_eq!(spec.user_plugin_prefixes, vec!["reaper_lreaparams"]);
+        assert_eq!(spec.user_plugin_suffixes.windows, vec![".dll"]);
+        assert!(spec.user_plugin_suffixes.macos.is_empty());
+        assert!(matches!(
+            &spec.whats_new,
+            Some(WhatsNewRule::GithubReleaseBody { url })
+                if url == "https://api.github.com/repos/Lo-lo78/LReaParams/releases?per_page=30"
+        ));
+
+        let release = spec.github_release.as_ref().unwrap();
+        assert_eq!(release.repo, "Lo-lo78/LReaParams");
+        assert_eq!(release.release, GithubReleaseSelector::Latest);
+        assert_eq!(
+            release.version_from,
+            VersionSource::TagName {
+                strip_v_prefix: true
+            }
+        );
+        assert_eq!(
+            release.artifact_kind,
+            Some(GithubArtifactKind::ExtensionBinary)
+        );
+        let dll = |arch| AssetSelector {
+            platform: SupportedPlatform::Windows,
+            arch: Some(arch),
+            name_prefix: None,
+            name_suffix: None,
+            exact_name: Some("reaper_lreaparams.dll".to_string()),
+            artifact_kind: None,
+        };
+        assert_eq!(
+            release.assets,
+            vec![
+                dll(Architecture::X64),
+                dll(Architecture::Arm64),
+                dll(Architecture::Arm64Ec),
+            ]
+        );
+
+        // Windows only, and never part of the default selection.
+        assert!(
+            builtin_package_specs(Platform::Windows)
+                .iter()
+                .any(|spec| spec.id == PACKAGE_LREAPARAMS)
+        );
+        assert!(
+            !builtin_package_specs(Platform::MacOs)
+                .iter()
+                .any(|spec| spec.id == PACKAGE_LREAPARAMS)
+        );
+        assert!(
+            !default_desired_package_ids_for_host(&Default::default())
+                .contains(&PACKAGE_LREAPARAMS.to_string())
+        );
+    }
+
+    /// A package left to ReaPack has to be able to tell that ReaPack
+    /// installed it, refuse an uninstall behind ReaPack's back, and install
+    /// where ReaPack does.
+    #[test]
+    fn leave_to_reapack_needs_reapacks_records_and_folder() {
+        use super::uninstall::ReapackOwnedPolicy;
+        use super::{
+            InstallDestination, PACKAGE_LREAPARAMS, PACKAGE_REAPACK, PackageDetector,
+            embedded_package_manifest, validate_package_spec,
+        };
+
+        let lreaparams = embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == PACKAGE_LREAPARAMS)
+            .unwrap();
+        assert_eq!(validate_package_spec(&lreaparams), Ok(()));
+
+        let mut without_detector = lreaparams.clone();
+        without_detector
+            .detectors
+            .retain(|detector| *detector != PackageDetector::ReapackRegistry);
+        assert!(
+            validate_package_spec(&without_detector)
+                .unwrap_err()
+                .contains("reapack_registry")
+        );
+
+        let mut ignoring_reapack = lreaparams.clone();
+        ignoring_reapack.uninstall.reapack_owned = ReapackOwnedPolicy::Ignore;
+        assert!(
+            validate_package_spec(&ignoring_reapack)
+                .unwrap_err()
+                .contains("reapack_owned")
+        );
+
+        let mut outside = lreaparams.clone();
+        outside.install_destination = InstallDestination::WindowsClapDir;
+        assert!(
+            validate_package_spec(&outside)
+                .unwrap_err()
+                .contains("inside the resource folder")
+        );
+
+        // Without plug-in names, nothing in ReaPack's records could ever
+        // match, and the flag would silently do nothing; an empty name
+        // would match every plug-in ReaPack installed. The uninstall plan
+        // checks its own names, so here it removes only receipt files.
+        let mut receipt_only = lreaparams.clone();
+        for plan in &mut receipt_only.uninstall.plans {
+            plan.remove.matching_user_plugins = false;
+        }
+        assert_eq!(validate_package_spec(&receipt_only), Ok(()));
+        for prefixes in [vec![], vec![String::new()]] {
+            let mut nameless = receipt_only.clone();
+            nameless.user_plugin_prefixes = prefixes;
+            assert!(
+                validate_package_spec(&nameless)
+                    .unwrap_err()
+                    .contains("leave_to_reapack needs user_plugin_prefixes")
+            );
+        }
+        let mut suffixless = receipt_only;
+        suffixless.user_plugin_suffixes.windows.clear();
+        assert!(
+            validate_package_spec(&suffixless)
+                .unwrap_err()
+                .contains("leave_to_reapack needs user_plugin_suffixes for Windows")
+        );
+
+        // ReaPack's records list ReaPack, so on ReaPack the flag would stop
+        // every update of it.
+        let mut reapack = embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == PACKAGE_REAPACK)
+            .unwrap();
+        assert_eq!(validate_package_spec(&reapack), Ok(()));
+        reapack.leave_to_reapack = true;
+        assert!(
+            validate_package_spec(&reapack)
+                .unwrap_err()
+                .contains("ReaPack itself")
+        );
+    }
+
     /// Surge XT is listed under Instruments and app2clap under Tools; the
     /// language packs keep their own group, and the REAPER stack stays in
     /// the main one.
@@ -1748,6 +2008,7 @@ mod tests {
         };
         assert_eq!(category("surge-xt"), PackageCategory::Instruments);
         assert_eq!(category("app2clap"), PackageCategory::Tools);
+        assert_eq!(category("lreaparams"), PackageCategory::Tools);
         for id in ["reaper", "osara", "sws", "reapack", "ffmpeg"] {
             assert_eq!(category(id), PackageCategory::Core, "{id}");
         }
@@ -1876,9 +2137,9 @@ mod tests {
         let manifest = embedded_package_manifest();
 
         assert_eq!(manifest.schema_version, 1);
-        // 9 software packages + the Spanish, German and French REAPER
+        // 10 software packages + the Spanish, German and French REAPER
         // language packs.
-        assert_eq!(manifest.packages.len(), 12);
+        assert_eq!(manifest.packages.len(), 13);
         assert!(
             manifest
                 .packages

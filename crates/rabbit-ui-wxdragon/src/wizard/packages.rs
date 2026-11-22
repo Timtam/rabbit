@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use rabbit_core::Result;
 use rabbit_core::detection::detect_components;
 use rabbit_core::localization::Localizer;
-use rabbit_core::model::{Architecture, Platform};
+use rabbit_core::model::{Architecture, LeftToReapack, Platform};
 use rabbit_core::operation::{PackageAutomationSupport, package_automation_support};
 use rabbit_core::osara_keymap::{OsaraKeymapState, replace_by_default};
 use rabbit_core::package::{
@@ -353,6 +353,38 @@ fn mark_row_unavailable(localizer: &Localizer, row: &mut PackageRow, reason_key:
     row.unavailability_reason = Some(reason);
 }
 
+/// The short reason a row's label gives, as a Fluent key, and the sentence
+/// its details add, for a package RABBIT leaves to ReaPack.
+fn left_to_reapack_text(
+    localizer: &Localizer,
+    left: &LeftToReapack,
+    package: &str,
+) -> (&'static str, String) {
+    match left {
+        LeftToReapack::Managed { reapack_package } => (
+            "wizard-package-row-unavailable-reapack",
+            localizer
+                .format(
+                    "wizard-package-details-reapack",
+                    &[
+                        ("package", package),
+                        ("reapack_package", reapack_package.as_str()),
+                    ],
+                )
+                .value,
+        ),
+        LeftToReapack::RecordsUnreadable { error } => (
+            "wizard-package-row-unavailable-reapack-check-failed",
+            localizer
+                .format(
+                    "wizard-package-details-reapack-check-failed",
+                    &[("package", package), ("error", error.as_str())],
+                )
+                .value,
+        ),
+    }
+}
+
 /// Apply per-package latest-version-check failures to a built package-row
 /// set. Each failed package's row is force-unchecked and disabled (same
 /// mechanism as the portable-target restriction) with a localized "version
@@ -360,6 +392,9 @@ fn mark_row_unavailable(localizer: &Localizer, row: &mut PackageRow, reason_key:
 /// plus the full error message is appended for the Review page. One
 /// unreachable upstream (e.g. the SWS homepage being down) therefore
 /// disables just that package instead of blocking the whole update flow.
+///
+/// A row RABBIT leaves to ReaPack keeps its own reason, and gets no note:
+/// RABBIT wouldn't install or update that package whatever the check found.
 ///
 /// Returns the recomputed "at least one actionable Install/Update row is
 /// left" flag, which the caller should store as its can-install state.
@@ -370,10 +405,13 @@ pub fn apply_version_check_failures_to_rows(
     failures: &[(String, String)],
 ) -> bool {
     for (package_id, message) in failures {
-        if let Some(row) = package_rows
+        let row = package_rows
             .iter_mut()
-            .find(|row| row.package_id == *package_id)
-        {
+            .find(|row| row.package_id == *package_id);
+        if row.as_ref().is_some_and(|row| row.left_to_reapack) {
+            continue;
+        }
+        if let Some(row) = row {
             mark_row_unavailable(
                 localizer,
                 row,
@@ -758,12 +796,24 @@ pub(crate) fn package_rows(
                     .unwrap_or(false),
                 available_channel,
                 installed_channel,
+                left_to_reapack: action.left_to_reapack.is_some(),
             };
             row.summary = package_row_summary(localizer, &row);
+            // A package ReaPack looks after can't be ticked: the plan keeps
+            // it, and the row and its details say why.
+            let reapack_sentence = action.left_to_reapack.as_ref().map(|left| {
+                let (reason_key, sentence) = left_to_reapack_text(localizer, left, &display_name);
+                mark_row_unavailable(localizer, &mut row, reason_key);
+                sentence
+            });
             let summary = &row.summary;
             let details = match &channel_sentence {
                 Some(sentence) => format!("{summary}\n\n{sentence}"),
                 None => summary.clone(),
+            };
+            let details = match &reapack_sentence {
+                Some(sentence) => format!("{details}\n\n{sentence}"),
+                None => details,
             };
             let details = if description.is_empty() {
                 details

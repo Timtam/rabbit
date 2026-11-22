@@ -1,0 +1,95 @@
+{
+  "id": "lreaparams",
+  "display_name": "LReaParams",
+  "display_name_key": "package-lreaparams",
+  "display_description_key": "package-lreaparams-description",
+  "package_kind": "user_plugin_binary",
+  "install_destination": "user_plugins",
+  "depends_on": [
+    "reaper"
+  ],
+  "required": false,
+  "recommended": false,
+  "leave_to_reapack": true,
+  "supported_platforms": [
+    "windows"
+  ],
+  "supported_architectures": [
+    "x64",
+    "arm64",
+    "arm64-ec"
+  ],
+  "whats_new": {
+    "github_release_body": {
+      "url": "https://api.github.com/repos/Lo-lo78/LReaParams/releases?per_page=30"
+    }
+  },
+  "github_release": {
+    "repo": "Lo-lo78/LReaParams",
+    "release": "latest",
+    "version_from": {
+      "tag_name": {
+        "strip_v_prefix": true
+      }
+    },
+    "assets": [
+      {
+        "platform": "windows",
+        "arch": "x64",
+        "exact_name": "reaper_lreaparams.dll"
+      },
+      {
+        "platform": "windows",
+        "arch": "arm64",
+        "exact_name": "reaper_lreaparams.dll"
+      },
+      {
+        "platform": "windows",
+        "arch": "arm64-ec",
+        "exact_name": "reaper_lreaparams.dll"
+      }
+    ],
+    "artifact_kind": "extension_binary"
+  },
+  "detectors": [
+    "rabbit_receipt",
+    "user_plugin_file",
+    "reapack_registry"
+  ],
+  "install_steps": [
+    "copy_user_plugin_binary"
+  ],
+  "uninstall": {
+    "plans": [
+      {
+        "platform": "windows",
+        "strategy": "remove_files",
+        "summary": {
+          "removes_key": "uninstall-summary-lreaparams-removes",
+          "keeps_key": "uninstall-summary-lreaparams-keeps"
+        },
+        "remove": {
+          "receipt_files": true,
+          "matching_user_plugins": true
+        },
+        "kept_user_data": [
+          {
+            "path": "{resource}/LReaParams",
+            "note_key": "uninstall-kept-lreaparams-data"
+          }
+        ]
+      }
+    ]
+  },
+  "backup_policy": "backup_overwritten_files",
+  "user_plugin_prefixes": [
+    "reaper_lreaparams"
+  ],
+  "user_plugin_suffixes": {
+    "windows": [
+      ".dll"
+    ],
+    "macos": []
+  },
+  "category": "tools"
+}

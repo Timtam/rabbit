@@ -2236,6 +2236,14 @@ fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Err
     ensure_reapack_donation_acknowledged(&package, accept_reapack_donation_notice)?;
     let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
     let architecture = architecture.map_or_else(Architecture::current, Into::into);
+    // A copy ReaPack looks after stays as it is even when named here, as
+    // in `apply-packages`. Asked before anything is resolved, so nothing is
+    // looked up or downloaded for it.
+    let package = without_packages_left_to_reapack(&resource_path, platform, package);
+    if package.is_empty() {
+        eprintln!("note: nothing left to install.");
+        return Ok(());
+    }
     let channels = effective_package_channels(Some(&resource_path), &package, &package_channel)?;
     let artifacts = resolve_latest_artifacts_on(&package, platform, architecture, &channels)?;
     warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
@@ -2306,6 +2314,37 @@ fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Err
         print_install_report(&report);
     }
     Ok(())
+}
+
+/// `package_ids` without the packages whose copies in `resource_path`
+/// RABBIT leaves to ReaPack, which the install pipeline skips too. Each one
+/// gets a note on stderr, like the other notes, so `--json` stays JSON, in
+/// the words `rabbit plan` gives as the reason it keeps the package.
+fn without_packages_left_to_reapack(
+    resource_path: &Path,
+    platform: Platform,
+    package_ids: Vec<String>,
+) -> Vec<String> {
+    let left =
+        rabbit_core::detection::packages_left_to_reapack(resource_path, platform, &package_ids);
+    if left.is_empty() {
+        return package_ids;
+    }
+    let specs = builtin_package_specs(platform);
+    for (id, why) in &left {
+        let name = specs
+            .iter()
+            .find(|spec| spec.id == *id)
+            .map_or(id.as_str(), |spec| spec.display_name.as_str());
+        eprintln!(
+            "note: leaving {name} as it is: {}",
+            rabbit_core::plan::left_to_reapack_reason(why)
+        );
+    }
+    package_ids
+        .into_iter()
+        .filter(|id| left.iter().all(|(left_id, _)| left_id != id))
+        .collect()
 }
 
 /// What `install-extension --apply` changes, once its artifacts are
@@ -3315,6 +3354,14 @@ fn print_components(components: &[ComponentDetection], plan: Option<&UninstallPl
         }
         for note in &component.notes {
             println!("  Note: {note}");
+        }
+        // The same words `rabbit plan` gives as the reason it keeps the
+        // package.
+        if let Some(left) = &component.left_to_reapack {
+            println!(
+                "  Note: {}",
+                rabbit_core::plan::left_to_reapack_reason(left)
+            );
         }
         println!();
     }
@@ -8259,6 +8306,55 @@ mod tests {
                 "{linked:?}"
             );
         }
+    }
+
+    /// `install-extension` leaves a copy of LReaParams that ReaPack looks
+    /// after as it is, even when the package is named, as `apply-packages`
+    /// does. With or without `--apply`, nothing is looked up or downloaded
+    /// for it, and its DLL isn't replaced, backed up or recorded in RABBIT's
+    /// receipt. LReaParams is Windows only.
+    #[cfg(windows)]
+    #[test]
+    fn install_extension_leaves_a_copy_reapack_looks_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugins = resource.join("UserPlugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(plugins.join("reaper_reapack-x64.dll"), b"ReaPack").unwrap();
+        let dll = plugins.join("reaper_lreaparams.dll");
+        std::fs::write(&dll, b"LReaParams from ReaPack").unwrap();
+        rabbit_core::reapack::write_test_registry(
+            &resource,
+            &[(
+                "LReaParams.ext",
+                "0.0.70",
+                &["UserPlugins/reaper_lreaparams.dll"],
+            )],
+        );
+        let cache = dir.path().join("cache");
+
+        for apply in [false, true] {
+            super::run_install_extension(super::Command::InstallExtension {
+                resource_path: resource.clone(),
+                target_app_path: None,
+                package: vec!["lreaparams".to_string()],
+                architecture: None,
+                cache_dir: Some(cache.clone()),
+                apply,
+                allow_reaper_running: true,
+                accept_reapack_donation_notice: false,
+                report_path: None,
+                save_report: false,
+                json: false,
+                package_channel: Vec::new(),
+            })
+            .unwrap();
+        }
+
+        assert_eq!(std::fs::read(&dll).unwrap(), b"LReaParams from ReaPack");
+        assert!(!cache.exists(), "nothing was downloaded");
+        // No backup set, receipt or lock.
+        assert!(!resource.join("RABBIT").exists());
     }
 
     /// In a debug build, clap's parser alone takes more than the 1 MB of

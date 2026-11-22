@@ -28,6 +28,7 @@ package-jaws-scripts = Scripts JAWS de Snowman pour REAPER
 package-ffmpeg = FFmpeg (prise en charge vidéo améliorée)
 package-surge-xt = Surge XT
 package-app2clap = app2clap
+package-lreaparams = LReaParams
 package-langpack-es = REAPER en espagnol
 package-langpack-de = REAPER en allemand
 package-langpack-fr = REAPER en français
@@ -43,6 +44,7 @@ package-jaws-scripts-description = Les scripts de Snowman améliorent la façon 
 package-ffmpeg-description = Les bibliothèques d'exécution partagées de FFmpeg permettent au décodeur vidéo de REAPER d'importer et de lire les formats audio et vidéo courants. RABBIT installe le dossier bin de la version « GPL-shared » de BtbN dans UserPlugins ; le niveau de correctif ne peut pas être déduit des seuls noms de fichiers DLL, c'est pourquoi les installations externes de FFmpeg sont signalées avec un substitut « <major>.0.0 ».
 package-surge-xt-description = Surge XT est un synthétiseur hybride gratuit et open source. RABBIT exécute le programme d'installation de l'éditeur pour vous — il installe les formats VST3, CLAP, AU (macOS uniquement) et autonome à l'échelle du système, afin que REAPER et les autres DAW puissent charger Surge XT. RABBIT suit le canal « nightly » continu, car la dernière version stable (1.3.4) date d'août 2024 et le projet est désormais distribué quasi exclusivement via les nightlies. Installations standard de REAPER uniquement : les données d'usine se trouvent en dehors de tout dossier REAPER portable.
 package-app2clap-description = app2clap est un plug-in CLAP pour Windows qui capture l'audio d'autres applications et l'amène dans REAPER (ou tout hôte CLAP) sous forme de plug-in à insérer sur une piste — pratique pour enregistrer ou traiter le son d'un navigateur, d'un lecteur multimédia ou d'un autre programme. RABBIT télécharge la dernière version et installe app2clap.clap dans votre dossier CLAP personnel, sans droits d'administrateur. Windows uniquement. Installations standard de REAPER uniquement : l'installation se fait en dehors de tout dossier REAPER portable.
+package-lreaparams-description = LReaParams est une extension open source de Lo-lo qui permet de contrôler au clavier, de façon accessible, les paramètres des FX et des pistes dans REAPER, et elle fonctionne avec OSARA. Windows uniquement.
 package-langpack-es-description = Traduit l'interface de REAPER en espagnol, y compris l'extension SWS. Maintenu par Javier Robledo pour la communauté hispanophone de REAPER et publié sur reaperespa.com — RABBIT télécharge la version actuelle et l'installe sous le nom es_ES.ReaperLangPack. OSARA se sert de ce nom de fichier pour choisir sa propre traduction espagnole. Après l'installation, sélectionnez la langue dans les préférences de REAPER (ou laissez RABBIT s'en charger).
 package-langpack-de-description = Traduit l'interface de REAPER en allemand, y compris l'extension SWS. Maintenu par MrData et publié dans le Stash de REAPER — RABBIT télécharge la version actuelle et l'installe sous le nom de_DE.ReaperLangPack. Après l'installation, sélectionnez la langue dans les préférences de REAPER (ou laissez RABBIT s'en charger).
 package-langpack-fr-description = Traduit l'interface de REAPER en français, y compris l'extension SWS. Maintenu par Lee Julien et Pierre-Marie Curt pour ReaperAccessible, la communauté francophone des utilisateurs de lecteurs d'écran, et publié dans leur dépôt ReaPack — RABBIT télécharge la version actuelle et l'installe sous le nom fr_CA.ReaperLangPack. OSARA lit ce nom de fichier pour choisir sa propre traduction française : sa traduction fr_CA est presque complète, là où sa traduction fr_FR laisse encore environ un tiers des messages en anglais ; le pack, lui, est le même français standard dans les deux cas. Après l'installation, sélectionnez la langue dans les préférences de REAPER (ou laissez RABBIT s'en charger).
@@ -65,6 +67,8 @@ uninstall-summary-ffmpeg-removes = Supprime les fichiers FFmpeg que RABBIT a ins
 uninstall-summary-ffmpeg-keeps = Les fichiers FFmpeg dont RABBIT n'a aucune trace sont conservés, comme ceux laissés par des versions plus anciennes.
 uninstall-summary-app2clap-removes = Supprime app2clap de votre dossier CLAP. Tous les programmes dans lesquels vous utilisez des plug-ins CLAP le perdent, pas seulement REAPER.
 uninstall-summary-app2clap-keeps = Le dossier CLAP et les autres plug-ins qu'il contient sont conservés.
+uninstall-summary-lreaparams-removes = Supprime l'extension LReaParams.
+uninstall-summary-lreaparams-keeps = Vos réglages et vos profils LReaParams sont conservés, de même que son guide.
 uninstall-summary-langpack-removes = Supprime le pack de langue que RABBIT a installé. Si REAPER l'utilise, RABBIT remet REAPER en anglais.
 uninstall-summary-langpack-keeps = Les packs de langue que vous avez ajoutés vous-même sont conservés.
 uninstall-summary-osara-removes = Supprime l'extension OSARA, ses traductions et la copie de ses raccourcis clavier dans le dossier KeyMaps.
@@ -96,6 +100,7 @@ uninstall-kept-reapack-settings = réglages de ReaPack et vos dépôts
 uninstall-kept-reapack-data = la liste de ce que ReaPack a installé, et son cache de téléchargement
 uninstall-kept-reakontrol-fx-maps = vos mappages FX
 uninstall-kept-app2clap-clap-folder = le dossier CLAP, partagé avec d'autres plug-ins
+uninstall-kept-lreaparams-data = vos réglages et vos profils LReaParams, et son guide
 uninstall-kept-osara-key-map = vos raccourcis clavier
 uninstall-kept-osara-replaced-key-map = vos raccourcis clavier d'avant leur remplacement par OSARA
 uninstall-kept-osara-merged-key-map = vos raccourcis clavier d'avant l'ajout de ceux d'OSARA
@@ -189,6 +194,18 @@ uninstall-vendor-refused-nothing-changed = Rien n'a été modifié. Vous pouvez 
 wizard-package-row-unavailable-suffix = (non disponible : { $reason })
 wizard-package-row-unavailable-portable = cible REAPER portable
 wizard-package-row-unavailable-version-check = échec de la vérification de version en ligne
+# Why an Install or update row can't be ticked, for a package RABBIT leaves
+# to ReaPack: ReaPack's records say ReaPack installed it, or RABBIT couldn't
+# read those records to tell. Word them as
+# wizard-uninstall-row-unavailable-reapack and its -check-failed partner do.
+wizard-package-row-unavailable-reapack = géré par ReaPack
+wizard-package-row-unavailable-reapack-check-failed = les registres de ReaPack n'ont pas pu être vérifiés
+# The sentence the details of such a row add. ReaPack's records can name a
+# package whose file is gone, so it doesn't say a copy is there. $package is
+# the localized package name, $reapack_package the name ReaPack knows the
+# package by, and $error an error message.
+wizard-package-details-reapack = D'après les registres de ReaPack, ReaPack a installé { $package } en tant que { $reapack_package }, RABBIT le laisse donc à ReaPack. Installez-le, mettez-le à jour ou supprimez-le dans ReaPack.
+wizard-package-details-reapack-check-failed = RABBIT n'a pas pu lire les registres de ReaPack ({ $error }) et ne peut donc pas savoir si ReaPack a installé { $package } ; il ne l'installe pas, ne le met pas à jour et ne le supprime pas.
 
 # Review-page note carrying the full error for a package whose latest-version
 # check failed; its row is disabled with the short reason above.
@@ -1963,6 +1980,7 @@ status-skipped-current = Ignoré (déjà à jour)
 status-failed = Échec
 status-skipped-dependency-failed = Ignoré (dépendance en échec)
 status-cancelled = Non installé (vous avez arrêté)
+status-skipped-left-to-reapack = Ignoré (laissé à ReaPack)
 # What became of a package in an uninstall, after its name in "Show details".
 status-removed = Désinstallé
 status-removed-with-leftovers = Désinstallé, mais une partie est toujours présente
@@ -1999,6 +2017,12 @@ package-status-extension-binary-installed = Binaire d'extension unique pris en c
 # $installed is the on-disk version; $available is the latest upstream version.
 package-status-skipped-current = La version installée { $installed } est égale ou plus récente que la version disponible { $available }.
 package-status-skipped-content-unchanged = La copie installée est identique à celle publiée par l'éditeur.
+# A package RABBIT left to ReaPack, even when asked for it by name: ReaPack's
+# records say ReaPack installed it, or RABBIT couldn't read them.
+# $reapack_package is the name ReaPack knows the package by, $error an error
+# message.
+package-status-skipped-managed-by-reapack = D'après les registres de ReaPack, ReaPack a installé ce paquet en tant que { $reapack_package }, RABBIT l'a donc laissé à ReaPack. Installez-le, mettez-le à jour ou supprimez-le dans ReaPack.
+package-status-skipped-reapack-records-unreadable = RABBIT n'a pas pu lire les registres de ReaPack ({ $error }) et ne peut donc pas savoir si ReaPack a installé ce paquet ; il ne l'a ni installé ni mis à jour.
 package-status-install-failed = Échec de l'installation : { $error }
 package-status-skipped-dependency-failed = Ignoré car { $dependency }, dont il dépend, ne s'est pas installé correctement.
 package-status-cancelled = Non installé : vous avez arrêté la configuration avant que RABBIT n'atteigne ce paquet.

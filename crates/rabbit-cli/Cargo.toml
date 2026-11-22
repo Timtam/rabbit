@@ -15,4 +15,8 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+# The install-extension tests write a ReaPack registry
+# (`reapack::write_test_registry`). With feature resolver 2+ the hook stays
+# out of the shipped binary.
+rabbit-core = { path = "../rabbit-core", features = ["test-support"] }
 tempfile.workspace = true

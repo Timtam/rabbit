@@ -102,6 +102,10 @@ pub(crate) fn status_label_for_summary(
             "Skipped (dependency failed)",
         ),
         PackageOperationStatus::Cancelled => ("status-cancelled", "Not installed (you stopped)"),
+        PackageOperationStatus::SkippedLeftToReapack => (
+            "status-skipped-left-to-reapack",
+            "Skipped (left to ReaPack)",
+        ),
     };
     localizer
         .map(|localizer| localizer.text(id).value)
@@ -137,6 +141,14 @@ pub(crate) fn localized_package_operation_message(
             ],
         ),
         Msg::SkippedContentUnchanged => localizer.text("package-status-skipped-content-unchanged"),
+        Msg::SkippedManagedByReapack { reapack_package } => localizer.format(
+            "package-status-skipped-managed-by-reapack",
+            &[("reapack_package", reapack_package.as_str())],
+        ),
+        Msg::SkippedReapackRecordsUnreadable { error } => localizer.format(
+            "package-status-skipped-reapack-records-unreadable",
+            &[("error", error.as_str())],
+        ),
         Msg::DryRunWouldRunUnattended { artifact_kind } => localizer.format(
             "package-status-dry-run-would-run-unattended",
             &[(

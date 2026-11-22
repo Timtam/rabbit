@@ -197,6 +197,7 @@ pub(super) fn detection(id: &str, installed: bool) -> ComponentDetection {
         confidence: Confidence::High,
         files: Vec::new(),
         notes: Vec::new(),
+        left_to_reapack: None,
     }
 }
 

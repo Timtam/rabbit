@@ -1611,8 +1611,8 @@ mod tests {
     use crate::package::{
         AssetMatch, AssetSelector, GithubArtifactKind, GithubReleaseSelector, GithubReleaseSpec,
         HrefMatch, HttpArtifactSource, HttpArtifactSpec, HttpArtifactTarget, PACKAGE_APP2CLAP,
-        PACKAGE_FFMPEG, PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK, PACKAGE_REAPER,
-        PACKAGE_SURGE_XT, PACKAGE_SWS, SupportedPlatform, VersionSource,
+        PACKAGE_FFMPEG, PACKAGE_LREAPARAMS, PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK,
+        PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS, SupportedPlatform, VersionSource,
     };
     use tempfile::tempdir;
 
@@ -3061,6 +3061,110 @@ mod tests {
             "https://api.github.com/repos/jcsteh/app2clap/releases/tags/snapshots",
             PACKAGE_APP2CLAP,
             &app2clap_github_spec(),
+            Platform::Windows,
+            Architecture::X64,
+        )
+        .unwrap_err();
+        assert!(matches!(error, RabbitError::NoArtifactFound { .. }));
+    }
+
+    /// LReaParams' release as GitHub's API lists it: the bare DLL beside an
+    /// installer zip whose name changes from release to release. The
+    /// manifest picks the DLL by its exact name, for an x64 REAPER and for
+    /// REAPER's ARM64EC build alike, and reads the version from the tag.
+    #[test]
+    fn resolves_lreaparams_dll_and_version_from_its_latest_release() {
+        let body = r#"{
+            "tag_name": "v0.0.75",
+            "name": "LReaParams 0.0.75 - Accessible Native Render Navigation",
+            "draft": false,
+            "prerelease": false,
+            "assets": [
+                {
+                    "name": "LReaParams-0.0.75-Windows-x64-SETUP-EXE.11.zip",
+                    "content_type": "application/x-zip-compressed",
+                    "size": 2668354,
+                    "browser_download_url": "https://github.com/Lo-lo78/LReaParams/releases/download/v0.0.75/LReaParams-0.0.75-Windows-x64-SETUP-EXE.11.zip"
+                },
+                {
+                    "name": "reaper_lreaparams.dll",
+                    "content_type": "application/x-msdownload",
+                    "size": 1881088,
+                    "browser_download_url": "https://github.com/Lo-lo78/LReaParams/releases/download/v0.0.75/reaper_lreaparams.dll"
+                }
+            ]
+        }"#;
+        let specs = crate::package::package_specs_by_id(Platform::Windows);
+        let spec = specs[PACKAGE_LREAPARAMS].github_release.clone().unwrap();
+        let url = crate::latest::github_release_url(&spec);
+        assert_eq!(
+            url,
+            "https://api.github.com/repos/Lo-lo78/LReaParams/releases/latest"
+        );
+        assert_eq!(
+            crate::latest::resolve_github_version(body, &url, &spec)
+                .unwrap()
+                .raw(),
+            "0.0.75"
+        );
+
+        for architecture in [
+            Architecture::X64,
+            Architecture::Arm64,
+            Architecture::Arm64Ec,
+        ] {
+            let artifact = resolve_github_artifact_from_release_body(
+                body,
+                &url,
+                PACKAGE_LREAPARAMS,
+                &spec,
+                Platform::Windows,
+                architecture,
+            )
+            .unwrap();
+            assert_eq!(artifact.package_id, PACKAGE_LREAPARAMS);
+            assert_eq!(artifact.kind, ArtifactKind::ExtensionBinary);
+            assert_eq!(artifact.version.raw(), "0.0.75");
+            assert_eq!(artifact.file_name, "reaper_lreaparams.dll");
+            assert_eq!(
+                artifact.url,
+                "https://github.com/Lo-lo78/LReaParams/releases/download/v0.0.75/reaper_lreaparams.dll"
+            );
+            assert_eq!(artifact.architecture, architecture);
+        }
+
+        // A 32-bit REAPER can't load a 64-bit DLL, and there is no Mac build.
+        for (platform, architecture) in [
+            (Platform::Windows, Architecture::X86),
+            (Platform::MacOs, Architecture::Arm64),
+        ] {
+            let error = resolve_github_artifact_from_release_body(
+                body,
+                &url,
+                PACKAGE_LREAPARAMS,
+                &spec,
+                platform,
+                architecture,
+            )
+            .unwrap_err();
+            assert!(matches!(error, RabbitError::NoArtifactFound { .. }));
+        }
+
+        // A release without the DLL offers nothing, rather than the zip.
+        let without_dll = r#"{
+            "tag_name": "v0.0.76",
+            "assets": [
+                {
+                    "name": "LReaParams-0.0.76-Windows-x64-SETUP-EXE.zip",
+                    "browser_download_url": "https://github.com/Lo-lo78/LReaParams/releases/download/v0.0.76/LReaParams-0.0.76-Windows-x64-SETUP-EXE.zip"
+                }
+            ]
+        }"#;
+        let error = resolve_github_artifact_from_release_body(
+            without_dll,
+            &url,
+            PACKAGE_LREAPARAMS,
+            &spec,
             Platform::Windows,
             Architecture::X64,
         )
