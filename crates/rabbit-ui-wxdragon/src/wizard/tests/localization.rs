@@ -460,3 +460,46 @@ fn locale_directory_override_remains_available_for_development() {
     assert!(localizer.source_path().is_some());
     assert_eq!(localizer.text("app-title").value, "RABBIT Test");
 }
+
+/// Every locale names the Instruments and Tools groups, each heading differs
+/// from the others, and the old "Additional software" group is gone.
+#[test]
+fn every_locale_names_each_package_group_and_not_additional_software() {
+    let de = wizard_text(&Localizer::embedded("de-DE").unwrap());
+    assert_eq!(
+        rabbit_core::package::PackageCategory::ALL.map(|category| de.package_group_label(category)),
+        ["Pakete", "Instrumente", "Werkzeuge", "Sprachpakete"]
+    );
+    for &locale in rabbit_core::localization::embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        for key in [
+            "wizard-instruments-tree-group-label",
+            "wizard-tools-tree-group-label",
+        ] {
+            let text = localizer.text(key);
+            assert!(!text.missing && !text.value.is_empty(), "{locale}: {key}");
+        }
+        assert!(
+            localizer
+                .text("wizard-additional-software-tree-group-label")
+                .missing,
+            "{locale}"
+        );
+        let text = wizard_text(&localizer);
+        let mut labels: Vec<&str> = text
+            .package_group_labels
+            .iter()
+            .map(|(_, label)| label.as_str())
+            .chain([text.configuration_tree_group_label.as_str()])
+            .collect();
+        for label in &labels {
+            assert!(
+                !label.is_empty() && !label.starts_with("wizard-"),
+                "{locale}: {label}"
+            );
+        }
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), 5, "{locale}: two groups share a heading");
+    }
+}

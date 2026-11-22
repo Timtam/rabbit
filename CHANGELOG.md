@@ -459,6 +459,11 @@ from this file and posts it as the GitHub release body.
   `deleting`; its id can match a set's, and its `path` is in
   `RABBIT\backups-deleting`. `rabbit backups` and `rabbit restore-backup`
   now have help text.
+- The package list's **Additional software** group is now two groups:
+  **Instruments**, with Surge XT, and **Tools**, with app2clap. The
+  Uninstall tab groups its rows the same way. `rabbit packages --json` and
+  `rabbit packages --manifest --json` now give their `category` as
+  `instruments` and `tools` instead of `additional`.
 
 ### Fixed
 
@@ -486,9 +491,12 @@ from this file and posts it as the GitHub release body.
   reports as an empty path. It now asks you to close it, as it already did
   when Windows reported no location at all.
 - On macOS, the group rows in the **Packages** list (**Packages**,
-  **Additional software**, **Language packs**, **Configuration**) now show
-  their names, and VoiceOver reads them. Before, a group row had only its
+  **Instruments**, **Language packs**, **Configuration**) now show their
+  names, and VoiceOver reads them. Before, a group row had only its
   checkbox, so VoiceOver read it as a checkbox without a name.
+- On Windows, the **Language packs** heading in the **Packages** list now
+  updates its checkbox as soon as you tick or untick a language pack.
+  Before, it kept its old state until the list was built again.
 - On macOS, Tab and Shift+Tab no longer stop on a wizard page's scroll bar.
   When a page was too tall for the window, its scroll bar sat in the Tab
   order: on the **Packages** page, Shift+Tab from the package list went to

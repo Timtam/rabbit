@@ -347,19 +347,53 @@ fn notes_and_the_other_warnings_follow_what_stays() {
 
 #[test]
 fn rows_go_into_the_same_groups_as_the_install_tree() {
+    // Rows keep the plan's order, which here is the groups' order reversed.
     let rows = rows_for(vec![
-        item("sws", Removability::Removable),
-        item("app2clap", Removability::Removable),
         item("langpack-de", Removability::Removable),
+        item("app2clap", Removability::Removable),
+        item("surge-xt", Removability::Removable),
+        item("sws", Removability::Removable),
     ]);
 
     let categories: Vec<PackageCategory> = rows.iter().map(|row| row.category).collect();
     assert_eq!(
         categories,
         [
-            PackageCategory::Core,
-            PackageCategory::Additional,
-            PackageCategory::Language
+            PackageCategory::Language,
+            PackageCategory::Tools,
+            PackageCategory::Instruments,
+            PackageCategory::Core
+        ]
+    );
+    // The Uninstall tab's headings, on Windows and macOS, come from the same
+    // groups as the Install tree's, one per category with rows, in display
+    // order.
+    let groups = package_tree_groups(rows.iter().map(|row| row.category));
+    let headings: Vec<PackageCategory> = groups.iter().map(|group| group.category).collect();
+    assert_eq!(headings, PackageCategory::ALL);
+    let group_rows: Vec<&[usize]> = groups.iter().map(|group| group.rows.as_slice()).collect();
+    assert_eq!(group_rows, [[3], [2], [1], [0]]);
+}
+
+#[test]
+fn the_uninstall_tab_shows_no_heading_for_a_category_without_rows() {
+    let rows = rows_for(vec![
+        item("sws", Removability::Removable),
+        item("app2clap", Removability::Removable),
+    ]);
+
+    let groups = package_tree_groups(rows.iter().map(|row| row.category));
+    assert_eq!(
+        groups,
+        [
+            PackageTreeGroup {
+                category: PackageCategory::Core,
+                rows: vec![0],
+            },
+            PackageTreeGroup {
+                category: PackageCategory::Tools,
+                rows: vec![1],
+            },
         ]
     );
 }

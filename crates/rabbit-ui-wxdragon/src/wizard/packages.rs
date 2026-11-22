@@ -10,8 +10,8 @@ use rabbit_core::model::{Architecture, Platform};
 use rabbit_core::operation::{PackageAutomationSupport, package_automation_support};
 use rabbit_core::osara_keymap::{OsaraKeymapState, replace_by_default};
 use rabbit_core::package::{
-    HostCapabilities, PACKAGE_OSARA, PackageKind, PackageSpec, builtin_package_specs,
-    detect_host_capabilities, host_supports_package,
+    HostCapabilities, PACKAGE_OSARA, PackageCategory, PackageKind, PackageSpec,
+    builtin_package_specs, detect_host_capabilities, host_supports_package,
 };
 use rabbit_core::plan::{AvailablePackage, PlanAction, PlanActionKind, build_install_plan};
 
@@ -21,6 +21,47 @@ use super::model::{
     OsaraKeymapChoice, PackageRow, TargetRow, WizardModel, WizardPackagePlan, WizardText,
 };
 use super::target::installation_from_target_row;
+
+/// The Fluent key of the heading the Install and Uninstall trees show over a
+/// package category's rows. A new category needs a key here and in every
+/// locale, and nothing else in the trees.
+pub fn package_group_label_key(category: PackageCategory) -> &'static str {
+    match category {
+        PackageCategory::Core => "wizard-packages-tree-group-label",
+        PackageCategory::Instruments => "wizard-instruments-tree-group-label",
+        PackageCategory::Tools => "wizard-tools-tree-group-label",
+        PackageCategory::Language => "wizard-language-tree-group-label",
+    }
+}
+
+/// One package group of the Install or Uninstall tree: its category and the
+/// indices of its rows, in row order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageTreeGroup {
+    pub category: PackageCategory,
+    pub rows: Vec<usize>,
+}
+
+/// The package groups a tree shows for rows of these categories, given in
+/// row order: one per category that has rows, in [`PackageCategory::ALL`]
+/// order. A category without rows gets no group, so no heading shows empty.
+pub fn package_tree_groups(
+    categories: impl IntoIterator<Item = PackageCategory>,
+) -> Vec<PackageTreeGroup> {
+    let categories: Vec<PackageCategory> = categories.into_iter().collect();
+    PackageCategory::ALL
+        .into_iter()
+        .filter_map(|category| {
+            let rows: Vec<usize> = categories
+                .iter()
+                .enumerate()
+                .filter(|(_, row_category)| **row_category == category)
+                .map(|(index, _)| index)
+                .collect();
+            (!rows.is_empty()).then_some(PackageTreeGroup { category, rows })
+        })
+        .collect()
+}
 
 pub fn package_ids_for_indices(model: &WizardModel, indices: &[usize]) -> Vec<String> {
     package_ids_for_rows(&model.package_rows, indices)

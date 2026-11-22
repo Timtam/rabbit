@@ -276,7 +276,13 @@ wizard-packages-row-unchecked = Nicht ausgewählt
 wizard-packages-choice-shown = Neue Auswahl unter der Liste: { $choice }.
 wizard-packages-choice-hidden = Auswahl entfernt: { $choice }.
 wizard-packages-tree-group-label = Pakete
-wizard-additional-software-tree-group-label = Zusätzliche Software
+# Group headings in the Install or update and Uninstall lists, beside
+# Packages and Language packs. Instruments holds software instruments such as
+# Surge XT; Tools holds programs and plug-ins that help with other work, such
+# as app2clap. Screen readers read the heading alone, so keep the two clearly
+# different from each other.
+wizard-instruments-tree-group-label = Instrumente
+wizard-tools-tree-group-label = Werkzeuge
 wizard-language-tree-group-label = Sprachpakete
 wizard-configuration-tree-group-label = Konfiguration
 

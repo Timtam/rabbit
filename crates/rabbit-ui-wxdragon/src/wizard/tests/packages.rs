@@ -1,8 +1,9 @@
 use rabbit_core::localization::{DEFAULT_LOCALE, Localizer};
 use rabbit_core::model::{Architecture, Platform};
 use rabbit_core::package::{
-    HostCapabilities, PACKAGE_FFMPEG, PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK,
-    PACKAGE_REAPER, PACKAGE_SWS, builtin_package_specs,
+    HostCapabilities, PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_OSARA, PACKAGE_REAKONTROL,
+    PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS, PackageCategory,
+    builtin_package_specs,
 };
 use rabbit_core::plan::{AvailablePackage, InstallPlan, PlanAction, PlanActionKind};
 use rabbit_core::version::Version;
@@ -919,4 +920,140 @@ fn expert_mode_env_values_and_channels_outside_expert_mode() {
     let on = wizard_channels(true, Some("dev".into()), None);
     assert_eq!(on.get(PACKAGE_REAPER).map(String::as_str), Some("dev"));
     assert!(!on.contains_key(PACKAGE_OSARA));
+}
+
+/// The Install tree's package groups, built from the real manifest: Packages,
+/// Instruments, Tools, Language packs, in that order, each with its own rows
+/// in row order. Surge XT is the instrument and app2clap the tool.
+#[test]
+fn the_install_tree_groups_packages_instruments_tools_and_language_packs() {
+    let dir = tempdir().unwrap();
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        Vec::new(),
+        None,
+        InstallPlan {
+            target: None,
+            actions: Vec::new(),
+            notes: Vec::new(),
+        },
+    );
+    let target = custom_portable_target_row(&model, dir.path().join("PortableREAPER"), true);
+    let rows = wizard_package_plan_for_target(&model, Some(&target))
+        .unwrap()
+        .package_rows;
+
+    let groups = package_tree_groups(rows.iter().map(|row| row.category));
+    let categories: Vec<PackageCategory> = groups.iter().map(|group| group.category).collect();
+    assert_eq!(
+        categories,
+        [
+            PackageCategory::Core,
+            PackageCategory::Instruments,
+            PackageCategory::Tools,
+            PackageCategory::Language,
+        ]
+    );
+    let labels: Vec<&str> = categories
+        .iter()
+        .map(|category| model.text.package_group_label(*category))
+        .collect();
+    assert_eq!(
+        labels,
+        ["Packages", "Instruments", "Tools", "Language packs"]
+    );
+
+    let ids = |group: &PackageTreeGroup| -> Vec<&str> {
+        group
+            .rows
+            .iter()
+            .map(|index| rows[*index].package_id.as_str())
+            .collect()
+    };
+    assert_eq!(ids(&groups[1]), [PACKAGE_SURGE_XT]);
+    assert_eq!(ids(&groups[2]), [PACKAGE_APP2CLAP]);
+    assert!(
+        ids(&groups[3]).iter().all(|id| id.starts_with("langpack-")),
+        "{:?}",
+        ids(&groups[3])
+    );
+    let core = ids(&groups[0]);
+    assert_eq!(core.first(), Some(&PACKAGE_REAPER));
+    for id in [PACKAGE_OSARA, PACKAGE_SWS, PACKAGE_REAPACK] {
+        assert!(core.contains(&id), "{id} in {core:?}");
+    }
+    // Every row is in exactly one group, and each group keeps row order.
+    let mut all: Vec<usize> = groups.iter().flat_map(|group| group.rows.clone()).collect();
+    for group in &groups {
+        assert!(group.rows.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+    all.sort_unstable();
+    assert_eq!(all, (0..rows.len()).collect::<Vec<_>>());
+}
+
+/// A category no row has gets no group at all, so no heading shows empty;
+/// the others keep the display order whatever order the rows come in.
+#[test]
+fn a_category_without_rows_gets_no_group() {
+    let groups = package_tree_groups([
+        PackageCategory::Language,
+        PackageCategory::Core,
+        PackageCategory::Instruments,
+        PackageCategory::Core,
+        PackageCategory::Language,
+    ]);
+    assert_eq!(
+        groups,
+        [
+            PackageTreeGroup {
+                category: PackageCategory::Core,
+                rows: vec![1, 3],
+            },
+            PackageTreeGroup {
+                category: PackageCategory::Instruments,
+                rows: vec![2],
+            },
+            PackageTreeGroup {
+                category: PackageCategory::Language,
+                rows: vec![0, 4],
+            },
+        ]
+    );
+    assert_eq!(
+        package_tree_groups([PackageCategory::Tools]),
+        [PackageTreeGroup {
+            category: PackageCategory::Tools,
+            rows: vec![0],
+        }]
+    );
+    assert!(package_tree_groups(Vec::new()).is_empty());
+}
+
+/// Each category's heading has a key of its own, and the wizard's text holds
+/// a label for every category in display order.
+#[test]
+fn every_package_category_has_its_own_group_label() {
+    assert_eq!(
+        PackageCategory::ALL.map(package_group_label_key),
+        [
+            "wizard-packages-tree-group-label",
+            "wizard-instruments-tree-group-label",
+            "wizard-tools-tree-group-label",
+            "wizard-language-tree-group-label",
+        ]
+    );
+    let text = wizard_text(&Localizer::embedded(DEFAULT_LOCALE).unwrap());
+    let categories: Vec<PackageCategory> = text
+        .package_group_labels
+        .iter()
+        .map(|(category, _)| *category)
+        .collect();
+    assert_eq!(categories, PackageCategory::ALL);
+    assert_eq!(
+        PackageCategory::ALL.map(|category| text.package_group_label(category)),
+        ["Packages", "Instruments", "Tools", "Language packs"]
+    );
 }

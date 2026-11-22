@@ -47,8 +47,9 @@ RABBIT installs and keeps up to date:
   keeps it up to date. Disabled on portable REAPER targets because the CLAP
   folder lives outside any portable REAPER folder.
 
-Surge XT and app2clap are grouped under **Additional software** in the
-wizard — extras that aren't tied to REAPER itself. Both are disabled on
+The wizard's package list shows Surge XT under **Instruments** and app2clap
+under **Tools**, after the main **Packages** group and before **Language
+packs**; the Uninstall tab uses the same groups. Both are disabled on
 portable REAPER targets, since they install to fixed per-user/system
 locations rather than into the portable REAPER folder.
 

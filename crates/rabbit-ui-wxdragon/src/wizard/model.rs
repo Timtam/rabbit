@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use rabbit_core::localization::DEFAULT_LOCALE;
 use rabbit_core::model::{Architecture, ComponentDetection, Platform};
+use rabbit_core::package::PackageCategory;
 use rabbit_core::plan::{AvailablePackage, PlanActionKind};
 use rabbit_core::setup::SetupReport;
 use rabbit_core::version::Version;
@@ -106,9 +107,10 @@ pub struct WizardText {
     pub uninstall_remove_settings_label: String,
     pub packages_row_checked: String,
     pub packages_row_unchecked: String,
-    pub packages_tree_group_label: String,
-    pub additional_software_tree_group_label: String,
-    pub language_tree_group_label: String,
+    /// The heading of each package category's group in the Install and
+    /// Uninstall trees, in [`PackageCategory::ALL`] order. Read it with
+    /// [`WizardText::package_group_label`].
+    pub package_group_labels: Vec<(PackageCategory, String)>,
     pub configuration_tree_group_label: String,
     pub reapack_ack_heading: String,
     pub reapack_ack_body: String,
@@ -245,6 +247,17 @@ pub struct WizardText {
     pub expert_osara_builds_unavailable: String,
 }
 
+impl WizardText {
+    /// The heading of `category`'s group in the Install and Uninstall trees.
+    pub fn package_group_label(&self, category: PackageCategory) -> &str {
+        self.package_group_labels
+            .iter()
+            .find(|(group, _)| *group == category)
+            .map(|(_, label)| label.as_str())
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WizardStep {
     Target,
@@ -319,9 +332,9 @@ pub struct PackageRow {
     /// Localized reason matching `available_for_target == false`. `None`
     /// when the row is available.
     pub unavailability_reason: Option<String>,
-    /// Which wizard UI group this row belongs to ("Packages" vs "Additional
-    /// software"). Mirrors the package spec's category.
-    pub category: rabbit_core::package::PackageCategory,
+    /// Which group of the wizard's tree this row belongs to ("Packages",
+    /// "Instruments", ...). Mirrors the package spec's category.
+    pub category: PackageCategory,
     /// Mirrors the spec's `requires_standard_install`: when `true`, the row is
     /// disabled on a portable REAPER target (the package installs to a fixed
     /// location outside any portable folder).

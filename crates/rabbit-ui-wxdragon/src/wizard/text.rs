@@ -2,9 +2,10 @@
 //! (`&`-prefixed access key) encoding native buttons expect.
 
 use rabbit_core::localization::Localizer;
+use rabbit_core::package::PackageCategory;
 
 use super::model::{WizardStep, WizardStepLabel, WizardText};
-use super::packages::VARIANT_CHOICE_IDS;
+use super::packages::{VARIANT_CHOICE_IDS, package_group_label_key};
 
 pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
     WizardText {
@@ -59,11 +60,13 @@ pub(crate) fn wizard_text(localizer: &Localizer) -> WizardText {
         uninstall_remove_settings_label: localizer.text("wizard-uninstall-remove-settings").value,
         packages_row_checked: localizer.text("wizard-packages-row-checked").value,
         packages_row_unchecked: localizer.text("wizard-packages-row-unchecked").value,
-        packages_tree_group_label: localizer.text("wizard-packages-tree-group-label").value,
-        additional_software_tree_group_label: localizer
-            .text("wizard-additional-software-tree-group-label")
-            .value,
-        language_tree_group_label: localizer.text("wizard-language-tree-group-label").value,
+        package_group_labels: PackageCategory::ALL
+            .into_iter()
+            .map(|category| {
+                let label = localizer.text(package_group_label_key(category)).value;
+                (category, label)
+            })
+            .collect(),
         configuration_tree_group_label: localizer
             .text("wizard-configuration-tree-group-label")
             .value,

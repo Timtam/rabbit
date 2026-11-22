@@ -792,10 +792,19 @@ user can finish the install by pressing Next a few times.
      Nothing is ticked by default, and the version check clears both
      choices' ticks and sets the choice back to Restore. Everything below
      describes the Install or update tab.
-   - Tree view with two top-level groups: **Packages** and
-     **Configuration**. Packages contains REAPER, OSARA, SWS, ReaPack,
-     ReaKontrol, FFmpeg (Windows only), JAWS scripts (Windows only), and
-     later additions; each row reads as plain text "OSARA — installed
+   - Tree view with top-level groups in this order: **Packages**,
+     **Instruments**, **Tools**, **Language packs** and **Configuration**.
+     Each package's manifest `category` picks its group: `core` (the
+     default) for Packages, `instruments`, `tools` or `language`. The
+     package groups come from one ordered list, `PackageCategory::ALL`,
+     and each has a label key (`package_group_label_key`), so a new
+     category needs only its place in that list, its label key, and that
+     key in all six locales. A group without rows isn't shown, and the
+     Uninstall tab uses the same groups. Packages contains REAPER, OSARA,
+     SWS, ReaPack, ReaKontrol, FFmpeg (Windows only) and JAWS scripts
+     (Windows only); Instruments contains Surge XT; Tools contains
+     app2clap (Windows only); Language packs contains REAPER's
+     translations. Each row reads as plain text "OSARA — installed
      2024.3.6, latest 2026.2.16, will update". Configuration contains
      opt-in post-install tweaks (currently: "Add the REAPER Accessibility
      ReaPack repository to ReaPack"); rows that are already applied or
@@ -1680,15 +1689,15 @@ disk.
 Wizard surface:
 
 - Configuration steps appear in their own "Configuration" group at
-  the top level of the Packages tree, sibling to the "Packages"
-  group. Each step's row label is its localized display name; rows
-  whose dependency package isn't installed or queued show
-  `(requires <package>)` and rows whose effect is already on disk
-  show `(already applied)`. Both states render the row as disabled
-  with the checkbox forced unchecked, and click/Space input on those
-  rows is pre-empted before native processing reaches the
-  TVS_CHECKBOXES auto-cycle so screen readers don't announce a
-  phantom toggle.
+  the top level of the Packages tree, after the package groups
+  ("Packages", "Instruments", ...). Each step's row label is its
+  localized display name; rows whose dependency package isn't
+  installed or queued show `(requires <package>)` and rows whose
+  effect is already on disk show `(already applied)`. Both states
+  render the row as disabled with the checkbox forced unchecked, and
+  click/Space input on those rows is pre-empted before native
+  processing reaches the TVS_CHECKBOXES auto-cycle so screen readers
+  don't announce a phantom toggle.
 - Toggling the dependency package live (e.g. unticking ReaPack)
   re-evaluates the configuration row's availability and, if the row
   becomes actionable again, restores its recommended-default tick.

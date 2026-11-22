@@ -260,18 +260,32 @@ pub enum PackageKind {
 
 /// Which UI group a package is listed under in the wizard's package tree.
 /// `Core` packages (the default) are the REAPER accessibility stack shown
-/// under "Packages"; `Additional` packages are optional extras that aren't
-/// tied to REAPER itself (e.g. Surge XT, app2clap) and are shown under a
-/// separate "Additional software" group. Defaults to `Core` so a package
-/// without a `category` in the manifest stays in the main list.
+/// under "Packages". Defaults to `Core` so a package without a `category` in
+/// the manifest stays in the main list. The category picks the group;
+/// `Language` also marks the packs the wizard offers as REAPER's language
+/// after installation (see `selected_language_packs` in the GUI crate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum PackageCategory {
     #[default]
     Core,
-    Additional,
+    /// Software instruments, such as Surge XT.
+    Instruments,
+    /// Programs and plug-ins that help with other work, such as app2clap.
+    Tools,
     /// REAPER language packs, listed in their own wizard group.
     Language,
+}
+
+impl PackageCategory {
+    /// Every category, in the order the wizard shows their groups. A new
+    /// category goes here too, or the wizard's trees leave its packages out.
+    pub const ALL: [PackageCategory; 4] = [
+        PackageCategory::Core,
+        PackageCategory::Instruments,
+        PackageCategory::Tools,
+        PackageCategory::Language,
+    ];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1715,6 +1729,76 @@ mod tests {
         assert_eq!(variant("langpack-es", Some("nope")).as_deref(), Some("rae"));
         assert_eq!(variant("langpack-de", Some("pma")), None);
         assert_eq!(variant("no-such-package", Some("pma")), None);
+    }
+
+    /// Surge XT is listed under Instruments and app2clap under Tools; the
+    /// language packs keep their own group, and the REAPER stack stays in
+    /// the main one.
+    #[test]
+    fn surge_xt_is_an_instrument_and_app2clap_a_tool() {
+        use super::{PackageCategory, PackageKind, embedded_package_manifest};
+
+        let packages = embedded_package_manifest().packages;
+        let category = |id: &str| {
+            packages
+                .iter()
+                .find(|spec| spec.id == id)
+                .unwrap_or_else(|| panic!("{id} is in the manifest"))
+                .category
+        };
+        assert_eq!(category("surge-xt"), PackageCategory::Instruments);
+        assert_eq!(category("app2clap"), PackageCategory::Tools);
+        for id in ["reaper", "osara", "sws", "reapack", "ffmpeg"] {
+            assert_eq!(category(id), PackageCategory::Core, "{id}");
+        }
+        for spec in packages
+            .iter()
+            .filter(|spec| spec.package_kind == PackageKind::LanguagePack)
+        {
+            assert_eq!(spec.category, PackageCategory::Language, "{}", spec.id);
+        }
+    }
+
+    /// The manifest names the new categories in lowercase, and the old
+    /// "additional" is no category any more.
+    #[test]
+    fn categories_read_from_their_manifest_names() {
+        use super::PackageCategory;
+
+        let read = |name: &str| serde_json::from_str::<PackageCategory>(&format!("\"{name}\""));
+        assert_eq!(read("instruments").unwrap(), PackageCategory::Instruments);
+        assert_eq!(read("tools").unwrap(), PackageCategory::Tools);
+        assert_eq!(read("language").unwrap(), PackageCategory::Language);
+        assert_eq!(read("core").unwrap(), PackageCategory::Core);
+        assert!(read("additional").is_err());
+    }
+
+    /// `ALL` holds every category once, in the order the wizard shows their
+    /// groups: Packages, Instruments, Tools, Language packs. Every category
+    /// a package uses, on any platform, is in it: the trees only show the
+    /// categories in `ALL`, so a package of another one would be missing.
+    #[test]
+    fn all_lists_every_category_once_in_display_order() {
+        use super::{PackageCategory, embedded_package_manifest};
+
+        // The match pins the order. It can't make a new variant join `ALL`;
+        // the manifest check below catches one a package uses.
+        let position = |category: PackageCategory| match category {
+            PackageCategory::Core => 0,
+            PackageCategory::Instruments => 1,
+            PackageCategory::Tools => 2,
+            PackageCategory::Language => 3,
+        };
+        let positions: Vec<usize> = PackageCategory::ALL.into_iter().map(position).collect();
+        assert_eq!(positions, [0, 1, 2, 3]);
+
+        for spec in &embedded_package_manifest().packages {
+            assert!(
+                PackageCategory::ALL.contains(&spec.category),
+                "{} has a category missing from PackageCategory::ALL",
+                spec.id
+            );
+        }
     }
 
     /// A language pack must declare the locale-shaped file name REAPER (and
