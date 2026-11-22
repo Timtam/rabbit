@@ -821,6 +821,15 @@ user can finish the install by pressing Next a few times.
    - Defaults: install or update missing/outdated recommended accessibility
      packages, plus apply every recommended Configuration step whose
      dependency is satisfied and which isn't already applied.
+   - A package with no build for the target REAPER's architecture (see
+     Package Model) stays listed but can't be ticked, and no default tick
+     ticks it. Its row ends with "(not available: no version for 32-bit
+     REAPER)", or "for this REAPER's processor type" for any other
+     architecture, such as REAPER on Windows on ARM, and its details say the
+     same in a sentence. The architecture is the target's own, the one the
+     install request hands to artifact resolution: the target REAPER's
+     binary, or for a REAPER RABBIT is about to install, the slice it will
+     install. The Uninstall tab doesn't ask about builds.
    - OSARA key map: an explicit checkbox stays on the Packages page so the
      user sees and controls what RABBIT will do with `reaper-kb.ini`.
      Default is replace-with-backup for a new OSARA and for a key map that
@@ -1507,6 +1516,34 @@ not start the install for that package until the user has confirmed the
 package-specific acknowledgement message in the GUI (a dedicated wizard
 page) or in the CLI (an interactive prompt or an explicit
 `--accept-<package>-notice` flag for unattended runs).
+
+`supported_architectures` lists the REAPER architectures a package has
+builds for; `universal` there is no wildcard. One offline rule,
+`artifact::package_has_build_for`, says whether a package can be installed
+for a platform and a REAPER architecture, without the network. It takes the
+architecture artifact resolution dispatches on, where a universal REAPER, or
+one not there yet or unreadable, counts as the slice REAPER runs as on this
+computer, and asks: is the package offered on the platform, does it list that
+architecture, and does its download source have a target for it (a
+`github_release` asset selector, an `http_artifact` target's `match_arches`,
+the HFS listing, which serves every architecture, or a pull request build's
+platform)? Resolution asks the same rule first and refuses what it refuses
+before it goes online, so FFmpeg, Surge XT and app2clap have no build for a
+32-bit REAPER, Surge XT included, whose Windows asset would match any
+architecture. The wizard, the CLI and setup ask the rule before a run starts,
+so a run never stops halfway on a download that can't be found: the wizard
+greys the row out (see User Workflow); `rabbit setup`, `apply-packages` and
+`plan` leave such a package out of their default list with a note; and a
+package named with `--package` in `setup`, `apply-packages` or
+`install-extension` is refused before anything changes, with exit code 2, as
+`uninstall` refuses a package it can't remove. Like the wizard, the CLI's
+install commands and `plan` take the target REAPER's architecture from its
+program file (`detection::target_reaper_architecture`), unless
+`--architecture` names one, and use it for the rule and for resolution
+alike. When even the dispatch architecture is unknown, nothing is blocked.
+An installed ARM64EC REAPER reads as x64, because the probe sees only the
+PE header (see `arch_probe`), so it is offered the x64 SWS and app2clap that
+a new REAPER on Windows on ARM is not.
 
 Initial package kinds:
 

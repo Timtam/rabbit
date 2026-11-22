@@ -184,7 +184,8 @@ pub fn preview_manual_instruction_lines(
     package: &PackageRow,
     osara_keymap_choice: OsaraKeymapChoice,
 ) -> Vec<String> {
-    let Ok(kind) = expected_artifact_kind(&package.package_id, model.platform, model.architecture)
+    // The target's own architecture, which the run resolves the download for.
+    let Ok(kind) = expected_artifact_kind(&package.package_id, model.platform, target.architecture)
     else {
         return Vec::new();
     };

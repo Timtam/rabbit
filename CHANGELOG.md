@@ -521,6 +521,15 @@ from this file and posts it as the GitHub release body.
   replaces it, it leaves your key map as it is, as before, but no longer
   says that it replaced it. It now says only that OSARA was installed, and
   its records no longer list your key map as one of OSARA's files.
+- A package with no version for your REAPER, such as FFmpeg, Surge XT or
+  app2clap for a 32-bit REAPER, or SWS for a new REAPER on Windows on ARM,
+  can no longer be ticked, and says why. Before, ticking FFmpeg, app2clap or
+  SWS stopped the whole install when the download couldn't be found, and
+  Surge XT ran its 64-bit installer. `rabbit setup`, `apply-packages` and
+  `plan` leave such a package out of their default list with a note, and one
+  named with `--package` changes nothing and exits with 2. `setup`,
+  `apply-packages` and `install-extension` now go by the target REAPER's own
+  architecture, as the wizard does, not RABBIT's.
 
 ### Security
 

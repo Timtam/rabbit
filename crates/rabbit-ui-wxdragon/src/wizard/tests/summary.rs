@@ -23,6 +23,42 @@ use rabbit_core::version::Version;
 use super::support::*;
 use crate::wizard::*;
 
+/// Done names the architecture the run installed for, the chosen target's,
+/// not that of the target the wizard opened on.
+#[test]
+fn done_names_the_architecture_the_run_installed_for() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        Vec::new(),
+        None,
+        InstallPlan {
+            target: None,
+            actions: Vec::new(),
+            notes: Vec::new(),
+        },
+    );
+    let request = WizardInstallRequest {
+        architecture: Architecture::X86,
+        ..sample_install_request(PathBuf::from("C:/PortableREAPER"))
+    };
+
+    let outcome = wizard_outcome_report_from_success(
+        &model,
+        &request,
+        &empty_setup_report(PathBuf::from("C:/PortableREAPER")),
+    );
+
+    let architecture = outcome
+        .detail_lines
+        .iter()
+        .find(|line| line.contains("Architecture:"))
+        .expect("Done names the architecture");
+    assert!(architecture.contains("x86"), "{architecture}");
+}
+
 #[test]
 fn the_summary_says_what_runs_for_an_installer_still_in_its_zip() {
     let plan = |kind, program: Option<&str>| PlannedExecutionPlan {
@@ -145,7 +181,7 @@ fn setup_summary_includes_manual_instruction_notes() {
         configuration_steps: Vec::new(),
     };
 
-    let summary = summarize_setup_report(&model, &report);
+    let summary = summarize_setup_report(&model, model.architecture, &report);
 
     assert!(
         summary
@@ -279,7 +315,7 @@ fn setup_summary_includes_backup_paths_when_present() {
         configuration_steps: Vec::new(),
     };
 
-    let summary = summarize_setup_report(&model, &report);
+    let summary = summarize_setup_report(&model, model.architecture, &report);
 
     assert!(
         summary
@@ -365,7 +401,7 @@ fn setup_summary_names_no_receipt_backup_after_vendor_installers() {
             message_code: rabbit_core::operation::PackageOperationMessage::UnattendedInstalled,
         });
 
-        let summary = summarize_setup_report(&model, &report);
+        let summary = summarize_setup_report(&model, model.architecture, &report);
 
         for label in ["Backup file:", "Backup manifest:", "Backup files created:"] {
             assert_eq!(
@@ -425,7 +461,7 @@ fn setup_summary_reports_failures_and_antivirus_hint() {
         },
     });
 
-    let summary = summarize_setup_report(&model, &report);
+    let summary = summarize_setup_report(&model, model.architecture, &report);
 
     assert!(
         summary.status_line.contains("Finished with errors"),
@@ -519,7 +555,7 @@ fn setup_summary_explains_installer_problems_in_every_locale() {
                 .items
                 .push(failed_surge_item(code.clone()));
 
-            let summary = summarize_setup_report(&model, &report);
+            let summary = summarize_setup_report(&model, model.architecture, &report);
 
             let explained = localized_install_problem(&localizer, code, &surge)
                 .unwrap_or_else(|| panic!("{locale} lacks a key for {code:?}"));
@@ -543,7 +579,7 @@ fn setup_summary_explains_installer_problems_in_every_locale() {
                 summary.detail_lines
             );
         }
-        let summary = summarize_setup_report(&model, &{
+        let summary = summarize_setup_report(&model, model.architecture, &{
             let mut report = empty_setup_report(PathBuf::from("C:/REAPER"));
             report
                 .package_operation
@@ -576,7 +612,7 @@ fn setup_summary_explains_installer_problems_in_every_locale() {
 
             // A package whose name is translated is named in German, not by
             // the manifest's English name.
-            let summary = summarize_setup_report(&model, &{
+            let summary = summarize_setup_report(&model, model.architecture, &{
                 let mut report = empty_setup_report(PathBuf::from("C:/REAPER"));
                 report.package_operation.items.push(failed_item(
                     PACKAGE_JAWS_SCRIPTS,
@@ -775,7 +811,7 @@ fn files_an_update_left_in_place_are_told_on_done_and_in_show_details_in_every_l
     actions.push(superseded_without_reason("older.dll"));
     let all = update_report(actions);
 
-    let summary = summarize_setup_report(&model, &all);
+    let summary = summarize_setup_report(&model, model.architecture, &all);
     // After ReaPack's own lines, so each says whose version it was.
     let reapack = lines_of_package(&summary.detail_lines, "ReaPack: ", &[]);
     for expected in [
@@ -830,7 +866,7 @@ fn files_an_update_left_in_place_are_told_on_done_and_in_show_details_in_every_l
     for &locale in embedded_locales() {
         model.bootstrap_options.locale = locale.to_string();
         let localizer = Localizer::embedded(locale).unwrap();
-        let summary = summarize_setup_report(&model, &all);
+        let summary = summarize_setup_report(&model, model.architecture, &all);
         for (index, (_, key)) in LEFT_IN_PLACE.iter().enumerate() {
             let path = format!("C:/PortableREAPER/UserPlugins/left{index}.dll");
             let line = localizer.format(key, &[("path", path.as_str())]).value;
@@ -912,7 +948,7 @@ fn files_an_update_moved_are_told_under_their_own_package() {
         .items
         .insert(0, updated_item(PACKAGE_FFMPEG, "8.0"));
 
-    let lines = summarize_setup_report(&model, &report).detail_lines;
+    let lines = summarize_setup_report(&model, model.architecture, &report).detail_lines;
 
     let ffmpeg = lines_of_package(
         &lines,
@@ -1032,7 +1068,8 @@ fn what_became_of_reapers_language_is_told_under_the_language_pack_in_every_loca
         ),
     ];
     for (language, _, expected) in cases {
-        let lines = summarize_setup_report(&model, &switched(language)).detail_lines;
+        let lines =
+            summarize_setup_report(&model, model.architecture, &switched(language)).detail_lines;
         let pack = lines_of_package(&lines, "REAPER in Spanish: ", &[]);
         assert_eq!(
             pack.last().map(String::as_str),
@@ -1046,7 +1083,7 @@ fn what_became_of_reapers_language_is_told_under_the_language_pack_in_every_loca
         let mut dry = switched(language);
         dry.dry_run = true;
         assert!(
-            !summarize_setup_report(&model, &dry)
+            !summarize_setup_report(&model, model.architecture, &dry)
                 .detail_lines
                 .iter()
                 .any(|line| line.contains("REAPER's")),
@@ -1066,7 +1103,8 @@ fn what_became_of_reapers_language_is_told_under_the_language_pack_in_every_loca
                     ],
                 )
                 .value;
-            let lines = summarize_setup_report(&model, &switched(language)).detail_lines;
+            let lines = summarize_setup_report(&model, model.architecture, &switched(language))
+                .detail_lines;
             assert!(
                 lines.contains(&line),
                 "{locale}: {line:?} not in {lines:#?}"
