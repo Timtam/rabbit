@@ -346,6 +346,17 @@ from this file and posts it as the GitHub release body.
   update it or uninstall it, not even when you name it on the command line,
   and its row says it is managed by ReaPack. Only restoring one of RABBIT's
   own backups of LReaParams still puts back the copy RABBIT had.
+- **LJuno-116**, **LB-303**, **LR-608** and **LSampler-24** (Windows only),
+  Lo-lo's VST3 instruments made to be played and edited with a screen
+  reader: a polyphonic synthesizer, a bassline synthesizer with a step
+  sequencer, a drum machine and a 24-slot sampler, under **Instruments**,
+  unticked by default. Thanks to Lo-lo for asking. RABBIT installs each
+  one's whole `.vst3` bundle from its latest GitHub release into REAPER's
+  own plug-in folder, `UserPlugins\FX`, without administrator rights and for
+  a portable REAPER too, keeps it up to date with a backup of the version
+  before, and can uninstall a copy it installed, keeping your presets and
+  samples. REAPER finds a new instrument after its next start or a plug-in
+  rescan.
 
 ### Changed
 

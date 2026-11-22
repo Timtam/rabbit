@@ -1,0 +1,106 @@
+{
+  "id": "lb-303",
+  "display_name": "LB-303",
+  "display_name_key": "package-lb-303",
+  "display_description_key": "package-lb-303-description",
+  "package_kind": "user_plugin_binary",
+  "install_destination": "user_plugins_fx",
+  "plugin_bundle": {
+    "name": "LB-303.vst3",
+    "binary": "Contents/x86_64-win/LB-303.vst3"
+  },
+  "depends_on": [
+    "reaper"
+  ],
+  "required": false,
+  "recommended": false,
+  "supported_platforms": [
+    "windows"
+  ],
+  "supported_architectures": [
+    "x64",
+    "arm64",
+    "arm64-ec"
+  ],
+  "whats_new": {
+    "github_release_body": {
+      "url": "https://api.github.com/repos/Lo-lo78/LB-303/releases?per_page=30"
+    }
+  },
+  "github_release": {
+    "repo": "Lo-lo78/LB-303",
+    "release": "latest",
+    "version_from": {
+      "tag_name": {
+        "strip_v_prefix": true
+      }
+    },
+    "assets": [
+      {
+        "platform": "windows",
+        "arch": "x64",
+        "name_prefix": "LB-303",
+        "name_suffix": ".zip",
+        "ignore_case": true
+      },
+      {
+        "platform": "windows",
+        "arch": "arm64",
+        "name_prefix": "LB-303",
+        "name_suffix": ".zip",
+        "ignore_case": true
+      },
+      {
+        "platform": "windows",
+        "arch": "arm64-ec",
+        "name_prefix": "LB-303",
+        "name_suffix": ".zip",
+        "ignore_case": true
+      }
+    ],
+    "artifact_kind": "archive"
+  },
+  "detectors": [
+    "rabbit_receipt",
+    "plugin_bundle",
+    "file_version_metadata"
+  ],
+  "install_steps": [
+    "copy_plugin_bundle"
+  ],
+  "uninstall": {
+    "requires_receipt": true,
+    "plans": [
+      {
+        "platform": "windows",
+        "strategy": "remove_files",
+        "summary": {
+          "removes_key": "uninstall-summary-lb-303-removes",
+          "keeps_key": "uninstall-summary-lb-303-keeps"
+        },
+        "remove": {
+          "receipt_files": true,
+          "trees_if_empty": [
+            "{resource}/UserPlugins/FX/LB-303.vst3"
+          ]
+        },
+        "keep": [
+          "{documents}/LB-303"
+        ],
+        "kept_user_data": [
+          {
+            "path": "{documents}/LB-303",
+            "note_key": "uninstall-kept-lb-303-presets"
+          }
+        ]
+      }
+    ]
+  },
+  "backup_policy": "backup_overwritten_files",
+  "user_plugin_prefixes": [],
+  "user_plugin_suffixes": {
+    "windows": [],
+    "macos": []
+  },
+  "category": "instruments"
+}

@@ -441,6 +441,12 @@ pub struct RemovalGuard {
     pub must_end_with: Option<String>,
     /// For `trees`: the name must contain this, ignoring case.
     pub name_contains: Option<String>,
+    /// For a plug-in bundle's files: every folder on the way to the path
+    /// below this one must be a real folder, never a symbolic link or
+    /// junction, wherever it leads. An install never puts a bundle's file
+    /// through one, and through one a removal could reach into another
+    /// bundle.
+    pub real_folders_below: Option<PathBuf>,
 }
 
 impl RemovalGuard {
@@ -467,6 +473,10 @@ pub enum PathRefusal {
     FolderRoot,
     #[error("it is a symbolic link or junction, which RABBIT never follows or removes")]
     Link,
+    /// A folder on the way to it is a link, for a path RABBIT never reaches
+    /// through one, such as a plug-in bundle's file.
+    #[error("a folder on the way to it is a symbolic link or junction, which RABBIT never follows")]
+    ThroughLink,
     #[error("it isn't the link RABBIT expected there")]
     NotALink,
     #[error("it is in RABBIT's own folder, which holds receipts, backups and logs")]
@@ -545,6 +555,25 @@ pub fn check_link_removal(
     check_removal_of(roots, path, guard, LastComponent::Link)
 }
 
+/// Refuse `parent`, the folder of a path to remove, when it or a folder on
+/// the way to it below `folder` is a symbolic link or junction, or isn't
+/// below `folder` at all.
+fn check_real_folders_below(folder: &Path, parent: &Path) -> Result<(), PathRefusal> {
+    let below = parent
+        .strip_prefix(folder)
+        .map_err(|_| PathRefusal::OutsideRoot)?;
+    let mut current = folder.to_path_buf();
+    for component in below.components() {
+        current.push(component);
+        let metadata = fs::symlink_metadata(&current)
+            .map_err(|error| PathRefusal::unreadable(&current, &error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(PathRefusal::ThroughLink);
+        }
+    }
+    Ok(())
+}
+
 /// What the last component of a path to remove must be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LastComponent {
@@ -585,6 +614,9 @@ fn check_removal_of(
         LastComponent::NotALink if is_link => return Err(PathRefusal::Link),
         LastComponent::Link if !is_link => return Err(PathRefusal::NotALink),
         _ => {}
+    }
+    if let Some(folder) = &guard.real_folders_below {
+        check_real_folders_below(folder, parent)?;
     }
     let canonical_parent =
         fs::canonicalize(parent).map_err(|error| PathRefusal::unreadable(parent, &error))?;

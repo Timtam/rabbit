@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
 use crate::archive::{
-    extract_bin_directory_from_seven_zip_archive, extract_user_plugin_from_archive,
+    extract_bin_directory_from_seven_zip_archive, extract_plugin_bundle_from_archive,
+    extract_user_plugin_from_archive,
 };
 use crate::artifact::{ArtifactKind, CachedArtifact};
 use crate::disk_image::extract_user_plugin_from_disk_image;
@@ -17,7 +18,8 @@ use crate::error::{IoPathContext, RabbitError, Result};
 use crate::hash::sha256_file;
 use crate::model::{InstallationKind, Platform};
 use crate::package::{
-    InstallDestination, PACKAGE_FFMPEG, PackageSpec, builtin_package_specs, package_specs_by_id,
+    InstallDestination, PACKAGE_FFMPEG, PackageSpec, PluginBundleSpec, builtin_package_specs,
+    package_specs_by_id,
 };
 use crate::preflight::{
     PreflightOptions, PreflightReport, RunningProcess, run_install_preflight_with_processes,
@@ -224,8 +226,9 @@ pub fn install_cached_artifacts(
 /// untouched call signature.
 ///
 /// An update keeps the version it replaces in one backup set (see
-/// [`BackupSetWriter`]): each file it replaces is copied in just before the
-/// new one takes its place, and each file the package's previous version
+/// [`BackupSetWriter`]): each file it replaces is copied in once every new
+/// file is staged, before the first one takes its place (see
+/// [`put_files_in_place`]), and each file the package's previous version
 /// installed that the new one doesn't is moved in once the new version's
 /// files are all in place (see [`UpdateRun::back_up_superseded_files`]).
 /// The package's receipt entry from before the update is recorded in the
@@ -360,7 +363,7 @@ pub(crate) fn install_cached_artifacts_within(
             .and_then(|spec| {
                 crate::package::resolved_install_as(spec, effective_variant.as_deref())
             })
-            .filter(|_| prepared.files.len() == 1);
+            .filter(|_| prepared.files.len() == 1 && prepared.bundle.is_none());
         // The variant this install puts in place, for a package that comes
         // in variants: the update's set records it with the version, so a
         // switch of variant at the same version reads apart.
@@ -369,65 +372,87 @@ pub(crate) fn install_cached_artifacts_within(
             .and_then(|spec| crate::package::recorded_variant(spec, effective_variant.as_deref()))
             .map(|variant| variant.id.clone());
 
+        let mut steps = Vec::with_capacity(prepared.files.len());
         for file in &prepared.files {
-            let target_path = resolve_install_target(
-                destination,
-                &artifact.descriptor.package_id,
+            let relative = install_as
+                .as_deref()
+                .map_or(file.target_relative.as_path(), Path::new);
+            let target_path =
+                resolve_install_target(destination, package_id, resource_path, relative)?;
+            steps.push(FileStep {
+                file,
+                target_path,
+                target_exists: false,
+                target_matches: false,
+                staged: None,
+                backup_path: None,
+                placed: false,
+            });
+        }
+        // A plug-in bundle never goes through a link or junction, nor puts a
+        // file where it needs a folder: checked for every file before any
+        // is written, in a dry run too.
+        if prepared.bundle.is_some() {
+            check_bundle_places(
                 resource_path,
-                install_as.as_deref().unwrap_or(&file.target_file_name),
+                steps.iter().map(|step| step.target_path.as_path()),
             )?;
+        }
+        for step in &mut steps {
             // In a dry run, a file an earlier package of the run would have
             // moved into the set is still there, but the real run finds it
             // gone and installs this one as a new file.
-            let moved_earlier = options.dry_run && places.moved.contains(&run.place(&target_path));
-            let target_exists = !moved_earlier && target_path.is_file();
-            let target_matches = target_exists && sha256_file(&target_path)? == file.source_sha256;
-            let replaces = target_exists && !target_matches;
+            let moved_earlier =
+                options.dry_run && places.moved.contains(&run.place(&step.target_path));
+            step.target_exists = !moved_earlier && step.target_path.is_file();
+            step.target_matches =
+                step.target_exists && sha256_file(&step.target_path)? == step.file.source_sha256;
+        }
+        // Every file that changes goes into its place only once every one
+        // is staged beside its place and checked, and every file they
+        // replace is in the update's set; should one fail to go in, the
+        // ones before it go back as they were (see `put_files_in_place`).
+        if !options.dry_run {
+            put_files_in_place(
+                &mut steps,
+                destination.folder_in(resource_path).as_deref(),
+                &mut replacement_backups,
+                &run,
+                package_id,
+                &ReplacedPackageRecord {
+                    receipt: previous.clone(),
+                    replaced_by: Some(artifact.descriptor.version.clone()),
+                    replaced_by_variant: new_variant.clone(),
+                    langpack_before: None,
+                },
+            )?;
+        }
 
+        for step in &steps {
+            let replaces = step.target_exists && !step.target_matches;
             let backup_path = if options.dry_run {
                 if replaces {
                     let backups = replacement_backups.get_or_insert_with(new_backup_set);
-                    Some(backups.copy_file(Some(package_id), &target_path)?)
+                    Some(backups.copy_file(Some(package_id), &step.target_path)?)
                 } else {
                     None
                 }
-            } else if target_matches {
-                None
             } else {
-                let backups = if replaces {
-                    Some(UpdateBackup {
-                        writer: replacement_backups.get_or_insert_with(new_backup_set),
-                        package_id,
-                        replaced: ReplacedPackageRecord {
-                            receipt: previous.clone(),
-                            replaced_by: Some(artifact.descriptor.version.clone()),
-                            replaced_by_variant: new_variant.clone(),
-                            langpack_before: None,
-                        },
-                    })
-                } else {
-                    None
-                };
-                install_extension_file(
-                    &file.source_path,
-                    &file.source_sha256,
-                    &target_path,
-                    backups,
-                )?
+                step.backup_path.clone()
             };
 
             report.actions.push(InstallFileReport {
                 package_id: package_id.to_string(),
-                source_path: file.source_path.clone(),
-                target_path: target_path.clone(),
+                source_path: step.file.source_path.clone(),
+                target_path: step.target_path.clone(),
                 backup_path,
-                action: classify_action(options.dry_run, target_exists, target_matches),
-                size: file.source_size,
-                sha256: file.source_sha256.clone(),
+                action: classify_action(options.dry_run, step.target_exists, step.target_matches),
+                size: step.file.source_size,
+                sha256: step.file.source_sha256.clone(),
                 warning: None,
                 left_reason: None,
             });
-            artifact_target_paths.push(target_path);
+            artifact_target_paths.push(step.target_path.clone());
         }
 
         if !options.dry_run {
@@ -464,6 +489,18 @@ pub(crate) fn install_cached_artifacts_within(
             &places,
             &mut replacement_backups,
         );
+        // A bundle's folders that the moves left empty go too, so REAPER
+        // doesn't find an empty folder of the version before.
+        if !options.dry_run {
+            remove_emptied_bundle_folders(
+                resource_path,
+                package_id,
+                superseded
+                    .iter()
+                    .filter(|action| action.action == InstallFileAction::MovedToBackup)
+                    .map(|action| action.target_path.as_path()),
+            );
+        }
         places.record(&run, package_id, &artifact_target_paths, &superseded);
         // REAPER's language follows a language pack file that moved, while
         // it names it, as the files on disk are now.
@@ -1163,14 +1200,18 @@ fn remove_exclusive_group_siblings_in(
 /// (`%LOCALAPPDATA%\Programs\Common\CLAP`), outside the resource path,
 /// where a replaced copy goes under the backup set's `external/` folder
 /// (see [`BackupSetWriter`]); no built-in package does any more.
+///
+/// `relative` is the file's name, or for a plug-in bundle its path below
+/// the install folder, starting with the bundle's folder.
 fn resolve_install_target(
     destination: InstallDestination,
     package_id: &str,
     resource_path: &Path,
-    file_name: &str,
+    relative: impl AsRef<Path>,
 ) -> Result<PathBuf> {
+    let relative = relative.as_ref();
     if let Some(folder) = destination.folder_in(resource_path) {
-        return Ok(folder.join(file_name));
+        return Ok(folder.join(relative));
     }
     let Some(folder) = destination.outside_folder() else {
         return Err(RabbitError::InstallLocationUnavailable {
@@ -1180,7 +1221,7 @@ fn resolve_install_target(
                 .to_string(),
         });
     };
-    Ok(folder.join(file_name))
+    Ok(folder.join(relative))
 }
 
 /// The folders outside any resource folder that RABBIT copies files into
@@ -1264,11 +1305,16 @@ struct PreparedInstallFile {
     source_path: PathBuf,
     source_sha256: String,
     source_size: u64,
-    target_file_name: String,
+    /// Where the file goes below the package's install folder: its file
+    /// name, or for a plug-in bundle its path inside the bundle's folder.
+    target_relative: PathBuf,
 }
 
 struct PreparedInstallSource {
+    /// For a plug-in bundle, its binary last.
     files: Vec<PreparedInstallFile>,
+    /// The plug-in bundle these files make up, if they are one.
+    bundle: Option<PluginBundleSpec>,
     _extraction_dir: Option<TempDir>,
 }
 
@@ -1279,8 +1325,9 @@ fn prepare_install_source(artifact: &CachedArtifact) -> Result<PreparedInstallSo
                 source_path: artifact.path.clone(),
                 source_sha256: artifact.sha256.clone(),
                 source_size: artifact.size,
-                target_file_name: artifact.descriptor.file_name.clone(),
+                target_relative: PathBuf::from(&artifact.descriptor.file_name),
             }],
+            bundle: None,
             _extraction_dir: None,
         }),
         ArtifactKind::Archive => {
@@ -1292,10 +1339,31 @@ fn prepare_install_source(artifact: &CachedArtifact) -> Result<PreparedInstallSo
                 path: PathBuf::from("rabbit-archive-extract"),
                 source,
             })?;
+            if let Some(bundle) = spec.plugin_bundle {
+                let files = extract_plugin_bundle_from_archive(
+                    &artifact.path,
+                    &bundle,
+                    extraction_dir.path(),
+                )?
+                .into_iter()
+                .map(|file| {
+                    prepared_install_file(
+                        file.extracted_path,
+                        Path::new(&bundle.name).join(file.relative),
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+                return Ok(PreparedInstallSource {
+                    files,
+                    bundle: Some(bundle),
+                    _extraction_dir: Some(extraction_dir),
+                });
+            }
             let extracted =
                 extract_user_plugin_from_archive(&artifact.path, &spec, extraction_dir.path())?;
             Ok(PreparedInstallSource {
                 files: vec![prepared_install_file_from_extracted(extracted)?],
+                bundle: None,
                 _extraction_dir: Some(extraction_dir),
             })
         }
@@ -1332,6 +1400,7 @@ fn prepare_install_source(artifact: &CachedArtifact) -> Result<PreparedInstallSo
                     .into_iter()
                     .map(prepared_install_file_from_extracted)
                     .collect::<Result<Vec<_>>>()?,
+                bundle: None,
                 _extraction_dir: Some(extraction_dir),
             })
         }
@@ -1348,6 +1417,7 @@ fn prepare_install_source(artifact: &CachedArtifact) -> Result<PreparedInstallSo
                 extract_user_plugin_from_disk_image(&artifact.path, &spec, extraction_dir.path())?;
             Ok(PreparedInstallSource {
                 files: vec![prepared_install_file_from_extracted(extracted)?],
+                bundle: None,
                 _extraction_dir: Some(extraction_dir),
             })
         }
@@ -1361,15 +1431,22 @@ fn prepare_install_source(artifact: &CachedArtifact) -> Result<PreparedInstallSo
 fn prepared_install_file_from_extracted(
     extracted: crate::archive::ExtractedUserPlugin,
 ) -> Result<PreparedInstallFile> {
-    let source_sha256 = sha256_file(&extracted.extracted_path)?;
-    let source_size = fs::metadata(&extracted.extracted_path)
-        .with_path(&extracted.extracted_path)?
-        .len();
+    prepared_install_file(extracted.extracted_path, PathBuf::from(extracted.file_name))
+}
+
+/// The extracted file at `source_path`, hashed, to go to `target_relative`
+/// below the package's install folder.
+fn prepared_install_file(
+    source_path: PathBuf,
+    target_relative: PathBuf,
+) -> Result<PreparedInstallFile> {
+    let source_sha256 = sha256_file(&source_path)?;
+    let source_size = fs::metadata(&source_path).with_path(&source_path)?.len();
     Ok(PreparedInstallFile {
-        source_path: extracted.extracted_path,
+        source_path,
         source_sha256,
         source_size,
-        target_file_name: extracted.file_name,
+        target_relative,
     })
 }
 
@@ -1442,12 +1519,231 @@ impl UpdateBackup<'_> {
 /// copied into that backup set first, after the new file is staged and
 /// checked, so a download that fails its check leaves no backup behind.
 /// Returns where the replaced file's copy went.
+#[cfg(test)]
 fn install_extension_file(
     source_path: &Path,
     source_sha256: &str,
     target_path: &Path,
     backups: Option<UpdateBackup<'_>>,
 ) -> Result<Option<PathBuf>> {
+    let staged = stage_install_file(source_path, source_sha256, target_path)?;
+    let backup_path = match backups {
+        Some(backup) => Some(backup.copy(target_path).inspect_err(|_| {
+            let _ = fs::remove_file(&staged);
+        })?),
+        None => None,
+    };
+    put_staged_in_place(&staged, target_path)?;
+    Ok(backup_path)
+}
+
+/// One file of a package's install, from where it goes to its place.
+struct FileStep<'a> {
+    file: &'a PreparedInstallFile,
+    target_path: PathBuf,
+    target_exists: bool,
+    /// The file there now is the one the install would put there.
+    target_matches: bool,
+    /// Its checked copy beside `target_path`, while it waits for its turn.
+    staged: Option<PathBuf>,
+    /// Where the update's set keeps the file it replaces.
+    backup_path: Option<PathBuf>,
+    /// It went into its place.
+    placed: bool,
+}
+
+/// Put the files of one package that change into their places, in three
+/// steps:
+/// 1. Each is copied beside its place under a temporary name and checked.
+/// 2. Each file they replace is copied into the update's set, which
+///    records the package with `replaced` first (see [`UpdateBackup`]).
+/// 3. Each goes into its place, in order: a plug-in bundle's binary last,
+///    so a REAPER that scans the bundle halfway finds the binary of the
+///    version before, or none on a first install.
+///
+/// A failure in the first two steps changes nothing: the staged copies go
+/// again, with the folders below `folder`, the package's install folder,
+/// that staging made, and so do the package's copies in the set. Should a
+/// file fail to go into its place, such as one Windows won't replace while
+/// REAPER has it loaded, the files before it go back as they were, last
+/// first, from their copies in the set; files new to their places go, and
+/// so do the folders staging made. Once every one is back, the package's
+/// copies leave the set again. A file that couldn't be put back keeps its
+/// copy there, which a restore of the set brings back.
+fn put_files_in_place(
+    steps: &mut [FileStep<'_>],
+    folder: Option<&Path>,
+    backups: &mut Option<BackupSetWriter>,
+    run: &UpdateRun<'_>,
+    package_id: &str,
+    replaced: &ReplacedPackageRecord,
+) -> Result<()> {
+    for index in 0..steps.len() {
+        let step = &steps[index];
+        if step.target_matches {
+            continue;
+        }
+        match stage_install_file(
+            &step.file.source_path,
+            &step.file.source_sha256,
+            &step.target_path,
+        ) {
+            Ok(staged) => steps[index].staged = Some(staged),
+            Err(error) => {
+                discard_staged(steps, folder);
+                return Err(error);
+            }
+        }
+    }
+    for index in 0..steps.len() {
+        if steps[index].staged.is_none() || !steps[index].target_exists {
+            continue;
+        }
+        let backup = UpdateBackup {
+            writer: backups.get_or_insert_with(|| run.new_backup_set()),
+            package_id,
+            replaced: replaced.clone(),
+        };
+        match backup.copy(&steps[index].target_path) {
+            Ok(path) => steps[index].backup_path = Some(path),
+            Err(error) => {
+                discard_staged(steps, folder);
+                if let Some(backups) = backups {
+                    backups.discard_package_copies(package_id);
+                }
+                return Err(error);
+            }
+        }
+    }
+    for index in 0..steps.len() {
+        let Some(staged) = steps[index].staged.take() else {
+            continue;
+        };
+        let target = steps[index].target_path.clone();
+        #[cfg(test)]
+        let seam = install_seam::at(&target).with_path(&target);
+        #[cfg(not(test))]
+        let seam: Result<()> = Ok(());
+        if let Err(error) = seam.and_then(|()| put_staged_in_place(&staged, &target)) {
+            let _ = fs::remove_file(&staged);
+            let all_back = put_back_placed(&steps[..=index], backups.as_ref());
+            discard_staged(steps, folder);
+            if all_back && let Some(backups) = backups {
+                backups.discard_package_copies(package_id);
+            }
+            return Err(error);
+        }
+        steps[index].placed = true;
+    }
+    Ok(())
+}
+
+/// Put back the places `steps` changed before the last of them failed to
+/// go into its place, last first: a file that was replaced comes back from
+/// its copy in the update's set `backups`, through a checked copy beside
+/// its place, and a file new to its place goes. The failed one is put back
+/// only when its place is empty now: the file there was removed before its
+/// copy failed to take the place. Returns whether every place is as it was.
+fn put_back_placed(steps: &[FileStep<'_>], backups: Option<&BackupSetWriter>) -> bool {
+    let mut all_back = true;
+    for step in steps.iter().rev() {
+        let place_empty = matches!(
+            fs::symlink_metadata(&step.target_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        );
+        if !step.placed && !(step.backup_path.is_some() && place_empty) {
+            continue;
+        }
+        let back = match &step.backup_path {
+            Some(copy) => backups
+                .and_then(|backups| backups.recorded_sha256(copy))
+                .is_some_and(|sha256| {
+                    stage_install_file(copy, &sha256, &step.target_path)
+                        .and_then(|staged| put_staged_in_place(&staged, &step.target_path))
+                        .is_ok()
+                }),
+            None => place_empty || fs::remove_file(&step.target_path).is_ok(),
+        };
+        all_back &= back;
+    }
+    all_back
+}
+
+/// Rename the checked copy at `temp_path` over `target_path`. On Windows
+/// the rename replaces the file there in one step, so a crash never leaves
+/// the place empty; only when that fails is the file there removed first
+/// and the rename tried again. On macOS the file there goes first, as it
+/// always has. The copy is gone afterwards, whatever happened.
+fn put_staged_in_place(temp_path: &Path, target_path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    if fs::rename(temp_path, target_path).is_ok() {
+        return Ok(());
+    }
+    // Removing the existing extension and renaming the new one into its place
+    // are the two steps that touch the (possibly OS-protected) target file, so
+    // both route their errors through `classify_install_write_error`, which
+    // turns a macOS permission block into actionable guidance instead of a bare
+    // "OS error 1".
+    if target_path.exists()
+        && let Err(source) = fs::remove_file(target_path)
+    {
+        let _ = fs::remove_file(temp_path);
+        return Err(classify_install_write_error(target_path, source));
+    }
+    fs::rename(temp_path, target_path).map_err(|source| {
+        let _ = fs::remove_file(temp_path);
+        classify_install_write_error(target_path, source)
+    })
+}
+
+/// A way for tests to fail a file of an install right before it goes into
+/// its place, as a file Windows won't replace would. Each thread has its
+/// own hook, so tests running at once never see each other's.
+#[cfg(test)]
+pub(crate) mod install_seam {
+    use std::cell::RefCell;
+    use std::io;
+    use std::path::Path;
+
+    type Hook = Box<dyn FnMut(&Path) -> io::Result<()>>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Takes the hook away again when dropped.
+    pub(crate) struct Installed;
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            HOOK.with(|hook| hook.borrow_mut().take());
+        }
+    }
+
+    /// Call `hook` with the place of every file this thread's installs put
+    /// in place, right before it goes in, until what this returns is
+    /// dropped. An error it returns fails that file.
+    pub(crate) fn install(hook: impl FnMut(&Path) -> io::Result<()> + 'static) -> Installed {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        Installed
+    }
+
+    pub(super) fn at(path: &Path) -> io::Result<()> {
+        HOOK.with(|hook| match hook.borrow_mut().as_mut() {
+            Some(hook) => hook(path),
+            None => Ok(()),
+        })
+    }
+}
+
+/// Copy a verified file beside `target_path` under a temporary name, making
+/// the folders on the way, and check the copy's hash. Returns the copy's
+/// path. A copy that fails or doesn't match is removed again.
+fn stage_install_file(
+    source_path: &Path,
+    source_sha256: &str,
+    target_path: &Path,
+) -> Result<PathBuf> {
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent).with_path(parent)?;
     }
@@ -1457,8 +1753,17 @@ fn install_extension_file(
         fs::remove_file(&temp_path).with_path(&temp_path)?;
     }
 
-    fs::copy(source_path, &temp_path).with_path(&temp_path)?;
-    let staged_hash = sha256_file(&temp_path)?;
+    if let Err(error) = fs::copy(source_path, &temp_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(crate::error::io_error_at(temp_path, error));
+    }
+    let staged_hash = match sha256_file(&temp_path) {
+        Ok(hash) => hash,
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error);
+        }
+    };
     if staged_hash != source_sha256 {
         let _ = fs::remove_file(&temp_path);
         return Err(RabbitError::HashMismatch {
@@ -1467,42 +1772,132 @@ fn install_extension_file(
             actual: staged_hash,
         });
     }
+    Ok(temp_path)
+}
 
-    let backup_path = match backups {
-        Some(backup) => match backup.copy(target_path) {
-            Ok(path) => Some(path),
-            Err(error) => {
-                let _ = fs::remove_file(&temp_path);
-                return Err(error);
-            }
-        },
-        None => None,
-    };
-
-    // Removing the existing extension and renaming the new one into its place
-    // are the two steps that touch the (possibly OS-protected) target file, so
-    // both route their errors through `classify_install_write_error`, which
-    // turns a macOS permission block into actionable guidance instead of a bare
-    // "OS error 1".
-    if target_path.exists()
-        && let Err(source) = fs::remove_file(target_path)
-    {
-        return Err(classify_install_write_error(target_path, source));
-    }
-
-    match fs::rename(&temp_path, target_path) {
-        Ok(()) => Ok(backup_path),
-        Err(source) => {
-            if let Some(backup_path) = &backup_path
-                && backup_path.is_file()
-                && !target_path.exists()
-            {
-                let _ = fs::copy(backup_path, target_path);
-            }
-            let _ = fs::remove_file(&temp_path);
-            Err(classify_install_write_error(target_path, source))
+/// Remove the staged copies of `steps` that didn't go into their places.
+/// With `folder`, the package's install folder, the folders below it on
+/// the way to each step's place that are empty now go too, nearest first:
+/// staging may have made them.
+fn discard_staged(steps: &mut [FileStep<'_>], folder: Option<&Path>) {
+    for step in steps {
+        if let Some(staged) = step.staged.take() {
+            let _ = fs::remove_file(&staged);
+        }
+        if let Some(folder) = folder {
+            remove_empty_folders_up_to(step.target_path.parent(), folder);
         }
     }
+}
+
+/// Remove `start` and each folder above it that is empty, nearest first,
+/// up to `stop`, which stays, and only below it. A symbolic link or
+/// junction is never removed, and ends the walk.
+fn remove_empty_folders_up_to(start: Option<&Path>, stop: &Path) {
+    let mut current = start;
+    while let Some(folder) = current {
+        if folder == stop || !folder.starts_with(stop) {
+            break;
+        }
+        let plain_folder = fs::symlink_metadata(folder)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+        if !plain_folder || fs::remove_dir(folder).is_err() {
+            break;
+        }
+        current = folder.parent();
+    }
+}
+
+/// Remove each folder inside a plug-in bundle package's install folder that
+/// moving the files at `moved` out of it left empty, from each file's
+/// folder up, as far as the install folder itself, which stays: the
+/// folders of a version that the version now in place doesn't have. Only
+/// real folders, each only when empty, never a symbolic link or junction.
+/// Nothing for a package without a plug-in bundle. Best effort.
+pub(crate) fn remove_emptied_bundle_folders<'a>(
+    resource_path: &Path,
+    package_id: &str,
+    moved: impl Iterator<Item = &'a Path>,
+) {
+    let Some(folder) = crate::package::plugin_bundle_of(package_id)
+        .and_then(|(destination, _)| destination.folder_in(resource_path))
+    else {
+        return;
+    };
+    let place = |path: &Path| {
+        same_place(&absolute_without_dots(path).unwrap_or_else(|_| path.to_path_buf()))
+    };
+    let stop = place(&folder);
+    for path in moved {
+        let mut current = path.parent();
+        while let Some(parent) = current {
+            let here = place(parent);
+            if here.len() <= stop.len() || !here.starts_with(&stop) {
+                break;
+            }
+            let plain_folder = fs::symlink_metadata(parent)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+            if !plain_folder || fs::remove_dir(parent).is_err() {
+                break;
+            }
+            current = parent.parent();
+        }
+    }
+}
+
+/// Refuse a plug-in bundle's install, before any of its files is written,
+/// when a place one of them goes to isn't what the bundle needs there: a
+/// symbolic link or junction at the place or at a folder on the way from
+/// the resource folder, which RABBIT never follows, a file where the bundle
+/// needs a folder, or a folder where it needs a file. A place that isn't
+/// there yet is fine; staging makes the folders.
+fn check_bundle_places<'a>(
+    resource_path: &Path,
+    targets: impl Iterator<Item = &'a Path>,
+) -> Result<()> {
+    let refused = |path: &Path, reason: &str| RabbitError::InstallPathRefused {
+        path: path.to_path_buf(),
+        reason: reason.to_string(),
+    };
+    let mut checked: BTreeSet<PathBuf> = BTreeSet::new();
+    for target in targets {
+        let Ok(relative) = target.strip_prefix(resource_path) else {
+            return Err(refused(target, "it isn't inside REAPER's resource folder"));
+        };
+        let names: Vec<_> = relative.components().collect();
+        let mut place = resource_path.to_path_buf();
+        for (index, name) in names.iter().enumerate() {
+            place.push(name);
+            let is_target = index + 1 == names.len();
+            if !is_target && !checked.insert(place.clone()) {
+                continue;
+            }
+            let metadata = match fs::symlink_metadata(&place) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) => return Err(crate::error::io_error_at(place, error)),
+            };
+            if metadata.file_type().is_symlink() {
+                return Err(refused(
+                    &place,
+                    "it is a symbolic link or junction, which RABBIT never follows",
+                ));
+            }
+            if is_target && metadata.is_dir() {
+                return Err(refused(
+                    &place,
+                    "it is a folder where the plug-in needs a file",
+                ));
+            }
+            if !is_target && !metadata.is_dir() {
+                return Err(refused(
+                    &place,
+                    "it is a file where the plug-in needs a folder",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Map a failed overwrite of an installed extension file to the clearest error.
@@ -2510,3 +2905,7 @@ mod tests {
 #[cfg(test)]
 #[path = "install_superseded_tests.rs"]
 mod superseded_tests;
+
+#[cfg(test)]
+#[path = "install_bundle_tests.rs"]
+pub(crate) mod bundle_tests;

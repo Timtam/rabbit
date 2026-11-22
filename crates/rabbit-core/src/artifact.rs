@@ -2015,6 +2015,7 @@ mod tests {
                 name_suffix: Some(".zip".to_string()),
                 exact_name: None,
                 artifact_kind: None,
+                ignore_case: false,
             }],
             artifact_kind: Some(GithubArtifactKind::Archive),
         }
@@ -2037,6 +2038,7 @@ mod tests {
                     name_suffix: Some(".zip".to_string()),
                     exact_name: None,
                     artifact_kind: None,
+                    ignore_case: false,
                 },
                 AssetSelector {
                     platform: SupportedPlatform::Macos,
@@ -2045,6 +2047,7 @@ mod tests {
                     name_suffix: Some(".zip".to_string()),
                     exact_name: None,
                     artifact_kind: None,
+                    ignore_case: false,
                 },
             ],
             artifact_kind: Some(GithubArtifactKind::Archive),
@@ -2061,6 +2064,7 @@ mod tests {
             name_suffix: None,
             exact_name: Some(name.to_string()),
             artifact_kind: None,
+            ignore_case: false,
         };
         GithubReleaseSpec {
             repo: "cfillion/reapack".to_string(),
@@ -2111,6 +2115,7 @@ mod tests {
                     name_suffix: Some("-setup.exe".to_string()),
                     exact_name: None,
                     artifact_kind: Some(GithubArtifactKind::Installer),
+                    ignore_case: false,
                 },
                 AssetSelector {
                     platform: SupportedPlatform::Macos,
@@ -2119,6 +2124,7 @@ mod tests {
                     name_suffix: Some(".dmg".to_string()),
                     exact_name: None,
                     artifact_kind: Some(GithubArtifactKind::DiskImage),
+                    ignore_case: false,
                 },
             ],
             artifact_kind: None,
@@ -3170,6 +3176,149 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, RabbitError::NoArtifactFound { .. }));
+    }
+
+    /// Each of Lo-lo's instruments as GitHub's API lists its latest release:
+    /// one zip, named by hand, LB-303's with `.VST3.zip` where the others
+    /// have `.vst3.zip`, and LJuno-116's earlier ones as
+    /// `LJuno-116-Windows-VST3.zip` and `LJuno-116.vst3.zip`. The manifest
+    /// picks it by the product's name and `.zip` for an x64 REAPER and
+    /// REAPER's builds for Windows on ARM alike, and reads the version from
+    /// the tag without its `v`. Another instrument's zip, and a release
+    /// without the zip, offer nothing.
+    #[test]
+    fn resolves_each_lolo_instrument_zip_and_reads_the_version_from_the_tag() {
+        use crate::package::{
+            PACKAGE_LB_303, PACKAGE_LJUNO_116, PACKAGE_LR_608, PACKAGE_LSAMPLER_24,
+        };
+
+        let specs = crate::package::package_specs_by_id(Platform::Windows);
+        for (package_id, product, asset, tag) in [
+            (
+                PACKAGE_LJUNO_116,
+                "LJuno-116",
+                "LJuno-116.0.99.66.vst3.zip",
+                "v0.99.66",
+            ),
+            (
+                PACKAGE_LJUNO_116,
+                "LJuno-116",
+                "LJuno-116-Windows-VST3.zip",
+                "v0.99.2",
+            ),
+            (
+                PACKAGE_LJUNO_116,
+                "LJuno-116",
+                "LJuno-116.vst3.zip",
+                "v0.99.3",
+            ),
+            (
+                PACKAGE_LB_303,
+                "LB-303",
+                "LB-303.0.99.7.VST3.zip",
+                "v0.99.7",
+            ),
+            (
+                PACKAGE_LR_608,
+                "LR-608",
+                "LR-608.0.99.34.vst3.zip",
+                "v0.99.34",
+            ),
+            (
+                PACKAGE_LSAMPLER_24,
+                "LSampler-24",
+                "LSampler-24.0.99.29.vst3.zip",
+                "v0.99.29",
+            ),
+        ] {
+            let download =
+                format!("https://github.com/Lo-lo78/{product}/releases/download/{tag}/{asset}");
+            let body = serde_json::json!({
+                "tag_name": tag,
+                "name": format!("{product} {tag}"),
+                "body": "What changed in this release.",
+                "draft": false,
+                "prerelease": false,
+                "assets": [
+                    {
+                        "name": "LMixer-12.0.1.0.vst3.zip",
+                        "browser_download_url": "https://github.com/Lo-lo78/LMixer-12/releases/download/v0.1.0/LMixer-12.0.1.0.vst3.zip"
+                    },
+                    {
+                        "name": asset,
+                        "content_type": "application/x-zip-compressed",
+                        "browser_download_url": download
+                    }
+                ]
+            })
+            .to_string();
+            let spec = specs[package_id].github_release.clone().unwrap();
+            let url = crate::latest::github_release_url(&spec);
+            assert_eq!(
+                url,
+                format!("https://api.github.com/repos/Lo-lo78/{product}/releases/latest")
+            );
+            assert_eq!(
+                crate::latest::resolve_github_version(&body, &url, &spec)
+                    .unwrap()
+                    .raw(),
+                tag.trim_start_matches('v')
+            );
+
+            for architecture in [
+                Architecture::X64,
+                Architecture::Arm64,
+                Architecture::Arm64Ec,
+            ] {
+                let artifact = resolve_github_artifact_from_release_body(
+                    &body,
+                    &url,
+                    package_id,
+                    &spec,
+                    Platform::Windows,
+                    architecture,
+                )
+                .unwrap();
+                assert_eq!(artifact.package_id, package_id);
+                assert_eq!(artifact.kind, ArtifactKind::Archive);
+                assert_eq!(artifact.version.raw(), tag.trim_start_matches('v'));
+                assert_eq!(artifact.file_name, asset);
+                assert_eq!(artifact.url, download);
+                assert_eq!(artifact.architecture, architecture);
+            }
+
+            let error = resolve_github_artifact_from_release_body(
+                &body,
+                &url,
+                package_id,
+                &spec,
+                Platform::Windows,
+                Architecture::X86,
+            )
+            .unwrap_err();
+            assert!(matches!(error, RabbitError::NoArtifactFound { .. }));
+
+            let without_zip = serde_json::json!({
+                "tag_name": tag,
+                "assets": [
+                    {
+                        "name": "LMixer-12.0.1.0.vst3.zip",
+                        "browser_download_url": "https://github.com/Lo-lo78/LMixer-12/releases/download/v0.1.0/LMixer-12.0.1.0.vst3.zip"
+                    }
+                ]
+            })
+            .to_string();
+            let error = resolve_github_artifact_from_release_body(
+                &without_zip,
+                &url,
+                package_id,
+                &spec,
+                Platform::Windows,
+                Architecture::X64,
+            )
+            .unwrap_err();
+            assert!(matches!(error, RabbitError::NoArtifactFound { .. }));
+        }
     }
 
     fn file_url_for_test(path: &Path) -> String {

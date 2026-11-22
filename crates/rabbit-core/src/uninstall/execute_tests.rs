@@ -33,7 +33,8 @@ use crate::cancel::CancelToken;
 use crate::hash::{sha256_bytes, sha256_file};
 use crate::model::{ComponentDetection, InstallationKind, Platform};
 use crate::package::{
-    PACKAGE_OSARA, PACKAGE_REAPACK, PACKAGE_SWS, PackageSpec, builtin_package_specs,
+    PACKAGE_LJUNO_116, PACKAGE_OSARA, PACKAGE_REAPACK, PACKAGE_SWS, PackageSpec,
+    builtin_package_specs,
 };
 use crate::preflight::RunningProcess;
 use crate::progress::{ProgressEvent, ProgressReporter, RemovalMethod};
@@ -2318,4 +2319,246 @@ fn a_file_placed_by_hand_keeps_osaras_folder() {
     assert_eq!(osara.removed_dirs, vec![osara_folder.join("locale")]);
     assert!(osara_folder.is_dir() && notes.is_file());
     assert!(osara.registry_entries.is_empty() && osara.problems.is_empty());
+}
+
+/// A fixture with LJuno-116 installed into UserPlugins\FX the way RABBIT
+/// installs it, its own presets in Documents, its extracted audio's
+/// folder name in AppData, and app2clap beside it in UserPlugins\FX. The
+/// roots point at the fixture's own Documents and AppData.
+fn ljuno_installed() -> (Fixture, Vec<PackageSpec>) {
+    let mut fixture = Fixture::new();
+    fixture.roots.documents = Some(fixture.dir.path().join("Documents"));
+    fixture.roots.appdata = Some(fixture.dir.path().join("AppData"));
+    let release = crate::install::bundle_tests::ljuno(
+        &fixture.dir.path().join("cache"),
+        "0.99.66",
+        &[
+            ("desktop.ini", b"ini"),
+            ("Contents/Resources/moduleinfo.json", b"{}"),
+            ("Contents/x86_64-win/LJuno-116.vst3", b"binary"),
+        ],
+    );
+    crate::install::bundle_tests::try_install(
+        &fixture.resource,
+        &[release],
+        &crate::install::InstallOptions {
+            dry_run: false,
+            allow_reaper_running: true,
+            target_app_path: None,
+            package_variants: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    fixture.file("UserPlugins/FX/app2clap.clap");
+    write(
+        &fixture
+            .dir
+            .path()
+            .join("Documents")
+            .join("LJuno-116")
+            .join("Mine.Ljuno"),
+        b"my preset",
+    );
+    let specs = builtin_package_specs(Platform::Windows)
+        .into_iter()
+        .filter(|spec| spec.id == PACKAGE_LJUNO_116)
+        .collect();
+    (fixture, specs)
+}
+
+/// Uninstalling LJuno-116 moves every file of its bundle into the backup
+/// set and removes the bundle's folder with every folder in it, once they
+/// are empty. Nothing else in UserPlugins\FX goes: app2clap beside it
+/// stays, and so does another bundle's empty folder. So do the user's
+/// presets in Documents. Restoring the set brings the bundle back exactly.
+#[test]
+fn a_bundle_comes_off_whole_and_nothing_else_in_fx_does() {
+    let (fixture, specs) = ljuno_installed();
+    let other = at(&fixture, "UserPlugins/FX/Other.vst3/Contents");
+    fs::create_dir_all(&other).unwrap();
+    let bundle = at(&fixture, "UserPlugins/FX/LJuno-116.vst3");
+    let before = tree(&bundle);
+    let state = load_install_state(&fixture.resource).unwrap().unwrap();
+    let harness = Harness::new(&fixture, specs, &[PACKAGE_LJUNO_116]);
+
+    let report = harness.apply(&[PACKAGE_LJUNO_116]);
+
+    let item = report.item(PACKAGE_LJUNO_116).unwrap();
+    assert_eq!(item.status, UninstallStatus::Removed, "{}", item.message);
+    assert!(fs::symlink_metadata(&bundle).is_err(), "the bundle is gone");
+    let fx = at(&fixture, "UserPlugins/FX");
+    let mut in_fx: Vec<PathBuf> = fs::read_dir(&fx)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    in_fx.sort();
+    assert_eq!(in_fx, [fx.join("Other.vst3"), fx.join("app2clap.clap")]);
+    assert!(other.is_dir());
+    assert_eq!(
+        fs::read(
+            fixture
+                .dir
+                .path()
+                .join("Documents")
+                .join("LJuno-116")
+                .join("Mine.Ljuno")
+        )
+        .unwrap(),
+        b"my preset"
+    );
+    let mut removed: Vec<PathBuf> = item.removed.iter().map(|file| file.path.clone()).collect();
+    removed.sort();
+    let mut expected: Vec<PathBuf> = state.packages[PACKAGE_LJUNO_116]
+        .installed_files
+        .iter()
+        .map(|file| fixture.resource.join(&file.path))
+        .collect();
+    expected.sort();
+    assert_eq!(removed, expected);
+    assert!(
+        item.removed_dirs.contains(&bundle),
+        "{:?}",
+        item.removed_dirs
+    );
+    let manifest = manifest(&report);
+    let mut originals: Vec<PathBuf> = manifest
+        .files
+        .iter()
+        .map(|file| file.original_path.clone())
+        .collect();
+    originals.sort();
+    let mut recorded: Vec<PathBuf> = state.packages[PACKAGE_LJUNO_116]
+        .installed_files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect();
+    recorded.sort();
+    assert_eq!(originals, recorded);
+
+    restore_backup_set(
+        &fixture.resource,
+        report.backup_set_id.as_deref().unwrap(),
+        &RestoreBackupOptions {
+            dry_run: false,
+            allow_reaper_running: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(tree(&bundle), before);
+    assert_eq!(
+        load_install_state(&fixture.resource)
+            .unwrap()
+            .unwrap()
+            .packages[PACKAGE_LJUNO_116],
+        state.packages[PACKAGE_LJUNO_116]
+    );
+}
+
+/// With "Also remove settings", and the bundle alone in UserPlugins\FX,
+/// the uninstall still takes nothing but the bundle: the FX folder stays,
+/// empty, and the presets in Documents stay too, since they are the
+/// user's music rather than settings.
+#[test]
+fn a_bundle_alone_in_fx_leaves_the_folder_and_the_presets_even_with_settings() {
+    let (fixture, specs) = ljuno_installed();
+    let fx = at(&fixture, "UserPlugins/FX");
+    fs::remove_file(fx.join("app2clap.clap")).unwrap();
+    let preset = fixture
+        .dir
+        .path()
+        .join("Documents")
+        .join("LJuno-116")
+        .join("Mine.Ljuno");
+    let harness = Harness::new(&fixture, specs, &[PACKAGE_LJUNO_116]);
+
+    let report = harness.run(&UninstallRequest {
+        remove_settings: true,
+        ..harness.request(&[PACKAGE_LJUNO_116])
+    });
+
+    let item = report.item(PACKAGE_LJUNO_116).unwrap();
+    assert_eq!(item.status, UninstallStatus::Removed, "{}", item.message);
+    assert!(fx.is_dir(), "UserPlugins\\FX stays");
+    assert_eq!(fs::read_dir(&fx).unwrap().count(), 0);
+    assert_eq!(fs::read(&preset).unwrap(), b"my preset");
+    assert!(
+        item.removed
+            .iter()
+            .all(|file| file.reason == RemovalReason::Receipt),
+        "{:?}",
+        item.removed
+    );
+    assert!(
+        item.removed
+            .iter()
+            .all(|file| file.path.starts_with(fx.join("LJuno-116.vst3")))
+    );
+}
+
+/// A file of the user's in the bundle keeps the folders on its way, and
+/// only those: the folders the uninstall emptied go. A symbolic link or
+/// junction anywhere in the bundle keeps its whole folder as it is, and
+/// what the link leads to is never touched.
+#[test]
+fn what_isnt_the_packages_keeps_its_folders_in_the_bundle() {
+    let (fixture, specs) = ljuno_installed();
+    let mine = fixture.file("UserPlugins/FX/LJuno-116.vst3/Contents/Resources/mine.txt");
+    let harness = Harness::new(&fixture, specs.clone(), &[PACKAGE_LJUNO_116]);
+
+    let report = harness.apply(&[PACKAGE_LJUNO_116]);
+
+    assert_eq!(
+        report.item(PACKAGE_LJUNO_116).unwrap().status,
+        UninstallStatus::Removed
+    );
+    assert_eq!(fs::read(&mine).unwrap(), b"file contents");
+    let bundle = at(&fixture, "UserPlugins/FX/LJuno-116.vst3");
+    let left: Vec<PathBuf> = tree(&bundle).into_keys().collect();
+    assert_eq!(
+        left,
+        [
+            at(&fixture, "UserPlugins/FX/LJuno-116.vst3/Contents"),
+            at(&fixture, "UserPlugins/FX/LJuno-116.vst3/Contents/Resources"),
+            mine.clone(),
+        ]
+    );
+
+    let (fixture, specs) = ljuno_installed();
+    let elsewhere = fixture.dir.path().join("Elsewhere");
+    write(&elsewhere.join("kept.txt"), b"not RABBIT's");
+    let link = at(&fixture, "UserPlugins/FX/LJuno-116.vst3/Contents/Linked");
+    crate::uninstall::paths::link_folder(&link, &elsewhere);
+    let harness = Harness::new(&fixture, specs, &[PACKAGE_LJUNO_116]);
+
+    let report = harness.apply(&[PACKAGE_LJUNO_116]);
+
+    assert_eq!(
+        report.item(PACKAGE_LJUNO_116).unwrap().status,
+        UninstallStatus::Removed
+    );
+    assert!(
+        at(
+            &fixture,
+            "UserPlugins/FX/LJuno-116.vst3/Contents/x86_64-win"
+        )
+        .is_dir()
+    );
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read(elsewhere.join("kept.txt")).unwrap(),
+        b"not RABBIT's"
+    );
+    assert!(
+        !at(
+            &fixture,
+            "UserPlugins/FX/LJuno-116.vst3/Contents/x86_64-win/LJuno-116.vst3"
+        )
+        .exists()
+    );
 }

@@ -738,6 +738,17 @@ impl PackagePlanner<'_> {
                 })?;
             files.push(candidate);
         }
+        // A plug-in bundle's binary goes first, so a REAPER that scans the
+        // bundle while the uninstall runs, or after it stopped halfway,
+        // never finds the binary beside only part of its files.
+        if let Some(bundle) = &self.spec.plugin_bundle
+            && let Some(folder) = self
+                .spec
+                .install_destination
+                .folder_in(&self.roots.resource)
+        {
+            files.sort_by_key(|file| !bundle.is_binary_in(&folder, &file.path));
+        }
 
         Ok(Collected {
             files,
@@ -991,6 +1002,12 @@ impl PackagePlanner<'_> {
             return;
         };
         let resource = &self.roots.resource;
+        // A plug-in bundle's files are never reached through a link: an
+        // install never puts one there that way.
+        let guard = RemovalGuard {
+            real_folders_below: self.spec.plugin_bundle.is_some().then(|| resource.clone()),
+            ..RemovalGuard::under(resource.clone())
+        };
         for entry in &receipt.installed_files {
             let Some(sha256) = &entry.sha256 else {
                 // Folders and user content such as reaper.ini are recorded
@@ -1023,12 +1040,7 @@ impl PackagePlanner<'_> {
                 continue;
             }
             let added = candidates.len();
-            add_file(
-                candidates,
-                path,
-                RemovalReason::Receipt,
-                &RemovalGuard::under(resource.clone()),
-            );
+            add_file(candidates, path, RemovalReason::Receipt, &guard);
             if let Some(candidate) = candidates.get_mut(added) {
                 candidate.receipt_sha256 = Some(sha256.clone());
             }
@@ -1170,6 +1182,30 @@ impl PackagePlanner<'_> {
                 let is_dir =
                     fs::symlink_metadata(&resolved.path).is_ok_and(|metadata| metadata.is_dir());
                 if is_dir && check_removal(self.roots, &resolved.path, &resolved.guard).is_ok() {
+                    dirs.push(resolved.path);
+                }
+            }
+        }
+        for path in &self.plan.remove.trees_if_empty {
+            for resolved in self.resolve(path)? {
+                // The same best effort for the folder and each folder inside
+                // it: the engine removes them innermost first, and each only
+                // when it is empty by then. A tree with a link anywhere in it
+                // stays whole, as does one RABBIT can't read through.
+                let is_dir =
+                    fs::symlink_metadata(&resolved.path).is_ok_and(|metadata| metadata.is_dir());
+                if !is_dir || check_removal(self.roots, &resolved.path, &resolved.guard).is_err() {
+                    continue;
+                }
+                let mut inside = Vec::new();
+                if !folders_inside(&resolved.path, &mut inside).unwrap_or(false) {
+                    continue;
+                }
+                if inside
+                    .iter()
+                    .all(|folder| check_removal(self.roots, folder, &resolved.guard).is_ok())
+                {
+                    dirs.extend(inside);
                     dirs.push(resolved.path);
                 }
             }
@@ -1349,6 +1385,26 @@ fn matches_any(path: &Path, paths: &[ResolvedPath]) -> bool {
 fn real_path(path: &Path) -> Option<PathBuf> {
     let parent = fs::canonicalize(path.parent()?).ok()?;
     Some(parent.join(path.file_name()?))
+}
+
+/// Every folder inside `folder`, at any depth, into `found`, without
+/// following anything. `Ok(false)` as soon as a symbolic link or junction
+/// turns up.
+fn folders_inside(folder: &Path, found: &mut Vec<PathBuf>) -> io::Result<bool> {
+    for entry in fs::read_dir(folder)? {
+        let path = entry?.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            return Ok(false);
+        }
+        if metadata.is_dir() {
+            found.push(path.clone());
+            if !folders_inside(&path, found)? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// A relative path made only of names: no root, no drive, no `.` or `..`.

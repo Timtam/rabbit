@@ -802,7 +802,8 @@ user can finish the install by pressing Next a few times.
      key in all six locales. A group without rows isn't shown, and the
      Uninstall tab uses the same groups. Packages contains REAPER, OSARA,
      SWS, ReaPack, ReaKontrol, FFmpeg (Windows only) and JAWS scripts
-     (Windows only); Instruments contains Surge XT; Tools contains
+     (Windows only); Instruments contains Surge XT and Lo-lo's LJuno-116,
+     LB-303, LR-608 and LSampler-24 (those four Windows only); Tools contains
      app2clap and LReaParams (both Windows only); Language packs contains
      REAPER's translations. Each row reads as plain text "OSARA — installed
      2024.3.6, latest 2026.2.16, will update". Configuration contains
@@ -1219,6 +1220,7 @@ should rely on. Detection must be package-specific and confidence-scored.
 | ReaPack | RABBIT receipt; Windows PE `ProductVersion`; ReaPack self-entry in `ReaPack/registry.db` after first launch | presence of `reaper_reapack*` | The registry DB may not exist until ReaPack has run inside REAPER. |
 | ReaKontrol | RABBIT receipt after RABBIT-managed install | best-effort binary metadata if available; presence of `reaper_kontrol*` | No installer or registry-based detector is expected; validate binary metadata quality during implementation. |
 | LReaParams | RABBIT receipt; ReaPack registry if installed by ReaPack | presence of `reaper_lreaparams*.dll`, version unknown | The DLL has no version resource. A copy ReaPack manages is left to ReaPack (`leave_to_reapack`). |
+| Lo-lo's instruments | RABBIT receipt, while the bundle folder and its binary are still real | the `<Product>.vst3` bundle in `UserPlugins/FX` with its binary `Contents/x86_64-win/<Product>.vst3`, version from the binary's version resource, else unknown | JUCE should write the version resource from the project version, which matches the release tag; the hardware pass confirms it. Without one the version is unknown. A link, or a file named like the bundle, is never the package (`plugin_bundle` detector). |
 | FFmpeg | RABBIT receipt after RABBIT-managed install; `ffmpeg.exe -version` parsed from stdout's first line | StringFileInfo `ProductVersion` of an FFmpeg executable (only present when a vendor patches it in); libavformat-major filename heuristic (`avformat-62.dll` → FFmpeg 8.0.0, mapped via `lib_major - 54`) | Vanilla FFmpeg attaches only a manifest to its binaries; `VS_FIXEDFILEINFO` of `ffmpeg.exe` carries libavutil's version, not the FFmpeg release. Spawning `ffmpeg.exe -version` is the only reliable vendor-independent way to recover the patch level for an externally-installed copy; the libavformat-major fallback recovers only the major when no executable is present. |
 | Surge XT | RABBIT receipt after RABBIT-managed install (records the `NIGHTLY-YYYY-MM-DD-sha` token verbatim) | `read_file_version_parts` on the system VST3 bundle — Windows PE `VERSIONINFO` of `Contents\x86_64-win\Surge XT.vst3` inside `<CommonProgramFiles>\VST3\Surge Synth Team\Surge XT.vst3\`; macOS `CFBundleShortVersionString` of `/Library/Audio/Plug-Ins/VST3/Surge XT.vst3/Contents/Info.plist` | The vendor-installed binary still carries the most recent *stable* semver (e.g. `1.3.4`) — Surge XT doesn't stamp nightlies with their date+sha. Receipt-driven detection produces the exact nightly token; the file-metadata fallback reports the stable semver, which compares lower than any `NIGHTLY-…` under `Version::cmp_lenient` so the planner naturally schedules an Update. On macOS a VST3 bundle whose version can't be read still counts as installed, with no version and low confidence: the uninstall deletes that bundle last with `rm -R`, which may take its `Info.plist` before it stops, so a removal stopped there leaves Surge XT detected and offered again. On Windows a bundle without a version is still not detected. |
 | ReaPack packages | `ReaPack/registry.db` table `entries.version` | none | This is the best source for packages ReaPack knows about. |
@@ -1362,9 +1364,106 @@ three are inside the resource folder, so they need no administrator rights,
 work for a portable REAPER, are recorded in the receipt relative to it, and
 are backed up in a set at their own relative path. app2clap installs into
 `user_plugins_fx`; no package installs into the CLAP folder any more. Other
-plug-ins share `UserPlugins/FX`, and a later package may put whole bundle
-folders there, so a file in it is a package's only by its receipt or its
-plug-in names, never because of where it is.
+plug-ins share `UserPlugins/FX`, and Lo-lo's instruments put whole bundle
+folders there, so a file in it is a package's only by its receipt, its
+plug-in names or its bundle, never because of where it is.
+
+A package whose release archive holds a plug-in bundle, a folder such as a
+VST3's `LJuno-116.vst3` with the binary and its resources at fixed places
+inside it, names it with `plugin_bundle`: the folder's `name` and its
+`binary`, the binary's path inside it with `/` between the folders
+(`Contents/x86_64-win/LJuno-116.vst3`). Its one install step is
+`copy_plugin_bundle`, its detectors include `plugin_bundle`, every download
+is an archive, nothing renames it, and it installs into a folder inside the
+resource folder; the manifest check refuses anything else.
+
+- Extraction (`extract_plugin_bundle_from_archive`) takes the bundle folder
+  from the top of the archive, found ignoring ASCII case, keeps the paths
+  inside it, and ignores everything else. Every entry of the archive is
+  checked before anything is written, and the whole archive is refused for
+  a link (by its Unix mode or Windows' reparse-point attribute), a name that
+  is absolute, has a drive, a UNC prefix or a stream (any `:`), an empty
+  folder name, `.` or `..`, a name Windows can't open as written
+  (reserved or control characters, a trailing dot or space, a device name),
+  or a name ending in `.rabbit-tmp` or `.rabbit-restore-tmp`, ignoring case,
+  which an install's or a restore's checked copy takes while it waits
+  beside its place: such an entry could slip unchecked bytes into another
+  file's place. `\` counts as a separator, as some Windows tools write it.
+  Inside the bundle, two files whose paths differ only in case, or a file
+  where another one's folder is, refuse it too, and so does an archive
+  without the bundle folder and its binary.
+- Install checks every place a file goes to first, from the resource folder
+  down: a symbolic link or junction at the place or at a folder on the way,
+  `UserPlugins` and `UserPlugins/FX` included, a file where the bundle needs
+  a folder, or a folder where it needs a file refuses the install before
+  anything is written, in a dry run too. Then, as for every package RABBIT
+  installs file by file, FFmpeg's libraries too, the install goes in three
+  steps (`put_files_in_place`):
+  1. Every file that changes is staged beside its place as
+     `<name>.rabbit-tmp` and checked against its hash.
+  2. Every file they replace is copied into the update's set.
+  3. Each staged copy is renamed over its place, the binary last.
+
+  A failure in the first two steps changes nothing: the staged copies, the
+  folders staging made and the package's copies in the set go again. On
+  Windows the rename replaces the file there in one step, so no place is
+  ever empty; only when that rename fails is the file removed first and the
+  rename tried again, which is how macOS always does it. Should a file fail
+  to go into its place, such as a binary Windows won't replace while REAPER
+  or a plug-in scanner has it loaded, the files that went in before it go
+  back as they were, last first: each replaced file from its copy in the
+  set, through a checked copy beside its place, and each new file is
+  removed, with the folders staging made. Once every one is back, the
+  package's copies and record leave the set again, so the bundle, the
+  receipt and the set all still say the earlier version; a file that
+  couldn't be put back keeps its copy in the set, which a restore brings
+  back. Only a crash can leave a mixed bundle: because the binary goes
+  last, a REAPER that scans the bundle then finds the binary of the version
+  before (with some of the new resources beside it), or no binary at all
+  on a first install. The receipt is saved only after the whole run, so it
+  still lists the earlier version's files, detection reads the bundle as
+  not matching it, and the next run offers the update again. The receipt
+  lists every file by its path below the resource folder, such as
+  `UserPlugins/FX/LJuno-116.vst3/Contents/x86_64-win/LJuno-116.vst3`, and
+  the update's set holds each copy at the same relative path.
+- An update moves the files only the earlier version had into its set, as
+  for any package, and removes each folder inside the install folder that
+  those moves leave empty, up to the install folder itself, never a link.
+  Going back to the earlier version from that set does the same for the
+  files only the newer version had, so the earlier bundle comes back
+  exactly, folders included. A restore of any set puts a bundle's binary
+  back after every other file of it, as the install does, so a crash
+  partway leaves the binary that was there with part of the other
+  version's files beside it, never the restored binary beside part of its
+  own.
+- A bundle's file is never reached through a symbolic link or junction
+  anywhere below the resource folder, also after the install: a restore
+  refuses such a place (`ThroughLink`), so does going back, an update
+  leaves a file of the version before that is only reached through one
+  where it is, and an uninstall refuses the package
+  (`PathRefusal::ThroughLink`). Through a link inside one bundle, any of
+  them could otherwise write or move another bundle's files.
+- Detection (`plugin_bundle_binary`) finds the bundle folder in the install
+  folder only while it, and every folder on the way to the binary, is a real
+  folder and the binary a real file: a link there, a file named like the
+  bundle, or a bundle without its binary isn't the package. A receipt whose
+  files match still needs that, or it counts as not matching. The version
+  comes from the receipt, else from the binary's version resource
+  (`file_version_metadata`), else it is unknown.
+- Uninstall is `remove_files` with `receipt_files` and, in
+  `trees_if_empty`, the bundle folder: after the files, each folder in it
+  goes once it is empty, innermost first, and the bundle folder last. The
+  binary goes first, so a crash partway never leaves it beside part of its
+  files. A file left in the bundle keeps the folders on its way, and a link
+  anywhere in it keeps the whole folder as it is. Nothing else in the
+  install folder is ever a candidate: a bundle package has no plug-in
+  names. Only the receipt says which files in the bundle are the
+  package's, so the package sets `requires_receipt`: a copy without one,
+  placed by hand or left by a first install that crashed before the
+  receipt was saved, can't be removed, and an install over it adopts it.
+  The manifest check refuses a bundle package without `requires_receipt`,
+  and a `remove_files` plan without `receipt_files` or without the bundle
+  folder, `{resource}/<install folder>/<name>`, in its `trees_if_empty`.
 
 A package that moved names where it installed before in
 `former_install_destinations`, as app2clap names `windows_clap_dir`.
@@ -1420,11 +1519,13 @@ administrator rights never go into the user's backups, and no path may reach
 into `{resource}/RABBIT`. `rabbit uninstall` carries out `remove_files`
 and `vendor_uninstaller` plans (see Safety Behavior), and so does the wizard's
 Uninstall tab. OSARA, SWS, ReaPack, ReaKontrol, FFmpeg, app2clap,
-LReaParams, the JAWS scripts and the language packs have `remove_files`
-plans. FFmpeg and the language packs set `requires_receipt`, because a copy
-RABBIT has no receipt for is most likely the user's own; the others name
-their files, so a copy without a receipt can go too, unless ReaPack still
-manages it. OSARA's
+LReaParams, Lo-lo's instruments, the JAWS scripts and the language packs
+have `remove_files` plans. FFmpeg, the language packs and Lo-lo's
+instruments set `requires_receipt`: a copy of FFmpeg or of a language pack
+RABBIT has no receipt for is most likely the user's own, and only the
+receipt says which files in an instrument's bundle are its own. The others
+name their files, so a copy without a receipt can go too, unless ReaPack
+still manages it. OSARA's
 Windows plan also has a `registry_cleanup` entry: once the files are gone,
 the engine removes `HKCU\...\Uninstall\OSARA`, but only while its
 `UninstallString` names a program directly in this resource folder's `osara`
@@ -1765,6 +1866,44 @@ strategies:
   - the uninstall removes the DLL and keeps `{resource}/LReaParams`, with
     LReaParams' settings, `.fx` and `.tp` profiles and the guide its own
     installer puts there, unless "Also remove settings" is ticked.
+- Lo-lo's instruments, LJuno-116 (polyphonic synthesizer), LB-303 (bass
+  synthesizer with a step sequencer), LR-608 (drum machine) and
+  LSampler-24 (24-slot sampler) (Windows only, opt-in, under Instruments):
+  - latest-version + artifact provider: the `/releases/latest` of
+    `Lo-lo78/<Product>` on GitHub. The version is the tag without its `v`
+    (`v0.99.66` is 0.99.66). Each release has one zip, named by hand and
+    not always the same way, so the asset is matched by the product's name
+    at its start and `.zip` at its end, ignoring case (the selector's
+    `ignore_case`): `LJuno-116.0.99.66.vst3.zip`, `LB-303.0.99.7.VST3.zip`,
+    and earlier `LJuno-116-Windows-VST3.zip`. A zip without the bundle
+    folder and its binary installs nothing. What's New is the releases' own
+    notes.
+  - the zip holds the JUCE build's whole `<Product>.vst3` folder, made by
+    PowerShell's `Compress-Archive`: the binary at
+    `Contents/x86_64-win/<Product>.vst3`, JUCE's `desktop.ini` and
+    `Plugin.ico`, and maybe `Contents/Resources`. RABBIT installs it as a
+    plug-in bundle (see Package Model) into `user_plugins_fx`, REAPER's own
+    plug-in folder, without administrator rights and for a portable REAPER
+    too. REAPER names `<resource>\UserPlugins\FX` beside its VST scan
+    code and scans it for CLAP; the hardware pass confirms that it finds a
+    VST3 bundle there after its next start or a plug-in rescan.
+  - x64 plug-ins, offered for x64 and, on Windows on ARM, for `arm64` and
+    `arm64-ec`, as LReaParams: REAPER's ARM64EC build loads x64 plug-ins.
+    The hardware pass confirms it for these VST3 bundles, whose only binary
+    is in `x86_64-win`. Never for x86 or macOS.
+  - detection looks only in `UserPlugins/FX`. A copy the user put into
+    `<CommonProgramFiles>\VST3` by hand isn't seen, and REAPER would load
+    both, so each description asks the user to remove such a copy.
+  - the uninstall needs a receipt (`requires_receipt`), takes the receipt's
+    files and the emptied bundle folder, and keeps each instrument's own
+    data, which its project names:
+    `{documents}/LJuno-116`, `{documents}/LB-303` and `{documents}/LR-608`
+    (presets and kits), `{documents}/LSampler-24` (the sample library, its
+    slots and banks) and `{appdata}/Lo-lo78/LSampler-24` (audio it
+    extracted from videos and multichannel files). They are in the plan's
+    `keep` as well as `kept_user_data`, so "Also remove settings" never
+    takes them: they are the user's music rather than settings, and a
+    sample library can be large.
 
 ## Configuration Steps
 
@@ -2000,7 +2139,9 @@ Extension files:
   entry whose copy doesn't come back is left out and never refused, since
   nothing is written for it.
 - An update keeps the version it replaces whole in its set. Each file it
-  replaces is copied in just before the new file takes its place. Each
+  replaces is copied in once every new file is staged and checked, before
+  the first one takes its place, and a file that then fails to go in puts
+  the package back as it was (see Package Model). Each
   file the package's previous receipt entry lists that the new version
   doesn't install, such as FFmpeg's libraries after they were renamed, or
   the Spanish language pack's old name after a switch from es_ES to es_MX,

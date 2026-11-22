@@ -1182,7 +1182,7 @@ fn execute_operation_with(
                     status: PackageOperationStatus::InstalledOrChecked,
                     artifact: cached.descriptor.clone(),
                     cached_artifact: Some(cached.clone()),
-                    install_action: report.actions.first().cloned(),
+                    install_action: package_install_action(&report, &cached.descriptor),
                     backup_paths: Vec::new(),
                     backup_manifest_path: None,
                     planned_execution: None,
@@ -1224,6 +1224,25 @@ fn execute_operation_with(
         receipt_backup_manifest_path: None,
         items,
     })
+}
+
+/// The install action that stands for the package in its item: its first
+/// file's, or for a plug-in bundle its binary's, which goes in after every
+/// other file of the bundle. The files of its previous version that moved
+/// out come after its own actions (see `crate::install`), and never stand
+/// for it.
+pub(crate) fn package_install_action(
+    report: &InstallReport,
+    artifact: &ArtifactDescriptor,
+) -> Option<InstallFileReport> {
+    let mut own = report
+        .actions
+        .iter()
+        .filter(|action| !action.action.is_superseded_file());
+    let bundle = package_specs_by_id(platform_of(artifact))
+        .get(&artifact.package_id)
+        .is_some_and(|spec| spec.plugin_bundle.is_some());
+    if bundle { own.next_back() } else { own.next() }.cloned()
 }
 
 /// The platform an artifact descriptor was resolved for.

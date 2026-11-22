@@ -13,7 +13,7 @@ use crate::error::{IoPathContext, JsonPathContext, RabbitError, Result};
 use crate::hash::sha256_file;
 use crate::keymap_scripts::{keymap_with_scripts_kept, scripts_to_keep};
 use crate::model::{InstallationKind, Platform};
-use crate::package::PackageSpec;
+use crate::package::{PackageSpec, plugin_bundle_of};
 use crate::preflight::{
     BACKUP_FOLDER_CHECK, PreflightCheck, PreflightOptions, PreflightReport, PreflightStatus,
     REAPER_PROCESS_CHECK, RunningProcess, is_one_of, run_restore_preflight_with_processes,
@@ -1046,28 +1046,9 @@ impl BackupSetWriter {
             return false;
         }
         let set_path = self.set_path.clone();
-        self.manifest.files.retain(|entry| {
-            // The writer made every copy path inside its own new folder.
-            // The origin note is beside the copy, so one check covers both.
-            let Ok(relative) = entry.backup_path.strip_prefix(&set_path) else {
-                return true;
-            };
-            if check_no_link_in_set(&set_path, relative).is_err() {
-                return true;
-            }
-            if entry.original_path.is_absolute()
-                && let Some(name) = entry.backup_path.file_name()
-            {
-                let mut note = name.to_os_string();
-                note.push(ORIGIN_SIDECAR_SUFFIX);
-                let _ = fs::remove_file(entry.backup_path.with_file_name(note));
-            }
-            match fs::symlink_metadata(&entry.backup_path) {
-                Ok(metadata) if metadata.is_file() => fs::remove_file(&entry.backup_path).is_err(),
-                Ok(_) => true,
-                Err(_) => false,
-            }
-        });
+        self.manifest
+            .files
+            .retain(|entry| !remove_copy(&set_path, entry));
         if !self.manifest.files.is_empty() {
             let _ = self.save();
             return false;
@@ -1075,6 +1056,45 @@ impl BackupSetWriter {
         self.manifest.packages.clear();
         self.manifest.replaced.clear();
         self.discard_if_empty()
+    }
+
+    /// Take `package_id` out of the set again after every file of it that
+    /// the set copied in is back where it came from, as an update that
+    /// failed partway leaves it: each copy is then the same as the file on
+    /// disk. Each of its copies goes as [`Self::discard_copies`] removes
+    /// one, with the folders in the set it leaves empty, and then the
+    /// record of what replaced it, unless a copy stays. Other packages'
+    /// files and records stay; a set left with nothing goes. Best effort.
+    pub(crate) fn discard_package_copies(&mut self, package_id: &str) {
+        if !self.started || self.planning {
+            return;
+        }
+        if check_backups_folder_is_real(&self.resource_path).is_err()
+            || !matches!(is_real_folder(&self.set_path), Ok(true))
+        {
+            return;
+        }
+        let set_path = self.set_path.clone();
+        self.manifest.files.retain(|entry| {
+            if entry.package_id.as_deref() != Some(package_id) {
+                return true;
+            }
+            let removed = remove_copy(&set_path, entry);
+            if removed {
+                remove_empty_parents(&entry.backup_path, &set_path);
+            }
+            !removed
+        });
+        let holds_copy = self
+            .manifest
+            .files
+            .iter()
+            .any(|entry| entry.package_id.as_deref() == Some(package_id));
+        if !holds_copy {
+            self.manifest.replaced.remove(package_id);
+        }
+        let _ = self.save();
+        self.discard_if_empty();
     }
 
     /// Copy `original` into the set and return where the copy is. The
@@ -4726,6 +4746,17 @@ fn run_planned_restore(
                 // A set that got the entry and no file holds nothing to go
                 // back to, and goes again.
                 backups.forget_replaced_without_entry(&swap.package_id);
+                // The folders of a plug-in bundle that only the newer
+                // version had are empty now, and go too.
+                crate::install::remove_emptied_bundle_folders(
+                    resource_path,
+                    &swap.package_id,
+                    swap.report
+                        .moved_out
+                        .iter()
+                        .filter(|file| file.action == MoveOutAction::MovedOut)
+                        .map(|file| file.path.as_path()),
+                );
             }
             // The writer makes the set with the first file, or the first
             // record of a swap, that goes in, and may have named it
@@ -5913,6 +5944,20 @@ fn plan_restore_from_manifest(
             is_keymap: is_keymap_entry(resource_path, entry),
         });
     }
+    // A plug-in bundle's binary comes back after every other file of the
+    // set, as an install puts it in last: a REAPER that scans the bundle
+    // while the restore runs, or after it stopped halfway, finds the binary
+    // that was there before, not the earlier one beside part of its files.
+    plan.files.sort_by_key(|file| {
+        file.package_id
+            .as_deref()
+            .and_then(plugin_bundle_of)
+            .is_some_and(|(destination, bundle)| {
+                destination
+                    .folder_in(resource_path)
+                    .is_some_and(|folder| bundle.is_binary_in(&folder, &file.target_path))
+            })
+    });
     Ok(plan)
 }
 
@@ -6074,6 +6119,9 @@ fn restore_target(
     {
         let target = inside_place_by_text(resource_path, &relative).map_err(refuse)?;
         check_stays_in_resource_folder(resource_path, &relative).map_err(refuse)?;
+        if package_id.is_some_and(|package_id| plugin_bundle_of(package_id).is_some()) {
+            check_reached_without_links(resource_path, &relative).map_err(refuse)?;
+        }
         return Ok(target);
     }
 
@@ -6241,7 +6289,8 @@ fn inside_resource_folder(
 /// inside the resource folder's real path and outside RABBIT's folder,
 /// however that is spelt or reached. A link further up is allowed as long
 /// as that holds, so `UserPlugins` may be a link to another folder inside
-/// the resource folder, but never to `RABBIT` or outside it. A resource
+/// the resource folder, but never to `RABBIT` or outside it; a plug-in
+/// bundle's file allows none (see [`check_reached_without_links`]). A resource
 /// folder that isn't there has nothing in it to follow. The error says
 /// which failed.
 fn check_stays_in_resource_folder(
@@ -6283,6 +6332,36 @@ fn check_stays_in_resource_folder(
         || linked_rabbit.is_some_and(|linked| inside_or_same(&real, &linked))
     {
         return Err(TargetRefusal::LeadsIntoRabbitFolder);
+    }
+    Ok(())
+}
+
+/// Refuse a place of a plug-in bundle's file, `relative` below the
+/// resource folder, that a symbolic link or junction on the way from there
+/// leads to, however far up and wherever it leads: an install never puts a
+/// bundle's file through one (see `crate::install`), and through one a
+/// restore, an update or going back could reach into another bundle. The
+/// place itself being one is [`check_stays_in_resource_folder`]'s to
+/// refuse.
+fn check_reached_without_links(
+    resource_path: &Path,
+    relative: &Path,
+) -> std::result::Result<(), TargetRefusal> {
+    let mut current = resource_path.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        if components.peek().is_none() {
+            break;
+        }
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(TargetRefusal::ThroughLink { link: current });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(could_not_check(&current, &error)),
+        }
     }
     Ok(())
 }
@@ -6753,6 +6832,32 @@ pub(crate) mod restore_seam {
             Some(hook) => hook(step, path),
             None => Ok(()),
         })
+    }
+}
+
+/// Remove the copy of `entry` from the set at `set_path`, with the origin
+/// note of an outside file, without following a symbolic link or junction
+/// in the set. Returns whether the copy is gone, or was never there.
+fn remove_copy(set_path: &Path, entry: &BackupManifestFile) -> bool {
+    // The writer made every copy path inside its own new folder. The
+    // origin note is beside the copy, so one check covers both.
+    let Ok(relative) = entry.backup_path.strip_prefix(set_path) else {
+        return false;
+    };
+    if check_no_link_in_set(set_path, relative).is_err() {
+        return false;
+    }
+    if entry.original_path.is_absolute()
+        && let Some(name) = entry.backup_path.file_name()
+    {
+        let mut note = name.to_os_string();
+        note.push(ORIGIN_SIDECAR_SUFFIX);
+        let _ = fs::remove_file(entry.backup_path.with_file_name(note));
+    }
+    match fs::symlink_metadata(&entry.backup_path) {
+        Ok(metadata) if metadata.is_file() => fs::remove_file(&entry.backup_path).is_ok(),
+        Ok(_) => false,
+        Err(_) => true,
     }
 }
 

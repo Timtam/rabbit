@@ -54,9 +54,10 @@ use crate::package::uninstall::{
     UninstallPath, UninstallPostStep, UninstallStrategy, VendorUninstallerKind,
 };
 use crate::package::{
-    PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_JAWS_SCRIPTS, PACKAGE_LREAPARAMS, PACKAGE_OSARA,
-    PACKAGE_REAKONTROL, PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS,
-    PackageSpec, builtin_package_specs, embedded_package_manifest, validate_package_spec,
+    PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_JAWS_SCRIPTS, PACKAGE_LB_303, PACKAGE_LJUNO_116,
+    PACKAGE_LR_608, PACKAGE_LREAPARAMS, PACKAGE_LSAMPLER_24, PACKAGE_OSARA, PACKAGE_REAKONTROL,
+    PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS, PackageSpec,
+    builtin_package_specs, embedded_package_manifest, validate_package_spec,
 };
 use crate::preflight::{MACOS_REAPER_PROCESS_NAMES, RunningProcess};
 use crate::progress::ProgressReporter;
@@ -285,6 +286,10 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
                 (PACKAGE_SURGE_XT, vendor),
                 (PACKAGE_APP2CLAP, remove_files),
                 (PACKAGE_LREAPARAMS, remove_files),
+                (PACKAGE_LJUNO_116, remove_files),
+                (PACKAGE_LB_303, remove_files),
+                (PACKAGE_LR_608, remove_files),
+                (PACKAGE_LSAMPLER_24, remove_files),
                 (LANGPACK_ES, remove_files),
                 (LANGPACK_DE, remove_files),
                 (LANGPACK_FR, remove_files),
@@ -296,7 +301,8 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
             // The JAWS scripts and Surge XT serve the whole computer, so a
             // portable target can't remove them: each has a removal only
             // the standard REAPER can reach. app2clap lives in REAPER's own
-            // UserPlugins\FX folder, so a portable REAPER removes its own.
+            // UserPlugins\FX folder, so a portable REAPER removes its own,
+            // as do Lo-lo's instruments.
             &[
                 (PACKAGE_REAPER, manual),
                 (PACKAGE_OSARA, remove_files),
@@ -308,6 +314,10 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
                 (PACKAGE_SURGE_XT, None),
                 (PACKAGE_APP2CLAP, remove_files),
                 (PACKAGE_LREAPARAMS, remove_files),
+                (PACKAGE_LJUNO_116, remove_files),
+                (PACKAGE_LB_303, remove_files),
+                (PACKAGE_LR_608, remove_files),
+                (PACKAGE_LSAMPLER_24, remove_files),
                 (LANGPACK_ES, remove_files),
                 (LANGPACK_DE, remove_files),
                 (LANGPACK_FR, remove_files),
@@ -1050,6 +1060,94 @@ fn app2clap_removes_an_older_copy_from_the_clap_folder_on_a_standard_target() {
     assert!(!app2clap.every_reaper_closed);
     assert!(!app2clap.warnings.contains(&UninstallWarning::MachineWide));
     assert!(older.is_file() && other.is_file());
+}
+
+/// Each of Lo-lo's instruments removes the files its receipt lists in its
+/// bundle, the binary first, then the bundle's folder with every folder in
+/// it once they are empty, and nothing else in UserPlugins\FX. Its presets
+/// stay, even with "Also remove settings". A copy without a receipt is
+/// refused: RABBIT can't tell the bundle's files from anything else in it.
+/// A symbolic link or junction on the way to a file of the bundle refuses
+/// the package too: RABBIT never reaches a bundle's file through one.
+#[test]
+fn lolo_instruments_remove_their_bundle_by_its_receipt_alone() {
+    let mut fixture = Fixture::new();
+    let documents = fixture.dir.path().join("Documents");
+    fixture.roots.documents = Some(documents.clone());
+    fixture.roots.appdata = Some(fixture.dir.path().join("AppData"));
+    let files = [
+        "UserPlugins/FX/LJuno-116.vst3/Contents/Resources/moduleinfo.json",
+        "UserPlugins/FX/LJuno-116.vst3/Contents/x86_64-win/LJuno-116.vst3",
+        "UserPlugins/FX/LJuno-116.vst3/desktop.ini",
+    ];
+    let paths: Vec<PathBuf> = files.iter().map(|file| fixture.file(file)).collect();
+    let binary = paths[1].clone();
+    let other = fixture.file("UserPlugins/FX/Other.vst3/Contents/x86_64-win/Other.vst3");
+    let presets = documents.join("LJuno-116");
+    write(&presets.join("Mine.Ljuno"), b"my preset");
+    let state = receipt(&fixture, &[(PACKAGE_LJUNO_116, &files)]);
+    let bundle = fixture
+        .resource
+        .join("UserPlugins")
+        .join("FX")
+        .join("LJuno-116.vst3");
+    let shipped = Shipped::new(&fixture, Platform::Windows);
+
+    for remove_settings in [false, true] {
+        let plan = shipped.plan_with(
+            &installed(&[PACKAGE_LJUNO_116]),
+            Some(&state),
+            InstallationKind::Standard,
+            remove_settings,
+        );
+        let ljuno = item(&plan, PACKAGE_LJUNO_116);
+        assert_eq!(ljuno.removability, Removability::Removable);
+        assert_eq!(removed(ljuno), sorted(paths.clone()));
+        assert_eq!(ljuno.files[0].path, binary, "the binary goes first");
+        assert!(
+            ljuno
+                .files
+                .iter()
+                .all(|file| file.reason == RemovalReason::Receipt)
+        );
+        assert!(!removed(ljuno).contains(&other));
+        assert!(ljuno.dirs_if_empty.contains(&bundle));
+        assert!(
+            ljuno
+                .dirs_if_empty
+                .iter()
+                .all(|folder| folder.starts_with(&bundle)),
+            "{:?}",
+            ljuno.dirs_if_empty
+        );
+        let kept = ljuno
+            .kept
+            .iter()
+            .find(|kept| kept.path == presets)
+            .unwrap_or_else(|| panic!("{:?}", ljuno.kept));
+        assert!(kept.exists && !kept.removable_with_settings, "{kept:?}");
+    }
+
+    let plan = shipped.plan(&installed(&[PACKAGE_LJUNO_116]), None);
+    let ljuno = item(&plan, PACKAGE_LJUNO_116);
+    assert_eq!(ljuno.removability, Removability::NoReceipt);
+    assert!(ljuno.removability.is_blocked());
+    assert!(ljuno.files.is_empty() && ljuno.dirs_if_empty.is_empty());
+
+    let resources = bundle.join("Contents").join("Resources");
+    let elsewhere = fixture.dir.path().join("Elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::rename(&paths[0], elsewhere.join("moduleinfo.json")).unwrap();
+    fs::remove_dir(&resources).unwrap();
+    link_folder(&resources, &elsewhere);
+    let plan = shipped.plan(&installed(&[PACKAGE_LJUNO_116]), Some(&state));
+    assert_eq!(
+        item(&plan, PACKAGE_LJUNO_116).removability,
+        Removability::UnsafePath {
+            path: paths[0].clone(),
+            refusal: PathRefusal::ThroughLink,
+        }
+    );
 }
 
 /// Each language pack removes the one file its receipt names, whichever

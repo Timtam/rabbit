@@ -36,6 +36,31 @@ RABBIT installs and keeps up to date:
   fixed system paths outside any portable REAPER folder. On Windows, close
   Surge XT before you install or update it: RABBIT doesn't start its
   installer while Surge XT is open, and says so.
+- **Lo-lo's instruments** *(Windows only, opt-in)* — four VST3 instruments
+  by Lo-lo, made to be played and edited with a screen reader:
+  [LJuno-116](https://github.com/Lo-lo78/LJuno-116), a polyphonic
+  synthesizer; [LB-303](https://github.com/Lo-lo78/LB-303), a bassline
+  synthesizer with a step sequencer;
+  [LR-608](https://github.com/Lo-lo78/LR-608), a drum machine that
+  synthesizes its sounds; and
+  [LSampler-24](https://github.com/Lo-lo78/LSampler-24), a sampler with 24
+  slots for your own samples. RABBIT downloads each one's latest GitHub
+  release and installs its whole `.vst3` bundle folder, such as
+  `LJuno-116.vst3`, into `UserPlugins\FX` in REAPER's resource folder,
+  REAPER's own plug-in folder, with no administrator rights needed, so it
+  works with a portable REAPER too. REAPER finds a new instrument after its
+  next start, or after a rescan of its plug-ins in its preferences. If you
+  copied one into `C:\Program Files\Common Files\VST3` yourself, remove that
+  copy, so REAPER doesn't find the instrument twice; RABBIT doesn't look
+  there. They are 64-bit plug-ins, so they are for a 64-bit REAPER,
+  REAPER's ARM64EC build on Windows on ARM included. An update replaces the
+  files of the bundle that changed and moves the ones the new version no
+  longer has into the update's backup, and an uninstall removes the
+  bundle's files and then its folder. RABBIT uninstalls only a copy it
+  installed, or installed over. Your presets and samples stay: LJuno-116's, LB-303's and LR-608's in the
+  folder of their name in your Documents, and LSampler-24's library in
+  `Documents\LSampler-24` and the audio it extracted in
+  `%APPDATA%\Lo-lo78\LSampler-24`, even with **Also remove settings**.
 - **app2clap** *(Windows only, opt-in)* —
   [app2clap](https://app2clap.jantrid.net/), a CLAP plugin by Jamie Teh
   (jcsteh, of OSARA/NVDA fame) that captures audio from other applications
@@ -88,9 +113,10 @@ RABBIT installs and keeps up to date:
   the `LReaParams` folder of REAPER's resource folder, and an uninstall keeps
   them unless you ask for settings to go too.
 
-The wizard's package list shows Surge XT under **Instruments** and app2clap
-and LReaParams under **Tools**, after the main **Packages** group and before
-**Language packs**; the Uninstall tab uses the same groups. Surge XT is
+The wizard's package list shows Surge XT, LJuno-116, LB-303, LR-608 and
+LSampler-24 under **Instruments** and app2clap and LReaParams under
+**Tools**, after the main **Packages** group and before **Language packs**;
+the Uninstall tab uses the same groups. Surge XT is
 disabled on portable REAPER targets, since it installs to fixed system
 locations rather than into the portable REAPER folder.
 
@@ -280,20 +306,23 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
   anywhere on the page, the arrow keys while the tabs have focus, or
   VoiceOver's own navigation of the tab group. VoiceOver mentions Ctrl+Tab
   the first time the page opens.
-- **What RABBIT can remove:** OSARA, SWS, ReaPack, ReaKontrol, FFmpeg,
-  app2clap, LReaParams and the JAWS scripts (all four Windows only), the
-  language packs, Surge XT and REAPER (see below). On Windows that means a
-  standard REAPER; on a Mac, the REAPER app of a standard or a portable
-  REAPER. Every other installed package is listed too, with the reason it
-  can't be ticked, such as an LReaParams that ReaPack manages.
+- **What RABBIT can remove:** OSARA, SWS, ReaPack, ReaKontrol, the
+  language packs, Surge XT and REAPER (see below), and on Windows also
+  FFmpeg, app2clap, LReaParams, Lo-lo's four instruments and the JAWS
+  scripts. For REAPER, on Windows that means a standard REAPER; on a Mac,
+  the REAPER app of a standard or a portable REAPER. Every other installed
+  package is listed too, with the reason it can't be ticked, such as an
+  LReaParams that ReaPack manages, or a copy of one of Lo-lo's instruments
+  that RABBIT didn't install.
 - **What is kept:** your settings, such as SWS's grooves, ReaPack's
   repositories, ReaKontrol's FX maps and LReaParams' settings and profiles,
   unless you tick **Also remove settings** below the list. `reaper.ini`,
   `reaper-kb.ini`, your key maps and everything ReaPack installed always
   stay, and so do the key map backups OSARA made and OSARA's settings, which
-  live in `reaper-extstate.ini` beside every other extension's. Script files
-  of the JAWS scripts that RABBIT can't be sure the installer added, and
-  those changed since, always stay too.
+  live in `reaper-extstate.ini` beside every other extension's, and the
+  presets and samples of Lo-lo's instruments. Script files of the JAWS
+  scripts that RABBIT can't be sure the installer added, and those changed
+  since, always stay too.
   Everything that goes, settings removed with that option included, moves
   into a backup set under `RABBIT\backups` rather than being deleted, and
   stays there until you delete the backup. Surge XT and REAPER are the
@@ -441,8 +470,9 @@ ticked. The rows come in up to four groups:
   in the CLAP folder, where earlier versions of RABBIT installed it. RABBIT moves
   those into the backup instead of deleting them, so the earlier version
   stays whole. Only updates RABBIT installs file by file keep them:
-  ReaPack, ReaKontrol, FFmpeg, app2clap, LReaParams, the language packs, and
-  SWS on a Mac. A package's own installer, such as REAPER's, keeps none.
+  ReaPack, ReaKontrol, FFmpeg, app2clap, LReaParams, Lo-lo's instruments,
+  the language packs, and SWS on a Mac. A package's own installer, such as
+  REAPER's, keeps none.
 - **Key maps:** your key map from before OSARA's key map replaced it.
   Usually only the oldest is your own.
 - **Other backups:** what RABBIT can't restore here, such as the other
@@ -764,8 +794,9 @@ GITHUB_TOKEN="<your token>" /Applications/Rabbit.app/Contents/MacOS/rabbit   # m
 ### Uninstall
 
 `uninstall` removes packages RABBIT knows how to take off again: today OSARA,
-SWS, ReaPack, ReaKontrol, FFmpeg, app2clap, LReaParams and the JAWS scripts
-(all four Windows only), the language packs, Surge XT and REAPER. On Windows,
+SWS, ReaPack, ReaKontrol, the language packs, Surge XT and REAPER, and on
+Windows also FFmpeg, app2clap, LReaParams, Lo-lo's four instruments and the
+JAWS scripts. On Windows,
 Surge XT and a standard REAPER come off through their own uninstallers, and
 the JAWS scripts only from a standard REAPER. On a Mac, RABBIT deletes Surge
 XT for good and moves the REAPER app of a standard or a portable REAPER to
@@ -797,7 +828,10 @@ RABBIT uninstall --resource-path "$HOME/Library/Application Support/REAPER" \
   that belongs to another REAPER stays. The report says which. For the JAWS
   scripts, it is their two plug-in files and the script files RABBIT
   recorded their installer adding, each script file only while it still
-  holds what the installer wrote (see below).
+  holds what the installer wrote (see below). For one of Lo-lo's
+  instruments, it is the files of its `.vst3` bundle that RABBIT installed,
+  then the bundle's folder once it is empty; RABBIT doesn't remove a copy it
+  didn't install.
 - **What stays:** your settings, such as SWS's grooves and `S&M.ini`,
   ReaPack's repositories and its list of what it installed, ReaKontrol's FX
   maps, and the `LReaParams` folder with LReaParams' settings and profiles.
@@ -807,7 +841,9 @@ RABBIT uninstall --resource-path "$HOME/Library/Application Support/REAPER" \
   backups OSARA made, and OSARA's settings, which live in
   `reaper-extstate.ini` beside every other extension's. Script files of the
   JAWS scripts that RABBIT can't be sure the installer added, and those
-  changed since, stay too, even with `--remove-settings`.
+  changed since, stay too, even with `--remove-settings`. So do the presets
+  and samples of Lo-lo's instruments, in their folders in your Documents,
+  and the audio LSampler-24 extracted, in `%APPDATA%\Lo-lo78\LSampler-24`.
 - **Nothing is deleted for good,** except Surge XT, REAPER on Windows, and
   the JAWS scripts' uninstaller folder and registry entry (see below). A
   REAPER app on a Mac goes to the Trash. Other removed files move into a
@@ -1072,8 +1108,8 @@ or when the set's record of the earlier version is one RABBIT would never
 write, such as one that lists a file outside the folders it installs into.
 
 Only updates RABBIT installs file by file make such a backup: ReaPack,
-ReaKontrol, FFmpeg, app2clap, LReaParams, the language packs, and SWS on a
-Mac. REAPER, OSARA, SWS on Windows, Surge XT and the JAWS scripts are updated
+ReaKontrol, FFmpeg, app2clap, LReaParams, Lo-lo's instruments, the language
+packs, and SWS on a Mac. REAPER, OSARA, SWS on Windows, Surge XT and the JAWS scripts are updated
 by their own installers, or for OSARA on a Mac its own archive, which
 overwrite files with no backup, so they can't go back this way.
 

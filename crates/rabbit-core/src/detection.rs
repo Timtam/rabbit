@@ -252,7 +252,18 @@ pub(crate) fn detect_component_seeing(
     uninstall_display_version: fn(&str) -> Option<String>,
     former_outside: &dyn Fn(InstallDestination) -> Option<PathBuf>,
 ) -> Result<ComponentDetection> {
-    match verify_package_receipt(resource_path, state, &spec.id)? {
+    let verification = match verify_package_receipt(resource_path, state, &spec.id)? {
+        // A receipt's files are there, but the bundle isn't a real folder
+        // with its binary any more, such as one a link replaced.
+        ReceiptVerification::Verified(receipt)
+            if spec.plugin_bundle.is_some()
+                && plugin_bundle_binary(resource_path, spec).is_none() =>
+        {
+            ReceiptVerification::Mismatch(receipt)
+        }
+        verification => verification,
+    };
+    match verification {
         ReceiptVerification::Verified(receipt) => {
             let files = receipt
                 .installed_files
@@ -352,7 +363,9 @@ fn run_detector_probe(
     uninstall_display_version: fn(&str) -> Option<String>,
 ) -> Result<Option<ComponentDetection>> {
     let detection = match detector {
-        PackageDetector::RabbitReceipt | PackageDetector::UserPluginFile => None,
+        PackageDetector::RabbitReceipt
+        | PackageDetector::UserPluginFile
+        | PackageDetector::PluginBundle => None,
         PackageDetector::FileVersionMetadata => {
             let mut found = None;
             for file in files {
@@ -851,10 +864,43 @@ fn detected_user_plugin_files(
     former_outside: &dyn Fn(InstallDestination) -> Option<PathBuf>,
 ) -> Result<Vec<PathBuf>> {
     let mut files = matching_user_plugin_files(resource_path, platform, spec)?;
+    if spec.detectors.contains(&PackageDetector::PluginBundle) {
+        files.extend(plugin_bundle_binary(resource_path, spec));
+    }
     for folder in former_scan_dirs(resource_path, spec, former_outside) {
         files.extend(user_plugin_files_in(&folder, spec)?);
     }
     Ok(files)
+}
+
+/// The binary of `spec`'s plug-in bundle in its install folder (see
+/// [`crate::package::PluginBundleSpec`]), when the bundle's folder and each
+/// folder on the way to the binary is a real folder and the binary a real
+/// file. A symbolic link or junction anywhere there, a file named like the
+/// bundle, or a bundle without its binary isn't the package. `None` too for
+/// a package without a bundle.
+pub(crate) fn plugin_bundle_binary(resource_path: &Path, spec: &PackageSpec) -> Option<PathBuf> {
+    let bundle = spec.plugin_bundle.as_ref()?;
+    let real_folder = |path: &Path| {
+        fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+    };
+    let mut place = bundle.folder_in(&package_scan_dir(resource_path, spec)?);
+    if !real_folder(&place) {
+        return None;
+    }
+    let names: Vec<&str> = bundle.binary_components().collect();
+    let (binary, folders) = names.split_last()?;
+    for name in folders {
+        place.push(name);
+        if !real_folder(&place) {
+            return None;
+        }
+    }
+    place.push(binary);
+    fs::symlink_metadata(&place)
+        .is_ok_and(|metadata| metadata.is_file())
+        .then_some(place)
 }
 
 /// The files in `spec`'s install folder whose names match its plug-in
@@ -1674,6 +1720,102 @@ mod tests {
             &outside,
         )
         .unwrap()
+    }
+
+    /// Detect LJuno-116 in `resource` with `state`.
+    fn detect_ljuno(
+        resource: &std::path::Path,
+        state: Option<&crate::receipt::InstallState>,
+    ) -> crate::model::ComponentDetection {
+        let spec = package_specs_by_id(Platform::Windows)
+            .remove(crate::package::PACKAGE_LJUNO_116)
+            .unwrap();
+        super::detect_component_seeing(resource, Platform::Windows, &spec, state, |_| None, &|_| {
+            None
+        })
+        .unwrap()
+    }
+
+    /// LJuno-116 is its VST3 bundle in UserPlugins\FX: a real folder with
+    /// the binary inside it. Without a receipt it is found by that binary,
+    /// whose version resource gives no version here, so the version is
+    /// unknown; with one RABBIT wrote, the receipt gives it. A file named
+    /// like the bundle, a bundle without its binary, and a bundle reached
+    /// through a link aren't LJuno-116, receipt or not.
+    #[test]
+    fn ljuno_is_found_by_its_bundle_and_never_through_a_link() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let fx = resource.join("UserPlugins").join("FX");
+        let bundle = fx.join("LJuno-116.vst3");
+        let binary = bundle
+            .join("Contents")
+            .join("x86_64-win")
+            .join("LJuno-116.vst3");
+        fs::create_dir_all(&fx).unwrap();
+        assert!(!detect_ljuno(&resource, None).installed);
+
+        // A single file with the bundle's name.
+        fs::write(&bundle, b"a flat plug-in").unwrap();
+        assert!(!detect_ljuno(&resource, None).installed);
+        fs::remove_file(&bundle).unwrap();
+
+        // The bundle's folder, still without its binary.
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::write(bundle.join("desktop.ini"), b"ini").unwrap();
+        assert!(!detect_ljuno(&resource, None).installed);
+
+        fs::write(&binary, b"binary").unwrap();
+        let found = detect_ljuno(&resource, None);
+        assert!(found.installed);
+        assert_eq!(found.version, None);
+        assert_eq!(found.detector, "file-presence");
+        assert_eq!(found.files, std::slice::from_ref(&binary));
+
+        let relative = std::path::Path::new("UserPlugins")
+            .join("FX")
+            .join("LJuno-116.vst3")
+            .join("Contents")
+            .join("x86_64-win")
+            .join("LJuno-116.vst3");
+        let mut state = app2clap_receipt("0.99.66", &relative, b"binary");
+        let entry = state.packages.remove(PACKAGE_APP2CLAP).unwrap();
+        state.packages.insert(
+            crate::package::PACKAGE_LJUNO_116.to_string(),
+            crate::receipt::PackageReceipt {
+                id: crate::package::PACKAGE_LJUNO_116.to_string(),
+                ..entry
+            },
+        );
+        let found = detect_ljuno(&resource, Some(&state));
+        assert!(found.installed);
+        assert_eq!(found.detector, "rabbit-receipt");
+        assert_eq!(found.version.unwrap().raw(), "0.99.66");
+
+        // The same bundle, reached through a link where its folder was,
+        // matches the receipt file for file, and still isn't the package.
+        let elsewhere = dir.path().join("Elsewhere.vst3");
+        fs::rename(&bundle, &elsewhere).unwrap();
+        crate::uninstall::paths::link_folder(&bundle, &elsewhere);
+        assert!(
+            fs::metadata(&binary).is_ok(),
+            "the link leads to the binary"
+        );
+        assert!(!detect_ljuno(&resource, Some(&state)).installed);
+        assert!(!detect_ljuno(&resource, None).installed);
+
+        // A link inside the bundle, on the way to the binary, the same.
+        fs::remove_dir(&bundle).ok();
+        if fs::symlink_metadata(&bundle).is_ok() {
+            fs::remove_file(&bundle).unwrap();
+        }
+        fs::create_dir_all(bundle.join("Contents")).unwrap();
+        crate::uninstall::paths::link_folder(
+            &bundle.join("Contents").join("x86_64-win"),
+            &elsewhere.join("Contents").join("x86_64-win"),
+        );
+        assert!(!detect_ljuno(&resource, Some(&state)).installed);
+        assert!(!detect_ljuno(&resource, None).installed);
     }
 
     /// app2clap in REAPER's own UserPlugins\FX folder is found by its

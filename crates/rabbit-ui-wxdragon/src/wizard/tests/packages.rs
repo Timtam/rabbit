@@ -1,9 +1,10 @@
 use rabbit_core::localization::{DEFAULT_LOCALE, Localizer, embedded_locales};
 use rabbit_core::model::{Architecture, LeftToReapack, Platform};
 use rabbit_core::package::{
-    HostCapabilities, PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_LREAPARAMS, PACKAGE_OSARA,
-    PACKAGE_REAKONTROL, PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS,
-    PackageCategory, builtin_package_specs,
+    HostCapabilities, PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_LB_303, PACKAGE_LJUNO_116,
+    PACKAGE_LR_608, PACKAGE_LREAPARAMS, PACKAGE_LSAMPLER_24, PACKAGE_OSARA, PACKAGE_REAKONTROL,
+    PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS, PackageCategory,
+    builtin_package_specs,
 };
 use rabbit_core::plan::{AvailablePackage, InstallPlan, PlanAction, PlanActionKind};
 use rabbit_core::version::Version;
@@ -1215,8 +1216,8 @@ fn expert_mode_env_values_and_channels_outside_expert_mode() {
 
 /// The Install tree's package groups, built from the real manifest: Packages,
 /// Instruments, Tools, Language packs, in that order, each with its own rows
-/// in row order. Surge XT is the instrument, and app2clap and LReaParams the
-/// tools.
+/// in row order. Surge XT and Lo-lo's four instruments are the instruments,
+/// and app2clap and LReaParams the tools.
 #[test]
 fn the_install_tree_groups_packages_instruments_tools_and_language_packs() {
     let dir = tempdir().unwrap();
@@ -1265,7 +1266,16 @@ fn the_install_tree_groups_packages_instruments_tools_and_language_packs() {
             .map(|index| rows[*index].package_id.as_str())
             .collect()
     };
-    assert_eq!(ids(&groups[1]), [PACKAGE_SURGE_XT]);
+    assert_eq!(
+        ids(&groups[1]),
+        [
+            PACKAGE_SURGE_XT,
+            PACKAGE_LJUNO_116,
+            PACKAGE_LB_303,
+            PACKAGE_LR_608,
+            PACKAGE_LSAMPLER_24,
+        ]
+    );
     assert_eq!(ids(&groups[2]), [PACKAGE_APP2CLAP, PACKAGE_LREAPARAMS]);
     assert!(
         ids(&groups[3]).iter().all(|id| id.starts_with("langpack-")),

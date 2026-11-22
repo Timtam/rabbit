@@ -19,6 +19,10 @@ pub const PACKAGE_FFMPEG: &str = "ffmpeg";
 pub const PACKAGE_SURGE_XT: &str = "surge-xt";
 pub const PACKAGE_APP2CLAP: &str = "app2clap";
 pub const PACKAGE_LREAPARAMS: &str = "lreaparams";
+pub const PACKAGE_LJUNO_116: &str = "ljuno-116";
+pub const PACKAGE_LB_303: &str = "lb-303";
+pub const PACKAGE_LR_608: &str = "lr-608";
+pub const PACKAGE_LSAMPLER_24: &str = "lsampler-24";
 
 /// Logical id of the embedded package manifest, reported by the portability
 /// self-check. It's no longer a single file — the packages live in
@@ -57,6 +61,9 @@ pub struct PackageSpec {
     /// File name to install under, overriding the upstream name; see
     /// [`EmbeddedPackageSpec::install_as`].
     pub install_as: Option<String>,
+    /// The plug-in bundle folder the package installs as a whole; see
+    /// [`EmbeddedPackageSpec::plugin_bundle`].
+    pub plugin_bundle: Option<PluginBundleSpec>,
     /// Selectable flavours; see [`PackageVariant`].
     pub variants: Vec<PackageVariant>,
     /// Mutual-exclusion group; see [`EmbeddedPackageSpec::exclusive_group`].
@@ -191,6 +198,12 @@ pub struct EmbeddedPackageSpec {
     /// `None` keeps the upstream name.
     #[serde(default)]
     pub install_as: Option<String>,
+    /// A plug-in bundle folder, such as `LJuno-116.vst3`, that the release
+    /// archive holds at its top and that installs as a whole tree into the
+    /// install folder, keeping the paths inside it. `None` for a package
+    /// that installs single files. See [`PluginBundleSpec`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_bundle: Option<PluginBundleSpec>,
     /// Packages sharing a non-empty group are mutually exclusive: installing
     /// one removes any other from the group that RABBIT previously installed
     /// (per its receipts). REAPER loads exactly one language pack, so
@@ -420,23 +433,68 @@ pub struct AssetSelector {
     /// spec-wide kind.
     #[serde(default)]
     pub artifact_kind: Option<GithubArtifactKind>,
+    /// Compare the name, prefix and suffix ignoring ASCII upper and lower
+    /// case, for a project that names its assets by hand and spells the
+    /// same part both ways, such as LB-303's `.VST3.zip` beside the other
+    /// instruments' `.vst3.zip`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_case: bool,
 }
 
 impl AssetSelector {
     /// Whether `asset_name` satisfies this selector.
     pub fn matches_asset(&self, asset_name: &str) -> bool {
         if let Some(exact) = &self.exact_name {
-            return asset_name == exact;
+            return if self.ignore_case {
+                asset_name.eq_ignore_ascii_case(exact)
+            } else {
+                asset_name == exact
+            };
         }
         let prefix_ok = self
             .name_prefix
-            .as_ref()
-            .is_none_or(|prefix| asset_name.starts_with(prefix));
+            .as_deref()
+            .is_none_or(|prefix| self.starts_with(asset_name, prefix));
         let suffix_ok = self
             .name_suffix
-            .as_ref()
-            .is_none_or(|suffix| asset_name.ends_with(suffix));
+            .as_deref()
+            .is_none_or(|suffix| self.ends_with(asset_name, suffix));
         prefix_ok && suffix_ok
+    }
+
+    /// The part of `asset_name` between the selector's prefix and suffix,
+    /// when the name starts with the one and ends with the other, compared
+    /// as [`Self::ignore_case`] says, and the two don't overlap. A missing
+    /// prefix or suffix counts as empty.
+    pub fn name_core<'a>(&self, asset_name: &'a str) -> Option<&'a str> {
+        let prefix = self.name_prefix.as_deref().unwrap_or("");
+        let suffix = self.name_suffix.as_deref().unwrap_or("");
+        if !self.starts_with(asset_name, prefix) || !self.ends_with(asset_name, suffix) {
+            return None;
+        }
+        asset_name.get(prefix.len()..asset_name.len() - suffix.len())
+    }
+
+    fn starts_with(&self, name: &str, prefix: &str) -> bool {
+        name.get(..prefix.len())
+            .is_some_and(|head| self.same(head, prefix))
+    }
+
+    fn ends_with(&self, name: &str, suffix: &str) -> bool {
+        name.len()
+            .checked_sub(suffix.len())
+            .and_then(|start| name.get(start..))
+            .is_some_and(|tail| self.same(tail, suffix))
+    }
+
+    /// Whether `found` is `wanted`, ignoring ASCII case when the selector
+    /// says so.
+    fn same(&self, found: &str, wanted: &str) -> bool {
+        if self.ignore_case {
+            found.eq_ignore_ascii_case(wanted)
+        } else {
+            found == wanted
+        }
     }
 }
 
@@ -521,6 +579,77 @@ impl InstallDestination {
             Self::UserPlugins | Self::UserPluginsFx | Self::LangPack => None,
         }
     }
+}
+
+/// A plug-in bundle a package installs as a whole: a folder such as
+/// `LJuno-116.vst3` that holds the plug-in's binary and its resources at
+/// fixed places below it, as VST3 plug-ins come. The release archive holds
+/// the folder at its top. RABBIT installs every file in it into the
+/// package's install folder at the same path below it, and ignores
+/// everything else in the archive (see
+/// [`crate::archive::extract_plugin_bundle_from_archive`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginBundleSpec {
+    /// The bundle folder's name, in the archive and in the install folder,
+    /// such as `LJuno-116.vst3`. A plain name, never a path.
+    pub name: String,
+    /// The plug-in's binary, by its path inside the bundle with `/` between
+    /// the folders, such as `Contents/x86_64-win/LJuno-116.vst3`. An install
+    /// puts it in place after every other file of the bundle, detection
+    /// looks for it, and its version resource gives the version when no
+    /// receipt does.
+    pub binary: String,
+}
+
+impl PluginBundleSpec {
+    /// The binary's path inside the bundle, one name per folder.
+    pub fn binary_components(&self) -> impl Iterator<Item = &str> {
+        self.binary.split('/')
+    }
+
+    /// The bundle folder inside `folder`, the package's install folder.
+    pub fn folder_in(&self, folder: &Path) -> PathBuf {
+        folder.join(&self.name)
+    }
+
+    /// The binary inside the bundle folder `bundle`, joined one name at a
+    /// time, so the path has the platform's own separator.
+    pub fn binary_in(&self, bundle: &Path) -> PathBuf {
+        self.binary_components()
+            .fold(bundle.to_path_buf(), |path, name| path.join(name))
+    }
+
+    /// Whether `path` is this bundle's binary in the install folder
+    /// `folder`, by its names ignoring case, as an archive may spell the
+    /// names below the bundle's folder in either case.
+    pub fn is_binary_in(&self, folder: &Path, path: &Path) -> bool {
+        crate::uninstall::paths::same_ignoring_case(&self.binary_in(&self.folder_in(folder)), path)
+    }
+}
+
+/// The plug-in bundle of `package_id` by the embedded manifest, with the
+/// folder it installs into, or `None` for a package without one. The
+/// manifest is read once for this: install, restore and uninstall ask it
+/// about single files.
+pub(crate) fn plugin_bundle_of(
+    package_id: &str,
+) -> Option<(InstallDestination, &'static PluginBundleSpec)> {
+    static BUNDLES: std::sync::OnceLock<BTreeMap<String, (InstallDestination, PluginBundleSpec)>> =
+        std::sync::OnceLock::new();
+    BUNDLES
+        .get_or_init(|| {
+            embedded_package_manifest()
+                .packages
+                .into_iter()
+                .filter_map(|spec| {
+                    let bundle = spec.plugin_bundle?;
+                    Some((spec.id, (spec.install_destination, bundle)))
+                })
+                .collect()
+        })
+        .get(package_id)
+        .map(|(destination, bundle)| (*destination, bundle))
 }
 
 /// Data-driven artifact (download) resolution for packages that are NOT a
@@ -953,6 +1082,12 @@ pub enum PackageDetector {
     /// `UserPlugins`, so without this it has no detector of its own and is
     /// only ever as visible as its receipt.
     ReaperApp,
+    /// The package's [`PluginBundleSpec`] folder in its install folder,
+    /// with the binary inside it: a real folder and a real file, never a
+    /// symbolic link or junction anywhere on the way. A bookend like
+    /// `UserPluginFile`: it gives the binary to the version probes after it,
+    /// such as `file_version_metadata`.
+    PluginBundle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -962,6 +1097,8 @@ pub enum InstallStep {
     CopyUserPluginBinary,
     CopyKeymap,
     InstallReapackPackage,
+    /// Install the archive's [`PluginBundleSpec`] folder as a whole tree.
+    CopyPluginBundle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1147,6 +1284,7 @@ pub fn validate_package_spec(spec: &EmbeddedPackageSpec) -> Result<(), String> {
     uninstall::validate_uninstall_spec(spec)?;
     validate_leave_to_reapack(spec)?;
     validate_former_install_destinations(spec)?;
+    validate_plugin_bundle(spec)?;
     // Pull-request builds need a pull request number, which only a channel
     // parameter supplies. On the package itself it could never resolve.
     if spec.github_actions_artifact.is_some() {
@@ -1239,6 +1377,122 @@ fn validate_leave_to_reapack(spec: &EmbeddedPackageSpec) -> Result<(), String> {
         return Err(
             "leave_to_reapack needs an install folder inside the resource folder".to_string(),
         );
+    }
+    Ok(())
+}
+
+/// A plug-in bundle comes from an archive and installs by the bundle step
+/// alone, into a folder inside the resource folder, where its receipt
+/// records each file by its path below the resource folder. Its detector
+/// finds it, its names are plain names Windows opens as written, and
+/// nothing renames it. The bundle step and detector need a bundle to
+/// install and find.
+fn validate_plugin_bundle(spec: &EmbeddedPackageSpec) -> Result<(), String> {
+    let step = spec.install_steps.contains(&InstallStep::CopyPluginBundle);
+    let detector = spec.detectors.contains(&PackageDetector::PluginBundle);
+    let Some(bundle) = &spec.plugin_bundle else {
+        if step || detector {
+            return Err(
+                "the copy_plugin_bundle step and the plugin_bundle detector need a plugin_bundle"
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    };
+    if spec.install_steps != [InstallStep::CopyPluginBundle] {
+        return Err("plugin_bundle needs install_steps [\"copy_plugin_bundle\"] alone".to_string());
+    }
+    if !detector {
+        return Err("plugin_bundle needs the plugin_bundle detector".to_string());
+    }
+    if spec.install_destination.resource_components().is_none() {
+        return Err("plugin_bundle needs an install folder inside the resource folder".to_string());
+    }
+    if !spec.former_install_destinations.is_empty() {
+        return Err("plugin_bundle can't have former_install_destinations".to_string());
+    }
+    if spec.install_as.is_some() || !spec.variants.is_empty() {
+        return Err("plugin_bundle can't be renamed by install_as or variants".to_string());
+    }
+    if !uninstall::is_plain_file_name(&bundle.name) {
+        return Err(format!(
+            "plugin_bundle name {:?} must be one plain file name",
+            bundle.name
+        ));
+    }
+    if !bundle
+        .binary_components()
+        .all(uninstall::is_plain_file_name)
+    {
+        return Err(format!(
+            "plugin_bundle binary {:?} must be plain names separated by /",
+            bundle.binary
+        ));
+    }
+    let archive = Some(GithubArtifactKind::Archive);
+    let all_archives = spec.github_release.as_ref().is_none_or(|release| {
+        release
+            .assets
+            .iter()
+            .all(|selector| selector.artifact_kind.or(release.artifact_kind) == archive)
+    }) && spec.http_artifact.as_ref().is_none_or(|http| {
+        http.targets
+            .iter()
+            .all(|target| Some(target.artifact_kind) == archive)
+    }) && spec
+        .hfs_listing
+        .as_ref()
+        .is_none_or(|hfs| Some(hfs.artifact_kind) == archive);
+    if !all_archives {
+        return Err("plugin_bundle needs every download to be an archive".to_string());
+    }
+    // A channel brings a download of its own, which would need the same
+    // check; no bundle package has one.
+    if !spec.channels.is_empty() {
+        return Err("plugin_bundle can't have channels".to_string());
+    }
+    validate_plugin_bundle_uninstall(spec, bundle)
+}
+
+/// A plug-in bundle comes off by its receipt alone: without one, RABBIT
+/// can't tell its files from what else sits in the bundle, so the package
+/// needs `requires_receipt`. Each `remove_files` plan takes the receipt's
+/// files and then the bundle's folder with every folder in it, once empty,
+/// by the path the install puts it at, so the two can't drift apart.
+fn validate_plugin_bundle_uninstall(
+    spec: &EmbeddedPackageSpec,
+    bundle: &PluginBundleSpec,
+) -> Result<(), String> {
+    if !spec.uninstall.requires_receipt {
+        return Err("plugin_bundle needs uninstall.requires_receipt".to_string());
+    }
+    // Checked to be inside the resource folder above.
+    let components = spec
+        .install_destination
+        .resource_components()
+        .unwrap_or_default();
+    let tree = std::iter::once("{resource}")
+        .chain(components.iter().copied())
+        .chain(std::iter::once(bundle.name.as_str()))
+        .collect::<Vec<_>>()
+        .join("/");
+    for plan in &spec.uninstall.plans {
+        if plan.strategy != uninstall::UninstallStrategy::RemoveFiles {
+            continue;
+        }
+        if !plan.remove.receipt_files {
+            return Err("plugin_bundle needs receipt_files in its remove_files plans".to_string());
+        }
+        if !plan
+            .remove
+            .trees_if_empty
+            .iter()
+            .any(|path| path.as_str() == tree)
+        {
+            return Err(format!(
+                "plugin_bundle needs {tree} in the trees_if_empty of its remove_files plans"
+            ));
+        }
     }
     Ok(())
 }
@@ -1544,6 +1798,7 @@ impl EmbeddedPackageSpec {
             former_install_destinations: self.former_install_destinations.clone(),
             language: self.language.clone(),
             install_as: self.install_as.clone(),
+            plugin_bundle: self.plugin_bundle.clone(),
             variants: self.variants.clone(),
             exclusive_group: self.exclusive_group.clone(),
             depends_on: self.depends_on.clone(),
@@ -1962,6 +2217,7 @@ mod tests {
             name_suffix: None,
             exact_name: Some("reaper_lreaparams.dll".to_string()),
             artifact_kind: None,
+            ignore_case: false,
         };
         assert_eq!(
             release.assets,
@@ -1987,6 +2243,364 @@ mod tests {
             !default_desired_package_ids_for_host(&Default::default())
                 .contains(&PACKAGE_LREAPARAMS.to_string())
         );
+    }
+
+    /// Lo-lo's four instruments: each one's id, its product name, and the
+    /// folders of its own where its user data lives.
+    const LOLO_INSTRUMENTS: [(&str, &str, &[&str]); 4] = [
+        (
+            super::PACKAGE_LJUNO_116,
+            "LJuno-116",
+            &["{documents}/LJuno-116"],
+        ),
+        (super::PACKAGE_LB_303, "LB-303", &["{documents}/LB-303"]),
+        (super::PACKAGE_LR_608, "LR-608", &["{documents}/LR-608"]),
+        (
+            super::PACKAGE_LSAMPLER_24,
+            "LSampler-24",
+            &["{documents}/LSampler-24", "{appdata}/Lo-lo78/LSampler-24"],
+        ),
+    ];
+
+    /// Each of Lo-lo's instruments: a Windows-only instrument, unticked by
+    /// default, whose release zip's VST3 bundle installs whole into REAPER's
+    /// own plug-in folder, found by its bundle and versioned by its tag.
+    /// Uninstalling takes the receipt's files and the emptied bundle folder,
+    /// and keeps the user's presets and samples, even with "Also remove
+    /// settings".
+    #[test]
+    fn lolo_instruments_install_their_vst3_bundles_into_reapers_fx_folder() {
+        use super::uninstall::{UninstallPath, UninstallStrategy};
+        use super::{
+            GithubArtifactKind, GithubReleaseSelector, InstallDestination, InstallStep,
+            PACKAGE_REAPER, PackageCategory, PackageDetector, PackageKind, SupportedPlatform,
+            VersionSource, WhatsNewRule, builtin_package_specs,
+            default_desired_package_ids_for_host, embedded_package_manifest,
+        };
+        use crate::model::{Architecture, Platform};
+
+        let manifest = embedded_package_manifest();
+        for (id, product, user_data) in LOLO_INSTRUMENTS {
+            let spec = manifest
+                .packages
+                .iter()
+                .find(|spec| spec.id == id)
+                .unwrap_or_else(|| panic!("{id} is in the manifest"));
+            assert_eq!(spec.display_name, product);
+            assert_eq!(spec.display_name_key, format!("package-{id}"));
+            assert_eq!(
+                spec.display_description_key,
+                format!("package-{id}-description")
+            );
+            assert_eq!(spec.category, PackageCategory::Instruments);
+            assert_eq!(spec.package_kind, PackageKind::UserPluginBinary);
+            assert_eq!(spec.install_destination, InstallDestination::UserPluginsFx);
+            assert_eq!(spec.depends_on, vec![PACKAGE_REAPER.to_string()]);
+            assert!(!spec.required && !spec.recommended && spec.recommended_when.is_none());
+            assert!(!spec.requires_standard_install && !spec.leave_to_reapack);
+            assert_eq!(spec.supported_platforms, vec![SupportedPlatform::Windows]);
+            // An x64 plug-in: an x64 REAPER loads it, and so does REAPER's
+            // ARM64EC build on Windows on ARM, which loads x64 code.
+            assert_eq!(
+                spec.supported_architectures,
+                vec![
+                    Architecture::X64,
+                    Architecture::Arm64,
+                    Architecture::Arm64Ec
+                ]
+            );
+            let bundle = spec.plugin_bundle.as_ref().unwrap();
+            assert_eq!(bundle.name, format!("{product}.vst3"));
+            assert_eq!(bundle.binary, format!("Contents/x86_64-win/{product}.vst3"));
+            assert_eq!(spec.install_steps, vec![InstallStep::CopyPluginBundle]);
+            assert_eq!(
+                spec.detectors,
+                vec![
+                    PackageDetector::RabbitReceipt,
+                    PackageDetector::PluginBundle,
+                    PackageDetector::FileVersionMetadata,
+                ]
+            );
+            // Nothing in UserPlugins\FX matches the package by its name:
+            // only its bundle is its own.
+            assert!(spec.user_plugin_prefixes.is_empty());
+            assert!(spec.user_plugin_suffixes.windows.is_empty());
+            assert!(matches!(
+                &spec.whats_new,
+                Some(WhatsNewRule::GithubReleaseBody { url })
+                    if *url == format!("https://api.github.com/repos/Lo-lo78/{product}/releases?per_page=30")
+            ));
+
+            let release = spec.github_release.as_ref().unwrap();
+            assert_eq!(release.repo, format!("Lo-lo78/{product}"));
+            assert_eq!(release.release, GithubReleaseSelector::Latest);
+            assert_eq!(
+                release.version_from,
+                VersionSource::TagName {
+                    strip_v_prefix: true
+                }
+            );
+            assert_eq!(release.artifact_kind, Some(GithubArtifactKind::Archive));
+            let arches: Vec<Option<Architecture>> =
+                release.assets.iter().map(|asset| asset.arch).collect();
+            assert_eq!(
+                arches,
+                [
+                    Some(Architecture::X64),
+                    Some(Architecture::Arm64),
+                    Some(Architecture::Arm64Ec)
+                ]
+            );
+            for asset in &release.assets {
+                assert_eq!(asset.name_prefix.as_deref(), Some(product));
+                assert_eq!(asset.name_suffix.as_deref(), Some(".zip"));
+                assert!(asset.ignore_case && asset.exact_name.is_none());
+            }
+
+            // Without a receipt RABBIT can't tell the bundle's files from
+            // anything else in it, so a copy without one isn't removable.
+            assert!(spec.uninstall.requires_receipt);
+            let [plan] = spec.uninstall.plans.as_slice() else {
+                panic!("{id} has one uninstall plan");
+            };
+            assert_eq!(plan.platform, Some(SupportedPlatform::Windows));
+            assert_eq!(plan.strategy, UninstallStrategy::RemoveFiles);
+            assert!(plan.remove.receipt_files && !plan.remove.matching_user_plugins);
+            assert!(plan.remove.paths.is_empty() && plan.remove.dirs_if_empty.is_empty());
+            assert_eq!(
+                plan.remove.trees_if_empty,
+                [UninstallPath::new(format!(
+                    "{{resource}}/UserPlugins/FX/{product}.vst3"
+                ))]
+            );
+            let kept: Vec<&str> = plan
+                .kept_user_data
+                .iter()
+                .map(|kept| kept.path.as_str())
+                .collect();
+            assert_eq!(kept, user_data);
+            let keep: Vec<&str> = plan.keep.iter().map(UninstallPath::as_str).collect();
+            assert_eq!(keep, user_data);
+        }
+
+        let windows: Vec<String> = builtin_package_specs(Platform::Windows)
+            .into_iter()
+            .filter(|spec| spec.category == PackageCategory::Instruments)
+            .map(|spec| spec.id)
+            .collect();
+        assert_eq!(
+            windows,
+            [
+                super::PACKAGE_SURGE_XT,
+                super::PACKAGE_LJUNO_116,
+                super::PACKAGE_LB_303,
+                super::PACKAGE_LR_608,
+                super::PACKAGE_LSAMPLER_24,
+            ]
+        );
+        let mac = builtin_package_specs(Platform::MacOs);
+        let desired = default_desired_package_ids_for_host(&Default::default());
+        for (id, _, _) in LOLO_INSTRUMENTS {
+            assert!(!mac.iter().any(|spec| spec.id == id), "{id} on macOS");
+            assert!(!desired.iter().any(|desired| desired == id), "{id} ticked");
+        }
+    }
+
+    /// The instruments' names, descriptions and uninstall texts are in
+    /// every locale, and each translation of a description is the
+    /// locale's own rather than the English one.
+    #[test]
+    fn lolo_instruments_have_their_texts_in_every_locale() {
+        use crate::localization::{DEFAULT_LOCALE, Localizer, embedded_locales};
+
+        let english = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let manifest = super::embedded_package_manifest();
+        assert_eq!(embedded_locales().len(), 6);
+        for locale in embedded_locales() {
+            let localizer = Localizer::embedded(locale).unwrap();
+            for (id, product, _) in LOLO_INSTRUMENTS {
+                let spec = manifest.packages.iter().find(|spec| spec.id == id).unwrap();
+                let mut keys = vec![
+                    spec.display_name_key.as_str(),
+                    spec.display_description_key.as_str(),
+                ];
+                keys.extend(spec.uninstall.fluent_keys());
+                for key in keys {
+                    let text = localizer.text(key);
+                    assert!(!text.missing, "{locale} lacks {key}");
+                    assert!(!text.value.trim().is_empty(), "{locale} {key} is empty");
+                }
+                assert_eq!(localizer.text(&spec.display_name_key).value, product);
+                let description = localizer.text(&spec.display_description_key).value;
+                assert!(description.contains(product), "{locale}: {description}");
+                assert!(
+                    description.contains("UserPlugins\\FX"),
+                    "{locale}: {description}"
+                );
+                if *locale != DEFAULT_LOCALE {
+                    assert_ne!(
+                        description,
+                        english.text(&spec.display_description_key).value,
+                        "{locale} keeps the English description of {id}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A selector that ignores case matches an asset name however it spells
+    /// its prefix and suffix, and cuts them off to find the version; one
+    /// that doesn't matches only the exact spelling, as before.
+    #[test]
+    fn an_asset_selector_can_ignore_case() {
+        use super::{AssetSelector, SupportedPlatform};
+        use crate::version::Version;
+
+        let selector = |ignore_case| AssetSelector {
+            platform: SupportedPlatform::Windows,
+            arch: None,
+            name_prefix: Some("LB-303".to_string()),
+            name_suffix: Some(".vst3.zip".to_string()),
+            exact_name: None,
+            artifact_kind: None,
+            ignore_case,
+        };
+        let any_case = selector(true);
+        for name in [
+            "LB-303.0.99.7.VST3.zip",
+            "LB-303.0.99.7.vst3.zip",
+            "lb-303.0.99.7.Vst3.ZIP",
+        ] {
+            assert!(any_case.matches_asset(name), "{name}");
+            assert_eq!(any_case.name_core(name), Some(".0.99.7"));
+        }
+        assert!(!any_case.matches_asset("LB-303.0.99.7.zip"));
+        assert!(!any_case.matches_asset("LR-608.0.99.7.vst3.zip"));
+        assert!(!any_case.matches_asset(".vst3.zip"));
+
+        let exact = selector(false);
+        assert!(exact.matches_asset("LB-303.0.99.7.vst3.zip"));
+        assert!(!exact.matches_asset("LB-303.0.99.7.VST3.zip"));
+        assert_eq!(exact.name_core("LB-303.0.99.7.VST3.zip"), None);
+
+        // The name core is the version with a dot in front of it, which an
+        // asset-name version reads once the prefix ends in that dot.
+        let versioned = AssetSelector {
+            name_prefix: Some("lb-303.".to_string()),
+            ..selector(true)
+        };
+        assert_eq!(
+            crate::latest::github_asset_version(
+                "LB-303.0.99.7.VST3.zip",
+                std::slice::from_ref(&versioned),
+                false
+            ),
+            Some(Version::parse("0.99.7").unwrap())
+        );
+        let named = AssetSelector {
+            name_prefix: None,
+            name_suffix: None,
+            exact_name: Some("reaper_lreaparams.dll".to_string()),
+            ..selector(true)
+        };
+        assert!(named.matches_asset("REAPER_LReaParams.DLL"));
+    }
+
+    /// A plug-in bundle installs from an archive by the bundle step alone,
+    /// into a folder inside the resource folder, is found by its detector,
+    /// and has plain names; the step and the detector need a bundle. It
+    /// comes off only by its receipt, and its plans remove the folder the
+    /// install puts it in.
+    #[test]
+    fn a_plugin_bundle_must_be_installable_and_findable() {
+        use super::{
+            GithubArtifactKind, InstallDestination, InstallStep, PackageDetector,
+            embedded_package_manifest, validate_package_spec,
+        };
+
+        let ljuno = embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == super::PACKAGE_LJUNO_116)
+            .unwrap();
+        assert_eq!(validate_package_spec(&ljuno), Ok(()));
+
+        type Change = Box<dyn Fn(&mut super::EmbeddedPackageSpec)>;
+        let broken: Vec<(&str, Change)> = vec![
+            (
+                "no detector",
+                Box::new(|spec| {
+                    spec.detectors
+                        .retain(|d| *d != PackageDetector::PluginBundle)
+                }),
+            ),
+            (
+                "another step",
+                Box::new(|spec| spec.install_steps = vec![InstallStep::CopyUserPluginBinary]),
+            ),
+            (
+                "outside the resource folder",
+                Box::new(|spec| spec.install_destination = InstallDestination::WindowsClapDir),
+            ),
+            (
+                "a path for a name",
+                Box::new(|spec| {
+                    spec.plugin_bundle.as_mut().unwrap().name = "FX/LJuno-116.vst3".to_string()
+                }),
+            ),
+            (
+                "climbing out",
+                Box::new(|spec| {
+                    spec.plugin_bundle.as_mut().unwrap().binary =
+                        "Contents/../../evil.dll".to_string()
+                }),
+            ),
+            (
+                "an empty folder name",
+                Box::new(|spec| {
+                    spec.plugin_bundle.as_mut().unwrap().binary =
+                        "Contents//LJuno-116.vst3".to_string()
+                }),
+            ),
+            (
+                "a bare binary",
+                Box::new(|spec| {
+                    spec.github_release.as_mut().unwrap().artifact_kind =
+                        Some(GithubArtifactKind::ExtensionBinary)
+                }),
+            ),
+            (
+                "renamed",
+                Box::new(|spec| spec.install_as = Some("Other.vst3".to_string())),
+            ),
+            ("no bundle", Box::new(|spec| spec.plugin_bundle = None)),
+            (
+                "removable without a receipt",
+                Box::new(|spec| spec.uninstall.requires_receipt = false),
+            ),
+            (
+                "not the receipt's files",
+                Box::new(|spec| spec.uninstall.plans[0].remove.receipt_files = false),
+            ),
+            (
+                "another folder's tree",
+                Box::new(|spec| {
+                    spec.uninstall.plans[0].remove.trees_if_empty =
+                        vec![super::uninstall::UninstallPath::new(
+                            "{resource}/UserPlugins/FX/LJuno-161.vst3",
+                        )]
+                }),
+            ),
+            (
+                "no tree",
+                Box::new(|spec| spec.uninstall.plans[0].remove.trees_if_empty.clear()),
+            ),
+        ];
+        for (what, change) in broken {
+            let mut spec = ljuno.clone();
+            change(&mut spec);
+            assert!(validate_package_spec(&spec).is_err(), "{what} passed");
+        }
     }
 
     /// A package left to ReaPack has to be able to tell that ReaPack
@@ -2356,9 +2970,9 @@ mod tests {
         let manifest = embedded_package_manifest();
 
         assert_eq!(manifest.schema_version, 1);
-        // 10 software packages + the Spanish, German and French REAPER
-        // language packs.
-        assert_eq!(manifest.packages.len(), 13);
+        // 14 software packages, Lo-lo's four instruments among them, + the
+        // Spanish, German and French REAPER language packs.
+        assert_eq!(manifest.packages.len(), 17);
         assert!(
             manifest
                 .packages
