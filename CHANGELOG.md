@@ -74,9 +74,9 @@ from this file and posts it as the GitHub release body.
   remove settings**. Next goes to a Review that says what each package
   loses and keeps. Enter never starts an uninstall there: press
   **Uninstall** to go ahead. If REAPER is open, RABBIT asks you to close it
-  first; for app2clap, every REAPER on the computer. Removed files move
-  into a backup rather than being deleted. The progress page names each
-  package as it goes and says whether it went, and closing RABBIT during an
+  first. Removed files move into a backup rather than being deleted. The
+  progress page names each package as it goes and says whether it went,
+  and closing RABBIT during an
   uninstall asks first, then stops after the step it is on: one package, or
   on macOS the administrator command, which can remove several. The Done
   page says what went, why anything stayed, and how to get a package back:
@@ -408,8 +408,8 @@ from this file and posts it as the GitHub release body.
 - `rabbit restore-backup` now checks, for each package it brings back, what
   that package's own uninstall checks. Before, it checked only that the
   REAPER it restores into was closed. Now a restore of a package that
-  serves every REAPER on the computer, such as app2clap or the JAWS
-  scripts, is refused, and changes nothing, while any REAPER is open,
+  serves every REAPER on the computer, such as the JAWS scripts, is
+  refused, and changes nothing, while any REAPER is open,
   portable ones included. Any program a package's uninstall names must be
   closed too. `--allow-reaper-running` still lets only the REAPER you
   restore into stay open. A dry run says what is running and goes on, as
@@ -474,6 +474,21 @@ from this file and posts it as the GitHub release body.
   Uninstall tab groups its rows the same way. `rabbit packages --json` and
   `rabbit packages --manifest --json` now give their `category` as
   `instruments` and `tools` instead of `additional`.
+- app2clap now installs into REAPER's own plug-in folder, `UserPlugins\FX`,
+  instead of the per-user CLAP folder, so it works with a portable REAPER
+  too, and RABBIT installs it for REAPER only, not for other CLAP hosts. The
+  next update or reinstall of app2clap in the standard REAPER moves the copy
+  in the CLAP folder into its backup, whether an earlier RABBIT or you put
+  it there, so the standard REAPER doesn't load two copies. Portable REAPERs
+  and other programs that loaded app2clap from the CLAP folder no longer
+  find it then, and the wizard says so; RABBIT can install it into each
+  portable REAPER. Until then every REAPER loads that copy, so a portable
+  REAPER that gets its own app2clap loads both: update app2clap in the
+  standard REAPER first. While your app2clap is already the latest version,
+  no update runs, and the copy stays in the CLAP folder until app2clap's
+  next release, unless you tick app2clap on the **Install or update** tab
+  to reinstall it. Uninstalling app2clap needs only that REAPER closed,
+  unless it removes a copy from the CLAP folder too.
 
 ### Fixed
 

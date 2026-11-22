@@ -146,8 +146,9 @@ impl<'f> Shipped<'f> {
 
     /// Real detection on the fixture for `ids`, plus ReaPack as not
     /// installed unless it is among them. Only for packages whose detectors
-    /// look nowhere but the resource folder: app2clap's look in the real
-    /// CLAP folder, so its tests stand detection in.
+    /// look nowhere but the resource folder. app2clap's look in the CLAP
+    /// folder too, but only for the standard REAPER, which the fixture's
+    /// temporary resource folder never is.
     fn detect(&self, state: Option<&InstallState>, ids: &[&str]) -> Vec<ComponentDetection> {
         let mut detections: Vec<ComponentDetection> = self
             .specs
@@ -292,9 +293,10 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
         (
             Platform::Windows,
             InstallationKind::Portable,
-            // The JAWS scripts, Surge XT and app2clap serve the whole
-            // computer, so a portable target can't remove them: each has a
-            // removal only the standard REAPER can reach.
+            // The JAWS scripts and Surge XT serve the whole computer, so a
+            // portable target can't remove them: each has a removal only
+            // the standard REAPER can reach. app2clap lives in REAPER's own
+            // UserPlugins\FX folder, so a portable REAPER removes its own.
             &[
                 (PACKAGE_REAPER, manual),
                 (PACKAGE_OSARA, remove_files),
@@ -304,7 +306,7 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
                 (PACKAGE_JAWS_SCRIPTS, None),
                 (PACKAGE_FFMPEG, remove_files),
                 (PACKAGE_SURGE_XT, None),
-                (PACKAGE_APP2CLAP, None),
+                (PACKAGE_APP2CLAP, remove_files),
                 (PACKAGE_LREAPARAMS, remove_files),
                 (LANGPACK_ES, remove_files),
                 (LANGPACK_DE, remove_files),
@@ -394,9 +396,9 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
             note_key: "uninstall-manual-reaper-portable".to_string()
         }
     );
-    // The JAWS scripts, Surge XT and app2clap come off only from the
-    // standard REAPER. The JAWS scripts lend the standard plan's steps to
-    // remove them by hand, so a portable target still says how.
+    // The JAWS scripts and Surge XT come off only from the standard
+    // REAPER. The JAWS scripts lend the standard plan's steps to remove
+    // them by hand, so a portable target still says how.
     let jaws = item(&plan, PACKAGE_JAWS_SCRIPTS);
     assert_eq!(jaws.removability, Removability::NeedsStandardTarget);
     assert_eq!(
@@ -412,7 +414,7 @@ fn the_shipped_plans_say_which_packages_rabbit_can_uninstall() {
     );
     assert_eq!(
         item(&plan, PACKAGE_APP2CLAP).removability,
-        Removability::NeedsStandardTarget
+        Removability::Removable
     );
 
     // On macOS no package waits for a later version any more, on either
@@ -948,67 +950,106 @@ fn ffmpeg_removes_what_its_receipt_lists_and_refuses_a_copy_without_one() {
     assert!(plan.item(PACKAGE_APP2CLAP).is_none());
 }
 
-/// app2clap: one file in the user's CLAP folder, which every CLAP host of
-/// theirs loads. The folder and the other plug-ins in it stay, every REAPER
-/// must be closed, and a portable target can't remove it.
+/// app2clap: one file in REAPER's own `UserPlugins\FX` folder. The other
+/// plug-ins there stay, only the target's REAPER must be closed, and a
+/// portable REAPER removes its own copy too. With no copy in the CLAP
+/// folder, nothing serves the whole computer, so no machine-wide warning.
 #[test]
-fn app2clap_removes_one_file_from_the_clap_folder_on_a_standard_target() {
+fn app2clap_removes_its_file_from_the_fx_folder() {
     let fixture = Fixture::new();
-    let clap_dir = fixture.dir.path().join("CLAP");
-    let plugin = write(&clap_dir.join("app2clap.clap"), b"file contents");
-    let other = write(&clap_dir.join("Other Synth.clap"), b"file contents");
-    let state = receipt(&fixture, &[(PACKAGE_APP2CLAP, &[plugin.to_str().unwrap()])]);
+    let plugin = fixture.file("UserPlugins/FX/app2clap.clap");
+    let other = fixture.file("UserPlugins/FX/Other Synth.vst3");
+    let other_clap = fixture.file("UserPlugins/FX/Other Synth.clap");
+    let state = receipt(
+        &fixture,
+        &[(PACKAGE_APP2CLAP, &["UserPlugins/FX/app2clap.clap"])],
+    );
     let shipped = Shipped::new(&fixture, Platform::Windows);
 
-    let plan = shipped.plan(&installed(&[PACKAGE_APP2CLAP]), Some(&state));
-    let app2clap = item(&plan, PACKAGE_APP2CLAP);
-    assert_eq!(app2clap.removability, Removability::Removable);
-    assert_eq!(removed(app2clap), vec![plugin.clone()]);
-    assert!(!removed(app2clap).contains(&other));
-    assert_eq!(reason_of(app2clap, &plugin), RemovalReason::ManifestPath);
-    assert!(
-        app2clap.files[0].receipt_sha256.is_some(),
-        "the receipt lends the file its hash"
-    );
-    assert!(app2clap.every_reaper_closed);
-    assert!(app2clap.warnings.contains(&UninstallWarning::MachineWide));
-    let folder = app2clap
-        .kept
-        .iter()
-        .find(|kept| kept.path == clap_dir)
-        .expect("the CLAP folder is listed as staying");
-    assert_eq!(folder.reason, KeptReason::FolderRoot);
-    assert_eq!(
-        folder.note_key.as_deref(),
-        Some("uninstall-kept-app2clap-clap-folder")
-    );
-    assert!(!folder.removable_with_settings);
-
-    // Not even "Also remove settings" takes the folder.
-    let plan = shipped.plan_with(
-        &installed(&[PACKAGE_APP2CLAP]),
-        Some(&state),
-        InstallationKind::Standard,
-        true,
-    );
-    assert_eq!(removed(item(&plan, PACKAGE_APP2CLAP)), vec![plugin.clone()]);
-
-    let plan = shipped.plan_with(
-        &installed(&[PACKAGE_APP2CLAP]),
-        Some(&state),
-        InstallationKind::Portable,
-        false,
-    );
-    let app2clap = item(&plan, PACKAGE_APP2CLAP);
-    assert_eq!(app2clap.removability, Removability::NeedsStandardTarget);
-    assert!(app2clap.files.is_empty());
+    for target in [InstallationKind::Standard, InstallationKind::Portable] {
+        let plan = shipped.plan_with(&installed(&[PACKAGE_APP2CLAP]), Some(&state), target, true);
+        let app2clap = item(&plan, PACKAGE_APP2CLAP);
+        assert_eq!(app2clap.removability, Removability::Removable, "{target:?}");
+        assert_eq!(removed(app2clap), vec![plugin.clone()], "{target:?}");
+        assert!(!removed(app2clap).contains(&other));
+        assert!(!removed(app2clap).contains(&other_clap));
+        assert!(
+            app2clap.files[0].receipt_sha256.is_some(),
+            "the receipt lends the file its hash"
+        );
+        assert!(!app2clap.every_reaper_closed, "{target:?}");
+        assert!(!app2clap.warnings.contains(&UninstallWarning::MachineWide));
+        assert!(app2clap.kept.is_empty(), "{:?}", app2clap.kept);
+    }
 
     // The manifest names the file, so a copy without a receipt may go too.
     let plan = shipped.plan(&installed(&[PACKAGE_APP2CLAP]), None);
     let app2clap = item(&plan, PACKAGE_APP2CLAP);
     assert_eq!(app2clap.removability, Removability::Removable);
-    assert_eq!(removed(app2clap), vec![plugin]);
+    assert_eq!(removed(app2clap), vec![plugin.clone()]);
+    assert_eq!(reason_of(app2clap, &plugin), RemovalReason::ManifestPath);
     assert_eq!(app2clap.notes, vec![UninstallNote::NoReceipt]);
+}
+
+/// An app2clap an earlier RABBIT installed into the user's CLAP folder, a
+/// temporary one here, whose receipt names the file there by its absolute
+/// path: the standard REAPER's uninstall removes it, together with a copy
+/// in `UserPlugins\FX`, and leaves the other plug-ins in the CLAP folder
+/// alone. Every REAPER and every other program that reads the folder may
+/// have that copy loaded, so every REAPER must be closed, and the details
+/// say they all lose it. A portable REAPER's uninstall removes only its own
+/// copy: the CLAP folder is every REAPER's, and only the standard REAPER
+/// ever installed into it.
+#[test]
+fn app2clap_removes_an_older_copy_from_the_clap_folder_on_a_standard_target() {
+    let fixture = Fixture::new();
+    let clap_dir = fixture.dir.path().join("CLAP");
+    let older = write(&clap_dir.join("app2clap.clap"), b"file contents");
+    let other = write(&clap_dir.join("Other Synth.clap"), b"file contents");
+    let state = receipt(&fixture, &[(PACKAGE_APP2CLAP, &[older.to_str().unwrap()])]);
+    let shipped = Shipped::new(&fixture, Platform::Windows);
+
+    let plan = shipped.plan(&installed(&[PACKAGE_APP2CLAP]), Some(&state));
+    let app2clap = item(&plan, PACKAGE_APP2CLAP);
+    assert_eq!(app2clap.removability, Removability::Removable);
+    assert_eq!(removed(app2clap), vec![older.clone()]);
+    assert!(!removed(app2clap).contains(&other));
+    assert_eq!(reason_of(app2clap, &older), RemovalReason::ManifestPath);
+    assert!(
+        app2clap.files[0].receipt_sha256.is_some(),
+        "the receipt lends the file its hash"
+    );
+    assert_eq!(
+        app2clap.summary.as_ref().unwrap().removes_key,
+        "uninstall-summary-app2clap-removes-standard"
+    );
+    assert!(app2clap.every_reaper_closed);
+    assert!(app2clap.warnings.contains(&UninstallWarning::MachineWide));
+
+    // Copies in both places, as after a move by hand: both go.
+    let newer = fixture.file("UserPlugins/FX/app2clap.clap");
+    let plan = shipped.plan(&installed(&[PACKAGE_APP2CLAP]), Some(&state));
+    let mut both = vec![older.clone(), newer.clone()];
+    both.sort();
+    assert_eq!(removed(item(&plan, PACKAGE_APP2CLAP)), both);
+
+    // A portable REAPER takes only its own copy, and says so.
+    let plan = shipped.plan_with(
+        &installed(&[PACKAGE_APP2CLAP]),
+        None,
+        InstallationKind::Portable,
+        false,
+    );
+    let app2clap = item(&plan, PACKAGE_APP2CLAP);
+    assert_eq!(app2clap.removability, Removability::Removable);
+    assert_eq!(removed(app2clap), vec![newer]);
+    assert_eq!(
+        app2clap.summary.as_ref().unwrap().removes_key,
+        "uninstall-summary-app2clap-removes"
+    );
+    assert!(!app2clap.every_reaper_closed);
+    assert!(!app2clap.warnings.contains(&UninstallWarning::MachineWide));
+    assert!(older.is_file() && other.is_file());
 }
 
 /// Each language pack removes the one file its receipt names, whichever

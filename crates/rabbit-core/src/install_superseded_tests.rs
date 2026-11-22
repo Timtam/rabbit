@@ -24,7 +24,10 @@ use crate::backup_overview::{
 use crate::cancel::CancelToken;
 use crate::hash::{sha256_bytes, sha256_file};
 use crate::model::{Architecture, Platform};
-use crate::package::{PACKAGE_FFMPEG, PACKAGE_REAKONTROL, PACKAGE_REAPACK, PACKAGE_SWS};
+use crate::package::{
+    InstallDestination, PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_REAKONTROL, PACKAGE_REAPACK,
+    PACKAGE_SWS, package_specs_by_id,
+};
 use crate::progress::ProgressReporter;
 use crate::receipt::{
     InstallState, InstalledFileReceipt, PackageReceipt, load_install_state, save_install_state,
@@ -76,7 +79,8 @@ fn resource_folder() -> (tempfile::TempDir, PathBuf) {
 
 /// Install `artifacts` into `resource`, where no file is outside the
 /// resource folder: the install never asks which folders outside it
-/// RABBIT installs into, so it never looks at the real CLAP folder. No
+/// RABBIT installs into, and no former install folder outside it counts,
+/// as for a portable REAPER, so it never looks at the real CLAP folder. No
 /// REAPER runs, so the install never depends on what runs on the computer
 /// that tests it.
 fn install(
@@ -93,6 +97,31 @@ fn install(
             panic!("only a file outside the resource folder asks for the folders outside it")
         },
         &Vec::new,
+        &|_| None,
+    )
+    .unwrap()
+}
+
+/// Install `artifacts` into `resource` as into the standard REAPER, where
+/// `clap` stands in for the CLAP folder: it is the one folder outside the
+/// resource folder that RABBIT installs into, and app2clap's former install
+/// folder.
+fn install_beside_clap(
+    resource: &Path,
+    artifacts: &[CachedArtifact],
+    options: &InstallOptions,
+    clap: &Path,
+) -> InstallReport {
+    install_cached_artifacts_within(
+        resource,
+        artifacts,
+        options,
+        &ProgressReporter::noop(),
+        &|| vec![clap.to_path_buf()],
+        &Vec::new,
+        &|destination| {
+            (destination == InstallDestination::WindowsClapDir).then(|| clap.to_path_buf())
+        },
     )
     .unwrap()
 }
@@ -989,6 +1018,7 @@ fn an_outside_file_goes_under_external_with_its_origin_note() {
             vec![clap.clone()]
         },
         &Vec::new,
+        &|_| None,
     )
     .unwrap();
 
@@ -1046,6 +1076,473 @@ fn an_outside_file_goes_under_external_with_its_origin_note() {
         Some(format!("{LINK_WARNING} {UNTRACKED_NOTE}").as_str())
     );
     assert_eq!(link.left_reason, Some(LeftInPlaceReason::Link));
+}
+
+/// Everything below `dir` outside the resource folder `resource`, as
+/// [`snapshot`] gives it.
+fn outside_of(
+    dir: &Path,
+    resource: &Path,
+) -> Vec<(PathBuf, crate::rollback::restore_run_tests::Node)> {
+    snapshot(dir)
+        .into_iter()
+        .filter(|(path, _)| !path.starts_with(resource))
+        .collect()
+}
+
+/// app2clap's file in REAPER's own UserPlugins\FX folder.
+fn app2clap_in_fx(resource: &Path) -> PathBuf {
+    resource
+        .join("UserPlugins")
+        .join("FX")
+        .join("app2clap.clap")
+}
+
+/// app2clap installs into REAPER's own UserPlugins\FX folder. Checked
+/// before a test installs it: were it the CLAP folder again, the install
+/// would write into the real one before any other check could fail.
+fn assert_fx_destination() {
+    assert_eq!(
+        package_specs_by_id(Platform::Windows)[PACKAGE_APP2CLAP].install_destination,
+        InstallDestination::UserPluginsFx
+    );
+}
+
+/// An install of app2clap puts its file into REAPER's own UserPlugins\FX
+/// folder, inside the resource folder, so the receipt records it relative
+/// to that folder, as a portable REAPER needs. The install never asks
+/// which folders outside the resource folder RABBIT installs into, and
+/// nothing outside it changes.
+#[test]
+fn app2clap_installs_into_the_fx_folder_with_a_relative_receipt() {
+    let (dir, resource) = resource_folder();
+    let cache = dir.path().join("cache");
+    let new = artifact(
+        &cache,
+        PACKAGE_APP2CLAP,
+        "2026.5.17.34",
+        "app2clap.clap",
+        b"app2clap",
+    );
+    let outside_before = outside_of(dir.path(), &resource);
+
+    assert_fx_destination();
+    let report = install(&resource, &[new], &APPLY);
+
+    let fx = app2clap_in_fx(&resource);
+    assert_eq!(fs::read(&fx).unwrap(), b"app2clap");
+    assert_eq!(action_at(&report, &fx).action, InstallFileAction::Installed);
+    assert_eq!(report.backup_manifest_path, None);
+    let state = load_install_state(&resource).unwrap().unwrap();
+    let entry = &state.packages[PACKAGE_APP2CLAP];
+    assert_eq!(entry.version, Some(version("2026.5.17.34")));
+    let recorded: Vec<&Path> = entry
+        .installed_files
+        .iter()
+        .map(|file| file.path.as_path())
+        .collect();
+    assert_eq!(
+        recorded,
+        [Path::new("UserPlugins").join("FX").join("app2clap.clap")]
+    );
+    assert_eq!(outside_of(dir.path(), &resource), outside_before);
+}
+
+/// An update of an app2clap that an earlier RABBIT installed into the CLAP
+/// folder, a temporary one here, whose receipt names the file there by its
+/// absolute path: the new version goes into UserPlugins\FX, and the old
+/// file moves out of the CLAP folder into the update's backup set, under
+/// `external/1` beside a note of where it came from, so the standard
+/// REAPER doesn't load two copies. Finding the file there by its name too,
+/// as for a copy with no record, moves it only once. The Backups overview lists that earlier version as one that
+/// can be restored. Restoring it puts the copy back into the CLAP folder
+/// and moves the one in UserPlugins\FX into a new set, in its usual place
+/// there; restoring that set goes forward again. Nothing else outside the
+/// resource folder changes.
+#[test]
+fn an_update_moves_app2clap_out_of_the_clap_folder_and_can_be_undone() {
+    let (dir, resource) = resource_folder();
+    let cache = dir.path().join("cache");
+    let clap = dir.path().join("CLAP");
+    let old = clap.join("app2clap.clap");
+    write(&clap.join("Other Synth.clap"), b"other");
+    installed(
+        &resource,
+        &[(
+            entry(PACKAGE_APP2CLAP, "2026.5.16.31", &[(&old, b"old app2clap")]),
+            &[(&old, b"old app2clap")],
+        )],
+    );
+    let before = load_install_state(&resource).unwrap().unwrap();
+    let new = artifact(
+        &cache,
+        PACKAGE_APP2CLAP,
+        "2026.5.17.34",
+        "app2clap.clap",
+        b"new app2clap",
+    );
+    let outside_before = outside_of(dir.path(), &resource);
+
+    assert_fx_destination();
+    let report = install_beside_clap(&resource, &[new], &APPLY, &clap);
+
+    let fx = app2clap_in_fx(&resource);
+    assert_eq!(fs::read(&fx).unwrap(), b"new app2clap");
+    assert!(!old.exists());
+    assert_eq!(
+        action_at(&report, &old).action,
+        InstallFileAction::MovedToBackup
+    );
+    let set = report
+        .backup_manifest_path
+        .as_ref()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let copy = set.join("external").join("1").join("app2clap.clap");
+    assert_eq!(fs::read(&copy).unwrap(), b"old app2clap");
+    let note = copy.with_file_name(format!("app2clap.clap{ORIGIN_SIDECAR_SUFFIX}"));
+    assert_eq!(fs::read_to_string(&note).unwrap(), old.to_string_lossy());
+    assert_eq!(
+        files_held(&update_set(&report), PACKAGE_APP2CLAP),
+        vec![(old.clone(), b"old app2clap".to_vec())]
+    );
+    let after = load_install_state(&resource).unwrap().unwrap();
+    let recorded: Vec<&Path> = after.packages[PACKAGE_APP2CLAP]
+        .installed_files
+        .iter()
+        .map(|file| file.path.as_path())
+        .collect();
+    assert_eq!(
+        recorded,
+        [Path::new("UserPlugins").join("FX").join("app2clap.clap")]
+    );
+    // Outside the resource folder, only the old file is gone.
+    let outside_after = outside_of(dir.path(), &resource);
+    let gone: Vec<&PathBuf> = outside_before
+        .iter()
+        .filter(|found| !outside_after.contains(found))
+        .map(|(path, _)| path)
+        .collect();
+    assert_eq!(gone, [&old]);
+    assert!(
+        outside_after
+            .iter()
+            .all(|found| outside_before.contains(found))
+    );
+
+    let set_id = set_id(&report);
+    let clap_rules = || OutsideRestoreRules {
+        shared_roots: vec![clap.clone()],
+        vendor_added: Vec::new(),
+    };
+    let rules_for = |_: &Path| clap_rules();
+    let environment = BackupEnvironment {
+        outside_rules: &rules_for,
+        ..BackupEnvironment::AS_USER
+    };
+    let row = overview_with(&resource, &environment)
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|entry| {
+            entry.item
+                == BackupItem::Package {
+                    set_id: set_id.clone(),
+                    package_id: PACKAGE_APP2CLAP.to_string(),
+                }
+        })
+        .unwrap();
+    assert_eq!(row.group, BackupGroup::EarlierVersions);
+    assert_eq!(row.status, BackupStatus::CanRestore, "{row:?}");
+    assert_eq!(row.version, Some(version("2026.5.16.31")));
+    assert_eq!(row.replaced_by, Some(version("2026.5.17.34")));
+
+    let options = RestoreBackupOptions {
+        dry_run: false,
+        allow_reaper_running: false,
+        package_id: Some(PACKAGE_APP2CLAP.to_string()),
+    };
+    let back = restore_backup_set_within(&resource, &set_id, &options, &clap_rules()).unwrap();
+
+    assert_eq!(back.status, RestoreStatus::Restored, "{back:?}");
+    assert_eq!(fs::read(&old).unwrap(), b"old app2clap");
+    assert!(!fx.exists());
+    let swap = back.swap.as_ref().unwrap();
+    assert_eq!(swap.moved_out.len(), 1);
+    assert_eq!(swap.moved_out[0].path, fx);
+    assert_eq!(
+        load_install_state(&resource).unwrap().unwrap().packages,
+        before.packages
+    );
+    let newer = back.before_restore_set_id.clone().unwrap();
+    let newer_set = resource.join("RABBIT").join("backups").join(&newer);
+    assert_eq!(
+        fs::read(
+            newer_set
+                .join("UserPlugins")
+                .join("FX")
+                .join("app2clap.clap")
+        )
+        .unwrap(),
+        b"new app2clap"
+    );
+    assert_eq!(outside_of(dir.path(), &resource), outside_before);
+
+    let forward = restore_backup_set_within(&resource, &newer, &options, &clap_rules()).unwrap();
+
+    assert_eq!(forward.status, RestoreStatus::Restored, "{forward:?}");
+    assert_eq!(fs::read(&fx).unwrap(), b"new app2clap");
+    assert!(!old.exists());
+    assert_eq!(
+        load_install_state(&resource).unwrap().unwrap().packages,
+        after.packages
+    );
+}
+
+/// Paths `before` lists that `after` doesn't.
+fn gone_from<'a>(
+    before: &'a [(PathBuf, crate::rollback::restore_run_tests::Node)],
+    after: &[(PathBuf, crate::rollback::restore_run_tests::Node)],
+) -> Vec<&'a PathBuf> {
+    before
+        .iter()
+        .filter(|found| !after.contains(found))
+        .map(|(path, _)| path)
+        .collect()
+}
+
+/// A copy of app2clap in the CLAP folder, a temporary one here, that
+/// RABBIT has no record of, such as one put there by hand, counts as
+/// installed for the standard REAPER. So its update moves that copy into
+/// the update's backup set too, under `external/1` beside a note of where
+/// it came from, and the standard REAPER doesn't load two copies. The set
+/// has no earlier record of the package, so the Backups overview lists the
+/// copy the update replaced, with no version, and restoring it puts that
+/// copy back into the CLAP folder. The copy in UserPlugins\FX stays then,
+/// as for any copy RABBIT didn't install, and RABBIT no longer counts
+/// app2clap as installed by it. An install into a portable REAPER never
+/// touches the copy: the folder isn't that REAPER's own. The other
+/// plug-ins in the CLAP folder stay throughout.
+#[test]
+fn an_update_moves_a_copy_in_the_clap_folder_with_no_receipt_into_its_backup() {
+    let (dir, resource) = resource_folder();
+    let cache = dir.path().join("cache");
+    let clap = dir.path().join("CLAP");
+    let by_hand = clap.join("app2clap.clap");
+    let other = clap.join("Other Synth.clap");
+    write(&by_hand, b"by hand");
+    write(&other, b"other");
+    let new = artifact(
+        &cache,
+        PACKAGE_APP2CLAP,
+        "2026.5.17.34",
+        "app2clap.clap",
+        b"new app2clap",
+    );
+    assert_fx_destination();
+
+    let portable = dir.path().join("Portable");
+    fs::create_dir_all(&portable).unwrap();
+    let report = install(&portable, std::slice::from_ref(&new), &APPLY);
+    assert_eq!(
+        fs::read(app2clap_in_fx(&portable)).unwrap(),
+        b"new app2clap"
+    );
+    assert_eq!(fs::read(&by_hand).unwrap(), b"by hand");
+    assert_eq!(report.backup_manifest_path, None);
+    assert!(
+        report
+            .actions
+            .iter()
+            .all(|action| !action.action.is_superseded_file()),
+        "{:?}",
+        report.actions
+    );
+
+    let outside_before = outside_of(dir.path(), &resource);
+    let report = install_beside_clap(&resource, &[new], &APPLY, &clap);
+
+    let fx = app2clap_in_fx(&resource);
+    assert_eq!(fs::read(&fx).unwrap(), b"new app2clap");
+    assert!(!by_hand.exists());
+    assert_eq!(fs::read(&other).unwrap(), b"other");
+    assert_eq!(
+        action_at(&report, &by_hand).action,
+        InstallFileAction::MovedToBackup
+    );
+    let set = report
+        .backup_manifest_path
+        .as_ref()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let copy = set.join("external").join("1").join("app2clap.clap");
+    assert_eq!(fs::read(&copy).unwrap(), b"by hand");
+    let note = copy.with_file_name(format!("app2clap.clap{ORIGIN_SIDECAR_SUFFIX}"));
+    assert_eq!(
+        fs::read_to_string(&note).unwrap(),
+        by_hand.to_string_lossy()
+    );
+    let manifest = update_set(&report);
+    assert_eq!(
+        files_held(&manifest, PACKAGE_APP2CLAP),
+        vec![(by_hand.clone(), b"by hand".to_vec())]
+    );
+    let record = &manifest.replaced[PACKAGE_APP2CLAP];
+    assert_eq!(record.receipt, None);
+    assert_eq!(record.replaced_by, Some(version("2026.5.17.34")));
+    let outside_after = outside_of(dir.path(), &resource);
+    assert_eq!(gone_from(&outside_before, &outside_after), [&by_hand]);
+    assert!(gone_from(&outside_after, &outside_before).is_empty());
+
+    let set_id = set_id(&report);
+    let clap_rules = || OutsideRestoreRules {
+        shared_roots: vec![clap.clone()],
+        vendor_added: Vec::new(),
+    };
+    let rules_for = |_: &Path| clap_rules();
+    let environment = BackupEnvironment {
+        outside_rules: &rules_for,
+        ..BackupEnvironment::AS_USER
+    };
+    let row = overview_with(&resource, &environment)
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|entry| {
+            entry.item
+                == BackupItem::Package {
+                    set_id: set_id.clone(),
+                    package_id: PACKAGE_APP2CLAP.to_string(),
+                }
+        })
+        .unwrap();
+    assert_eq!(row.group, BackupGroup::EarlierVersions);
+    assert_eq!(row.status, BackupStatus::CanRestore, "{row:?}");
+    assert_eq!(row.version, None);
+    assert_eq!(row.replaced_by, Some(version("2026.5.17.34")));
+
+    let options = RestoreBackupOptions {
+        dry_run: false,
+        allow_reaper_running: false,
+        package_id: Some(PACKAGE_APP2CLAP.to_string()),
+    };
+    let back = restore_backup_set_within(&resource, &set_id, &options, &clap_rules()).unwrap();
+
+    assert_eq!(back.status, RestoreStatus::Restored, "{back:?}");
+    assert_eq!(fs::read(&by_hand).unwrap(), b"by hand");
+    assert_eq!(fs::read(&other).unwrap(), b"other");
+    let swap = back.swap.as_ref().unwrap();
+    assert_eq!(swap.left_in_place, std::slice::from_ref(&fx));
+    assert!(swap.moved_out.is_empty());
+    assert_eq!(fs::read(&fx).unwrap(), b"new app2clap");
+    assert!(
+        !load_install_state(&resource)
+            .unwrap()
+            .unwrap()
+            .packages
+            .contains_key(PACKAGE_APP2CLAP)
+    );
+    assert_eq!(outside_of(dir.path(), &resource), outside_before);
+}
+
+/// An old app2clap in the CLAP folder, a temporary one here, that the
+/// update can't move, because another program holds it open on Windows, or
+/// its folder may not be changed on Unix, stays there with a warning, and
+/// the new version is in UserPlugins\FX all the same. RABBIT's records then
+/// list only the new file, but the next update or reinstall on the
+/// standard REAPER finds the copy in the CLAP folder by its name, and moves
+/// it into its own backup set then.
+#[test]
+fn a_copy_in_the_clap_folder_that_cant_be_moved_goes_at_the_next_update() {
+    let (dir, resource) = resource_folder();
+    let cache = dir.path().join("cache");
+    let clap = dir.path().join("CLAP");
+    let old = clap.join("app2clap.clap");
+    installed(
+        &resource,
+        &[(
+            entry(PACKAGE_APP2CLAP, "2026.5.16.31", &[(&old, b"old app2clap")]),
+            &[(&old, b"old app2clap")],
+        )],
+    );
+    assert_fx_destination();
+    let fx = app2clap_in_fx(&resource);
+    {
+        let Some(_held) = hold(&old) else {
+            return;
+        };
+        let report = install_beside_clap(
+            &resource,
+            &[artifact(
+                &cache,
+                PACKAGE_APP2CLAP,
+                "2026.5.17.34",
+                "app2clap.clap",
+                b"app2clap 34",
+            )],
+            &APPLY,
+            &clap,
+        );
+
+        let left = action_at(&report, &old);
+        assert_eq!(left.action, InstallFileAction::LeftInPlace);
+        #[cfg(windows)]
+        assert_eq!(left.left_reason, Some(LeftInPlaceReason::InUse));
+        #[cfg(unix)]
+        assert_eq!(left.left_reason, Some(LeftInPlaceReason::Other));
+        assert_eq!(fs::read(&fx).unwrap(), b"app2clap 34");
+    }
+    assert_eq!(fs::read(&old).unwrap(), b"old app2clap");
+    let recorded: Vec<PathBuf> = load_install_state(&resource).unwrap().unwrap().packages
+        [PACKAGE_APP2CLAP]
+        .installed_files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect();
+    assert_eq!(
+        recorded,
+        [Path::new("UserPlugins").join("FX").join("app2clap.clap")]
+    );
+
+    let report = install_beside_clap(
+        &resource,
+        &[artifact(
+            &cache,
+            PACKAGE_APP2CLAP,
+            "2026.5.18.36",
+            "app2clap.clap",
+            b"app2clap 36",
+        )],
+        &APPLY,
+        &clap,
+    );
+
+    assert!(!old.exists());
+    assert_eq!(fs::read(&fx).unwrap(), b"app2clap 36");
+    assert_eq!(
+        action_at(&report, &old).action,
+        InstallFileAction::MovedToBackup
+    );
+    let manifest = update_set(&report);
+    assert_eq!(
+        files_held(&manifest, PACKAGE_APP2CLAP),
+        vec![
+            (old.clone(), b"old app2clap".to_vec()),
+            (
+                Path::new("UserPlugins").join("FX").join("app2clap.clap"),
+                b"app2clap 34".to_vec()
+            ),
+        ]
+    );
+    let earlier = manifest.replaced[PACKAGE_APP2CLAP]
+        .receipt
+        .as_ref()
+        .unwrap();
+    assert_eq!(earlier.version, Some(version("2026.5.17.34")));
 }
 
 /// A symbolic link or junction where the previous version had a file is

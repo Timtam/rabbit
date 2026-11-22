@@ -43,7 +43,7 @@ package-reakontrol-description = ReaKontrol fornisce un'integrazione open source
 package-jaws-scripts-description = Gli script di Snowman migliorano il modo in cui JAWS gestisce le varie finestre di REAPER, oltre a offrire un supporto Braille esteso e molte altre funzionalità. Tieni presente che questi script sono concepiti per essere usati insieme a OSARA: non ne sono un'alternativa. Per un'accessibilità ottimale con JAWS, dovresti installarli entrambi.
 package-ffmpeg-description = Le librerie di runtime condivise di FFmpeg consentono al decoder video di REAPER di importare e riprodurre i formati audio e video più comuni. RABBIT installa la cartella bin della build «GPL-shared» di BtbN in UserPlugins; il livello di patch non può essere dedotto dai soli nomi dei file DLL, perciò le installazioni esterne di FFmpeg vengono segnalate con un segnaposto «<major>.0.0».
 package-surge-xt-description = Surge XT è un sintetizzatore ibrido gratuito e open source. RABBIT esegue il programma di installazione del fornitore al posto tuo — installa a livello di sistema i formati VST3, CLAP, AU (solo macOS) e standalone, così REAPER e gli altri DAW possono caricare Surge XT. Segue il canale nightly continuo perché l'ultima versione stabile (1.3.4) risale all'agosto 2024 e il progetto ormai viene distribuito di fatto tramite le nightly. Solo installazioni standard di REAPER: i dati di fabbrica risiedono al di fuori di qualsiasi cartella REAPER portatile.
-package-app2clap-description = app2clap è un plug-in CLAP per Windows che cattura l'audio di altre applicazioni e lo porta in REAPER (o in qualsiasi host CLAP) come plug-in da inserire su una traccia — utile per registrare o elaborare il suono di un browser, un lettore multimediale o un altro programma. RABBIT scarica la versione più recente e installa app2clap.clap nella tua cartella CLAP personale, senza bisogno dei diritti di amministratore. Solo Windows. Solo installazioni standard di REAPER: viene installato al di fuori di qualsiasi cartella REAPER portatile.
+package-app2clap-description = app2clap è un plug-in CLAP per Windows che cattura l'audio di altre applicazioni e lo porta in REAPER come plug-in da inserire su una traccia — utile per registrare o elaborare il suono di un browser, un lettore multimediale o un altro programma. RABBIT scarica la versione più recente e installa app2clap.clap nella cartella dei plug-in di REAPER stesso, UserPlugins\FX, così è disponibile solo per quel REAPER. Non servono i diritti di amministratore, e funziona anche con un REAPER portatile. Solo Windows.
 package-lreaparams-description = LReaParams è un'estensione open source di Lo-lo che ti permette di controllare dalla tastiera, in modo accessibile, i parametri degli FX e delle tracce in REAPER, e funziona insieme a OSARA. Solo Windows.
 package-langpack-es-description = Traduce l'interfaccia di REAPER in spagnolo, inclusa l'estensione SWS. Curato da Javier Robledo per la comunità ispanofona di REAPER e pubblicato su reaperespa.com: RABBIT scarica la versione attuale e la installa come es_ES.ReaperLangPack. OSARA usa quel nome di file per scegliere la propria traduzione spagnola. Dopo l'installazione, seleziona la lingua nelle preferenze di REAPER (oppure lascia che sia RABBIT a farlo).
 package-langpack-de-description = Traduce l'interfaccia di REAPER in tedesco, inclusa l'estensione SWS. Curato da MrData e pubblicato nello Stash di REAPER: RABBIT scarica la versione attuale e la installa come de_DE.ReaperLangPack. Dopo l'installazione, seleziona la lingua nelle preferenze di REAPER (oppure lascia che sia RABBIT a farlo).
@@ -65,8 +65,12 @@ uninstall-summary-reakontrol-removes = Rimuove l'estensione ReaKontrol.
 uninstall-summary-reakontrol-keeps = Le tue mappe FX restano, e RABBIT non tocca il tuo software Native Instruments.
 uninstall-summary-ffmpeg-removes = Rimuove i file di FFmpeg che RABBIT ha installato in UserPlugins. Dopo, REAPER non può più usare FFmpeg per aprire o renderizzare file multimediali.
 uninstall-summary-ffmpeg-keeps = I file di FFmpeg di cui RABBIT non ha traccia restano, come quelli lasciati da versioni precedenti.
-uninstall-summary-app2clap-removes = Rimuove app2clap dalla tua cartella CLAP. Lo perdono tutti i programmi in cui usi plug-in CLAP, non solo REAPER.
-uninstall-summary-app2clap-keeps = La cartella CLAP e gli altri plug-in che contiene restano.
+uninstall-summary-app2clap-removes = Rimuove app2clap dalla cartella UserPlugins\FX di REAPER.
+# The same on the standard REAPER, which also removes any app2clap in the
+# per-user CLAP folder, whoever put it there: earlier versions of RABBIT
+# installed it there. Keep UserPlugins\FX as it is: it is the folder's name.
+uninstall-summary-app2clap-removes-standard = Rimuove app2clap dalla cartella UserPlugins\FX di REAPER e qualsiasi app2clap nella tua cartella CLAP, come quello che una versione precedente di RABBIT ci ha installato. Tutti i programmi in cui usi plug-in CLAP perdono la copia nella cartella CLAP, non solo REAPER.
+uninstall-summary-app2clap-keeps = Gli altri tuoi plug-in restano.
 uninstall-summary-lreaparams-removes = Rimuove l'estensione LReaParams.
 uninstall-summary-lreaparams-keeps = Le tue impostazioni e i tuoi profili di LReaParams restano, così come la sua guida.
 uninstall-summary-langpack-removes = Rimuove il pacchetto lingua che RABBIT ha installato. Se REAPER lo usa, RABBIT riporta REAPER in inglese.
@@ -99,7 +103,6 @@ uninstall-kept-sws-cycle-actions = le tue azioni cicliche
 uninstall-kept-reapack-settings = impostazioni di ReaPack e i tuoi repository
 uninstall-kept-reapack-data = l'elenco di ciò che ReaPack ha installato e la sua cache dei download
 uninstall-kept-reakontrol-fx-maps = le tue mappe FX
-uninstall-kept-app2clap-clap-folder = la cartella CLAP, condivisa con altri plug-in
 uninstall-kept-lreaparams-data = le tue impostazioni e i tuoi profili di LReaParams, e la sua guida
 uninstall-kept-osara-key-map = la tua mappa dei tasti
 uninstall-kept-osara-replaced-key-map = la tua mappa dei tasti di prima che OSARA la sostituisse
@@ -206,6 +209,18 @@ wizard-package-row-unavailable-reapack-check-failed = non è stato possibile con
 # package by, and $error an error message.
 wizard-package-details-reapack = Secondo i registri di ReaPack, ReaPack ha installato { $package } come { $reapack_package }, quindi RABBIT lo lascia a ReaPack. Installalo, aggiornalo o rimuovilo da ReaPack.
 wizard-package-details-reapack-check-failed = RABBIT non ha potuto leggere i registri di ReaPack ({ $error }), quindi non sa se { $package } l'ha installato ReaPack, e non lo installa, non lo aggiorna e non lo rimuove.
+# A sentence the package details add on a portable REAPER when the per-user
+# CLAP folder holds a copy of a package that now installs into each REAPER's
+# own UserPlugins\FX folder, such as app2clap. Every REAPER on the computer
+# loads the plug-ins in the CLAP folder, so this one would load two copies.
+# Updating or reinstalling the package in the standard REAPER moves the copy
+# out of the CLAP folder. $package is the localized package name.
+wizard-package-details-clap-copy-portable = Questo REAPER carica già la copia di { $package } nella tua cartella CLAP, come tutti i REAPER di questo computer. Se lo installi anche qui, questo REAPER ne caricherà due copie. Per dargli una copia propria, aggiorna o reinstalla prima { $package } nel REAPER standard: così la copia nella cartella CLAP viene spostata in un backup.
+# The same on the standard REAPER: updating or reinstalling the package there
+# moves the copy out of the CLAP folder into a backup, so portable REAPERs and
+# every other program that loaded it from there lose it. $package is the
+# localized package name.
+wizard-package-details-clap-copy-standard = La tua cartella CLAP contiene una copia di { $package }. Aggiornando o reinstallando { $package } qui, quella copia viene spostata in un backup, così REAPER non carica due copie. Poi i REAPER portatili e gli altri programmi che usano plug-in CLAP non la trovano più, e RABBIT può installare { $package } anche in ogni REAPER portatile.
 
 # Review-page note carrying the full error for a package whose latest-version
 # check failed; its row is disabled with the short reason above.
@@ -762,7 +777,7 @@ wizard-restore-refusal-earlier-file-refused = La sua registrazione di quella ver
 wizard-restore-refusal-receipt-unreadable = RABBIT non riesce a leggere i suoi registri ({ $detail }), quindi non può sapere se questo backup corrisponde.
 wizard-restore-refusal-reaper-running = REAPER è aperto. Chiudilo, poi riprova.
 # The same, for packages every REAPER on the computer can use, such as
-# app2clap. $packages is a list of localized package names.
+# the JAWS scripts. $packages is a list of localized package names.
 wizard-restore-refusal-reaper-running-every = Un REAPER è aperto. Chiudi tutte le copie di REAPER su questo computer, comprese quelle portatili, poi riprova. Ogni REAPER può usare { $packages }.
 wizard-restore-refusal-keymap-needs-reaper-closed = Rimette a posto la mappa dei tasti di REAPER, cosa che RABBIT fa solo con REAPER chiuso.
 wizard-restore-refusal-program-running = Chiudi questi programmi, poi riprova: { $programs }.
@@ -1237,7 +1252,7 @@ wizard-error-backup-folder-link = RABBIT si è fermato perché la sua cartella i
 # button as wizard-button-uninstall does.
 wizard-reaper-running-uninstall-body = Chiudi REAPER, poi premi di nuovo Disinstalla. RABBIT non può disinstallare niente da REAPER mentre REAPER è aperto.
 # The same, for packages every REAPER on the computer can load, such as
-# app2clap. $packages is a comma-separated list of localized package names.
+# Surge XT. $packages is a comma-separated list of localized package names.
 wizard-reaper-running-uninstall-every-body = Chiudi tutte le copie di REAPER su questo computer, comprese quelle portatili, poi premi di nuovo Disinstalla. Qualsiasi REAPER su questo computer può usare { $packages }.
 wizard-reaper-running-uninstall-reaper-body = Chiudi tutte le copie di REAPER su questo computer, comprese quelle portatili, poi premi di nuovo Disinstalla. Il programma di disinstallazione di REAPER non parte finché è aperto un REAPER.
 # The same on macOS, when RABBIT's administrator command is to move REAPER's
@@ -1525,6 +1540,11 @@ wizard-summary-left-in-place-keymap = Resta dov'è, perché è la mappa dei tast
 wizard-summary-left-in-place-refused = Resta dov'è, perché RABBIT non potrebbe rimetterlo lì da un backup: { $path }
 wizard-summary-left-in-place-unreadable = Resta dov'è, perché RABBIT non è riuscito a leggerlo: { $path }
 wizard-summary-left-in-place-other = Resta dov'è, perché RABBIT non è riuscito a spostarlo nel backup: { $path }
+# Show details' line right after wizard-summary-moved-to-backup, for a file
+# that was outside REAPER's own folder, in a folder other programs read too,
+# such as the per-user CLAP folder: they no longer find it there. $path is the
+# file's path.
+wizard-summary-moved-from-shared-folder = I REAPER portatili e gli altri programmi che lo caricavano da lì non lo trovano più: { $path }
 # Show details after an update that moved the language pack file REAPER's
 # language named into the backup, such as after a switch between the two
 # Spanish variants: REAPER's language now names the new version's file;

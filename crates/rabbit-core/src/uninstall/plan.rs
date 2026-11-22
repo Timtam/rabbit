@@ -161,7 +161,8 @@ fn blocking_programs_of(plan: Option<&UninstallPlanSpec>) -> Vec<String> {
 /// alone, by the rules the plan of an uninstall follows, so a restore of the
 /// package checks the same (backup plan 4.4). Only an uninstall of REAPER
 /// itself that needs the administrator command adds every REAPER besides,
-/// which takes detection; no backup set holds REAPER's app.
+/// which takes detection; no backup set holds REAPER's app. So does one
+/// that removes a file from the CLAP folder, which takes the files found.
 pub(crate) fn uninstall_process_rules(
     spec: &PackageSpec,
     platform: Platform,
@@ -468,6 +469,23 @@ fn plan_item(
     }
     item.files = collected.files;
     item.files.extend(settings);
+    // A file in the CLAP folder, such as an app2clap an earlier RABBIT put
+    // there: every REAPER on the computer, and every other program that
+    // reads the folder, may have it loaded, and they all lose it. So every
+    // REAPER must be closed, and the details say so, as for a package that
+    // serves the whole computer, unless its manifest turns that off.
+    if input.roots.clap_dir.as_ref().is_some_and(|clap_dir| {
+        item.files
+            .iter()
+            .any(|file| file.path.starts_with(clap_dir))
+    }) {
+        item.every_reaper_closed = true;
+        if spec.uninstall.machine_wide_warning
+            && !item.warnings.contains(&UninstallWarning::MachineWide)
+        {
+            item.warnings.push(UninstallWarning::MachineWide);
+        }
+    }
     item.dirs_if_empty = collected.dirs_if_empty;
     item.registry_cleanup = planner.registry_cleanup();
     item
@@ -877,10 +895,12 @@ impl PackagePlanner<'_> {
         if !self.plan.remove.matching_user_plugins {
             return Ok(());
         }
-        let (token, folder) = match self.spec.install_destination {
-            InstallDestination::UserPlugins => (UninstallPathToken::Resource, Some("UserPlugins")),
-            InstallDestination::LangPack => (UninstallPathToken::Resource, Some("LangPack")),
-            InstallDestination::WindowsClapDir => (UninstallPathToken::ClapDir, None),
+        let destination = self.spec.install_destination;
+        let token = match destination {
+            InstallDestination::UserPlugins
+            | InstallDestination::UserPluginsFx
+            | InstallDestination::LangPack => UninstallPathToken::Resource,
+            InstallDestination::WindowsClapDir => UninstallPathToken::ClapDir,
         };
         let roots = self.roots.resolve(token);
         if roots.is_empty() {
@@ -892,7 +912,9 @@ impl PackagePlanner<'_> {
             });
         }
         for root in roots {
-            let scan_dir = folder.map_or_else(|| root.clone(), |folder| root.join(folder));
+            // Below the resource folder, the destination's own folder; the
+            // CLAP folder is the token's root itself.
+            let scan_dir = destination.folder_in(&root).unwrap_or_else(|| root.clone());
             let entries = match fs::read_dir(&scan_dir) {
                 Ok(entries) => entries,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,

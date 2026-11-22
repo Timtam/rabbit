@@ -194,13 +194,10 @@ pub(crate) fn left_to_reapack(resource_path: &Path, spec: &PackageSpec) -> Optio
     if !spec.leave_to_reapack {
         return None;
     }
-    let folder = match spec.install_destination {
-        InstallDestination::UserPlugins => "UserPlugins",
-        InstallDestination::LangPack => "LangPack",
-        // ReaPack only installs inside the resource folder.
-        InstallDestination::WindowsClapDir => return None,
-    };
-    match reapack_package_with_file_in(resource_path, folder, |name| {
+    // ReaPack only installs inside the resource folder, and its records
+    // name each file by its path there with `/` between the folders.
+    let folder = spec.install_destination.resource_components()?.join("/");
+    match reapack_package_with_file_in(resource_path, &folder, |name| {
         user_plugin_name_matches(spec, name)
     }) {
         Ok(Some(reapack_package)) => Some(LeftToReapack::Managed { reapack_package }),
@@ -233,6 +230,28 @@ pub(crate) fn detect_component_with_probes(
     state: Option<&crate::receipt::InstallState>,
     uninstall_display_version: fn(&str) -> Option<String>,
 ) -> Result<ComponentDetection> {
+    detect_component_seeing(
+        resource_path,
+        platform,
+        spec,
+        state,
+        uninstall_display_version,
+        &|destination| former_outside_folder(platform, resource_path, destination),
+    )
+}
+
+/// [`detect_component_with_probes`], with `former_outside` giving the
+/// folder outside the resource folder that a former install destination
+/// names for this REAPER, if it counts here (see [`former_scan_dirs`]).
+/// Tests give a temporary one, so they never look in the real CLAP folder.
+pub(crate) fn detect_component_seeing(
+    resource_path: &Path,
+    platform: Platform,
+    spec: &PackageSpec,
+    state: Option<&crate::receipt::InstallState>,
+    uninstall_display_version: fn(&str) -> Option<String>,
+    former_outside: &dyn Fn(InstallDestination) -> Option<PathBuf>,
+) -> Result<ComponentDetection> {
     match verify_package_receipt(resource_path, state, &spec.id)? {
         ReceiptVerification::Verified(receipt) => {
             let files = receipt
@@ -253,7 +272,7 @@ pub(crate) fn detect_component_with_probes(
             });
         }
         ReceiptVerification::Mismatch(receipt) => {
-            let files = matching_user_plugin_files(resource_path, platform, spec)?;
+            let files = detected_user_plugin_files(resource_path, platform, spec, former_outside)?;
             if !files.is_empty() {
                 return Ok(ComponentDetection {
                     package_id: spec.id.clone(),
@@ -274,7 +293,7 @@ pub(crate) fn detect_component_with_probes(
         ReceiptVerification::MissingReceipt | ReceiptVerification::MissingPackage => {}
     }
 
-    let files = matching_user_plugin_files(resource_path, platform, spec)?;
+    let files = detected_user_plugin_files(resource_path, platform, spec, former_outside)?;
 
     // Run the package's detector probes in their declared order; the first
     // that yields a detection wins. This is the data-driven replacement for
@@ -727,20 +746,120 @@ fn ffmpeg_major_from_libavformat_major(libavformat_major: u64) -> Option<u64> {
     libavformat_major.checked_sub(54)
 }
 
-/// The directory a package's plug-in file(s) live in. The default is
-/// `<resource>/UserPlugins`; a data-driven package that declares a
-/// `github_release.install_destination` other than UserPlugins (app2clap's
-/// per-user CLAP folder) is scanned there instead. Returns `None` when the
-/// destination can't be resolved (e.g. the CLAP folder on a non-Windows
-/// host), in which case detection finds no files.
+/// The directory a package's plug-in file(s) live in: the folder its
+/// `install_destination` names, such as `<resource>/UserPlugins` (the
+/// default), `<resource>/UserPlugins/FX` or `<resource>/LangPack`. Returns
+/// `None` when the destination can't be resolved (e.g. the CLAP folder on a
+/// non-Windows host), in which case detection finds no files.
 fn package_scan_dir(resource_path: &Path, spec: &PackageSpec) -> Option<PathBuf> {
-    match spec.install_destination {
-        InstallDestination::WindowsClapDir => rabbit_platform::windows_clap_dir(),
-        InstallDestination::LangPack => Some(resource_path.join("LangPack")),
-        InstallDestination::UserPlugins => Some(resource_path.join("UserPlugins")),
-    }
+    let destination = spec.install_destination;
+    destination
+        .folder_in(resource_path)
+        .or_else(|| destination.outside_folder())
 }
 
+/// The folders `spec` installed into before it moved to its install folder
+/// (its `former_install_destinations`), where a copy installed back then
+/// still counts as the package. One inside the resource folder counts for
+/// every REAPER. One outside it, such as the CLAP folder, is shared by
+/// every REAPER on the computer, and only a standard REAPER's receipt ever
+/// recorded a copy there, so `outside` gives it only for the standard
+/// REAPER (see [`former_outside_folder`]): a portable REAPER offers the
+/// package as a new install rather than ticking an update of a copy that
+/// isn't its own, and the wizard says the shared copy is there (see
+/// [`copies_in_former_outside_folders`]).
+fn former_scan_dirs(
+    resource_path: &Path,
+    spec: &PackageSpec,
+    outside: &dyn Fn(InstallDestination) -> Option<PathBuf>,
+) -> Vec<PathBuf> {
+    spec.former_install_destinations
+        .iter()
+        .filter_map(|destination| {
+            destination
+                .folder_in(resource_path)
+                .or_else(|| outside(*destination))
+        })
+        .collect()
+}
+
+/// The folder outside every resource folder that `destination` names on
+/// this computer, when `resource_path` is the standard REAPER's resource
+/// folder, the only one a former outside install counts for (see
+/// [`former_scan_dirs`]).
+pub(crate) fn former_outside_folder(
+    platform: Platform,
+    resource_path: &Path,
+    destination: InstallDestination,
+) -> Option<PathBuf> {
+    let folder = destination.outside_folder()?;
+    (crate::uninstall::execute::target_kind_of(platform, resource_path)
+        == InstallationKind::Standard)
+        .then_some(folder)
+}
+
+/// `spec`'s copies in the folders it installed into before, as detection
+/// counts them for the REAPER at `resource_path` (see
+/// [`former_scan_dirs`]): the files there whose names match its plug-in
+/// names. An update moves each one no receipt lists into its backup set,
+/// so REAPER doesn't load it beside the new version. A folder that can't
+/// be read gives none, and the update goes on without it.
+pub(crate) fn former_copies(
+    resource_path: &Path,
+    spec: &PackageSpec,
+    outside: &dyn Fn(InstallDestination) -> Option<PathBuf>,
+) -> Vec<PathBuf> {
+    former_scan_dirs(resource_path, spec, outside)
+        .iter()
+        .flat_map(|folder| user_plugin_files_in(folder, spec).unwrap_or_default())
+        .collect()
+}
+
+/// `spec`'s copies in a folder outside every resource folder that it
+/// installed into before, such as an app2clap an earlier RABBIT put in the
+/// CLAP folder: the files there whose names match its plug-in names. Every
+/// REAPER on the computer loads what is in that folder, portable ones too,
+/// and so does every other program that reads it, whichever REAPER
+/// detection counts the copy for. Empty when there are none, or the folder
+/// can't be read.
+pub fn copies_in_former_outside_folders(spec: &PackageSpec) -> Vec<PathBuf> {
+    former_outside_copies_seeing(spec, &InstallDestination::outside_folder)
+}
+
+/// [`copies_in_former_outside_folders`], with `outside` giving the folder
+/// a destination names. Tests give a temporary one.
+fn former_outside_copies_seeing(
+    spec: &PackageSpec,
+    outside: &dyn Fn(InstallDestination) -> Option<PathBuf>,
+) -> Vec<PathBuf> {
+    spec.former_install_destinations
+        .iter()
+        .filter(|destination| destination.resource_components().is_none())
+        .filter_map(|destination| outside(*destination))
+        .flat_map(|folder| user_plugin_files_in(&folder, spec).unwrap_or_default())
+        .collect()
+}
+
+/// The files detection counts as `spec`'s when no matching receipt says
+/// which they are: those in its install folder whose names match its
+/// plug-in names (see [`matching_user_plugin_files`]), then those in each
+/// folder it installed into before (see [`former_scan_dirs`]).
+fn detected_user_plugin_files(
+    resource_path: &Path,
+    platform: Platform,
+    spec: &PackageSpec,
+    former_outside: &dyn Fn(InstallDestination) -> Option<PathBuf>,
+) -> Result<Vec<PathBuf>> {
+    let mut files = matching_user_plugin_files(resource_path, platform, spec)?;
+    for folder in former_scan_dirs(resource_path, spec, former_outside) {
+        files.extend(user_plugin_files_in(&folder, spec)?);
+    }
+    Ok(files)
+}
+
+/// The files in `spec`'s install folder whose names match its plug-in
+/// names. Only that folder: the files RABBIT records for a package a
+/// vendor installer put in place come from here.
 pub(crate) fn matching_user_plugin_files(
     resource_path: &Path,
     _platform: Platform,
@@ -749,13 +868,20 @@ pub(crate) fn matching_user_plugin_files(
     let Some(scan_dir) = package_scan_dir(resource_path, spec) else {
         return Ok(Vec::new());
     };
+    user_plugin_files_in(&scan_dir, spec)
+}
+
+/// The files directly in `scan_dir` whose names match `spec`'s plug-in
+/// names, sorted. Other files and folders there are left out, as the
+/// folder may hold other plug-ins too.
+fn user_plugin_files_in(scan_dir: &Path, spec: &PackageSpec) -> Result<Vec<PathBuf>> {
     if !scan_dir.is_dir() {
         return Ok(Vec::new());
     }
 
     let mut files = Vec::new();
-    for entry in fs::read_dir(&scan_dir).with_path(&scan_dir)? {
-        let entry = entry.with_path(&scan_dir)?;
+    for entry in fs::read_dir(scan_dir).with_path(scan_dir)? {
+        let entry = entry.with_path(scan_dir)?;
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -1480,25 +1606,238 @@ mod tests {
             package_scan_dir(resource, reakontrol),
             Some(resource.join("UserPlugins"))
         );
-        // app2clap installs to the per-user CLAP folder → scanned there, NOT
-        // under the resource path. (windows_clap_dir resolves only on Windows.)
+        // app2clap installs to REAPER's own UserPlugins\FX folder → scanned
+        // there, under the resource path, on every platform.
         let app2clap = specs.get(PACKAGE_APP2CLAP).unwrap();
-        #[cfg(target_os = "windows")]
-        {
-            assert_eq!(
-                package_scan_dir(resource, app2clap),
-                rabbit_platform::windows_clap_dir()
-            );
-            assert_ne!(
-                package_scan_dir(resource, app2clap),
-                Some(resource.join("UserPlugins"))
-            );
+        assert_eq!(
+            package_scan_dir(resource, app2clap),
+            Some(resource.join("UserPlugins").join("FX"))
+        );
+    }
+
+    /// app2clap's spec for Windows.
+    fn app2clap() -> crate::package::PackageSpec {
+        package_specs_by_id(Platform::Windows)
+            .remove(PACKAGE_APP2CLAP)
+            .unwrap()
+    }
+
+    /// A receipt with app2clap at `version`, listing `path`, relative to
+    /// the resource folder or absolute, as holding `contents`.
+    fn app2clap_receipt(
+        version: &str,
+        path: &std::path::Path,
+        contents: &[u8],
+    ) -> crate::receipt::InstallState {
+        let mut state = crate::receipt::InstallState::default();
+        state.packages.insert(
+            PACKAGE_APP2CLAP.to_string(),
+            crate::receipt::PackageReceipt {
+                id: PACKAGE_APP2CLAP.to_string(),
+                version: Some(crate::version::Version::parse(version).unwrap()),
+                source_url: None,
+                source_sha256: None,
+                variant: None,
+                channel: None,
+                installed_files: vec![crate::receipt::InstalledFileReceipt {
+                    path: path.to_path_buf(),
+                    sha256: Some(crate::hash::sha256_bytes(contents)),
+                    size: Some(contents.len() as u64),
+                }],
+                installed_at: None,
+                rabbit_version: None,
+                architecture: None,
+                vendor_added_files: Vec::new(),
+            },
+        );
+        state
+    }
+
+    /// Detect app2clap in `resource` with `state`, where `clap` is the
+    /// CLAP folder of a standard REAPER, `None` for a portable one.
+    fn detect_app2clap(
+        resource: &std::path::Path,
+        state: Option<&crate::receipt::InstallState>,
+        clap: Option<&std::path::Path>,
+    ) -> crate::model::ComponentDetection {
+        let outside = |destination: crate::package::InstallDestination| {
+            (destination == crate::package::InstallDestination::WindowsClapDir)
+                .then(|| clap.map(std::path::Path::to_path_buf))
+                .flatten()
+        };
+        super::detect_component_seeing(
+            resource,
+            Platform::Windows,
+            &app2clap(),
+            state,
+            |_| None,
+            &outside,
+        )
+        .unwrap()
+    }
+
+    /// app2clap in REAPER's own UserPlugins\FX folder is found by its
+    /// receipt, which records the file relative to the resource folder,
+    /// and without one by its name. The other plug-ins in that folder,
+    /// files and folders alike, are never taken for it.
+    #[test]
+    fn app2clap_is_found_in_the_fx_folder() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let fx = resource.join("UserPlugins").join("FX");
+        fs::create_dir_all(fx.join("Other Synth.vst3")).unwrap();
+        fs::write(fx.join("Other Synth.clap"), b"other").unwrap();
+        fs::write(fx.join("app2clap.clap"), b"app2clap").unwrap();
+        let relative = std::path::Path::new("UserPlugins")
+            .join("FX")
+            .join("app2clap.clap");
+        let state = app2clap_receipt("2026.5.17.34", &relative, b"app2clap");
+
+        let found = detect_app2clap(&resource, Some(&state), None);
+        assert!(found.installed, "{found:?}");
+        assert_eq!(found.detector, "rabbit-receipt");
+        assert_eq!(found.version.unwrap().raw(), "2026.5.17.34");
+        assert_eq!(found.files, vec![fx.join("app2clap.clap")]);
+
+        let found = detect_app2clap(&resource, None, None);
+        assert!(found.installed, "{found:?}");
+        assert_eq!(found.detector, "file-presence");
+        assert_eq!(found.version, None);
+        assert_eq!(found.files, vec![fx.join("app2clap.clap")]);
+
+        fs::remove_file(fx.join("app2clap.clap")).unwrap();
+        assert!(!detect_app2clap(&resource, None, None).installed);
+    }
+
+    /// An app2clap an earlier RABBIT installed into the CLAP folder, a
+    /// temporary one here, whose receipt names it by its absolute path,
+    /// still counts as installed with its version. So does one moved by
+    /// hand into UserPlugins\FX since, its receipt still naming the CLAP
+    /// folder.
+    #[test]
+    fn an_older_receipt_naming_the_clap_folder_still_finds_app2clap() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let clap = dir.path().join("CLAP");
+        fs::create_dir_all(&resource).unwrap();
+        fs::create_dir_all(&clap).unwrap();
+        fs::write(clap.join("app2clap.clap"), b"old app2clap").unwrap();
+        let state = app2clap_receipt("2026.5.16.31", &clap.join("app2clap.clap"), b"old app2clap");
+
+        for standard in [Some(clap.as_path()), None] {
+            let found = detect_app2clap(&resource, Some(&state), standard);
+            assert!(found.installed, "{found:?}");
+            assert_eq!(found.detector, "rabbit-receipt");
+            assert_eq!(found.version.unwrap().raw(), "2026.5.16.31");
+            assert_eq!(found.files, vec![clap.join("app2clap.clap")]);
         }
-        #[cfg(not(target_os = "windows"))]
-        {
-            // No CLAP folder off-Windows → nothing to scan.
-            assert_eq!(package_scan_dir(resource, app2clap), None);
-        }
+
+        let fx = resource.join("UserPlugins").join("FX");
+        fs::create_dir_all(&fx).unwrap();
+        fs::rename(clap.join("app2clap.clap"), fx.join("app2clap.clap")).unwrap();
+        let found = detect_app2clap(&resource, Some(&state), Some(&clap));
+        assert!(found.installed, "{found:?}");
+        assert_eq!(found.detector, "rabbit-receipt-mismatch");
+        assert_eq!(found.version.unwrap().raw(), "2026.5.16.31");
+        assert_eq!(found.files, vec![fx.join("app2clap.clap")]);
+    }
+
+    /// A copy in the CLAP folder with no receipt, such as one put there by
+    /// hand, counts as installed for the standard REAPER, as it did while
+    /// app2clap installed there. For a portable REAPER it doesn't: the
+    /// folder is every REAPER's, and RABBIT never installed there for one.
+    /// Detection in a temporary resource folder, never the standard
+    /// REAPER's, doesn't look in the real CLAP folder at all.
+    #[test]
+    fn a_copy_in_the_clap_folder_counts_only_for_the_standard_reaper() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let clap = dir.path().join("CLAP");
+        fs::create_dir_all(&resource).unwrap();
+        fs::create_dir_all(&clap).unwrap();
+        fs::write(clap.join("app2clap.clap"), b"by hand").unwrap();
+        fs::write(clap.join("Other Synth.clap"), b"other").unwrap();
+
+        let found = detect_app2clap(&resource, None, Some(&clap));
+        assert!(found.installed, "{found:?}");
+        assert_eq!(found.version, None);
+        assert_eq!(found.files, vec![clap.join("app2clap.clap")]);
+
+        assert!(!detect_app2clap(&resource, None, None).installed);
+        assert_eq!(
+            super::former_outside_folder(
+                Platform::Windows,
+                &resource,
+                crate::package::InstallDestination::WindowsClapDir
+            ),
+            None
+        );
+    }
+
+    /// For the standard REAPER, the CLAP folder is where a former copy of
+    /// app2clap counts. Only the paths are compared: nothing is read or
+    /// written in the real resource folder or the real CLAP folder.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_standard_reaper_looks_in_the_clap_folder_for_a_former_copy() {
+        use crate::package::InstallDestination;
+
+        let standard = crate::preflight::standard_resource_path(Some(Platform::Windows))
+            .expect("the standard resource folder on Windows");
+        assert_eq!(
+            super::former_outside_folder(
+                Platform::Windows,
+                &standard,
+                InstallDestination::WindowsClapDir
+            ),
+            rabbit_platform::windows_clap_dir()
+        );
+        assert!(rabbit_platform::windows_clap_dir().is_some());
+        assert_eq!(
+            super::former_outside_folder(
+                Platform::Windows,
+                &standard,
+                InstallDestination::UserPluginsFx
+            ),
+            None
+        );
+    }
+
+    /// The copies an update moves out of the way are the ones detection
+    /// counts: in the CLAP folder only for the standard REAPER, and only
+    /// files matching app2clap's plug-in names. The copies every REAPER
+    /// loads are those in the CLAP folder, whichever REAPER asks.
+    #[test]
+    fn former_copies_are_the_ones_detection_counts() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let clap = dir.path().join("CLAP");
+        fs::create_dir_all(&resource).unwrap();
+        fs::create_dir_all(clap.join("app2clap.clap.d")).unwrap();
+        fs::write(clap.join("app2clap.clap"), b"by hand").unwrap();
+        fs::write(clap.join("Other Synth.clap"), b"other").unwrap();
+        let spec = app2clap();
+        let standard = |destination: crate::package::InstallDestination| {
+            (destination == crate::package::InstallDestination::WindowsClapDir)
+                .then(|| clap.clone())
+        };
+
+        assert_eq!(
+            super::former_copies(&resource, &spec, &standard),
+            vec![clap.join("app2clap.clap")]
+        );
+        assert!(super::former_copies(&resource, &spec, &|_| None).is_empty());
+        assert_eq!(
+            super::former_outside_copies_seeing(&spec, &standard),
+            vec![clap.join("app2clap.clap")]
+        );
+        fs::remove_file(clap.join("app2clap.clap")).unwrap();
+        assert!(super::former_outside_copies_seeing(&spec, &standard).is_empty());
+        // A package that never moved has no former copies.
+        let reapack = package_specs_by_id(Platform::Windows)
+            .remove(crate::package::PACKAGE_REAPACK)
+            .unwrap();
+        assert!(super::former_outside_copies_seeing(&reapack, &|_| Some(clap.clone())).is_empty());
     }
 
     #[test]

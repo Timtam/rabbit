@@ -2438,7 +2438,8 @@ fn a_restore_reads_the_process_rules_the_plan_does() {
         super::plan::uninstall_process_rules(spec, platform, InstallationKind::Standard)
     };
     assert_eq!(rules("sws", Platform::Windows), (false, Vec::new()));
-    assert!(rules("app2clap", Platform::Windows).0);
+    // app2clap lives in each REAPER's own UserPlugins\FX folder now.
+    assert_eq!(rules("app2clap", Platform::Windows), (false, Vec::new()));
     assert!(rules("jaws-scripts", Platform::Windows).0);
     let (every, programs) = rules("surge-xt", Platform::Windows);
     assert!(every && !programs.is_empty(), "{programs:?}");

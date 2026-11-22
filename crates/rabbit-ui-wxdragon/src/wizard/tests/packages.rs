@@ -677,10 +677,10 @@ fn portable_target_marks_surge_xt_as_unavailable() {
 }
 
 #[test]
-fn portable_target_marks_app2clap_as_unavailable() {
-    // app2clap installs into the per-user CLAP folder, outside any
-    // portable REAPER folder, so it must be gated on portable targets
-    // exactly like Surge XT.
+fn portable_target_offers_app2clap() {
+    // app2clap installs into REAPER's own UserPlugins\FX folder, which a
+    // portable REAPER has too, so unlike Surge XT it stays available
+    // there. It is opt-in, so it starts unticked, and can be ticked.
     let dir = tempdir().unwrap();
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
     let model = model_from_plan(
@@ -705,15 +705,108 @@ fn portable_target_marks_app2clap_as_unavailable() {
         .expect("app2clap row should appear in the package list");
 
     assert!(
-        !app2clap.available_for_target,
-        "app2clap must be marked unavailable on a portable REAPER target"
+        app2clap.available_for_target,
+        "app2clap must stay available on a portable REAPER target"
     );
+    assert!(!app2clap.requires_standard_install);
+    assert_eq!(app2clap.unavailability_reason, None);
+    assert!(!app2clap.summary.contains("portable REAPER target"));
     assert!(!app2clap.selected);
-    assert_eq!(app2clap.action, PlanActionKind::Keep);
-    assert!(
-        app2clap.unavailability_reason.is_some(),
-        "the gate should attach a localized reason so screen readers announce why"
+    assert_eq!(app2clap.original_action, PlanActionKind::Install);
+}
+
+/// A copy of app2clap in the CLAP folder, which every REAPER on the computer
+/// loads, adds a sentence to app2clap's details, right after its summary.
+/// On a portable REAPER it says that installing app2clap there too would
+/// load two copies, and to update or reinstall it in the standard REAPER
+/// first. On the standard REAPER it says that its update or reinstall moves
+/// the copy into a backup, and that portable REAPERs and other programs
+/// then no longer find it. No other row changes, and without a copy
+/// nothing does. The copies are made up here, so the real CLAP folder is
+/// never looked at. In every language.
+#[test]
+fn a_copy_in_the_clap_folder_is_told_in_app2claps_details() {
+    let dir = tempdir().unwrap();
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        Vec::new(),
+        None,
+        InstallPlan {
+            target: None,
+            actions: Vec::new(),
+            notes: Vec::new(),
+        },
     );
+    let target = custom_portable_target_row(&model, dir.path().join("PortableREAPER"), true);
+    let mut rows = wizard_package_plan_for_target(&model, Some(&target))
+        .unwrap()
+        .package_rows;
+    // Details as the rows had them before any note, whatever the real CLAP
+    // folder of the computer that tests this holds.
+    for row in &mut rows {
+        row.details = format!("{}\n\nWhat it is.", row.summary);
+    }
+    let specs = builtin_package_specs(Platform::Windows);
+    let copy = std::path::PathBuf::from("C:/CLAP/app2clap.clap");
+    let in_clap = |spec: &rabbit_core::package::PackageSpec| {
+        if spec.id == PACKAGE_APP2CLAP {
+            vec![copy.clone()]
+        } else {
+            Vec::new()
+        }
+    };
+
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        for (portable, key) in [
+            (true, "wizard-package-details-clap-copy-portable"),
+            (false, "wizard-package-details-clap-copy-standard"),
+        ] {
+            let mut noted = rows.clone();
+            crate::wizard::packages::note_copies_in_former_outside_folders(
+                &localizer, &mut noted, &specs, portable, &in_clap,
+            );
+            let app2clap = noted
+                .iter()
+                .find(|row| row.package_id == PACKAGE_APP2CLAP)
+                .unwrap();
+            let sentence = localizer.format(key, &[("package", app2clap.display_name.as_str())]);
+            assert!(!sentence.missing, "{locale}: {key}");
+            assert_reads(locale, &sentence.value);
+            assert_eq!(
+                app2clap.details,
+                format!("{}\n\n{}\n\nWhat it is.", app2clap.summary, sentence.value),
+                "{locale}"
+            );
+            for (row, before) in noted.iter().zip(&rows) {
+                if row.package_id != PACKAGE_APP2CLAP {
+                    assert_eq!(row, before, "{locale}");
+                }
+            }
+        }
+    }
+    assert!(
+        localizer
+            .format(
+                "wizard-package-details-clap-copy-portable",
+                &[("package", "app2clap")]
+            )
+            .value
+            .contains("first update or reinstall app2clap in the standard REAPER")
+    );
+
+    let mut untouched = rows.clone();
+    crate::wizard::packages::note_copies_in_former_outside_folders(
+        &localizer,
+        &mut untouched,
+        &specs,
+        true,
+        &|_| Vec::new(),
+    );
+    assert_eq!(untouched, rows);
 }
 
 #[test]

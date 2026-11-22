@@ -335,10 +335,10 @@ enum Command {
         /// Restore even though this REAPER is open. Files REAPER holds open
         /// may fail to be replaced, so prefer closing it first. It never
         /// lets a restore past what a package's own uninstall needs closed:
-        /// every REAPER on the computer for a package such as app2clap, and
-        /// the programs its uninstall names. A restore that puts a key map
-        /// back is refused with it, since REAPER may save its own key map
-        /// when it quits.
+        /// every REAPER on the computer for a package such as the JAWS
+        /// scripts, and the programs its uninstall names. A restore that
+        /// puts a key map back is refused with it, since REAPER may save its
+        /// own key map when it quits.
         #[arg(long)]
         allow_reaper_running: bool,
         /// Write the JSON run report to exactly this path.
@@ -782,9 +782,10 @@ pub use rabbit_core::uninstall::HELPER_SUBCOMMAND as UNINSTALL_HELPER_SUBCOMMAND
 /// Shown below `rabbit uninstall --help`. Every other command that changes
 /// files has `--allow-reaper-running`; this says why uninstall doesn't.
 const UNINSTALL_AFTER_HELP: &str = "\
-REAPER must be closed. For REAPER on Windows, Surge XT, app2clap and the JAWS \
-scripts, every REAPER on the computer must be closed, and so it must for a \
-REAPER.app on macOS that the administrator command moves.
+REAPER must be closed. For REAPER on Windows, Surge XT and the JAWS scripts, \
+every REAPER on the computer must be closed, and so it must for app2clap \
+while a copy of it is in the CLAP folder, and for a REAPER.app on macOS \
+that the administrator command moves.
 
 There is no --allow-reaper-running, unlike the commands that install: a \
 running REAPER holds its extensions' files open, so they can't be moved, and \
@@ -8075,8 +8076,8 @@ mod tests {
             "Close REAPER before restoring a backup: reaper.exe (7). This restore puts REAPER's key map back, which RABBIT does only while REAPER is closed, so --allow-reaper-running doesn't change this."
         );
         let every = RestoreRefusal::ReaperRunning {
-            every_reaper_for: vec!["app2clap".to_string()],
-            package_names: vec!["app2clap".to_string()],
+            every_reaper_for: vec!["jaws-scripts".to_string()],
+            package_names: vec!["JAWS scripts".to_string()],
             processes: vec![reaper],
             puts_keymap_back: true,
         };

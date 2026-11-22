@@ -2,6 +2,7 @@
 //! how a checkbox toggle changes a row.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use rabbit_core::Result;
 use rabbit_core::detection::detect_components;
@@ -297,8 +298,9 @@ pub fn wizard_package_plan_for_target_with_available(
     // location outside any portable REAPER folder. JAWS-for-REAPER scripts'
     // NSIS package hard-codes `%APPDATA%\REAPER\UserPlugins\`; Surge XT's
     // vendor installer writes to the system VST3 root + ProgramData /
-    // /Library/Application Support; app2clap installs into the per-user CLAP
-    // folder. Each declares `requires_standard_install` in the manifest, so
+    // /Library/Application Support. (app2clap installs into REAPER's own
+    // UserPlugins\FX folder, so a portable REAPER gets it too.) Each
+    // declares `requires_standard_install` in the manifest, so
     // the gate is data-driven rather than a hardcoded package-id list. Mark
     // those rows unavailable on a portable target so the checklist disables
     // their checkboxes and each row label carries a localized "(requires
@@ -309,6 +311,18 @@ pub fn wizard_package_plan_for_target_with_available(
                 mark_row_unavailable(&localizer, row, "wizard-package-row-unavailable-portable");
             }
         }
+    }
+    // A copy that every REAPER on the computer loads, in the CLAP folder an
+    // earlier RABBIT installed app2clap into: the details say what it means
+    // for this REAPER.
+    if let Some(target) = target {
+        note_copies_in_former_outside_folders(
+            &localizer,
+            &mut package_rows,
+            &package_specs,
+            target.portable,
+            &rabbit_core::detection::copies_in_former_outside_folders,
+        );
     }
 
     let can_install = package_rows.iter().any(|row| {
@@ -322,6 +336,47 @@ pub fn wizard_package_plan_for_target_with_available(
         can_install,
         detections,
     })
+}
+
+/// Add a sentence to the details of each row whose package has a copy in a
+/// folder it installed into before, outside every resource folder: the
+/// CLAP folder, where earlier versions of RABBIT installed app2clap. Every
+/// REAPER on the computer loads that copy. On a `portable` REAPER, the
+/// sentence says that installing the package there too would load two
+/// copies, and that updating or reinstalling it in the standard REAPER
+/// first moves the shared copy into a backup. On the standard REAPER, it
+/// says that its update or reinstall does that, and that portable REAPERs
+/// and other programs that loaded the copy from there then no longer find
+/// it. The sentence follows the row's summary. `copies` gives a package's
+/// copies there; tests give their own, so they never look in the real CLAP
+/// folder.
+pub(crate) fn note_copies_in_former_outside_folders(
+    localizer: &Localizer,
+    rows: &mut [PackageRow],
+    specs: &[PackageSpec],
+    portable: bool,
+    copies: &dyn Fn(&PackageSpec) -> Vec<PathBuf>,
+) {
+    let key = if portable {
+        "wizard-package-details-clap-copy-portable"
+    } else {
+        "wizard-package-details-clap-copy-standard"
+    };
+    for row in rows {
+        let Some(spec) = specs.iter().find(|spec| spec.id == row.package_id) else {
+            continue;
+        };
+        if spec.former_install_destinations.is_empty() || copies(spec).is_empty() {
+            continue;
+        }
+        let sentence = localizer
+            .format(key, &[("package", row.display_name.as_str())])
+            .value;
+        row.details = match row.details.split_once("\n\n") {
+            Some((summary, rest)) => format!("{summary}\n\n{sentence}\n\n{rest}"),
+            None => format!("{}\n\n{sentence}", row.details),
+        };
+    }
 }
 
 /// Mark `row` as unavailable: force-uncheck it, record the localized reason,

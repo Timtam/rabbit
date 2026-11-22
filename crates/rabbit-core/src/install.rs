@@ -243,16 +243,24 @@ pub fn install_cached_artifacts_with_progress(
         progress,
         &outside_install_roots,
         &|| running_reaper_processes(Platform::current()),
+        &|destination| {
+            Platform::current().and_then(|platform| {
+                crate::detection::former_outside_folder(platform, resource_path, destination)
+            })
+        },
     )
 }
 
 /// [`install_cached_artifacts_with_progress`], with `outside_roots` as the
-/// folders outside the resource folder that RABBIT installs into, and
-/// `reapers` as every REAPER running on this computer, which the preflight
-/// checks the target's among. The folders are asked only when a file of a
-/// previous version is outside the resource folder. Tests give their own
-/// of both, so they never touch the real CLAP folder and never depend on
-/// what runs on the computer that tests them.
+/// folders outside the resource folder that RABBIT installs into, `reapers`
+/// as every REAPER running on this computer, which the preflight checks the
+/// target's among, and `former_outside` as the folder outside the resource
+/// folder that a package's former install destination names, when a copy
+/// there counts as this REAPER's (see
+/// [`crate::detection::former_outside_folder`]). The folders are asked only
+/// when a file of a previous version is outside the resource folder. Tests
+/// give their own of all three, so they never touch the real CLAP folder
+/// and never depend on what runs on the computer that tests them.
 pub(crate) fn install_cached_artifacts_within(
     resource_path: &Path,
     artifacts: &[CachedArtifact],
@@ -260,6 +268,7 @@ pub(crate) fn install_cached_artifacts_within(
     progress: &ProgressReporter,
     outside_roots: &dyn Fn() -> Vec<PathBuf>,
     reapers: &dyn Fn() -> Vec<RunningProcess>,
+    former_outside: &dyn Fn(InstallDestination) -> Option<PathBuf>,
 ) -> Result<InstallReport> {
     let preflight = run_install_preflight_with_processes(
         resource_path,
@@ -324,6 +333,14 @@ pub(crate) fn install_cached_artifacts_within(
         let destination = install_spec
             .as_ref()
             .map(|spec| spec.install_destination)
+            .unwrap_or_default();
+        // Copies in the folders the package installed into before, such as
+        // an app2clap in the CLAP folder, as detection counts them for this
+        // REAPER: they go into the set too, so REAPER doesn't load them
+        // beside the new version.
+        let former_copies = install_spec
+            .as_ref()
+            .map(|spec| crate::detection::former_copies(resource_path, spec, former_outside))
             .unwrap_or_default();
         // `install_as` renames the installed file, because REAPER selects a
         // language pack BY FILE NAME (and OSARA reads that name to pick its
@@ -441,6 +458,7 @@ pub(crate) fn install_cached_artifacts_within(
                 version: &artifact.descriptor.version,
                 variant: new_variant.as_deref(),
                 installed: &artifact_target_paths,
+                former_copies: &former_copies,
             },
             &state,
             &places,
@@ -519,6 +537,9 @@ struct UpdatedPackage<'a> {
     /// Where this install put the new version's files, or in a dry run
     /// would.
     installed: &'a [PathBuf],
+    /// The package's copies in the folders it installed into before, by
+    /// their absolute paths (see [`crate::detection::former_copies`]).
+    former_copies: &'a [PathBuf],
 }
 
 /// What the packages an install call handled so far did to places, each
@@ -628,14 +649,18 @@ impl UpdateRun<'_> {
     /// Only files the package's own previous receipt entry lists with a
     /// hash are looked at: one recorded without a hash, such as
     /// `reaper.ini` or a folder, is the user's, as a restore treats it (see
-    /// [`crate::rollback::files_only_in_newer`]). Never a file the new
-    /// version installs, by any spelling of its place, nor one another
-    /// package lists, as `places` and `state` say the run leaves them (see
-    /// [`RunPlaces`]). A file the user changed since goes in too: it is the
-    /// only copy. The set records the previous entry before the package's
-    /// first file, exactly as for a file it replaces (see
-    /// [`UpdateBackup`]), so a set that holds only moved files is a whole
-    /// earlier version too.
+    /// [`crate::rollback::files_only_in_newer`]). Besides those, the
+    /// package's copies in the folders it installed into before
+    /// ([`UpdatedPackage::former_copies`]), such as an app2clap put into
+    /// the CLAP folder by hand or left there by a move that failed:
+    /// detection counts them as the package, and REAPER would load them
+    /// beside the new version. Never a file the new version installs, by
+    /// any spelling of its place, nor one another package lists, as
+    /// `places` and `state` say the run leaves them (see [`RunPlaces`]). A
+    /// file the user changed since goes in too: it is the only copy. The
+    /// set records the previous entry, if any, before the package's first
+    /// file, exactly as for a file it replaces (see [`UpdateBackup`]), so a
+    /// set that holds only moved files is a whole earlier version too.
     ///
     /// Called once the new version's files are all in place and its entry
     /// changed in memory, before the receipt is saved. So whatever happens
@@ -656,9 +681,13 @@ impl UpdateRun<'_> {
         places: &RunPlaces,
         backups: &mut Option<BackupSetWriter>,
     ) -> Vec<InstallFileReport> {
-        let Some(previous) = package.previous else {
+        let previous_files = package
+            .previous
+            .map(|previous| previous.installed_files.as_slice())
+            .unwrap_or_default();
+        if previous_files.is_empty() && package.former_copies.is_empty() {
             return Vec::new();
-        };
+        }
         let mut skipped: BTreeSet<Vec<String>> = package
             .installed
             .iter()
@@ -688,19 +717,29 @@ impl UpdateRun<'_> {
             .filter_map(|path| file_identity(path).ok())
             .collect();
         let mut actions = Vec::new();
-        for file in &previous.installed_files {
+        for file in previous_files {
             // Each place once: it is skipped from now on.
             if file.sha256.is_none() || !skipped.insert(self.receipt_place(&file.path)) {
                 continue;
             }
             actions.extend(self.back_up_superseded_file(package, &file.path, &new_files, backups));
         }
+        for copy in package.former_copies {
+            if !skipped.insert(self.place(copy)) {
+                continue;
+            }
+            // As a receipt would record it: below the resource folder by
+            // its path there, anywhere else by its absolute path.
+            let path = copy.strip_prefix(self.resource_path).unwrap_or(copy);
+            actions.extend(self.back_up_superseded_file(package, path, &new_files, backups));
+        }
         actions
     }
 
-    /// Move the file a package's previous receipt entry records at `path`
-    /// into the set, as [`Self::back_up_superseded_files`] says. `None`
-    /// when nothing is there, or the file there is one of `new_files`.
+    /// Move the file a package's previous receipt entry records at `path`,
+    /// or its copy at `path` in a folder it installed into before, into the
+    /// set, as [`Self::back_up_superseded_files`] says. `None` when nothing
+    /// is there, or the file there is one of `new_files`.
     fn back_up_superseded_file(
         &self,
         package: &UpdatedPackage<'_>,
@@ -1116,33 +1155,32 @@ fn remove_exclusive_group_siblings_in(
 
 /// Resolve where a package's file installs from its declared
 /// [`InstallDestination`]. The default is `<resource>/UserPlugins/<file>`;
-/// `WindowsClapDir` packages (app2clap) install into the per-user CLAP
-/// folder (`%LOCALAPPDATA%\Programs\Common\CLAP`), outside the REAPER
-/// resource path. A replaced copy of an outside file goes under the backup
-/// set's `external/` folder (see [`BackupSetWriter`]).
+/// app2clap installs into `<resource>/UserPlugins/FX`, REAPER's own
+/// plug-in folder, and language packs into `<resource>/LangPack`, all
+/// inside the resource path, so the receipt records them relative to it
+/// and portable installs work unchanged. A `WindowsClapDir` package would
+/// install into the per-user CLAP folder
+/// (`%LOCALAPPDATA%\Programs\Common\CLAP`), outside the resource path,
+/// where a replaced copy goes under the backup set's `external/` folder
+/// (see [`BackupSetWriter`]); no built-in package does any more.
 fn resolve_install_target(
     destination: InstallDestination,
     package_id: &str,
     resource_path: &Path,
     file_name: &str,
 ) -> Result<PathBuf> {
-    match destination {
-        InstallDestination::WindowsClapDir => {
-            let clap_dir = rabbit_platform::windows_clap_dir().ok_or_else(|| {
-                RabbitError::InstallLocationUnavailable {
-                    package_id: package_id.to_string(),
-                    reason: "the Windows CLAP folder (%LOCALAPPDATA%\\Programs\\Common\\CLAP) \
-                             could not be resolved"
-                        .to_string(),
-                }
-            })?;
-            Ok(clap_dir.join(file_name))
-        }
-        // REAPER reads translations from <resource>/LangPack/. Inside the
-        // resource path, so portable installs work unchanged.
-        InstallDestination::LangPack => Ok(resource_path.join("LangPack").join(file_name)),
-        InstallDestination::UserPlugins => Ok(resource_path.join("UserPlugins").join(file_name)),
+    if let Some(folder) = destination.folder_in(resource_path) {
+        return Ok(folder.join(file_name));
     }
+    let Some(folder) = destination.outside_folder() else {
+        return Err(RabbitError::InstallLocationUnavailable {
+            package_id: package_id.to_string(),
+            reason: "the Windows CLAP folder (%LOCALAPPDATA%\\Programs\\Common\\CLAP) could not \
+                     be resolved"
+                .to_string(),
+        });
+    };
+    Ok(folder.join(file_name))
 }
 
 /// The folders outside any resource folder that RABBIT copies files into
@@ -1151,6 +1189,12 @@ fn resolve_install_target(
 /// never backs up what they replace; only an uninstall moves files of
 /// theirs, which [`outside_restore_rules`] lets back for their package
 /// alone. A new outside [`InstallDestination`] belongs here too.
+///
+/// No built-in package installs into the CLAP folder any more, but it
+/// stays here: app2clap did before it moved to `UserPlugins/FX`, so older
+/// receipts name its file there, the next update moves that file into its
+/// backup set, and older sets hold copies from there, all of which a
+/// restore must be able to put back.
 pub(crate) fn outside_install_roots() -> Vec<PathBuf> {
     rabbit_platform::windows_clap_dir().into_iter().collect()
 }
@@ -1517,9 +1561,9 @@ mod tests {
     use crate::error::RabbitError;
     use crate::hash::sha256_file;
     use crate::model::{Architecture, Platform};
-    #[cfg(target_os = "windows")]
-    use crate::package::PACKAGE_APP2CLAP;
-    use crate::package::{InstallDestination, PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK};
+    use crate::package::{
+        InstallDestination, PACKAGE_APP2CLAP, PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK,
+    };
     use crate::receipt::{
         InstallState, InstalledFileReceipt, PackageReceipt, load_install_state, save_install_state,
     };
@@ -1632,9 +1676,37 @@ mod tests {
         assert!(target.starts_with(&resource));
     }
 
+    /// app2clap installs into REAPER's own plug-in folder, UserPlugins\FX,
+    /// inside the resource path, so portable installs work unchanged.
+    #[test]
+    fn install_target_for_app2clap_is_reapers_fx_folder() {
+        let resource = PathBuf::from("/some/reaper");
+        let destination = crate::package::package_specs_by_id(Platform::Windows)
+            .remove(PACKAGE_APP2CLAP)
+            .unwrap()
+            .install_destination;
+        assert_eq!(destination, InstallDestination::UserPluginsFx);
+        let target =
+            resolve_install_target(destination, PACKAGE_APP2CLAP, &resource, "app2clap.clap")
+                .expect("UserPlugins\\FX target resolves");
+        assert_eq!(
+            target,
+            resource
+                .join("UserPlugins")
+                .join("FX")
+                .join("app2clap.clap")
+        );
+        assert!(target.starts_with(&resource));
+    }
+
+    /// No package installs into the CLAP folder any more, but the
+    /// destination still names it, and it stays the one folder outside the
+    /// resource path that a restore may write to: older receipts and backup
+    /// sets name app2clap's file there. Only the paths are compared;
+    /// nothing in the CLAP folder is read or written.
     #[cfg(target_os = "windows")]
     #[test]
-    fn install_target_for_app2clap_is_the_clap_folder() {
+    fn the_clap_folder_stays_a_folder_rabbit_installs_into() {
         let resource = PathBuf::from("C:/some/reaper");
         let target = resolve_install_target(
             InstallDestination::WindowsClapDir,
@@ -1645,9 +1717,7 @@ mod tests {
         .expect("CLAP folder resolves on Windows");
         let clap_dir = rabbit_platform::windows_clap_dir().expect("CLAP dir on Windows");
         assert_eq!(target, clap_dir.join("app2clap.clap"));
-        // The install lands outside the REAPER resource path entirely.
         assert!(!target.starts_with(&resource));
-        // So a restore may write there, and nowhere else outside it.
         assert_eq!(super::outside_install_roots(), vec![clap_dir]);
     }
 

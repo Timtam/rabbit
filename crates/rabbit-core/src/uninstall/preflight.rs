@@ -5,7 +5,7 @@
 //! way to allow it, so a running REAPER blocks the dry run too
 //! and the dry run says what `--apply` would say. Some packages need every
 //! REAPER closed, not only the target's: REAPER's own uninstaller reacts to
-//! any REAPER window, and a machine-wide package such as app2clap may be
+//! any REAPER window, and a machine-wide package such as Surge XT may be
 //! loaded by any REAPER on the computer.
 //!
 //! The engine runs the process checks again right before each package,

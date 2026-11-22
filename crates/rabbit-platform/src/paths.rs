@@ -107,9 +107,9 @@ pub fn windows_public_desktop_dir() -> Option<PathBuf> {
 
 /// `%LOCALAPPDATA%\Programs\Common\CLAP` — the per-user CLAP plug-in folder
 /// on Windows, one of the standard locations CLAP hosts (REAPER included)
-/// scan. RABBIT installs app2clap here so it needs no elevation and stays
-/// scoped to the invoking user. Returns `None` when `%LOCALAPPDATA%` isn't
-/// set (most non-Windows hosts).
+/// scan. Earlier RABBIT versions installed app2clap here; it stays one of
+/// the folders RABBIT backs up and restores files in. Returns `None` when
+/// `%LOCALAPPDATA%` isn't set (most non-Windows hosts).
 pub fn windows_clap_dir() -> Option<PathBuf> {
     user_local_appdata_dir().map(|local| local.join("Programs").join("Common").join("CLAP"))
 }

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +47,10 @@ pub struct PackageSpec {
     /// Where this package's resolved file installs; see
     /// [`EmbeddedPackageSpec::install_destination`].
     pub install_destination: InstallDestination,
+    /// Where earlier RABBIT versions installed this package; see
+    /// [`EmbeddedPackageSpec::former_install_destinations`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub former_install_destinations: Vec<InstallDestination>,
     /// BCP-47 language subtag this package provides, if it is a language
     /// pack; see [`EmbeddedPackageSpec::language`].
     pub language: Option<String>,
@@ -92,9 +97,9 @@ pub struct PackageSpec {
     /// When `true`, the package can only be installed against a *standard*
     /// REAPER installation, not a portable one: it installs to a fixed
     /// system/per-user location outside any portable REAPER folder (Surge XT
-    /// and JAWS scripts via vendor installers; app2clap into the per-user
-    /// CLAP folder). The wizard disables this package's row on a portable
-    /// target. Replaces what used to be a hardcoded package-id list in the UI.
+    /// and JAWS scripts via vendor installers). The wizard disables this
+    /// package's row on a portable target. Replaces what used to be a
+    /// hardcoded package-id list in the UI.
     pub requires_standard_install: bool,
     /// When `true`, a copy ReaPack's records name is ReaPack's to look after;
     /// see [`EmbeddedPackageSpec::leave_to_reapack`].
@@ -156,6 +161,18 @@ pub struct EmbeddedPackageSpec {
     /// `UserPlugins`.
     #[serde(default)]
     pub install_destination: InstallDestination,
+    /// Where earlier RABBIT versions installed this package before it moved
+    /// to `install_destination`, such as the CLAP folder app2clap used
+    /// before it moved to `UserPlugins/FX`. Detection still looks there, so
+    /// a copy installed before the move still counts as installed; one
+    /// outside the resource folder counts only for the standard REAPER (see
+    /// [`crate::detection`]). Each install of the package moves the copies
+    /// detection counts there into its backup set, like any file the new
+    /// version no longer installs, whether a receipt lists them or not, so
+    /// REAPER doesn't load two copies. The uninstall plans name the old
+    /// place themselves. Empty for a package that never moved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub former_install_destinations: Vec<InstallDestination>,
     /// BCP-47 language subtag this package provides (`es`), for packages
     /// that localize REAPER. The wizard suggests the pack matching its own
     /// UI language. `None` for everything that isn't a language pack.
@@ -450,13 +467,60 @@ pub enum InstallDestination {
     /// `<resource>/UserPlugins/` — the default for REAPER extensions.
     #[default]
     UserPlugins,
-    /// `%LOCALAPPDATA%\Programs\Common\CLAP` — the per-user CLAP folder
-    /// (app2clap), outside any REAPER resource path.
+    /// `<resource>/UserPlugins/FX/` — REAPER's own plug-in folder for this
+    /// REAPER, scanned for VST, VST3 and CLAP. Inside the resource path, so
+    /// it needs no administrator rights and works for portable installs
+    /// too. Other plug-ins share it, so a file there is a package's only by
+    /// its receipt or its plug-in names.
+    UserPluginsFx,
+    /// `%LOCALAPPDATA%\Programs\Common\CLAP` — the per-user CLAP folder,
+    /// outside any REAPER resource path. No built-in package installs there
+    /// any more: app2clap did until it moved to `UserPluginsFx`, and names
+    /// it among its former destinations. It stays so that the folder keeps
+    /// a name in the manifest, and RABBIT still backs up and restores files
+    /// there (see `crate::install::outside_install_roots`).
     WindowsClapDir,
     /// `<resource>/LangPack/` — where REAPER looks for `.ReaperLangPack`
     /// translation files. Inside the resource path, so it works for portable
     /// installs too.
     LangPack,
+}
+
+impl InstallDestination {
+    /// The folder's path components below the resource folder, or `None`
+    /// for a folder outside every resource folder.
+    pub fn resource_components(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::UserPlugins => Some(&["UserPlugins"]),
+            Self::UserPluginsFx => Some(&["UserPlugins", "FX"]),
+            Self::LangPack => Some(&["LangPack"]),
+            Self::WindowsClapDir => None,
+        }
+    }
+
+    /// The folder inside the resource folder `resource`, joined one
+    /// component at a time, so a receipt records the path below it with
+    /// the platform's own separator. `None` for a folder outside every
+    /// resource folder.
+    pub fn folder_in(self, resource: &Path) -> Option<PathBuf> {
+        self.resource_components().map(|components| {
+            components
+                .iter()
+                .fold(resource.to_path_buf(), |folder, component| {
+                    folder.join(component)
+                })
+        })
+    }
+
+    /// The folder outside every resource folder that this destination
+    /// names on this computer: the CLAP folder, which resolves only on
+    /// Windows. `None` for a folder inside the resource folder.
+    pub fn outside_folder(self) -> Option<PathBuf> {
+        match self {
+            Self::WindowsClapDir => rabbit_platform::windows_clap_dir(),
+            Self::UserPlugins | Self::UserPluginsFx | Self::LangPack => None,
+        }
+    }
 }
 
 /// Data-driven artifact (download) resolution for packages that are NOT a
@@ -1082,6 +1146,7 @@ pub fn validate_package_spec(spec: &EmbeddedPackageSpec) -> Result<(), String> {
     // the uninstall block is checked once, on the package itself.
     uninstall::validate_uninstall_spec(spec)?;
     validate_leave_to_reapack(spec)?;
+    validate_former_install_destinations(spec)?;
     // Pull-request builds need a pull request number, which only a channel
     // parameter supplies. On the package itself it could never resolve.
     if spec.github_actions_artifact.is_some() {
@@ -1170,10 +1235,28 @@ fn validate_leave_to_reapack(spec: &EmbeddedPackageSpec) -> Result<(), String> {
     if spec.uninstall.reapack_owned != uninstall::ReapackOwnedPolicy::Block {
         return Err("leave_to_reapack needs uninstall.reapack_owned: block".to_string());
     }
-    if spec.install_destination == InstallDestination::WindowsClapDir {
+    if spec.install_destination.resource_components().is_none() {
         return Err(
             "leave_to_reapack needs an install folder inside the resource folder".to_string(),
         );
+    }
+    Ok(())
+}
+
+/// A former install folder is one the package no longer installs into,
+/// named once.
+fn validate_former_install_destinations(spec: &EmbeddedPackageSpec) -> Result<(), String> {
+    for (index, destination) in spec.former_install_destinations.iter().enumerate() {
+        if *destination == spec.install_destination {
+            return Err(format!(
+                "former_install_destinations names {destination:?}, where the package installs now"
+            ));
+        }
+        if spec.former_install_destinations[..index].contains(destination) {
+            return Err(format!(
+                "former_install_destinations names {destination:?} twice"
+            ));
+        }
     }
     Ok(())
 }
@@ -1458,6 +1541,7 @@ impl EmbeddedPackageSpec {
             display_description_key: self.display_description_key.clone(),
             package_kind: self.package_kind,
             install_destination: self.install_destination,
+            former_install_destinations: self.former_install_destinations.clone(),
             language: self.language.clone(),
             install_as: self.install_as.clone(),
             variants: self.variants.clone(),
@@ -1948,6 +2032,10 @@ mod tests {
                 .unwrap_err()
                 .contains("inside the resource folder")
         );
+        // REAPER's own UserPlugins\FX folder is inside it.
+        let mut in_fx = lreaparams.clone();
+        in_fx.install_destination = InstallDestination::UserPluginsFx;
+        assert_eq!(validate_package_spec(&in_fx), Ok(()));
 
         // Without plug-in names, nothing in ReaPack's records could ever
         // match, and the flag would silently do nothing; an empty name
@@ -1989,6 +2077,137 @@ mod tests {
                 .unwrap_err()
                 .contains("ReaPack itself")
         );
+    }
+
+    /// REAPER's own plug-in folder, `UserPlugins/FX`, is a destination
+    /// inside the resource folder, spelt `user_plugins_fx` in a manifest.
+    /// The CLAP folder is the one outside every resource folder.
+    #[test]
+    fn user_plugins_fx_resolves_under_the_resource_folder() {
+        use super::InstallDestination;
+        use std::path::Path;
+
+        let resource = Path::new("/some/reaper");
+        assert_eq!(
+            InstallDestination::UserPluginsFx.folder_in(resource),
+            Some(resource.join("UserPlugins").join("FX"))
+        );
+        assert_eq!(InstallDestination::UserPluginsFx.outside_folder(), None);
+        assert_eq!(
+            serde_json::to_value(InstallDestination::UserPluginsFx).unwrap(),
+            serde_json::json!("user_plugins_fx")
+        );
+        assert_eq!(
+            serde_json::from_value::<InstallDestination>(serde_json::json!("user_plugins_fx"))
+                .unwrap(),
+            InstallDestination::UserPluginsFx
+        );
+        assert_eq!(
+            InstallDestination::UserPlugins.folder_in(resource),
+            Some(resource.join("UserPlugins"))
+        );
+        assert_eq!(
+            InstallDestination::LangPack.folder_in(resource),
+            Some(resource.join("LangPack"))
+        );
+        assert_eq!(InstallDestination::WindowsClapDir.folder_in(resource), None);
+        // A manifest that still names the CLAP folder reads.
+        assert_eq!(
+            serde_json::from_value::<InstallDestination>(serde_json::json!("windows_clap_dir"))
+                .unwrap(),
+            InstallDestination::WindowsClapDir
+        );
+    }
+
+    /// app2clap installs into REAPER's own UserPlugins\FX folder, which a
+    /// portable REAPER has too, so it no longer needs a standard REAPER. The
+    /// CLAP folder it used before is a former destination. Its uninstall
+    /// removes the receipt's files and its file in UserPlugins\FX, and on
+    /// the standard REAPER also a copy an earlier RABBIT left in the CLAP
+    /// folder.
+    #[test]
+    fn app2clap_installs_into_the_fx_folder_on_any_reaper() {
+        use super::uninstall::{UninstallStrategy, UninstallTarget};
+        use super::{
+            InstallDestination, PACKAGE_APP2CLAP, embedded_package_manifest, validate_package_spec,
+        };
+
+        let app2clap = embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == PACKAGE_APP2CLAP)
+            .unwrap();
+        assert_eq!(validate_package_spec(&app2clap), Ok(()));
+        assert_eq!(
+            app2clap.install_destination,
+            InstallDestination::UserPluginsFx
+        );
+        assert_eq!(
+            app2clap.former_install_destinations,
+            vec![InstallDestination::WindowsClapDir]
+        );
+        assert!(!app2clap.requires_standard_install);
+
+        let plans: Vec<(UninstallTarget, Vec<&str>)> = app2clap
+            .uninstall
+            .plans
+            .iter()
+            .map(|plan| {
+                assert_eq!(plan.strategy, UninstallStrategy::RemoveFiles);
+                assert!(plan.remove.receipt_files);
+                assert!(!plan.remove.matching_user_plugins);
+                assert!(plan.kept_user_data.is_empty());
+                (
+                    plan.target,
+                    plan.remove.paths.iter().map(|path| path.as_str()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            plans,
+            vec![
+                (
+                    UninstallTarget::Standard,
+                    vec![
+                        "{resource}/UserPlugins/FX/app2clap.clap",
+                        "{clap_dir}/app2clap.clap"
+                    ]
+                ),
+                (
+                    UninstallTarget::Portable,
+                    vec!["{resource}/UserPlugins/FX/app2clap.clap"]
+                ),
+            ]
+        );
+    }
+
+    /// A former destination is one the package no longer installs into,
+    /// named once.
+    #[test]
+    fn former_install_destinations_name_other_folders_once() {
+        use super::{
+            InstallDestination, PACKAGE_APP2CLAP, embedded_package_manifest, validate_package_spec,
+        };
+
+        let app2clap = embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == PACKAGE_APP2CLAP)
+            .unwrap();
+        let mut current = app2clap.clone();
+        current
+            .former_install_destinations
+            .push(InstallDestination::UserPluginsFx);
+        assert!(
+            validate_package_spec(&current)
+                .unwrap_err()
+                .contains("where the package installs now")
+        );
+        let mut twice = app2clap;
+        twice
+            .former_install_destinations
+            .push(InstallDestination::WindowsClapDir);
+        assert!(validate_package_spec(&twice).unwrap_err().contains("twice"));
     }
 
     /// Surge XT is listed under Instruments and app2clap under Tools; the

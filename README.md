@@ -36,16 +36,40 @@ RABBIT installs and keeps up to date:
   fixed system paths outside any portable REAPER folder. On Windows, close
   Surge XT before you install or update it: RABBIT doesn't start its
   installer while Surge XT is open, and says so.
-- **app2clap** *(Windows only, opt-in, standard REAPER installations only)* —
+- **app2clap** *(Windows only, opt-in)* —
   [app2clap](https://app2clap.jantrid.net/), a CLAP plugin by Jamie Teh
   (jcsteh, of OSARA/NVDA fame) that captures audio from other applications
-  and brings it into REAPER — or any CLAP host — as a plug-in you insert on
-  a track. RABBIT tracks the
+  and brings it into REAPER as a plug-in you insert on a track. RABBIT tracks
+  the
   [rolling `snapshots` release](https://github.com/jcsteh/app2clap/releases/tag/snapshots),
-  installs `app2clap.clap` into the per-user CLAP folder
-  (`%LOCALAPPDATA%\Programs\Common\CLAP`) with no elevation required, and
-  keeps it up to date. Disabled on portable REAPER targets because the CLAP
-  folder lives outside any portable REAPER folder.
+  installs `app2clap.clap` into `UserPlugins\FX` in REAPER's resource folder,
+  REAPER's own plug-in folder, with no elevation required, and keeps it up to
+  date. Only that REAPER loads plug-ins from there, so app2clap works with a
+  portable REAPER too, and RABBIT installs it for REAPER only, not for other
+  CLAP hosts.
+  Earlier versions of RABBIT installed it into the per-user CLAP folder
+  (`%LOCALAPPDATA%\Programs\Common\CLAP`) instead, for a standard REAPER
+  only. RABBIT still finds such a copy in the standard REAPER, with its
+  version. A copy there that RABBIT has no record of, such as one you put
+  there yourself, counts as installed there too, with no version, so the
+  wizard ticks its update. The next update of app2clap in the standard
+  REAPER installs the new version into `UserPlugins\FX` and moves the copy
+  out of the CLAP folder into that update's backup, so the standard REAPER
+  doesn't load two copies.
+  Restoring that backup puts the copy back; for one RABBIT had no record of,
+  the copy in `UserPlugins\FX` stays too. After that update, portable
+  REAPERs and other programs that loaded app2clap from the CLAP folder no
+  longer find it; RABBIT can install it into each portable REAPER. The
+  wizard says so in app2clap's details before, and in Show details after.
+  While your copy is already the latest version, no update runs, so it stays
+  in the CLAP folder until the next app2clap release. To move it sooner,
+  tick app2clap on the **Install or update** tab of the standard REAPER to
+  reinstall it: the reinstall moves the copy into a backup, as an update
+  does. Until the copy leaves the CLAP folder, every REAPER loads it,
+  portable ones too, so a portable REAPER that gets its own app2clap loads
+  both. Update or reinstall app2clap in the standard REAPER first.
+  Uninstalling app2clap from the standard REAPER removes a copy in the CLAP
+  folder too, and then needs every REAPER on the computer closed.
 - **LReaParams** *(Windows only, opt-in)* —
   [LReaParams](https://github.com/Lo-lo78/LReaParams), an accessible REAPER
   extension by Lo-lo for controlling FX and track parameters from the
@@ -66,9 +90,9 @@ RABBIT installs and keeps up to date:
 
 The wizard's package list shows Surge XT under **Instruments** and app2clap
 and LReaParams under **Tools**, after the main **Packages** group and before
-**Language packs**; the Uninstall tab uses the same groups. Surge XT and
-app2clap are disabled on portable REAPER targets, since they install to
-fixed per-user/system locations rather than into the portable REAPER folder.
+**Language packs**; the Uninstall tab uses the same groups. Surge XT is
+disabled on portable REAPER targets, since it installs to fixed system
+locations rather than into the portable REAPER folder.
 
 ### Language packs
 
@@ -277,8 +301,9 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
   entry; see below.
 - **Starting it:** the review page says what each package loses and keeps.
   Enter doesn't start an uninstall there; press **Uninstall**. REAPER must be
-  closed, and for app2clap, the JAWS scripts, Surge XT and REAPER itself
-  every REAPER on the computer. On a Mac, uninstalling REAPER needs every
+  closed, and for the JAWS scripts, Surge XT and REAPER itself every REAPER
+  on the computer, as for app2clap while a copy of it in the CLAP folder
+  goes too. On a Mac, uninstalling REAPER needs every
   REAPER closed only when moving its app takes an administrator's password;
   otherwise closing that REAPER is enough.
 - **Surge XT and REAPER (Windows):** their own uninstallers remove them, with
@@ -411,8 +436,9 @@ ticked. The rows come in up to four groups:
   it.
 - **Earlier versions:** the files an update replaced, and the files of the
   earlier version that the new one no longer installs, such as FFmpeg's
-  libraries when an update gives them new names, or the Spanish language
-  pack's old file after you switch between es_ES and es_MX. RABBIT moves
+  libraries when an update gives them new names, the Spanish language
+  pack's old file after you switch between es_ES and es_MX, or an app2clap
+  in the CLAP folder, where earlier versions of RABBIT installed it. RABBIT moves
   those into the backup instead of deleting them, so the earlier version
   stays whole. Only updates RABBIT installs file by file keep them:
   ReaPack, ReaKontrol, FFmpeg, app2clap, LReaParams, the language packs, and
@@ -490,8 +516,8 @@ again)".
   restores a copy of its records.
 - **Starting a restore:** Review says what comes back and what else
   changes, and, while REAPER is open, to close it first, or every copy of
-  REAPER for a package any REAPER can use, such as app2clap or the JAWS
-  scripts. Enter doesn't start it there; press **Restore**. If something
+  REAPER for a package any REAPER can use, such as the JAWS scripts. Enter
+  doesn't start it there; press **Restore**. If something
   that must be closed is still open then, RABBIT says so and changes
   nothing. Each backup comes back whole or not at all.
 - **Delete:** deletes the ticked backups for good, not to the Recycle Bin or
@@ -789,10 +815,11 @@ RABBIT uninstall --resource-path "$HOME/Library/Application Support/REAPER" \
   `--remove-settings`; they stay there until you delete that set with
   `delete-backup`. The run saves a report under `RABBIT\logs`. If REAPER
   used the language pack you removed, RABBIT sets REAPER back to English.
-- **REAPER must be closed.** For REAPER on Windows, Surge XT, app2clap and the
-  JAWS scripts, every REAPER on the computer must be closed, portable ones
-  included. The same goes for REAPER on a Mac when the administrator command
-  (see below) moves its app. Unlike the commands that install, `uninstall` has
+- **REAPER must be closed.** For REAPER on Windows, Surge XT and the JAWS
+  scripts, every REAPER on the computer must be closed, portable ones
+  included. The same goes for app2clap while a copy of it in the CLAP folder
+  goes too, and for REAPER on a Mac when the administrator command (see
+  below) moves its app. Unlike the commands that install, `uninstall` has
   no `--allow-reaper-running`: a running REAPER holds its extensions' files
   open, so they can't be moved, and it writes `reaper.ini` again when it
   closes, which would undo the language reset. The dry run checks this too.
@@ -986,8 +1013,8 @@ restore the set's other packages one at a time with `--package`.
 
 Before it changes anything, a restore checks what each package's own
 uninstall checks. REAPER must be closed. For a package that serves every
-REAPER on the computer, such as app2clap or the JAWS scripts, every REAPER
-must be closed, portable ones included. Any program a package's uninstall
+REAPER on the computer, such as the JAWS scripts, every REAPER must be
+closed, portable ones included. Any program a package's uninstall
 names must be closed too. `--allow-reaper-running` lets only the REAPER you
 restore into stay open, as before; it never lets a restore past the other
 checks. A dry run says what is running and goes on. A backup that belongs to

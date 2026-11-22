@@ -947,8 +947,9 @@ user can finish the install by pressing Next a few times.
    - Before an uninstall starts, the Uninstall button refuses with a message
      while something the uninstall preflight needs closed is running: the
      target's REAPER, every REAPER for a package that needs a standard
-     REAPER (such as app2clap, which any REAPER can load, or the JAWS
-     scripts), and the programs a package's plan names. JAWS itself is
+     REAPER (such as the JAWS scripts) or whose plan removes a file from
+     the CLAP folder (app2clap, while a copy of it is there), and the
+     programs a package's plan names. JAWS itself is
      never one of them: it is the user's screen reader, and the scripts'
      plan names no program to close. On macOS a REAPER.app the
      administrator command moves needs every REAPER closed too, because
@@ -1260,11 +1261,13 @@ read the file. OSARA's key map is always kept when OSARA is removed, so the
 receipt doesn't track a key map backup.
 
 Two packages can look odd on Windows. The uninstall of FFmpeg and app2clap
-removes only the files RABBIT's receipt lists, plus `app2clap.clap` for
-app2clap. It also keeps an FFmpeg file that changed since RABBIT installed it.
+removes only the files RABBIT's receipt lists, plus `app2clap.clap` in
+`UserPlugins/FX` for app2clap, and on the standard REAPER also in the CLAP
+folder. It also keeps an FFmpeg file that changed since RABBIT installed it.
 But any `avformat*`, `avcodec*` or similar DLL in `UserPlugins` counts as
-FFmpeg, and any `app2clap*.clap` in the CLAP folder counts as app2clap. So
-such a file still counts as the package right after the removal, and the
+FFmpeg, and any `app2clap*.clap` in `UserPlugins/FX`, or for the standard
+REAPER in the CLAP folder, counts as app2clap. So such a file still counts
+as the package right after the removal, and the
 uninstall reports it as left behind. The package's Update row is then ticked,
 unless RABBIT can read the file's version and it is already the latest.
 Without a receipt, RABBIT can't read app2clap's version at all. This is left
@@ -1348,6 +1351,56 @@ PackageSpec {
   backup_policy
 }
 ```
+
+A package that RABBIT copies into place itself names its folder with
+`install_destination`: `user_plugins` (`<resource>/UserPlugins`, the
+default, for REAPER extensions), `user_plugins_fx` (`<resource>/UserPlugins/FX`,
+REAPER's own plug-in folder for this REAPER, scanned for VST, VST3 and
+CLAP), `lang_pack` (`<resource>/LangPack`) or `windows_clap_dir` (the
+per-user CLAP folder, `%LOCALAPPDATA%\Programs\Common\CLAP`). The first
+three are inside the resource folder, so they need no administrator rights,
+work for a portable REAPER, are recorded in the receipt relative to it, and
+are backed up in a set at their own relative path. app2clap installs into
+`user_plugins_fx`; no package installs into the CLAP folder any more. Other
+plug-ins share `UserPlugins/FX`, and a later package may put whole bundle
+folders there, so a file in it is a package's only by its receipt or its
+plug-in names, never because of where it is.
+
+A package that moved names where it installed before in
+`former_install_destinations`, as app2clap names `windows_clap_dir`.
+Detection still finds a copy there: one inside the resource folder for
+every REAPER, one outside it only for the standard REAPER, whose receipt
+alone could record it, so a portable REAPER doesn't count the copy every
+REAPER shares as its own. A receipt that names the file there by its
+absolute path still counts, with its version; a copy there that no receipt
+lists counts with no version, so its Update row is ticked.
+
+Every install of such a package moves the copies detection counts for that
+REAPER in its former folders into the install's backup set, as any file the
+new version no longer installs (see Safety Behavior): the files the
+previous receipt entry lists, and any other file there that matches the
+package's plug-in names and that no receipt lists, such as one put there
+by hand or one an earlier move left because it was in use. So the
+standard REAPER doesn't load two copies, a restore of the set puts the copy
+back, and a copy that couldn't be moved goes at the next install. A set
+with no earlier receipt entry restores as the copy an update replaced: the
+new version's file stays where it is, as for any copy RABBIT didn't
+install. A portable REAPER's install never touches the CLAP folder. While
+the installed version is the latest, no update runs, and the old copy stays
+until the next release, a reinstall (the user ticks the row), or an
+uninstall: the package's uninstall plans name the old place themselves,
+app2clap's standard plan `{clap_dir}/app2clap.clap`. An uninstall that
+removes a file from the CLAP folder needs every REAPER closed and warns
+that every program loses it, unless the manifest turns that warning off.
+
+Every REAPER, portable ones included, and every other CLAP host loads what
+is in the CLAP folder. So the wizard says what a copy there means in the
+package's details. On a portable REAPER: installing the package there too
+loads two copies, until the standard REAPER's update or reinstall moves
+the shared copy. On the standard REAPER: that update or reinstall moves it,
+and portable REAPERs and other programs then no longer find it. Show
+details says the same after an install, under each file it moved from
+outside the resource folder.
 
 Every package also carries a required `uninstall` block saying what removing
 it means. It holds a list of plans, and the first plan matching the platform
@@ -1893,7 +1946,8 @@ Extension files:
   copies the receipt into an update's set either. Vendor installers, and
   OSARA's macOS archive, overwrite files with no backup.
   Files from inside the resource folder keep their relative path in the
-  set; files from outside it (app2clap's CLAP folder) go under
+  set, `UserPlugins/FX` included; files from outside it (the CLAP folder,
+  where app2clap was before it moved to `UserPlugins/FX`) go under
   `external/<n>/`, beside a `<file>.rabbit-origin` note of their original
   path. `<n>` is one above the highest number the set's manifest or its
   `external` folder already uses, so an outside file never lands on
@@ -1912,7 +1966,9 @@ Extension files:
   file inside it its path relative to the resource folder. Restore puts
   each file back at its recorded path and takes the install lock. Outside
   the resource folder it writes only below a folder RABBIT installs into
-  itself (the CLAP folder), for any package, or where one of the entry's
+  itself (`outside_install_roots`: the CLAP folder, which stays one though
+  no package installs there any more, since older receipts and sets name
+  app2clap's file there), for any package, or where one of the entry's
   own package's `vendor_added_files` patterns matches; another package's
   file never goes there. For a pattern,
   the folder before its first `*` (`%APPDATA%\Freedom Scientific\JAWS` for

@@ -926,9 +926,9 @@ pub enum RestoreBackupActionKind {
 /// version that the new one no longer installs.
 ///
 /// Files inside the resource folder keep their relative path in the set.
-/// Files outside it (app2clap's CLAP folder) go under
-/// `external/<n>/<file name>`, beside a `<file name>.rabbit-origin` note
-/// holding the original absolute path.
+/// Files outside it, in the CLAP folder where earlier RABBIT versions
+/// installed app2clap, go under `external/<n>/<file name>`, beside a
+/// `<file name>.rabbit-origin` note holding the original absolute path.
 ///
 /// Each entry is saved as pending before its copy starts and marked done
 /// once the copy matches the original, and each save writes a temp file and

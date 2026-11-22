@@ -296,7 +296,7 @@ fn every_reason_a_package_stays_reads_as_a_sentence() {
 
 #[test]
 fn a_portable_target_reads_like_the_install_row_of_the_same_package() {
-    let row = rows_for(vec![item("app2clap", Removability::NeedsStandardTarget)]).remove(0);
+    let row = rows_for(vec![item("surge-xt", Removability::NeedsStandardTarget)]).remove(0);
     assert!(
         row.summary
             .ends_with("(not available: portable REAPER target)")
@@ -551,7 +551,7 @@ fn rows_build_in_every_locale_without_missing_text() {
                     note_key: "uninstall-manual-reaper-portable".to_string(),
                 },
             ),
-            item("app2clap", Removability::NeedsStandardTarget),
+            item("surge-xt", Removability::NeedsStandardTarget),
             item(
                 "reapack",
                 Removability::ManagedByReaPack {
@@ -1378,6 +1378,8 @@ fn an_uninstall_review_names_the_ticks_on_both_other_tabs() {
     assert!(text.contains("Backups tab"), "{text}");
 }
 
+/// app2clap on the standard REAPER, with an older copy in the CLAP folder
+/// that every program using CLAP plug-ins may load.
 #[test]
 fn a_package_for_every_program_asks_to_close_them_first() {
     let mut list = list_for(vec![UninstallPlanItem {
@@ -1875,7 +1877,8 @@ fn only_a_package_a_backup_cant_bring_back_asks_a_question() {
         ];
         if platform == Platform::Windows {
             removable.push("ffmpeg");
-            // In Windows' own CLAP folder, a temporary one here.
+            // In REAPER's UserPlugins\FX folder, or an older copy in
+            // Windows' own CLAP folder, a temporary one here.
             removable.push("app2clap");
         }
         for id in removable {
