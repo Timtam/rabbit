@@ -20,7 +20,7 @@ use crate::latest::{
 use crate::model::{Architecture, Platform};
 use crate::package::{
     AssetMatch, GithubArtifactKind, GithubReleaseSpec, HttpArtifactSource, HttpArtifactSpec,
-    HttpArtifactTarget, PackageChannels, STABLE_CHANNEL, VersionRule, VersionSource,
+    HttpArtifactTarget, PackageChannels, PackageSpec, STABLE_CHANNEL, VersionRule, VersionSource,
     package_specs_by_id_on,
 };
 use crate::progress::{ProgressEvent, ProgressReporter};
@@ -176,6 +176,19 @@ fn resolve_artifacts_with_specs(
         // GitHub release (github_release) or a non-GitHub scrape/fixed/max-
         // major source (http_artifact). Only JAWS still has a bespoke resolver.
         let spec = specs.get(package_id);
+        // The offline rule first, the one the wizard and the CLI ask before a
+        // run starts (see `package_has_build_for`), so every package it
+        // refuses is refused here before anything goes online. A package
+        // that doesn't list this architecture has no build for it, even
+        // where an asset for any architecture would match: Surge XT's only
+        // Windows installer is 64-bit.
+        if spec.is_some_and(|spec| !has_build_for_dispatch(spec, platform, architecture)) {
+            return Err(RabbitError::NoArtifactFound {
+                package_id: package_id.clone(),
+                platform,
+                architecture,
+            });
+        }
         if let Some(github_release) = spec.and_then(|spec| spec.github_release.as_ref()) {
             artifacts.push(resolve_github_artifact(
                 &client,
@@ -261,7 +274,11 @@ pub fn expected_artifact_kind_on(
         })
         .unwrap_or_default();
     let specs = package_specs_by_id_on(platform, &channels);
-    let spec = specs.get(package_id);
+    // The same offline checks the resolver makes, so a package reports a
+    // kind exactly when its download can be resolved for this REAPER.
+    let spec = specs
+        .get(package_id)
+        .filter(|spec| resolves_for(spec, platform, architecture));
     if let Some(github_release) = spec.and_then(|spec| spec.github_release.as_ref()) {
         let selector = select_github_selector(github_release, platform, architecture);
         return github_kind_for(github_release, selector).ok_or(RabbitError::NoArtifactFound {
@@ -500,6 +517,104 @@ fn canonicalize_dispatch_arch(architecture: Architecture) -> Architecture {
         return Architecture::current();
     }
     architecture
+}
+
+/// The architecture artifact resolution works with for a REAPER of
+/// `architecture`, as [`resolve_latest_artifacts`] and
+/// [`expected_artifact_kind`] see it. `Universal` (a macOS universal REAPER)
+/// and `Unknown` (no REAPER there yet, or one whose binary couldn't be read)
+/// become the slice REAPER runs as on this computer.
+pub fn dispatch_architecture(architecture: Architecture) -> Architecture {
+    canonicalize_dispatch_arch(architecture)
+}
+
+/// Whether `spec` has a build for a REAPER of `architecture` on `platform`,
+/// answered from the manifest alone, without the network.
+///
+/// Artifact resolution asks this same rule first, for the same
+/// [`dispatch_architecture`], and refuses what it refuses before it goes
+/// online. It asks whether the package is offered on `platform`, lists that
+/// architecture in `supported_architectures`, and has a download source with
+/// a target for it. That is a `github_release` asset selector, an
+/// `http_artifact` target's `match_arches`, the HFS listing (one installer
+/// for every architecture), or the platform of a pull request build. Pass
+/// `spec` as it resolves on its channel.
+///
+/// When the dispatch architecture is still unknown, on a computer RABBIT has
+/// no build for, nothing is blocked, as before this check existed.
+pub fn package_has_build_for(
+    spec: &PackageSpec,
+    platform: Platform,
+    architecture: Architecture,
+) -> bool {
+    has_build_for_dispatch(spec, platform, canonicalize_dispatch_arch(architecture))
+}
+
+/// The packages among `package_ids` that have no build for a REAPER of
+/// `architecture` on `platform`, each on the channel `channels` gives it (see
+/// [`package_has_build_for`]). Ids `platform` doesn't offer aren't listed:
+/// they aren't a question of architecture.
+pub fn packages_without_build(
+    package_ids: &[String],
+    platform: Platform,
+    architecture: Architecture,
+    channels: &PackageChannels,
+) -> Vec<String> {
+    let specs = package_specs_by_id_on(platform, channels);
+    package_ids
+        .iter()
+        .filter(|id| {
+            specs
+                .get(id.as_str())
+                .is_some_and(|spec| !package_has_build_for(spec, platform, architecture))
+        })
+        .cloned()
+        .collect()
+}
+
+/// [`package_has_build_for`] for an architecture already canonicalized. The
+/// resolver asks it for every package before it goes online.
+fn has_build_for_dispatch(
+    spec: &PackageSpec,
+    platform: Platform,
+    architecture: Architecture,
+) -> bool {
+    architecture == Architecture::Unknown || resolves_for(spec, platform, architecture)
+}
+
+/// The checks resolution makes before it goes online, for a dispatch
+/// architecture: the package is offered on `platform`, lists the
+/// architecture, and its source has a target for it.
+fn resolves_for(spec: &PackageSpec, platform: Platform, architecture: Architecture) -> bool {
+    spec.supports_platform(platform)
+        && lists_architecture(spec, architecture)
+        && source_has_target(spec, platform, architecture)
+}
+
+/// Whether `spec` lists the dispatch `architecture` among the REAPER
+/// architectures it has builds for. An unknown dispatch architecture passes,
+/// so resolution on a computer RABBIT has no build for goes on as before.
+fn lists_architecture(spec: &PackageSpec, architecture: Architecture) -> bool {
+    architecture == Architecture::Unknown || spec.supports_architecture(architecture)
+}
+
+/// Whether `spec`'s download source has a target for `platform` and the
+/// dispatch `architecture`, by the selectors the resolver itself uses. The
+/// source is the one the resolver picks, in the same order.
+fn source_has_target(spec: &PackageSpec, platform: Platform, architecture: Architecture) -> bool {
+    if let Some(github_release) = &spec.github_release {
+        return select_github_selector(github_release, platform, architecture).is_some();
+    }
+    if let Some(http_artifact) = &spec.http_artifact {
+        return select_http_target(http_artifact, platform, architecture).is_some();
+    }
+    // One installer serves every architecture (the JAWS scripts).
+    if spec.hfs_listing.is_some() {
+        return true;
+    }
+    spec.github_actions_artifact
+        .as_ref()
+        .is_some_and(|actions| crate::actions_artifact::target_for(actions, platform).is_some())
 }
 
 /// Ephemeral artifact-download cache directory. Defaults to a stable path
@@ -3066,6 +3181,243 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, RabbitError::NoArtifactFound { .. }));
+    }
+
+    /// Every architecture the wizard and the CLI can hand over for a REAPER.
+    const EVERY_ARCHITECTURE: [Architecture; 6] = [
+        Architecture::X86,
+        Architecture::X64,
+        Architecture::Arm64,
+        Architecture::Arm64Ec,
+        Architecture::Universal,
+        Architecture::Unknown,
+    ];
+
+    /// A release holding one asset for each of `spec`'s selectors, named so
+    /// that selector matches it and its version can be read.
+    fn release_with_every_asset(spec: &GithubReleaseSpec) -> String {
+        let strip = matches!(
+            spec.version_from,
+            VersionSource::AssetName {
+                strip_trailing_dot_segment: true
+            }
+        );
+        let assets: Vec<serde_json::Value> = spec
+            .assets
+            .iter()
+            .map(|selector| {
+                let name = selector.exact_name.clone().unwrap_or_else(|| {
+                    format!(
+                        "{}1.2.3.4{}{}",
+                        selector.name_prefix.as_deref().unwrap_or_default(),
+                        if strip { ".cafef00d" } else { "" },
+                        selector.name_suffix.as_deref().unwrap_or_default()
+                    )
+                });
+                serde_json::json!({
+                    "name": name,
+                    "browser_download_url": format!("https://example.test/{name}"),
+                })
+            })
+            .collect();
+        let tag = match spec.version_from {
+            VersionSource::TagName {
+                strip_v_prefix: true,
+            } => "v1.2.3",
+            _ => "1.2.3",
+        };
+        serde_json::json!({ "tag_name": tag, "assets": assets }).to_string()
+    }
+
+    /// The ids of the packages offered on `platform`.
+    fn package_ids_on(platform: Platform) -> Vec<String> {
+        crate::package::builtin_package_specs(platform)
+            .into_iter()
+            .map(|spec| spec.id)
+            .collect()
+    }
+
+    /// The offline rule and artifact resolution agree for every shipped
+    /// package, on every channel, platform and architecture. Resolution's
+    /// side runs its own selectors on manifest data: a release holding an
+    /// asset for every `github_release` selector, the `http_artifact`
+    /// targets' `match_arches`, and a pull request build's platform. Where
+    /// the rule refuses, the resolver is asked as well, and refuses before it
+    /// makes a request. Nothing goes online.
+    #[test]
+    fn the_offline_rule_agrees_with_artifact_resolution_for_every_shipped_package() {
+        for package in crate::package::embedded_package_manifest().packages {
+            let channels = std::iter::once(None).chain(package.channels.iter().map(|channel| {
+                Some(match channel.parameter {
+                    Some(_) => format!("{}:1", channel.id),
+                    None => channel.id.clone(),
+                })
+            }));
+            for channel in channels {
+                let on_channel = package.on_channel(channel.as_deref());
+                for platform in [Platform::Windows, Platform::MacOs] {
+                    let spec = on_channel.to_package_spec(platform);
+                    if !on_channel.supports_platform(platform) {
+                        assert!(
+                            !package_has_build_for(&spec, platform, Architecture::X64),
+                            "{} isn't offered on {platform:?}",
+                            spec.id
+                        );
+                        continue;
+                    }
+                    for architecture in EVERY_ARCHITECTURE {
+                        let label =
+                            format!("{} on {channel:?}, {platform:?}, {architecture:?}", spec.id);
+                        let dispatch = canonicalize_dispatch_arch(architecture);
+                        if dispatch == Architecture::Unknown {
+                            // Only on a computer RABBIT has no build for.
+                            assert!(package_has_build_for(&spec, platform, architecture));
+                            continue;
+                        }
+                        let source_resolves = if let Some(release) = &spec.github_release {
+                            resolve_github_artifact_from_release_body(
+                                &release_with_every_asset(release),
+                                "https://example.test/release",
+                                &spec.id,
+                                release,
+                                platform,
+                                dispatch,
+                            )
+                            .is_ok()
+                        } else if let Some(http) = &spec.http_artifact {
+                            select_http_target(http, platform, dispatch).is_some()
+                        } else if spec.hfs_listing.is_some() {
+                            true
+                        } else if let Some(actions) = &spec.github_actions_artifact {
+                            crate::actions_artifact::target_for(actions, platform).is_some()
+                        } else {
+                            false
+                        };
+                        let resolves =
+                            spec.supported_architectures.contains(&dispatch) && source_resolves;
+                        assert_eq!(
+                            package_has_build_for(&spec, platform, architecture),
+                            resolves,
+                            "{label}"
+                        );
+                        assert_eq!(
+                            expected_artifact_kind_on(
+                                &spec.id,
+                                platform,
+                                architecture,
+                                channel.as_deref()
+                            )
+                            .is_ok(),
+                            resolves,
+                            "{label}"
+                        );
+                        // The resolver itself refuses what the rule refuses,
+                        // before it makes a request.
+                        if !resolves {
+                            let channels: PackageChannels = channel
+                                .iter()
+                                .map(|channel| (spec.id.clone(), channel.clone()))
+                                .collect();
+                            let error = resolve_latest_artifacts_on(
+                                std::slice::from_ref(&spec.id),
+                                platform,
+                                architecture,
+                                &channels,
+                            )
+                            .unwrap_err();
+                            assert!(
+                                matches!(error, RabbitError::NoArtifactFound { .. }),
+                                "{label}: {error}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A 32-bit REAPER has no FFmpeg, Surge XT or app2clap, and has
+    /// everything else. Resolution refuses those three before it goes
+    /// online, Surge XT too, whose Windows asset matches any architecture.
+    #[test]
+    fn a_32_bit_reaper_has_no_build_of_ffmpeg_surge_xt_or_app2clap() {
+        let without = packages_without_build(
+            &package_ids_on(Platform::Windows),
+            Platform::Windows,
+            Architecture::X86,
+            &PackageChannels::new(),
+        );
+        assert_eq!(
+            without,
+            [PACKAGE_FFMPEG, PACKAGE_SURGE_XT, PACKAGE_APP2CLAP].map(String::from)
+        );
+        for package_id in &without {
+            let error = resolve_latest_artifacts(
+                std::slice::from_ref(package_id),
+                Platform::Windows,
+                Architecture::X86,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, RabbitError::NoArtifactFound { .. }),
+                "{package_id}: {error}"
+            );
+        }
+    }
+
+    /// REAPER on Windows on ARM and on a Mac keeps every package that has a
+    /// build for it. SWS has no Windows build for ARM, as its `http_artifact`
+    /// targets say, and app2clap is x64 only.
+    #[test]
+    fn windows_on_arm_and_macos_keep_what_has_a_build_for_them() {
+        let without = |platform, architecture| {
+            packages_without_build(
+                &package_ids_on(platform),
+                platform,
+                architecture,
+                &PackageChannels::new(),
+            )
+        };
+        for arm in [Architecture::Arm64, Architecture::Arm64Ec] {
+            assert_eq!(
+                without(Platform::Windows, arm),
+                [PACKAGE_SWS, PACKAGE_APP2CLAP].map(String::from),
+                "{arm:?}"
+            );
+            assert!(expected_artifact_kind(PACKAGE_SWS, Platform::Windows, arm).is_err());
+            assert!(expected_artifact_kind(PACKAGE_FFMPEG, Platform::Windows, arm).is_ok());
+            assert!(expected_artifact_kind(PACKAGE_SURGE_XT, Platform::Windows, arm).is_ok());
+        }
+        assert!(without(Platform::Windows, Architecture::X64).is_empty());
+        // A universal REAPER is judged by the slice it runs as here.
+        for architecture in [
+            Architecture::X64,
+            Architecture::Arm64,
+            Architecture::Universal,
+        ] {
+            assert!(
+                without(Platform::MacOs, architecture).is_empty(),
+                "{architecture:?}"
+            );
+        }
+        assert_eq!(
+            without(Platform::MacOs, Architecture::X86),
+            [PACKAGE_SURGE_XT].map(String::from)
+        );
+    }
+
+    /// When even the dispatch architecture is unknown, nothing is blocked.
+    #[test]
+    fn an_architecture_that_cant_be_known_blocks_nothing() {
+        for platform in [Platform::Windows, Platform::MacOs] {
+            for spec in crate::package::builtin_package_specs(platform) {
+                assert!(
+                    has_build_for_dispatch(&spec, platform, Architecture::Unknown),
+                    "{} on {platform:?}",
+                    spec.id
+                );
+            }
+        }
     }
 
     fn file_url_for_test(path: &Path) -> String {

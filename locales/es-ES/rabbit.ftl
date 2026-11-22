@@ -189,6 +189,16 @@ uninstall-vendor-refused-nothing-changed = No se ha cambiado nada. Puedes desins
 wizard-package-row-unavailable-suffix = (No está disponible: { $reason })
 wizard-package-row-unavailable-portable = Ruta de Reaper portable
 wizard-package-row-unavailable-version-check = Falló la comprobación de la versión en línea
+# Why a package row can't be ticked: there is no version of the package for
+# the REAPER at the chosen target. The first names a 32-bit REAPER; the
+# second covers every other kind, such as REAPER on Windows on ARM, by the
+# type of processor it runs on.
+wizard-package-row-unavailable-32-bit = no hay versión para REAPER de 32 bits
+wizard-package-row-unavailable-processor = no hay versión para el tipo de procesador de este REAPER
+# The same, as a sentence in the row's details. $package is the localized
+# package name.
+wizard-package-details-unavailable-32-bit = { $package } no tiene ninguna versión compatible con REAPER de 32 bits, así que RABBIT no puede instalar este paquete aquí.
+wizard-package-details-unavailable-processor = { $package } no tiene ninguna versión compatible con el tipo de procesador de este REAPER, así que RABBIT no puede instalar este paquete aquí.
 
 # Review-page note carrying the full error for a package whose latest-version
 # check failed; its row is disabled with the short reason above.

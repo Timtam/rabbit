@@ -6,7 +6,8 @@ use crate::arch_probe::probe_executable_architecture;
 use crate::error::{IoPathContext, RabbitError, Result};
 use crate::metadata::file_version;
 use crate::model::{
-    ComponentDetection, Confidence, Evidence, Installation, InstallationKind, Platform,
+    Architecture, ComponentDetection, Confidence, Evidence, Installation, InstallationKind,
+    Platform,
 };
 use crate::package::{InstallDestination, PackageDetector, PackageSpec, builtin_package_specs};
 use crate::reapack::package_owner_for_file;
@@ -55,6 +56,31 @@ pub fn default_standard_installation(platform: Platform) -> Option<Installation>
         Platform::Windows => standard_windows_installation(false),
         Platform::MacOs => standard_macos_installation(false),
     }
+}
+
+/// The architecture of the REAPER a run for `resource_path` installs for,
+/// read from REAPER's own program file as the wizard reads it: the app at
+/// `target_app_path` when given, else the standard REAPER whose resource
+/// folder this is, else the portable REAPER in it. `Unknown` while there is
+/// no REAPER there yet, which artifact resolution takes as the REAPER RABBIT
+/// will install: the slice REAPER runs as on this computer.
+pub fn target_reaper_architecture(
+    platform: Platform,
+    resource_path: &Path,
+    target_app_path: Option<&Path>,
+) -> Architecture {
+    if let Some(app_path) = target_app_path {
+        return probe_executable_architecture(app_path);
+    }
+    if let Some(standard) = default_standard_installation(platform)
+        .filter(|installation| installation.resource_path == resource_path)
+    {
+        return standard.architecture.unwrap_or(Architecture::Unknown);
+    }
+    crate::preflight::portable_target_app_path(resource_path, Some(platform))
+        .map_or(Architecture::Unknown, |app_path| {
+            probe_executable_architecture(&app_path)
+        })
 }
 
 /// If the folder holding the currently running RABBIT executable also
@@ -1624,6 +1650,45 @@ mod tests {
     fn colocated_portable_root_is_none_without_portable_reaper() {
         let dir = tempdir().unwrap();
         assert!(super::portable_root_in_dir(dir.path()).is_none());
+    }
+
+    /// The REAPER a run installs for is read from its program file: the one
+    /// named with a target app path, or the portable REAPER in the folder.
+    /// Without a REAPER there yet it is unknown, so resolution takes the one
+    /// RABBIT will install.
+    #[test]
+    fn the_target_reapers_architecture_comes_from_its_program_file() {
+        use super::target_reaper_architecture;
+        use crate::arch_probe::tests::{MACHO_CPU_TYPE_ARM64, write_mach_o_thin_64, write_pe64};
+        use crate::model::Architecture;
+
+        let dir = tempdir().unwrap();
+        let windows = dir.path().join("Windows");
+        fs::create_dir_all(&windows).unwrap();
+        assert_eq!(
+            target_reaper_architecture(Platform::Windows, &windows, None),
+            Architecture::Unknown
+        );
+        write_pe64(&windows.join("reaper.exe"), 0x014c);
+        assert_eq!(
+            target_reaper_architecture(Platform::Windows, &windows, None),
+            Architecture::X86
+        );
+        let elsewhere = dir.path().join("reaper64.exe");
+        write_pe64(&elsewhere, 0x8664);
+        assert_eq!(
+            target_reaper_architecture(Platform::Windows, &windows, Some(&elsewhere)),
+            Architecture::X64
+        );
+
+        let mac = dir.path().join("Mac");
+        let executables = mac.join("REAPER.app").join("Contents").join("MacOS");
+        fs::create_dir_all(&executables).unwrap();
+        write_mach_o_thin_64(&executables.join("REAPER"), MACHO_CPU_TYPE_ARM64);
+        assert_eq!(
+            target_reaper_architecture(Platform::MacOs, &mac, None),
+            Architecture::Arm64
+        );
     }
 
     #[test]

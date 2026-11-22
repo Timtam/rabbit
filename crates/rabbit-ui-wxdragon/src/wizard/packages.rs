@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use rabbit_core::Result;
+use rabbit_core::artifact::{dispatch_architecture, package_has_build_for};
 use rabbit_core::detection::detect_components;
 use rabbit_core::localization::Localizer;
 use rabbit_core::model::{Architecture, Platform};
@@ -239,11 +240,15 @@ pub fn wizard_package_plan_for_target_with_available(
     let installed_channels = target
         .map(|target| rabbit_core::receipt::installed_channels_at(&target.path))
         .unwrap_or_default();
+    // The target's own architecture, which the install request hands to
+    // artifact resolution, rather than the one of the target the wizard
+    // opened on.
+    let architecture = target.map_or(model.architecture, |target| target.architecture);
     let mut package_rows = package_rows(
         &localizer,
         &model.text,
         model.platform,
-        model.architecture,
+        architecture,
         &package_specs,
         &plan.actions,
         available_packages,
@@ -261,10 +266,12 @@ pub fn wizard_package_plan_for_target_with_available(
     // the gate is data-driven rather than a hardcoded package-id list. Mark
     // those rows unavailable on a portable target so the checklist disables
     // their checkboxes and each row label carries a localized "(requires
-    // standard installation)" indicator.
+    // standard installation)" indicator. A row already unavailable because
+    // the package has no build for this REAPER keeps that reason, which its
+    // details already explain.
     if target.is_some_and(|target| target.portable) {
         for row in &mut package_rows {
-            if row.requires_standard_install {
+            if row.requires_standard_install && row.has_build_for_target {
                 mark_row_unavailable(&localizer, row, "wizard-package-row-unavailable-portable");
             }
         }
@@ -329,10 +336,16 @@ pub fn apply_version_check_failures_to_rows(
     failures: &[(String, String)],
 ) -> bool {
     for (package_id, message) in failures {
-        if let Some(row) = package_rows
+        let row = package_rows
             .iter_mut()
-            .find(|row| row.package_id == *package_id)
-        {
+            .find(|row| row.package_id == *package_id);
+        // A package with no build for this REAPER can't be installed in any
+        // run, and its row and details already say why: a failed version
+        // check gives it no other reason, and Review no note about it.
+        if row.as_ref().is_some_and(|row| !row.has_build_for_target) {
+            continue;
+        }
+        if let Some(row) = row {
             mark_row_unavailable(
                 localizer,
                 row,
@@ -522,6 +535,23 @@ fn row_installs(action: PlanActionKind) -> bool {
     matches!(action, PlanActionKind::Install | PlanActionKind::Update)
 }
 
+/// The Fluent keys of the reason and the details sentence for a package with
+/// no build for a REAPER of `architecture`. A 32-bit REAPER is named as
+/// such; any other, on Windows on ARM or a Mac, by its processor type.
+fn no_build_keys(architecture: Architecture) -> (&'static str, &'static str) {
+    if dispatch_architecture(architecture) == Architecture::X86 {
+        (
+            "wizard-package-row-unavailable-32-bit",
+            "wizard-package-details-unavailable-32-bit",
+        )
+    } else {
+        (
+            "wizard-package-row-unavailable-processor",
+            "wizard-package-details-unavailable-processor",
+        )
+    }
+}
+
 /// A package row's one-line label: package, action and versions, then a tag
 /// when the build is not the regular release, or this run takes it back to
 /// one. Everything that changes a row's action rebuilds the label through
@@ -592,10 +622,22 @@ pub(crate) fn package_rows(
                 .map(|notes| (available.package_id.as_str(), notes))
         })
         .collect();
+    // Each package as it resolves on the channel its version was checked
+    // on, which is where the run would download it from.
+    let channels: rabbit_core::package::PackageChannels = channel_by_id
+        .iter()
+        .map(|(package_id, channel)| (package_id.to_string(), channel.to_string()))
+        .collect();
+    let specs_on_channels = rabbit_core::package::package_specs_by_id_on(platform, &channels);
     actions
         .iter()
         .map(|action| {
             let spec = specs_by_id.get(action.package_id.as_str()).copied();
+            // A package with no build for this REAPER is listed, but can't
+            // be ticked: resolving its download would stop the whole run.
+            let no_build = specs_on_channels
+                .get(action.package_id.as_str())
+                .is_some_and(|spec| !package_has_build_for(spec, platform, architecture));
             let display_name = spec
                 .map(|spec| localizer.text(&spec.display_name_key).value)
                 .unwrap_or_else(|| action.package_id.clone());
@@ -644,16 +686,18 @@ pub(crate) fn package_rows(
                         )
                 })
                 .unwrap_or(false);
-            let initially_selected = match action.action {
-                // Updates are ticked by default because a package you have
-                // should stay current. A language pack you turned down or
-                // removed is the exception. Someone who stopped using one
-                // and turned its update down would otherwise be offered it
-                // again, ticked, every time the translators publish a fix.
-                PlanActionKind::Update => !refuses_updates,
-                PlanActionKind::Install => recommended && !refused,
-                PlanActionKind::Keep => false,
-            };
+            let initially_selected = !no_build
+                && match action.action {
+                    // Updates are ticked by default because a package you
+                    // have should stay current. A language pack you turned
+                    // down or removed is the exception. Someone who stopped
+                    // using one and turned its update down would otherwise
+                    // be offered it again, ticked, every time the
+                    // translators publish a fix.
+                    PlanActionKind::Update => !refuses_updates,
+                    PlanActionKind::Install => recommended && !refused,
+                    PlanActionKind::Keep => false,
+                };
             // When the auto-tick rule leaves an Install/Update row unticked,
             // mirror what `apply_checkbox_state_to_package_row(checked=false)`
             // does on a manual untick: flip the *displayed* action to Keep so
@@ -711,6 +755,7 @@ pub(crate) fn package_rows(
                 manual_attention_expected,
                 available_for_target: true,
                 unavailability_reason: None,
+                has_build_for_target: !no_build,
                 category: spec.map(|spec| spec.category).unwrap_or_default(),
                 requires_standard_install: spec
                     .map(|spec| spec.requires_standard_install)
@@ -719,10 +764,22 @@ pub(crate) fn package_rows(
                 installed_channel,
             };
             row.summary = package_row_summary(localizer, &row);
+            // The row says why in its label, and its details in a sentence.
+            let no_build_sentence = no_build.then(|| {
+                let (reason_key, sentence_key) = no_build_keys(architecture);
+                mark_row_unavailable(localizer, &mut row, reason_key);
+                localizer
+                    .format(sentence_key, &[("package", display_name.as_str())])
+                    .value
+            });
             let summary = &row.summary;
-            let details = match &channel_sentence {
+            let details = match &no_build_sentence {
                 Some(sentence) => format!("{summary}\n\n{sentence}"),
                 None => summary.clone(),
+            };
+            let details = match &channel_sentence {
+                Some(sentence) => format!("{details}\n\n{sentence}"),
+                None => details,
             };
             let details = if description.is_empty() {
                 details

@@ -311,14 +311,18 @@ pub struct PackageRow {
     pub manual_attention_expected: bool,
     /// `false` when this package can't be installed against the currently
     /// selected target — the row is shown but its checkbox is disabled and
-    /// the row label carries a localized indicator. Today only true → false
-    /// flip is "JAWS-for-REAPER scripts on a portable REAPER target", since
-    /// the NSIS installer hard-codes `%APPDATA%\REAPER\UserPlugins\` and
-    /// can't honor the portable destination.
+    /// the row label carries a localized indicator. That is a package that
+    /// installs outside any portable REAPER folder on a portable target, one
+    /// with no build for the target REAPER's architecture, such as FFmpeg
+    /// for a 32-bit REAPER, and one whose version check failed.
     pub available_for_target: bool,
     /// Localized reason matching `available_for_target == false`. `None`
     /// when the row is available.
     pub unavailability_reason: Option<String>,
+    /// `false` when the package has no build for the target REAPER's
+    /// architecture. The row is then unavailable for that reason, which
+    /// neither a portable target nor a failed version check replaces.
+    pub has_build_for_target: bool,
     /// Which wizard UI group this row belongs to ("Packages" vs "Additional
     /// software"). Mirrors the package spec's category.
     pub category: rabbit_core::package::PackageCategory,
