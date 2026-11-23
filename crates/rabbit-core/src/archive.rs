@@ -397,11 +397,10 @@ pub fn extract_bin_directory_from_archive(
 }
 
 /// 7z twin of [`extract_bin_directory_from_archive`]. Used by the
-/// FFmpeg pipeline because both upstreams (Gyan.dev for x64,
-/// `tordona/ffmpeg-win-arm64` for ARM64) ship the shared variant only
-/// as `.7z`. Walks every entry in the archive, picks the ones whose
-/// immediate parent directory is `bin/` (case insensitive), and
-/// extracts them flat into `extract_dir`. Errors when the archive
+/// FFmpeg pipeline because its upstream, Gyan.dev, ships the shared
+/// variant only as `.7z`. Walks every entry in the archive, picks the
+/// ones whose immediate parent directory is `bin/` (case insensitive),
+/// and extracts them flat into `extract_dir`. Errors when the archive
 /// contains no `bin/<file>` entries.
 pub fn extract_bin_directory_from_seven_zip_archive(
     archive_path: &Path,

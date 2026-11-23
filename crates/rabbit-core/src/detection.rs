@@ -702,7 +702,8 @@ fn detect_ffmpeg_version(
 /// — but some redistributors patch the format. Gyan.dev's full builds,
 /// for example, drop the comma and pad the version with trailing
 /// spaces (`%s version 8.1.1-full_build-www.gyan.dev         Copyright
-/// (c) …`), and tordona's ARM snapshots embed `n8.1.1-6-…` directly.
+/// (c) …`), and tordona's ARM64 builds, which RABBIT installed on Windows
+/// on ARM before, embed `n8.1.1-6-…` directly.
 /// We anchor on the distinctive `the FFmpeg developers` suffix, walk
 /// back to find the trailing `version ` token, and treat the *next*
 /// `Copyright` (with any preceding comma/whitespace stripped) as the
@@ -2193,6 +2194,114 @@ mod tests {
         let version = ffmpeg.version.as_ref().expect("version not detected");
         assert_eq!(version.raw(), "8.0.0");
         assert_eq!(ffmpeg.detector, "ffmpeg-libavformat-major");
+    }
+
+    /// FFmpeg in a REAPER on Windows on ARM, which is ARM64EC. The ARM64
+    /// build RABBIT installed there before is found with its version, FFmpeg
+    /// has a build for this REAPER, and a newer x64 build is offered as an
+    /// update. Once the x64 build is installed, nothing takes it for the
+    /// wrong architecture: it is found with its version, kept while it is
+    /// current and updated when a newer one comes.
+    #[test]
+    fn ffmpeg_in_an_arm64ec_reaper_updates_from_the_arm64_build_to_the_x64_one() {
+        use crate::arch_probe::PeKind;
+        use crate::arch_probe::test_support::pe_image;
+        use crate::model::Architecture;
+        use crate::plan::{
+            AvailablePackage, PlanAction, PlanActionKind,
+            build_install_plan_with_installed_channels,
+        };
+        use crate::receipt::{PackageReceiptParams, save_install_state, upsert_package_receipt};
+        use crate::version::Version;
+
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("reaper.exe"), pe_image(PeKind::Arm64Ec)).unwrap();
+        fs::write(dir.path().join("reaper.ini"), b"").unwrap();
+        let architecture = super::target_reaper_architecture(Platform::Windows, dir.path(), None);
+        assert_eq!(architecture, Architecture::Arm64Ec);
+        let specs = package_specs_by_id(Platform::Windows);
+        assert!(crate::artifact::package_has_build_for(
+            &specs[PACKAGE_FFMPEG],
+            Platform::Windows,
+            architecture
+        ));
+
+        let plugins = dir.path().join("UserPlugins");
+        fs::create_dir_all(&plugins).unwrap();
+        // Writes `names` into UserPlugins and a receipt for them, as an
+        // install of FFmpeg's `version` built for `built_for` leaves them.
+        let installed = |version: &str, built_for: Architecture, names: &[&str]| {
+            let paths: Vec<std::path::PathBuf> = names
+                .iter()
+                .map(|name| {
+                    let path = plugins.join(name);
+                    fs::write(&path, format!("{name} {version}")).unwrap();
+                    path
+                })
+                .collect();
+            let mut state = crate::receipt::InstallState::default();
+            upsert_package_receipt(
+                &mut state,
+                dir.path(),
+                PackageReceiptParams {
+                    variant: None,
+                    channel: None,
+                    package_id: PACKAGE_FFMPEG,
+                    version: Some(Version::parse(version).unwrap()),
+                    source_url: None,
+                    source_sha256: None,
+                    installed_paths: &paths,
+                    installed_at: None,
+                    architecture: Some(built_for),
+                },
+            )
+            .unwrap();
+            save_install_state(dir.path(), &state).unwrap();
+        };
+        // FFmpeg's plan action when `available` is the newest version.
+        let action = |available: &str| -> PlanAction {
+            let detections =
+                super::detect_components_with_probes(dir.path(), Platform::Windows, |_| None)
+                    .unwrap();
+            let ffmpeg = detections
+                .iter()
+                .find(|detection| detection.package_id == PACKAGE_FFMPEG)
+                .unwrap();
+            assert!(ffmpeg.installed);
+            assert_eq!(ffmpeg.detector, "rabbit-receipt");
+            let plan = build_install_plan_with_installed_channels(
+                None,
+                &detections,
+                &[PACKAGE_FFMPEG.to_string()],
+                &[AvailablePackage {
+                    package_id: PACKAGE_FFMPEG.to_string(),
+                    version: Some(Version::parse(available).unwrap()),
+                    whats_new: None,
+                    channel: None,
+                }],
+                &crate::package::PackageChannels::new(),
+            );
+            plan.actions.into_iter().next().unwrap()
+        };
+
+        let arm64 = ["avcodec-62.dll", "avformat-62.dll", "ffmpeg.exe"];
+        installed("8.0.1", Architecture::Arm64, &arm64);
+        let update = action("9.1");
+        assert_eq!(update.action, PlanActionKind::Update);
+        assert_eq!(update.installed_version.unwrap().raw(), "8.0.1");
+
+        for name in arm64 {
+            fs::remove_file(plugins.join(name)).unwrap();
+        }
+        installed(
+            "9.1",
+            Architecture::X64,
+            &["avcodec-63.dll", "avformat-63.dll", "ffmpeg.exe"],
+        );
+        let current = action("9.1");
+        assert_eq!(current.action, PlanActionKind::Keep);
+        assert_eq!(current.installed_version.unwrap().raw(), "9.1");
+        assert_eq!(action("9.2").action, PlanActionKind::Update);
     }
 
     #[test]

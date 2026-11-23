@@ -46,6 +46,7 @@
       {
         "platform": "windows",
         "arch": "arm64",
+        "report_arch": "x64",
         "name_prefix": "LB-303",
         "name_suffix": ".zip",
         "ignore_case": true
@@ -53,6 +54,7 @@
       {
         "platform": "windows",
         "arch": "arm64-ec",
+        "report_arch": "x64",
         "name_prefix": "LB-303",
         "name_suffix": ".zip",
         "ignore_case": true

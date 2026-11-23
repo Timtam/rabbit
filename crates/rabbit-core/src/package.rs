@@ -421,10 +421,19 @@ pub enum VersionSource {
 pub struct AssetSelector {
     pub platform: SupportedPlatform,
     /// `None` matches any host arch and the resolved descriptor reports
-    /// `Architecture::Universal`; `Some` pins both the match and the
-    /// reported architecture (ReaPack's per-slice DLLs).
+    /// `Architecture::Universal`; `Some` pins the match, and the reported
+    /// architecture too unless `report_arch` names another (ReaPack's
+    /// per-slice DLLs).
     #[serde(default)]
     pub arch: Option<Architecture>,
+    /// The architecture of the build this selector picks, stamped on the
+    /// resolved descriptor and so on the receipt, when it differs from
+    /// `arch`. REAPER on Windows on ARM loads x64 builds, so a package with
+    /// no ARM64EC build of its own, such as app2clap, picks its x64 asset
+    /// for `arm64` and `arm64-ec` and reports `x64`, as the `http_artifact`
+    /// targets' `report_arch` does. `None` reports `arch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_arch: Option<Architecture>,
     #[serde(default)]
     pub name_prefix: Option<String>,
     #[serde(default)]
@@ -658,17 +667,16 @@ pub(crate) fn plugin_bundle_of(
 
 /// Data-driven artifact (download) resolution for packages that are NOT a
 /// single GitHub release: REAPER (reaper.fm scrape), OSARA (snapshot-index
-/// scrape), SWS (home-page scrape) and FFmpeg (per-arch dual source). Read
+/// scrape), SWS (home-page scrape) and FFmpeg (Gyan.dev's fixed URL). Read
 /// only by [`crate::artifact`]; the version side keeps using [`VersionRule`]
 /// and the resolved version is stamped onto the descriptor.
 ///
 /// Every target is keyed by `(platform, match_arches)`. The first target
 /// whose platform matches and whose `match_arches` contains the (already
 /// canonicalized) dispatch arch wins. No matching target yields
-/// `NoArtifactFound` — this is how SWS rejects Windows-on-ARM and FFmpeg
-/// rejects x86/macOS, with no per-package Rust. A package sets EXACTLY ONE of
-/// `github_release` / `http_artifact` / `hfs_listing` (enforced by the
-/// load-time validator).
+/// `NoArtifactFound` — this is how FFmpeg rejects x86/macOS, with no
+/// per-package Rust. A package sets EXACTLY ONE of `github_release` /
+/// `http_artifact` / `hfs_listing` (enforced by the load-time validator).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpArtifactSpec {
     pub targets: Vec<HttpArtifactTarget>,
@@ -684,9 +692,11 @@ pub struct HttpArtifactTarget {
     /// are accepted belt-and-suspenders even though canonicalization usually
     /// rewrites them to a concrete host slice first.
     pub match_arches: Vec<Architecture>,
-    /// Architecture stamped on the resulting descriptor (REWRITES arch:
-    /// win x64-target → `x64`, mac universal-target → `universal`, osara →
-    /// `universal`, ffmpeg-arm64 → `arm64`). Independent of `match_arches`.
+    /// Architecture stamped on the resulting descriptor, and so on the
+    /// receipt (REWRITES arch: win x64-target → `x64`, mac universal-target
+    /// → `universal`, osara → `universal`). Independent of `match_arches`:
+    /// FFmpeg's and SWS's x64 targets also serve `arm64` and `arm64-ec`, and
+    /// still report the `x64` build they install.
     pub report_arch: Architecture,
     pub artifact_kind: GithubArtifactKind,
     /// How the download URL + file name are produced.
@@ -713,26 +723,13 @@ pub enum HttpArtifactSource {
         #[serde(rename = "match")]
         href_match: HrefMatch,
     },
-    /// A fixed download URL (no version interpolation). Covers FFmpeg x64
-    /// (Gyan redirector). `file_name` overrides the URL basename so the cache
+    /// A fixed download URL (no version interpolation). Covers FFmpeg (Gyan
+    /// redirector). `file_name` overrides the URL basename so the cache
     /// layout stays stable if the redirector path changes.
     FixedUrl {
         url: String,
         #[serde(default)]
         file_name: Option<String>,
-    },
-    /// Highest *stable* GitHub release whose major == `supported_major`, then
-    /// the asset matching `asset`. Covers FFmpeg arm64 (tordona). The version
-    /// is the picked release's, NOT the package `VersionRule`. Distinct from
-    /// `github_release` because tags are plain `MAJOR.MINOR.PATCH` and
-    /// "newest within a pinned major" isn't expressible by
-    /// [`GithubReleaseSelector`].
-    GithubReleaseMaxMajor {
-        /// `owner/name`, e.g. `tordona/ffmpeg-win-arm64`.
-        repo: String,
-        /// Major-version gate; must equal `FFMPEG_SUPPORTED_MAJOR`.
-        supported_major: u64,
-        asset: AssetMatch,
     },
 }
 
@@ -760,22 +757,6 @@ impl HrefMatch {
     }
 }
 
-/// Asset predicate for [`HttpArtifactSource::GithubReleaseMaxMajor`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssetMatch {
-    #[serde(default)]
-    pub contains: Vec<String>,
-    #[serde(default)]
-    pub ends_with: Option<String>,
-}
-
-impl AssetMatch {
-    pub fn matches(&self, name: &str) -> bool {
-        self.contains.iter().all(|needle| name.contains(needle))
-            && self.ends_with.as_ref().is_none_or(|s| name.ends_with(s))
-    }
-}
-
 /// Data-driven definition of a package distributed through a rejetto HFS
 /// folder listing (`hoard.reaperaccessibility.com`). Like [`GithubReleaseSpec`]
 /// it drives BOTH the version side ([`crate::latest`]) and the download side
@@ -783,8 +764,7 @@ impl AssetMatch {
 /// picks the highest-version installer, and uses it for both. Covers JAWS-for-
 /// REAPER scripts — the one package that isn't a web page or GitHub release.
 /// The HFS `get_file_list` protocol and the `.exe` highest-version pick stay as
-/// engine helpers selected by this block (the same "spec selects an irreducible
-/// helper" pattern as [`HttpArtifactSource::GithubReleaseMaxMajor`]).
+/// engine helpers selected by this block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HfsListingSpec {
     /// rejetto HFS server root, e.g. `https://hoard.reaperaccessibility.com`.
@@ -1554,6 +1534,13 @@ fn validate_resolvable_spec(spec: &EmbeddedPackageSpec) -> Result<(), String> {
                     "github_release asset #{index} has no artifact_kind and the spec sets no fallback artifact_kind"
                 ));
             }
+            // An any-arch selector serves every REAPER, so no one build
+            // architecture is true of what it picks.
+            if selector.report_arch.is_some() && selector.arch.is_none() {
+                return Err(format!(
+                    "github_release asset #{index} sets report_arch without arch"
+                ));
+            }
         }
     }
 
@@ -2217,9 +2204,11 @@ mod tests {
             release.artifact_kind,
             Some(GithubArtifactKind::ExtensionBinary)
         );
+        // REAPER on Windows on ARM loads the x64 DLL, and the receipt says so.
         let dll = |arch| AssetSelector {
             platform: SupportedPlatform::Windows,
             arch: Some(arch),
+            report_arch: (arch != Architecture::X64).then_some(Architecture::X64),
             name_prefix: None,
             name_suffix: None,
             exact_name: Some("reaper_lreaparams.dll".to_string()),
@@ -2466,6 +2455,7 @@ mod tests {
         let selector = |ignore_case| AssetSelector {
             platform: SupportedPlatform::Windows,
             arch: None,
+            report_arch: None,
             name_prefix: Some("LB-303".to_string()),
             name_suffix: Some(".vst3.zip".to_string()),
             exact_name: None,
@@ -2826,6 +2816,44 @@ mod tests {
                     vec!["{resource}/UserPlugins/FX/app2clap.clap"]
                 ),
             ]
+        );
+    }
+
+    /// An asset selector names the build it picks with `report_arch` only
+    /// when it matches one architecture: one that matches every REAPER picks
+    /// no one build.
+    #[test]
+    fn a_selector_reports_a_build_only_for_the_architecture_it_matches() {
+        use super::{PACKAGE_APP2CLAP, embedded_package_manifest, validate_package_spec};
+
+        let app2clap = embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == PACKAGE_APP2CLAP)
+            .unwrap();
+        let reported: Vec<_> = app2clap
+            .github_release
+            .as_ref()
+            .unwrap()
+            .assets
+            .iter()
+            .map(|selector| (selector.arch, selector.report_arch))
+            .collect();
+        assert_eq!(
+            reported,
+            [
+                (Some(Architecture::X64), None),
+                (Some(Architecture::Arm64), Some(Architecture::X64)),
+                (Some(Architecture::Arm64Ec), Some(Architecture::X64)),
+            ]
+        );
+
+        let mut any_arch = app2clap;
+        let selector = &mut any_arch.github_release.as_mut().unwrap().assets[1];
+        selector.arch = None;
+        assert_eq!(
+            validate_package_spec(&any_arch),
+            Err("github_release asset #1 sets report_arch without arch".to_string())
         );
     }
 

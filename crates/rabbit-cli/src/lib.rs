@@ -3221,8 +3221,8 @@ fn keep_packages_with_builds(
 
 /// What `plan` does with the packages that have no build for a REAPER of
 /// `architecture`: takes them out of `package_ids` and returns a plan note
-/// for each, such as "Skipping SWS Extension: it has no version for REAPER
-/// on arm64."
+/// for each, in the form "Skipping <package>: it has no version for
+/// <REAPER>."
 fn leave_out_packages_without_builds(
     package_ids: &mut Vec<String>,
     platform: Platform,
@@ -8843,17 +8843,18 @@ mod tests {
     }
 
     /// An installed REAPER on Windows on ARM is an ARM64EC program, whose
-    /// header names x64. The install commands read it as arm64-ec, as the
-    /// wizard does, so SWS and app2clap, which have no build for it, are
-    /// refused with the reason, and nothing in its folder changes. `plan`
-    /// leaves SWS, which it lists by default, out with a note, and the
-    /// helper it leaves packages out with does the same for app2clap. The
-    /// architecture is checked first, and the commands run without
-    /// `--apply` and with the cache in the temporary folder, so a probe
-    /// that reads it wrong fails the test before anything could install.
+    /// header names x64. The probe reads it as arm64-ec, as the wizard does,
+    /// and so does `plan`. It loads x64 libraries, so SWS and app2clap have
+    /// their x64 builds for it: the build check the install commands make
+    /// before anything changes lets them through when they are named, and
+    /// `plan` keeps SWS, which it lists by default, with no note. No install
+    /// command runs here: with nothing refused, it would go online. That
+    /// they read the target's architecture is checked by
+    /// `the_install_commands_go_by_the_target_reapers_architecture`, with a
+    /// 32-bit REAPER. `plan` stays offline without `--online`.
     #[cfg(windows)]
     #[test]
-    fn the_install_commands_read_an_arm64ec_reaper_as_arm64_ec() {
+    fn plan_and_the_build_check_read_an_arm64ec_reaper_as_arm64_ec() {
         use rabbit_core::arch_probe::PeKind;
         use rabbit_core::arch_probe::test_support::pe_image;
         use rabbit_core::model::Architecture;
@@ -8879,37 +8880,16 @@ mod tests {
         };
         let before = listing();
         let path = resource.to_string_lossy().into_owned();
-        let cache = dir.path().join("cache").to_string_lossy().into_owned();
-        for command in ["setup", "apply-packages", "install-extension"] {
-            let cli = Cli::try_parse_from([
-                "rabbit",
-                command,
-                "--resource-path",
-                path.as_str(),
-                "--cache-dir",
-                cache.as_str(),
-                "--package",
-                "sws",
-                "--package",
-                "app2clap",
-            ])
-            .unwrap();
-
-            let error = super::run_with(cli).unwrap_err();
-
-            assert_eq!(
-                super::refusal_exit_code(error.as_ref()),
-                Some(2),
-                "{command}: {error}"
-            );
-            assert_eq!(
-                error.to_string(),
-                "SWS Extension and app2clap have no version for REAPER on arm64-ec, so RABBIT \
-                 can't install them. Nothing was changed.",
-                "{command}"
-            );
-            assert_eq!(listing(), before, "{command} changed the disk");
-        }
+        let mut named = ["sws", "app2clap"].map(String::from).to_vec();
+        super::keep_packages_with_builds(
+            &mut named,
+            true,
+            super::Platform::Windows,
+            architecture,
+            &super::PackageChannels::new(),
+        )
+        .unwrap();
+        assert_eq!(named, ["sws", "app2clap"]);
 
         // `plan` finds the portable REAPER and goes by the architecture
         // detection read for it. It stays offline without --online.
@@ -8934,21 +8914,18 @@ mod tests {
             Some(Architecture::Arm64Ec)
         );
         assert!(
-            !plan.actions.iter().any(|action| action.package_id == "sws"),
+            plan.actions.iter().any(|action| action.package_id == "sws"),
             "{:?}",
             plan.actions
         );
         assert!(
-            plan.notes
-                .iter()
-                .any(|note| note
-                    == "Skipping SWS Extension: it has no version for REAPER on arm64-ec."),
+            !plan.notes.iter().any(|note| note.starts_with("Skipping")),
             "{:?}",
             plan.notes
         );
         assert_eq!(listing(), before, "plan changed the disk");
 
-        let mut ids = ["reaper", "osara", "sws", "reapack", "app2clap"]
+        let mut ids = ["reaper", "osara", "sws", "reapack", "app2clap", "ffmpeg"]
             .map(String::from)
             .to_vec();
         let notes = super::leave_out_packages_without_builds(
@@ -8957,14 +8934,11 @@ mod tests {
             architecture,
             &super::PackageChannels::new(),
         );
-        assert_eq!(ids, ["reaper", "osara", "reapack"]);
         assert_eq!(
-            notes,
-            [
-                "Skipping SWS Extension: it has no version for REAPER on arm64-ec.",
-                "Skipping app2clap: it has no version for REAPER on arm64-ec.",
-            ]
+            ids,
+            ["reaper", "osara", "sws", "reapack", "app2clap", "ffmpeg"]
         );
+        assert!(notes.is_empty(), "{notes:?}");
     }
 
     /// The refusal names every package without a build and the REAPER. It
@@ -8994,14 +8968,17 @@ mod tests {
             "FFmpeg and app2clap have no version for 32-bit REAPER (x86), so RABBIT can't \
              install them. Nothing was changed."
         );
+        // Any other REAPER is named by its architecture. No shipped package
+        // lacks a build for REAPER on Windows on ARM, so this one is made
+        // up, and named by its id.
         assert_eq!(
             super::no_build_refusal_text(
-                &["sws".to_string()],
+                &["example".to_string()],
                 false,
                 super::Platform::Windows,
                 super::Architecture::Arm64Ec
             ),
-            "SWS Extension has no version for REAPER on arm64-ec, so RABBIT can't install it. \
+            "example has no version for REAPER on arm64-ec, so RABBIT can't install it. \
              Nothing was changed."
         );
     }
@@ -9098,52 +9075,63 @@ mod tests {
     #[test]
     fn the_default_list_skips_packages_without_a_build() {
         let channels = super::PackageChannels::new();
-        let mut defaults = ["reaper", "osara", "sws"].map(String::from).to_vec();
+        let mut defaults = ["reaper", "osara", "sws", "ffmpeg"]
+            .map(String::from)
+            .to_vec();
         super::keep_packages_with_builds(
             &mut defaults,
             false,
             super::Platform::Windows,
-            super::Architecture::Arm64,
+            super::Architecture::X86,
             &channels,
         )
         .unwrap();
-        assert_eq!(defaults, ["reaper", "osara"]);
+        assert_eq!(defaults, ["reaper", "osara", "sws"]);
 
-        let mut named = ["reaper", "sws"].map(String::from).to_vec();
+        let mut named = ["reaper", "ffmpeg"].map(String::from).to_vec();
         let refusal = super::keep_packages_with_builds(
             &mut named,
             true,
             super::Platform::Windows,
-            super::Architecture::Arm64,
+            super::Architecture::X86,
             &channels,
         )
         .unwrap_err();
         assert_eq!(
             refusal.to_string(),
-            "SWS Extension has no version for REAPER on arm64, so RABBIT can't install it. \
+            "FFmpeg has no version for 32-bit REAPER (x86), so RABBIT can't install it. \
              Nothing was changed. To install the others, run the command again without \
-             --package sws."
+             --package ffmpeg."
         );
-        assert_eq!(named, ["reaper", "sws"]);
+        assert_eq!(named, ["reaper", "ffmpeg"]);
 
-        // On a 64-bit REAPER nothing is left out.
-        let mut defaults = ["reaper", "osara", "sws"].map(String::from).to_vec();
-        super::keep_packages_with_builds(
-            &mut defaults,
-            false,
-            super::Platform::Windows,
+        // On a 64-bit REAPER, and on REAPER on Windows on ARM, which loads
+        // the x64 builds of SWS, FFmpeg and app2clap, nothing is left out.
+        for architecture in [
             super::Architecture::X64,
-            &channels,
-        )
-        .unwrap();
-        assert_eq!(defaults.len(), 3);
+            super::Architecture::Arm64,
+            super::Architecture::Arm64Ec,
+        ] {
+            let mut defaults = ["reaper", "osara", "sws", "ffmpeg", "app2clap"]
+                .map(String::from)
+                .to_vec();
+            super::keep_packages_with_builds(
+                &mut defaults,
+                false,
+                super::Platform::Windows,
+                architecture,
+                &channels,
+            )
+            .unwrap();
+            assert_eq!(defaults.len(), 5, "{architecture:?}");
+        }
         assert_eq!(
             super::no_build_reasons(
-                &["sws".to_string()],
+                &["ffmpeg".to_string()],
                 super::Platform::Windows,
-                super::Architecture::Arm64
+                super::Architecture::X86
             ),
-            ["SWS Extension: it has no version for REAPER on arm64"]
+            ["FFmpeg: it has no version for 32-bit REAPER (x86)"]
         );
     }
 

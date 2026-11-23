@@ -45,7 +45,7 @@ package-sws-description = Die SWS-Erweiterung ist eine seit langem etablierte Co
 package-reapack-description = ReaPack ist der Paketmanager für REAPER: Er installiert und aktualisiert Skripte und Erweiterungen Dritter direkt aus REAPER heraus. Installieren Sie ReaPack, wenn Sie von der REAPER-Community geteilte Skripte verwenden möchten.
 package-reakontrol-description = ReaKontrol fügt REAPER Unterstützung für Native Instruments Komplete-Kontrol-Tastaturen hinzu. Installieren Sie es, wenn Sie eine Komplete-Kontrol-Tastatur besitzen und Hardware-Steuerung nutzen möchten.
 package-jaws-scripts-description = Die JAWS-Skripte für REAPER ergänzen den Screenreader JAWS unter Windows um Skript-Unterstützung für REAPER. RABBIT bietet sie nur an, wenn JAWS auf diesem PC erkannt wird.
-package-ffmpeg-description = Die gemeinsam genutzten Laufzeitbibliotheken von FFmpeg ermöglichen es dem Videodecoder von REAPER, gängige Video- und Audioformate zu importieren und abzuspielen. RABBIT installiert den Inhalt des `bin`-Ordners aus dem GPL-Shared-Build von BtbN in `UserPlugins`. Die genaue Patch-Version lässt sich aus den DLL-Dateinamen allein nicht ableiten — extern installierte FFmpeg-Versionen werden deshalb als `<major>.0.0` gemeldet.
+package-ffmpeg-description = Die gemeinsam genutzten Laufzeitbibliotheken von FFmpeg ermöglichen es dem Videodecoder von REAPER, gängige Video- und Audioformate zu importieren und abzuspielen. RABBIT installiert den Inhalt des `bin`-Ordners aus dem 64-Bit-Shared-Build (x64) von Gyan.dev in `UserPlugins`. REAPER auf einem Windows-PC mit ARM-Prozessor kann 64-Bit-Bibliotheken (x64) laden und erhält daher ebenfalls diesen Build. Die genaue Patch-Version lässt sich aus den DLL-Dateinamen allein nicht ableiten — extern installierte FFmpeg-Versionen werden deshalb als `<major>.0.0` gemeldet.
 package-surge-xt-description = Surge XT ist ein freier, quelloffener Hybrid-Synthesizer. RABBIT führt das Installationsprogramm des Herstellers für Sie aus — es installiert die Formate VST3, CLAP, AU (nur macOS) und Standalone systemweit, sodass REAPER und andere DAWs Surge XT laden können. RABBIT verfolgt den fortlaufenden Nightly-Kanal, weil die letzte stabile Veröffentlichung (1.3.4) aus dem August 2024 stammt und das Projekt inzwischen praktisch ausschließlich über Nightly-Builds ausgeliefert wird. Nur in Standard-REAPER-Installationen verfügbar: Die mitgelieferten Daten liegen außerhalb eines portablen REAPER-Ordners.
 # Lo-lo's four instruments, VST3 plug-ins that RABBIT installs into REAPER's
 # own plug-in folder. Keep UserPlugins\FX and
@@ -261,8 +261,8 @@ wizard-package-details-clap-copy-portable-installed = Dieses REAPER lädt zwei K
 wizard-package-details-clap-copy-standard = Ihr CLAP-Ordner enthält eine Kopie von { $package }. Wenn Sie { $package } hier aktualisieren oder neu installieren, wird diese Kopie in eine Sicherung verschoben, damit REAPER nicht zwei Kopien lädt. Portable REAPER und andere Programme, die CLAP-Plug-ins verwenden, finden sie danach nicht mehr. RABBIT kann { $package } auch in jedes portable REAPER installieren.
 # Why a package row can't be ticked: there is no version of the package for
 # the REAPER at the chosen target. The first names a 32-bit REAPER; the
-# second covers every other kind, such as REAPER on Windows on ARM, by the
-# type of processor it runs on.
+# second covers any other REAPER a package has no version for, by the type
+# of processor it runs on.
 wizard-package-row-unavailable-32-bit = keine Version für 32-Bit-REAPER
 wizard-package-row-unavailable-processor = keine Version für REAPER auf diesem Prozessortyp
 # The same, as a sentence in the row's details. $package is the localized

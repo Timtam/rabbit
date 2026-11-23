@@ -14,12 +14,12 @@ use crate::error::{IoPathContext, RabbitError, Result};
 use crate::hash::sha256_file;
 use crate::hfs::{fetch_file_list, file_url as hfs_file_url};
 use crate::latest::{
-    github_asset_version, github_release_url, pick_ffmpeg_tordona_release,
-    pick_jaws_for_reaper_version, resolve_github_version, resolve_version_rule,
+    github_asset_version, github_release_url, pick_jaws_for_reaper_version, resolve_github_version,
+    resolve_version_rule,
 };
 use crate::model::{Architecture, Platform};
 use crate::package::{
-    AssetMatch, GithubArtifactKind, GithubReleaseSpec, HttpArtifactSource, HttpArtifactSpec,
+    GithubArtifactKind, GithubReleaseSpec, HttpArtifactSource, HttpArtifactSpec,
     HttpArtifactTarget, PackageChannels, PackageSpec, STABLE_CHANNEL, VersionRule, VersionSource,
     package_specs_by_id_on,
 };
@@ -78,8 +78,7 @@ pub enum ArtifactKind {
     Installer,
     Archive,
     /// `.7z` archive — used by the FFmpeg shared builds we ship from
-    /// Gyan.dev (x64) and `tordona/ffmpeg-win-arm64` (ARM64). Both
-    /// upstreams ship `.7z` exclusively for the shared variant; the
+    /// Gyan.dev, which ships `.7z` exclusively for the shared variant; the
     /// install pipeline dispatches to a dedicated 7z extractor since
     /// the `zip` crate can't read these.
     SevenZipArchive,
@@ -173,8 +172,8 @@ fn resolve_artifacts_with_specs(
 
     for package_id in package_ids {
         // Data-driven packages resolve through the generic engines: a single
-        // GitHub release (github_release) or a non-GitHub scrape/fixed/max-
-        // major source (http_artifact). Only JAWS still has a bespoke resolver.
+        // GitHub release (github_release) or a non-GitHub scrape/fixed
+        // source (http_artifact). Only JAWS still has a bespoke resolver.
         let spec = specs.get(package_id);
         // The offline rule first, the one the wizard and the CLI ask before a
         // run starts (see `package_has_build_for`), so every package it
@@ -469,9 +468,13 @@ fn resolve_github_artifact_from_release_body(
         package_id: package_id.to_string(),
         version,
         platform,
-        // A selector that pins an arch reports it (ReaPack's per-slice DLLs);
-        // an any-arch selector reports Universal, matching the old resolvers.
-        architecture: selector.arch.unwrap_or(Architecture::Universal),
+        // A selector that pins an arch reports it (ReaPack's per-slice DLLs),
+        // or the x64 build it picks for an ARM REAPER (app2clap); an any-arch
+        // selector reports Universal, matching the old resolvers.
+        architecture: selector
+            .report_arch
+            .or(selector.arch)
+            .unwrap_or(Architecture::Universal),
         kind,
         url: download_url.to_string(),
         file_name: file_name.to_string(),
@@ -1281,9 +1284,8 @@ fn select_http_target(
 
 /// Resolve the download for a data-driven non-GitHub package (REAPER, OSARA,
 /// SWS, FFmpeg). Selects the `(platform, arch)` target, then dispatches on its
-/// source. The version is the package `VersionRule` for scrape/fixed sources,
-/// or the picked release's own version for a max-major GitHub source. No
-/// matching target -> `NoArtifactFound` (SWS-on-WinArm, FFmpeg x86/macOS).
+/// source. The version is the package `VersionRule`. No matching target ->
+/// `NoArtifactFound` (FFmpeg x86/macOS).
 fn resolve_http_artifact(
     client: &Client,
     package_id: &str,
@@ -1344,33 +1346,13 @@ fn resolve_http_artifact(
                 channel: None,
             })
         }
-        HttpArtifactSource::GithubReleaseMaxMajor {
-            repo,
-            supported_major,
-            asset,
-        } => {
-            let url = github_releases_list_url(repo);
-            let body = http_get_text(client, &url)?;
-            resolve_github_max_major_from_body(
-                &body,
-                &url,
-                package_id,
-                *supported_major,
-                asset,
-                kind,
-                target.report_arch,
-                platform,
-                architecture,
-            )
-        }
     }
 }
 
 /// Version for a scrape/fixed `http_artifact` source: the package
 /// `VersionRule`. These sources store the version on the descriptor only (it
 /// is never interpolated), so a source without a version rule is a manifest
-/// error. The `GithubReleaseMaxMajor` arm does NOT use this — it takes the
-/// version from the picked release tag.
+/// error.
 fn resolve_http_version(
     client: &Client,
     package_id: &str,
@@ -1383,54 +1365,6 @@ fn resolve_http_version(
         ),
     })?;
     resolve_version_rule(client, rule)
-}
-
-fn github_releases_list_url(repo: &str) -> String {
-    format!("https://api.github.com/repos/{repo}/releases?per_page=100")
-}
-
-/// Body seam for [`HttpArtifactSource::GithubReleaseMaxMajor`]: the highest
-/// stable release whose major == `supported_major`, then its asset matching
-/// `asset_match`. The descriptor version is the release's own. Split out so it
-/// can be exercised against a fixture body without a live request.
-#[allow(clippy::too_many_arguments)]
-fn resolve_github_max_major_from_body(
-    body: &str,
-    url: &str,
-    package_id: &str,
-    supported_major: u64,
-    asset_match: &AssetMatch,
-    kind: ArtifactKind,
-    report_arch: Architecture,
-    platform: Platform,
-    architecture: Architecture,
-) -> Result<ArtifactDescriptor> {
-    let release = pick_ffmpeg_tordona_release(body, url, supported_major)?.ok_or(
-        RabbitError::NoArtifactFound {
-            package_id: package_id.to_string(),
-            platform,
-            architecture,
-        },
-    )?;
-    let asset = release
-        .assets
-        .iter()
-        .find(|asset| asset_match.matches(&asset.name))
-        .ok_or(RabbitError::NoArtifactFound {
-            package_id: package_id.to_string(),
-            platform,
-            architecture,
-        })?;
-    Ok(ArtifactDescriptor {
-        package_id: package_id.to_string(),
-        version: release.version,
-        platform,
-        architecture: report_arch,
-        kind,
-        url: asset.url.clone(),
-        file_name: asset.name.clone(),
-        channel: None,
-    })
 }
 
 /// Resolve the download for a data-driven HFS-listing package (JAWS): read the
@@ -1724,8 +1658,8 @@ mod tests {
     use std::time::Duration;
 
     use crate::package::{
-        AssetMatch, AssetSelector, GithubArtifactKind, GithubReleaseSelector, GithubReleaseSpec,
-        HrefMatch, HttpArtifactSource, HttpArtifactSpec, HttpArtifactTarget, InstallDestination,
+        AssetSelector, GithubArtifactKind, GithubReleaseSelector, GithubReleaseSpec, HrefMatch,
+        HttpArtifactSource, HttpArtifactSpec, HttpArtifactTarget, InstallDestination,
         PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_LB_303, PACKAGE_LJUNO_116, PACKAGE_LR_608,
         PACKAGE_LREAPARAMS, PACKAGE_LSAMPLER_24, PACKAGE_OSARA, PACKAGE_REAKONTROL,
         PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS, SupportedPlatform,
@@ -2117,23 +2051,30 @@ mod tests {
     }
 
     /// The app2clap manifest's `github_release` block as a literal, for the
-    /// data-driven artifact-resolver tests.
+    /// data-driven artifact-resolver tests. Its one x64 zip serves REAPER
+    /// on Windows on ARM too, and says it is the x64 build there.
     fn app2clap_github_spec() -> GithubReleaseSpec {
+        let zip = |arch| AssetSelector {
+            platform: SupportedPlatform::Windows,
+            arch: Some(arch),
+            report_arch: (arch != Architecture::X64).then_some(Architecture::X64),
+            name_prefix: Some("app2clap_".to_string()),
+            name_suffix: Some(".zip".to_string()),
+            exact_name: None,
+            artifact_kind: None,
+            ignore_case: false,
+        };
         GithubReleaseSpec {
             repo: "jcsteh/app2clap".to_string(),
             release: GithubReleaseSelector::Tag("snapshots".to_string()),
             version_from: VersionSource::AssetName {
                 strip_trailing_dot_segment: true,
             },
-            assets: vec![AssetSelector {
-                platform: SupportedPlatform::Windows,
-                arch: Some(Architecture::X64),
-                name_prefix: Some("app2clap_".to_string()),
-                name_suffix: Some(".zip".to_string()),
-                exact_name: None,
-                artifact_kind: None,
-                ignore_case: false,
-            }],
+            assets: vec![
+                zip(Architecture::X64),
+                zip(Architecture::Arm64),
+                zip(Architecture::Arm64Ec),
+            ],
             artifact_kind: Some(GithubArtifactKind::Archive),
         }
     }
@@ -2151,6 +2092,7 @@ mod tests {
                 AssetSelector {
                     platform: SupportedPlatform::Windows,
                     arch: None,
+                    report_arch: None,
                     name_prefix: Some("reaKontrol_windows_".to_string()),
                     name_suffix: Some(".zip".to_string()),
                     exact_name: None,
@@ -2160,6 +2102,7 @@ mod tests {
                 AssetSelector {
                     platform: SupportedPlatform::Macos,
                     arch: None,
+                    report_arch: None,
                     name_prefix: Some("reaKontrol_mac_".to_string()),
                     name_suffix: Some(".zip".to_string()),
                     exact_name: None,
@@ -2177,6 +2120,7 @@ mod tests {
         let exact = |platform, arch, name: &str| AssetSelector {
             platform,
             arch: Some(arch),
+            report_arch: None,
             name_prefix: None,
             name_suffix: None,
             exact_name: Some(name.to_string()),
@@ -2228,6 +2172,7 @@ mod tests {
                 AssetSelector {
                     platform: SupportedPlatform::Windows,
                     arch: None,
+                    report_arch: None,
                     name_prefix: Some("surge-xt-win64-".to_string()),
                     name_suffix: Some("-setup.exe".to_string()),
                     exact_name: None,
@@ -2237,6 +2182,7 @@ mod tests {
                 AssetSelector {
                     platform: SupportedPlatform::Macos,
                     arch: None,
+                    report_arch: None,
                     name_prefix: Some("surge-xt-macOS-".to_string()),
                     name_suffix: Some(".dmg".to_string()),
                     exact_name: None,
@@ -2453,43 +2399,10 @@ mod tests {
                 .report_arch,
             Architecture::X64
         );
-        // No Windows-arm target → None (this is how SWS rejects Windows-on-ARM).
+        // No Windows-arm target → None: the package has no build for it.
         assert!(select_http_target(&spec, Platform::Windows, Architecture::Arm64).is_none());
         assert!(select_http_target(&spec, Platform::MacOs, Architecture::X64).is_none());
         assert!(select_http_target(&spec, Platform::MacOs, Architecture::Arm64).is_some());
-    }
-
-    #[test]
-    fn asset_match_isolates_full_shared_arm64_7z() {
-        let m = AssetMatch {
-            contains: vec!["-full-shared-win-arm64".to_string()],
-            ends_with: Some(".7z".to_string()),
-        };
-        assert!(m.matches("ffmpeg-8.1.1-full-shared-win-arm64.7z"));
-        assert!(!m.matches("ffmpeg-8.1.1-essentials-shared-win-arm64.7z"));
-        assert!(!m.matches("ffmpeg-8.1.1-full-shared-win-arm64.zip"));
-    }
-
-    /// The manifest FFmpeg `supported_major` must track the detector's
-    /// `FFMPEG_SUPPORTED_MAJOR`; a divergence would resolve the wrong major.
-    #[test]
-    fn ffmpeg_manifest_supported_major_matches_constant() {
-        let spec = crate::package::builtin_package_specs(Platform::Windows)
-            .into_iter()
-            .find(|spec| spec.id == PACKAGE_FFMPEG)
-            .unwrap();
-        let http = spec.http_artifact.expect("ffmpeg uses http_artifact");
-        let arm = http
-            .targets
-            .iter()
-            .find_map(|target| match &target.source {
-                HttpArtifactSource::GithubReleaseMaxMajor {
-                    supported_major, ..
-                } => Some(*supported_major),
-                _ => None,
-            })
-            .expect("ffmpeg has a github_release_max_major target");
-        assert_eq!(arm, crate::latest::FFMPEG_SUPPORTED_MAJOR);
     }
 
     #[test]
@@ -2968,112 +2881,6 @@ mod tests {
     }
 
     #[test]
-    fn resolves_ffmpeg_arm64_asset_from_tordona_releases() {
-        let body = r#"[
-            {
-                "tag_name": "daily-autobuild-2026.05.06.0",
-                "prerelease": false,
-                "assets": [
-                    {
-                        "name": "ffmpeg-master-latest-full-shared-win-arm64.7z",
-                        "browser_download_url": "https://example.test/ffmpeg-master-latest-full-shared-win-arm64.7z"
-                    }
-                ]
-            },
-            {
-                "tag_name": "8.1.1",
-                "prerelease": false,
-                "assets": [
-                    {
-                        "name": "ffmpeg-8.1.1-essentials-shared-win-arm64.7z",
-                        "browser_download_url": "https://example.test/ffmpeg-8.1.1-essentials-shared-win-arm64.7z"
-                    },
-                    {
-                        "name": "ffmpeg-8.1.1-full-shared-win-arm64.7z",
-                        "browser_download_url": "https://example.test/ffmpeg-8.1.1-full-shared-win-arm64.7z"
-                    },
-                    {
-                        "name": "ffmpeg-8.1.1-full-static-win-arm64.7z",
-                        "browser_download_url": "https://example.test/ffmpeg-8.1.1-full-static-win-arm64.7z"
-                    }
-                ]
-            },
-            {
-                "tag_name": "8.0.2",
-                "prerelease": false,
-                "assets": [
-                    {
-                        "name": "ffmpeg-8.0.2-full-shared-win-arm64.7z",
-                        "browser_download_url": "https://example.test/ffmpeg-8.0.2-full-shared-win-arm64.7z"
-                    }
-                ]
-            },
-            {
-                "tag_name": "7.1.4",
-                "prerelease": false,
-                "assets": [
-                    {
-                        "name": "ffmpeg-7.1.4-full-shared-win-arm64.7z",
-                        "browser_download_url": "https://example.test/ffmpeg-7.1.4-full-shared-win-arm64.7z"
-                    }
-                ]
-            }
-        ]"#;
-
-        let releases_url =
-            "https://api.github.com/repos/tordona/ffmpeg-win-arm64/releases?per_page=100";
-        let asset = AssetMatch {
-            contains: vec!["-full-shared-win-arm64".to_string()],
-            ends_with: Some(".7z".to_string()),
-        };
-        let arm64 = resolve_github_max_major_from_body(
-            body,
-            releases_url,
-            PACKAGE_FFMPEG,
-            8,
-            &asset,
-            ArtifactKind::SevenZipArchive,
-            Architecture::Arm64,
-            Platform::Windows,
-            Architecture::Arm64,
-        )
-        .unwrap();
-        assert_eq!(arm64.package_id, PACKAGE_FFMPEG);
-        assert_eq!(arm64.kind, ArtifactKind::SevenZipArchive);
-        assert_eq!(arm64.version.raw(), "8.1.1");
-        assert_eq!(arm64.file_name, "ffmpeg-8.1.1-full-shared-win-arm64.7z");
-        assert_eq!(arm64.architecture, Architecture::Arm64);
-
-        // Same body with no n8 stable tags must surface NoArtifactFound
-        // rather than silently picking the autobuild.
-        let only_autobuild_body = r#"[
-            {
-                "tag_name": "daily-autobuild-2026.05.06.0",
-                "prerelease": false,
-                "assets": [
-                    {
-                        "name": "ffmpeg-master-latest-full-shared-win-arm64.7z",
-                        "browser_download_url": "https://example.test/ffmpeg-master-latest-full-shared-win-arm64.7z"
-                    }
-                ]
-            }
-        ]"#;
-        let error = resolve_github_max_major_from_body(
-            only_autobuild_body,
-            releases_url,
-            PACKAGE_FFMPEG,
-            8,
-            &asset,
-            ArtifactKind::SevenZipArchive,
-            Architecture::Arm64,
-            Platform::Windows,
-            Architecture::Arm64,
-        )
-        .unwrap_err();
-        assert!(matches!(error, RabbitError::NoArtifactFound { .. }));
-    }
-
-    #[test]
     fn errors_when_reakontrol_release_has_no_matching_assets() {
         let body = r#"{"tag_name": "v0", "assets": []}"#;
         let error = resolve_github_artifact_from_release_body(
@@ -3253,7 +3060,8 @@ mod tests {
                 artifact.url,
                 "https://github.com/Lo-lo78/LReaParams/releases/download/v0.0.75/reaper_lreaparams.dll"
             );
-            assert_eq!(artifact.architecture, architecture);
+            // The x64 DLL, which REAPER on Windows on ARM loads too.
+            assert_eq!(artifact.architecture, Architecture::X64);
         }
 
         // A 32-bit REAPER can't load a 64-bit DLL, and there is no Mac build.
@@ -3397,7 +3205,8 @@ mod tests {
                 assert_eq!(artifact.version.raw(), tag.trim_start_matches('v'));
                 assert_eq!(artifact.file_name, asset);
                 assert_eq!(artifact.url, download);
-                assert_eq!(artifact.architecture, architecture);
+                // The x64 plug-in, which REAPER on Windows on ARM loads too.
+                assert_eq!(artifact.architecture, Architecture::X64);
             }
 
             let error = resolve_github_artifact_from_release_body(
@@ -3518,8 +3327,9 @@ mod tests {
     /// makes a request. Nothing goes online. Among the packages are
     /// selectors that ignore case, whose assets the release spells the other
     /// way round, whole plug-in bundles installed into `UserPlugins\FX`,
-    /// app2clap installed there too, and LReaParams, which RABBIT leaves to
-    /// ReaPack where ReaPack installed it.
+    /// app2clap installed there too, LReaParams, which RABBIT leaves to
+    /// ReaPack where ReaPack installed it, and FFmpeg's and SWS's x64
+    /// targets, which serve REAPER on Windows on ARM as well.
     #[test]
     fn the_offline_rule_agrees_with_artifact_resolution_for_every_shipped_package() {
         let windows = crate::package::package_specs_by_id(Platform::Windows);
@@ -3540,6 +3350,11 @@ mod tests {
             InstallDestination::UserPluginsFx
         );
         assert!(windows[PACKAGE_LREAPARAMS].leave_to_reapack);
+        for id in [PACKAGE_FFMPEG, PACKAGE_SWS] {
+            let http = windows[id].http_artifact.as_ref().unwrap();
+            let x64 = select_http_target(http, Platform::Windows, Architecture::X64).unwrap();
+            assert!(x64.match_arches.contains(&Architecture::Arm64Ec), "{id}");
+        }
 
         for package in crate::package::embedded_package_manifest().packages {
             let channels = std::iter::once(None).chain(package.channels.iter().map(|channel| {
@@ -3672,9 +3487,9 @@ mod tests {
     }
 
     /// REAPER on Windows on ARM and on a Mac keeps every package that has a
-    /// build for it. SWS has no Windows build for ARM, as its `http_artifact`
-    /// targets say, and app2clap is x64 only. LReaParams and Lo-lo's
-    /// instruments list REAPER's builds for Windows on ARM, and stay.
+    /// build for it. On Windows on ARM that is every Windows package: REAPER
+    /// there is ARM64EC, which loads x64 libraries, so FFmpeg, SWS,
+    /// app2clap, LReaParams and Lo-lo's instruments offer their x64 builds.
     #[test]
     fn windows_on_arm_and_macos_keep_what_has_a_build_for_them() {
         let without = |platform, architecture| {
@@ -3686,13 +3501,19 @@ mod tests {
             )
         };
         for arm in [Architecture::Arm64, Architecture::Arm64Ec] {
+            assert!(without(Platform::Windows, arm).is_empty(), "{arm:?}");
             assert_eq!(
-                without(Platform::Windows, arm),
-                [PACKAGE_SWS, PACKAGE_APP2CLAP].map(String::from),
-                "{arm:?}"
+                expected_artifact_kind(PACKAGE_SWS, Platform::Windows, arm).unwrap(),
+                ArtifactKind::Installer
             );
-            assert!(expected_artifact_kind(PACKAGE_SWS, Platform::Windows, arm).is_err());
-            assert!(expected_artifact_kind(PACKAGE_FFMPEG, Platform::Windows, arm).is_ok());
+            assert_eq!(
+                expected_artifact_kind(PACKAGE_FFMPEG, Platform::Windows, arm).unwrap(),
+                ArtifactKind::SevenZipArchive
+            );
+            assert_eq!(
+                expected_artifact_kind(PACKAGE_APP2CLAP, Platform::Windows, arm).unwrap(),
+                ArtifactKind::Archive
+            );
             assert!(expected_artifact_kind(PACKAGE_SURGE_XT, Platform::Windows, arm).is_ok());
             assert_eq!(
                 expected_artifact_kind(PACKAGE_LREAPARAMS, Platform::Windows, arm).unwrap(),
@@ -3732,10 +3553,10 @@ mod tests {
     /// An installed REAPER on Windows on ARM is an ARM64EC program, whose
     /// header names x64. Read from its program file in a portable folder, it
     /// is an arm64-ec REAPER: an update fetches REAPER's arm64ec installer
-    /// and ReaPack's arm64ec DLL, and SWS and app2clap have no build for it.
-    /// An x64 REAPER in the same place still gets the x64 ones. Nothing goes
-    /// online: the resolver's own selectors run on a download page and a
-    /// release laid out like the real ones.
+    /// and ReaPack's arm64ec DLL, and every other package has a build for
+    /// it. An x64 REAPER in the same place still gets the x64 ones. Nothing
+    /// goes online: the resolver's own selectors run on a download page and
+    /// a release laid out like the real ones.
     #[test]
     fn an_installed_arm64ec_reaper_gets_the_arm64ec_builds() {
         use crate::arch_probe::PeKind;
@@ -3750,20 +3571,18 @@ mod tests {
         let specs = crate::package::package_specs_by_id(Platform::Windows);
         let reaper = specs[PACKAGE_REAPER].http_artifact.as_ref().unwrap();
         let reapack = specs[PACKAGE_REAPACK].github_release.as_ref().unwrap();
-        for (kind, architecture, installer, reapack_dll, without) in [
+        for (kind, architecture, installer, reapack_dll) in [
             (
                 PeKind::Arm64Ec,
                 Architecture::Arm64Ec,
                 "reaper776_arm64ec-install.exe",
                 "reaper_reapack-arm64ec.dll",
-                vec![PACKAGE_SWS, PACKAGE_APP2CLAP],
             ),
             (
                 PeKind::X64,
                 Architecture::X64,
                 "reaper776_x64-install.exe",
                 "reaper_reapack-x64.dll",
-                Vec::new(),
             ),
         ] {
             let folder = dir.path().join(kind.name());
@@ -3796,16 +3615,109 @@ mod tests {
             assert_eq!(resolved.file_name, reapack_dll);
             assert_eq!(resolved.architecture, architecture);
 
-            assert_eq!(
+            assert!(
                 packages_without_build(
                     &package_ids_on(Platform::Windows),
                     Platform::Windows,
                     target,
                     &PackageChannels::new(),
-                ),
-                without,
+                )
+                .is_empty(),
                 "{kind:?}"
             );
+        }
+    }
+
+    /// An ARM64EC REAPER loads x64 libraries, so REAPER on Windows on ARM, a
+    /// new one (`arm64`) and an installed one (`arm64-ec`), gets the x64
+    /// builds of FFmpeg, SWS and app2clap: the download an x64 REAPER gets.
+    /// Each reports it as the x64 build it is, and so its receipt records
+    /// it. Nothing goes online: the resolver's own selectors run on a
+    /// download page and a release laid out like the real ones.
+    #[test]
+    fn reaper_on_windows_on_arm_gets_the_x64_ffmpeg_sws_and_app2clap() {
+        let specs = crate::package::package_specs_by_id(Platform::Windows);
+        let ffmpeg = specs[PACKAGE_FFMPEG].http_artifact.as_ref().unwrap();
+        let sws = specs[PACKAGE_SWS].http_artifact.as_ref().unwrap();
+        let app2clap = specs[PACKAGE_APP2CLAP].github_release.as_ref().unwrap();
+        let sws_page = r#"
+            <a href="download/featured/sws-2.14.0.7-Windows-x86.exe">x86</a>
+            <a href="download/featured/sws-2.14.0.7-Windows-x64.exe">x64</a>
+            <a href="download/featured/sws-2.14.0.7-Darwin-x86_64.dmg">Intel</a>
+            <a href="download/featured/sws-2.14.0.7-Darwin-arm64.dmg">Apple</a>
+        "#;
+        let snapshots = r#"{
+            "tag_name": "snapshots",
+            "assets": [
+                {
+                    "name": "app2clap_2026.5.17.34.b6f558cf.zip",
+                    "browser_download_url": "https://github.com/jcsteh/app2clap/releases/download/snapshots/app2clap_2026.5.17.34.b6f558cf.zip"
+                }
+            ]
+        }"#;
+        let x64_ffmpeg = select_http_target(ffmpeg, Platform::Windows, Architecture::X64).unwrap();
+        let x64_sws = select_http_target(sws, Platform::Windows, Architecture::X64).unwrap();
+
+        for arm in [Architecture::Arm64, Architecture::Arm64Ec] {
+            for id in [PACKAGE_FFMPEG, PACKAGE_SWS, PACKAGE_APP2CLAP] {
+                assert!(
+                    package_has_build_for(&specs[id], Platform::Windows, arm),
+                    "{id} on {arm:?}"
+                );
+            }
+
+            // FFmpeg: Gyan.dev's x64 build, the one an x64 REAPER gets.
+            let target = select_http_target(ffmpeg, Platform::Windows, arm).unwrap();
+            assert_eq!(target, x64_ffmpeg, "{arm:?}");
+            assert_eq!(target.report_arch, Architecture::X64);
+            let HttpArtifactSource::FixedUrl { url, .. } = &target.source else {
+                panic!("FFmpeg comes from Gyan.dev's fixed URL");
+            };
+            assert_eq!(
+                url,
+                "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z"
+            );
+
+            // SWS: the x64 installer, which installs reaper_sws-x64.dll.
+            let target = select_http_target(sws, Platform::Windows, arm).unwrap();
+            assert_eq!(target, x64_sws, "{arm:?}");
+            let HttpArtifactSource::ScrapeHref {
+                base_url,
+                href_match,
+                ..
+            } = &target.source
+            else {
+                panic!("SWS's installers come from its home page");
+            };
+            let href = find_href_with(sws_page, |href, _| href_match.matches(href)).unwrap();
+            let installer = artifact_from_href(
+                PACKAGE_SWS,
+                Version::parse("2.14.0.7").unwrap(),
+                Platform::Windows,
+                target.report_arch,
+                github_artifact_kind(target.artifact_kind),
+                base_url,
+                &href,
+            )
+            .unwrap();
+            assert_eq!(installer.file_name, "sws-2.14.0.7-Windows-x64.exe");
+            assert_eq!(installer.kind, ArtifactKind::Installer);
+            assert_eq!(installer.architecture, Architecture::X64);
+
+            // app2clap: its one x64 zip, which holds app2clap.clap.
+            let zip = resolve_github_artifact_from_release_body(
+                snapshots,
+                "https://api.github.com/repos/jcsteh/app2clap/releases/tags/snapshots",
+                PACKAGE_APP2CLAP,
+                app2clap,
+                Platform::Windows,
+                arm,
+            )
+            .unwrap();
+            assert_eq!(zip.file_name, "app2clap_2026.5.17.34.b6f558cf.zip");
+            assert_eq!(zip.kind, ArtifactKind::Archive);
+            assert_eq!(zip.version.raw(), "2026.5.17.34");
+            assert_eq!(zip.architecture, Architecture::X64, "{arm:?}");
         }
     }
 
@@ -3815,7 +3727,10 @@ mod tests {
     /// Windows package, on every channel, has a build for both or for
     /// neither, and picks the same download for both. The Windows on ARM
     /// smoke tables check the `arm64-ec` downloads, and this keeps a new
-    /// install on the same ones. Nothing goes online.
+    /// install on the same ones. An ARM64EC REAPER can't load a plain ARM64
+    /// library, so no `http_artifact` target serves it a build that reports
+    /// `arm64`, as FFmpeg's target for tordona's ARM64 build did. Nothing
+    /// goes online.
     #[test]
     fn a_new_and_an_installed_reaper_on_windows_on_arm_get_the_same_builds() {
         for package in crate::package::embedded_package_manifest().packages {
@@ -3862,10 +3777,14 @@ mod tests {
                 if let Some(http) = &spec.http_artifact {
                     let [new, installed] =
                         [Architecture::Arm64, Architecture::Arm64Ec].map(|architecture| {
-                            select_http_target(http, Platform::Windows, architecture)
-                                .map(|target| (target.artifact_kind, &target.source))
+                            select_http_target(http, Platform::Windows, architecture).map(
+                                |target| (target.artifact_kind, &target.source, target.report_arch),
+                            )
                         });
                     assert_eq!(new, installed, "{label}");
+                    if let Some((_, _, report_arch)) = installed {
+                        assert_ne!(report_arch, Architecture::Arm64, "{label}");
+                    }
                 }
             }
         }

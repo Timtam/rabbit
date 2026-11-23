@@ -653,9 +653,8 @@ fn package_plan_includes_reaper_for_empty_custom_target() {
 }
 
 /// A portable target in `path` for a 64-bit REAPER. An empty folder would
-/// otherwise take the architecture of the computer the tests run on, and on
-/// an ARM one SWS and app2clap would have no build, whatever else a test
-/// checks about them.
+/// otherwise take the architecture of the computer the tests run on, and
+/// the rows would depend on it.
 fn x64_portable_target(model: &WizardModel, path: std::path::PathBuf) -> TargetRow {
     TargetRow {
         architecture: Architecture::X64,
@@ -1682,32 +1681,20 @@ fn a_32_bit_reaper_offers_no_ffmpeg_surge_xt_app2clap_or_lolos_packages() {
     }
 }
 
+/// REAPER on Windows on ARM is ARM64EC, which loads x64 libraries, so every
+/// package is offered there: SWS, FFmpeg and app2clap with their x64 builds,
+/// as LReaParams and Lo-lo's instruments. SWS is ticked by default, as
+/// everywhere, and a package installed there is ticked for its update.
 #[test]
-fn windows_on_arm_offers_no_sws_or_app2clap_and_says_why() {
-    // LReaParams and Lo-lo's instruments list REAPER's builds for Windows
-    // on ARM, and are offered there.
+fn windows_on_arm_offers_every_package_sws_and_app2clap_included() {
     for architecture in [Architecture::Arm64, Architecture::Arm64Ec] {
         let model = every_package_updated(Platform::Windows, architecture);
         let rows = &model.package_rows;
 
-        assert_eq!(
-            unavailable_rows(rows),
-            [PACKAGE_SWS, PACKAGE_APP2CLAP],
-            "{architecture:?}"
-        );
-        for package_id in [PACKAGE_SWS, PACKAGE_APP2CLAP] {
-            let row = rows
-                .iter()
-                .find(|row| row.package_id == package_id)
-                .unwrap();
-            assert_no_build_row(
-                row,
-                "no version for this REAPER's processor type",
-                "For this REAPER's processor type there is no version of {package}, so RABBIT \
-                 can't install it here.",
-            );
-        }
+        assert!(unavailable_rows(rows).is_empty(), "{architecture:?}");
         for package_id in [
+            PACKAGE_SWS,
+            PACKAGE_APP2CLAP,
             PACKAGE_FFMPEG,
             PACKAGE_SURGE_XT,
             PACKAGE_LJUNO_116,
@@ -1720,8 +1707,54 @@ fn windows_on_arm_offers_no_sws_or_app2clap_and_says_why() {
                 .iter()
                 .find(|row| row.package_id == package_id)
                 .unwrap();
-            assert!(row.available_for_target && row.selected, "{row:?}");
+            assert!(
+                row.available_for_target && row.has_build_for_target && row.selected,
+                "{row:?}"
+            );
+            assert_eq!(row.action, PlanActionKind::Update, "{row:?}");
+            assert_eq!(row.unavailability_reason, None, "{row:?}");
+            assert!(!row.summary.contains("not available"), "{}", row.summary);
         }
+
+        // A new install there ticks SWS, which is recommended, and leaves
+        // app2clap for the user to tick.
+        let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let new_install = model_from_plan(
+            &localizer,
+            Platform::Windows,
+            architecture,
+            Vec::new(),
+            None,
+            InstallPlan {
+                target: None,
+                actions: [PACKAGE_SWS, PACKAGE_APP2CLAP]
+                    .map(|package_id| PlanAction {
+                        package_id: package_id.to_string(),
+                        action: PlanActionKind::Install,
+                        installed_version: None,
+                        available_version: Some(Version::parse("2.0").unwrap()),
+                        reason: "test".to_string(),
+                        left_to_reapack: None,
+                    })
+                    .to_vec(),
+                notes: Vec::new(),
+            },
+        );
+        let row = |package_id: &str| {
+            new_install
+                .package_rows
+                .iter()
+                .find(|row| row.package_id == package_id)
+                .unwrap()
+                .clone()
+        };
+        let sws = row(PACKAGE_SWS);
+        assert!(sws.available_for_target && sws.selected, "{sws:?}");
+        let app2clap = row(PACKAGE_APP2CLAP);
+        assert!(
+            app2clap.available_for_target && !app2clap.selected,
+            "{app2clap:?}"
+        );
     }
 }
 
@@ -1796,11 +1829,11 @@ fn the_rows_follow_the_chosen_targets_architecture() {
 }
 
 /// An installed REAPER on Windows on ARM is an ARM64EC program, whose header
-/// names x64. Its target row reads it as arm64ec from its program file, so
-/// the rows for it offer no SWS or app2clap and say why, as for a new REAPER
-/// on Windows on ARM.
+/// names x64. Its target row reads it as arm64ec from its program file, and
+/// the rows for it offer every package, SWS and app2clap with their x64
+/// builds, as for a new REAPER on Windows on ARM.
 #[test]
-fn an_installed_arm64ec_reaper_offers_no_sws_or_app2clap() {
+fn an_installed_arm64ec_reaper_offers_sws_and_app2clap() {
     use rabbit_core::arch_probe::PeKind;
     use rabbit_core::arch_probe::test_support::pe_image;
 
@@ -1820,25 +1853,16 @@ fn an_installed_arm64ec_reaper_offers_no_sws_or_app2clap() {
 
     let plan = wizard_package_plan_for_target(&model, Some(&target)).unwrap();
 
-    assert_eq!(
-        unavailable_rows(&plan.package_rows),
-        [PACKAGE_SWS, PACKAGE_APP2CLAP]
-    );
-    for package_id in [PACKAGE_SWS, PACKAGE_APP2CLAP] {
-        let row = plan
-            .package_rows
-            .iter()
-            .find(|row| row.package_id == package_id)
-            .unwrap();
-        assert_no_build_row(
-            row,
-            "no version for this REAPER's processor type",
-            "For this REAPER's processor type there is no version of {package}, so RABBIT can't \
-             install it here.",
-        );
-    }
-    // REAPER, ReaPack and FFmpeg have arm64ec builds and stay available.
-    for package_id in [PACKAGE_REAPER, PACKAGE_REAPACK, PACKAGE_FFMPEG] {
+    assert!(unavailable_rows(&plan.package_rows).is_empty());
+    // REAPER and ReaPack have arm64ec builds; SWS, FFmpeg and app2clap give
+    // it their x64 ones.
+    for package_id in [
+        PACKAGE_REAPER,
+        PACKAGE_REAPACK,
+        PACKAGE_SWS,
+        PACKAGE_FFMPEG,
+        PACKAGE_APP2CLAP,
+    ] {
         let row = plan
             .package_rows
             .iter()
@@ -1853,49 +1877,68 @@ fn an_installed_arm64ec_reaper_offers_no_sws_or_app2clap() {
 
 /// Every locale says why a package has no build, for a 32-bit REAPER and for
 /// one on another processor, in the row and in its details, with the
-/// package's name in the sentence.
+/// package's name in the sentence. No package lacks a build for REAPER on
+/// Windows on ARM or on a Mac today, so the texts for another processor are
+/// checked by the keys a row would use.
 #[test]
 fn the_no_build_texts_are_in_every_locale() {
     for &locale in rabbit_core::localization::embedded_locales() {
         let localizer = Localizer::embedded(locale).unwrap();
-        for (architecture, package_id) in [
-            (Architecture::X86, PACKAGE_FFMPEG),
-            (Architecture::Arm64, PACKAGE_SWS),
-        ] {
-            let model = model_from_plan(
-                &localizer,
-                Platform::Windows,
-                architecture,
-                Vec::new(),
-                None,
-                InstallPlan {
-                    target: None,
-                    actions: vec![PlanAction {
-                        package_id: package_id.to_string(),
-                        action: PlanActionKind::Install,
-                        installed_version: None,
-                        available_version: None,
-                        reason: "test".to_string(),
-                        left_to_reapack: None,
-                    }],
-                    notes: Vec::new(),
-                },
-            );
-            let row = &model.package_rows[0];
-            let reason = row.unavailability_reason.as_deref().unwrap_or_default();
-            assert!(
-                !reason.is_empty() && !reason.starts_with("wizard-"),
-                "{locale}: {reason:?}"
-            );
-            assert!(row.summary.ends_with(')'), "{locale}: {}", row.summary);
-            let sentence = row.details.split("\n\n").nth(1).unwrap_or_default();
-            assert!(
-                sentence.contains(&row.display_name)
-                    && !sentence.contains("wizard-")
-                    && !sentence.contains('{'),
-                "{locale}: {sentence:?}"
-            );
-        }
+        let (reason_key, sentence_key) = no_build_keys(Architecture::Arm64Ec);
+        assert_eq!(
+            (reason_key, sentence_key),
+            (
+                "wizard-package-row-unavailable-processor",
+                "wizard-package-details-unavailable-processor"
+            )
+        );
+        let reason = localizer.text(reason_key);
+        assert!(
+            !reason.missing && !reason.fallback_used && !reason.value.is_empty(),
+            "{locale}: {reason:?}"
+        );
+        let sentence = localizer.format(sentence_key, &[("package", "SWS Extension")]);
+        assert!(
+            !sentence.missing
+                && !sentence.fallback_used
+                && sentence.value.contains("SWS Extension")
+                && !sentence.value.contains('{'),
+            "{locale}: {sentence:?}"
+        );
+        // A 32-bit REAPER has no FFmpeg, so its row says so.
+        let model = model_from_plan(
+            &localizer,
+            Platform::Windows,
+            Architecture::X86,
+            Vec::new(),
+            None,
+            InstallPlan {
+                target: None,
+                actions: vec![PlanAction {
+                    package_id: PACKAGE_FFMPEG.to_string(),
+                    action: PlanActionKind::Install,
+                    installed_version: None,
+                    available_version: None,
+                    reason: "test".to_string(),
+                    left_to_reapack: None,
+                }],
+                notes: Vec::new(),
+            },
+        );
+        let row = &model.package_rows[0];
+        let reason = row.unavailability_reason.as_deref().unwrap_or_default();
+        assert!(
+            !reason.is_empty() && !reason.starts_with("wizard-"),
+            "{locale}: {reason:?}"
+        );
+        assert!(row.summary.ends_with(')'), "{locale}: {}", row.summary);
+        let sentence = row.details.split("\n\n").nth(1).unwrap_or_default();
+        assert!(
+            sentence.contains(&row.display_name)
+                && !sentence.contains("wizard-")
+                && !sentence.contains('{'),
+            "{locale}: {sentence:?}"
+        );
     }
 }
 

@@ -71,6 +71,8 @@
         "platform": "windows",
         "match_arches": [
           "x64",
+          "arm64",
+          "arm64-ec",
           "universal",
           "unknown"
         ],
@@ -80,27 +82,6 @@
           "fixed_url": {
             "url": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z",
             "file_name": "ffmpeg-release-full-shared.7z"
-          }
-        }
-      },
-      {
-        "platform": "windows",
-        "match_arches": [
-          "arm64",
-          "arm64-ec"
-        ],
-        "report_arch": "arm64",
-        "artifact_kind": "seven_zip_archive",
-        "source": {
-          "github_release_max_major": {
-            "repo": "tordona/ffmpeg-win-arm64",
-            "supported_major": 8,
-            "asset": {
-              "contains": [
-                "-full-shared-win-arm64"
-              ],
-              "ends_with": ".7z"
-            }
           }
         }
       }
