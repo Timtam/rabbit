@@ -83,8 +83,9 @@ repository.
 - The **Backups** tab lists what RABBIT kept in four groups: **Software
   you uninstalled**, **Earlier versions**, **Key maps** and **Other
   backups**. The text below the list says if a backup is the only copy.
-- Below the list, choose **Restore** or **Delete** for the ticked
-  backups; both go through Review, and Enter never starts either.
+- Tick backups, then choose **Restore** or **Delete** below the list. Both
+  go through Review, and Enter never starts either. A backup that can't be
+  restored can be ticked only with **Delete** chosen.
 - A restore brings an uninstalled package back as it was, takes a
   package back to before an update, or puts your old key map back,
   keeping the scripts ReaPack added since. Rows it can't restore say why.

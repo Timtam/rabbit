@@ -255,9 +255,15 @@ pub(super) fn index_of(list: &WizardBackupList, name: &str) -> usize {
         .unwrap_or_else(|| panic!("no row named {name}"))
 }
 
+/// Tick the row named `name` with `choice` chosen below the list, choosing
+/// it first when the other one is chosen, as someone would. `true` when the
+/// tick changed.
 pub(super) fn tick(list: &mut WizardBackupList, name: &str, choice: BackupChoice) -> bool {
     let index = index_of(list, name);
-    apply_backup_checkbox(&mut list.rows, index, choice, true)
+    if list.choice != choice {
+        set_backup_choice(list, choice);
+    }
+    apply_backup_checkbox(list, index, true)
 }
 
 /// That `text` reads in `locale`, as [`assert_reads`] checks it, and holds
@@ -394,7 +400,7 @@ fn status_refusal(entry: &BackupEntry, status: BackupStatus) -> Option<RestoreRe
 /// restore has no restore scope and carries the refusal a run would give,
 /// the file that is missing is named, a version RABBIT doesn't know has no
 /// number, and what is no backup is of its own kind.
-fn with_status(entry: BackupEntry, status: BackupStatus) -> BackupEntry {
+pub(super) fn with_status(entry: BackupEntry, status: BackupStatus) -> BackupEntry {
     let missing = matches!(
         status,
         BackupStatus::PartMissing | BackupStatus::NotComplete
@@ -611,11 +617,7 @@ fn rows_come_by_group_newest_first_with_a_heading_for_each_group() {
     );
     // Nothing is ticked, and the rows are labelled for Restore.
     assert_eq!(list.choice, BackupChoice::Restore);
-    assert!(
-        list.rows
-            .iter()
-            .all(|row| !row.restore_ticked && !row.delete_ticked)
-    );
+    assert!(list.rows.iter().all(|row| !row.ticked));
 }
 
 #[test]
@@ -1231,7 +1233,7 @@ fn every_status_reads_in_both_choices_in_every_locale() {
             let mut list = list_in(&localizer, vec![entry]);
             for choice in [BackupChoice::Restore, BackupChoice::Delete] {
                 set_backup_choice(&mut list, choice);
-                apply_backup_checkbox(&mut list.rows, 1, choice, true);
+                apply_backup_checkbox(&mut list, 1, true);
                 for row in &list.rows {
                     assert_reads_here(locale, &row.summary);
                     assert_reads_here(locale, &row.details);
@@ -1630,8 +1632,8 @@ fn an_unfinished_deletion_beside_a_set_rabbit_cant_delete_can_only_be_unticked()
 
         tick(&mut list, "Unfinished deletion", BackupChoice::Delete);
         // The row that can't be ticked stays unticked, and isn't asked for.
-        apply_backup_checkbox(&mut list.rows, other, BackupChoice::Delete, true);
-        assert!(!list.rows[other].delete_ticked);
+        apply_backup_checkbox(&mut list, other, true);
+        assert!(!list.rows[other].ticked);
         let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
         assert!(!review.can_delete);
         assert!(!can_delete_backups(&list));
@@ -1706,41 +1708,60 @@ fn an_undated_backup_says_rabbit_cant_tell_when() {
 // The choice and the ticks.
 // ---------------------------------------------------------------------------
 
+/// The names of the ticked rows, in list order.
+fn ticked_names(list: &WizardBackupList) -> Vec<&str> {
+    list.rows
+        .iter()
+        .filter(|row| row.ticked)
+        .map(|row| row.name.as_str())
+        .collect()
+}
+
 #[test]
-fn each_choice_keeps_its_own_ticks() {
+fn both_choices_share_the_ticks() {
     let mut list = backup_list(vec![sws(), reapack(), keymap()]);
     tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Restore);
     tick(&mut list, "Your key map", BackupChoice::Restore);
     assert_eq!(list.ticked_rows(BackupChoice::Restore).count(), 2);
 
-    set_backup_choice(&mut list, BackupChoice::Delete);
-    assert_eq!(list.ticked_rows(BackupChoice::Delete).count(), 0);
-    assert!(
-        list.rows
-            .iter()
-            .filter(|row| !row.is_heading())
-            .all(|row| row.summary.contains(": Won't touch.")),
-        "{:#?}",
-        list.rows
+    // Every backup that can be restored can be deleted too, so a switch to
+    // Delete keeps every tick.
+    assert_eq!(
+        set_backup_choice(&mut list, BackupChoice::Delete),
+        Vec::<usize>::new()
     );
     assert_eq!(
-        backups_ticked_announcement(&en(), &list),
-        "No backups ticked to delete."
+        ticked_names(&list),
+        ["SWS Extension 2.14.0.7", "Your key map"]
+    );
+    assert_eq!(list.ticked_rows(BackupChoice::Delete).count(), 2);
+    assert!(
+        list.rows[index_of(&list, "Your key map")]
+            .summary
+            .starts_with("Your key map: Will delete the only copy.")
+    );
+    assert!(
+        list.rows[index_of(&list, "ReaPack 1.2.4")]
+            .summary
+            .starts_with("ReaPack 1.2.4: Won't touch.")
+    );
+    assert_eq!(
+        backups_ticked_announcement(&en(), &list, 0),
+        "2 backups ticked to delete."
     );
 
     set_backup_choice(&mut list, BackupChoice::Restore);
-    let ticked: Vec<&str> = list
-        .ticked_rows(BackupChoice::Restore)
-        .map(|row| row.name.as_str())
-        .collect();
-    assert_eq!(ticked, ["SWS Extension 2.14.0.7", "Your key map"]);
+    assert_eq!(
+        ticked_names(&list),
+        ["SWS Extension 2.14.0.7", "Your key map"]
+    );
     assert!(
         list.rows[index_of(&list, "Your key map")]
             .summary
             .starts_with("Your key map: Will restore.")
     );
     assert_eq!(
-        backups_ticked_announcement(&en(), &list),
+        backups_ticked_announcement(&en(), &list, 0),
         "2 backups ticked to restore."
     );
     untick_and_check_one(&mut list);
@@ -1748,11 +1769,331 @@ fn each_choice_keeps_its_own_ticks() {
 
 fn untick_and_check_one(list: &mut WizardBackupList) {
     let index = index_of(list, "Your key map");
-    apply_backup_checkbox(&mut list.rows, index, BackupChoice::Restore, false);
+    apply_backup_checkbox(list, index, false);
     assert_eq!(
-        backups_ticked_announcement(&en(), list),
+        backups_ticked_announcement(&en(), list, 0),
         "One backup ticked to restore."
     );
+}
+
+/// The maintainer's case: FFmpeg's earlier version ticked while Restore is
+/// chosen, then Delete chosen. It stays ticked, and Review deletes it.
+#[test]
+fn a_backup_ticked_with_restore_chosen_is_deleted_after_a_switch() {
+    let ffmpeg_earlier = BackupEntry {
+        version: Some(version("8.0")),
+        replaced_by: Some(version("9.0")),
+        ..backup(
+            package("unix-1793697120", "ffmpeg"),
+            BackupGroup::EarlierVersions,
+            Some(NOV_3_0912),
+        )
+    };
+    let mut list = backup_list(vec![sws(), ffmpeg_earlier]);
+    let name = "FFmpeg for Improved Video Support 8.0";
+    assert!(tick(&mut list, name, BackupChoice::Restore));
+    // While Restore stays chosen, nothing is ticked to delete.
+    assert!(backup_delete_items(&list).is_empty());
+    assert!(!can_delete_backups(&list));
+
+    let unticked = set_backup_choice(&mut list, BackupChoice::Delete);
+    assert!(unticked.is_empty());
+    let row = index_of(&list, name);
+    assert!(list.rows[row].ticked);
+    assert!(
+        list.rows[row]
+            .summary
+            .starts_with("FFmpeg for Improved Video Support 8.0: Will delete."),
+        "{}",
+        list.rows[row].summary
+    );
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(review.can_delete, "{:#?}", review.lines);
+    assert!(can_delete_backups(&list));
+    assert_eq!(
+        review.lines,
+        [
+            "Target: C:/REAPER",
+            "",
+            "This backup goes for good and frees about 4 MB:",
+            "FFmpeg for Improved Video Support 8.0: you can't go back to it after this.",
+        ]
+    );
+    assert_eq!(
+        backup_delete_items(&list),
+        [DeleteItem::package("unix-1793697120", "ffmpeg").with_fingerprint(fingerprint(2))]
+    );
+}
+
+/// A backup that can be deleted but not restored, ticked while Delete is
+/// chosen, loses its tick when Restore is chosen, says why, and stays
+/// unticked when Delete is chosen again.
+#[test]
+fn a_switch_unticks_what_the_new_choice_cant_do_for_good() {
+    for status in [BackupStatus::VersionUnknown, BackupStatus::NotComplete] {
+        let reakontrol = BackupEntry {
+            item: package("unix-1793697120", "reakontrol"),
+            version: Some(version("1.0")),
+            ..reapack()
+        };
+        let mut list = backup_list(vec![reapack(), with_status(reakontrol, status)]);
+        let reapack = index_of(&list, "ReaPack 1.2.4");
+        // Found by its package, as its name depends on the status.
+        let other = list
+            .rows
+            .iter()
+            .position(|row| {
+                row.entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.item.package_id() == Some("reakontrol"))
+            })
+            .unwrap();
+        let name = list.rows[other].name.clone();
+        assert!(
+            !list.rows[other].can_tick(BackupChoice::Restore),
+            "{status:?}"
+        );
+        tick(&mut list, "ReaPack 1.2.4", BackupChoice::Delete);
+        tick(&mut list, &name, BackupChoice::Delete);
+        assert_eq!(ticked_names(&list).len(), 2, "{status:?}");
+
+        let unticked = set_backup_choice(&mut list, BackupChoice::Restore);
+        assert_eq!(unticked, [other], "{status:?}");
+        assert!(list.rows[reapack].ticked, "{status:?}");
+        assert!(!list.rows[other].ticked, "{status:?}");
+        // Its label and details say why, as an unavailable row's do.
+        let summary = &list.rows[other].summary;
+        assert!(summary.contains(": Won't touch."), "{status:?}: {summary}");
+        assert!(
+            summary.contains("(not available: "),
+            "{status:?}: {summary}"
+        );
+        assert!(
+            list.rows[other].details.starts_with(summary.as_str()),
+            "{status:?}"
+        );
+        assert_eq!(
+            backups_ticked_announcement(&en(), &list, unticked.len()),
+            "One backup ticked to restore. One backup can't be restored, so it is no longer \
+             ticked.",
+            "{status:?}"
+        );
+        let items = backup_restore_items(&list);
+        assert_eq!(items.len(), 1, "{status:?}");
+
+        // A lost tick doesn't come back by itself.
+        assert_eq!(
+            set_backup_choice(&mut list, BackupChoice::Delete),
+            Vec::<usize>::new()
+        );
+        assert!(!list.rows[other].ticked, "{status:?}");
+        assert_eq!(ticked_names(&list), ["ReaPack 1.2.4"], "{status:?}");
+        assert_eq!(backup_delete_items(&list).len(), 1, "{status:?}");
+    }
+}
+
+/// Windows says nothing at a switch, and a radio group's arrow keys switch
+/// as they move: Delete, Restore and back to Delete loses a tick to Restore
+/// on the way. Review says so, with Restore or Delete chosen, until the
+/// row is ticked again or the list is read again.
+#[test]
+fn review_says_how_many_backups_lost_their_tick_until_ticked_again() {
+    let reakontrol = BackupEntry {
+        item: package("unix-1793697120", "reakontrol"),
+        version: Some(version("1.0")),
+        ..reapack()
+    };
+    let mut list = backup_list(vec![
+        reapack(),
+        with_status(reakontrol, BackupStatus::NotComplete),
+    ]);
+    let reapack = index_of(&list, "ReaPack 1.2.4");
+    let other = index_of(&list, "ReaKontrol 1.0");
+    let note = "One backup can't be restored, so it is no longer ticked.";
+    let nothing = "Can't delete yet: Nothing is ticked to delete. Tick backups in the list with \
+                   Space.";
+    set_backup_choice(&mut list, BackupChoice::Delete);
+    apply_backup_checkbox(&mut list, other, true);
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(!review.lines.iter().any(|line| line == note));
+
+    // Restore, then Delete again: ReaKontrol lost its tick on the way.
+    assert_eq!(set_backup_choice(&mut list, BackupChoice::Restore), [other]);
+    let review = build_backup_restore_review(&en(), Some(&target(true)), &list, None, &[]);
+    assert!(
+        review.lines.iter().any(|line| line == note),
+        "{:#?}",
+        review.lines
+    );
+    assert_eq!(
+        set_backup_choice(&mut list, BackupChoice::Delete),
+        Vec::<usize>::new()
+    );
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(!review.can_delete);
+    assert_eq!(
+        review.lines,
+        ["Target: C:/REAPER", "", "Notes", note, "", nothing]
+    );
+
+    // Another tick leaves the note, as ReaKontrol is still left out.
+    apply_backup_checkbox(&mut list, reapack, true);
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(review.can_delete);
+    assert!(
+        review.lines.iter().any(|line| line == note),
+        "{:#?}",
+        review.lines
+    );
+
+    // Ticked again, it is no longer left out.
+    apply_backup_checkbox(&mut list, other, true);
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(
+        !review.lines.iter().any(|line| line == note),
+        "{:#?}",
+        review.lines
+    );
+    assert_eq!(review.items.len(), 2);
+
+    // A reset forgets it too.
+    set_backup_choice(&mut list, BackupChoice::Restore);
+    let review = build_backup_restore_review(&en(), Some(&target(true)), &list, None, &[]);
+    assert!(
+        review.lines.iter().any(|line| line == note),
+        "{:#?}",
+        review.lines
+    );
+    reset_backup_ticks(&mut list);
+    let review = build_backup_restore_review(&en(), Some(&target(true)), &list, None, &[]);
+    assert!(
+        !review.lines.iter().any(|line| line == note),
+        "{:#?}",
+        review.lines
+    );
+    assert!(list.rows.iter().all(|row| !row.lost_tick));
+}
+
+/// Review's note on lost ticks reads in every language, for one backup
+/// and for several.
+#[test]
+fn the_lost_tick_note_reads_in_every_locale() {
+    let unrestorable = |id: &str| {
+        let entry = BackupEntry {
+            item: package("unix-1793697120", id),
+            version: Some(version("1.0")),
+            ..reapack()
+        };
+        with_status(entry, BackupStatus::NotComplete)
+    };
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let mut notes = Vec::new();
+        for count in [1, 2] {
+            let entries = ["reakontrol", "lreaparams"][..count]
+                .iter()
+                .map(|&id| unrestorable(id))
+                .collect();
+            let mut list = list_in(&localizer, entries);
+            set_backup_choice(&mut list, BackupChoice::Delete);
+            for index in 0..list.rows.len() {
+                apply_backup_checkbox(&mut list, index, true);
+            }
+            let unticked = set_backup_choice(&mut list, BackupChoice::Restore);
+            assert_eq!(unticked.len(), count, "{locale}");
+            let restore =
+                build_backup_restore_review(&localizer, Some(&target(true)), &list, None, &[]);
+            set_backup_choice(&mut list, BackupChoice::Delete);
+            let delete = build_backup_delete_review(&localizer, Some(&target(true)), &list, &[]);
+            // The notes heading, the note, then a blank line and the
+            // blocker: the same note on both Reviews.
+            let note = |lines: &[String]| lines[lines.len() - 3].clone();
+            assert_eq!(note(&restore.lines), note(&delete.lines), "{locale}");
+            let said = note(&delete.lines);
+            assert_reads_here(locale, &said);
+            if count > 1 {
+                assert!(said.contains('2'), "{locale}: {said}");
+            }
+            notes.push(said);
+        }
+        assert_ne!(notes[0], notes[1], "{locale}");
+    }
+}
+
+#[test]
+fn the_switch_announcement_counts_the_rows_that_lost_their_tick() {
+    let unrestorable = |id: &str| {
+        let entry = BackupEntry {
+            item: package("unix-1793697120", id),
+            version: Some(version("1.0")),
+            ..reapack()
+        };
+        with_status(entry, BackupStatus::NotComplete)
+    };
+    let mut list = backup_list(vec![unrestorable("reakontrol"), unrestorable("lreaparams")]);
+    set_backup_choice(&mut list, BackupChoice::Delete);
+    for index in 0..list.rows.len() {
+        apply_backup_checkbox(&mut list, index, true);
+    }
+    let unticked = set_backup_choice(&mut list, BackupChoice::Restore);
+    assert_eq!(unticked.len(), 2);
+    assert_eq!(
+        backups_ticked_announcement(&en(), &list, unticked.len()),
+        "No backups ticked to restore. 2 backups can't be restored, so they are no longer ticked."
+    );
+    // The Delete form, which no switch gives today: every backup that can
+    // be restored can be deleted.
+    set_backup_choice(&mut list, BackupChoice::Delete);
+    assert_eq!(
+        backups_ticked_announcement(&en(), &list, 1),
+        "No backups ticked to delete. One backup can't be deleted, so it is no longer ticked."
+    );
+}
+
+#[test]
+fn the_switch_announcement_reads_in_every_locale() {
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let mut list = list_in(&localizer, vec![sws(), reapack(), keymap()]);
+        let mut said = Vec::new();
+        let backups: Vec<usize> = (0..list.rows.len())
+            .filter(|&index| !list.rows[index].is_heading())
+            .collect();
+        for choice in [BackupChoice::Delete, BackupChoice::Restore] {
+            set_backup_choice(&mut list, choice);
+            for ticked in [0, 1, 3] {
+                for (count, &index) in backups.iter().enumerate() {
+                    apply_backup_checkbox(&mut list, index, count < ticked);
+                }
+                for unticked in [0, 1, 2, 5] {
+                    let text = backups_ticked_announcement(&localizer, &list, unticked);
+                    assert_reads_here(locale, &text);
+                    if unticked > 1 {
+                        assert!(text.contains(&unticked.to_string()), "{locale}: {text}");
+                    }
+                    said.push(text);
+                }
+            }
+        }
+        // Each count and each choice reads differently.
+        let distinct: std::collections::BTreeSet<&String> = said.iter().collect();
+        assert_eq!(distinct.len(), said.len(), "{locale}: {said:#?}");
+    }
+}
+
+/// The texts that said each choice kept its own ticks are gone from every
+/// language.
+#[test]
+fn no_language_keeps_texts_of_ticks_kept_per_choice() {
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        for key in [
+            "wizard-review-restore-other-choice-note",
+            "wizard-review-delete-other-choice-note",
+        ] {
+            assert!(localizer.text(key).missing, "{locale}: {key}");
+        }
+    }
 }
 
 #[test]
@@ -1769,13 +2110,8 @@ fn a_delete_tick_changes_only_its_row() {
     set_backup_choice(&mut list, BackupChoice::Delete);
     let before = list.rows.clone();
 
-    assert!(apply_backup_checkbox(
-        &mut list.rows,
-        ffmpeg,
-        BackupChoice::Delete,
-        true
-    ));
-    assert!(list.rows[ffmpeg].delete_ticked);
+    assert!(apply_backup_checkbox(&mut list, ffmpeg, true));
+    assert!(list.rows[ffmpeg].ticked);
     assert!(
         list.rows[ffmpeg]
             .summary
@@ -1790,35 +2126,15 @@ fn a_delete_tick_changes_only_its_row() {
     assert_eq!(list.ticked_rows(BackupChoice::Delete).count(), 1);
 
     // Ticking it again changes nothing.
-    assert!(!apply_backup_checkbox(
-        &mut list.rows,
-        ffmpeg,
-        BackupChoice::Delete,
-        true
-    ));
+    assert!(!apply_backup_checkbox(&mut list, ffmpeg, true));
 
     // Its set mate ticks alone too, and unticking one leaves the other.
-    assert!(apply_backup_checkbox(
-        &mut list.rows,
-        sws,
-        BackupChoice::Delete,
-        true
-    ));
-    assert!(apply_backup_checkbox(
-        &mut list.rows,
-        ffmpeg,
-        BackupChoice::Delete,
-        false
-    ));
-    assert!(list.rows[sws].delete_ticked && !list.rows[ffmpeg].delete_ticked);
-    assert!(!list.rows[index_of(&list, "ReaKontrol 1.0")].delete_ticked);
-    assert!(!list.rows[index_of(&list, "ReaPack 1.2.4")].delete_ticked);
-    assert!(!apply_backup_checkbox(
-        &mut list.rows,
-        ffmpeg,
-        BackupChoice::Delete,
-        false
-    ));
+    assert!(apply_backup_checkbox(&mut list, sws, true));
+    assert!(apply_backup_checkbox(&mut list, ffmpeg, false));
+    assert!(list.rows[sws].ticked && !list.rows[ffmpeg].ticked);
+    assert!(!list.rows[index_of(&list, "ReaKontrol 1.0")].ticked);
+    assert!(!list.rows[index_of(&list, "ReaPack 1.2.4")].ticked);
+    assert!(!apply_backup_checkbox(&mut list, ffmpeg, false));
 }
 
 /// VoiceOver says only "Checked" or "Unchecked" after a tick: no other row
@@ -1851,21 +2167,13 @@ fn restore_ticks_are_the_rows_own_too() {
         "SWS Extension 2.14.0.7",
         BackupChoice::Restore
     ));
-    assert!(!list.rows[index_of(&list, "FFmpeg for Improved Video Support 7.1")].restore_ticked);
+    assert!(!list.rows[index_of(&list, "FFmpeg for Improved Video Support 7.1")].ticked);
     // Ticking it again changes nothing.
     assert!(!tick(
         &mut list,
         "SWS Extension 2.14.0.7",
         BackupChoice::Restore
     ));
-    // And a delete tick leaves the restore ticks alone.
-    tick(
-        &mut list,
-        "FFmpeg for Improved Video Support 7.1",
-        BackupChoice::Delete,
-    );
-    assert!(list.rows[index_of(&list, "SWS Extension 2.14.0.7")].restore_ticked);
-    assert!(!list.rows[index_of(&list, "FFmpeg for Improved Video Support 7.1")].restore_ticked);
 }
 
 #[test]
@@ -1880,37 +2188,25 @@ fn headings_and_rows_that_cant_be_ticked_stay_unticked() {
         mine_not,
     ]);
     for choice in [BackupChoice::Restore, BackupChoice::Delete] {
-        assert!(!apply_backup_checkbox(&mut list.rows, 0, choice, true));
-        assert!(!list.rows[0].is_ticked(choice));
+        set_backup_choice(&mut list, choice);
+        assert!(!apply_backup_checkbox(&mut list, 0, true));
+        assert!(!list.rows[0].ticked);
     }
+    set_backup_choice(&mut list, BackupChoice::Restore);
     let installed_again = index_of(&list, "SWS Extension 2.14.0.7");
-    assert!(!apply_backup_checkbox(
-        &mut list.rows,
-        installed_again,
-        BackupChoice::Restore,
-        true
-    ));
-    assert!(!list.rows[installed_again].restore_ticked);
+    assert!(!apply_backup_checkbox(&mut list, installed_again, true));
+    assert!(!list.rows[installed_again].ticked);
     assert!(
         list.rows[installed_again]
             .summary
             .contains(": Won't touch.")
     );
     let not_yours = index_of(&list, "ReaKontrol 1.0");
-    assert!(!apply_backup_checkbox(
-        &mut list.rows,
-        not_yours,
-        BackupChoice::Delete,
-        true
-    ));
-    assert!(!list.rows[not_yours].delete_ticked);
+    set_backup_choice(&mut list, BackupChoice::Delete);
+    assert!(!apply_backup_checkbox(&mut list, not_yours, true));
+    assert!(!list.rows[not_yours].ticked);
     // An index past the end changes nothing.
-    assert!(!apply_backup_checkbox(
-        &mut list.rows,
-        99,
-        BackupChoice::Delete,
-        true
-    ));
+    assert!(!apply_backup_checkbox(&mut list, 99, true));
 }
 
 /// An unfinished deletion whose id also names a set: a delete of it takes
@@ -1938,7 +2234,7 @@ fn an_unfinished_deletion_of_a_listed_sets_id_goes_only_with_that_set() {
         list.rows[row].details
     );
     assert!(tick(&mut list, "Unfinished deletion", BackupChoice::Delete));
-    assert!(!list.rows[index_of(&list, "SWS Extension 2.14.0.7")].delete_ticked);
+    assert!(!list.rows[index_of(&list, "SWS Extension 2.14.0.7")].ticked);
 
     let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
     assert!(!review.can_delete);
@@ -2005,18 +2301,21 @@ fn a_row_beside_another_accounts_backup_ticks_by_its_own_status() {
 }
 
 #[test]
-fn a_reset_clears_both_choices_and_chooses_restore() {
-    let mut list = backup_list(vec![sws(), reapack()]);
+fn a_reset_clears_every_tick_and_chooses_restore() {
+    let mut list = backup_list(vec![sws(), reapack(), records()]);
     tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Restore);
     set_backup_choice(&mut list, BackupChoice::Delete);
     tick(&mut list, "ReaPack 1.2.4", BackupChoice::Delete);
+    tick(
+        &mut list,
+        "Old copies of RABBIT's records",
+        BackupChoice::Delete,
+    );
+    assert_eq!(ticked_names(&list).len(), 3);
     reset_backup_ticks(&mut list);
     assert_eq!(list.choice, BackupChoice::Restore);
-    assert!(
-        list.rows
-            .iter()
-            .all(|row| !row.restore_ticked && !row.delete_ticked)
-    );
+    assert!(list.rows.iter().all(|row| !row.ticked));
+    assert_eq!(list.ticked_rows(BackupChoice::Delete).count(), 0);
     assert!(
         list.rows[index_of(&list, "ReaPack 1.2.4")]
             .summary
@@ -2042,7 +2341,11 @@ fn the_runs_get_what_is_ticked_with_the_listed_fingerprints() {
     assert_eq!(items[1].part, RestorePart::Keymap);
     assert!(items[1].fingerprint.is_some());
 
-    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Delete);
+    // A delete gets the same ticks: SWS, without the key map, which is
+    // unticked, and with the records, which are ticked now.
+    set_backup_choice(&mut list, BackupChoice::Delete);
+    let keymap_row = index_of(&list, "Your key map");
+    assert!(apply_backup_checkbox(&mut list, keymap_row, false));
     tick(
         &mut list,
         "Old copies of RABBIT's records",
@@ -2658,11 +2961,6 @@ fn restore_review_says_what_comes_back_and_what_else_changes() {
     tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Restore);
     tick(&mut list, "ReaPack 1.2.4", BackupChoice::Restore);
     tick(&mut list, "Your key map", BackupChoice::Restore);
-    tick(
-        &mut list,
-        "Old copies of RABBIT's records",
-        BackupChoice::Delete,
-    );
     let items = backup_restore_items(&list);
     let mut sws_plan = planned(&items[0]);
     sws_plan.packages.push(RestoredPackage {
@@ -2706,7 +3004,6 @@ fn restore_review_says_what_comes_back_and_what_else_changes() {
             "REAPER's language goes back to de_DE.ReaperLangPack.",
             "Close REAPER first.",
             "What is ticked on the Uninstall tab isn't part of this run: SWS Extension.",
-            "One backup ticked to delete isn't part of this run.",
         ]
     );
     assert!(review.can_restore);
@@ -2738,7 +3035,7 @@ fn restore_review_names_an_earlier_version_without_the_versions_from_the_quick_p
     );
     assert!(review.can_restore);
     let mut copy = backup_list(vec![copy]);
-    apply_backup_checkbox(&mut copy.rows, 1, BackupChoice::Restore, true);
+    apply_backup_checkbox(&mut copy, 1, true);
     let review = build_backup_restore_review(
         &en(),
         Some(&target(true)),
@@ -2871,7 +3168,7 @@ fn restore_review_blocks_when_nothing_is_ticked_or_there_is_no_target() {
         [
             "Target: C:/REAPER",
             "",
-            "Can't restore yet: Nothing is ticked to restore.",
+            "Can't restore yet: Nothing is ticked to restore. Tick backups in the list with Space.",
         ]
     );
     assert!(!review.can_restore);
@@ -3063,7 +3360,7 @@ fn restore_review_blocks_backups_the_quick_plan_did_not_check() {
     // A plan from before a row was unticked: it holds one too many.
     let both = plan_all(&list);
     let reapack = index_of(&list, "ReaPack 1.2.4");
-    apply_backup_checkbox(&mut list.rows, reapack, BackupChoice::Restore, false);
+    apply_backup_checkbox(&mut list, reapack, false);
     let review = build_backup_restore_review(&en(), Some(&target(true)), &list, Some(&both), &[]);
     assert_eq!(review.lines.last().unwrap(), not_checked);
     assert!(!review.can_restore);
@@ -3180,7 +3477,6 @@ fn delete_review_says_what_goes_and_what_it_frees() {
         "Old copies of RABBIT's records",
         BackupChoice::Delete,
     );
-    tick(&mut list, "ReaPack 1.2.4", BackupChoice::Restore);
 
     let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
     assert_eq!(review.heading, "Ready to delete backups");
@@ -3198,9 +3494,6 @@ fn delete_review_says_what_goes_and_what_it_frees() {
             "Your key map from November 1, 2026, 6:40 PM: the only copy.",
             "Backup with no record of what it holds: it is gone for good.",
             "Old copies of RABBIT's records: nothing that is installed changes.",
-            "",
-            "Notes",
-            "One backup ticked to restore isn't part of this run.",
         ]
     );
     assert!(review.can_delete);
@@ -3298,11 +3591,48 @@ fn delete_review_blocks_when_nothing_is_ticked() {
             "Notes",
             "Note.",
             "",
-            "Can't delete yet: Nothing is ticked to delete.",
+            "Can't delete yet: Nothing is ticked to delete. Tick backups in the list with Space.",
         ]
     );
     assert!(!review.can_delete);
     assert!(review.items.is_empty());
+}
+
+/// Both Reviews with nothing ticked say how to tick, in every language.
+#[test]
+fn nothing_ticked_says_how_to_tick_in_every_locale() {
+    for &locale in embedded_locales() {
+        let hint = match locale {
+            "en-US" => "Tick backups in the list with Space.",
+            "de-DE" => {
+                "Drücken Sie in der Liste auf einer Sicherung die Leertaste, um sie auszuwählen."
+            }
+            "es-ES" => "Marca copias de seguridad en la lista con la barra espaciadora.",
+            "fr-FR" => "Cochez des sauvegardes dans la liste avec la barre d'espace.",
+            "it-IT" => "Premi la barra spaziatrice su un backup nell'elenco per selezionarlo.",
+            "pt-BR" => "Marque backups na lista com a barra de espaço.",
+            other => panic!("{other}: add the hint here"),
+        };
+        let localizer = Localizer::embedded(locale).unwrap();
+        let mut list = list_in(&localizer, vec![sws()]);
+        let restore =
+            build_backup_restore_review(&localizer, Some(&target(true)), &list, None, &[]);
+        set_backup_choice(&mut list, BackupChoice::Delete);
+        let delete = build_backup_delete_review(&localizer, Some(&target(true)), &list, &[]);
+        for (lines, nothing_key) in [
+            (&restore.lines, "wizard-review-restore-nothing-ticked"),
+            (&delete.lines, "wizard-review-delete-nothing-ticked"),
+        ] {
+            let blocker = lines.last().unwrap();
+            assert!(blocker.ends_with(hint), "{locale}: {blocker}");
+            assert!(
+                localizer.text(nothing_key).value.ends_with(hint),
+                "{locale}: {nothing_key}"
+            );
+            assert_reads_here(locale, blocker);
+        }
+        assert!(!restore.can_restore && !delete.can_delete, "{locale}");
+    }
 }
 
 #[test]
@@ -3322,7 +3652,8 @@ fn the_delete_question_counts_backups_space_and_only_copies() {
 
     // A key map, as its row counts it.
     let mut one = backup_list(vec![keymap()]);
-    apply_backup_checkbox(&mut one.rows, 1, BackupChoice::Delete, true);
+    set_backup_choice(&mut one, BackupChoice::Delete);
+    apply_backup_checkbox(&mut one, 1, true);
     let (_, body) = delete_backups_question(&en(), &one);
     assert_eq!(
         body,
@@ -3331,7 +3662,8 @@ fn the_delete_question_counts_backups_space_and_only_copies() {
     );
 
     let mut none_only = backup_list(vec![reapack()]);
-    apply_backup_checkbox(&mut none_only.rows, 1, BackupChoice::Delete, true);
+    set_backup_choice(&mut none_only, BackupChoice::Delete);
+    apply_backup_checkbox(&mut none_only, 1, true);
     let (_, body) = delete_backups_question(&en(), &none_only);
     assert_eq!(
         body,
@@ -3383,7 +3715,7 @@ fn every_restore_refusal_reads_in_every_locale() {
         }
         // As Review says them, for a backup and for the whole run.
         let mut list = list_in(&localizer, vec![sws()]);
-        apply_backup_checkbox(&mut list.rows, 1, BackupChoice::Restore, true);
+        apply_backup_checkbox(&mut list, 1, true);
         let items = backup_restore_items(&list);
         for refusal in sample_refusals() {
             let mut plan = planned(&items[0]);
@@ -3630,17 +3962,17 @@ fn every_row_review_and_question_reads_in_every_locale() {
         let mut list = backup_list_from_source(&localizer, &source, &utc);
         said.push(list.list_label(&localizer));
         for index in 0..list.rows.len() {
-            apply_backup_checkbox(&mut list.rows, index, BackupChoice::Restore, true);
+            apply_backup_checkbox(&mut list, index, true);
         }
         set_backup_choice(&mut list, BackupChoice::Delete);
         for index in 0..list.rows.len() {
-            apply_backup_checkbox(&mut list.rows, index, BackupChoice::Delete, true);
+            apply_backup_checkbox(&mut list, index, true);
         }
         for row in &list.rows {
             said.push(row.summary.clone());
             said.push(row.details.clone());
         }
-        said.push(backups_ticked_announcement(&localizer, &list));
+        said.push(backups_ticked_announcement(&localizer, &list, 0));
         let delete = build_backup_delete_review(&localizer, Some(&target(true)), &list, &[]);
         assert!(delete.can_delete);
         said.push(delete.heading);
@@ -3649,13 +3981,17 @@ fn every_row_review_and_question_reads_in_every_locale() {
         said.push(title);
         said.push(body);
 
-        let first_deleted = list.rows.iter().position(|row| row.delete_ticked).unwrap();
-        apply_backup_checkbox(&mut list.rows, first_deleted, BackupChoice::Delete, false);
-        set_backup_choice(&mut list, BackupChoice::Restore);
+        // Back to Restore: the rows that can't be restored lose their tick.
+        let unticked = set_backup_choice(&mut list, BackupChoice::Restore);
+        assert!(unticked.len() > 1, "{locale}");
         for row in &list.rows {
             said.push(row.summary.clone());
         }
-        said.push(backups_ticked_announcement(&localizer, &list));
+        said.push(backups_ticked_announcement(
+            &localizer,
+            &list,
+            unticked.len(),
+        ));
 
         // Restore's Review, from four quick plans: one that says the
         // language goes back, a version goes back from one to another, an
@@ -3706,7 +4042,7 @@ fn every_row_review_and_question_reads_in_every_locale() {
             said.extend(review.lines.into_iter().filter(|line| !line.is_empty()));
         }
 
-        // Delete's Review with what is ticked to restore and on other tabs.
+        // Delete's Review with what is ticked on other tabs.
         set_backup_choice(&mut list, BackupChoice::Delete);
         let delete = build_backup_delete_review(&localizer, Some(&target(true)), &list, &notes);
         said.extend(delete.lines.into_iter().filter(|line| !line.is_empty()));
@@ -3745,7 +4081,8 @@ fn every_row_review_and_question_reads_in_every_locale() {
                     })
                 })
                 .unwrap();
-            apply_backup_checkbox(&mut whole.rows, row, BackupChoice::Delete, true);
+            set_backup_choice(&mut whole, BackupChoice::Delete);
+            apply_backup_checkbox(&mut whole, row, true);
             said.push(whole.rows[row].details.clone());
             let review = build_backup_delete_review(&localizer, Some(&target(true)), &whole, &[]);
             assert!(!review.can_delete, "{locale}");
@@ -3753,7 +4090,8 @@ fn every_row_review_and_question_reads_in_every_locale() {
         }
         // Whole sets only, whose size is exact.
         let mut exact = list_in(&localizer, vec![no_manifest_set()]);
-        apply_backup_checkbox(&mut exact.rows, 1, BackupChoice::Delete, true);
+        set_backup_choice(&mut exact, BackupChoice::Delete);
+        apply_backup_checkbox(&mut exact, 1, true);
         said.push(delete_backups_question(&localizer, &exact).1);
         said.extend(
             build_backup_delete_review(&localizer, Some(&target(true)), &exact, &[])
@@ -3763,8 +4101,9 @@ fn every_row_review_and_question_reads_in_every_locale() {
         );
         for single in [1, 2] {
             let mut few = list_in(&localizer, vec![keymap(), sws(), ffmpeg()]);
+            set_backup_choice(&mut few, BackupChoice::Delete);
             for index in 1..=single {
-                apply_backup_checkbox(&mut few.rows, index, BackupChoice::Delete, true);
+                apply_backup_checkbox(&mut few, index, true);
             }
             said.push(delete_backups_question(&localizer, &few).1);
             said.extend(
@@ -3784,6 +4123,8 @@ fn every_row_review_and_question_reads_in_every_locale() {
         if locale == DEFAULT_LOCALE {
             let all = said.join("\n");
             for reached in [
+                // The switch back to Restore.
+                "backups can't be restored, so they are no longer ticked.",
                 // Rows and details.
                 "Replaced on November 3, 2026, 9:12 AM",
                 "A restore replaced it on",
@@ -3801,8 +4142,6 @@ fn every_row_review_and_question_reads_in_every_locale() {
                 "RABBIT no longer counts FFmpeg for Improved Video Support as installed by it.",
                 "Close REAPER first.",
                 "Close every copy of REAPER first.",
-                "backups ticked to delete aren't part of this run.",
-                "backups ticked to restore aren't part of this run.",
                 "What is ticked on the Uninstall tab isn't part of this run.",
                 "both put back the same file. Tick only one of them.",
                 "are both backups of SWS Extension. Tick only one of them.",
@@ -3992,10 +4331,12 @@ fn the_quick_plan_runs_only_with_something_ticked_to_restore() {
         panic!("the quick plan ran with nothing ticked to restore")
     };
     assert_eq!(backup_quick_plan_with(dir.path(), &list, &never), None);
-    // Ticks for Delete don't count.
-    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Delete);
-    assert_eq!(backup_quick_plan_with(dir.path(), &list, &never), None);
     assert_eq!(backup_quick_plan(dir.path(), &list), None);
+    // Nor with a tick taken back.
+    tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Restore);
+    let sws = index_of(&list, "SWS Extension 2.14.0.7");
+    apply_backup_checkbox(&mut list, sws, false);
+    assert_eq!(backup_quick_plan_with(dir.path(), &list, &never), None);
 }
 
 #[test]
@@ -4067,12 +4408,12 @@ fn both_backup_reviews_name_the_ticks_on_the_other_two_tabs() {
     let ticks = PackagesTabTicks {
         install: vec!["OSARA".to_string()],
         uninstall: vec!["SWS Extension".to_string()],
-        backups_to_restore: 1,
-        backups_to_delete: 1,
+        backups_ticked: 2,
+        backups_choice: BackupChoice::Restore,
     };
     let mut list = backup_list(vec![sws(), reapack()]);
     tick(&mut list, "SWS Extension 2.14.0.7", BackupChoice::Restore);
-    tick(&mut list, "ReaPack 1.2.4", BackupChoice::Delete);
+    tick(&mut list, "ReaPack 1.2.4", BackupChoice::Restore);
     let install = "What is ticked on the Install or update tab isn't part of this run: OSARA.";
     let uninstall = "What is ticked on the Uninstall tab isn't part of this run: SWS Extension.";
 
@@ -4084,13 +4425,14 @@ fn both_backup_reviews_name_the_ticks_on_the_other_two_tabs() {
         Some(&plan_all(&list)),
         &notes,
     );
+    set_backup_choice(&mut list, BackupChoice::Delete);
     let notes = inactive_tab_notes(&en(), WizardMode::DeleteBackups, &ticks);
     let delete = build_backup_delete_review(&en(), Some(&target(true)), &list, &notes);
     for lines in [&restore.lines, &delete.lines] {
         assert!(lines.iter().any(|line| line == install), "{lines:#?}");
         assert!(lines.iter().any(|line| line == uninstall), "{lines:#?}");
-        // The Backups tab's own ticks are said by the Review itself, for the
-        // other choice, not as another tab's.
+        // The Backups tab's own ticks are what the Review is about, not
+        // another tab's.
         assert!(
             !lines.iter().any(|line| line.contains("Backups tab")),
             "{lines:#?}"
@@ -4496,7 +4838,7 @@ fn restore_review_names_the_variants_and_reapers_language() {
     for &locale in embedded_locales() {
         let localizer = Localizer::embedded(locale).unwrap();
         let mut list = list_in(&localizer, vec![spanish_es()]);
-        apply_backup_checkbox(&mut list.rows, 1, BackupChoice::Restore, true);
+        apply_backup_checkbox(&mut list, 1, true);
         let items = backup_restore_items(&list);
         let pma = localizer.text("package-langpack-es-variant-pma").value;
         for language in [

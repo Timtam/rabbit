@@ -98,11 +98,11 @@ impl BackupsTreeData {
 
 /// Tick or untick a row, with every side effect: the row in the view, and
 /// the details when it is the selected row, as the Windows tree's toggle
-/// does. A tick is the row's alone, for either choice. `false` when nothing
-/// could change, because the row can't be ticked for the choice. Shared by
-/// the model's `set_value` (a click, or VO+Space while interacting with the
-/// list) and the Space handler, which wx never routes through `set_value`
-/// on macOS, so the two can't drift apart.
+/// does. A tick is the row's alone. `false` when nothing could change,
+/// because the row can't be ticked for the choice. Shared by the model's
+/// `set_value` (a click, or VO+Space while interacting with the list) and
+/// the Space handler, which wx never routes through `set_value` on macOS,
+/// so the two can't drift apart.
 type BackupsToggle = Rc<dyn Fn(&BackupsTreeData, usize, bool) -> bool>;
 
 /// The details text below the list. It is created after the list, because
@@ -124,7 +124,7 @@ fn new_backups_toggle(
                 if !list.rows.get(index).is_some_and(|row| row.can_tick(choice)) {
                     return false;
                 }
-                apply_backup_checkbox(&mut list.rows, index, choice, checked);
+                apply_backup_checkbox(&mut list, index, checked);
                 list.rows[index].details.clone()
             };
             if index >= data.nodes.len() {
@@ -185,9 +185,7 @@ fn build_backups_tree_model(
             let list = data.list.borrow();
             let row = list.rows.get(node.index);
             if col == BACKUPS_COL_TOGGLE {
-                return Variant::from_bool(
-                    row.is_some_and(|row| !row.is_heading() && row.is_ticked(list.choice)),
-                );
+                return Variant::from_bool(row.is_some_and(|row| !row.is_heading() && row.ticked));
             }
             Variant::from_string(row.map(|row| row.summary.as_str()).unwrap_or_default())
         },
@@ -247,7 +245,8 @@ fn expand_backup_groups(tree: &DataViewCtrl, model: &CustomDataViewTreeModel) {
 }
 
 /// Have every backup's row read again: its label and its tick, after the
-/// choice below the list changed them all. The headings stay as they are.
+/// choice below the list relabelled them all and unticked those it can't
+/// do. The headings stay as they are.
 fn refresh_every_row(model: &CustomDataViewTreeModel) {
     let rows = model
         .with_userdata_mut::<BackupsTreeData, _>(|data| {
@@ -271,9 +270,10 @@ pub(crate) fn reset_backups_list_caret_on_focus() {}
 /// Non-Windows: build the Backups tab: the label naming the tab and the
 /// total, the list, a read-only details text, and the choice below them,
 /// Restore or Delete. Ticking a row changes its text and the details, and
-/// no other row; switching the choice relabels every row without moving
-/// focus and says how many are ticked for it. Review reads the ticks when
-/// Next is pressed.
+/// no other row; switching the choice relabels every row and unticks those
+/// it can't do, without moving focus, and says how many are ticked for it
+/// and, if any, how many lost their tick. Review reads the ticks when Next
+/// is pressed.
 pub(crate) fn build_backups_tab(
     page: &Panel,
     model: &WizardModel,
@@ -418,9 +418,7 @@ pub(crate) fn build_backups_tab(
             let index = node.index;
             let is_ticked = |data: &BackupsTreeData| {
                 let list = data.list.borrow();
-                list.rows
-                    .get(index)
-                    .is_some_and(|row| row.is_ticked(list.choice))
+                list.rows.get(index).is_some_and(|row| row.ticked)
             };
             let checked = is_ticked(data);
             if !toggle(data, index, !checked) {
@@ -438,22 +436,24 @@ pub(crate) fn build_backups_tab(
         });
     }
 
-    // Restore or Delete: the rows stay the same rows; each shows its action
-    // and its tick for the new choice. Focus stays on the choice, so the
-    // rows changed away from it: VoiceOver says how many are ticked for the
-    // new choice, politely, after it reads the choice itself.
+    // Restore or Delete: the rows stay the same rows with the same ticks,
+    // except those the new choice can't do, which lose theirs; each shows
+    // its action for the new choice and its tick. Focus stays on the
+    // choice, so the rows changed away from it: VoiceOver says how many are
+    // ticked for the new choice and, if any, how many lost their tick,
+    // politely, after it reads the choice itself.
     {
         let items = Rc::clone(&items);
         let list = Rc::clone(&list);
         choice.on_selected(move |_| {
             let chosen = selected_backup_choice(&choice);
-            {
+            let unticked = {
                 let mut list = list.borrow_mut();
                 if list.choice == chosen {
                     return;
                 }
-                set_backup_choice(&mut list, chosen);
-            }
+                set_backup_choice(&mut list, chosen).len()
+            };
             let Some(dv_model) = items.borrow().clone() else {
                 return;
             };
@@ -478,7 +478,11 @@ pub(crate) fn build_backups_tab(
             }
             let mut message = None;
             with_ui_localizer(|localizer| {
-                message = Some(backups_ticked_announcement(localizer, &list.borrow()));
+                message = Some(backups_ticked_announcement(
+                    localizer,
+                    &list.borrow(),
+                    unticked,
+                ));
             });
             if let Some(message) = message {
                 announce(&message, AnnouncePriority::Polite);

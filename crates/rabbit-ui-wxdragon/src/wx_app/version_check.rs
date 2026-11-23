@@ -192,8 +192,8 @@ pub(crate) fn start_version_check(ui: VersionCheckUi) {
                         // The Backups tab's rows, read again for this target
                         // on the UI thread, as the Uninstall rows are: the
                         // overview reads manifests, RABBIT's records and file
-                        // sizes, and hashes nothing. Both choices start with
-                        // nothing ticked, and Restore is chosen again.
+                        // sizes, and hashes nothing. Nothing is ticked, and
+                        // Restore is chosen again.
                         reread_backup_list(&mut ui.backup_list.borrow_mut(), &ui.model, &ui.target);
                         *ui.package_rows.borrow_mut() = plan.package_rows;
                         *ui.package_notes.borrow_mut() = plan.notes;

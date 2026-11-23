@@ -6,8 +6,9 @@
 //! tick a group. Space on a heading, on the placeholder of an empty list or
 //! on a row that can't be ticked for the choice below the list does
 //! nothing. What a tick does lives in the wx-free model
-//! (`apply_backup_checkbox`): it ticks only that row, for either choice, and
-//! the tree shows the row as it changed.
+//! (`apply_backup_checkbox`): it ticks only that row, and the tree shows the
+//! row as it changed. Both choices share the ticks, so a switch only
+//! unticks the rows the new choice can't do (`set_backup_choice`).
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -128,9 +129,8 @@ fn is_selected(tree: &TreeCtrl, item: &TreeItemId) -> bool {
 }
 
 /// Rebuild the tree from `list`: each heading at the top level with its
-/// rows below it, every row's checkbox showing its tick for the list's
-/// choice, nothing ticked unless the row says otherwise; or the placeholder
-/// alone.
+/// rows below it, every row's checkbox showing its tick, nothing ticked
+/// unless the row says otherwise; or the placeholder alone.
 fn populate_backups_tree(tree: &TreeCtrl, items: &BackupsStateCell, list: &WizardBackupList) {
     // Forget the old handles before the tree lets go of them: deleting and
     // adding rows can run the selection handler, and a deleted handle's
@@ -171,7 +171,7 @@ fn populate_backups_tree(tree: &TreeCtrl, items: &BackupsStateCell, list: &Wizar
             .and_then(|heading| fresh.nodes[heading].clone())
             .unwrap_or_else(|| root.clone());
         if let Some(item) = tree.append_item(&parent, &row.summary, None, None) {
-            native_tree_checkboxes::set_check_state(hwnd, &item, row.is_ticked(list.choice));
+            native_tree_checkboxes::set_check_state(hwnd, &item, row.ticked);
             fresh.nodes[index] = Some(item);
         }
     }
@@ -183,9 +183,10 @@ fn populate_backups_tree(tree: &TreeCtrl, items: &BackupsStateCell, list: &Wizar
 
 /// Windows: build the Backups tab: the label naming the tab and the total,
 /// the list, a read-only details text, and the choice below them, Restore
-/// or Delete. Ticking a row changes its text, the rows a Delete tick takes
-/// with it, and the details; switching the choice relabels every row
-/// without moving focus. Review reads the ticks when Next is pressed.
+/// or Delete. Ticking a row changes its text and the details, and no other
+/// row; switching the choice relabels every row and unticks those the new
+/// choice can't do, without moving focus. Review reads the ticks when Next
+/// is pressed.
 pub(crate) fn build_backups_tab(
     page: &Panel,
     model: &WizardModel,
@@ -315,9 +316,12 @@ pub(crate) fn build_backups_tab(
         });
     }
 
-    // Restore or Delete: the rows stay the same rows; each shows its action
-    // and its tick for the new choice. Focus stays on the choice, and the
-    // rows are read with their new action when focus comes back to them.
+    // Restore or Delete: the rows stay the same rows with the same ticks,
+    // except those the new choice can't do, which lose theirs; each shows
+    // its action for the new choice and its tick. Focus stays on the
+    // choice, and the rows are read with their new action when focus comes
+    // back to them; a row that lost its tick says why at its end. Nothing
+    // is said at the switch, so Review says how many lost their tick.
     {
         let items = Rc::clone(&items);
         let list = Rc::clone(&list);
@@ -331,7 +335,7 @@ pub(crate) fn build_backups_tab(
                 set_backup_choice(&mut list, chosen);
                 list.rows
                     .iter()
-                    .map(|row| (row.is_heading(), row.is_ticked(chosen), row.summary.clone()))
+                    .map(|row| (row.is_heading(), row.ticked, row.summary.clone()))
                     .collect()
             };
             let nodes: Vec<Option<TreeItemId>> = items.borrow().nodes.clone();
@@ -430,15 +434,10 @@ fn reconcile_toggle(
             // reads the list or the items.
             let changed: Option<(bool, String, String)> = {
                 let mut list = list.borrow_mut();
-                let choice = list.choice;
-                apply_backup_checkbox(&mut list.rows, index, choice, checked);
-                list.rows.get(index).map(|row| {
-                    (
-                        row.is_ticked(choice),
-                        row.summary.clone(),
-                        row.details.clone(),
-                    )
-                })
+                apply_backup_checkbox(&mut list, index, checked);
+                list.rows
+                    .get(index)
+                    .map(|row| (row.ticked, row.summary.clone(), row.details.clone()))
             };
             if let Some((ticked, summary, row_details)) = changed {
                 native_tree_checkboxes::set_check_state(hwnd, item, ticked);
