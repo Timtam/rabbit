@@ -838,6 +838,11 @@ config-reapack-reaper-accessible-fr-name = Add the REAPER Accessible (FR) ReaPac
 config-reapack-reaper-accessible-fr-description = Adds the REAPER Accessible French-language ReaPack repository (https://github.com/reaperaccessible/rap_fr/raw/main/index.xml). Once added, go to the Extensions menu, ReaPack, Browse Packages to get REAPER Accessible's French resources.
 config-reapack-reaper-accessible-en-name = Add the REAPER Accessible (EN) ReaPack repository
 config-reapack-reaper-accessible-en-description = Adds the REAPER Accessible English-language ReaPack repository (https://github.com/reaperaccessible/rap_en/raw/main/index.xml). Once added, go to the Extensions menu, ReaPack, Browse Packages to get REAPER Accessible's English resources.
+# ReaWarp is Gabriel Schuck's set of accessible audio warping scripts. Keep
+# "ReaWarp" and "ReaPack" as they are; the menu path names REAPER's own menus,
+# as in the other repository steps.
+config-reapack-reawarp-name = Add the ReaWarp ReaPack repository
+config-reapack-reawarp-description = ReaWarp, by Gabriel Schuck, is a set of accessible scripts for audio warping, tempo maps, groove matching and quantizing. Its messages are in English, Portuguese or Spanish. This adds its ReaPack repository (https://github.com/gabrielschuck/reawarp/raw/main/index.xml). Once added, go to the Extensions menu, ReaPack, Browse Packages to install ReaWarp; ReaPack then keeps it up to date.
 config-set-reaper-language-name = Set REAPER's language
 config-set-reaper-language-description = Tells REAPER which of the installed language packs to use, by writing it into reaper.ini. Without this you would have to select the language yourself under Options, Preferences, General. You can install several language packs and switch between them in REAPER later; this only chooses which one is active now. Untick if you only want the files installed.
 

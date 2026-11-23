@@ -830,6 +830,11 @@ config-reapack-reaper-accessible-fr-name = Aggiungi il repository ReaPack «REAP
 config-reapack-reaper-accessible-fr-description = Aggiunge il repository ReaPack in lingua francese di REAPER Accessible (https://github.com/reaperaccessible/rap_fr/raw/main/index.xml). Una volta aggiunto, apri il menu Estensioni, ReaPack, Sfoglia pacchetti per accedere alle risorse in francese di REAPER Accessible.
 config-reapack-reaper-accessible-en-name = Aggiungi il repository ReaPack «REAPER Accessible (EN)»
 config-reapack-reaper-accessible-en-description = Aggiunge il repository ReaPack in lingua inglese di REAPER Accessible (https://github.com/reaperaccessible/rap_en/raw/main/index.xml). Una volta aggiunto, apri il menu Estensioni, ReaPack, Sfoglia pacchetti per accedere alle risorse in inglese di REAPER Accessible.
+# ReaWarp è la raccolta di script accessibili di Gabriel Schuck per il warping
+# dell'audio. «ReaWarp» e «ReaPack» non si traducono; il percorso di menu
+# nomina i menu di REAPER, come negli altri passi dei repository.
+config-reapack-reawarp-name = Aggiungi il repository ReaPack «ReaWarp»
+config-reapack-reawarp-description = ReaWarp, di Gabriel Schuck, è una raccolta di script accessibili per il warping dell'audio, le mappe del tempo, l'adattamento al groove e la quantizzazione. I suoi messaggi sono in inglese, portoghese o spagnolo. Questo passo aggiunge il suo repository ReaPack (https://github.com/gabrielschuck/reawarp/raw/main/index.xml). Una volta aggiunto, apri il menu Estensioni, ReaPack, Sfoglia pacchetti per installare ReaWarp; ReaPack lo terrà poi aggiornato.
 config-set-reaper-language-name = Imposta la lingua di REAPER
 config-set-reaper-language-description = Indica a REAPER quale dei pacchetti lingua installati usare, scrivendolo in reaper.ini. Senza questo dovresti selezionare la lingua manualmente in Opzioni, Preferenze, Generale. Puoi installare più pacchetti lingua e passare dall'uno all'altro in REAPER in seguito; qui si sceglie solo quale è attivo ora. Deseleziona se vuoi solo installare i file.
 

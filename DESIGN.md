@@ -797,10 +797,10 @@ user can finish the install by pressing Next a few times.
      ReaKontrol, FFmpeg (Windows only), JAWS scripts (Windows only), and
      later additions; each row reads as plain text "OSARA — installed
      2024.3.6, latest 2026.2.16, will update". Configuration contains
-     opt-in post-install tweaks (currently: "Add the REAPER Accessibility
-     ReaPack repository to ReaPack"); rows that are already applied or
-     whose dependency package isn't in the install plan are disabled with
-     a short status tag in the row label
+     opt-in post-install tweaks (currently: the ReaPack repository steps
+     and Set REAPER's language; see Configuration Steps); rows that are
+     already applied or whose dependency package isn't in the install
+     plan are disabled with a short status tag in the row label
      (`(already applied)`, `(requires ReaPack)`).
    - Parent group nodes show a half-checked / tristate state when only
      some of their children are ticked. Toggling the parent propagates to
@@ -1709,10 +1709,32 @@ Initial step kinds:
   appended index honours ReaPack's `size=` field so it lands at the
   next slot ReaPack itself would have written.
 
-The single shipped step today is the REAPER Accessibility ReaPack
-remote (`https://github.com/Timtam/reapack/raw/master/index.xml`),
-recommended when ReaPack is part of the install plan or already on
-disk.
+The shipped `AddReapackRemote` steps, in this order, add these ReaPack
+remotes:
+
+- REAPER Accessibility
+  (`https://github.com/Timtam/reapack/raw/master/index.xml`),
+- REAPER Accessible (FR)
+  (`https://github.com/reaperaccessible/rap_fr/raw/main/index.xml`),
+- REAPER Accessible (EN)
+  (`https://github.com/reaperaccessible/rap_en/raw/main/index.xml`),
+- ReaWarp (`https://github.com/gabrielschuck/reawarp/raw/main/index.xml`),
+  Gabriel Schuck's accessible audio warping scripts.
+
+All of them require ReaPack. All but REAPER Accessible (FR), whose
+content is French only, are recommended when ReaPack is part of the
+install plan or already on disk. ReaWarp is recommended because its
+messages come in English, Portuguese or Spanish, so it is of use
+whatever RABBIT's UI language. The REAPER Accessibility and REAPER
+Accessible remotes get readable names in `reapack.ini` rather than
+their indexes' own names. ReaWarp keeps its index's own name,
+`reawarp`: ReaPack finds remotes by exact name and installs into
+`Scripts/<remote name>/`, so a name that differed only in case would
+let a later import by hand, as ReaWarp's README describes, add a second
+remote sharing the same folder on Windows and macOS. Detection matches
+on the URL, so a repository the user imported by hand still counts as
+applied. These steps only add the repository: the user installs its
+packages in ReaPack afterwards.
 
 Wizard surface:
 

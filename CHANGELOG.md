@@ -336,6 +336,12 @@ from this file and posts it as the GitHub release body.
   Português (Brasil), it ships in the macOS app bundle, and OS-language
   auto-detection on first launch covers Portuguese locales (any `pt-*`, which
   map to pt-BR).
+- A new configuration step adds the ReaPack repository of **ReaWarp**, Gabriel
+  Schuck's accessible scripts for audio warping, tempo maps, groove matching
+  and quantizing, so you can install and update ReaWarp in ReaPack
+  (Extensions, ReaPack, Browse packages). Like REAPER Accessible (EN), it is
+  ticked by default when ReaPack is installed or part of the run; on the
+  command line it is `--config-step reapack-add-reawarp-remote`.
 
 ### Changed
 

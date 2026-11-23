@@ -833,6 +833,11 @@ config-reapack-reaper-accessible-fr-name = Ajouter le dépôt ReaPack « REAPER 
 config-reapack-reaper-accessible-fr-description = Ajoute le dépôt ReaPack francophone de REAPER Accessible (https://github.com/reaperaccessible/rap_fr/raw/main/index.xml). Une fois ajouté, ouvrez le menu Extensions, ReaPack, Parcourir les paquets pour accéder aux ressources francophones de REAPER Accessible.
 config-reapack-reaper-accessible-en-name = Ajouter le dépôt ReaPack « REAPER Accessible (EN) »
 config-reapack-reaper-accessible-en-description = Ajoute le dépôt ReaPack anglophone de REAPER Accessible (https://github.com/reaperaccessible/rap_en/raw/main/index.xml). Une fois ajouté, ouvrez le menu Extensions, ReaPack, Parcourir les paquets pour accéder aux ressources anglophones de REAPER Accessible.
+# ReaWarp est l'ensemble de scripts accessibles de Gabriel Schuck pour le
+# warping audio. « ReaWarp » et « ReaPack » ne se traduisent pas ; le chemin de
+# menu nomme les menus de REAPER, comme pour les autres étapes de dépôt.
+config-reapack-reawarp-name = Ajouter le dépôt ReaPack « ReaWarp »
+config-reapack-reawarp-description = ReaWarp, de Gabriel Schuck, est un ensemble de scripts accessibles pour le warping audio, les cartes de tempo, le calage sur un groove et la quantification. Ses messages sont en anglais, portugais ou espagnol. Cette étape ajoute son dépôt ReaPack (https://github.com/gabrielschuck/reawarp/raw/main/index.xml). Une fois ajouté, ouvrez le menu Extensions, ReaPack, Parcourir les paquets pour installer ReaWarp ; ReaPack le tiendra ensuite à jour.
 config-set-reaper-language-name = Définir la langue de REAPER
 config-set-reaper-language-description = Indique à REAPER lequel des packs de langue installés utiliser, en l'inscrivant dans reaper.ini. Sans cela, vous devriez sélectionner la langue vous-même dans Options, Préférences, Général. Vous pouvez installer plusieurs packs de langue et basculer entre eux dans REAPER par la suite ; ceci choisit seulement celui qui est actif maintenant. Décochez si vous voulez seulement installer les fichiers.
 
