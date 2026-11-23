@@ -52,6 +52,8 @@ from this file and posts it as the GitHub release body.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-23
+
 The **Packages** page now has three tabs, **Install or update**,
 **Uninstall** and **Backups**; Ctrl+Tab moves between them. The
 **Uninstall** tab removes packages, keeping most files in a backup; the

@@ -1168,7 +1168,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rabbit"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "rabbit-cli",
  "rabbit-ui-wxdragon",
@@ -1177,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "rabbit-cli"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "clap",
  "rabbit-core",
@@ -1189,7 +1189,7 @@ dependencies = [
 
 [[package]]
 name = "rabbit-core"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "fluent-bundle",
  "libc",
@@ -1214,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "rabbit-platform"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
@@ -1227,7 +1227,7 @@ dependencies = [
 
 [[package]]
 name = "rabbit-ui-wxdragon"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "rabbit-core",
  "rabbit-platform",
