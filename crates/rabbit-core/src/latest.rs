@@ -1345,7 +1345,7 @@ mod tests {
     };
     use crate::package::{
         AssetSelector, GithubArtifactKind, GithubReleaseSelector, GithubReleaseSpec,
-        SupportedPlatform, VersionSource,
+        SupportedPlatform, VersionRule, VersionSource,
     };
     use crate::version::Version;
 
@@ -1708,6 +1708,43 @@ mod tests {
         assert!(
             super::resolve_html_version("nothing here", "u", r"Version ([0-9.]+)", "{1}").is_err()
         );
+    }
+
+    /// The French language pack reads its version from the `desc` of its
+    /// entry in ReaperAccessible's ReaPack index. That text dropped its
+    /// "par ReaperAccessible" tail in November 2026; the shipped rule must
+    /// read both forms, and not the version of another entry in the index.
+    #[test]
+    fn langpack_fr_rule_reads_old_and_new_index_descriptions() {
+        let manifest = crate::package::embedded_package_manifest();
+        let package = manifest
+            .packages
+            .iter()
+            .find(|package| package.id == "langpack-fr")
+            .expect("langpack-fr is embedded");
+        let Some(VersionRule::Html {
+            url,
+            pattern,
+            format,
+        }) = &package.version
+        else {
+            panic!("langpack-fr should use an html version rule");
+        };
+
+        let index = |desc: &str| {
+            format!(
+                r#"<reapack name="Ajouter_piste.lua" type="script" desc="Script V2.0">
+    <reapack name="REAPER_SWS_FRC.ReaperLangPack" type="langpack" desc="{desc}">
+      <version name="7.05" author="Lee JULIEN et Pierre-Marie CURT">"#
+            )
+        };
+        for (desc, expected) in [
+            ("Français V7.85.1", "7.85.1"),
+            ("Français V7.80.1 par ReaperAccessible", "7.80.1"),
+        ] {
+            let version = super::resolve_html_version(&index(desc), url, pattern, format).unwrap();
+            assert_eq!(version.raw(), expected, "desc {desc:?}");
+        }
     }
 
     /// ReaKontrol's `github_release` block: per-platform asset prefixes,

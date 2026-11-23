@@ -249,6 +249,9 @@ repository.
   leaves yours alone and now says only that OSARA was installed.
 - In a portable REAPER, a package that needs a standard install, such as
   Surge XT, keeps saying so when its version check fails.
+- The French language pack installs and updates again: RABBIT found no
+  version once its description stopped ending in "par ReaperAccessible".
+  (Fixed by math65 in #36.)
 
 #### Windows
 
