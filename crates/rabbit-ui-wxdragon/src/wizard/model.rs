@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use rabbit_core::localization::DEFAULT_LOCALE;
 use rabbit_core::model::{Architecture, ComponentDetection, Platform};
+use rabbit_core::package::PackageCategory;
 use rabbit_core::plan::{AvailablePackage, PlanActionKind};
 use rabbit_core::setup::SetupReport;
 use rabbit_core::version::Version;
@@ -106,9 +107,10 @@ pub struct WizardText {
     pub uninstall_remove_settings_label: String,
     pub packages_row_checked: String,
     pub packages_row_unchecked: String,
-    pub packages_tree_group_label: String,
-    pub additional_software_tree_group_label: String,
-    pub language_tree_group_label: String,
+    /// The heading of each package category's group in the Install and
+    /// Uninstall trees, in [`PackageCategory::ALL`] order. Read it with
+    /// [`WizardText::package_group_label`].
+    pub package_group_labels: Vec<(PackageCategory, String)>,
     pub configuration_tree_group_label: String,
     pub reapack_ack_heading: String,
     pub reapack_ack_body: String,
@@ -245,6 +247,17 @@ pub struct WizardText {
     pub expert_osara_builds_unavailable: String,
 }
 
+impl WizardText {
+    /// The heading of `category`'s group in the Install and Uninstall trees.
+    pub fn package_group_label(&self, category: PackageCategory) -> &str {
+        self.package_group_labels
+            .iter()
+            .find(|(group, _)| *group == category)
+            .map(|(_, label)| label.as_str())
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WizardStep {
     Target,
@@ -314,26 +327,45 @@ pub struct PackageRow {
     /// the row label carries a localized indicator. That is a package that
     /// installs outside any portable REAPER folder on a portable target, one
     /// with no build for the target REAPER's architecture, such as FFmpeg
-    /// for a 32-bit REAPER, and one whose version check failed.
+    /// for a 32-bit REAPER, one RABBIT leaves to ReaPack, and one whose
+    /// version check failed. When more than one of these holds, the label
+    /// gives the first in this order: no build, left to ReaPack, portable
+    /// target, failed version check.
     pub available_for_target: bool,
     /// Localized reason matching `available_for_target == false`. `None`
     /// when the row is available.
     pub unavailability_reason: Option<String>,
     /// `false` when the package has no build for the target REAPER's
     /// architecture. The row is then unavailable for that reason, which
-    /// neither a portable target nor a failed version check replaces.
+    /// neither a copy left to ReaPack, a portable target nor a failed
+    /// version check replaces.
     pub has_build_for_target: bool,
-    /// Which wizard UI group this row belongs to ("Packages" vs "Additional
-    /// software"). Mirrors the package spec's category.
-    pub category: rabbit_core::package::PackageCategory,
+    /// Which group of the wizard's tree this row belongs to ("Packages",
+    /// "Instruments", ...). Mirrors the package spec's category.
+    pub category: PackageCategory,
     /// Mirrors the spec's `requires_standard_install`: when `true`, the row is
     /// disabled on a portable REAPER target (the package installs to a fixed
-    /// location outside any portable folder).
+    /// location outside any portable folder). A failed version check
+    /// doesn't replace that reason, as no run installs the package there.
     pub requires_standard_install: bool,
     /// The channel the available build is on; `None` is the regular release.
     pub available_channel: Option<String>,
     /// The channel the installed build came from, as its receipt recorded it.
     pub installed_channel: Option<String>,
+    /// `true` when the plan leaves this package to ReaPack. The row can't be
+    /// ticked and says why, and neither a portable target nor a failed
+    /// version check changes that reason: RABBIT wouldn't install or update
+    /// the package either way. A package with no build for the target
+    /// REAPER gives that reason instead, and its details still say that
+    /// ReaPack looks after it.
+    pub left_to_reapack: bool,
+    /// What Review says when the row is ticked while a copy of the package
+    /// sits in a folder every REAPER loads, such as an app2clap in the CLAP
+    /// folder: on the standard REAPER that the copy moves into the backup,
+    /// on a portable REAPER without the package that it will load two
+    /// copies. `None` otherwise (see
+    /// `packages::note_copies_in_former_outside_folders`).
+    pub former_copy_review_note: Option<String>,
 }
 
 /// Wizard-side row for a single [`crate::configuration::ConfigurationStep`]

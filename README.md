@@ -31,35 +31,103 @@ RABBIT installs and keeps up to date:
   REAPER and other DAWs to pick up. Tracks the
   [rolling nightly channel](https://github.com/surge-synthesizer/surge/releases/tag/Nightly)
   rather than the official 1.3.4 release (which is from August 2024
-  and the project effectively ships through nightlies). Hidden on
-  portable REAPER targets because Surge XT's factory data lives at
+  and the project effectively ships through nightlies). Can't be ticked
+  on a portable REAPER target, because Surge XT's factory data lives at
   fixed system paths outside any portable REAPER folder. On Windows, close
   Surge XT before you install or update it: RABBIT doesn't start its
   installer while Surge XT is open, and says so.
-- **app2clap** *(Windows only, opt-in, standard REAPER installations only)* —
+- **Lo-lo's instruments** *(Windows only, opt-in)* — four VST3 instruments
+  by Lo-lo, made to be played and edited with a screen reader:
+  [LJuno-116](https://github.com/Lo-lo78/LJuno-116), a polyphonic
+  synthesizer; [LB-303](https://github.com/Lo-lo78/LB-303), a bassline
+  synthesizer with a step sequencer;
+  [LR-608](https://github.com/Lo-lo78/LR-608), a drum machine that
+  synthesizes its sounds; and
+  [LSampler-24](https://github.com/Lo-lo78/LSampler-24), a sampler with 24
+  slots for your own samples. RABBIT downloads each one's latest GitHub
+  release and installs its whole `.vst3` bundle folder, such as
+  `LJuno-116.vst3`, into `UserPlugins\FX` in REAPER's resource folder,
+  REAPER's own plug-in folder, with no administrator rights needed, so it
+  works with a portable REAPER too. REAPER finds a new instrument after its
+  next start, or after a rescan of its plug-ins in its preferences. If you
+  copied one into `C:\Program Files\Common Files\VST3` yourself, remove that
+  copy, so REAPER only uses the one RABBIT keeps up to date; RABBIT doesn't
+  look there. They are 64-bit plug-ins, for a 64-bit REAPER. An update
+  replaces the files of the bundle that changed and moves the ones the new
+  version no longer has into the update's backup, and an uninstall removes
+  the bundle's files and then its folder. RABBIT uninstalls only a copy it
+  installed, or installed over. Your presets and samples stay: LJuno-116's,
+  LB-303's and LR-608's in the folder of their name in your Documents, and
+  LSampler-24's library in `Documents\LSampler-24` and the audio it
+  extracted in `%APPDATA%\Lo-lo78\LSampler-24`, even with **Also remove
+  settings**.
+- **app2clap** *(Windows only, opt-in)* —
   [app2clap](https://app2clap.jantrid.net/), a CLAP plugin by Jamie Teh
   (jcsteh, of OSARA/NVDA fame) that captures audio from other applications
-  and brings it into REAPER — or any CLAP host — as a plug-in you insert on
-  a track. RABBIT tracks the
+  and brings it into REAPER as a plug-in you insert on a track. RABBIT tracks
+  the
   [rolling `snapshots` release](https://github.com/jcsteh/app2clap/releases/tag/snapshots),
-  installs `app2clap.clap` into the per-user CLAP folder
-  (`%LOCALAPPDATA%\Programs\Common\CLAP`) with no elevation required, and
-  keeps it up to date. Disabled on portable REAPER targets because the CLAP
-  folder lives outside any portable REAPER folder.
+  installs `app2clap.clap` into `UserPlugins\FX` in REAPER's resource folder,
+  REAPER's own plug-in folder, with no elevation required, and keeps it up to
+  date. Only that REAPER loads plug-ins from there, so app2clap works with a
+  portable REAPER too, and RABBIT installs it for REAPER only, not for other
+  CLAP hosts.
+  Earlier versions of RABBIT installed it into the per-user CLAP folder
+  (`%LOCALAPPDATA%\Programs\Common\CLAP`) instead, for a standard REAPER
+  only. RABBIT still finds such a copy in the standard REAPER, with its
+  version. A copy there that RABBIT has no record of, such as one you put
+  there yourself, counts as installed there too, with no version, so the
+  wizard ticks its update. The next update of app2clap in the standard
+  REAPER installs the new version into `UserPlugins\FX` and moves the copy
+  out of the CLAP folder into that update's backup, so the standard REAPER
+  doesn't load two copies.
+  Restoring that backup puts the copy back; for one RABBIT had no record of,
+  the copy in `UserPlugins\FX` stays too. After that update, portable
+  REAPERs and other programs that loaded app2clap from the CLAP folder no
+  longer find it; RABBIT can install it into each portable REAPER. The
+  wizard says so in app2clap's details before, and in Show details after.
+  While your copy is already the latest version, no update runs, so it stays
+  in the CLAP folder until the next app2clap release. To move it sooner,
+  tick app2clap on the **Install or update** tab of the standard REAPER to
+  reinstall it: the reinstall moves the copy into a backup, as an update
+  does. Until the copy leaves the CLAP folder, every REAPER loads it,
+  portable ones too, so a portable REAPER that gets its own app2clap loads
+  both. Update or reinstall app2clap in the standard REAPER first.
+  Uninstalling app2clap from the standard REAPER removes a copy in the CLAP
+  folder too, and then needs every REAPER on the computer closed.
+- **LReaParams** *(Windows only, opt-in)* —
+  [LReaParams](https://github.com/Lo-lo78/LReaParams), an accessible REAPER
+  extension by Lo-lo for controlling FX and track parameters from the
+  keyboard, which works alongside OSARA. RABBIT installs
+  `reaper_lreaparams.dll` from the project's latest GitHub release into
+  `UserPlugins` as a REAPER extension, without LReaParams' own installer, and
+  keeps it up to date. It is a 64-bit DLL, so it is for a 64-bit REAPER,
+  REAPER's ARM64EC build on Windows on ARM included, which loads 64-bit
+  extensions. LReaParams is also published through its own ReaPack
+  repository: if ReaPack installed your copy, RABBIT leaves it to ReaPack.
+  It doesn't install over it, update it or uninstall it while ReaPack is
+  installed, not even when you name it on the command line, and the package
+  list says so. Restoring one of RABBIT's own backups of LReaParams is the
+  one exception: you ask for the copy RABBIT had, so it comes back even over
+  one ReaPack installed since. Your LReaParams settings and profiles live in
+  the `LReaParams` folder of REAPER's resource folder, and an uninstall keeps
+  them unless you ask for settings to go too.
 
-Surge XT and app2clap are grouped under **Additional software** in the
-wizard — extras that aren't tied to REAPER itself. Both are disabled on
-portable REAPER targets, since they install to fixed per-user/system
-locations rather than into the portable REAPER folder.
+The wizard's package list shows Surge XT, LJuno-116, LB-303, LR-608 and
+LSampler-24 under **Instruments** and app2clap and LReaParams under
+**Tools**, after the main **Packages** group and before **Language packs**;
+the Uninstall tab uses the same groups.
 
-Not every package has a version for every REAPER: FFmpeg, Surge XT and
-app2clap have none for a 32-bit REAPER, for example. The wizard still lists
-such a package, but its row can't be ticked and ends with "(not available:
-no version for 32-bit REAPER)", or "no version for this REAPER's processor
-type" for another kind of REAPER, such as one on Windows on ARM. The row's
-details say the same. RABBIT goes by the REAPER you picked, or for a REAPER
-it is about to install, by the one it will install. Uninstalling isn't
-affected.
+Not every package has a version for every REAPER: FFmpeg, Surge XT,
+app2clap, LReaParams and Lo-lo's instruments have none for a 32-bit REAPER,
+for example. The wizard still lists such a package, but its row can't be
+ticked and ends with "(not available: no version for 32-bit REAPER)", or "no
+version for this REAPER's processor type" for another kind of REAPER, such
+as one on Windows on ARM. The row's details say the same. This reason comes
+before any other the row could give, such as "managed by ReaPack"; the
+details still say when ReaPack looks after your copy. RABBIT goes by the
+REAPER you picked, or for a REAPER it is about to install, by the one it
+will install. Uninstalling isn't affected.
 
 ### Language packs
 
@@ -263,18 +331,23 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
   anywhere on the page, the arrow keys while the tabs have focus, or
   VoiceOver's own navigation of the tab group. VoiceOver mentions Ctrl+Tab
   the first time the page opens.
-- **What RABBIT can remove:** OSARA, SWS, ReaPack, ReaKontrol, FFmpeg,
-  app2clap and the JAWS scripts (all three Windows only), the language packs,
-  Surge XT and REAPER (see below). On Windows that means a standard REAPER;
-  on a Mac, the REAPER app of a standard or a portable REAPER. Every other
-  installed package is listed too, with the reason it can't be ticked.
+- **What RABBIT can remove:** OSARA, SWS, ReaPack, ReaKontrol, the
+  language packs, Surge XT and REAPER (see below), and on Windows also
+  FFmpeg, app2clap, LReaParams, Lo-lo's four instruments and the JAWS
+  scripts. For REAPER, on Windows that means a standard REAPER; on a Mac,
+  the REAPER app of a standard or a portable REAPER. Every other installed
+  package is listed too, with the reason it can't be ticked, such as an
+  LReaParams that ReaPack manages, or a copy of one of Lo-lo's instruments
+  that RABBIT didn't install.
 - **What is kept:** your settings, such as SWS's grooves, ReaPack's
-  repositories and ReaKontrol's FX maps, unless you tick **Also remove
-  settings** below the list. `reaper.ini`, `reaper-kb.ini`, your key maps and
-  everything ReaPack installed always stay, and so do the key map backups
-  OSARA made and OSARA's settings, which live in `reaper-extstate.ini` beside
-  every other extension's. Script files of the JAWS scripts that RABBIT can't
-  be sure the installer added, and those changed since, always stay too.
+  repositories, ReaKontrol's FX maps and LReaParams' settings and profiles,
+  unless you tick **Also remove settings** below the list. `reaper.ini`,
+  `reaper-kb.ini`, your key maps and everything ReaPack installed always
+  stay, and so do the key map backups OSARA made and OSARA's settings, which
+  live in `reaper-extstate.ini` beside every other extension's, and the
+  presets and samples of Lo-lo's instruments. Script files of the JAWS
+  scripts that RABBIT can't be sure the installer added, and those changed
+  since, always stay too.
   Everything that goes, settings removed with that option included, moves
   into a backup set under `RABBIT\backups` rather than being deleted, and
   stays there until you delete the backup. Surge XT and REAPER are the
@@ -282,8 +355,9 @@ page, tick what should go, and press Next. Nothing is ticked to begin with.
   entry; see below.
 - **Starting it:** the review page says what each package loses and keeps.
   Enter doesn't start an uninstall there; press **Uninstall**. REAPER must be
-  closed, and for app2clap, the JAWS scripts, Surge XT and REAPER itself
-  every REAPER on the computer. On a Mac, uninstalling REAPER needs every
+  closed, and for the JAWS scripts, Surge XT and REAPER itself every REAPER
+  on the computer, as for app2clap while a copy of it in the CLAP folder
+  goes too. On a Mac, uninstalling REAPER needs every
   REAPER closed only when moving its app takes an administrator's password;
   otherwise closing that REAPER is enough.
 - **Surge XT and REAPER (Windows):** their own uninstallers remove them, with
@@ -416,12 +490,14 @@ ticked. The rows come in up to four groups:
   it.
 - **Earlier versions:** the files an update replaced, and the files of the
   earlier version that the new one no longer installs, such as FFmpeg's
-  libraries when an update gives them new names, or the Spanish language
-  pack's old file after you switch between es_ES and es_MX. RABBIT moves
-  those into the backup instead of deleting them, so the earlier version
-  stays whole. Only updates RABBIT installs file by file keep them:
-  ReaPack, ReaKontrol, FFmpeg, app2clap, the language packs, and SWS on a
-  Mac. A package's own installer, such as REAPER's, keeps none.
+  libraries when an update gives them new names, the Spanish language
+  pack's old file after you switch between es_ES and es_MX, or an app2clap
+  in the CLAP folder, where earlier versions of RABBIT installed it. RABBIT
+  moves those into the backup instead of deleting them, so the earlier
+  version stays whole. Only updates RABBIT installs file by file keep them:
+  ReaPack, ReaKontrol, FFmpeg, app2clap, LReaParams, Lo-lo's instruments,
+  the language packs, and SWS on a Mac. A package's own installer, such as
+  REAPER's, keeps none.
 - **Key maps:** your key map from before OSARA's key map replaced it.
   Usually only the oldest is your own.
 - **Other backups:** what RABBIT can't restore here, such as the other
@@ -495,8 +571,8 @@ again)".
   restores a copy of its records.
 - **Starting a restore:** Review says what comes back and what else
   changes, and, while REAPER is open, to close it first, or every copy of
-  REAPER for a package any REAPER can use, such as app2clap or the JAWS
-  scripts. Enter doesn't start it there; press **Restore**. If something
+  REAPER for a package any REAPER can use, such as the JAWS scripts. Enter
+  doesn't start it there; press **Restore**. If something
   that must be closed is still open then, RABBIT says so and changes
   nothing. Each backup comes back whole or not at all.
 - **Delete:** deletes the ticked backups for good, not to the Recycle Bin or
@@ -650,7 +726,9 @@ choose in REAPER's preferences once REAPER is closed. A file that can't be
 moved, for example because another program has it open, stays where it
 is, and the output says why (`Warning:`); the update itself still
 finishes. RABBIT then no longer keeps track of that file, and can't
-restore that earlier version. Once you no longer need it, you can remove a
+restore that earlier version. An app2clap left in the CLAP folder is the
+exception: REAPER loads it beside the new one until app2clap's next update
+or reinstall, which moves it. Once you no longer need it, you can remove a
 file that stayed because another program had it open or RABBIT couldn't
 read it; leave any other file a `Warning:` line names where it is, such as
 REAPER's key map, a folder or a link.
@@ -754,12 +832,13 @@ GITHUB_TOKEN="<your token>" /Applications/Rabbit.app/Contents/MacOS/rabbit   # m
 ### Uninstall
 
 `uninstall` removes packages RABBIT knows how to take off again: today OSARA,
-SWS, ReaPack, ReaKontrol, FFmpeg, app2clap and the JAWS scripts (all three
-Windows only), the language packs, Surge XT and REAPER. On Windows, Surge XT
-and a standard REAPER come off through their own uninstallers, and the JAWS
-scripts only from a standard REAPER. On a Mac, RABBIT deletes Surge XT for
-good and moves the REAPER app of a standard or a portable REAPER to the Trash.
-`RABBIT components` says for each package whether RABBIT can
+SWS, ReaPack, ReaKontrol, the language packs, Surge XT and REAPER, and on
+Windows also FFmpeg, app2clap, LReaParams, Lo-lo's four instruments and the
+JAWS scripts. On Windows,
+Surge XT and a standard REAPER come off through their own uninstallers, and
+the JAWS scripts only from a standard REAPER. On a Mac, RABBIT deletes Surge
+XT for good and moves the REAPER app of a standard or a portable REAPER to
+the Trash. `RABBIT components` says for each package whether RABBIT can
 uninstall it, and if not, why. Name every package with `--package`; there is
 no "remove everything". Like the other commands, it only shows what it would
 do until you add `--apply`:
@@ -787,16 +866,22 @@ RABBIT uninstall --resource-path "$HOME/Library/Application Support/REAPER" \
   that belongs to another REAPER stays. The report says which. For the JAWS
   scripts, it is their two plug-in files and the script files RABBIT
   recorded their installer adding, each script file only while it still
-  holds what the installer wrote (see below).
+  holds what the installer wrote (see below). For one of Lo-lo's
+  instruments, it is the files of its `.vst3` bundle that RABBIT installed,
+  then the bundle's folder once it is empty; RABBIT doesn't remove a copy it
+  didn't install.
 - **What stays:** your settings, such as SWS's grooves and `S&M.ini`,
-  ReaPack's repositories and its list of what it installed, and ReaKontrol's
-  FX maps. Add `--remove-settings` to remove those too. `reaper.ini`,
+  ReaPack's repositories and its list of what it installed, ReaKontrol's FX
+  maps, and the `LReaParams` folder with LReaParams' settings and profiles.
+  Add `--remove-settings` to remove those too. `reaper.ini`,
   `reaper-kb.ini`, your key maps and everything ReaPack installed always stay,
   even files ReaPack installed among a package's settings. So do the key map
   backups OSARA made, and OSARA's settings, which live in
   `reaper-extstate.ini` beside every other extension's. Script files of the
   JAWS scripts that RABBIT can't be sure the installer added, and those
-  changed since, stay too, even with `--remove-settings`.
+  changed since, stay too, even with `--remove-settings`. So do the presets
+  and samples of Lo-lo's instruments, in their folders in your Documents,
+  and the audio LSampler-24 extracted, in `%APPDATA%\Lo-lo78\LSampler-24`.
 - **Nothing is deleted for good,** except Surge XT, REAPER on Windows, and
   the JAWS scripts' uninstaller folder and registry entry (see below). A
   REAPER app on a Mac goes to the Trash. Other removed files move into a
@@ -804,10 +889,11 @@ RABBIT uninstall --resource-path "$HOME/Library/Application Support/REAPER" \
   `--remove-settings`; they stay there until you delete that set with
   `delete-backup`. The run saves a report under `RABBIT\logs`. If REAPER
   used the language pack you removed, RABBIT sets REAPER back to English.
-- **REAPER must be closed.** For REAPER on Windows, Surge XT, app2clap and the
-  JAWS scripts, every REAPER on the computer must be closed, portable ones
-  included. The same goes for REAPER on a Mac when the administrator command
-  (see below) moves its app. Unlike the commands that install, `uninstall` has
+- **REAPER must be closed.** For REAPER on Windows, Surge XT and the JAWS
+  scripts, every REAPER on the computer must be closed, portable ones
+  included. The same goes for app2clap while a copy of it in the CLAP folder
+  goes too, and for REAPER on a Mac when the administrator command (see
+  below) moves its app. Unlike the commands that install, `uninstall` has
   no `--allow-reaper-running`: a running REAPER holds its extensions' files
   open, so they can't be moved, and it writes `reaper.ini` again when it
   closes, which would undo the language reset. The dry run checks this too.
@@ -1001,8 +1087,8 @@ restore the set's other packages one at a time with `--package`.
 
 Before it changes anything, a restore checks what each package's own
 uninstall checks. REAPER must be closed. For a package that serves every
-REAPER on the computer, such as app2clap or the JAWS scripts, every REAPER
-must be closed, portable ones included. Any program a package's uninstall
+REAPER on the computer, such as the JAWS scripts, every REAPER must be
+closed, portable ones included. Any program a package's uninstall
 names must be closed too. `--allow-reaper-running` lets only the REAPER you
 restore into stay open, as before; it never lets a restore past the other
 checks. A dry run says what is running and goes on. A backup that belongs to
@@ -1060,10 +1146,11 @@ or when the set's record of the earlier version is one RABBIT would never
 write, such as one that lists a file outside the folders it installs into.
 
 Only updates RABBIT installs file by file make such a backup: ReaPack,
-ReaKontrol, FFmpeg, app2clap, the language packs, and SWS on a Mac. REAPER,
-OSARA, SWS on Windows, Surge XT and the JAWS scripts are updated by their own
-installers, or for OSARA on a Mac its own archive, which overwrite files with
-no backup, so they can't go back this way.
+ReaKontrol, FFmpeg, app2clap, LReaParams, Lo-lo's instruments, the language
+packs, and SWS on a Mac. REAPER, OSARA, SWS on Windows, Surge XT and the
+JAWS scripts are updated by their own installers, or for OSARA on a Mac its
+own archive, which overwrite files with no backup, so they can't go back
+this way.
 
 To get back the key map you had before OSARA's key map replaced it, restore
 only the key map from the backup set `rabbit backups` lists it in:

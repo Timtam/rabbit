@@ -27,7 +27,10 @@ use wxdragon::widgets::dataview::{
     Variant, VariantType,
 };
 
-use crate::{WizardModel, WizardText, WizardUninstallList, apply_uninstall_checkbox};
+use crate::{
+    PackageTreeGroup, WizardModel, WizardText, WizardUninstallList, apply_uninstall_checkbox,
+    package_tree_groups,
+};
 
 use super::{UninstallSideWidgets, WXK_SPACE, build_uninstall_settings};
 
@@ -50,16 +53,10 @@ pub(crate) fn new_uninstall_state() -> UninstallStateCell {
 const UNINSTALL_COL_LABEL: u32 = 0;
 const UNINSTALL_COL_TOGGLE: u32 = 1;
 
-/// The groups, in the install tree's order.
-const GROUP_ORDER: [PackageCategory; 3] = [
-    PackageCategory::Core,
-    PackageCategory::Additional,
-    PackageCategory::Language,
-];
-
 #[derive(Clone, Copy, Debug)]
 enum UninstallNodeKind {
-    /// A heading: the index into `GROUP_ORDER`.
+    /// A heading: the index of its category in `PackageCategory::ALL`, the
+    /// install tree's order.
     Group(usize),
     /// An index into the list's rows.
     Row(usize),
@@ -78,7 +75,7 @@ struct UninstallNode {
 struct UninstallTreeData {
     list: Rc<RefCell<WizardUninstallList>>,
     text: WizardText,
-    group_nodes: [Box<UninstallNode>; 3],
+    group_nodes: [Box<UninstallNode>; PackageCategory::ALL.len()],
     row_nodes: Vec<UninstallNode>,
 }
 
@@ -92,11 +89,7 @@ impl UninstallTreeData {
     }
 
     fn group_label(&self, group: usize) -> &str {
-        match GROUP_ORDER[group] {
-            PackageCategory::Core => &self.text.packages_tree_group_label,
-            PackageCategory::Additional => &self.text.additional_software_tree_group_label,
-            PackageCategory::Language => &self.text.language_tree_group_label,
-        }
+        self.text.package_group_label(PackageCategory::ALL[group])
     }
 
     fn group_ptr(&self, group: usize) -> *const UninstallNode {
@@ -107,29 +100,38 @@ impl UninstallTreeData {
         &self.row_nodes[index]
     }
 
-    /// The groups that have rows, as indices into `GROUP_ORDER`.
+    /// The groups of the list's rows, from the same `package_tree_groups`
+    /// as the Windows tab, so both tabs group the rows alike.
+    fn tree_groups(&self) -> Vec<PackageTreeGroup> {
+        package_tree_groups(self.list.borrow().rows.iter().map(|row| row.category))
+    }
+
+    /// The groups that have rows, as indices into `PackageCategory::ALL`.
     fn groups_with_rows(&self) -> Vec<usize> {
-        let list = self.list.borrow();
-        (0..GROUP_ORDER.len())
-            .filter(|group| {
-                list.rows
-                    .iter()
-                    .any(|row| row.category == GROUP_ORDER[*group])
-            })
+        self.tree_groups()
+            .into_iter()
+            .filter_map(|tree_group| group_index(tree_group.category))
             .collect()
     }
 
     fn rows_in_group(&self, group: usize) -> Vec<*mut UninstallNode> {
-        let list = self.list.borrow();
-        list.rows
-            .iter()
-            .enumerate()
-            .filter(|(index, row)| {
-                row.category == GROUP_ORDER[group] && *index < self.row_nodes.len()
-            })
-            .map(|(index, _)| self.row_ptr(index) as *mut UninstallNode)
+        let category = PackageCategory::ALL[group];
+        self.tree_groups()
+            .into_iter()
+            .filter(|tree_group| tree_group.category == category)
+            .flat_map(|tree_group| tree_group.rows)
+            .filter(|index| *index < self.row_nodes.len())
+            .map(|index| self.row_ptr(index) as *mut UninstallNode)
             .collect()
     }
+}
+
+/// The index of `category` in `PackageCategory::ALL`, which is the one its
+/// heading's `UninstallNodeKind::Group` holds.
+fn group_index(category: PackageCategory) -> Option<usize> {
+    PackageCategory::ALL
+        .iter()
+        .position(|group| *group == category)
 }
 
 /// The details text to start from: the first row's, or, for an empty list,
@@ -220,7 +222,7 @@ fn build_uninstall_tree_model(
             match node.kind {
                 UninstallNodeKind::Row(index) => {
                     let category = data.list.borrow().rows.get(index)?.category;
-                    let group = GROUP_ORDER.iter().position(|group| *group == category)?;
+                    let group = group_index(category)?;
                     Some(data.group_ptr(group) as *mut UninstallNode)
                 }
                 UninstallNodeKind::Group(_) => None,
@@ -371,7 +373,7 @@ pub(crate) fn build_uninstall_tab(
     let data = UninstallTreeData {
         list: Rc::clone(&list),
         text: model.text.clone(),
-        group_nodes: [0, 1, 2].map(|group| {
+        group_nodes: std::array::from_fn(|group| {
             Box::new(UninstallNode {
                 kind: UninstallNodeKind::Group(group),
             })

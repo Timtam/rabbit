@@ -679,6 +679,8 @@ fn preflight(checks: Vec<PreflightCheck>) -> PreflightReport {
     }
 }
 
+/// app2clap on the standard REAPER, with an older copy in the CLAP folder,
+/// which any REAPER on the computer may have loaded.
 fn app2clap() -> UninstallPlanItem {
     UninstallPlanItem {
         every_reaper_closed: true,

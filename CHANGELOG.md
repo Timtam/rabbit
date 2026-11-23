@@ -69,14 +69,16 @@ from this file and posts it as the GitHub release body.
   VoiceOver's tab navigation. VoiceOver mentions Ctrl+Tab the first time
   the page opens. The **Uninstall** tab lists what
   is installed in the chosen REAPER, with nothing ticked. RABBIT can remove
-  SWS, ReaPack, ReaKontrol, FFmpeg, app2clap and the language packs, and a
-  row it can't tick says why. Your settings stay unless you tick **Also
-  remove settings**. Next goes to a Review that says what each package
-  loses and keeps. Enter never starts an uninstall there: press
-  **Uninstall** to go ahead. If REAPER is open, RABBIT asks you to close it
-  first; for app2clap, every REAPER on the computer. Removed files move
-  into a backup rather than being deleted. The progress page names each
-  package as it goes and says whether it went, and closing RABBIT during an
+  SWS, ReaPack, ReaKontrol, FFmpeg, app2clap, LReaParams, Lo-lo's
+  instruments and the language packs, and a row it can't tick says why.
+  Your settings stay unless you tick **Also remove settings**. Next goes to
+  a Review that says what each package loses and keeps. Enter never starts
+  an uninstall there: press **Uninstall** to go ahead. If REAPER is open,
+  RABBIT asks you to close it first, and for app2clap, while a copy of it
+  in the CLAP folder goes too, every REAPER on the computer. Removed files
+  move into a backup rather than being deleted. The
+  progress page names each package as it goes and says whether it went,
+  and closing RABBIT during an
   uninstall asks first, then stops after the step it is on: one package, or
   on macOS the administrator command, which can remove several. The Done
   page says what went, why anything stayed, and how to get a package back:
@@ -84,25 +86,26 @@ from this file and posts it as the GitHub release body.
   longer ticked by itself, or, when RABBIT kept its files, restore it on
   the **Backups** tab. **Show details** lists the files, and names each
   package that can be restored there.
-- `rabbit uninstall` removes SWS, ReaPack, ReaKontrol, FFmpeg, app2clap and
-  the language packs. Name each package with `--package`. Without `--apply`
-  it only lists what would go, what stays and what would stop it, and with
-  `--apply` it changes nothing at all if any package you named can't be
-  uninstalled, or one of its files can't be read. Removed files move into a
-  backup set rather than being deleted, your settings stay unless you add
-  `--remove-settings`, and if REAPER used the language pack you removed, it
-  goes back to English. REAPER must be closed; there is deliberately no
-  `--allow-reaper-running`. Ctrl+C stops the run once the step it is on is
-  done: a package, or on macOS the administrator command, which can remove
-  several. For a portable REAPER on Windows, which RABBIT can't remove, it
-  prints how to remove it by hand. The exit code is 0 when everything you
-  named is gone or wasn't installed, 2 when something can't be uninstalled,
-  and 1 when a removal failed. The wizard's **Uninstall** tab removes the
-  same packages. A run that moved no file leaves no backup set, and the
-  report names the set only for packages whose files went into it. While
-  `RABBIT` or its `backups` folder is a symbolic link or junction, an
-  uninstall changes nothing and says why: RABBIT never restores a backup
-  from behind one, and the backup would be the only copy of what it removes.
+- `rabbit uninstall` removes SWS, ReaPack, ReaKontrol, FFmpeg, app2clap,
+  LReaParams, Lo-lo's instruments and the language packs. Name each package
+  with `--package`. Without `--apply` it only lists what would go, what
+  stays and what would stop it, and with `--apply` it changes nothing at all
+  if any package you named can't be uninstalled, or one of its files can't
+  be read. Removed files move into a backup set rather than being deleted,
+  your settings stay unless you add `--remove-settings`, and if REAPER used
+  the language pack you removed, it goes back to English. REAPER must be
+  closed; there is deliberately no `--allow-reaper-running`. Ctrl+C stops
+  the run once the step it is on is done: a package, or on macOS the
+  administrator command, which can remove several. For a portable REAPER on
+  Windows, which RABBIT can't remove, it prints how to remove it by hand.
+  The exit code is 0 when everything you named is gone or wasn't installed,
+  2 when something can't be uninstalled, and 1 when a removal failed. The
+  wizard's **Uninstall** tab removes the same packages. A run that moved no
+  file leaves no backup set, and the report names the set only for packages
+  whose files went into it. While `RABBIT` or its `backups` folder is a
+  symbolic link or junction, an uninstall changes nothing and says why:
+  RABBIT never restores a backup from behind one, and the backup would be
+  the only copy of what it removes.
 - `rabbit restore-backup --package <id>` brings one uninstalled package back
   from its backup set: its files, its entry in RABBIT's records, and REAPER's
   language if the uninstall reset it and no other language was picked since.
@@ -336,6 +339,27 @@ from this file and posts it as the GitHub release body.
   Português (Brasil), it ships in the macOS app bundle, and OS-language
   auto-detection on first launch covers Portuguese locales (any `pt-*`, which
   map to pt-BR).
+- **LReaParams** (Windows, 64-bit REAPER), Lo-lo's accessible REAPER
+  extension for controlling FX and track parameters from the keyboard, under
+  **Tools**, unticked by default. Thanks to Lo-lo for asking. RABBIT installs
+  `reaper_lreaparams.dll` from the latest GitHub release into `UserPlugins`,
+  keeps it up to date and can uninstall it, keeping the `LReaParams` folder
+  with your settings and profiles unless you ask for settings to go too. A
+  copy ReaPack installed is left to ReaPack: RABBIT doesn't install over it,
+  update it or uninstall it, not even when you name it on the command line,
+  and its row says it is managed by ReaPack. Only restoring one of RABBIT's
+  own backups of LReaParams still puts back the copy RABBIT had.
+- **LJuno-116**, **LB-303**, **LR-608** and **LSampler-24** (Windows, 64-bit
+  REAPER), Lo-lo's VST3 instruments made to be played and edited with a screen
+  reader: a polyphonic synthesizer, a bassline synthesizer with a step
+  sequencer, a drum machine and a 24-slot sampler, under **Instruments**,
+  unticked by default. Thanks to Lo-lo for asking. RABBIT installs each one's
+  whole `.vst3` bundle from its latest GitHub release into REAPER's own
+  plug-in folder, `UserPlugins\FX`, without administrator rights and for a
+  portable REAPER too, keeps it up to date with a backup of the version
+  before, and can uninstall a copy it installed, keeping your presets and
+  samples. REAPER finds a new instrument after its next start or a plug-in
+  rescan.
 - A new configuration step adds the ReaPack repository of **ReaWarp**, Gabriel
   Schuck's accessible scripts for audio warping, tempo maps, groove matching
   and quantizing, so you can install and update ReaWarp in ReaPack
@@ -404,8 +428,8 @@ from this file and posts it as the GitHub release body.
 - `rabbit restore-backup` now checks, for each package it brings back, what
   that package's own uninstall checks. Before, it checked only that the
   REAPER it restores into was closed. Now a restore of a package that
-  serves every REAPER on the computer, such as app2clap or the JAWS
-  scripts, is refused, and changes nothing, while any REAPER is open,
+  serves every REAPER on the computer, such as the JAWS scripts, is
+  refused, and changes nothing, while any REAPER is open,
   portable ones included. Any program a package's uninstall names must be
   closed too. `--allow-reaper-running` still lets only the REAPER you
   restore into stay open. A dry run says what is running and goes on, as
@@ -465,6 +489,22 @@ from this file and posts it as the GitHub release body.
   `deleting`; its id can match a set's, and its `path` is in
   `RABBIT\backups-deleting`. `rabbit backups` and `rabbit restore-backup`
   now have help text.
+- The package list's **Additional software** group is now two groups:
+  **Instruments**, with Surge XT and Lo-lo's instruments, and **Tools**,
+  with app2clap and LReaParams. The Uninstall tab groups its rows the same
+  way. `rabbit packages --json` and
+  `rabbit packages --manifest --json` now give their `category` as
+  `instruments` and `tools` instead of `additional`.
+- app2clap now installs into REAPER's own plug-in folder, `UserPlugins\FX`,
+  instead of the per-user CLAP folder, so it works with a portable REAPER
+  too; only REAPER loads it there, not other CLAP hosts. In the standard
+  REAPER, the next update of app2clap, or a reinstall when you tick it on
+  the **Install or update** tab, moves the copy in the CLAP folder into its
+  backup, whether an earlier RABBIT or you put it there, so REAPER doesn't
+  load two copies; portable REAPERs and other programs that loaded it from
+  there then no longer find it, and the wizard says so. Until then every
+  REAPER loads that copy, so update app2clap in the standard REAPER before
+  you install it into a portable one.
 
 ### Fixed
 
@@ -492,9 +532,12 @@ from this file and posts it as the GitHub release body.
   reports as an empty path. It now asks you to close it, as it already did
   when Windows reported no location at all.
 - On macOS, the group rows in the **Packages** list (**Packages**,
-  **Additional software**, **Language packs**, **Configuration**) now show
-  their names, and VoiceOver reads them. Before, a group row had only its
+  **Instruments**, **Language packs**, **Configuration**) now show their
+  names, and VoiceOver reads them. Before, a group row had only its
   checkbox, so VoiceOver read it as a checkbox without a name.
+- On Windows, the **Language packs** heading in the **Packages** list now
+  updates its checkbox as soon as you tick or untick a language pack.
+  Before, it kept its old state until the list was built again.
 - On macOS, Tab and Shift+Tab no longer stop on a wizard page's scroll bar.
   When a page was too tall for the window, its scroll bar sat in the Tab
   order: on the **Packages** page, Shift+Tab from the package list went to
@@ -536,6 +579,10 @@ from this file and posts it as the GitHub release body.
   named with `--package` changes nothing and exits with 2. `setup`,
   `apply-packages` and `install-extension` now go by the target REAPER's own
   architecture, as the wizard does, not RABBIT's.
+- In a portable REAPER, a package that needs a standard installation, such
+  as Surge XT, now keeps saying so when its online version check fails.
+  Before, its row said that the version check failed instead, and Review
+  noted the failed check for a package that can't be installed there anyway.
 
 ### Security
 

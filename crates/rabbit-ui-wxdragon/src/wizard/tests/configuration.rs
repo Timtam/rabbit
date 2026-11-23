@@ -26,6 +26,7 @@ fn only_rows_that_offered_something_record_a_verdict() {
         installed_version: None,
         available_version: None,
         reason: "test".to_string(),
+        left_to_reapack: None,
     };
     let model = model_from_plan(
         &localizer,
@@ -96,6 +97,7 @@ fn a_tick_clears_any_refusal_but_only_remembering_packages_record_one() {
         installed_version: None,
         available_version: None,
         reason: "test".to_string(),
+        left_to_reapack: None,
     };
     let model = model_from_plan(
         &localizer,
@@ -159,6 +161,7 @@ fn a_declined_language_pack_stops_being_ticked_by_default() {
         installed_version: None,
         available_version: None,
         reason: "Missing".to_string(),
+        left_to_reapack: None,
     }];
 
     let suggested = package_rows(
@@ -380,6 +383,7 @@ fn additive_steps_still_auto_tick_for_an_already_installed_dependency() {
                 installed_version: Some(Version::parse("1.2.6").unwrap()),
                 available_version: Some(Version::parse("1.2.6").unwrap()),
                 reason: "installed".to_string(),
+                left_to_reapack: None,
             }],
             notes: Vec::new(),
         },
@@ -426,6 +430,7 @@ fn the_reawarp_step_is_in_the_configuration_group_in_every_locale() {
                     installed_version: Some(Version::parse("1.2.6").unwrap()),
                     available_version: Some(Version::parse("1.2.6").unwrap()),
                     reason: "installed".to_string(),
+                    left_to_reapack: None,
                 }],
                 notes: Vec::new(),
             },
@@ -509,6 +514,7 @@ fn configuration_row_unticks_when_dep_package_is_unticked_install() {
                 installed_version: None,
                 available_version: Some(Version::parse("1.2.6").unwrap()),
                 reason: "Missing".to_string(),
+                left_to_reapack: None,
             }],
             notes: Vec::new(),
         },

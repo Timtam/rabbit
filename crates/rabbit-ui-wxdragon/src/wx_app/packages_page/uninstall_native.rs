@@ -12,12 +12,11 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
 
-use rabbit_core::package::PackageCategory;
 use wxdragon::event::tree_events::TreeEventData;
 use wxdragon::prelude::*;
 use wxdragon::widgets::treectrl::{TreeCtrl, TreeItemId};
 
-use crate::{WizardModel, WizardUninstallList, apply_uninstall_checkbox};
+use crate::{WizardModel, WizardUninstallList, apply_uninstall_checkbox, package_tree_groups};
 
 use super::native::{build_checkbox_tree, clear_tree_without_taking_focus, native_tree_handle};
 use super::native_tree_checkboxes;
@@ -162,30 +161,17 @@ fn populate_uninstall_tree(
         *items.borrow_mut() = fresh;
         return;
     }
-    let groups = [
-        (PackageCategory::Core, &model.text.packages_tree_group_label),
-        (
-            PackageCategory::Additional,
-            &model.text.additional_software_tree_group_label,
-        ),
-        (
-            PackageCategory::Language,
-            &model.text.language_tree_group_label,
-        ),
-    ];
     fresh.leaves = vec![None; list.rows.len()];
-    for (category, label) in groups {
-        if !list.rows.iter().any(|row| row.category == category) {
-            continue;
-        }
+    for group in package_tree_groups(list.rows.iter().map(|row| row.category)) {
+        let label = model.text.package_group_label(group.category);
         let Some(heading) = tree.append_item(&root, label, None, None) else {
             continue;
         };
         native_tree_checkboxes::clear_check_state(hwnd, &heading);
-        for (index, row) in list.rows.iter().enumerate() {
-            if row.category != category {
+        for index in group.rows {
+            let Some(row) = list.rows.get(index) else {
                 continue;
-            }
+            };
             if let Some(item) = tree.append_item(&heading, &row.summary, None, None) {
                 native_tree_checkboxes::set_check_state(hwnd, &item, row.selected);
                 fresh.leaves[index] = Some(item);

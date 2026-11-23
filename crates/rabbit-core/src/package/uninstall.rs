@@ -333,6 +333,13 @@ pub struct UninstallRemoveSpec {
     /// Folders removed after the files, and only when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dirs_if_empty: Vec<UninstallPath>,
+    /// Folders removed after the files with every folder inside them, each
+    /// only when it is empty by then, innermost first: a plug-in bundle's
+    /// folder, whose folders the receipt doesn't list. A file left anywhere
+    /// in one keeps the folders on its way, and a symbolic link or junction
+    /// anywhere in one keeps the whole folder as it is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trees_if_empty: Vec<UninstallPath>,
     /// Whole folders such as macOS bundles, removed in this order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trees: Vec<UninstallTree>,
@@ -884,6 +891,7 @@ impl PathUse {
 
 const REMOVE_PATHS: PathUse = PathUse::new("remove.paths", true, false, true);
 const DIRS_IF_EMPTY: PathUse = PathUse::new("remove.dirs_if_empty", true, false, false);
+const TREES_IF_EMPTY: PathUse = PathUse::new("remove.trees_if_empty", true, false, false);
 const TREES: PathUse = PathUse::new("remove.trees", true, true, false);
 const KEEP: PathUse = PathUse::new("keep", false, false, true);
 const KEPT_USER_DATA: PathUse = PathUse::new("kept_user_data", false, false, false);
@@ -1164,6 +1172,9 @@ fn validate_plan(spec: &EmbeddedPackageSpec, plan: &UninstallPlanSpec) -> Result
     for path in &plan.remove.dirs_if_empty {
         check_path(plan, path, DIRS_IF_EMPTY)?;
     }
+    for path in &plan.remove.trees_if_empty {
+        check_path(plan, path, TREES_IF_EMPTY)?;
+    }
     for tree in &plan.remove.trees {
         check_path(plan, &tree.path, TREES)?;
     }
@@ -1282,6 +1293,7 @@ fn validate_files_elevation(plan: &UninstallPlanSpec) -> Result<(), String> {
             ("matching_user_plugins", remove.matching_user_plugins),
             ("paths", !remove.paths.is_empty()),
             ("dirs_if_empty", !remove.dirs_if_empty.is_empty()),
+            ("trees_if_empty", !remove.trees_if_empty.is_empty()),
             ("vendor_added_files", remove.vendor_added_files.is_some()),
             ("registry_cleanup", !plan.registry_cleanup.is_empty()),
         ];
@@ -1695,7 +1707,7 @@ fn validate_machine_cleanup(
 /// a pattern, a stream or a device, and no trailing dot or space, which
 /// Windows drops, so one name can't be spelt two ways. That also refuses
 /// `.` and `..`.
-fn is_plain_file_name(name: &str) -> bool {
+pub(crate) fn is_plain_file_name(name: &str) -> bool {
     !name.is_empty()
         && !ends_in_dot_or_space(name)
         && !name.chars().any(|ch| {
@@ -1711,7 +1723,7 @@ fn is_plain_file_name(name: &str) -> bool {
 /// The part before the first dot decides, so `nul.txt` counts too. This
 /// errs on the side of refusing: newer Windows versions read fewer names
 /// this way.
-fn is_windows_device_name(name: &str) -> bool {
+pub(crate) fn is_windows_device_name(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
     let named = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
         .iter()

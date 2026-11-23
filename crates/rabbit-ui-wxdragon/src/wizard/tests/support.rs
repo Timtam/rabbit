@@ -34,6 +34,7 @@ pub(super) fn langpack_model(action: PlanActionKind) -> (Localizer, WizardModel)
                 installed_version: None,
                 available_version: None,
                 reason: "test".to_string(),
+                left_to_reapack: None,
             }],
             notes: Vec::new(),
         },

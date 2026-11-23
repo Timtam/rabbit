@@ -1725,9 +1725,11 @@ mod tests {
 
     use crate::package::{
         AssetMatch, AssetSelector, GithubArtifactKind, GithubReleaseSelector, GithubReleaseSpec,
-        HrefMatch, HttpArtifactSource, HttpArtifactSpec, HttpArtifactTarget, PACKAGE_APP2CLAP,
-        PACKAGE_FFMPEG, PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK, PACKAGE_REAPER,
-        PACKAGE_SURGE_XT, PACKAGE_SWS, SupportedPlatform, VersionSource,
+        HrefMatch, HttpArtifactSource, HttpArtifactSpec, HttpArtifactTarget, InstallDestination,
+        PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_LB_303, PACKAGE_LJUNO_116, PACKAGE_LR_608,
+        PACKAGE_LREAPARAMS, PACKAGE_LSAMPLER_24, PACKAGE_OSARA, PACKAGE_REAKONTROL,
+        PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS, SupportedPlatform,
+        VersionSource,
     };
     use tempfile::tempdir;
 
@@ -2130,6 +2132,7 @@ mod tests {
                 name_suffix: Some(".zip".to_string()),
                 exact_name: None,
                 artifact_kind: None,
+                ignore_case: false,
             }],
             artifact_kind: Some(GithubArtifactKind::Archive),
         }
@@ -2152,6 +2155,7 @@ mod tests {
                     name_suffix: Some(".zip".to_string()),
                     exact_name: None,
                     artifact_kind: None,
+                    ignore_case: false,
                 },
                 AssetSelector {
                     platform: SupportedPlatform::Macos,
@@ -2160,6 +2164,7 @@ mod tests {
                     name_suffix: Some(".zip".to_string()),
                     exact_name: None,
                     artifact_kind: None,
+                    ignore_case: false,
                 },
             ],
             artifact_kind: Some(GithubArtifactKind::Archive),
@@ -2176,6 +2181,7 @@ mod tests {
             name_suffix: None,
             exact_name: Some(name.to_string()),
             artifact_kind: None,
+            ignore_case: false,
         };
         GithubReleaseSpec {
             repo: "cfillion/reapack".to_string(),
@@ -2226,6 +2232,7 @@ mod tests {
                     name_suffix: Some("-setup.exe".to_string()),
                     exact_name: None,
                     artifact_kind: Some(GithubArtifactKind::Installer),
+                    ignore_case: false,
                 },
                 AssetSelector {
                     platform: SupportedPlatform::Macos,
@@ -2234,6 +2241,7 @@ mod tests {
                     name_suffix: Some(".dmg".to_string()),
                     exact_name: None,
                     artifact_kind: Some(GithubArtifactKind::DiskImage),
+                    ignore_case: false,
                 },
             ],
             artifact_kind: None,
@@ -3183,6 +3191,249 @@ mod tests {
         assert!(matches!(error, RabbitError::NoArtifactFound { .. }));
     }
 
+    /// LReaParams' release as GitHub's API lists it: the bare DLL beside an
+    /// installer zip whose name changes from release to release. The
+    /// manifest picks the DLL by its exact name, for an x64 REAPER and for
+    /// REAPER's ARM64EC build alike, and reads the version from the tag.
+    #[test]
+    fn resolves_lreaparams_dll_and_version_from_its_latest_release() {
+        let body = r#"{
+            "tag_name": "v0.0.75",
+            "name": "LReaParams 0.0.75 - Accessible Native Render Navigation",
+            "draft": false,
+            "prerelease": false,
+            "assets": [
+                {
+                    "name": "LReaParams-0.0.75-Windows-x64-SETUP-EXE.11.zip",
+                    "content_type": "application/x-zip-compressed",
+                    "size": 2668354,
+                    "browser_download_url": "https://github.com/Lo-lo78/LReaParams/releases/download/v0.0.75/LReaParams-0.0.75-Windows-x64-SETUP-EXE.11.zip"
+                },
+                {
+                    "name": "reaper_lreaparams.dll",
+                    "content_type": "application/x-msdownload",
+                    "size": 1881088,
+                    "browser_download_url": "https://github.com/Lo-lo78/LReaParams/releases/download/v0.0.75/reaper_lreaparams.dll"
+                }
+            ]
+        }"#;
+        let specs = crate::package::package_specs_by_id(Platform::Windows);
+        let spec = specs[PACKAGE_LREAPARAMS].github_release.clone().unwrap();
+        let url = crate::latest::github_release_url(&spec);
+        assert_eq!(
+            url,
+            "https://api.github.com/repos/Lo-lo78/LReaParams/releases/latest"
+        );
+        assert_eq!(
+            crate::latest::resolve_github_version(body, &url, &spec)
+                .unwrap()
+                .raw(),
+            "0.0.75"
+        );
+
+        for architecture in [
+            Architecture::X64,
+            Architecture::Arm64,
+            Architecture::Arm64Ec,
+        ] {
+            let artifact = resolve_github_artifact_from_release_body(
+                body,
+                &url,
+                PACKAGE_LREAPARAMS,
+                &spec,
+                Platform::Windows,
+                architecture,
+            )
+            .unwrap();
+            assert_eq!(artifact.package_id, PACKAGE_LREAPARAMS);
+            assert_eq!(artifact.kind, ArtifactKind::ExtensionBinary);
+            assert_eq!(artifact.version.raw(), "0.0.75");
+            assert_eq!(artifact.file_name, "reaper_lreaparams.dll");
+            assert_eq!(
+                artifact.url,
+                "https://github.com/Lo-lo78/LReaParams/releases/download/v0.0.75/reaper_lreaparams.dll"
+            );
+            assert_eq!(artifact.architecture, architecture);
+        }
+
+        // A 32-bit REAPER can't load a 64-bit DLL, and there is no Mac build.
+        for (platform, architecture) in [
+            (Platform::Windows, Architecture::X86),
+            (Platform::MacOs, Architecture::Arm64),
+        ] {
+            let error = resolve_github_artifact_from_release_body(
+                body,
+                &url,
+                PACKAGE_LREAPARAMS,
+                &spec,
+                platform,
+                architecture,
+            )
+            .unwrap_err();
+            assert!(matches!(error, RabbitError::NoArtifactFound { .. }));
+        }
+
+        // A release without the DLL offers nothing, rather than the zip.
+        let without_dll = r#"{
+            "tag_name": "v0.0.76",
+            "assets": [
+                {
+                    "name": "LReaParams-0.0.76-Windows-x64-SETUP-EXE.zip",
+                    "browser_download_url": "https://github.com/Lo-lo78/LReaParams/releases/download/v0.0.76/LReaParams-0.0.76-Windows-x64-SETUP-EXE.zip"
+                }
+            ]
+        }"#;
+        let error = resolve_github_artifact_from_release_body(
+            without_dll,
+            &url,
+            PACKAGE_LREAPARAMS,
+            &spec,
+            Platform::Windows,
+            Architecture::X64,
+        )
+        .unwrap_err();
+        assert!(matches!(error, RabbitError::NoArtifactFound { .. }));
+    }
+
+    /// Each of Lo-lo's instruments as GitHub's API lists its latest release:
+    /// one zip, named by hand, LB-303's with `.VST3.zip` where the others
+    /// have `.vst3.zip`, and LJuno-116's earlier ones as
+    /// `LJuno-116-Windows-VST3.zip` and `LJuno-116.vst3.zip`. The manifest
+    /// picks it by the product's name and `.zip` for an x64 REAPER and
+    /// REAPER's builds for Windows on ARM alike, and reads the version from
+    /// the tag without its `v`. Another instrument's zip, and a release
+    /// without the zip, offer nothing.
+    #[test]
+    fn resolves_each_lolo_instrument_zip_and_reads_the_version_from_the_tag() {
+        let specs = crate::package::package_specs_by_id(Platform::Windows);
+        for (package_id, product, asset, tag) in [
+            (
+                PACKAGE_LJUNO_116,
+                "LJuno-116",
+                "LJuno-116.0.99.66.vst3.zip",
+                "v0.99.66",
+            ),
+            (
+                PACKAGE_LJUNO_116,
+                "LJuno-116",
+                "LJuno-116-Windows-VST3.zip",
+                "v0.99.2",
+            ),
+            (
+                PACKAGE_LJUNO_116,
+                "LJuno-116",
+                "LJuno-116.vst3.zip",
+                "v0.99.3",
+            ),
+            (
+                PACKAGE_LB_303,
+                "LB-303",
+                "LB-303.0.99.7.VST3.zip",
+                "v0.99.7",
+            ),
+            (
+                PACKAGE_LR_608,
+                "LR-608",
+                "LR-608.0.99.34.vst3.zip",
+                "v0.99.34",
+            ),
+            (
+                PACKAGE_LSAMPLER_24,
+                "LSampler-24",
+                "LSampler-24.0.99.29.vst3.zip",
+                "v0.99.29",
+            ),
+        ] {
+            let download =
+                format!("https://github.com/Lo-lo78/{product}/releases/download/{tag}/{asset}");
+            let body = serde_json::json!({
+                "tag_name": tag,
+                "name": format!("{product} {tag}"),
+                "body": "What changed in this release.",
+                "draft": false,
+                "prerelease": false,
+                "assets": [
+                    {
+                        "name": "LMixer-12.0.1.0.vst3.zip",
+                        "browser_download_url": "https://github.com/Lo-lo78/LMixer-12/releases/download/v0.1.0/LMixer-12.0.1.0.vst3.zip"
+                    },
+                    {
+                        "name": asset,
+                        "content_type": "application/x-zip-compressed",
+                        "browser_download_url": download
+                    }
+                ]
+            })
+            .to_string();
+            let spec = specs[package_id].github_release.clone().unwrap();
+            let url = crate::latest::github_release_url(&spec);
+            assert_eq!(
+                url,
+                format!("https://api.github.com/repos/Lo-lo78/{product}/releases/latest")
+            );
+            assert_eq!(
+                crate::latest::resolve_github_version(&body, &url, &spec)
+                    .unwrap()
+                    .raw(),
+                tag.trim_start_matches('v')
+            );
+
+            for architecture in [
+                Architecture::X64,
+                Architecture::Arm64,
+                Architecture::Arm64Ec,
+            ] {
+                let artifact = resolve_github_artifact_from_release_body(
+                    &body,
+                    &url,
+                    package_id,
+                    &spec,
+                    Platform::Windows,
+                    architecture,
+                )
+                .unwrap();
+                assert_eq!(artifact.package_id, package_id);
+                assert_eq!(artifact.kind, ArtifactKind::Archive);
+                assert_eq!(artifact.version.raw(), tag.trim_start_matches('v'));
+                assert_eq!(artifact.file_name, asset);
+                assert_eq!(artifact.url, download);
+                assert_eq!(artifact.architecture, architecture);
+            }
+
+            let error = resolve_github_artifact_from_release_body(
+                &body,
+                &url,
+                package_id,
+                &spec,
+                Platform::Windows,
+                Architecture::X86,
+            )
+            .unwrap_err();
+            assert!(matches!(error, RabbitError::NoArtifactFound { .. }));
+
+            let without_zip = serde_json::json!({
+                "tag_name": tag,
+                "assets": [
+                    {
+                        "name": "LMixer-12.0.1.0.vst3.zip",
+                        "browser_download_url": "https://github.com/Lo-lo78/LMixer-12/releases/download/v0.1.0/LMixer-12.0.1.0.vst3.zip"
+                    }
+                ]
+            })
+            .to_string();
+            let error = resolve_github_artifact_from_release_body(
+                &without_zip,
+                &url,
+                package_id,
+                &spec,
+                Platform::Windows,
+                Architecture::X64,
+            )
+            .unwrap_err();
+            assert!(matches!(error, RabbitError::NoArtifactFound { .. }));
+        }
+    }
+
     /// Every architecture the wizard and the CLI can hand over for a REAPER.
     const EVERY_ARCHITECTURE: [Architecture; 6] = [
         Architecture::X86,
@@ -3214,6 +3465,14 @@ mod tests {
                         selector.name_suffix.as_deref().unwrap_or_default()
                     )
                 });
+                // A selector that ignores case finds its asset spelt the
+                // other way round, as LB-303's `.VST3.zip` beside the other
+                // instruments' `.vst3.zip`.
+                let name = if selector.ignore_case {
+                    swap_ascii_case(&name)
+                } else {
+                    name
+                };
                 serde_json::json!({
                     "name": name,
                     "browser_download_url": format!("https://example.test/{name}"),
@@ -3227,6 +3486,19 @@ mod tests {
             _ => "1.2.3",
         };
         serde_json::json!({ "tag_name": tag, "assets": assets }).to_string()
+    }
+
+    /// `name` with every ASCII letter in the other case.
+    fn swap_ascii_case(name: &str) -> String {
+        name.chars()
+            .map(|letter| {
+                if letter.is_ascii_lowercase() {
+                    letter.to_ascii_uppercase()
+                } else {
+                    letter.to_ascii_lowercase()
+                }
+            })
+            .collect()
     }
 
     /// The ids of the packages offered on `platform`.
@@ -3243,9 +3515,32 @@ mod tests {
     /// asset for every `github_release` selector, the `http_artifact`
     /// targets' `match_arches`, and a pull request build's platform. Where
     /// the rule refuses, the resolver is asked as well, and refuses before it
-    /// makes a request. Nothing goes online.
+    /// makes a request. Nothing goes online. Among the packages are
+    /// selectors that ignore case, whose assets the release spells the other
+    /// way round, whole plug-in bundles installed into `UserPlugins\FX`,
+    /// app2clap installed there too, and LReaParams, which RABBIT leaves to
+    /// ReaPack where ReaPack installed it.
     #[test]
     fn the_offline_rule_agrees_with_artifact_resolution_for_every_shipped_package() {
+        let windows = crate::package::package_specs_by_id(Platform::Windows);
+        for id in [
+            PACKAGE_LJUNO_116,
+            PACKAGE_LB_303,
+            PACKAGE_LR_608,
+            PACKAGE_LSAMPLER_24,
+        ] {
+            let spec = &windows[id];
+            assert!(spec.plugin_bundle.is_some(), "{id}");
+            assert_eq!(spec.install_destination, InstallDestination::UserPluginsFx);
+            let release = spec.github_release.as_ref().unwrap();
+            assert!(release.assets.iter().all(|asset| asset.ignore_case), "{id}");
+        }
+        assert_eq!(
+            windows[PACKAGE_APP2CLAP].install_destination,
+            InstallDestination::UserPluginsFx
+        );
+        assert!(windows[PACKAGE_LREAPARAMS].leave_to_reapack);
+
         for package in crate::package::embedded_package_manifest().packages {
             let channels = std::iter::once(None).chain(package.channels.iter().map(|channel| {
                 Some(match channel.parameter {
@@ -3336,11 +3631,12 @@ mod tests {
         }
     }
 
-    /// A 32-bit REAPER has no FFmpeg, Surge XT or app2clap, and has
-    /// everything else. Resolution refuses those three before it goes
-    /// online, Surge XT too, whose Windows asset matches any architecture.
+    /// A 32-bit REAPER has no FFmpeg, Surge XT, app2clap, LReaParams or any
+    /// of Lo-lo's four instruments, and has everything else. Resolution
+    /// refuses those before it goes online, Surge XT too, whose Windows
+    /// asset matches any architecture.
     #[test]
-    fn a_32_bit_reaper_has_no_build_of_ffmpeg_surge_xt_or_app2clap() {
+    fn a_32_bit_reaper_has_no_build_of_ffmpeg_surge_xt_app2clap_or_lolos_packages() {
         let without = packages_without_build(
             &package_ids_on(Platform::Windows),
             Platform::Windows,
@@ -3349,7 +3645,17 @@ mod tests {
         );
         assert_eq!(
             without,
-            [PACKAGE_FFMPEG, PACKAGE_SURGE_XT, PACKAGE_APP2CLAP].map(String::from)
+            [
+                PACKAGE_FFMPEG,
+                PACKAGE_SURGE_XT,
+                PACKAGE_LJUNO_116,
+                PACKAGE_LB_303,
+                PACKAGE_LR_608,
+                PACKAGE_LSAMPLER_24,
+                PACKAGE_APP2CLAP,
+                PACKAGE_LREAPARAMS,
+            ]
+            .map(String::from)
         );
         for package_id in &without {
             let error = resolve_latest_artifacts(
@@ -3367,7 +3673,8 @@ mod tests {
 
     /// REAPER on Windows on ARM and on a Mac keeps every package that has a
     /// build for it. SWS has no Windows build for ARM, as its `http_artifact`
-    /// targets say, and app2clap is x64 only.
+    /// targets say, and app2clap is x64 only. LReaParams and Lo-lo's
+    /// instruments list REAPER's builds for Windows on ARM, and stay.
     #[test]
     fn windows_on_arm_and_macos_keep_what_has_a_build_for_them() {
         let without = |platform, architecture| {
@@ -3387,6 +3694,22 @@ mod tests {
             assert!(expected_artifact_kind(PACKAGE_SWS, Platform::Windows, arm).is_err());
             assert!(expected_artifact_kind(PACKAGE_FFMPEG, Platform::Windows, arm).is_ok());
             assert!(expected_artifact_kind(PACKAGE_SURGE_XT, Platform::Windows, arm).is_ok());
+            assert_eq!(
+                expected_artifact_kind(PACKAGE_LREAPARAMS, Platform::Windows, arm).unwrap(),
+                ArtifactKind::ExtensionBinary
+            );
+            for instrument in [
+                PACKAGE_LJUNO_116,
+                PACKAGE_LB_303,
+                PACKAGE_LR_608,
+                PACKAGE_LSAMPLER_24,
+            ] {
+                assert_eq!(
+                    expected_artifact_kind(instrument, Platform::Windows, arm).unwrap(),
+                    ArtifactKind::Archive,
+                    "{instrument} on {arm:?}"
+                );
+            }
         }
         assert!(without(Platform::Windows, Architecture::X64).is_empty());
         // A universal REAPER is judged by the slice it runs as here.

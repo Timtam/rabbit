@@ -120,6 +120,33 @@ pub enum RabbitError {
     #[error("archive {archive} could not be read: {message}")]
     ArchiveRead { archive: PathBuf, message: String },
 
+    /// An entry of a plug-in bundle's archive that could reach outside the
+    /// folder it is extracted to, or that Windows would open under another
+    /// name, such as `../evil.dll` or a symbolic link. Refused before
+    /// anything is extracted: RABBIT installs nothing from such an archive.
+    #[error("RABBIT installs nothing from the archive {archive}: its entry \"{entry}\" {reason}")]
+    ArchiveEntryRefused {
+        archive: PathBuf,
+        entry: String,
+        reason: String,
+    },
+
+    /// A plug-in bundle's archive without the bundle's folder, or with the
+    /// folder but not the plug-in's binary at its place inside it.
+    #[error("archive {archive} has no {bundle} folder with {binary} in it")]
+    ArchiveMissingBundleBinary {
+        archive: PathBuf,
+        bundle: String,
+        binary: String,
+    },
+
+    /// A place a plug-in bundle installs into, or a folder on the way to it,
+    /// isn't what the bundle needs there, such as a symbolic link or
+    /// junction, which RABBIT never follows, or a file where the bundle
+    /// needs a folder. Refused before the bundle's first file is written.
+    #[error("RABBIT didn't install into {path}: {reason}")]
+    InstallPathRefused { path: PathBuf, reason: String },
+
     #[error("archive {archive} did not contain the expected OSARA installer assets")]
     OsaraArchiveMissingAssets { archive: PathBuf },
 

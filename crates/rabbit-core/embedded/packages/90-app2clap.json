@@ -1,11 +1,13 @@
 {
   "id": "app2clap",
-  "requires_standard_install": true,
   "display_name": "app2clap",
   "display_name_key": "package-app2clap",
   "display_description_key": "package-app2clap-description",
   "package_kind": "user_plugin_binary",
-  "install_destination": "windows_clap_dir",
+  "install_destination": "user_plugins_fx",
+  "former_install_destinations": [
+    "windows_clap_dir"
+  ],
   "required": false,
   "recommended": false,
   "supported_platforms": [
@@ -47,6 +49,23 @@
     "plans": [
       {
         "platform": "windows",
+        "target": "standard",
+        "strategy": "remove_files",
+        "summary": {
+          "removes_key": "uninstall-summary-app2clap-removes-standard",
+          "keeps_key": "uninstall-summary-app2clap-keeps"
+        },
+        "remove": {
+          "receipt_files": true,
+          "paths": [
+            "{resource}/UserPlugins/FX/app2clap.clap",
+            "{clap_dir}/app2clap.clap"
+          ]
+        }
+      },
+      {
+        "platform": "windows",
+        "target": "portable",
         "strategy": "remove_files",
         "summary": {
           "removes_key": "uninstall-summary-app2clap-removes",
@@ -55,15 +74,9 @@
         "remove": {
           "receipt_files": true,
           "paths": [
-            "{clap_dir}/app2clap.clap"
+            "{resource}/UserPlugins/FX/app2clap.clap"
           ]
-        },
-        "kept_user_data": [
-          {
-            "path": "{clap_dir}",
-            "note_key": "uninstall-kept-app2clap-clap-folder"
-          }
-        ]
+        }
       }
     ]
   },
@@ -77,5 +90,5 @@
     ],
     "macos": []
   },
-  "category": "additional"
+  "category": "tools"
 }

@@ -21,13 +21,13 @@ use crate::artifact::{
 };
 use crate::cancel::CancelToken;
 use crate::detection::{
-    default_standard_installation, detect_components, matching_user_plugin_files,
+    default_standard_installation, detect_components, left_to_reapack, matching_user_plugin_files,
 };
 use crate::error::{IoPathContext, RabbitError};
 use crate::install::{
     InstallFileReport, InstallOptions, InstallReport, install_cached_artifacts_with_progress,
 };
-use crate::model::{Architecture, ComponentDetection, InstallationKind, Platform};
+use crate::model::{Architecture, ComponentDetection, InstallationKind, LeftToReapack, Platform};
 use crate::osara_keymap::osara_keymap_state;
 use crate::package::package_specs_by_id;
 use crate::package::uninstall::UninstallPath;
@@ -37,6 +37,7 @@ use crate::preflight::{
     ensure_resource_path_ready, running_processes_named, running_reaper_processes,
 };
 use crate::progress::{ProgressEvent, ProgressReporter};
+use crate::reapack::reapack_counts_as_installed;
 use crate::receipt::{
     InstallState, PackageReceiptParams, load_install_state, save_install_state,
     upsert_package_receipt,
@@ -170,6 +171,10 @@ pub enum PackageOperationMessage {
     /// `extension_binary` install path completed: a single user-plugin
     /// DLL was placed into `UserPlugins`.
     ExtensionBinaryInstalled,
+    /// RABBIT put a plug-in into REAPER's own plug-in folder,
+    /// `UserPlugins\FX`, itself, as it does Lo-lo's instruments and
+    /// app2clap: REAPER finds it after its next start or a plug-in rescan.
+    PluginInstalled,
     /// Plan kept the installed version because it's current or newer
     /// than the latest upstream release.
     SkippedCurrent {
@@ -183,6 +188,14 @@ pub enum PackageOperationMessage {
     /// would be meaningless (and would read as "hd6debe3ec507 is current or
     /// newer than hd6debe3ec507").
     SkippedContentUnchanged,
+    /// ReaPack's records say it installed this package as
+    /// `reapack_package`, so RABBIT left it to ReaPack. Only for a package
+    /// whose manifest says `leave_to_reapack`.
+    SkippedManagedByReapack { reapack_package: String },
+    /// RABBIT couldn't read ReaPack's records to tell whether ReaPack
+    /// installed this package, so it left it alone. `error` is the canonical
+    /// English error text.
+    SkippedReapackRecordsUnreadable { error: String },
     /// Dry-run preview: this artifact would be downloaded and run
     /// unattended.
     DryRunWouldRunUnattended { artifact_kind: ArtifactKind },
@@ -348,6 +361,9 @@ pub enum PackageOperationStatus {
     /// why this is not a failure: the report says "we never got here",
     /// not "we tried and it broke".
     Cancelled,
+    /// ReaPack looks after this package, so RABBIT left it as it was, even
+    /// when asked for it by name. Not a failure: nothing was meant to change.
+    SkippedLeftToReapack,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -701,6 +717,13 @@ fn execute_operation_with(
     let mut deferred_installable = Vec::new();
 
     for artifact in artifacts {
+        // A copy ReaPack looks after stays as it is, even when the user
+        // named the package or ticked it again. Asked of the disk right now,
+        // since a caller may pass no detections at all.
+        if let Some(left) = left_to_reapack_for(resource_path, &artifact, detections) {
+            items.push(left_to_reapack_item(artifact, left));
+            continue;
+        }
         let plan_action = {
             let computed = plan_action_for_artifact(&artifact, detections);
             // Honor the user's explicit re-tick: a Keep computed from
@@ -1157,19 +1180,20 @@ fn execute_operation_with(
             progress,
         ) {
             Ok(report) => {
+                let (message, message_code) = direct_install_message(&cached.descriptor);
                 items.push(PackageOperationItem {
                     package_id: cached.descriptor.package_id.clone(),
                     plan_action: planned.plan_action,
                     status: PackageOperationStatus::InstalledOrChecked,
                     artifact: cached.descriptor.clone(),
                     cached_artifact: Some(cached.clone()),
-                    install_action: report.actions.first().cloned(),
+                    install_action: package_install_action(&report, &cached.descriptor),
                     backup_paths: Vec::new(),
                     backup_manifest_path: None,
                     planned_execution: None,
                     manual_instruction: None,
-                    message: "Single extension binary handled by RABBIT installer.".to_string(),
-                    message_code: PackageOperationMessage::ExtensionBinaryInstalled,
+                    message: message.to_string(),
+                    message_code,
                 });
                 merge_install_report(&mut install_report, report);
             }
@@ -1205,6 +1229,49 @@ fn execute_operation_with(
         receipt_backup_manifest_path: None,
         items,
     })
+}
+
+/// What a package RABBIT installed itself, file by file, says once its
+/// files are in place, in English and as its code: a plug-in in REAPER's
+/// own plug-in folder, `UserPlugins\FX`, says where it went and when REAPER
+/// finds it; any other package is an extension's binary.
+fn direct_install_message(
+    artifact: &ArtifactDescriptor,
+) -> (&'static str, PackageOperationMessage) {
+    let destination = package_specs_by_id(artifact.platform)
+        .remove(&artifact.package_id)
+        .map(|spec| spec.install_destination);
+    if destination == Some(crate::package::InstallDestination::UserPluginsFx) {
+        (
+            "Installed into REAPER's UserPlugins\\FX folder. REAPER finds it after its next \
+             start or a plug-in rescan.",
+            PackageOperationMessage::PluginInstalled,
+        )
+    } else {
+        (
+            "Single extension binary handled by RABBIT installer.",
+            PackageOperationMessage::ExtensionBinaryInstalled,
+        )
+    }
+}
+
+/// The install action that stands for the package in its item: its first
+/// file's, or for a plug-in bundle its binary's, which goes in after every
+/// other file of the bundle. The files of its previous version that moved
+/// out come after its own actions (see `crate::install`), and never stand
+/// for it.
+pub(crate) fn package_install_action(
+    report: &InstallReport,
+    artifact: &ArtifactDescriptor,
+) -> Option<InstallFileReport> {
+    let mut own = report
+        .actions
+        .iter()
+        .filter(|action| !action.action.is_superseded_file());
+    let bundle = package_specs_by_id(platform_of(artifact))
+        .get(&artifact.package_id)
+        .is_some_and(|spec| spec.plugin_bundle.is_some());
+    if bundle { own.next_back() } else { own.next() }.cloned()
 }
 
 /// The platform an artifact descriptor was resolved for.
@@ -1308,6 +1375,54 @@ fn receipt_channel(resource_path: &Path, package_id: &str) -> Option<String> {
                 .get(package_id)
                 .and_then(|r| r.channel.clone())
         })
+}
+
+/// Why this run leaves `artifact`'s package to ReaPack, if it does. Without
+/// a detection for ReaPack, ReaPack counts as installed, so an empty
+/// `detections` errs on the side of leaving the copy alone.
+fn left_to_reapack_for(
+    resource_path: &Path,
+    artifact: &ArtifactDescriptor,
+    detections: &[ComponentDetection],
+) -> Option<LeftToReapack> {
+    if !reapack_counts_as_installed(detections) {
+        return None;
+    }
+    let specs = package_specs_by_id(artifact.platform);
+    left_to_reapack(resource_path, specs.get(&artifact.package_id)?)
+}
+
+fn left_to_reapack_item(artifact: ArtifactDescriptor, left: LeftToReapack) -> PackageOperationItem {
+    let (message, message_code) = match left {
+        LeftToReapack::Managed { reapack_package } => (
+            format!(
+                "ReaPack's records say it installed this package as {reapack_package}, so \
+                 RABBIT left it to ReaPack. Install, update or remove it in ReaPack."
+            ),
+            PackageOperationMessage::SkippedManagedByReapack { reapack_package },
+        ),
+        LeftToReapack::RecordsUnreadable { error } => (
+            format!(
+                "RABBIT couldn't read ReaPack's records ({error}), so it can't tell whether \
+                 ReaPack installed this package, and didn't install or update it."
+            ),
+            PackageOperationMessage::SkippedReapackRecordsUnreadable { error },
+        ),
+    };
+    PackageOperationItem {
+        package_id: artifact.package_id.clone(),
+        plan_action: PlanActionKind::Keep,
+        status: PackageOperationStatus::SkippedLeftToReapack,
+        message,
+        message_code,
+        artifact,
+        cached_artifact: None,
+        install_action: None,
+        backup_paths: Vec::new(),
+        backup_manifest_path: None,
+        planned_execution: None,
+        manual_instruction: None,
+    }
 }
 
 fn skipped_current_item(
@@ -2622,8 +2737,8 @@ mod tests {
     use crate::model::{Architecture, ComponentDetection, Confidence, Platform};
     use crate::package::uninstall::UninstallPath;
     use crate::package::{
-        PACKAGE_JAWS_SCRIPTS, PACKAGE_OSARA, PACKAGE_REAKONTROL, PACKAGE_REAPACK, PACKAGE_REAPER,
-        PACKAGE_SURGE_XT, PACKAGE_SWS,
+        PACKAGE_JAWS_SCRIPTS, PACKAGE_LREAPARAMS, PACKAGE_OSARA, PACKAGE_REAKONTROL,
+        PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS,
     };
     use crate::plan::PlanActionKind;
     use crate::preflight::RunningProcess;
@@ -4804,6 +4919,203 @@ mod tests {
         );
     }
 
+    /// Options for a real run in `dir`, with its own install lock and nothing
+    /// forced unless `force` names it.
+    fn real_run_options(dir: &std::path::Path, force: &[&str]) -> PackageOperationOptions {
+        PackageOperationOptions {
+            dry_run: false,
+            allow_reaper_running: true,
+            stage_unsupported: false,
+            replace_osara_keymap: false,
+            target_app_path: None,
+            lock_path: Some(dir.join("locks").join("install.lock")),
+            force_reinstall_packages: force.iter().map(|id| id.to_string()).collect(),
+            package_variants: Default::default(),
+            package_channels: Default::default(),
+        }
+    }
+
+    /// LReaParams' release asset as the resolver hands it over: the bare DLL,
+    /// here read from `source`.
+    fn lreaparams_dll(source: &std::path::Path) -> ArtifactDescriptor {
+        ArtifactDescriptor {
+            version: Version::parse("0.0.75").unwrap(),
+            ..artifact_with_url(
+                PACKAGE_LREAPARAMS,
+                ArtifactKind::ExtensionBinary,
+                "reaper_lreaparams.dll",
+                &source.display().to_string(),
+            )
+        }
+    }
+
+    /// A package RABBIT installs into REAPER's own plug-in folder,
+    /// UserPlugins\FX, says so once it is in place, and when REAPER finds
+    /// it: a VST3 bundle is a folder of many files, not a single extension
+    /// binary. Any other package that RABBIT installs file by file is an
+    /// extension's binary.
+    #[test]
+    fn a_plugin_in_the_fx_folder_says_where_it_went() {
+        for package_id in [
+            crate::package::PACKAGE_APP2CLAP,
+            crate::package::PACKAGE_LJUNO_116,
+            crate::package::PACKAGE_LB_303,
+            crate::package::PACKAGE_LR_608,
+            crate::package::PACKAGE_LSAMPLER_24,
+        ] {
+            let artifact =
+                artifact_with_url(package_id, ArtifactKind::Archive, "plug-in.zip", "unused");
+            let (message, code) = super::direct_install_message(&artifact);
+            assert_eq!(
+                code,
+                PackageOperationMessage::PluginInstalled,
+                "{package_id}"
+            );
+            assert!(
+                message.contains("UserPlugins\\FX"),
+                "{package_id}: {message}"
+            );
+        }
+        let artifact = artifact_with_url(
+            PACKAGE_LREAPARAMS,
+            ArtifactKind::ExtensionBinary,
+            "reaper_lreaparams.dll",
+            "unused",
+        );
+        assert_eq!(
+            super::direct_install_message(&artifact).1,
+            PackageOperationMessage::ExtensionBinaryInstalled
+        );
+    }
+
+    /// LReaParams' bare DLL goes straight into UserPlugins under its own
+    /// name, with a receipt, through which detection then finds it.
+    #[test]
+    fn installs_the_bare_lreaparams_dll_with_a_receipt() {
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let resource_path = dir.path().join("REAPER");
+        fs::create_dir_all(resource_path.join("UserPlugins")).unwrap();
+        let source = dir.path().join("reaper_lreaparams.dll");
+        fs::write(&source, b"LReaParams 0.0.75").unwrap();
+
+        let report = execute_resolved_package_operation(
+            &resource_path,
+            vec![lreaparams_dll(&source)],
+            cache.path(),
+            &real_run_options(dir.path(), &[]),
+        )
+        .unwrap();
+
+        let item = &report.items[0];
+        assert_eq!(item.status, PackageOperationStatus::InstalledOrChecked);
+        assert_eq!(
+            item.message_code,
+            PackageOperationMessage::ExtensionBinaryInstalled
+        );
+        let installed = resource_path
+            .join("UserPlugins")
+            .join("reaper_lreaparams.dll");
+        assert_eq!(fs::read(&installed).unwrap(), b"LReaParams 0.0.75");
+        let state = load_install_state(&resource_path).unwrap().unwrap();
+        let receipt = &state.packages[PACKAGE_LREAPARAMS];
+        assert_eq!(receipt.version.as_ref().unwrap().raw(), "0.0.75");
+        assert_eq!(
+            receipt
+                .installed_files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+            vec![std::path::Path::new("UserPlugins").join("reaper_lreaparams.dll")]
+        );
+
+        let detections = crate::detection::detect_components_with_probes(
+            &resource_path,
+            Platform::Windows,
+            |_| None,
+        )
+        .unwrap();
+        let found = detections
+            .iter()
+            .find(|detection| detection.package_id == PACKAGE_LREAPARAMS)
+            .unwrap();
+        assert!(found.installed);
+        assert_eq!(found.detector, "rabbit-receipt");
+        assert_eq!(found.version.as_ref().unwrap().raw(), "0.0.75");
+    }
+
+    /// A copy ReaPack installed and keeps up to date is left as it is, even
+    /// when the user asks for the package by name: nothing is downloaded,
+    /// replaced or recorded. Without a detection for ReaPack, ReaPack counts
+    /// as installed. Once ReaPack is gone, nothing keeps its records, and the
+    /// copy is updated like any other.
+    #[test]
+    fn never_installs_over_a_copy_reapack_looks_after() {
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let resource_path = dir.path().join("REAPER");
+        let plugins = resource_path.join("UserPlugins");
+        fs::create_dir_all(&plugins).unwrap();
+        let installed = plugins.join("reaper_lreaparams.dll");
+        fs::write(&installed, b"LReaParams from ReaPack").unwrap();
+        crate::reapack::write_test_registry(
+            &resource_path,
+            &[(
+                "LReaParams.ext",
+                "0.0.70",
+                &["UserPlugins/reaper_lreaparams.dll"],
+            )],
+        );
+        let source = dir.path().join("reaper_lreaparams.dll");
+        fs::write(&source, b"LReaParams 0.0.75").unwrap();
+        let options = real_run_options(dir.path(), &[PACKAGE_LREAPARAMS]);
+
+        let report = execute_resolved_package_operation(
+            &resource_path,
+            vec![lreaparams_dll(&source)],
+            cache.path(),
+            &options,
+        )
+        .unwrap();
+
+        let item = &report.items[0];
+        assert_eq!(item.status, PackageOperationStatus::SkippedLeftToReapack);
+        assert_eq!(item.plan_action, PlanActionKind::Keep);
+        assert_eq!(
+            item.message_code,
+            PackageOperationMessage::SkippedManagedByReapack {
+                reapack_package: "LReaParams.ext".to_string()
+            }
+        );
+        assert!(item.cached_artifact.is_none());
+        assert!(!report.has_failures());
+        assert!(report.install_report.is_none());
+        assert_eq!(fs::read(&installed).unwrap(), b"LReaParams from ReaPack");
+        assert!(
+            load_install_state(&resource_path)
+                .unwrap()
+                .is_none_or(|state| !state.packages.contains_key(PACKAGE_LREAPARAMS))
+        );
+
+        let reapack_gone = [ComponentDetection::not_installed(
+            PACKAGE_REAPACK,
+            "ReaPack",
+        )];
+        let report = execute_resolved_package_operation_with_detections(
+            &resource_path,
+            vec![lreaparams_dll(&source)],
+            &reapack_gone,
+            cache.path(),
+            &options,
+        )
+        .unwrap();
+        assert_eq!(
+            report.items[0].status,
+            PackageOperationStatus::InstalledOrChecked
+        );
+        assert_eq!(fs::read(&installed).unwrap(), b"LReaParams 0.0.75");
+    }
+
     /// The wizard's Close button cancels through this path, so a cancelled
     /// run has to look like a run that stopped, not one that broke: no
     /// package reports a failure, the report says what was skipped, and the
@@ -5908,6 +6220,7 @@ mod tests {
             confidence: Confidence::High,
             files: Vec::new(),
             notes: Vec::new(),
+            left_to_reapack: None,
         }
     }
 

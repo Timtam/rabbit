@@ -3,7 +3,7 @@ use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::{IoPathContext, RabbitError, Result};
-use crate::package::PackageSpec;
+use crate::package::{PackageSpec, PluginBundleSpec};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedUserPlugin {
@@ -78,6 +78,209 @@ pub fn extract_user_plugin_from_archive(
         extracted_path,
         file_name: basename,
     })
+}
+
+/// One file of a plug-in bundle, extracted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedBundleFile {
+    /// Where it goes inside the bundle folder, one name per component, as
+    /// the archive spells them.
+    pub relative: PathBuf,
+    pub extracted_path: PathBuf,
+}
+
+/// Extract the plug-in bundle folder `bundle` names from the top of the zip
+/// at `archive_path` into `extract_dir`, keeping the paths below it. Returns
+/// the bundle's files, the binary last, each with its path inside the
+/// bundle. The bundle folder is found ignoring ASCII case; everything else
+/// in the archive is ignored.
+///
+/// Every entry of the archive is checked before anything is written, and
+/// the whole archive is refused with [`RabbitError::ArchiveEntryRefused`]
+/// for an entry that is a symbolic link, or whose name is absolute, has a
+/// drive, a stream or an empty folder name, climbs out with `..`, or holds
+/// a name Windows can't open as written, such as one ending in a dot or
+/// naming a device. Inside the bundle, two files whose paths differ only in
+/// case, and a path that is both a file and a folder, are refused the same
+/// way: Windows would write one over the other. A bundle without its binary
+/// is [`RabbitError::ArchiveMissingBundleBinary`]. `\` counts as a
+/// separator too, as some Windows tools write it.
+pub fn extract_plugin_bundle_from_archive(
+    archive_path: &Path,
+    bundle: &PluginBundleSpec,
+    extract_dir: &Path,
+) -> Result<Vec<ExtractedBundleFile>> {
+    let file = fs::File::open(archive_path).with_path(archive_path)?;
+    let mut archive =
+        zip::ZipArchive::new(BufReader::new(file)).map_err(|source| RabbitError::ArchiveRead {
+            archive: archive_path.to_path_buf(),
+            message: source.to_string(),
+        })?;
+    let refused = |entry: &str, reason: &str| RabbitError::ArchiveEntryRefused {
+        archive: archive_path.to_path_buf(),
+        entry: entry.to_string(),
+        reason: reason.to_string(),
+    };
+
+    // Every entry is checked first; only then is anything written.
+    // Each file of the bundle: its index, its name and its names below the
+    // bundle folder.
+    let mut files: Vec<(usize, String, Vec<String>)> = Vec::new();
+    let mut folders: Vec<Vec<String>> = Vec::new();
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|source| RabbitError::ArchiveRead {
+                archive: archive_path.to_path_buf(),
+                message: source.to_string(),
+            })?;
+        let name = zip_entry_name(&entry, archive_path)?;
+        if entry.is_symlink() || entry.external_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(refused(&name, "is a symbolic link"));
+        }
+        let components = bundle_entry_components(&name, entry.is_dir())
+            .map_err(|reason| refused(&name, reason))?;
+        if !components[0].eq_ignore_ascii_case(&bundle.name) {
+            continue;
+        }
+        if entry.is_dir() {
+            folders.push(components[1..].to_vec());
+        } else if components.len() > 1 {
+            files.push((index, name, components[1..].to_vec()));
+        } else {
+            return Err(refused(
+                &name,
+                "is a file where the plug-in bundle's folder should be",
+            ));
+        }
+    }
+
+    // Windows reads names ignoring case, so each file has a place of its
+    // own and no file sits where another one's folder is.
+    let folded = |components: &[String]| -> Vec<String> {
+        components.iter().map(|name| name.to_lowercase()).collect()
+    };
+    let mut file_places = std::collections::BTreeSet::new();
+    let mut folder_places: std::collections::BTreeSet<Vec<String>> =
+        folders.iter().map(|folder| folded(folder)).collect();
+    for (_, _, components) in &files {
+        for depth in 1..components.len() {
+            folder_places.insert(folded(&components[..depth]));
+        }
+    }
+    for (_, name, components) in &files {
+        let place = folded(components);
+        if folder_places.contains(&place) {
+            return Err(refused(name, "is both a file and a folder"));
+        }
+        if !file_places.insert(place) {
+            return Err(refused(
+                name,
+                "is in the archive twice, perhaps spelt in other upper and lower case",
+            ));
+        }
+    }
+
+    let binary: Vec<String> = bundle.binary_components().map(str::to_lowercase).collect();
+    let Some(binary_at) = files
+        .iter()
+        .position(|(_, _, components)| folded(components) == binary)
+    else {
+        return Err(RabbitError::ArchiveMissingBundleBinary {
+            archive: archive_path.to_path_buf(),
+            bundle: bundle.name.clone(),
+            binary: bundle.binary.clone(),
+        });
+    };
+    let binary_entry = files.remove(binary_at);
+    files.sort_by(|left, right| left.2.cmp(&right.2));
+    files.push(binary_entry);
+
+    fs::create_dir_all(extract_dir).with_path(extract_dir)?;
+    let mut extracted = Vec::with_capacity(files.len());
+    for (index, _, components) in files {
+        let relative: PathBuf = components.iter().collect();
+        let target = extract_dir.join(&relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).with_path(parent)?;
+        }
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|source| RabbitError::ArchiveRead {
+                archive: archive_path.to_path_buf(),
+                message: source.to_string(),
+            })?;
+        let mut output = fs::File::create(&target).with_path(&target)?;
+        std::io::copy(&mut entry, &mut output).with_path(&target)?;
+        output.flush().with_path(&target)?;
+        extracted.push(ExtractedBundleFile {
+            relative,
+            extracted_path: target,
+        });
+    }
+    Ok(extracted)
+}
+
+/// Windows' attribute of a symbolic link or junction, as a zip made on
+/// Windows may record it in an entry's external attributes.
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+/// The names an entry's path is made of, or why the entry is refused. The
+/// one separator a folder entry ends with is dropped first.
+fn bundle_entry_components(
+    name: &str,
+    is_dir: bool,
+) -> std::result::Result<Vec<String>, &'static str> {
+    if name.is_empty() {
+        return Err("has no name");
+    }
+    if name.starts_with(['/', '\\']) {
+        return Err("is an absolute path");
+    }
+    if name.contains(':') {
+        return Err("names a drive or a stream");
+    }
+    let trimmed = if is_dir {
+        name.strip_suffix(['/', '\\']).unwrap_or(name)
+    } else {
+        name
+    };
+    let mut components = Vec::new();
+    for component in trimmed.split(['/', '\\']) {
+        match component {
+            "" => return Err("has an empty folder name"),
+            "." | ".." => return Err("climbs out of its folder with . or .."),
+            _ if !windows_opens_as_written(component) => {
+                return Err("holds a name Windows can't open as written");
+            }
+            _ if is_rabbit_temporary_name(component) => {
+                return Err("has a name RABBIT keeps for its own temporary files");
+            }
+            _ => components.push(component.to_string()),
+        }
+    }
+    Ok(components)
+}
+
+/// Whether `name` ends the way the temporary copies of an install or a
+/// restore do, ignoring ASCII case. Such an entry would take the name of
+/// another file's copy while it waits beside its place, and could slip
+/// unchecked bytes into that file's place.
+fn is_rabbit_temporary_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".rabbit-tmp") || lower.ends_with(".rabbit-restore-tmp")
+}
+
+/// Whether Windows opens a file or folder by `name` under exactly that
+/// name: no character it reserves, no control character, no dot or space
+/// at the end, which it drops, and no device name such as `NUL`.
+fn windows_opens_as_written(name: &str) -> bool {
+    !name.is_empty()
+        && !name.ends_with(['.', ' '])
+        && !name.chars().any(|ch| {
+            matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || ch.is_control()
+        })
+        && !crate::package::uninstall::is_windows_device_name(name)
 }
 
 fn matches_user_plugin_file(file_name: &str, spec: &PackageSpec) -> bool {
@@ -522,6 +725,26 @@ pub fn extract_osara_macos_assets(
     })
 }
 
+/// Write a zip at `path` holding `entries`, each a name and what the file
+/// holds, stored as they are. A name ending in `/` is a folder. For tests.
+#[cfg(test)]
+pub(crate) fn write_test_zip(path: &Path, entries: &[(&str, &[u8])]) {
+    use zip::write::SimpleFileOptions;
+
+    let file = fs::File::create(path).unwrap();
+    let mut writer = zip::ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, contents) in entries {
+        if name.ends_with('/') {
+            writer.add_directory(*name, options).unwrap();
+        } else {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(contents).unwrap();
+        }
+    }
+    writer.finish().unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -529,14 +752,20 @@ mod tests {
     use tempfile::tempdir;
     use zip::write::SimpleFileOptions;
 
+    use std::path::PathBuf;
+
     use super::{
         extract_bin_directory_from_archive, extract_bin_directory_from_seven_zip_archive,
-        extract_osara_macos_assets, extract_user_plugin_from_archive, extract_zipped_installer,
-        osara_resources_suffix,
+        extract_osara_macos_assets, extract_plugin_bundle_from_archive,
+        extract_user_plugin_from_archive, extract_zipped_installer, osara_resources_suffix,
+        write_test_zip,
     };
     use crate::error::RabbitError;
     use crate::model::Platform;
-    use crate::package::{PACKAGE_FFMPEG, PACKAGE_REAKONTROL, package_specs_by_id};
+    use crate::package::{
+        PACKAGE_FFMPEG, PACKAGE_LJUNO_116, PACKAGE_REAKONTROL, PluginBundleSpec,
+        package_specs_by_id,
+    };
 
     /// A package that identifies its file by suffix alone (an empty prefix
     /// list) must match any basename with that suffix — REAPER language
@@ -966,6 +1195,324 @@ mod tests {
             error,
             RabbitError::ArchiveMissingExtensionBinary { .. }
         ));
+    }
+
+    /// LJuno-116's bundle as its release zip holds it.
+    fn ljuno_bundle() -> PluginBundleSpec {
+        package_specs_by_id(Platform::Windows)
+            .remove(PACKAGE_LJUNO_116)
+            .unwrap()
+            .plugin_bundle
+            .unwrap()
+    }
+
+    /// The bundle folder comes out whole, every file at its path inside it
+    /// and the binary last; files outside it, and another bundle beside it,
+    /// stay in the archive. The folder is found whatever its case.
+    #[test]
+    fn extracts_a_plugin_bundle_keeping_its_tree_and_the_binary_last() {
+        let dir = tempdir().unwrap();
+        let archive_path = dir.path().join("LJuno-116.0.99.66.vst3.zip");
+        write_test_zip(
+            &archive_path,
+            &[
+                ("ljuno-116.vst3/", b""),
+                (
+                    "ljuno-116.vst3/Contents/x86_64-win/LJuno-116.vst3",
+                    b"binary",
+                ),
+                ("ljuno-116.vst3/desktop.ini", b"ini"),
+                ("ljuno-116.vst3/Contents/Resources/moduleinfo.json", b"{}"),
+                ("ljuno-116.vst3/Plugin.ico", b"icon"),
+                ("README.txt", b"docs"),
+                ("Other.vst3/Contents/x86_64-win/Other.vst3", b"other"),
+            ],
+        );
+        let extract_dir = dir.path().join("extract");
+
+        let files =
+            extract_plugin_bundle_from_archive(&archive_path, &ljuno_bundle(), &extract_dir)
+                .unwrap();
+
+        let relative = |text: &str| text.split('/').collect::<PathBuf>();
+        let found: Vec<(PathBuf, Vec<u8>)> = files
+            .iter()
+            .map(|file| {
+                assert_eq!(file.extracted_path, extract_dir.join(&file.relative));
+                (
+                    file.relative.clone(),
+                    std::fs::read(&file.extracted_path).unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    relative("Contents/Resources/moduleinfo.json"),
+                    b"{}".to_vec()
+                ),
+                (relative("Plugin.ico"), b"icon".to_vec()),
+                (relative("desktop.ini"), b"ini".to_vec()),
+                (
+                    relative("Contents/x86_64-win/LJuno-116.vst3"),
+                    b"binary".to_vec()
+                ),
+            ]
+        );
+        assert!(!extract_dir.join("README.txt").exists());
+        assert!(!extract_dir.join("Other.vst3").exists());
+        assert!(!dir.path().join("Other.vst3").exists());
+    }
+
+    /// Any entry that could land outside the folder it is extracted to,
+    /// that Windows would open under another name, or that takes the name
+    /// of an install's or a restore's temporary copy, refuses the whole
+    /// archive, wherever in the archive it is, before anything is written.
+    #[test]
+    fn refuses_unsafe_entries_before_writing_anything() {
+        let unsafe_names = [
+            "../evil.dll",
+            "LJuno-116.vst3/../../evil.dll",
+            "LJuno-116.vst3/Contents/../../../evil.dll",
+            "LJuno-116.vst3/./desktop.ini",
+            "/absolute/evil.dll",
+            "\\absolute\\evil.dll",
+            "\\\\server\\share\\evil.dll",
+            "C:/Windows/evil.dll",
+            "C:evil.dll",
+            "LJuno-116.vst3/Contents/x86_64-win/LJuno-116.vst3:stream",
+            "LJuno-116.vst3//desktop.ini",
+            "LJuno-116.vst3/CON",
+            "LJuno-116.vst3/nul.txt",
+            "LJuno-116.vst3/trailing.",
+            "LJuno-116.vst3/trailing ",
+            "LJuno-116.vst3/a*b",
+            "LJuno-116.vst3/a?b",
+            "LJuno-116.vst3/a|b",
+            "LJuno-116.vst3/a\u{1}b",
+            "LJuno-116.vst3\\..\\evil.dll",
+            "LJuno-116.vst3/Contents/x86_64-win/LJuno-116.vst3.rabbit-tmp",
+            "LJuno-116.vst3/desktop.ini.RABBIT-RESTORE-TMP",
+        ];
+        for unsafe_name in unsafe_names {
+            for unsafe_first in [true, false] {
+                let dir = tempdir().unwrap();
+                let archive_path = dir.path().join("LJuno-116.vst3.zip");
+                let good: &[(&str, &[u8])] = &[
+                    ("LJuno-116.vst3/desktop.ini", b"ini"),
+                    (
+                        "LJuno-116.vst3/Contents/x86_64-win/LJuno-116.vst3",
+                        b"binary",
+                    ),
+                ];
+                let bad: &[(&str, &[u8])] = &[(unsafe_name, b"evil")];
+                let entries: Vec<(&str, &[u8])> = if unsafe_first {
+                    bad.iter().chain(good).copied().collect()
+                } else {
+                    good.iter().chain(bad).copied().collect()
+                };
+                write_test_zip(&archive_path, &entries);
+                let extract_dir = dir.path().join("extract");
+
+                let error = extract_plugin_bundle_from_archive(
+                    &archive_path,
+                    &ljuno_bundle(),
+                    &extract_dir,
+                )
+                .unwrap_err();
+
+                assert!(
+                    matches!(&error, RabbitError::ArchiveEntryRefused { entry, .. } if entry == unsafe_name),
+                    "{unsafe_name:?}: {error}"
+                );
+                assert!(!extract_dir.exists(), "{unsafe_name:?} wrote something");
+                assert!(!dir.path().join("evil.dll").exists());
+            }
+        }
+    }
+
+    /// A symbolic link in the archive, in the bundle or beside it, refuses
+    /// the archive before anything is written: extracting it could point a
+    /// later file anywhere.
+    #[test]
+    fn refuses_a_symbolic_link_entry_before_writing_anything() {
+        for link_name in [
+            "LJuno-116.vst3/Contents/x86_64-win/LJuno-116.vst3",
+            "LJuno-116.vst3/Contents/Resources",
+            "elsewhere",
+        ] {
+            let dir = tempdir().unwrap();
+            let archive_path = dir.path().join("LJuno-116.vst3.zip");
+            {
+                let file = std::fs::File::create(&archive_path).unwrap();
+                let mut writer = zip::ZipWriter::new(file);
+                let options =
+                    SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+                writer
+                    .start_file("LJuno-116.vst3/desktop.ini", options)
+                    .unwrap();
+                writer.write_all(b"ini").unwrap();
+                writer
+                    .add_symlink(link_name, "../../../../evil", options)
+                    .unwrap();
+                writer.finish().unwrap();
+            }
+            let extract_dir = dir.path().join("extract");
+
+            let error =
+                extract_plugin_bundle_from_archive(&archive_path, &ljuno_bundle(), &extract_dir)
+                    .unwrap_err();
+
+            assert!(
+                matches!(&error, RabbitError::ArchiveEntryRefused { entry, reason, .. }
+                    if entry == link_name && reason.contains("symbolic link")),
+                "{link_name}: {error}"
+            );
+            assert!(!extract_dir.exists());
+        }
+    }
+
+    /// An entry that a zip made on Windows marks as a symbolic link or
+    /// junction by the reparse-point bit of its attributes refuses the
+    /// archive too, though its Unix mode calls it a plain file.
+    #[test]
+    fn refuses_an_entry_marked_as_a_reparse_point_before_writing_anything() {
+        let dir = tempdir().unwrap();
+        let archive_path = dir.path().join("LJuno-116.vst3.zip");
+        let marked = "LJuno-116.vst3/Contents/Resources";
+        write_test_zip(
+            &archive_path,
+            &[
+                ("LJuno-116.vst3/desktop.ini", b"ini"),
+                (marked, b"../../../../evil"),
+                (
+                    "LJuno-116.vst3/Contents/x86_64-win/LJuno-116.vst3",
+                    b"binary",
+                ),
+            ],
+        );
+        // Without the bit, the same archive extracts.
+        extract_plugin_bundle_from_archive(
+            &archive_path,
+            &ljuno_bundle(),
+            &dir.path().join("plain"),
+        )
+        .unwrap();
+
+        // The entry's header in the central directory: its signature, the
+        // length of its name at 28 and the name at 46. Its external
+        // attributes, little-endian, are at 38; the reparse-point bit,
+        // 0x400, is in their second byte.
+        let mut bytes = std::fs::read(&archive_path).unwrap();
+        let header = (0..bytes.len() - 46)
+            .find(|&at| {
+                let length = usize::from(u16::from_le_bytes([bytes[at + 28], bytes[at + 29]]));
+                bytes[at..].starts_with(&[0x50, 0x4b, 0x01, 0x02])
+                    && bytes.get(at + 46..at + 46 + length) == Some(marked.as_bytes())
+            })
+            .expect("the entry is in the central directory");
+        bytes[header + 39] |= 0x04;
+        std::fs::write(&archive_path, &bytes).unwrap();
+        let extract_dir = dir.path().join("extract");
+
+        let error =
+            extract_plugin_bundle_from_archive(&archive_path, &ljuno_bundle(), &extract_dir)
+                .unwrap_err();
+
+        assert!(
+            matches!(&error, RabbitError::ArchiveEntryRefused { entry, reason, .. }
+                if entry == marked && reason.contains("symbolic link")),
+            "{error}"
+        );
+        assert!(!extract_dir.exists());
+    }
+
+    /// Windows reads names ignoring case, so two files whose paths differ
+    /// only in case, or a file where another one's folder is, would land on
+    /// one place: the archive is refused before anything is written.
+    #[test]
+    fn refuses_files_that_would_land_on_one_place() {
+        let cases: [&[(&str, &[u8])]; 3] = [
+            &[
+                ("LJuno-116.vst3/desktop.ini", b"one"),
+                ("LJuno-116.vst3/Desktop.INI", b"two"),
+            ],
+            &[
+                ("LJuno-116.vst3/Contents", b"a file"),
+                (
+                    "LJuno-116.vst3/Contents/x86_64-win/LJuno-116.vst3",
+                    b"binary",
+                ),
+            ],
+            &[
+                ("LJuno-116.vst3/Contents/Resources/", b""),
+                ("LJuno-116.vst3/contents/resources", b"a file"),
+            ],
+        ];
+        for entries in cases {
+            let dir = tempdir().unwrap();
+            let archive_path = dir.path().join("LJuno-116.vst3.zip");
+            let mut entries = entries.to_vec();
+            entries.push((
+                "LJuno-116.vst3/Contents/x86_64-win/LJuno-116.vst3",
+                b"binary",
+            ));
+            entries.dedup_by_key(|(name, _)| *name);
+            write_test_zip(&archive_path, &entries);
+            let extract_dir = dir.path().join("extract");
+
+            let error =
+                extract_plugin_bundle_from_archive(&archive_path, &ljuno_bundle(), &extract_dir)
+                    .unwrap_err();
+
+            assert!(
+                matches!(error, RabbitError::ArchiveEntryRefused { .. }),
+                "{entries:?}: {error}"
+            );
+            assert!(!extract_dir.exists());
+        }
+    }
+
+    /// A bundle without its binary, a file where the bundle's folder
+    /// should be, and an archive without the bundle install nothing.
+    #[test]
+    fn a_bundle_without_its_binary_installs_nothing() {
+        let cases: [&[(&str, &[u8])]; 3] = [
+            &[("LJuno-116.vst3/desktop.ini", b"ini")],
+            &[("Other.vst3/Contents/x86_64-win/LJuno-116.vst3", b"binary")],
+            &[("LJuno-116.vst3/Contents/x86_64-win/LJuno-116.vst3/", b"")],
+        ];
+        for entries in cases {
+            let dir = tempdir().unwrap();
+            let archive_path = dir.path().join("LJuno-116.vst3.zip");
+            write_test_zip(&archive_path, entries);
+            let extract_dir = dir.path().join("extract");
+
+            let error =
+                extract_plugin_bundle_from_archive(&archive_path, &ljuno_bundle(), &extract_dir)
+                    .unwrap_err();
+
+            assert!(
+                matches!(error, RabbitError::ArchiveMissingBundleBinary { .. }),
+                "{entries:?}: {error}"
+            );
+            assert!(!extract_dir.exists());
+        }
+
+        let dir = tempdir().unwrap();
+        let archive_path = dir.path().join("LJuno-116.vst3.zip");
+        write_test_zip(&archive_path, &[("LJuno-116.vst3", b"a flat plug-in")]);
+        let error = extract_plugin_bundle_from_archive(
+            &archive_path,
+            &ljuno_bundle(),
+            &dir.path().join("extract"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, RabbitError::ArchiveEntryRefused { .. }),
+            "{error}"
+        );
     }
 
     /// One solid LZMA2 block holding every entry.

@@ -1,8 +1,10 @@
-use rabbit_core::localization::{DEFAULT_LOCALE, Localizer};
-use rabbit_core::model::{Architecture, Platform};
+use rabbit_core::localization::{DEFAULT_LOCALE, Localizer, embedded_locales};
+use rabbit_core::model::{Architecture, LeftToReapack, Platform};
 use rabbit_core::package::{
-    HostCapabilities, PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_OSARA, PACKAGE_REAKONTROL,
-    PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS, builtin_package_specs,
+    HostCapabilities, PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_LB_303, PACKAGE_LJUNO_116,
+    PACKAGE_LR_608, PACKAGE_LREAPARAMS, PACKAGE_LSAMPLER_24, PACKAGE_OSARA, PACKAGE_REAKONTROL,
+    PACKAGE_REAPACK, PACKAGE_REAPER, PACKAGE_SURGE_XT, PACKAGE_SWS, PackageCategory,
+    builtin_package_specs,
 };
 use rabbit_core::plan::{AvailablePackage, InstallPlan, PlanAction, PlanActionKind};
 use rabbit_core::version::Version;
@@ -66,6 +68,7 @@ fn toggling_a_package_row_updates_its_action_label_and_summary() {
                 installed_version: None,
                 available_version: Some(Version::parse("2026.1").unwrap()),
                 reason: "Missing".to_string(),
+                left_to_reapack: None,
             }],
             notes: Vec::new(),
         },
@@ -113,6 +116,7 @@ fn toggling_a_keep_row_to_checked_promotes_it_to_update() {
                 installed_version: Some(Version::parse("1.2.6").unwrap()),
                 available_version: Some(Version::parse("1.2.6").unwrap()),
                 reason: "Current".to_string(),
+                left_to_reapack: None,
             }],
             notes: Vec::new(),
         },
@@ -149,6 +153,7 @@ fn non_recommended_package_install_row_starts_unticked() {
                 installed_version: None,
                 available_version: Some(Version::parse("8.1.1").unwrap()),
                 reason: "Missing".to_string(),
+                left_to_reapack: None,
             }],
             notes: Vec::new(),
         },
@@ -160,6 +165,207 @@ fn non_recommended_package_install_row_starts_unticked() {
     assert_eq!(row.original_action, PlanActionKind::Install);
     assert_eq!(row.action, PlanActionKind::Keep);
     assert!(!row.selected);
+}
+
+/// The wizard model for a plan whose only action is LReaParams 0.0.70,
+/// with 0.0.75 out, kept because of `left`.
+fn lreaparams_left_to_reapack(localizer: &Localizer, left: LeftToReapack) -> WizardModel {
+    lreaparams_left_to_reapack_on(localizer, left, Architecture::X64)
+}
+
+/// [`lreaparams_left_to_reapack`] for a REAPER of `architecture`.
+fn lreaparams_left_to_reapack_on(
+    localizer: &Localizer,
+    left: LeftToReapack,
+    architecture: Architecture,
+) -> WizardModel {
+    let installation = rabbit_core::model::Installation {
+        architecture: Some(architecture),
+        ..fake_installation()
+    };
+    model_from_plan(
+        localizer,
+        Platform::Windows,
+        architecture,
+        vec![installation.clone()],
+        Some(0),
+        InstallPlan {
+            target: Some(installation),
+            actions: vec![PlanAction {
+                package_id: PACKAGE_LREAPARAMS.to_string(),
+                action: PlanActionKind::Keep,
+                installed_version: Some(Version::parse("0.0.70").unwrap()),
+                available_version: Some(Version::parse("0.0.75").unwrap()),
+                reason: "ReaPack looks after it".to_string(),
+                left_to_reapack: Some(left),
+            }],
+            notes: Vec::new(),
+        },
+    )
+}
+
+/// A package ReaPack installed and keeps up to date can't be ticked, even
+/// with a newer release out: its row says ReaPack manages it, and its
+/// details say to update or remove it in ReaPack. So does a package whose
+/// ReaPack records RABBIT couldn't read, in its own words.
+#[test]
+fn a_package_reapack_looks_after_cant_be_ticked_and_says_why() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let model = lreaparams_left_to_reapack(
+        &localizer,
+        LeftToReapack::Managed {
+            reapack_package: "LReaParams.ext".to_string(),
+        },
+    );
+    let row = &model.package_rows[0];
+    assert!(!row.available_for_target);
+    assert!(!row.selected && !row.default_selected);
+    assert_eq!(row.action, PlanActionKind::Keep);
+    assert_eq!(row.category, PackageCategory::Tools);
+    assert!(!model.controls.can_install);
+    assert!(
+        row.summary.starts_with("LReaParams")
+            && row.summary.ends_with("(not available: managed by ReaPack)"),
+        "{}",
+        row.summary
+    );
+    assert_eq!(
+        row.unavailability_reason.as_deref(),
+        Some("managed by ReaPack")
+    );
+    // The ReaPack sentence comes once, before the description, which
+    // doesn't repeat it.
+    assert_eq!(
+        row.details,
+        format!(
+            "{}\n\nReaPack's records say it installed LReaParams as LReaParams.ext, so RABBIT \
+             leaves it to ReaPack. Install, update or remove it in ReaPack.\n\nLReaParams is an \
+             open source extension by Lo-lo that gives you accessible keyboard control of FX \
+             and track parameters in REAPER, and it works alongside OSARA. Windows only.",
+            row.summary
+        )
+    );
+
+    let model = lreaparams_left_to_reapack(
+        &localizer,
+        LeftToReapack::RecordsUnreadable {
+            error: "file is not a database".to_string(),
+        },
+    );
+    let row = &model.package_rows[0];
+    assert!(!row.available_for_target && !row.selected);
+    assert!(
+        row.summary
+            .ends_with("(not available: ReaPack's records couldn't be checked)"),
+        "{}",
+        row.summary
+    );
+    assert!(
+        row.details.contains(
+            "RABBIT couldn't read ReaPack's records (file is not a database), so it can't \
+             tell whether ReaPack installed LReaParams, and doesn't install, update or remove \
+             it."
+        ),
+        "{}",
+        row.details
+    );
+
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        for left in [
+            LeftToReapack::Managed {
+                reapack_package: "LReaParams.ext".to_string(),
+            },
+            LeftToReapack::RecordsUnreadable {
+                error: "file is not a database".to_string(),
+            },
+        ] {
+            let model = lreaparams_left_to_reapack(&localizer, left);
+            let row = &model.package_rows[0];
+            assert!(!row.available_for_target, "{locale}");
+            assert_reads(locale, &row.summary);
+            assert_reads(locale, &row.details);
+            assert!(
+                !row.details.contains("package-"),
+                "{locale}: {}",
+                row.details
+            );
+        }
+    }
+}
+
+/// Without ReaPack's say, an LReaParams with a newer release out is
+/// offered as an update like any package.
+#[test]
+fn lreaparams_not_left_to_reapack_is_offered_as_usual() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let installation = fake_installation();
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        vec![installation.clone()],
+        Some(0),
+        InstallPlan {
+            target: Some(installation),
+            actions: vec![PlanAction {
+                package_id: PACKAGE_LREAPARAMS.to_string(),
+                action: PlanActionKind::Update,
+                installed_version: Some(Version::parse("0.0.70").unwrap()),
+                available_version: Some(Version::parse("0.0.75").unwrap()),
+                reason: "Newer".to_string(),
+                left_to_reapack: None,
+            }],
+            notes: Vec::new(),
+        },
+    );
+    let row = &model.package_rows[0];
+    assert!(row.available_for_target && row.selected);
+    assert!(!row.left_to_reapack);
+    assert_eq!(row.action, PlanActionKind::Update);
+    assert!(!row.summary.contains("ReaPack"), "{}", row.summary);
+}
+
+/// A failed version check leaves a row ReaPack looks after as it was: its
+/// label keeps saying ReaPack manages it, as its details do, and Review
+/// gets no note that installing it is disabled for this run, since RABBIT
+/// wouldn't install or update it in any run. Another package's failure
+/// still counts as usual.
+#[test]
+fn a_failed_version_check_leaves_a_row_reapack_looks_after_as_it_was() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let mut model = lreaparams_left_to_reapack(
+        &localizer,
+        LeftToReapack::Managed {
+            reapack_package: "LReaParams.ext".to_string(),
+        },
+    );
+    assert!(model.package_rows[0].left_to_reapack);
+    let before = model.package_rows.clone();
+    let mut notes = Vec::new();
+
+    let can_install = apply_version_check_failures_to_rows(
+        &localizer,
+        &mut model.package_rows,
+        &mut notes,
+        &[
+            (
+                PACKAGE_LREAPARAMS.to_string(),
+                "GitHub's rate limit was reached".to_string(),
+            ),
+            (PACKAGE_SWS.to_string(), "the SWS site is down".to_string()),
+        ],
+    );
+
+    assert!(!can_install);
+    assert_eq!(model.package_rows, before);
+    assert!(
+        model.package_rows[0]
+            .summary
+            .ends_with("(not available: managed by ReaPack)")
+    );
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("the SWS site is down"), "{notes:?}");
 }
 
 #[test]
@@ -185,6 +391,7 @@ fn a_declined_language_pack_does_not_auto_tick_its_updates_either() {
                 installed_version: None,
                 available_version: None,
                 reason: "upstream file changed".to_string(),
+                left_to_reapack: None,
             }],
             &[],
             &HostCapabilities::default(),
@@ -235,6 +442,7 @@ fn sws_row(kind: PlanActionKind, declined: &[&str]) -> PackageRow {
             installed_version: None,
             available_version: None,
             reason: "test".to_string(),
+            left_to_reapack: None,
         }],
         &[],
         &HostCapabilities::default(),
@@ -302,6 +510,7 @@ fn reakontrol_install_row_starts_ticked_when_komplete_kontrol_is_detected() {
             installed_version: None,
             available_version: Some(Version::parse("2026.2").unwrap()),
             reason: "Missing".to_string(),
+            left_to_reapack: None,
         }],
         &[],
         &host,
@@ -328,6 +537,7 @@ fn reakontrol_install_row_starts_ticked_when_komplete_kontrol_is_detected() {
             installed_version: None,
             available_version: Some(Version::parse("2026.2").unwrap()),
             reason: "Missing".to_string(),
+            left_to_reapack: None,
         }],
         &[],
         &HostCapabilities::default(),
@@ -362,6 +572,7 @@ fn non_recommended_package_update_row_starts_ticked() {
                 installed_version: Some(Version::parse("8.0.0").unwrap()),
                 available_version: Some(Version::parse("8.1.1").unwrap()),
                 reason: "Older version on disk".to_string(),
+                left_to_reapack: None,
             }],
             notes: Vec::new(),
         },
@@ -490,11 +701,64 @@ fn portable_target_marks_surge_xt_as_unavailable() {
     );
 }
 
+/// No run installs Surge XT in a portable REAPER, so a failed version check
+/// for it changes nothing there: the row keeps saying it needs a standard
+/// installation, and Review gets no note about the check.
 #[test]
-fn portable_target_marks_app2clap_as_unavailable() {
-    // app2clap installs into the per-user CLAP folder, outside any
-    // portable REAPER folder, so it must be gated on portable targets
-    // exactly like Surge XT.
+fn a_failed_version_check_keeps_the_portable_reason() {
+    let dir = tempdir().unwrap();
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        Vec::new(),
+        None,
+        InstallPlan {
+            target: None,
+            actions: Vec::new(),
+            notes: Vec::new(),
+        },
+    );
+    let target = x64_portable_target(&model, dir.path().join("PortableREAPER"));
+    let mut plan = wizard_package_plan_for_target(&model, Some(&target)).unwrap();
+    let before = plan.package_rows.clone();
+    let mut notes = Vec::new();
+
+    apply_version_check_failures_to_rows(
+        &localizer,
+        &mut plan.package_rows,
+        &mut notes,
+        &[(
+            PACKAGE_SURGE_XT.to_string(),
+            "rate limit exceeded".to_string(),
+        )],
+    );
+
+    let surge = plan
+        .package_rows
+        .iter()
+        .find(|row| row.package_id == PACKAGE_SURGE_XT)
+        .expect("Surge XT row should appear in the package list");
+    assert!(surge.has_build_for_target);
+    assert_eq!(
+        surge.unavailability_reason.as_deref(),
+        Some("portable REAPER target")
+    );
+    assert!(
+        surge
+            .summary
+            .ends_with("(not available: portable REAPER target)")
+    );
+    assert_eq!(plan.package_rows, before);
+    assert!(notes.is_empty(), "{notes:?}");
+}
+
+#[test]
+fn portable_target_offers_app2clap() {
+    // app2clap installs into REAPER's own UserPlugins\FX folder, which a
+    // portable REAPER has too, so unlike Surge XT it stays available
+    // there. It is opt-in, so it starts unticked, and can be ticked.
     let dir = tempdir().unwrap();
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
     let model = model_from_plan(
@@ -519,16 +783,251 @@ fn portable_target_marks_app2clap_as_unavailable() {
         .expect("app2clap row should appear in the package list");
 
     assert!(
-        !app2clap.available_for_target,
-        "app2clap must be marked unavailable on a portable REAPER target"
+        app2clap.available_for_target,
+        "app2clap must stay available on a portable REAPER target"
     );
+    assert!(!app2clap.requires_standard_install);
+    assert_eq!(app2clap.unavailability_reason, None);
+    assert!(!app2clap.summary.contains("portable REAPER target"));
     assert!(!app2clap.selected);
-    assert_eq!(app2clap.action, PlanActionKind::Keep);
-    assert_eq!(
-        app2clap.unavailability_reason.as_deref(),
-        Some("portable REAPER target"),
-        "the gate should attach a localized reason so screen readers announce why"
+    assert_eq!(app2clap.original_action, PlanActionKind::Install);
+}
+
+/// A copy of app2clap in the CLAP folder, which every REAPER on the computer
+/// loads, adds a sentence to app2clap's details, right after its summary.
+/// On a portable REAPER without app2clap, it says that installing app2clap
+/// there too would load two copies, and to update or reinstall it in the
+/// standard REAPER first; on one that has its own app2clap already, that it
+/// loads both, and how the shared one goes. On the standard REAPER it says
+/// that its update or reinstall moves the copy into a backup, and that
+/// portable REAPERs and other programs then no longer find it. The row also
+/// carries what Review says should it be ticked: on the standard REAPER
+/// that the copy moves, on a portable one without app2clap that it will
+/// load two copies, and nothing on a portable one with its own. No other row
+/// changes, and without a copy nothing does. The plan finds the copy
+/// through the wizard's test seam, so the real CLAP folder is never looked
+/// at. In every language.
+#[test]
+fn a_copy_in_the_clap_folder_is_told_in_app2claps_details() {
+    let dir = tempdir().unwrap();
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        Vec::new(),
+        None,
+        InstallPlan {
+            target: None,
+            actions: Vec::new(),
+            notes: Vec::new(),
+        },
     );
+    let target = x64_portable_target(&model, dir.path().join("PortableREAPER"));
+    let rows = wizard_package_plan_for_target(&model, Some(&target))
+        .unwrap()
+        .package_rows;
+    assert!(
+        rows.iter().all(|row| row.former_copy_review_note.is_none()),
+        "without a copy, no row has a note"
+    );
+    let index = rows
+        .iter()
+        .position(|row| row.package_id == PACKAGE_APP2CLAP)
+        .unwrap();
+    let specs = builtin_package_specs(Platform::Windows);
+    let copy = std::path::PathBuf::from("C:/CLAP/app2clap.clap");
+    let in_clap = move |spec: &rabbit_core::package::PackageSpec| {
+        if spec.id == PACKAGE_APP2CLAP {
+            vec![copy.clone()]
+        } else {
+            Vec::new()
+        }
+    };
+    let with_sentence = |row: &PackageRow, sentence: &str| {
+        let (summary, rest) = row.details.split_once("\n\n").unwrap();
+        format!("{summary}\n\n{sentence}\n\n{rest}")
+    };
+
+    // The plan itself finds the copy, and app2clap isn't in this portable
+    // REAPER yet.
+    {
+        let _seam = crate::wizard::packages::former_copies_seam::install(in_clap.clone());
+        let planned = wizard_package_plan_for_target(&model, Some(&target))
+            .unwrap()
+            .package_rows;
+        let package = [("package", planned[index].display_name.as_str())];
+        let sentence = localizer
+            .format("wizard-package-details-clap-copy-portable", &package)
+            .value;
+        assert_eq!(
+            planned[index].details,
+            with_sentence(&rows[index], &sentence)
+        );
+        assert_eq!(
+            planned[index].former_copy_review_note,
+            Some(
+                localizer
+                    .format("wizard-review-clap-copy-twice", &package)
+                    .value
+            )
+        );
+        for (row, before) in planned.iter().zip(&rows) {
+            if row.package_id != PACKAGE_APP2CLAP {
+                assert_eq!(row, before);
+            }
+        }
+    }
+
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        for (portable, action, key, review_key) in [
+            (
+                true,
+                PlanActionKind::Install,
+                "wizard-package-details-clap-copy-portable",
+                Some("wizard-review-clap-copy-twice"),
+            ),
+            (
+                true,
+                PlanActionKind::Update,
+                "wizard-package-details-clap-copy-portable-installed",
+                None,
+            ),
+            (
+                true,
+                PlanActionKind::Keep,
+                "wizard-package-details-clap-copy-portable-installed",
+                None,
+            ),
+            (
+                false,
+                PlanActionKind::Update,
+                "wizard-package-details-clap-copy-standard",
+                Some("wizard-review-clap-copy-moves"),
+            ),
+            (
+                false,
+                PlanActionKind::Keep,
+                "wizard-package-details-clap-copy-standard",
+                Some("wizard-review-clap-copy-moves"),
+            ),
+        ] {
+            let mut before = rows.clone();
+            before[index].original_action = action;
+            let mut noted = before.clone();
+            crate::wizard::packages::note_copies_in_former_outside_folders(
+                &localizer, &mut noted, &specs, portable, &in_clap,
+            );
+            let app2clap = &noted[index];
+            let package = [("package", app2clap.display_name.as_str())];
+            let sentence = localizer.format(key, &package);
+            assert!(!sentence.missing, "{locale}: {key}");
+            assert_reads(locale, &sentence.value);
+            assert_eq!(
+                app2clap.details,
+                with_sentence(&before[index], &sentence.value),
+                "{locale}: {key}"
+            );
+            let review = review_key.map(|review_key| {
+                let review = localizer.format(review_key, &package);
+                assert!(!review.missing, "{locale}: {review_key}");
+                assert_reads(locale, &review.value);
+                review.value
+            });
+            assert_eq!(app2clap.former_copy_review_note, review, "{locale}");
+            for (row, before) in noted.iter().zip(&before) {
+                if row.package_id != PACKAGE_APP2CLAP {
+                    assert_eq!(row, before, "{locale}");
+                }
+            }
+        }
+    }
+    let english = |key: &str| localizer.format(key, &[("package", "app2clap")]).value;
+    assert!(
+        english("wizard-package-details-clap-copy-portable")
+            .contains("first update or reinstall app2clap in the standard REAPER")
+    );
+    assert!(
+        english("wizard-package-details-clap-copy-portable-installed")
+            .starts_with("This REAPER loads two copies of app2clap")
+    );
+
+    let mut untouched = rows.clone();
+    crate::wizard::packages::note_copies_in_former_outside_folders(
+        &localizer,
+        &mut untouched,
+        &specs,
+        true,
+        &|_| Vec::new(),
+    );
+    assert_eq!(untouched, rows);
+}
+
+/// Review says what a ticked row does to a copy in the CLAP folder, under
+/// its notes, before the plan's own: here, on the standard REAPER, that
+/// app2clap's copy moves into the backup. The details pane isn't the one
+/// place a screen reader user is sure to hear. Unticked, the row adds
+/// nothing.
+#[test]
+fn review_says_what_a_ticked_row_does_to_a_copy_in_the_clap_folder() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let installation = fake_standard_installation();
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        vec![installation.clone()],
+        Some(0),
+        InstallPlan {
+            target: Some(installation),
+            actions: vec![PlanAction {
+                package_id: PACKAGE_APP2CLAP.to_string(),
+                action: PlanActionKind::Update,
+                installed_version: None,
+                available_version: Some(Version::parse("2026.5.17.34").unwrap()),
+                reason: "test".to_string(),
+                left_to_reapack: None,
+            }],
+            notes: Vec::new(),
+        },
+    );
+    let mut rows = model.package_rows.clone();
+    let copy = std::path::PathBuf::from("C:/CLAP/app2clap.clap");
+    crate::wizard::packages::note_copies_in_former_outside_folders(
+        &localizer,
+        &mut rows,
+        &builtin_package_specs(Platform::Windows),
+        false,
+        &|_| vec![copy.clone()],
+    );
+    let note = localizer
+        .format("wizard-review-clap-copy-moves", &[("package", "app2clap")])
+        .value;
+    let plan_note = "A note from the plan.".to_string();
+    let review = |ticked: &[usize]| {
+        build_review_preview_for_package_rows(
+            &model,
+            model.target_rows.first(),
+            ticked,
+            &rows,
+            std::slice::from_ref(&plan_note),
+            OsaraKeymapChoice::ReplaceCurrent,
+            rabbit_core::osara_keymap::OsaraKeymapState::OwnChanges,
+        )
+        .lines
+    };
+
+    let lines = review(&[0]);
+    let heading = lines
+        .iter()
+        .position(|line| *line == model.text.review_notes_heading)
+        .expect("a notes heading");
+    assert_eq!(lines[heading + 1..], [note.clone(), plan_note.clone()]);
+    assert!(note.starts_with("app2clap: the copy in your CLAP folder moves into the backup"));
+
+    let lines = review(&[]);
+    assert!(!lines.contains(&note), "{lines:?}");
 }
 
 #[test]
@@ -816,6 +1315,7 @@ fn reaper_row(
             installed_version: Some(Version::parse("7.80").unwrap()),
             available_version: Some(Version::parse("7.80+dev0918").unwrap()),
             reason: "test".to_string(),
+            left_to_reapack: None,
         }],
         &[AvailablePackage {
             package_id: PACKAGE_REAPER.to_string(),
@@ -935,6 +1435,152 @@ fn expert_mode_env_values_and_channels_outside_expert_mode() {
     assert!(!on.contains_key(PACKAGE_OSARA));
 }
 
+/// The Install tree's package groups, built from the real manifest: Packages,
+/// Instruments, Tools, Language packs, in that order, each with its own rows
+/// in row order. Surge XT and Lo-lo's four instruments are the instruments,
+/// and app2clap and LReaParams the tools.
+#[test]
+fn the_install_tree_groups_packages_instruments_tools_and_language_packs() {
+    let dir = tempdir().unwrap();
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        Vec::new(),
+        None,
+        InstallPlan {
+            target: None,
+            actions: Vec::new(),
+            notes: Vec::new(),
+        },
+    );
+    let target = custom_portable_target_row(&model, dir.path().join("PortableREAPER"), true);
+    let rows = wizard_package_plan_for_target(&model, Some(&target))
+        .unwrap()
+        .package_rows;
+
+    let groups = package_tree_groups(rows.iter().map(|row| row.category));
+    let categories: Vec<PackageCategory> = groups.iter().map(|group| group.category).collect();
+    assert_eq!(
+        categories,
+        [
+            PackageCategory::Core,
+            PackageCategory::Instruments,
+            PackageCategory::Tools,
+            PackageCategory::Language,
+        ]
+    );
+    let labels: Vec<&str> = categories
+        .iter()
+        .map(|category| model.text.package_group_label(*category))
+        .collect();
+    assert_eq!(
+        labels,
+        ["Packages", "Instruments", "Tools", "Language packs"]
+    );
+
+    let ids = |group: &PackageTreeGroup| -> Vec<&str> {
+        group
+            .rows
+            .iter()
+            .map(|index| rows[*index].package_id.as_str())
+            .collect()
+    };
+    assert_eq!(
+        ids(&groups[1]),
+        [
+            PACKAGE_SURGE_XT,
+            PACKAGE_LJUNO_116,
+            PACKAGE_LB_303,
+            PACKAGE_LR_608,
+            PACKAGE_LSAMPLER_24,
+        ]
+    );
+    assert_eq!(ids(&groups[2]), [PACKAGE_APP2CLAP, PACKAGE_LREAPARAMS]);
+    assert!(
+        ids(&groups[3]).iter().all(|id| id.starts_with("langpack-")),
+        "{:?}",
+        ids(&groups[3])
+    );
+    let core = ids(&groups[0]);
+    assert_eq!(core.first(), Some(&PACKAGE_REAPER));
+    for id in [PACKAGE_OSARA, PACKAGE_SWS, PACKAGE_REAPACK] {
+        assert!(core.contains(&id), "{id} in {core:?}");
+    }
+    // Every row is in exactly one group, and each group keeps row order.
+    let mut all: Vec<usize> = groups.iter().flat_map(|group| group.rows.clone()).collect();
+    for group in &groups {
+        assert!(group.rows.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+    all.sort_unstable();
+    assert_eq!(all, (0..rows.len()).collect::<Vec<_>>());
+}
+
+/// A category no row has gets no group at all, so no heading shows empty;
+/// the others keep the display order whatever order the rows come in.
+#[test]
+fn a_category_without_rows_gets_no_group() {
+    let groups = package_tree_groups([
+        PackageCategory::Language,
+        PackageCategory::Core,
+        PackageCategory::Instruments,
+        PackageCategory::Core,
+        PackageCategory::Language,
+    ]);
+    assert_eq!(
+        groups,
+        [
+            PackageTreeGroup {
+                category: PackageCategory::Core,
+                rows: vec![1, 3],
+            },
+            PackageTreeGroup {
+                category: PackageCategory::Instruments,
+                rows: vec![2],
+            },
+            PackageTreeGroup {
+                category: PackageCategory::Language,
+                rows: vec![0, 4],
+            },
+        ]
+    );
+    assert_eq!(
+        package_tree_groups([PackageCategory::Tools]),
+        [PackageTreeGroup {
+            category: PackageCategory::Tools,
+            rows: vec![0],
+        }]
+    );
+    assert!(package_tree_groups(Vec::new()).is_empty());
+}
+
+/// Each category's heading has a key of its own, and the wizard's text holds
+/// a label for every category in display order.
+#[test]
+fn every_package_category_has_its_own_group_label() {
+    assert_eq!(
+        PackageCategory::ALL.map(package_group_label_key),
+        [
+            "wizard-packages-tree-group-label",
+            "wizard-instruments-tree-group-label",
+            "wizard-tools-tree-group-label",
+            "wizard-language-tree-group-label",
+        ]
+    );
+    let text = wizard_text(&Localizer::embedded(DEFAULT_LOCALE).unwrap());
+    let categories: Vec<PackageCategory> = text
+        .package_group_labels
+        .iter()
+        .map(|(category, _)| *category)
+        .collect();
+    assert_eq!(categories, PackageCategory::ALL);
+    assert_eq!(
+        PackageCategory::ALL.map(|category| text.package_group_label(category)),
+        ["Packages", "Instruments", "Tools", "Language packs"]
+    );
+}
+
 /// A model for `platform` and a REAPER of `architecture`, with no target,
 /// whose plan updates every package offered there. Updates are ticked by
 /// default, so every row would start ticked if nothing stopped it.
@@ -948,6 +1594,7 @@ fn every_package_updated(platform: Platform, architecture: Architecture) -> Wiza
             installed_version: Some(Version::parse("1.0").unwrap()),
             available_version: Some(Version::parse("2.0").unwrap()),
             reason: "test".to_string(),
+            left_to_reapack: None,
         })
         .collect();
     model_from_plan(
@@ -994,16 +1641,26 @@ fn assert_no_build_row(row: &PackageRow, reason: &str, sentence: &str) {
     );
 }
 
+/// The packages with no build for a 32-bit REAPER, in row order: FFmpeg,
+/// Surge XT, Lo-lo's four instruments, app2clap and LReaParams.
+const NO_32_BIT_BUILD: [&str; 8] = [
+    PACKAGE_FFMPEG,
+    PACKAGE_SURGE_XT,
+    PACKAGE_LJUNO_116,
+    PACKAGE_LB_303,
+    PACKAGE_LR_608,
+    PACKAGE_LSAMPLER_24,
+    PACKAGE_APP2CLAP,
+    PACKAGE_LREAPARAMS,
+];
+
 #[test]
-fn a_32_bit_reaper_offers_no_ffmpeg_surge_xt_or_app2clap() {
+fn a_32_bit_reaper_offers_no_ffmpeg_surge_xt_app2clap_or_lolos_packages() {
     let model = every_package_updated(Platform::Windows, Architecture::X86);
     let rows = &model.package_rows;
 
-    assert_eq!(
-        unavailable_rows(rows),
-        [PACKAGE_FFMPEG, PACKAGE_SURGE_XT, PACKAGE_APP2CLAP]
-    );
-    for package_id in [PACKAGE_FFMPEG, PACKAGE_SURGE_XT, PACKAGE_APP2CLAP] {
+    assert_eq!(unavailable_rows(rows), NO_32_BIT_BUILD);
+    for package_id in NO_32_BIT_BUILD {
         let row = rows
             .iter()
             .find(|row| row.package_id == package_id)
@@ -1027,6 +1684,8 @@ fn a_32_bit_reaper_offers_no_ffmpeg_surge_xt_or_app2clap() {
 
 #[test]
 fn windows_on_arm_offers_no_sws_or_app2clap_and_says_why() {
+    // LReaParams and Lo-lo's instruments list REAPER's builds for Windows
+    // on ARM, and are offered there.
     for architecture in [Architecture::Arm64, Architecture::Arm64Ec] {
         let model = every_package_updated(Platform::Windows, architecture);
         let rows = &model.package_rows;
@@ -1048,7 +1707,15 @@ fn windows_on_arm_offers_no_sws_or_app2clap_and_says_why() {
                  can't install it here.",
             );
         }
-        for package_id in [PACKAGE_FFMPEG, PACKAGE_SURGE_XT] {
+        for package_id in [
+            PACKAGE_FFMPEG,
+            PACKAGE_SURGE_XT,
+            PACKAGE_LJUNO_116,
+            PACKAGE_LB_303,
+            PACKAGE_LR_608,
+            PACKAGE_LSAMPLER_24,
+            PACKAGE_LREAPARAMS,
+        ] {
             let row = rows
                 .iter()
                 .find(|row| row.package_id == package_id)
@@ -1111,9 +1778,10 @@ fn the_rows_follow_the_chosen_targets_architecture() {
     assert!(plan.can_install, "REAPER and the rest still install");
 
     // On a portable target, a package without a build keeps that reason
-    // rather than the portable one.
+    // rather than the portable one, and Lo-lo's packages, offered for a
+    // portable REAPER, have none for a 32-bit one either.
     let plan = wizard_package_plan_for_target(&model, Some(&portable)).unwrap();
-    for package_id in [PACKAGE_SURGE_XT, PACKAGE_APP2CLAP] {
+    for package_id in NO_32_BIT_BUILD {
         let row = plan
             .package_rows
             .iter()
@@ -1152,6 +1820,7 @@ fn the_no_build_texts_are_in_every_locale() {
                         installed_version: None,
                         available_version: None,
                         reason: "test".to_string(),
+                        left_to_reapack: None,
                     }],
                     notes: Vec::new(),
                 },
@@ -1269,4 +1938,165 @@ fn the_uninstall_tab_still_offers_a_package_without_a_build() {
         .find(|row| row.package_id == PACKAGE_FFMPEG)
         .expect("the Uninstall tab lists the installed FFmpeg");
     assert!(uninstall_row.can_tick, "{uninstall_row:?}");
+}
+
+/// No build for the REAPER comes before every other reason a row gives,
+/// leaving LReaParams to ReaPack included: on a 32-bit REAPER its row says
+/// there is no version for it, whether ReaPack's records name it or can't be
+/// read, and its details say so first, then still say what ReaPack's
+/// records mean for it. A failed version check changes neither, and Review
+/// gets no note.
+#[test]
+fn no_build_comes_before_leaving_a_package_to_reapack() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    for (left, reapack_sentence) in [
+        (
+            LeftToReapack::Managed {
+                reapack_package: "LReaParams.ext".to_string(),
+            },
+            "ReaPack's records say it installed LReaParams as LReaParams.ext, so RABBIT leaves \
+             it to ReaPack. Install, update or remove it in ReaPack.",
+        ),
+        (
+            LeftToReapack::RecordsUnreadable {
+                error: "file is not a database".to_string(),
+            },
+            "RABBIT couldn't read ReaPack's records (file is not a database), so it can't tell \
+             whether ReaPack installed LReaParams, and doesn't install, update or remove it.",
+        ),
+    ] {
+        let mut model = lreaparams_left_to_reapack_on(&localizer, left, Architecture::X86);
+        let row = &model.package_rows[0];
+        assert!(row.left_to_reapack && !row.has_build_for_target, "{row:?}");
+        assert_no_build_row(
+            row,
+            "no version for 32-bit REAPER",
+            "For 32-bit REAPER there is no version of {package}, so RABBIT can't install it here.",
+        );
+        assert!(!row.summary.contains("ReaPack"), "{}", row.summary);
+        let (no_build, rest) = row
+            .details
+            .strip_prefix(&format!("{}\n\n", row.summary))
+            .and_then(|details| details.split_once("\n\n"))
+            .unwrap();
+        assert!(no_build.starts_with("For 32-bit REAPER"), "{}", row.details);
+        assert!(rest.starts_with(reapack_sentence), "{}", row.details);
+        assert!(!model.controls.can_install);
+
+        let before = model.package_rows.clone();
+        let mut notes = Vec::new();
+        apply_version_check_failures_to_rows(
+            &localizer,
+            &mut model.package_rows,
+            &mut notes,
+            &[(
+                PACKAGE_LREAPARAMS.to_string(),
+                "GitHub's rate limit was reached".to_string(),
+            )],
+        );
+        assert_eq!(model.package_rows, before);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    // On a 64-bit REAPER, ReaPack's reason is the row's own again.
+    let model = lreaparams_left_to_reapack_on(
+        &localizer,
+        LeftToReapack::Managed {
+            reapack_package: "LReaParams.ext".to_string(),
+        },
+        Architecture::X64,
+    );
+    assert!(model.package_rows[0].has_build_for_target);
+    assert_eq!(
+        model.package_rows[0].unavailability_reason.as_deref(),
+        Some("managed by ReaPack")
+    );
+}
+
+/// The sentences about a copy of app2clap in the CLAP folder say what
+/// installing, updating or reinstalling app2clap here does. app2clap has no
+/// build for a 32-bit REAPER, so none of that can happen there: its row and
+/// Review say nothing about the copy, on a portable REAPER and on the
+/// standard one, and its details start with why it isn't available. A row
+/// RABBIT leaves to ReaPack gets no such sentence either.
+#[test]
+fn a_copy_in_the_clap_folder_is_not_told_without_a_build() {
+    let dir = tempdir().unwrap();
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let model = every_package_updated(Platform::Windows, Architecture::X64);
+    let portable = TargetRow {
+        architecture: Architecture::X86,
+        ..custom_portable_target_row(&model, dir.path().join("PortableREAPER"), true)
+    };
+    let standard = TargetRow {
+        portable: false,
+        ..portable.clone()
+    };
+    let in_clap = |spec: &rabbit_core::package::PackageSpec| {
+        if spec.id == PACKAGE_APP2CLAP {
+            vec![std::path::PathBuf::from("C:/CLAP/app2clap.clap")]
+        } else {
+            Vec::new()
+        }
+    };
+    {
+        let _seam = crate::wizard::packages::former_copies_seam::install(in_clap);
+        for target in [&portable, &standard] {
+            let rows = wizard_package_plan_for_target(&model, Some(target))
+                .unwrap()
+                .package_rows;
+            let app2clap = rows
+                .iter()
+                .find(|row| row.package_id == PACKAGE_APP2CLAP)
+                .unwrap();
+            assert_no_build_row(
+                app2clap,
+                "no version for 32-bit REAPER",
+                "For 32-bit REAPER there is no version of {package}, so RABBIT can't install it here.",
+            );
+            assert_eq!(app2clap.former_copy_review_note, None);
+            assert!(
+                !app2clap.details.contains("CLAP folder"),
+                "{}",
+                app2clap.details
+            );
+            assert!(rows.iter().all(|row| row.former_copy_review_note.is_none()));
+        }
+    }
+
+    // Asked directly, the rule leaves a row without a build, and one left to
+    // ReaPack, as they are, while it notes the same row with a build.
+    let specs = builtin_package_specs(Platform::Windows);
+    let x64_standard = TargetRow {
+        architecture: Architecture::X64,
+        ..standard
+    };
+    let rows = wizard_package_plan_for_target(&model, Some(&x64_standard))
+        .unwrap()
+        .package_rows;
+    let index = rows
+        .iter()
+        .position(|row| row.package_id == PACKAGE_APP2CLAP)
+        .unwrap();
+    let mut noted = rows.clone();
+    crate::wizard::packages::note_copies_in_former_outside_folders(
+        &localizer, &mut noted, &specs, false, &in_clap,
+    );
+    assert!(noted[index].former_copy_review_note.is_some());
+    for change in [
+        (|row: &mut PackageRow| row.has_build_for_target = false) as fn(&mut PackageRow),
+        |row: &mut PackageRow| row.left_to_reapack = true,
+    ] {
+        let mut changed = rows.clone();
+        change(&mut changed[index]);
+        let before = changed.clone();
+        crate::wizard::packages::note_copies_in_former_outside_folders(
+            &localizer,
+            &mut changed,
+            &specs,
+            false,
+            &in_clap,
+        );
+        assert_eq!(changed, before);
+    }
 }
