@@ -1,0 +1,106 @@
+name: windows-arm-smoke
+
+# What RABBIT installs into a REAPER on Windows on ARM, checked against the
+# real downloads on a real Windows on ARM computer. REAPER there is an
+# ARM64EC program, which loads x64, ARM64EC and ARM64X libraries but no plain
+# ARM64 ones. The tests resolve and download every Windows package RABBIT
+# offers an arm64-ec REAPER, and an x64 one as a control, take each download
+# apart as RABBIT's install does, and read what every program file and
+# library is built for. They fail when RABBIT would put a library into an
+# ARM64EC REAPER that it can't load. They also install REAPER's arm64ec and
+# x64 builds as portable copies and check what RABBIT's probe reads. Only
+# REAPER's own installer runs, as a portable install into a temporary
+# folder; the other vendor installers are listed as skipped. The tests never
+# ask for elevation: they refuse a plan that would elevate and start the
+# installer with CreateProcess, which can't prompt. On GitHub's runners every
+# step has admin rights anyway, so here it is RABBIT's /PORTABLE arguments,
+# and the tests' check that /D= names their temporary folder, that keep the
+# install there. The tests download and run nothing unless
+# RABBIT_WINDOWS_ARM_SMOKE is 1, which only this workflow sets.
+# See crates/rabbit-core/tests/windows_arm_smoke.rs.
+on:
+  schedule:
+    # Weekly, Mondays at 05:00 UTC, an hour before the daily macOS smoke
+    # run.
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    name: Windows on ARM upstream smoke tests
+    runs-on: windows-11-arm
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.100
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # ring builds its C code for ARM64 Windows with clang only. The same
+      # LLVM as ci.yml's arm64 steps, without the GUI's Ninja, which these
+      # tests don't build.
+      - name: Install LLVM (arm64)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Choco's llvm package is x86_64-only. Downloaded with curl and
+          # retried, as in ci.yml: these transfers sometimes end early.
+          $RetryArgs = @("--retry", "5", "--retry-delay", "5")
+          if ((curl.exe --help all 2>&1) -match "--retry-all-errors") {
+            $RetryArgs += "--retry-all-errors"
+          }
+          $LlvmVersion = "19.1.7"
+          $LlvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LlvmVersion/LLVM-$LlvmVersion-woa64.exe"
+          $Installer = "$env:RUNNER_TEMP\llvm-installer.exe"
+          curl.exe --location --fail --show-error --silent `
+            @RetryArgs --connect-timeout 30 --output $Installer $LlvmUrl
+          if ($LASTEXITCODE -ne 0) {
+            throw "download failed after retries ($LlvmUrl)"
+          }
+          $size = (Get-Item $Installer).Length
+          if ($size -lt 50MB) {
+            throw "download too small: $size bytes from $LlvmUrl"
+          }
+          Start-Process -FilePath $Installer -ArgumentList "/S" -Wait
+          if (-not (Test-Path "C:\Program Files\LLVM\bin\clang.exe")) {
+            throw "LLVM installed but clang.exe is missing"
+          }
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # --nocapture prints each table as it is made; one thread keeps the
+      # tables apart. RABBIT sends GITHUB_TOKEN to api.github.com only.
+      # RABBIT_WINDOWS_ARM_SMOKE=1 lets the ignored tests download and run
+      # REAPER's installer; without it they do nothing.
+      - name: Run the Windows on ARM smoke tests
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RABBIT_WINDOWS_ARM_SMOKE: "1"
+        run: cargo test -p rabbit-core --test windows_arm_smoke -- --ignored --nocapture --test-threads=1
+
+      # Each table is also in the temporary folder, the one Rust's
+      # std::env::temp_dir names; put them on the run's summary page, failed
+      # run or not.
+      - name: Add the tables to the run's summary
+        if: always()
+        shell: pwsh
+        run: |
+          $Temp = [System.IO.Path]::GetTempPath()
+          $Tables = Get-ChildItem -Path $Temp -Filter "rabbit-windows-arm-smoke-*.md" -ErrorAction SilentlyContinue
+          if (-not $Tables) {
+            "No tables were written." | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          }
+          foreach ($Table in $Tables) {
+            Get-Content -Path $Table.FullName | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+            "" | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          }

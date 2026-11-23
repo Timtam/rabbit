@@ -579,6 +579,15 @@ from this file and posts it as the GitHub release body.
   named with `--package` changes nothing and exits with 2. `setup`,
   `apply-packages` and `install-extension` now go by the target REAPER's own
   architecture, as the wizard does, not RABBIT's.
+- An installed REAPER on Windows on ARM is now recognised as the ARM64EC
+  program it is, so updates keep its ARM64EC builds. Before, RABBIT read it
+  as an x64 REAPER and updated it with the x64 REAPER and ReaPack. Where
+  REAPER is still ARM64EC, the next ReaPack update now moves that x64
+  ReaPack into its backup. A REAPER that RABBIT already updated with the
+  x64 build is now an x64 REAPER, and RABBIT keeps it so; to go back,
+  install REAPER's ARM64EC build from reaper.fm. SWS and app2clap, which
+  have no version for an ARM64EC REAPER, can no longer be ticked there, as
+  for a new REAPER on Windows on ARM.
 - In a portable REAPER, a package that needs a standard installation, such
   as Surge XT, now keeps saying so when its online version check fails.
   Before, its row said that the version check failed instead, and Review

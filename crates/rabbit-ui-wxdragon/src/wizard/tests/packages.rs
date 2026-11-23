@@ -1795,6 +1795,62 @@ fn the_rows_follow_the_chosen_targets_architecture() {
     }
 }
 
+/// An installed REAPER on Windows on ARM is an ARM64EC program, whose header
+/// names x64. Its target row reads it as arm64ec from its program file, so
+/// the rows for it offer no SWS or app2clap and say why, as for a new REAPER
+/// on Windows on ARM.
+#[test]
+fn an_installed_arm64ec_reaper_offers_no_sws_or_app2clap() {
+    use rabbit_core::arch_probe::PeKind;
+    use rabbit_core::arch_probe::test_support::pe_image;
+
+    let dir = tempdir().unwrap();
+    let folder = dir.path().join("PortableREAPER");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("reaper.exe"), pe_image(PeKind::Arm64Ec)).unwrap();
+    let model = every_package_updated(Platform::Windows, Architecture::X64);
+    let portable = custom_portable_target_row(&model, folder, true);
+    assert_eq!(portable.architecture, Architecture::Arm64Ec);
+    // A standard target, so app2clap and Surge XT aren't held back for
+    // being on a portable one.
+    let target = TargetRow {
+        portable: false,
+        ..portable
+    };
+
+    let plan = wizard_package_plan_for_target(&model, Some(&target)).unwrap();
+
+    assert_eq!(
+        unavailable_rows(&plan.package_rows),
+        [PACKAGE_SWS, PACKAGE_APP2CLAP]
+    );
+    for package_id in [PACKAGE_SWS, PACKAGE_APP2CLAP] {
+        let row = plan
+            .package_rows
+            .iter()
+            .find(|row| row.package_id == package_id)
+            .unwrap();
+        assert_no_build_row(
+            row,
+            "no version for this REAPER's processor type",
+            "For this REAPER's processor type there is no version of {package}, so RABBIT can't \
+             install it here.",
+        );
+    }
+    // REAPER, ReaPack and FFmpeg have arm64ec builds and stay available.
+    for package_id in [PACKAGE_REAPER, PACKAGE_REAPACK, PACKAGE_FFMPEG] {
+        let row = plan
+            .package_rows
+            .iter()
+            .find(|row| row.package_id == package_id)
+            .unwrap();
+        assert!(
+            row.available_for_target && row.has_build_for_target,
+            "{row:?}"
+        );
+    }
+}
+
 /// Every locale says why a package has no build, for a 32-bit REAPER and for
 /// one on another processor, in the row and in its details, with the
 /// package's name in the sentence.

@@ -652,6 +652,62 @@ fn only_files_the_new_version_no_longer_has_move() {
     assert_eq!(manifest.replaced[PACKAGE_REAPACK].receipt, Some(reapack));
 }
 
+/// RABBIT used to read an installed REAPER on Windows on ARM as x64 and
+/// installed ReaPack's x64 DLL there. Now that it reads it as ARM64EC, the
+/// next ReaPack update installs the arm64ec DLL and moves the x64 one into
+/// the update's set, so REAPER never loads two copies of ReaPack.
+#[test]
+fn a_reapack_update_to_the_arm64ec_dll_moves_the_x64_one_into_its_backup() {
+    let (dir, resource) = resource_folder();
+    let cache = dir.path().join("cache");
+    let x64 = plugins("reaper_reapack-x64.dll");
+    let arm64ec = plugins("reaper_reapack-arm64ec.dll");
+    let reapack = entry(PACKAGE_REAPACK, "1.2.5", &[(&x64, b"reapack x64")]);
+    installed(&resource, &[(reapack.clone(), &[(&x64, b"reapack x64")])]);
+    let mut update = artifact(
+        &cache,
+        PACKAGE_REAPACK,
+        "1.2.6",
+        "reaper_reapack-arm64ec.dll",
+        b"reapack arm64ec",
+    );
+    update.descriptor.architecture = Architecture::Arm64Ec;
+
+    let report = install(&resource, &[update], &APPLY);
+
+    assert_eq!(
+        actions_by_name(&report),
+        BTreeMap::from([
+            (
+                "reaper_reapack-arm64ec.dll".to_string(),
+                InstallFileAction::Installed
+            ),
+            (
+                "reaper_reapack-x64.dll".to_string(),
+                InstallFileAction::MovedToBackup
+            ),
+        ])
+    );
+    assert_eq!(
+        fs::read(resource.join(&arm64ec)).unwrap(),
+        b"reapack arm64ec"
+    );
+    assert!(!resource.join(&x64).exists());
+    let manifest = update_set(&report);
+    assert_eq!(
+        files_held(&manifest, PACKAGE_REAPACK),
+        [(x64, b"reapack x64".to_vec())]
+    );
+    assert_eq!(manifest.replaced[PACKAGE_REAPACK].receipt, Some(reapack));
+    let state = load_install_state(&resource).unwrap().unwrap();
+    let listed: Vec<&Path> = state.packages[PACKAGE_REAPACK]
+        .installed_files
+        .iter()
+        .map(|file| file.path.as_path())
+        .collect();
+    assert_eq!(listed, [arm64ec.as_path()]);
+}
+
 /// On Windows and macOS a name in another case is the same file: a
 /// previous entry that spells the new version's file in another case
 /// doesn't move the file the update just installed.

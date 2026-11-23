@@ -407,6 +407,12 @@ GitHub Actions build pipeline for every push:
   - formatting
   - unit/integration tests
   - release-mode build
+- Run the tests again on Windows on ARM: the `verify-windows-arm` job runs
+  the workspace tests, and the GUI crate's with the `gui` feature, on the
+  `windows-11-arm` runner, with the artifacts job's arm64 LLVM and Ninja
+  setup (ring needs that clang to build for ARM64 Windows too). It is a job
+  of its own, so the main Windows job isn't slowed down; formatting and
+  clippy stay with the other jobs.
 - Build the distributable artifact shape, not only debug binaries:
   - Windows: a single `RABBIT.exe`
   - macOS: a single `RABBIT` executable (or a self-contained signed `.app`
@@ -420,15 +426,52 @@ GitHub Actions build pipeline for every push:
 
 Live-upstream smoke pipeline:
 
-- A separate scheduled workflow runs each day against the real upstream
-  download URLs so vendor-side changes (relocated assets, new archive
-  layouts, expired redirectors) trip CI before they trip a user. The
-  current workflow is `macos-smoke.yml`, which exercises the OSARA / SWS /
-  ReaKontrol / REAPER macOS install paths on `macos-latest`. The
-  Windows-side smoke (FFmpeg via Gyan + tordona, plus the existing
-  Windows install paths) is on the open-questions list — adding it
-  requires a parallel `windows-smoke.yml` and `windows_upstream_smoke.rs`
-  test file.
+- Separate scheduled workflows run against the real upstream download URLs
+  so vendor-side changes (relocated assets, new archive layouts, expired
+  redirectors) trip CI before they trip a user. `macos-smoke.yml` runs
+  daily and exercises the OSARA / SWS / ReaKontrol / REAPER macOS install
+  paths on `macos-latest`. The
+  Windows-side smoke of the install paths themselves (receipts and
+  detection round trips) is on the open-questions list.
+- `windows-arm-smoke.yml` runs weekly, and by hand, on the
+  `windows-11-arm` runner, with the `#[ignore]`d tests in
+  `crates/rabbit-core/tests/windows_arm_smoke.rs`. For an `arm64-ec`
+  REAPER, and for an `x64` one as a control, it resolves every Windows
+  package through RABBIT's own artifact resolution, downloads it into a
+  temporary folder and takes it apart as the install does: an extension
+  binary as it is, a zip's one plug-in file, FFmpeg's `bin/` folder.
+  REAPER's own installer runs as the portable install RABBIT plans for a
+  folder, with the arguments a dry run of RABBIT's install gives, started
+  in its download folder. The test never asks for elevation: it refuses a
+  plan that would elevate and starts the installer with CreateProcess,
+  which can't prompt. On GitHub's runners every step has admin rights
+  anyway, so there it is RABBIT's `/PORTABLE` arguments, and the test's
+  check that `/D=` names its temporary folder, that keep the install in
+  that folder. Every `.dll`, `.exe`, `.clap` and `.vst3` is read with
+  `arch_probe::classify_pe_file` and listed in a table (package, build,
+  file, kind, whether an ARM64EC process loads it, result), which also goes
+  on the run's summary page. The run fails when a library RABBIT would put
+  into an ARM64EC REAPER can't be loaded there, or, in the control, one
+  for an x64 REAPER isn't x64, and when a package's download can't be
+  found, fetched or taken apart. REAPER's own files are listed but not
+  judged, since RABBIT doesn't choose them, and neither is any program
+  file, which runs as a process of its own. The other vendor installers
+  (OSARA, SWS, Surge XT, the JAWS scripts) are listed as skipped: RABBIT
+  runs them rather than taking them apart, and running them would change
+  the runner outside a temporary folder. A third test installs REAPER's
+  arm64ec and x64 builds as portable copies and checks that the probe and
+  `detection::target_reaper_architecture` read them as `arm64-ec` and
+  `x64`. REAPER itself never runs there: it opens a window, wants an audio
+  device and shows its evaluation reminder. Even with `--ignored`, the
+  tests that download or run anything do nothing unless
+  `RABBIT_WINDOWS_ARM_SMOKE` is `1`, which only this workflow sets, so a
+  by-hand `cargo test -- --ignored` never runs REAPER's installer. The
+  tables are the evidence for which builds Windows on ARM gets (see
+  Package Model). They cover `arm64-ec`, the REAPER an update finds; a new
+  REAPER there is resolved for `arm64`, and a unit test
+  (`artifact::tests::a_new_and_an_installed_reaper_on_windows_on_arm_get_the_same_builds`)
+  keeps every Windows package's `arm64` build the same as its `arm64-ec`
+  one.
 
 GitHub release pipeline:
 
@@ -1220,6 +1263,40 @@ macOS portable detection:
   and the run name the same app.
 - Resource path is the selected folder.
 
+REAPER's architecture:
+
+- `arch_probe` reads it from REAPER's program file, never from RABBIT's own
+  build: a Mach-O fat binary is `universal`, any other file is what its
+  header names. A file it can't read is `unknown`, which artifact
+  resolution takes as the slice REAPER runs as on this computer.
+- On Windows, hybrid files name another machine in their PE header than
+  the code they run as. REAPER for Windows on ARM is ARM64EC: its header
+  names x64 (`IMAGE_FILE_MACHINE_AMD64`), and its load configuration
+  points at hybrid (CHPE) metadata, which a plain x64 file doesn't have.
+  `arch_probe::classify_pe` reads that pointer, so such a REAPER is
+  `arm64-ec`, and an update keeps its ARM64EC builds: REAPER's arm64ec
+  installer, ReaPack's arm64ec DLL. Every read is checked against the
+  file: the data directory, the load configuration's own `Size` field,
+  PE32 and PE32+. A file whose load configuration is missing, cut short or
+  outside its sections keeps the answer its header gives, as before.
+- An ARM64X file names ARM64 and has the same metadata. As a program,
+  Windows starts it in its ARM64 view, as a native ARM64 process, so the
+  probe reads it as `arm64`. Such a process could load none of the builds
+  the manifests offer for `arm64` on Windows, because there `arm64` stands
+  for the ARM64EC REAPER that a new install from an ARM RABBIT gets
+  (`Architecture::current()`): REAPER's arm64ec installer, ReaPack's
+  arm64ec DLL, x64 setups such as Surge XT's. REAPER ships ARM64EC, and no
+  ARM64 or ARM64X build of it exists, so this doesn't come up today. If
+  REAPER ever ships one, the package rules must give it builds of its own.
+- What loads where: an ARM64EC process loads x64, ARM64EC and ARM64X
+  libraries, but no plain ARM64 or x86 ones
+  (`arch_probe::PeKind::loads_in_arm64ec`). REAPER loads its plug-ins,
+  FFmpeg's libraries among them, into its own process, so for an ARM64EC
+  REAPER each must be one of those three. A program (`.exe`) runs as a
+  process of its own and isn't bound by this. `windows-arm-smoke.yml`
+  checks the real downloads against this rule (see CI/CD And Release
+  Delivery).
+
 REAPER runtime probe:
 
 - Optional later enhancement: launch REAPER in a controlled way with a temporary
@@ -1772,10 +1849,29 @@ with exit code 2, as `uninstall` refuses a package it can't remove. Like the
 wizard, the CLI's install commands and `plan` take the target REAPER's
 architecture from its program file (`detection::target_reaper_architecture`),
 unless `--architecture` names one, and use it for the rule and for resolution
-alike. When even the dispatch architecture is unknown, nothing is blocked. An
-installed ARM64EC REAPER reads as x64, because the probe sees only the PE
-header (see `arch_probe`), so it is offered the x64 SWS and app2clap that a
-new REAPER on Windows on ARM is not.
+alike. When even the dispatch architecture is unknown, nothing is blocked.
+
+Known limit, kept for now: SWS has Windows builds for x86 and x64 only, and
+app2clap for x64 only, so neither has a build for `arm64` or `arm64-ec`, and
+both are unavailable on Windows on ARM: for a new REAPER there, and, since
+the probe reads an installed one as ARM64EC (see Installation Discovery),
+for an installed one too. The wizard's row says "no version for this
+REAPER's processor type", and the CLI "it has no version for REAPER on
+arm64-ec", which is true: neither ships an ARM build. By the loading rule an
+ARM64EC REAPER could load their x64 builds, but the manifests don't offer
+them for `arm64-ec` yet; the package rules change in a later step. The
+`windows-arm-smoke.yml` tables give evidence for app2clap only: its x64
+`.clap` is read in the x64 control run. SWS's Windows download is a vendor
+installer, which the tests don't open, so its rule will rest on the loading
+rule and on its DLL being x64 by name (`reaper_sws-x64.dll`), not on the
+tables. An SWS that RABBIT installed earlier into such a REAPER, when the
+probe still read it as x64, stays where it is: RABBIT no longer updates it
+there, and the Uninstall tab still removes it. In a REAPER that is still
+ARM64EC, ReaPack's x64 DLL from that time goes into the backup of the next
+ReaPack update, which installs the arm64ec one, so REAPER never loads
+ReaPack twice. A REAPER that RABBIT already updated with the x64 build is
+now an x64 REAPER, and RABBIT keeps it so, with its x64 ReaPack and SWS; to
+go back, the user installs REAPER's ARM64EC build from reaper.fm.
 
 Initial package kinds:
 
@@ -3349,6 +3445,9 @@ Automated tests:
 - manifest parsing
 - version comparison
 - path discovery from fake filesystem fixtures
+- REAPER's architecture from hand-built PE and Mach-O headers, ARM64EC and
+  ARM64X files and cut-short or malformed ones included
+  (`arch_probe::test_support`)
 - ReaPack SQLite registry parsing
 - receipt read/write
 - install planning
@@ -3431,12 +3530,12 @@ Install tests:
   one-download, no-RABBIT-installer goal without sacrificing code signing,
   notarization, or screen-reader behavior.
 - Add a Windows-side live-upstream smoke pipeline analogous to
-  `macos-smoke.yml`: download FFmpeg per arch (Gyan x64, tordona ARM64),
-  extract the `bin/` payload into a temp UserPlugins, assert the receipt
-  round-trips, and round-trip the detection back to the upstream version.
-  Until that lands, FFmpeg's per-arch resolver is exercised only by unit
-  tests against fixture release-list bodies, not against real GitHub /
-  Gyan responses.
+  `macos-smoke.yml` for the install paths themselves: install FFmpeg per
+  arch (Gyan x64, tordona ARM64) into a temp UserPlugins, assert the
+  receipt round-trips, and round-trip the detection back to the upstream
+  version. `windows-arm-smoke.yml` already resolves and downloads both
+  builds against the real GitHub / Gyan responses and extracts their
+  `bin/` payload, but it only reads what each file is built for.
 - Find a scriptable source of shared (`dylib`) FFmpeg builds for macOS so
   the FFmpeg row can be enabled there too. OSXExperts.net and
   evermeet.cx ship static binaries only, which can't satisfy REAPER's

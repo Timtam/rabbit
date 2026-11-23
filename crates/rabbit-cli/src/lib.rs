@@ -8793,6 +8793,16 @@ mod tests {
         reaper.extend_from_slice(&optional);
         std::fs::write(resource.join("reaper.exe"), reaper).unwrap();
         std::fs::write(resource.join("reaper.ini"), "[REAPER]\n").unwrap();
+        // Checked first, so a probe that reads it wrong fails the test
+        // before any command runs.
+        assert_eq!(
+            rabbit_core::detection::target_reaper_architecture(
+                super::Platform::Windows,
+                &resource,
+                None,
+            ),
+            rabbit_core::model::Architecture::X86
+        );
         let listing = || {
             let mut names: Vec<_> = std::fs::read_dir(&resource)
                 .unwrap()
@@ -8803,15 +8813,20 @@ mod tests {
         };
         let before = listing();
         let path = resource.to_string_lossy().into_owned();
+        let cache = dir.path().join("cache").to_string_lossy().into_owned();
+        // Without --apply and with the cache in the temporary folder: the
+        // refusal comes before the --apply branch, and a run that wasn't
+        // refused would still install nothing.
         for command in ["setup", "apply-packages", "install-extension"] {
             let cli = Cli::try_parse_from([
                 "rabbit",
                 command,
                 "--resource-path",
                 path.as_str(),
+                "--cache-dir",
+                cache.as_str(),
                 "--package",
                 "surge-xt",
-                "--apply",
             ])
             .unwrap();
 
@@ -8825,6 +8840,131 @@ mod tests {
             );
             assert_eq!(listing(), before, "{command} changed the disk");
         }
+    }
+
+    /// An installed REAPER on Windows on ARM is an ARM64EC program, whose
+    /// header names x64. The install commands read it as arm64-ec, as the
+    /// wizard does, so SWS and app2clap, which have no build for it, are
+    /// refused with the reason, and nothing in its folder changes. `plan`
+    /// leaves SWS, which it lists by default, out with a note, and the
+    /// helper it leaves packages out with does the same for app2clap. The
+    /// architecture is checked first, and the commands run without
+    /// `--apply` and with the cache in the temporary folder, so a probe
+    /// that reads it wrong fails the test before anything could install.
+    #[cfg(windows)]
+    #[test]
+    fn the_install_commands_read_an_arm64ec_reaper_as_arm64_ec() {
+        use rabbit_core::arch_probe::PeKind;
+        use rabbit_core::arch_probe::test_support::pe_image;
+        use rabbit_core::model::Architecture;
+
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("PortableREAPER");
+        std::fs::create_dir_all(&resource).unwrap();
+        std::fs::write(resource.join("reaper.exe"), pe_image(PeKind::Arm64Ec)).unwrap();
+        std::fs::write(resource.join("reaper.ini"), "[REAPER]\n").unwrap();
+        let architecture = rabbit_core::detection::target_reaper_architecture(
+            super::Platform::Windows,
+            &resource,
+            None,
+        );
+        assert_eq!(architecture, Architecture::Arm64Ec);
+        let listing = || {
+            let mut names: Vec<_> = std::fs::read_dir(&resource)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = listing();
+        let path = resource.to_string_lossy().into_owned();
+        let cache = dir.path().join("cache").to_string_lossy().into_owned();
+        for command in ["setup", "apply-packages", "install-extension"] {
+            let cli = Cli::try_parse_from([
+                "rabbit",
+                command,
+                "--resource-path",
+                path.as_str(),
+                "--cache-dir",
+                cache.as_str(),
+                "--package",
+                "sws",
+                "--package",
+                "app2clap",
+            ])
+            .unwrap();
+
+            let error = super::run_with(cli).unwrap_err();
+
+            assert_eq!(
+                super::refusal_exit_code(error.as_ref()),
+                Some(2),
+                "{command}: {error}"
+            );
+            assert_eq!(
+                error.to_string(),
+                "SWS Extension and app2clap have no version for REAPER on arm64-ec, so RABBIT \
+                 can't install them. Nothing was changed.",
+                "{command}"
+            );
+            assert_eq!(listing(), before, "{command} changed the disk");
+        }
+
+        // `plan` finds the portable REAPER and goes by the architecture
+        // detection read for it. It stays offline without --online.
+        let report = dir.path().join("plan.json");
+        let cli = Cli::try_parse_from([
+            "rabbit",
+            "plan",
+            "--resource-path",
+            path.as_str(),
+            "--portable",
+            path.as_str(),
+            "--report-path",
+            report.to_str().unwrap(),
+        ])
+        .unwrap();
+        super::run_with(cli).unwrap();
+        let saved: rabbit_core::report::SavedJsonReport =
+            serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+        let plan: rabbit_core::plan::InstallPlan = serde_json::from_value(saved.report).unwrap();
+        assert_eq!(
+            plan.target.as_ref().and_then(|target| target.architecture),
+            Some(Architecture::Arm64Ec)
+        );
+        assert!(
+            !plan.actions.iter().any(|action| action.package_id == "sws"),
+            "{:?}",
+            plan.actions
+        );
+        assert!(
+            plan.notes
+                .iter()
+                .any(|note| note
+                    == "Skipping SWS Extension: it has no version for REAPER on arm64-ec."),
+            "{:?}",
+            plan.notes
+        );
+        assert_eq!(listing(), before, "plan changed the disk");
+
+        let mut ids = ["reaper", "osara", "sws", "reapack", "app2clap"]
+            .map(String::from)
+            .to_vec();
+        let notes = super::leave_out_packages_without_builds(
+            &mut ids,
+            super::Platform::Windows,
+            architecture,
+            &super::PackageChannels::new(),
+        );
+        assert_eq!(ids, ["reaper", "osara", "reapack"]);
+        assert_eq!(
+            notes,
+            [
+                "Skipping SWS Extension: it has no version for REAPER on arm64-ec.",
+                "Skipping app2clap: it has no version for REAPER on arm64-ec.",
+            ]
+        );
     }
 
     /// The refusal names every package without a build and the REAPER. It
