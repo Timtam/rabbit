@@ -5,9 +5,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::{
-    ConfigurationRow, OsaraKeymapChoice, PackageRow, WizardInstallOptions, WizardModel,
-    apply_checkbox_state_to_package_row, localizer_from_options, package_tree_groups,
-    recompute_configuration_row_availability,
+    ConfigurationRow, OsaraKeymapChoice, PackageRow, PackagesTreeNode, WizardInstallOptions,
+    WizardModel, apply_checkbox_state_to_package_row, localizer_from_options, package_tree_groups,
+    packages_tree_details, packages_tree_initial_details, recompute_configuration_row_availability,
 };
 use rabbit_core::package::PackageCategory;
 use rabbit_core::plan::PlanActionKind;
@@ -21,7 +21,7 @@ use super::{PackagesStateCell, PackagesView, WXK_SPACE};
 
 use crate::wx_app::pages::add_label;
 use crate::wx_app::widgets::{
-    REAPER_LANGUAGE_LABEL_NAME, SPANISH_VARIANT_LABEL_NAME, WizardWidgets, package_details,
+    REAPER_LANGUAGE_LABEL_NAME, SPANISH_VARIANT_LABEL_NAME, WizardWidgets,
     sync_osara_keymap_widgets, sync_reaper_language_widget, sync_spanish_variant_widget,
 };
 
@@ -86,10 +86,7 @@ pub(crate) fn rebuild_package_list_widgets(
         package_rows,
         configuration_rows,
     );
-    let initial = package_rows
-        .first()
-        .map(package_details)
-        .unwrap_or_default();
+    let initial = packages_tree_initial_details(package_rows);
     widgets.package_details.set_value(&initial);
     // No selection handler runs while the rows are rebuilt (see
     // `clear_tree_without_taking_focus`), so the choices that follow the
@@ -454,11 +451,7 @@ pub(crate) fn build_packages_page(
         &model.text.package_details_label,
         "rabbit-package-details-label",
     );
-    let initial_details = package_rows
-        .borrow()
-        .first()
-        .map(package_details)
-        .unwrap_or_default();
+    let initial_details = packages_tree_initial_details(&package_rows.borrow());
     let details = TextCtrl::builder(page)
         .with_value(&initial_details)
         .with_style(TextCtrlStyle::MultiLine | TextCtrlStyle::ReadOnly | TextCtrlStyle::WordWrap)
@@ -554,8 +547,8 @@ pub(crate) fn build_packages_page(
 
     // Selection-change updates the package details text. The event fires
     // when the focused row changes via mouse or arrow keys; we use the
-    // wxTreeItemId from the event to find the matching index in
-    // `package_items.leaves`.
+    // wxTreeItemId from the event to find the node it is, and the wizard
+    // says what the pane shows for it, as it does on macOS.
     {
         let package_rows = Rc::clone(&package_rows);
         let configuration_rows = Rc::clone(&configuration_rows);
@@ -566,20 +559,15 @@ pub(crate) fn build_packages_page(
         let spanish_checkbox = spanish_variant_choice;
         let language_choice = reaper_language_choice;
         tree.on_selection_changed(move |event| {
-            if let Some(item) = event.get_item() {
-                match classify_leaf(&package_items.borrow(), &item) {
-                    Some(WhichLeaf::Packages(idx)) => {
-                        if let Some(value) = package_rows.borrow().get(idx).map(package_details) {
-                            details.set_value(&value);
-                        }
-                    }
-                    Some(WhichLeaf::Configuration(idx)) => {
-                        if let Some(row) = configuration_rows.borrow().get(idx) {
-                            details.set_value(&row.details);
-                        }
-                    }
-                    None => {}
-                }
+            if let Some(item) = event.get_item()
+                && let Some(node) = classify_node(&package_items.borrow(), &item)
+                && let Some(value) = packages_tree_details(
+                    &package_rows.borrow(),
+                    &configuration_rows.borrow(),
+                    node,
+                )
+            {
+                details.set_value(&value);
             }
             sync_osara_keymap_widgets(
                 &model_text,
@@ -1067,6 +1055,22 @@ pub(crate) fn classify_leaf(items: &PackageItems, candidate: &TreeItemId) -> Opt
     None
 }
 
+/// Windows-only: which node of the wizard's tree an item is, a row or a
+/// heading, for [`packages_tree_details`]. Returns `None` for the hidden
+/// root and items that aren't part of our current row sets.
+fn classify_node(items: &PackageItems, candidate: &TreeItemId) -> Option<PackagesTreeNode> {
+    if let Some(leaf) = classify_leaf(items, candidate) {
+        return Some(match leaf {
+            WhichLeaf::Packages(idx) => PackagesTreeNode::Package(idx),
+            WhichLeaf::Configuration(idx) => PackagesTreeNode::Configuration(idx),
+        });
+    }
+    classify_group(items, candidate).map(|group| match group {
+        WhichGroup::Package(category) => PackagesTreeNode::PackageGroup(category),
+        WhichGroup::Configuration => PackagesTreeNode::ConfigurationGroup,
+    })
+}
+
 /// Windows-only: read the native `HTREEITEM` behind a wxdragon
 /// `TreeItemId`. SAFETY contract is the same as `native_tree_checkboxes`:
 /// `TreeItemId` is a single-field `repr(Rust)` wrapper around
@@ -1314,20 +1318,12 @@ pub(crate) fn refresh_after_packages_toggle(
     });
     can_install.set(any_install_or_update);
 
-    if let Some(selected) = tree.get_selection() {
-        match classify_leaf(&package_items.borrow(), &selected) {
-            Some(WhichLeaf::Packages(idx)) => {
-                if let Some(row) = package_rows.borrow().get(idx) {
-                    details.set_value(&package_details(row));
-                }
-            }
-            Some(WhichLeaf::Configuration(idx)) => {
-                if let Some(row) = configuration_rows.borrow().get(idx) {
-                    details.set_value(&row.details);
-                }
-            }
-            None => {}
-        }
+    if let Some(selected) = tree.get_selection()
+        && let Some(node) = classify_node(&package_items.borrow(), &selected)
+        && let Some(value) =
+            packages_tree_details(&package_rows.borrow(), &configuration_rows.borrow(), node)
+    {
+        details.set_value(&value);
     }
 
     sync_osara_keymap_widgets(
@@ -1429,7 +1425,7 @@ pub(crate) fn refresh_package_checklist(
     configuration_rows: &[ConfigurationRow],
 ) {
     populate_packages_tree(tree, package_items, model, rows, configuration_rows);
-    details.set_value(&rows.first().map(package_details).unwrap_or_default());
+    details.set_value(&packages_tree_initial_details(rows));
     sync_osara_keymap_widgets(model, rows, osara_keymap_replace, osara_keymap_note);
     sync_spanish_variant_widget(rows, spanish_variant_choice);
     sync_reaper_language_widget(rows, reaper_language_choice);

@@ -43,8 +43,13 @@ pub(super) fn langpack_model(action: PlanActionKind) -> (Localizer, WizardModel)
 }
 
 pub(super) fn language_step(rows: &[ConfigurationRow]) -> &ConfigurationRow {
+    &rows[language_step_index(rows)]
+}
+
+/// The index of the "Set REAPER's language" step among `rows`.
+pub(super) fn language_step_index(rows: &[ConfigurationRow]) -> usize {
     rows.iter()
-        .find(|row| row.step_id == rabbit_core::configuration::CONFIG_SET_REAPER_LANGUAGE)
+        .position(|row| row.step_id == rabbit_core::configuration::CONFIG_SET_REAPER_LANGUAGE)
         .expect("set-reaper-language row should exist")
 }
 
