@@ -636,14 +636,18 @@ CLI and UI expectations:
   (the Backups tab's Restore or Delete), never above it: on macOS, Tab from
   the tab strip goes straight into the list, and a control above it would
   be skipped. Its choices have no access keys; only buttons carry them. The
-  rows stay the same rows in both choices, and each choice keeps its own
-  ticks, so a switch only changes each row's action word and tick. Focus
-  stays on the RadioBox. On macOS, VoiceOver then says how many backups are
-  ticked for the new choice, politely, after reading the choice; on Windows,
-  which has no announcement, the rows read their new action when focus
-  comes back to them. On macOS without Full Keyboard Access, Tab doesn't
-  stop on the RadioBox, as it doesn't on the tab strip; VoiceOver's own
-  navigation reaches it, and README says so.
+  rows stay the same rows in both choices, with one set of ticks: you tick,
+  then choose. A switch changes each row's action word, keeps every tick
+  the new choice can do and unticks the rest, whose labels then say why.
+  Focus stays on the RadioBox. On macOS, VoiceOver then says how many
+  backups are ticked for the new choice and, if any, how many lost their
+  tick, politely, after reading the choice; on Windows, which has no
+  announcement, the rows read their new action and tick when focus comes
+  back to them. A radio group's arrow keys switch as they move, so Review
+  says how many backups lost their tick, on both systems, until they are
+  ticked again. On macOS without Full Keyboard Access, Tab doesn't stop on
+  the RadioBox, as it doesn't on the tab strip; VoiceOver's own navigation
+  reaches it, and README says so.
 - Every question before a step that can't be undone, and before stopping
   a run, is a native Yes/No message box with No focused (`wxNO_DEFAULT`),
   so Enter or Space pressed out of habit answers No: the uninstall question,
@@ -818,25 +822,26 @@ user can finish the install by pressing Next a few times.
      which name its folder. The list's label names the tab and the total
      size. An empty or unreadable list works like the empty Uninstall list.
      Below the details, a RadioBox, "What to do with the ticked backups",
-     picks Restore (the default) or Delete, each with its own ticks, kept in
-     one wx-free model (`WizardBackupList`). With Restore, a row the core
-     would refuse can't be ticked and its suffix says why; with Delete,
-     every row can be ticked except another account's on macOS and a link
-     or a folder RABBIT didn't make, each by its own status. A tick, for
-     either choice, changes only its row, and on macOS VoiceOver says only
-     "Checked" or "Unchecked". A delete takes each ticked row as the core
-     maps it (`DeleteItem::for_backup`): a package or the key map goes out
-     of its set, which keeps its other backups, and the core deletes the
-     set whole when the ticked rows are every backup it lists. A set's own
-     row, for files no other row brings back, and an unfinished deletion
-     whose id also names a set take that set whole; their details name the
-     rows that go with them, or those of them RABBIT can't delete, such as
-     another account's, which leave the row only to be unticked. A set that
-     goes whole also finishes an unfinished deletion of its id, ticked or
-     not; that loses nothing a restore could use, and Show details says so.
-     Nothing is ticked by default, and the version check clears both
-     choices' ticks and sets the choice back to Restore. Everything below
-     describes the Install or update tab.
+     picks Restore (the default) or Delete for the one set of ticks, kept in
+     one wx-free model (`WizardBackupList`); a switch keeps the ticks the
+     new choice can do and unticks the rest, so the run takes every ticked
+     row. With Restore, a row the core would refuse can't be ticked and its
+     suffix says why; with Delete, every row can be ticked except another
+     account's on macOS and a link or a folder RABBIT didn't make, each by
+     its own status. A tick changes only its row, and on macOS VoiceOver
+     says only "Checked" or "Unchecked". A delete takes each ticked row as
+     the core maps it (`DeleteItem::for_backup`): a package or the key map
+     goes out of its set, which keeps its other backups, and the core
+     deletes the set whole when the ticked rows are every backup it lists. A
+     set's own row, for files no other row brings back, and an unfinished
+     deletion whose id also names a set take that set whole; their details
+     name the rows that go with them, or those of them RABBIT can't delete,
+     such as another account's, which leave the row only to be unticked. A
+     set that goes whole also finishes an unfinished deletion of its id,
+     ticked or not; that loses nothing a restore could use, and Show details
+     says so. Nothing is ticked by default, and the version check clears the
+     ticks and sets the choice back to Restore. Everything below describes
+     the Install or update tab.
    - Tree view with top-level groups in this order: **Packages**,
      **Instruments**, **Tools**, **Language packs** and **Configuration**.
      Each package's manifest `category` picks its group: `core` (the
@@ -939,8 +944,8 @@ user can finish the install by pressing Next a few times.
      warnings, a note per other tab naming what is ticked there and left
      out (on the Install or update tab, only ticks RABBIT didn't set itself,
      such as an update it ticked by default; on the Backups tab, how many
-     backups are ticked to restore and to delete), and that the packages can be
-     installed again. When a ticked package's own uninstaller removes it
+     backups are ticked to restore or to delete), and that the packages can
+     be installed again. When a ticked package's own uninstaller removes it
      (on Windows, Surge XT or a standard REAPER), or the elevated helper
      removes the uninstaller folder and registry entry the JAWS scripts'
      installer left, the summary also says that Windows asks for permission
@@ -987,28 +992,31 @@ user can finish the install by pressing Next a few times.
      ("ReaPack goes back from 1.2.5 to 1.2.4. RABBIT keeps 1.2.5 as a
      backup."), what else changes, such as REAPER's language, "Close REAPER
      first." (or every REAPER) while one it needs closed is running, the
-     ticks on the other tabs and those for Delete, which the run leaves out,
-     and the blockers, each starting "Can't restore yet" or, for a backup
-     the dry run refuses, "Can't restore <backup> yet": nothing ticked, two
-     ticked backups of one package or of one file, a target RABBIT can't
-     write to, every refusal of the dry run, and a dry run that is missing
-     or covers other backups than the ticked ones, so Restore is never
-     enabled for backups nothing checked. Before a delete the heading says
-     "Ready to delete backups", and the summary says the ticked backups go
-     for good and how much room that frees, "about" when a package or key
-     map goes out of its set, whose size comes from the set's record, then
-     one line per ticked backup with what is lost ("the only copy", "you
-     can't go back to it after this"), the ticks left out, and the blockers,
-     each starting "Can't delete yet": nothing ticked, and a ticked row that
-     takes its whole set while other rows of that set aren't ticked ("To
-     delete it, tick the other one too.") or can't be ("Untick this
-     backup."), named after a colon so its row name keeps its capital, so no
-     backup a restore could use goes unless it is ticked; an unfinished
-     deletion of the same id is finished with its set. The Delete button
-     checks the same blockers again. Both name backups as the tab does, with
-     no set ids, and a path only in a refusal's own sentence. As for an
-     uninstall, focus goes to the summary, the run button is not the
-     default, and Back returns to the Backups list.
+     ticks on the other tabs, which the run leaves out, how many backups a
+     switch of the choice unticked and nobody ticked since, and the blockers,
+     each starting "Can't restore yet" or, for a backup the dry run refuses,
+     "Can't restore <backup> yet": nothing ticked, which says to tick backups
+     in the list with Space, two ticked backups of one package or of one
+     file, a target RABBIT can't write to, every refusal of the dry run, and
+     a dry run that is missing or covers other backups than the ticked ones,
+     so Restore is never enabled for backups nothing checked.
+     Before a delete the heading says "Ready to delete backups", and the
+     summary says the ticked backups go for good and how much room that
+     frees, "about" when a package or key map goes out of its set, whose
+     size comes from the set's record, then one line per ticked backup with
+     what is lost ("the only copy", "you can't go back to it after this"),
+     the ticks on the other tabs, the backups that lost their tick as for a
+     restore, and the blockers, each starting "Can't delete yet": nothing
+     ticked, with the same hint as for a restore, and a ticked row that takes
+     its whole set while other rows of that set aren't ticked ("To delete it,
+     tick the other one too.") or can't be ("Untick this backup."), named
+     after a colon so its row name keeps its capital, so no backup a restore
+     could use goes unless it is ticked; an unfinished deletion of the same
+     id is finished with its set. The Delete button checks the same blockers
+     again. Both name backups as the tab does, with no set ids, and a path
+     only in a refusal's own sentence. As for an uninstall, focus goes to the
+     summary, the run button is not the default, and Back returns to the
+     Backups list.
 
 6. Progress
    - Single progress bar plus one current-step line. A "Show details" toggle

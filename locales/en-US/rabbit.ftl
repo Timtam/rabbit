@@ -780,9 +780,10 @@ wizard-backups-details-delete-only-with-undeletable = RABBIT can only delete it 
 wizard-backups-choice-label = What to do with the ticked backups
 wizard-backups-choice-restore = Restore
 wizard-backups-choice-delete = Delete
-# The choice below the Backups list, Restore or Delete, keeps its own ticks.
-# After a switch, VoiceOver on macOS says how many backups are ticked for the
-# new choice. $choice is restore or delete, and $count a number.
+# The Backups list has one set of ticks for both choices below it, Restore
+# and Delete. After a switch, VoiceOver on macOS says how many backups are
+# ticked for the new choice. $choice is restore or delete, and $count a
+# number.
 wizard-backups-ticked-macos = { $choice ->
     [delete] { $count ->
         [0] No backups ticked to delete.
@@ -793,6 +794,21 @@ wizard-backups-ticked-macos = { $choice ->
         [0] No backups ticked to restore.
         [one] One backup ticked to restore.
        *[other] { $count } backups ticked to restore.
+    }
+}
+# Said after the sentence above, on macOS, when the switch unticked backups
+# the new choice can't do, such as a backup that can't be restored. Review
+# also gives it as a note, on every system, until those backups are ticked
+# again. $choice is the choice that can't do them, restore or delete, and
+# $count a number, never 0.
+wizard-backups-unticked = { $choice ->
+    [delete] { $count ->
+        [one] One backup can't be deleted, so it is no longer ticked.
+       *[other] { $count } backups can't be deleted, so they are no longer ticked.
+    }
+   *[restore] { $count ->
+        [one] One backup can't be restored, so it is no longer ticked.
+       *[other] { $count } backups can't be restored, so they are no longer ticked.
     }
 }
 # Why a restore of a backup is refused, a sentence or two each, about the
@@ -1038,11 +1054,13 @@ wizard-review-uninstall-trash-elevated-note-macos = { $package } goes into your 
 # such as "Set REAPER's language".
 wizard-review-inactive-tab-note-install = What is ticked on the Install or update tab isn't part of this run: { $packages }.
 wizard-review-inactive-tab-note-uninstall = What is ticked on the Uninstall tab isn't part of this run: { $packages }.
-# The same note for the Backups tab. $backups is one or both of the two
-# messages below, joined as wizard-backups-list-and joins names.
+# The same note for the Backups tab. $backups is one of the two messages
+# below: the tab has one set of ticks, for Restore or Delete as chosen below
+# its list.
 wizard-review-inactive-tab-note-backups = What is ticked on the Backups tab isn't part of this run: { $backups }.
-# How many backups are ticked on the Backups tab to restore, and to delete,
-# for the note above. $count is a number, never 0.
+# How many backups are ticked on the Backups tab, with Restore or with
+# Delete chosen below its list, for the note above. $count is a number,
+# never 0.
 wizard-review-inactive-tab-backups-restore = { $count ->
     [one] one backup to restore
    *[other] { $count } backups to restore
@@ -1115,20 +1133,17 @@ wizard-review-restore-needs-reinstall = To uninstall { $package } with RABBIT la
 # package serves every REAPER on the computer.
 wizard-review-restore-close-reaper = Close REAPER first.
 wizard-review-restore-close-every-reaper = Close every copy of REAPER first.
-# The backups ticked for the other choice below the list stay ticked, but
-# aren't part of this run. $count is a number.
-wizard-review-restore-other-choice-note = { $count ->
-    [one] One backup ticked to delete isn't part of this run.
-   *[other] { $count } backups ticked to delete aren't part of this run.
-}
-# Why the Restore button is disabled. $reason is a sentence, such as
+# Why the Restore button is disabled. $reason is a sentence or two, such as
 # wizard-review-restore-nothing-ticked. The -backup form names a backup that
 # can't come back: $backup as in wizard-backups-row-reference, or for a key
 # map as wizard-done-restore-keymap-in-sentence says it, and $reason one of
 # the wizard-restore-refusal-* sentences or wizard-review-restore-plan-failed.
 wizard-review-restore-blocked = Can't restore yet: { $reason }
 wizard-review-restore-blocked-backup = Can't restore { $backup } yet. { $reason }
-wizard-review-restore-nothing-ticked = Nothing is ticked to restore.
+# With nothing ticked to restore. The second sentence says how to tick:
+# Space is the Space bar, named as keyboards and screen readers in your
+# language name it.
+wizard-review-restore-nothing-ticked = Nothing is ticked to restore. Tick backups in the list with Space.
 wizard-review-restore-not-writable = RABBIT can't write to this REAPER's folder.
 # $first and $second name two ticked backups, as in
 # wizard-backups-row-reference, or for a key map as
@@ -1167,14 +1182,10 @@ wizard-review-delete-already-back = { $backup }: its files are on disk as well, 
 wizard-review-delete-records = { $backup }: nothing that is installed changes.
 wizard-review-delete-deleting = { $backup }: this finishes a deletion that started earlier.
 wizard-review-delete-other = { $backup }: it is gone for good.
-# $count is a number.
-wizard-review-delete-other-choice-note = { $count ->
-    [one] One backup ticked to restore isn't part of this run.
-   *[other] { $count } backups ticked to restore aren't part of this run.
-}
-# Why the Delete button is disabled. $reason is a sentence.
+# Why the Delete button is disabled. $reason is a sentence or two.
 wizard-review-delete-blocked = Can't delete yet: { $reason }
-wizard-review-delete-nothing-ticked = Nothing is ticked to delete.
+# As wizard-review-restore-nothing-ticked, with nothing ticked to delete.
+wizard-review-delete-nothing-ticked = Nothing is ticked to delete. Tick backups in the list with Space.
 # Why the Delete button is disabled, as $reason above: a ticked backup that
 # RABBIT can only delete together with the whole backup set it is in, such
 # as the set's own files, while other rows of that set aren't ticked. The

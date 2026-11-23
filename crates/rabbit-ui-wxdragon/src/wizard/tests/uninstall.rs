@@ -1266,14 +1266,14 @@ fn an_install_review_names_the_uninstall_ticks_it_leaves_out() {
     }
 }
 
-/// Something ticked on every tab: two install ticks, one uninstall tick,
-/// two backups to restore and one to delete.
+/// Something ticked on every tab: two install ticks, one uninstall tick
+/// and two backups to restore.
 fn ticks_on_every_tab() -> PackagesTabTicks {
     PackagesTabTicks {
         install: vec!["OSARA".to_string(), "REAPER".to_string()],
         uninstall: vec!["SWS Extension".to_string()],
-        backups_to_restore: 2,
-        backups_to_delete: 1,
+        backups_ticked: 2,
+        backups_choice: BackupChoice::Restore,
     }
 }
 
@@ -1285,7 +1285,7 @@ fn each_review_names_the_ticks_on_both_other_tabs_in_tab_order() {
                    OSARA, REAPER.";
     let uninstall = "What is ticked on the Uninstall tab isn't part of this run: SWS Extension.";
     let backups = "What is ticked on the Backups tab isn't part of this run: 2 backups to \
-                   restore and one backup to delete.";
+                   restore.";
     assert_eq!(
         inactive_tab_notes(&localizer, WizardMode::Install, &ticks),
         [uninstall, backups]
@@ -1294,8 +1294,8 @@ fn each_review_names_the_ticks_on_both_other_tabs_in_tab_order() {
         inactive_tab_notes(&localizer, WizardMode::Uninstall, &ticks),
         [install, backups]
     );
-    // The Backups tab's own Reviews say what is ticked for the other choice
-    // there, so only the other two tabs get a note.
+    // The Backups tab's own ticks are what its Reviews are about, so only
+    // the other two tabs get a note.
     for mode in [WizardMode::Restore, WizardMode::DeleteBackups] {
         assert_eq!(
             inactive_tab_notes(&localizer, mode, &ticks),
@@ -1306,29 +1306,31 @@ fn each_review_names_the_ticks_on_both_other_tabs_in_tab_order() {
 }
 
 #[test]
-fn the_backups_tab_note_counts_each_choice_it_has_ticks_for() {
+fn the_backups_tab_note_counts_the_ticks_for_its_choice() {
     let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
-    let note = |restore: usize, delete: usize| {
+    let note = |ticked: usize, choice: BackupChoice| {
         inactive_tab_notes(
             &localizer,
             WizardMode::Install,
             &PackagesTabTicks {
-                backups_to_restore: restore,
-                backups_to_delete: delete,
+                backups_ticked: ticked,
+                backups_choice: choice,
                 ..PackagesTabTicks::default()
             },
         )
     };
     let prefix = "What is ticked on the Backups tab isn't part of this run: ";
-    assert_eq!(note(1, 0), [format!("{prefix}one backup to restore.")]);
-    assert_eq!(note(0, 3), [format!("{prefix}3 backups to delete.")]);
     assert_eq!(
-        note(1, 1),
-        [format!(
-            "{prefix}one backup to restore and one backup to delete."
-        )]
+        note(1, BackupChoice::Restore),
+        [format!("{prefix}one backup to restore.")]
     );
-    assert_eq!(note(0, 0), Vec::<String>::new());
+    assert_eq!(
+        note(3, BackupChoice::Delete),
+        [format!("{prefix}3 backups to delete.")]
+    );
+    for choice in BackupChoice::ALL {
+        assert_eq!(note(0, choice), Vec::<String>::new(), "{choice:?}");
+    }
 }
 
 #[test]
@@ -1343,20 +1345,28 @@ fn the_three_tab_notes_read_in_every_locale() {
                 assert_reads(locale, note);
             }
         }
-        for (restore, delete) in [(1, 0), (0, 1), (5, 7)] {
+        for (ticked, choice) in [
+            (1, BackupChoice::Restore),
+            (1, BackupChoice::Delete),
+            (5, BackupChoice::Restore),
+            (7, BackupChoice::Delete),
+        ] {
             let notes = inactive_tab_notes(
                 &localizer,
                 WizardMode::Uninstall,
                 &PackagesTabTicks {
-                    backups_to_restore: restore,
-                    backups_to_delete: delete,
+                    backups_ticked: ticked,
+                    backups_choice: choice,
                     ..PackagesTabTicks::default()
                 },
             );
             assert_eq!(notes.len(), 1, "{locale}");
             assert_reads(locale, &notes[0]);
-            for count in [restore, delete].into_iter().filter(|count| *count > 1) {
-                assert!(notes[0].contains(&count.to_string()), "{locale}: {notes:?}");
+            if ticked > 1 {
+                assert!(
+                    notes[0].contains(&ticked.to_string()),
+                    "{locale}: {notes:?}"
+                );
             }
         }
     }
@@ -2179,7 +2189,7 @@ fn review_and_the_settings_note_read_in_every_locale() {
                     WizardMode::Uninstall,
                     &PackagesTabTicks {
                         install: vec!["OSARA".to_string()],
-                        backups_to_restore: 2,
+                        backups_ticked: 2,
                         ..PackagesTabTicks::default()
                     },
                 ),
@@ -2202,7 +2212,8 @@ fn review_and_the_settings_note_read_in_every_locale() {
             WizardMode::Install,
             &PackagesTabTicks {
                 uninstall: vec!["SWS".to_string()],
-                backups_to_delete: 1,
+                backups_ticked: 1,
+                backups_choice: BackupChoice::Delete,
                 ..PackagesTabTicks::default()
             },
         ));

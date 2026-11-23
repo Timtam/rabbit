@@ -217,7 +217,7 @@ fn all_ticked(localizer: &Localizer, entries: Vec<BackupEntry>) -> WizardBackupL
         .filter(|&index| !list.rows[index].is_heading())
         .collect();
     for index in rows {
-        apply_backup_checkbox(&mut list.rows, index, BackupChoice::Delete, true);
+        apply_backup_checkbox(&mut list, index, true);
     }
     list
 }
@@ -276,8 +276,6 @@ fn the_run_is_copied_out_of_the_list_row_by_row() {
     tick(&mut list, SWS, BackupChoice::Delete);
     tick(&mut list, REAPACK, BackupChoice::Delete);
     tick(&mut list, RECORDS, BackupChoice::Delete);
-    // A tick for Restore is no part of a delete.
-    tick(&mut list, KEYMAP, BackupChoice::Restore);
 
     let run = run_of(&en(), &list);
     assert_eq!(run.resource_path, PathBuf::from(RESOURCE));
@@ -317,19 +315,21 @@ fn the_run_is_copied_out_of_the_list_row_by_row() {
 
 #[test]
 fn review_the_question_and_done_count_the_same_backups() {
-    // A package of a set of two, a row alone, the records row and a tick
-    // for Restore only.
+    // The key map, ticked while Restore was chosen, then a package of a
+    // set of two, a row alone and the records row, ticked once Delete is
+    // chosen: both choices share the ticks.
     let mut list = backup_list(vec![sws(), ffmpeg(), reapack(), keymap(), records()]);
+    tick(&mut list, KEYMAP, BackupChoice::Restore);
     tick(&mut list, FFMPEG, BackupChoice::Delete);
     tick(&mut list, REAPACK, BackupChoice::Delete);
     tick(&mut list, RECORDS, BackupChoice::Delete);
-    tick(&mut list, KEYMAP, BackupChoice::Restore);
     let run = run_of(&en(), &list);
     assert_eq!(
         run.backups(),
         list.ticked_rows(BackupChoice::Delete).count()
     );
-    assert_eq!(run.backups(), 3);
+    assert_eq!(run.backups(), 4);
+    assert!(run.rows.iter().any(|row| row.name == KEYMAP));
 
     let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
     assert!(
@@ -339,7 +339,7 @@ fn review_the_question_and_done_count_the_same_backups() {
     );
     let (_, question) = delete_backups_question(&en(), &list);
     assert!(
-        question.starts_with("RABBIT deletes 3 backups and frees "),
+        question.starts_with("RABBIT deletes 4 backups and frees "),
         "{question}"
     );
     let all_deleted: Vec<DeleteReportItem> = run
@@ -354,7 +354,7 @@ fn review_the_question_and_done_count_the_same_backups() {
     assert!(
         outcome
             .heading
-            .starts_with("RABBIT deleted 3 backups and freed "),
+            .starts_with("RABBIT deleted 4 backups and freed "),
         "{}",
         outcome.heading
     );
@@ -363,12 +363,36 @@ fn review_the_question_and_done_count_the_same_backups() {
 #[test]
 fn nothing_ticked_to_delete_gives_a_run_of_nothing() {
     let mut list = backup_list(vec![sws(), reapack()]);
-    tick(&mut list, REAPACK, BackupChoice::Restore);
+    set_backup_choice(&mut list, BackupChoice::Delete);
     let run = run_of(&en(), &list);
     assert!(run.items.is_empty());
     assert!(run.rows.is_empty());
     assert_eq!(run.backups(), 0);
     assert_eq!(run.set_count(), 0);
+}
+
+/// The ticks are shared, but only the run of the choice below the list
+/// takes them: while Restore is chosen, a delete takes nothing, even if
+/// something asks for one.
+#[test]
+fn a_tick_with_restore_chosen_is_no_delete_until_delete_is_chosen() {
+    let mut list = backup_list(vec![sws(), reapack()]);
+    tick(&mut list, REAPACK, BackupChoice::Restore);
+    assert_eq!(list.choice, BackupChoice::Restore);
+    assert!(backup_delete_items(&list).is_empty());
+    assert!(!can_delete_backups(&list));
+    assert_eq!(backup_delete_bytes(&list), 0);
+    let run = run_of(&en(), &list);
+    assert!(run.items.is_empty());
+    assert!(run.rows.is_empty());
+    let review = build_backup_delete_review(&en(), Some(&target(true)), &list, &[]);
+    assert!(!review.can_delete);
+    assert!(review.items.is_empty());
+
+    // Chosen, Delete takes it.
+    set_backup_choice(&mut list, BackupChoice::Delete);
+    assert_eq!(run_of(&en(), &list).backups(), 1);
+    assert!(can_delete_backups(&list));
 }
 
 #[test]
@@ -607,8 +631,9 @@ fn the_records_row_is_said_once_at_its_start_and_once_at_its_end() {
 fn two_backups_of_one_name_are_each_said_with_their_dates() {
     let mut list = backup_list(vec![keymap(), older_keymap()]);
     let first = index_of(&list, KEYMAP);
-    apply_backup_checkbox(&mut list.rows, first, BackupChoice::Delete, true);
-    apply_backup_checkbox(&mut list.rows, first + 1, BackupChoice::Delete, true);
+    set_backup_choice(&mut list, BackupChoice::Delete);
+    apply_backup_checkbox(&mut list, first, true);
+    apply_backup_checkbox(&mut list, first + 1, true);
     assert_eq!(list.rows[first + 1].name, KEYMAP);
     let run = run_of(&en(), &list);
     assert_eq!(run.rows.len(), 2);
@@ -2310,8 +2335,9 @@ fn every_done_page_and_show_details_reads_in_every_locale() {
         // Two rows of one set: refused each, one stayed in it, and the set
         // gone whole for both.
         let mut pair = list_in(&localizer, vec![sws(), ffmpeg(), reapack()]);
-        apply_backup_checkbox(&mut pair.rows, 1, BackupChoice::Delete, true);
-        apply_backup_checkbox(&mut pair.rows, 2, BackupChoice::Delete, true);
+        set_backup_choice(&mut pair, BackupChoice::Delete);
+        apply_backup_checkbox(&mut pair, 1, true);
+        apply_backup_checkbox(&mut pair, 2, true);
         let run_pair = backup_delete_run(&localizer, Path::new(RESOURCE), &pair);
         assert_eq!(run_pair.rows.len(), 2);
         assert_eq!(run_pair.set_count(), 1);
@@ -2761,11 +2787,7 @@ fn a_real_delete_of_one_package_leaves_the_other_listed_and_restorable() {
     names.sort();
     assert_eq!(names, [FFMPEG, REAPACK, "Software you uninstalled"]);
     assert_eq!(list.choice, BackupChoice::Restore);
-    assert!(
-        list.rows
-            .iter()
-            .all(|row| !row.restore_ticked && !row.delete_ticked)
-    );
+    assert!(list.rows.iter().all(|row| !row.ticked));
     let ffmpeg = &list.rows[index_of(&list, FFMPEG)];
     assert!(ffmpeg.can_tick(BackupChoice::Restore), "{}", ffmpeg.summary);
     let entry = ffmpeg.entry.as_ref().expect("a backup's row");

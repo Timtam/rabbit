@@ -32,7 +32,7 @@ use tempfile::tempdir;
 
 use super::backups::{
     OCT_2_1100, en, ffmpeg, index_of, keymap, list_in, package, plan_all, reapack, sws, tick,
-    version, write_uninstall_set,
+    version, with_status, write_uninstall_set,
 };
 use super::support::{assert_reads, langpack_model};
 use super::uninstall::target;
@@ -44,7 +44,6 @@ use crate::wizard::*;
 
 const RESOURCE: &str = "C:/REAPER";
 const SWS: &str = "SWS Extension 2.14.0.7";
-const FFMPEG: &str = "FFmpeg for Improved Video Support 7.1";
 const REAPACK: &str = "ReaPack 1.2.4";
 const KEYMAP: &str = "Your key map";
 /// When a restore of November 10, 2026, 2:05 PM UTC made its backup of
@@ -119,7 +118,7 @@ fn all_ticked(localizer: &Localizer, entries: Vec<BackupEntry>) -> WizardBackupL
         .filter(|&index| list.rows[index].can_tick(BackupChoice::Restore))
         .collect();
     for index in rows {
-        apply_backup_checkbox(&mut list.rows, index, BackupChoice::Restore, true);
+        apply_backup_checkbox(&mut list, index, true);
     }
     list
 }
@@ -427,8 +426,6 @@ fn the_run_is_copied_out_of_the_list_with_the_listed_fingerprints() {
     tick(&mut list, SWS, BackupChoice::Restore);
     tick(&mut list, KEYMAP, BackupChoice::Restore);
     tick(&mut list, REAPACK, BackupChoice::Restore);
-    // A tick to delete is no part of a restore.
-    tick(&mut list, FFMPEG, BackupChoice::Delete);
 
     let run = run_of(&en(), &list);
     assert_eq!(run.resource_path, PathBuf::from(RESOURCE));
@@ -476,12 +473,42 @@ fn the_run_is_copied_out_of_the_list_with_the_listed_fingerprints() {
 
 #[test]
 fn nothing_ticked_to_restore_gives_a_run_of_nothing() {
-    let mut list = list_in(&en(), vec![sws(), reapack()]);
-    tick(&mut list, REAPACK, BackupChoice::Delete);
+    // An earlier version that can't be restored, ticked while Delete is
+    // chosen, loses its tick when Restore is chosen.
+    let mut list = list_in(
+        &en(),
+        vec![sws(), with_status(reapack(), BackupStatus::NotComplete)],
+    );
+    let reapack = index_of(&list, REAPACK);
+    assert!(!list.rows[reapack].can_tick(BackupChoice::Restore));
+    assert!(tick(&mut list, REAPACK, BackupChoice::Delete));
+    assert_eq!(
+        set_backup_choice(&mut list, BackupChoice::Restore),
+        [reapack]
+    );
     let run = run_of(&en(), &list);
     assert!(run.items.is_empty());
     assert!(run.rows.is_empty());
     assert_eq!(run.backups(), 0);
+}
+
+/// The ticks are shared, but only the run of the choice below the list
+/// takes them: while Delete is chosen, a restore takes nothing, even if
+/// something asks for one.
+#[test]
+fn a_tick_with_delete_chosen_is_no_restore_until_restore_is_chosen() {
+    let mut list = list_in(&en(), vec![sws(), reapack()]);
+    tick(&mut list, REAPACK, BackupChoice::Delete);
+    assert_eq!(list.choice, BackupChoice::Delete);
+    assert!(list.rows[index_of(&list, REAPACK)].can_tick(BackupChoice::Restore));
+    assert!(backup_restore_items(&list).is_empty());
+    let run = run_of(&en(), &list);
+    assert!(run.items.is_empty());
+    assert!(run.rows.is_empty());
+
+    // Chosen, Restore takes it.
+    set_backup_choice(&mut list, BackupChoice::Restore);
+    assert_eq!(run_of(&en(), &list).backups(), 1);
 }
 
 #[test]
@@ -2224,11 +2251,7 @@ fn a_real_restore_brings_back_exactly_the_ticked_backups_and_saves_its_report_th
     };
     reread_backup_list(&mut list, &model, &target);
     assert_eq!(list.choice, BackupChoice::Restore);
-    assert!(
-        list.rows
-            .iter()
-            .all(|row| !row.restore_ticked && !row.delete_ticked)
-    );
+    assert!(list.rows.iter().all(|row| !row.ticked));
     let sws_row = &list.rows[index_of(&list, SWS)];
     assert_eq!(
         sws_row.entry.as_ref().map(|entry| entry.status),

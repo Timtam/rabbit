@@ -1,15 +1,16 @@
 //! The Backups tab, without wxWidgets: one row for each backup RABBIT kept
-//! for the selected REAPER, grouped by what you get back, and what ticking a
-//! row does in either choice below the list, Restore or Delete. Also what a
-//! restore or a delete looks like before it starts: Review's text and its
-//! blockers, the run's input, and the question asked before a delete.
+//! for the selected REAPER, grouped by what you get back, the ticks, and
+//! the choice below the list, Restore or Delete, that says what happens to
+//! the ticked rows. Also what a restore or a delete looks like before it
+//! starts: Review's text and its blockers, the run's input, and the
+//! question asked before a delete.
 //!
 //! A backup set is one folder in `RABBIT/backups`. A backup, here, is one
 //! thing that can come back: one package from a set, or one key map. One set
-//! can hold several backups, so it can give several rows. A tick, for either
-//! choice, is the row's alone. A delete takes each ticked row as the core
-//! maps it (`DeleteItem::for_backup`): a package or the key map goes out of
-//! its set, which stays with its other backups, and a set's own row, an
+//! can hold several backups, so it can give several rows. A tick is the
+//! row's alone. A delete takes each ticked row as the core maps it
+//! (`DeleteItem::for_backup`): a package or the key map goes out of its
+//! set, which stays with its other backups, and a set's own row, an
 //! unfinished deletion and the old copies of RABBIT's records go whole. The
 //! core deletes a set whole when the ticked rows name every backup it lists.
 //!
@@ -20,9 +21,13 @@
 //! RABBIT's records and file sizes and hashes nothing, so the version check's
 //! handler can build the rows on the UI thread, next to the Uninstall rows.
 //!
-//! Nothing is ticked until the user ticks it. Each choice keeps its own
-//! ticks: switching relabels the rows and never moves a tick from one choice
-//! to the other.
+//! Nothing is ticked until the user ticks it. The list has one set of
+//! ticks for both choices: you tick backups, then choose what happens to
+//! them. Switching keeps every tick the new choice can do and unticks the
+//! rest, such as a backup that can't be restored, whose label then says
+//! why, and Review says how many lost their tick. So the chosen run takes
+//! every ticked row, and only the run of the choice below the list takes
+//! any.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -199,10 +204,14 @@ pub struct BackupRow {
     /// The row can be ticked while Delete is chosen: every backup but
     /// another account's and what is no backup.
     pub can_delete: bool,
-    /// Ticked to restore. Kept while Delete is chosen.
-    pub restore_ticked: bool,
-    /// Ticked to delete. Kept while Restore is chosen.
-    pub delete_ticked: bool,
+    /// Ticked, for whichever choice is chosen: the list has one set of
+    /// ticks. Only a row the list's choice can do stays ticked.
+    pub ticked: bool,
+    /// A switch of the choice unticked the row, because the choice it
+    /// switched to can't do it, and nobody ticked or unticked it since.
+    /// Review says how many such rows there are: on Windows nothing says it
+    /// at the switch.
+    pub(crate) lost_tick: bool,
     /// The row's label for the choice it was last labelled for. It starts
     /// with the action, so a screen reader says what will happen first.
     pub summary: String,
@@ -236,29 +245,14 @@ impl BackupRow {
             }
     }
 
-    /// Whether the row is ticked for `choice`.
-    pub fn is_ticked(&self, choice: BackupChoice) -> bool {
-        match choice {
-            BackupChoice::Restore => self.restore_ticked,
-            BackupChoice::Delete => self.delete_ticked,
-        }
-    }
-
     /// The files a restore of this backup writes.
     pub fn restore_targets(&self) -> &[PathBuf] {
         &self.targets
     }
 
-    fn set_ticked(&mut self, choice: BackupChoice, ticked: bool) {
-        match choice {
-            BackupChoice::Restore => self.restore_ticked = ticked,
-            BackupChoice::Delete => self.delete_ticked = ticked,
-        }
-    }
-
     /// Give the row the label and details of `choice`, as it is ticked.
     fn relabel(&mut self, choice: BackupChoice) {
-        self.summary = self.labels.get(choice, self.is_ticked(choice)).to_string();
+        self.summary = self.labels.get(choice, self.ticked).to_string();
         self.details = details_text(&self.summary, &self.explanation);
     }
 }
@@ -282,8 +276,11 @@ pub struct WizardBackupList {
 }
 
 impl WizardBackupList {
-    /// The rows ticked for `choice`, in list order. Only rows that can be
-    /// ticked for it count.
+    /// The ticked rows, in list order, when `choice` is the one chosen
+    /// below the list, and none for the other choice: a switch unticks what
+    /// the new choice can't do (see [`set_backup_choice`]). So a delete
+    /// never takes rows while Restore is chosen, nor a restore while Delete
+    /// is, even when the run and the choice disagree.
     pub fn ticked_rows(&self, choice: BackupChoice) -> impl Iterator<Item = &BackupRow> {
         self.ticked_indices(choice).map(|index| &self.rows[index])
     }
@@ -291,11 +288,31 @@ impl WizardBackupList {
     /// Where the rows [`WizardBackupList::ticked_rows`] gives are in the
     /// list, so a run copied out of it counts the same rows.
     pub(super) fn ticked_indices(&self, choice: BackupChoice) -> impl Iterator<Item = usize> {
+        let chosen = choice == self.choice;
         self.rows
             .iter()
             .enumerate()
-            .filter(move |(_, row)| row.can_tick(choice) && row.is_ticked(choice))
+            .filter(move |(_, row)| chosen && row.ticked && row.can_tick(choice))
             .map(|(index, _)| index)
+    }
+
+    /// How many rows a switch of the choice unticked and nobody ticked
+    /// since, for each choice that can't do them (see
+    /// [`BackupRow::lost_tick`]). Every backup that can be restored can be
+    /// deleted, so today only Restore unticks rows.
+    fn lost_ticks(&self) -> Vec<(BackupChoice, usize)> {
+        [BackupChoice::Restore, BackupChoice::Delete]
+            .into_iter()
+            .map(|choice| {
+                let count = self
+                    .rows
+                    .iter()
+                    .filter(|row| row.lost_tick && !row.can_tick(choice))
+                    .count();
+                (choice, count)
+            })
+            .filter(|&(_, count)| count > 0)
+            .collect()
     }
 
     /// The label right before the list. It names the tab first and gives
@@ -410,8 +427,7 @@ pub fn backup_list_for_target(model: &WizardModel, target: &TargetRow) -> Wizard
 
 /// Read the Backups tab's rows for `target` again in place of `list`'s, as
 /// the version check and the rescan after every run do: what changed on
-/// disk shows, no tick of either choice is kept, and Restore is chosen
-/// again.
+/// disk shows, no tick is kept, and Restore is chosen again.
 pub fn reread_backup_list(list: &mut WizardBackupList, model: &WizardModel, target: &TargetRow) {
     *list = backup_list_for_target(model, target);
     reset_backup_ticks(list);
@@ -509,61 +525,117 @@ pub fn backup_list_from_source(
     }
 }
 
-/// Tick or untick the row at `index` for `choice`, and only that row: for
-/// Delete as for Restore, each row goes alone. A heading, or a row that
-/// can't be ticked for `choice`, stays unticked. The row ends up labelled
-/// for `choice` as it is ticked, so the list can show it as it is. `true`
-/// when its tick changed.
-pub fn apply_backup_checkbox(
-    rows: &mut [BackupRow],
-    index: usize,
-    choice: BackupChoice,
-    checked: bool,
-) -> bool {
-    let Some(row) = rows.get_mut(index) else {
+/// Tick or untick the row at `index` for the choice below the list, and
+/// only that row: for Delete as for Restore, each row goes alone. A
+/// heading, or a row the choice can't do, stays unticked. The row ends up
+/// labelled for the choice as it is ticked, so the list can show it as it
+/// is, and no longer counts as unticked by a switch once the choice can
+/// tick it. `true` when its tick changed.
+pub fn apply_backup_checkbox(list: &mut WizardBackupList, index: usize, checked: bool) -> bool {
+    let choice = list.choice;
+    let Some(row) = list.rows.get_mut(index) else {
         return false;
     };
-    let checked = checked && row.can_tick(choice);
-    let changed = row.is_ticked(choice) != checked;
-    row.set_ticked(choice, checked);
+    let can_tick = row.can_tick(choice);
+    let checked = checked && can_tick;
+    let changed = row.ticked != checked;
+    row.ticked = checked;
+    row.lost_tick = row.lost_tick && !can_tick;
     row.relabel(choice);
     changed
 }
 
-/// Switch the choice below the list. The ticks of both choices stay as
-/// they are; only the rows' labels change.
-pub fn set_backup_choice(list: &mut WizardBackupList, choice: BackupChoice) {
+/// Switch the choice below the list and label every row for it. Both
+/// choices share the ticks, so every tick the new choice can do stays. A
+/// ticked row it can't do, such as a backup that can't be restored, loses
+/// its tick, and its label then says why; switching back doesn't tick it
+/// again, and Review says how many rows lost their tick until they are
+/// ticked again. Returns where the rows that lost their tick in this
+/// switch are, in list order, so the list can say how many.
+pub fn set_backup_choice(list: &mut WizardBackupList, choice: BackupChoice) -> Vec<usize> {
     list.choice = choice;
-    for row in &mut list.rows {
+    let mut unticked = Vec::new();
+    for (index, row) in list.rows.iter_mut().enumerate() {
+        if row.ticked && !row.can_tick(choice) {
+            row.ticked = false;
+            row.lost_tick = true;
+            unticked.push(index);
+        }
         row.relabel(choice);
     }
+    unticked
 }
 
-/// Clear the ticks of both choices and choose Restore again, as the version
-/// check does when it rebuilds the tab.
+/// Clear every tick and choose Restore again, as the version check does
+/// when it rebuilds the tab.
 pub fn reset_backup_ticks(list: &mut WizardBackupList) {
     list.choice = BackupChoice::Restore;
     for row in &mut list.rows {
-        row.restore_ticked = false;
-        row.delete_ticked = false;
+        row.ticked = false;
+        row.lost_tick = false;
         row.relabel(BackupChoice::Restore);
     }
 }
 
 /// What VoiceOver says after a switch of the choice, such as "2 backups
-/// ticked to delete.": the rows changed away from focus, so nothing would
-/// say it otherwise.
-pub fn backups_ticked_announcement(localizer: &Localizer, list: &WizardBackupList) -> String {
+/// ticked to delete.", then, when the switch unticked rows the new choice
+/// can't do, `unticked` of them, how many: "One backup can't be restored,
+/// so it is no longer ticked." The rows changed away from focus, so nothing
+/// would say it otherwise.
+pub fn backups_ticked_announcement(
+    localizer: &Localizer,
+    list: &WizardBackupList,
+    unticked: usize,
+) -> String {
     let count = list.ticked_rows(list.choice).count();
-    let choice = match list.choice {
-        BackupChoice::Restore => "restore",
-        BackupChoice::Delete => "delete",
-    };
-    say(
+    let ticked = say(
         localizer,
         "wizard-backups-ticked-macos",
-        &[("choice", choice.into()), ("count", count.into())],
+        &[
+            ("choice", choice_selector(list.choice).into()),
+            ("count", count.into()),
+        ],
+    );
+    if unticked == 0 {
+        return ticked;
+    }
+    format!(
+        "{ticked} {}",
+        unticked_text(localizer, list.choice, unticked)
     )
+}
+
+/// That `count` backups can't be done with `choice`, so they are no longer
+/// ticked: what VoiceOver says after a switch unticked them, and Review's
+/// note until they are ticked again (see [`lost_tick_notes`]).
+fn unticked_text(localizer: &Localizer, choice: BackupChoice, count: usize) -> String {
+    say(
+        localizer,
+        "wizard-backups-unticked",
+        &[
+            ("choice", choice_selector(choice).into()),
+            ("count", count.into()),
+        ],
+    )
+}
+
+/// Review's notes for the rows switches of the choice unticked and nobody
+/// ticked since, such as "One backup can't be restored, so it is no longer
+/// ticked.": on Windows nothing says it at the switch, and the run would
+/// otherwise leave them out without a word.
+fn lost_tick_notes(localizer: &Localizer, list: &WizardBackupList) -> Vec<String> {
+    list.lost_ticks()
+        .into_iter()
+        .map(|(choice, count)| unticked_text(localizer, choice, count))
+        .collect()
+}
+
+/// The Fluent selector a message about `choice` takes as `$choice`.
+fn choice_selector(choice: BackupChoice) -> &'static str {
+    match choice {
+        BackupChoice::Restore => "restore",
+        BackupChoice::Delete => "delete",
+    }
 }
 
 /// What a restore run is given: each row ticked for Restore, in list order,
@@ -726,7 +798,7 @@ pub(crate) fn backup_delete_blockers(list: &WizardBackupList) -> Vec<DeleteBlock
                     .partition(|&other| list.rows[other].can_tick(BackupChoice::Delete));
             let unticked: Vec<usize> = deletable
                 .into_iter()
-                .filter(|&other| !list.rows[other].delete_ticked)
+                .filter(|&other| !list.rows[other].ticked)
                 .collect();
             (!undeletable.is_empty() || !unticked.is_empty()).then_some(DeleteBlocker {
                 row,
@@ -849,8 +921,9 @@ pub struct WizardRestoreReviewPreview {
 /// 3. the notes: what the quick plan says changes besides the files, such
 ///    as REAPER's language, then "Close REAPER first." when a REAPER it
 ///    needs closed is running, `other_tab_notes` (what is ticked on the
-///    other tabs, which the caller words), and the backups ticked for
-///    Delete, which this run leaves out;
+///    other tabs, which the caller words), and how many rows a switch of
+///    the choice unticked and nobody ticked since (see
+///    [`set_backup_choice`]);
 /// 4. the blockers, each starting "Can't restore yet": nothing ticked, two
 ///    ticked backups of one package, two that write the same file, a target
 ///    RABBIT can't write to, a quick plan that is missing or covers other
@@ -938,14 +1011,9 @@ pub fn build_backup_restore_review(
         }
     }
     other_tab_notes.iter().cloned().for_each(&mut add_note);
-    let ticked_to_delete = list.ticked_rows(BackupChoice::Delete).count();
-    if ticked_to_delete > 0 {
-        add_note(say(
-            localizer,
-            "wizard-review-restore-other-choice-note",
-            &[("count", ticked_to_delete.into())],
-        ));
-    }
+    lost_tick_notes(localizer, list)
+        .into_iter()
+        .for_each(&mut add_note);
     if !notes.is_empty() {
         lines.push(String::new());
         lines.push(text(localizer, "wizard-review-notes-heading"));
@@ -985,7 +1053,8 @@ pub struct WizardDeleteReviewPreview {
 ///    that is an estimate (see [`backup_delete_size_is_estimate`]), then
 ///    one line per ticked backup saying what is lost;
 /// 3. the notes: `other_tab_notes` (what is ticked on the other tabs), and
-///    the backups ticked for Restore, which this run leaves out;
+///    how many rows a switch of the choice unticked and nobody ticked
+///    since, such as after Restore was chosen and then Delete again;
 /// 4. the blockers, each starting "Can't delete yet": nothing ticked, and a
 ///    ticked backup that goes only with its whole set, a set's own backup
 ///    or an unfinished deletion, while backups of that set aren't ticked,
@@ -1041,14 +1110,7 @@ pub fn build_backup_delete_review(
             notes.push(note.clone());
         }
     }
-    let ticked_to_restore = list.ticked_rows(BackupChoice::Restore).count();
-    if ticked_to_restore > 0 {
-        notes.push(say(
-            localizer,
-            "wizard-review-delete-other-choice-note",
-            &[("count", ticked_to_restore.into())],
-        ));
-    }
+    notes.extend(lost_tick_notes(localizer, list));
     if !notes.is_empty() {
         lines.push(String::new());
         lines.push(text(localizer, "wizard-review-notes-heading"));
@@ -1489,8 +1551,8 @@ impl RowDraft {
             heading: None,
             can_restore: self.restore_unavailable.is_none(),
             can_delete: self.delete_unavailable.is_none(),
-            restore_ticked: false,
-            delete_ticked: false,
+            ticked: false,
+            lost_tick: false,
             summary: String::new(),
             details: String::new(),
             labels,
@@ -1583,8 +1645,8 @@ fn heading_row(localizer: &Localizer, group: BackupGroup) -> BackupRow {
         when: String::new(),
         can_restore: false,
         can_delete: false,
-        restore_ticked: false,
-        delete_ticked: false,
+        ticked: false,
+        lost_tick: false,
         summary: name.clone(),
         details: details_text(&name, &explanation),
         labels: BackupRowLabels::all(&name),

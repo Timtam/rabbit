@@ -30,8 +30,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    BackupChoice, PackagesTabTicks, ProgressUiState, UiBootstrapOptions, WizardBackupList,
-    WizardInstallOptions, WizardMode, WizardOutcomeReport, WizardUninstallList, backup_quick_plan,
+    PackagesTabTicks, ProgressUiState, UiBootstrapOptions, WizardBackupList, WizardInstallOptions,
+    WizardMode, WizardOutcomeReport, WizardUninstallList, backup_quick_plan,
     build_backup_delete_review, build_backup_restore_review, build_review_preview_for_package_rows,
     build_uninstall_review_preview, execute_wizard_install_with_progress, inactive_tab_notes,
     install_request_from_target_and_rows, install_tab_ticks_left_out, load_wizard_model,
@@ -504,12 +504,8 @@ pub fn run() {
                                     .ticked_rows()
                                     .map(|row| row.display_name.clone())
                                     .collect(),
-                                backups_to_restore: backups
-                                    .ticked_rows(BackupChoice::Restore)
-                                    .count(),
-                                backups_to_delete: backups
-                                    .ticked_rows(BackupChoice::Delete)
-                                    .count(),
+                                backups_ticked: backups.ticked_rows(backups.choice).count(),
+                                backups_choice: backups.choice,
                             }
                         };
                         let mut other_tab_notes = Vec::new();

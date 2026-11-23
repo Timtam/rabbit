@@ -532,11 +532,16 @@ Below that, **What to do with the ticked backups** decides what Next does:
 text below it to reach the choice, and the arrow keys to change it. On a
 Mac without keyboard navigation, Tab doesn't stop there: reach it with
 VoiceOver's own navigation, or turn keyboard navigation on (see step 3 of
-[Use it](#use-it)). Each choice keeps its own ticks, so a tick to restore
-never becomes a tick to delete; switching changes what each row says it
-will do. With **Restore**, a row that can't be restored can't be ticked,
-and says why at its end, such as "(not available: you have SWS Extension
-again)".
+[Use it](#use-it)). Both choices share one set of ticks: tick the backups,
+then choose what happens to them. Switching keeps the ticks and changes
+what each row says it will do. With **Restore**, a row that can't be
+restored can't be ticked, and says why at its end, such as "(not available:
+you have SWS Extension again)". To delete a backup that can't be restored,
+choose **Delete** first, then tick it. If you ticked one for **Delete**,
+switching to **Restore** unticks it, and switching back doesn't tick it
+again. On a Mac, VoiceOver then says how many backups lost their tick;
+Windows says nothing at the switch. Review says it on both until you tick
+them again.
 
 - **Restore:** a package you uninstalled comes back as it was, with its
   settings if the uninstall removed them, and if RABBIT's records had it,

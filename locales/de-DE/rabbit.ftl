@@ -772,9 +772,10 @@ wizard-backups-details-delete-only-with-undeletable = RABBIT kann diese Sicherun
 wizard-backups-choice-label = Was mit den ausgewählten Sicherungen geschehen soll
 wizard-backups-choice-restore = Wiederherstellen
 wizard-backups-choice-delete = Löschen
-# The choice below the Backups list, Restore or Delete, keeps its own ticks.
-# After a switch, VoiceOver on macOS says how many backups are ticked for the
-# new choice. $choice is restore or delete, and $count a number.
+# The Backups list has one set of ticks for both choices below it, Restore
+# and Delete. After a switch, VoiceOver on macOS says how many backups are
+# ticked for the new choice. $choice is restore or delete, and $count a
+# number.
 wizard-backups-ticked-macos = { $choice ->
     [delete] { $count ->
         [0] Keine Sicherung zum Löschen ausgewählt.
@@ -785,6 +786,21 @@ wizard-backups-ticked-macos = { $choice ->
         [0] Keine Sicherung zum Wiederherstellen ausgewählt.
         [one] Eine Sicherung zum Wiederherstellen ausgewählt.
        *[other] { $count } Sicherungen zum Wiederherstellen ausgewählt.
+    }
+}
+# Said after the sentence above, on macOS, when the switch unticked backups
+# the new choice can't do, such as a backup that can't be restored. Review
+# also gives it as a note, on every system, until those backups are ticked
+# again. $choice is the choice that can't do them, restore or delete, and
+# $count a number, never 0.
+wizard-backups-unticked = { $choice ->
+    [delete] { $count ->
+        [one] Eine Sicherung lässt sich nicht löschen und ist nicht mehr ausgewählt.
+       *[other] { $count } Sicherungen lassen sich nicht löschen und sind nicht mehr ausgewählt.
+    }
+   *[restore] { $count ->
+        [one] Eine Sicherung lässt sich nicht wiederherstellen und ist nicht mehr ausgewählt.
+       *[other] { $count } Sicherungen lassen sich nicht wiederherstellen und sind nicht mehr ausgewählt.
     }
 }
 # Why a restore of a backup is refused, a sentence or two each, about the
@@ -1027,11 +1043,13 @@ wizard-review-uninstall-trash-elevated-note-macos = { $package } kommt mit dem P
 # such as "Set REAPER's language".
 wizard-review-inactive-tab-note-install = Was auf der Registerkarte „Installieren oder aktualisieren“ ausgewählt ist, gehört nicht zu diesem Durchlauf: { $packages }.
 wizard-review-inactive-tab-note-uninstall = Was auf der Registerkarte „Deinstallieren“ ausgewählt ist, gehört nicht zu diesem Durchlauf: { $packages }.
-# The same note for the Backups tab. $backups is one or both of the two
-# messages below, joined as wizard-backups-list-and joins names.
+# The same note for the Backups tab. $backups is one of the two messages
+# below: the tab has one set of ticks, for Restore or Delete as chosen below
+# its list.
 wizard-review-inactive-tab-note-backups = Was auf der Registerkarte „Sicherungen“ ausgewählt ist, gehört nicht zu diesem Durchlauf: { $backups }.
-# How many backups are ticked on the Backups tab to restore, and to delete,
-# for the note above. $count is a number, never 0.
+# How many backups are ticked on the Backups tab, with Restore or with
+# Delete chosen below its list, for the note above. $count is a number,
+# never 0.
 wizard-review-inactive-tab-backups-restore = { $count ->
     [one] eine Sicherung zum Wiederherstellen
    *[other] { $count } Sicherungen zum Wiederherstellen
@@ -1104,20 +1122,17 @@ wizard-review-restore-needs-reinstall = Um { $package } später mit RABBIT zu de
 # package serves every REAPER on the computer.
 wizard-review-restore-close-reaper = Schließen Sie zuerst REAPER.
 wizard-review-restore-close-every-reaper = Schließen Sie zuerst jedes REAPER auf diesem Computer.
-# The backups ticked for the other choice below the list stay ticked, but
-# aren't part of this run. $count is a number.
-wizard-review-restore-other-choice-note = { $count ->
-    [one] Eine zum Löschen ausgewählte Sicherung gehört nicht zu diesem Durchlauf.
-   *[other] { $count } zum Löschen ausgewählte Sicherungen gehören nicht zu diesem Durchlauf.
-}
-# Why the Restore button is disabled. $reason is a sentence, such as
+# Why the Restore button is disabled. $reason is a sentence or two, such as
 # wizard-review-restore-nothing-ticked. The -backup form names a backup that
 # can't come back: $backup as in wizard-backups-row-reference, or for a key
 # map as wizard-done-restore-keymap-in-sentence says it, and $reason one of
 # the wizard-restore-refusal-* sentences or wizard-review-restore-plan-failed.
 wizard-review-restore-blocked = Wiederherstellen derzeit nicht möglich: { $reason }
 wizard-review-restore-blocked-backup = Derzeit lässt sich { $backup } nicht wiederherstellen. { $reason }
-wizard-review-restore-nothing-ticked = Zum Wiederherstellen ist nichts ausgewählt.
+# With nothing ticked to restore. The second sentence says how to tick:
+# Space is the Space bar, named as keyboards and screen readers in your
+# language name it.
+wizard-review-restore-nothing-ticked = Zum Wiederherstellen ist nichts ausgewählt. Drücken Sie in der Liste auf einer Sicherung die Leertaste, um sie auszuwählen.
 wizard-review-restore-not-writable = RABBIT kann nicht in den Ordner dieses REAPER schreiben.
 # $first and $second name two ticked backups, as in
 # wizard-backups-row-reference, or for a key map as
@@ -1156,14 +1171,10 @@ wizard-review-delete-already-back = { $backup }: Die Dateien liegen auch auf der
 wizard-review-delete-records = { $backup }: An dem, was installiert ist, ändert sich nichts.
 wizard-review-delete-deleting = { $backup }: Damit wird eine früher begonnene Löschung abgeschlossen.
 wizard-review-delete-other = { $backup }: Diese Sicherung ist danach endgültig weg.
-# $count is a number.
-wizard-review-delete-other-choice-note = { $count ->
-    [one] Eine zum Wiederherstellen ausgewählte Sicherung gehört nicht zu diesem Durchlauf.
-   *[other] { $count } zum Wiederherstellen ausgewählte Sicherungen gehören nicht zu diesem Durchlauf.
-}
-# Why the Delete button is disabled. $reason is a sentence.
+# Why the Delete button is disabled. $reason is a sentence or two.
 wizard-review-delete-blocked = Löschen derzeit nicht möglich: { $reason }
-wizard-review-delete-nothing-ticked = Zum Löschen ist nichts ausgewählt.
+# As wizard-review-restore-nothing-ticked, with nothing ticked to delete.
+wizard-review-delete-nothing-ticked = Zum Löschen ist nichts ausgewählt. Drücken Sie in der Liste auf einer Sicherung die Leertaste, um sie auszuwählen.
 # Why the Delete button is disabled, as $reason above: a ticked backup that
 # RABBIT can only delete together with the whole backup set it is in, such
 # as the set's own files, while other rows of that set aren't ticked. The

@@ -24,7 +24,7 @@ use rabbit_core::uninstall::{
     VendorLookup, VendorRefusal, build_uninstall_plan,
 };
 
-use super::backups::{BackupChoice, and_list};
+use super::backups::BackupChoice;
 use super::bootstrap::localizer_from_options;
 use super::labels::version_text;
 use super::model::{ConfigurationRow, PackageRow, TargetRow, WizardModel, WizardText};
@@ -1143,10 +1143,11 @@ pub struct PackagesTabTicks {
     pub install: Vec<String>,
     /// The Uninstall tab's ticked packages, by their names.
     pub uninstall: Vec<String>,
-    /// How many backups are ticked on the Backups tab to restore, and how
-    /// many to delete. Each choice keeps its own ticks, so both can count.
-    pub backups_to_restore: usize,
-    pub backups_to_delete: usize,
+    /// How many backups are ticked on the Backups tab, and the choice below
+    /// its list, which says what they are ticked for: the tab has one set
+    /// of ticks for both choices.
+    pub backups_ticked: usize,
+    pub backups_choice: BackupChoice,
 }
 
 /// The notes Review adds about the tabs that aren't running, in tab order:
@@ -1154,9 +1155,8 @@ pub struct PackagesTabTicks {
 /// change behind the user's back, by Page Down on a checkbox on Windows, so
 /// Review says so. One note per tab with ticks: the Install or update tab's
 /// and the Uninstall tab's name what is ticked, and the Backups tab's says
-/// how many backups are ticked to restore and to delete. The tab of `mode`
-/// gets none; the Backups tab's Reviews say themselves what is ticked for
-/// the other choice there.
+/// how many backups are ticked there, to restore or to delete as its choice
+/// says. The tab of `mode` gets none.
 pub fn inactive_tab_notes(
     localizer: &Localizer,
     mode: WizardMode,
@@ -1190,29 +1190,19 @@ pub fn inactive_tab_notes(
 }
 
 /// The note on what is ticked on the Backups tab, such as "What is ticked on
-/// the Backups tab isn't part of this run: 2 backups to restore and one
-/// backup to delete.", or `None` with nothing ticked there.
+/// the Backups tab isn't part of this run: 2 backups to restore.", or `None`
+/// with nothing ticked there.
 fn backups_tab_note(localizer: &Localizer, ticks: &PackagesTabTicks) -> Option<String> {
-    let counted = |key: &str, count: usize| {
-        (count > 0).then(|| localizer.format_with(key, &[("count", count.into())]).value)
-    };
-    let parts: Vec<String> = [
-        counted(
-            "wizard-review-inactive-tab-backups-restore",
-            ticks.backups_to_restore,
-        ),
-        counted(
-            "wizard-review-inactive-tab-backups-delete",
-            ticks.backups_to_delete,
-        ),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    if parts.is_empty() {
+    if ticks.backups_ticked == 0 {
         return None;
     }
-    let backups = and_list(localizer, &parts);
+    let key = match ticks.backups_choice {
+        BackupChoice::Restore => "wizard-review-inactive-tab-backups-restore",
+        BackupChoice::Delete => "wizard-review-inactive-tab-backups-delete",
+    };
+    let backups = localizer
+        .format_with(key, &[("count", ticks.backups_ticked.into())])
+        .value;
     Some(
         localizer
             .format(
