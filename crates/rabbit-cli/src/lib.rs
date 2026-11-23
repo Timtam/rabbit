@@ -8784,6 +8784,76 @@ mod tests {
         }
     }
 
+    /// `--config-step reapack-add-reawarp-remote` names the ReaWarp
+    /// repository step. Like the other recommended repository steps it also
+    /// runs by default when ReaPack is part of the run, and
+    /// `--skip-config-step` leaves it out.
+    #[test]
+    fn setup_accepts_the_reawarp_config_step() {
+        use rabbit_core::configuration::{
+            CONFIG_REAPER_ACCESSIBLE_EN_REMOTE, CONFIG_REAWARP_REMOTE, builtin_configuration_steps,
+        };
+
+        let cli = Cli::try_parse_from([
+            "rabbit",
+            "setup",
+            "--resource-path",
+            "C:\\PortableREAPER",
+            "--config-step",
+            "reapack-add-reawarp-remote",
+        ])
+        .unwrap();
+        let config_step = match cli.command {
+            Command::Setup { config_step, .. } => config_step,
+            other => panic!("unexpected command: {other:?}"),
+        };
+        assert_eq!(config_step, vec![CONFIG_REAWARP_REMOTE.to_string()]);
+        assert!(
+            builtin_configuration_steps()
+                .iter()
+                .any(|step| step.id == CONFIG_REAWARP_REMOTE),
+            "the setup pipeline knows the id"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let windows = rabbit_core::model::Platform::Windows;
+        let reapack = ["reapack".to_string()];
+
+        let explicit = super::resolve_configuration_step_ids(root, windows, &[], &config_step, &[]);
+        assert_eq!(explicit, config_step);
+
+        let defaults = super::resolve_configuration_step_ids(root, windows, &reapack, &[], &[]);
+        assert!(
+            defaults.iter().any(|id| id == CONFIG_REAWARP_REMOTE),
+            "{defaults:?}"
+        );
+
+        let skipped =
+            super::resolve_configuration_step_ids(root, windows, &reapack, &[], &config_step);
+        assert!(
+            !skipped.iter().any(|id| id == CONFIG_REAWARP_REMOTE),
+            "{skipped:?}"
+        );
+        assert!(
+            skipped
+                .iter()
+                .any(|id| id == CONFIG_REAPER_ACCESSIBLE_EN_REMOTE),
+            "skipping ReaWarp leaves the other steps alone: {skipped:?}"
+        );
+
+        let without_reapack =
+            super::resolve_configuration_step_ids(root, windows, &["osara".to_string()], &[], &[]);
+        assert!(
+            !without_reapack.iter().any(|id| id == CONFIG_REAWARP_REMOTE),
+            "no ReaPack, no repository: {without_reapack:?}"
+        );
+        assert!(
+            std::fs::read_dir(root).unwrap().next().is_none(),
+            "choosing the steps must not write anything"
+        );
+    }
+
     #[test]
     fn ensure_reapack_donation_acknowledged_returns_err_when_unaccepted() {
         let result = super::ensure_reapack_donation_acknowledged(

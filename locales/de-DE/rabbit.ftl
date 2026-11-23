@@ -827,9 +827,14 @@ config-dependency-language-pack = ein Sprachpaket
 config-reapack-reaper-accessibility-name = REAPER Accessibility ReaPack Repository
 config-reapack-reaper-accessibility-description = Fügt das REAPER Accessibility Repository von Toni Barth (https://github.com/Timtam/reapack/raw/master/index.xml) zu ReaPack hinzu, sodass Pakete daraus direkt verfügbar sind.
 config-reapack-reaper-accessible-fr-name = REAPER Accessible (FR) ReaPack Repository hinzufügen
-config-reapack-reaper-accessible-fr-description = Fügt das französischsprachige REAPER Accessible Repository (https://github.com/reaperaccessible/rap_fr/raw/main/index.xml) zu ReaPack hinzu. Öffne nach dem Hinzufügen das Menü Erweiterungen, ReaPack, Pakete durchsuchen, um die französischsprachigen Ressourcen von REAPER Accessible zu erhalten.
+config-reapack-reaper-accessible-fr-description = Fügt das französischsprachige REAPER Accessible Repository (https://github.com/reaperaccessible/rap_fr/raw/main/index.xml) zu ReaPack hinzu. Öffnen Sie nach dem Hinzufügen das Menü Erweiterungen, ReaPack, Pakete durchsuchen, um die französischsprachigen Ressourcen von REAPER Accessible zu erhalten.
 config-reapack-reaper-accessible-en-name = REAPER Accessible (EN) ReaPack Repository hinzufügen
-config-reapack-reaper-accessible-en-description = Fügt das englischsprachige REAPER Accessible Repository (https://github.com/reaperaccessible/rap_en/raw/main/index.xml) zu ReaPack hinzu. Öffne nach dem Hinzufügen das Menü Erweiterungen, ReaPack, Pakete durchsuchen, um die englischsprachigen Ressourcen von REAPER Accessible zu erhalten.
+config-reapack-reaper-accessible-en-description = Fügt das englischsprachige REAPER Accessible Repository (https://github.com/reaperaccessible/rap_en/raw/main/index.xml) zu ReaPack hinzu. Öffnen Sie nach dem Hinzufügen das Menü Erweiterungen, ReaPack, Pakete durchsuchen, um die englischsprachigen Ressourcen von REAPER Accessible zu erhalten.
+# ReaWarp ist Gabriel Schucks Sammlung barrierefreier Skripte zum Warpen von
+# Audio. „ReaWarp“ und „ReaPack“ bleiben unübersetzt; der Menüpfad nennt
+# REAPERs eigene Menüs wie bei den anderen Repository-Schritten.
+config-reapack-reawarp-name = ReaWarp ReaPack Repository hinzufügen
+config-reapack-reawarp-description = ReaWarp von Gabriel Schuck ist eine Sammlung barrierefreier Skripte für Audio-Warping, Tempo-Maps, Groove-Matching und Quantisierung. ReaWarp gibt seine Meldungen auf Englisch, Portugiesisch oder Spanisch aus. Dieser Schritt fügt das ReaPack Repository von ReaWarp (https://github.com/gabrielschuck/reawarp/raw/main/index.xml) hinzu. Öffnen Sie danach das Menü Erweiterungen, ReaPack, Pakete durchsuchen, um ReaWarp zu installieren; ReaPack hält es dann aktuell.
 config-set-reaper-language-name = REAPER-Sprache einstellen
 config-set-reaper-language-description = Legt fest, welches der installierten Sprachpakete REAPER verwendet, indem es in die reaper.ini eingetragen wird. Andernfalls müssten Sie die Sprache selbst unter „Optionen“, „Einstellungen“, „Allgemein“ auswählen. Sie können mehrere Sprachpakete installieren und später in REAPER umschalten; hier wird nur ausgewählt, welches jetzt aktiv ist. Abwählen, wenn nur die Dateien installiert werden sollen.
 

@@ -838,6 +838,12 @@ config-reapack-reaper-accessible-fr-name = Adicionar o repositório ReaPack REAP
 config-reapack-reaper-accessible-fr-description = Adiciona o repositório ReaPack em francês do REAPER Accessible (https://github.com/reaperaccessible/rap_fr/raw/main/index.xml). Depois de adicionado, vá ao menu Extensions, ReaPack, Browse Packages para obter os recursos em francês do REAPER Accessible.
 config-reapack-reaper-accessible-en-name = Adicionar o repositório ReaPack REAPER Accessible (EN)
 config-reapack-reaper-accessible-en-description = Adiciona o repositório ReaPack em inglês do REAPER Accessible (https://github.com/reaperaccessible/rap_en/raw/main/index.xml). Depois de adicionado, vá ao menu Extensions, ReaPack, Browse Packages para obter os recursos em inglês do REAPER Accessible.
+# ReaWarp is Gabriel Schuck's set of accessible audio warping scripts. Keep
+# "ReaWarp" and "ReaPack" as they are; the menu path names REAPER's own menus,
+# in English as in the other repository steps. The feature names follow
+# ReaWarp's own Portuguese README ("Combinar groove" for Groove Match).
+config-reapack-reawarp-name = Adicionar o repositório ReaPack ReaWarp
+config-reapack-reawarp-description = O ReaWarp, de Gabriel Schuck, é um conjunto de scripts acessíveis para fazer warp de áudio, criar mapas de tempo, combinar groove e quantizar. As mensagens dele aparecem em inglês, português ou espanhol. Isto adiciona o repositório ReaPack dele (https://github.com/gabrielschuck/reawarp/raw/main/index.xml). Depois de adicionado, vá ao menu Extensions, ReaPack, Browse Packages para instalar o ReaWarp; o ReaPack passa a mantê-lo atualizado.
 config-set-reaper-language-name = Definir o idioma do REAPER
 config-set-reaper-language-description = Informa ao REAPER qual dos pacotes de idioma instalados ele deve usar, gravando essa escolha no reaper.ini. Sem isso, você teria que selecionar o idioma por conta própria em Options, Preferences, General. Você pode instalar vários pacotes de idioma e alternar entre eles no REAPER depois; isto apenas escolhe qual fica ativo agora. Desmarque se quiser apenas que os arquivos sejam instalados.
 

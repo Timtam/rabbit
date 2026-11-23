@@ -136,6 +136,22 @@ configuration tweaks:
   ticked by default; if the repository is already configured in your
   `reapack.ini`, the step shows as *already applied* and is skipped.
   Idempotent and safe to re-run.
+- **Add the REAPER Accessible (FR) ReaPack repository to ReaPack**
+  (`https://github.com/reaperaccessible/rap_fr/raw/main/index.xml`), with
+  REAPER Accessible's French-language resources. Not ticked by default;
+  otherwise it works like the step above.
+- **Add the REAPER Accessible (EN) ReaPack repository to ReaPack**
+  (`https://github.com/reaperaccessible/rap_en/raw/main/index.xml`), with
+  REAPER Accessible's English-language resources. Ticked by default,
+  detected and safe to re-run like the first step.
+- **Add the ReaWarp ReaPack repository to ReaPack**
+  (`https://github.com/gabrielschuck/reawarp/raw/main/index.xml`).
+  [ReaWarp](https://github.com/gabrielschuck/reawarp), by Gabriel Schuck,
+  is a set of accessible scripts for audio warping, tempo maps, groove
+  matching and quantizing; its messages are in English, Portuguese or
+  Spanish. Ticked by default, detected and safe to re-run like the first
+  step. It only adds the repository: install ReaWarp afterwards in ReaPack
+  (Extensions, ReaPack, Browse packages), which then keeps it up to date.
 - **Set REAPER's language** to one of the language packs you're
   installing, by writing it into `reaper.ini`. A single step covers every
   language — which one it activates comes from the dropdown above. The step
@@ -651,7 +667,8 @@ for it with `--config-step set-reaper-language` to switch to a pack you
 installed earlier. Step ids today are
 `reapack-add-reaper-accessibility-remote`,
 `reapack-add-reaper-accessible-fr-remote`,
-`reapack-add-reaper-accessible-en-remote`, and
+`reapack-add-reaper-accessible-en-remote`,
+`reapack-add-reawarp-remote`, and
 `set-reaper-language` (one step for every language; it depends on at
 least one language pack being installed or in the plan).
 
