@@ -366,6 +366,14 @@ pub struct PackageRow {
     /// copies. `None` otherwise (see
     /// `packages::note_copies_in_former_outside_folders`).
     pub former_copy_review_note: Option<String>,
+    /// The sentences the details pane gives right after the row's label,
+    /// whatever its tick: why the package has no build for this REAPER, that
+    /// ReaPack looks after it, or what a copy in a folder every REAPER loads
+    /// means here. Kept so `details` can be rebuilt when the label changes.
+    pub details_notes: Vec<String>,
+    /// The available version's What's-New notes, kept so `details` can be
+    /// rebuilt when the row is ticked or unticked.
+    pub whats_new: Option<String>,
 }
 
 /// Wizard-side row for a single [`crate::configuration::ConfigurationStep`]

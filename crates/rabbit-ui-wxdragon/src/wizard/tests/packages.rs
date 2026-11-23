@@ -84,6 +84,10 @@ fn toggling_a_package_row_updates_its_action_label_and_summary() {
     assert!(!row.selected);
     assert!(summary.contains("Won't touch"));
     assert!(row.summary.contains("Won't touch"));
+    // The details pane follows the tick too, and keeps the description.
+    assert!(row.details.starts_with(&row.summary), "{}", row.details);
+    assert!(!row.details.contains("Will install"), "{}", row.details);
+    assert!(row.details.contains(&row.description), "{}", row.details);
 
     // Re-checking restores the original install action because the
     // package was originally not installed.
@@ -92,6 +96,7 @@ fn toggling_a_package_row_updates_its_action_label_and_summary() {
     assert_eq!(row.action_label, "Will install");
     assert!(row.selected);
     assert!(summary.contains("Will install"));
+    assert!(row.details.starts_with(&row.summary), "{}", row.details);
 }
 
 #[test]
@@ -1029,6 +1034,79 @@ fn review_says_what_a_ticked_row_does_to_a_copy_in_the_clap_folder() {
     assert!(!lines.contains(&note), "{lines:?}");
 }
 
+/// The details follow a row's tick, and what they say about a copy in the
+/// CLAP folder doesn't depend on it: unticking, ticking again, and a failed
+/// version check all keep that sentence right below the label.
+#[test]
+fn a_tick_keeps_what_the_details_say_about_a_copy_in_the_clap_folder() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let installation = fake_standard_installation();
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        vec![installation.clone()],
+        Some(0),
+        InstallPlan {
+            target: Some(installation),
+            actions: vec![PlanAction {
+                package_id: PACKAGE_APP2CLAP.to_string(),
+                action: PlanActionKind::Update,
+                installed_version: None,
+                available_version: Some(Version::parse("2026.5.17.34").unwrap()),
+                reason: "test".to_string(),
+                left_to_reapack: None,
+            }],
+            notes: Vec::new(),
+        },
+    );
+    let mut rows = model.package_rows.clone();
+    let copy = std::path::PathBuf::from("C:/CLAP/app2clap.clap");
+    crate::wizard::packages::note_copies_in_former_outside_folders(
+        &localizer,
+        &mut rows,
+        &builtin_package_specs(Platform::Windows),
+        false,
+        &|_| vec![copy.clone()],
+    );
+    let sentence = localizer
+        .format(
+            "wizard-package-details-clap-copy-standard",
+            &[("package", "app2clap")],
+        )
+        .value;
+    let below_the_label = |row: &PackageRow| {
+        assert!(
+            row.details
+                .starts_with(&format!("{}\n\n{sentence}", row.summary)),
+            "{}",
+            row.details
+        );
+    };
+    below_the_label(&rows[0]);
+    for (checked, label) in [(false, "Won't touch"), (true, "Will update")] {
+        apply_checkbox_state_to_package_row(&model, &mut rows[0], checked).unwrap();
+        assert!(rows[0].summary.contains(label), "{}", rows[0].summary);
+        below_the_label(&rows[0]);
+    }
+
+    let mut notes = Vec::new();
+    apply_version_check_failures_to_rows(
+        &localizer,
+        &mut rows,
+        &mut notes,
+        &[(PACKAGE_APP2CLAP.to_string(), "offline".to_string())],
+    );
+    assert!(
+        rows[0]
+            .summary
+            .ends_with("(not available: online version check failed)"),
+        "{}",
+        rows[0].summary
+    );
+    below_the_label(&rows[0]);
+}
+
 #[test]
 fn version_check_failure_disables_row_and_records_note() {
     // SWS-website-down scenario: the deferred latest-version check fails
@@ -1076,6 +1154,8 @@ fn version_check_failure_disables_row_and_records_note() {
         Some("online version check failed"),
         "a localized reason should be attached so screen readers announce why"
     );
+    // The details pane reads the label as it is now, not "Will install".
+    assert!(sws.details.starts_with(&sws.summary), "{}", sws.details);
 
     // Other packages keep their flow — the plan as a whole stays
     // actionable (REAPER etc. are still installable on the empty target).
@@ -1147,6 +1227,21 @@ fn whats_new_notes_render_in_the_package_details_pane() {
     assert!(
         !reaper.details.contains("What's new"),
         "a package without resolved notes must keep its plain details"
+    );
+
+    // Ticking or unticking the row rebuilds its details: the notes stay.
+    let mut osara = osara.clone();
+    let untick = !osara.selected;
+    apply_checkbox_state_to_package_row(&model, &mut osara, untick).unwrap();
+    assert!(
+        osara.details.starts_with(&osara.summary),
+        "{}",
+        osara.details
+    );
+    assert!(
+        osara.details.contains("• Fix the slider."),
+        "{}",
+        osara.details
     );
 }
 
@@ -1358,12 +1453,19 @@ fn ticking_a_row_keeps_its_channel_tag() {
     );
     let mut row = reaper_row(PlanActionKind::Update, Some("dev"), None);
     apply_checkbox_state_to_package_row(&model, &mut row, false).unwrap();
+    // Unticked, the row installs nothing, so its details stop promising it.
+    assert!(
+        !row.details.contains("will be installed"),
+        "{}",
+        row.details
+    );
     apply_checkbox_state_to_package_row(&model, &mut row, true).unwrap();
     assert!(
         row.summary.contains("(development build)"),
         "{}",
         row.summary
     );
+    assert!(row.details.contains("unsupported"), "{}", row.details);
 
     // The way back is only announced while the row actually takes it.
     let mut back = reaper_row(PlanActionKind::Update, None, Some("dev"));

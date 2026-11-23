@@ -398,10 +398,8 @@ pub(crate) fn note_copies_in_former_outside_folders(
         let sentence = localizer.format(key, &package).value;
         row.former_copy_review_note =
             review_key.map(|review_key| localizer.format(review_key, &package).value);
-        row.details = match row.details.split_once("\n\n") {
-            Some((summary, rest)) => format!("{summary}\n\n{sentence}\n\n{rest}"),
-            None => format!("{}\n\n{sentence}", row.details),
-        };
+        row.details_notes.insert(0, sentence);
+        row.details = package_row_details(localizer, row);
     }
 }
 
@@ -448,6 +446,7 @@ fn mark_row_unavailable(localizer: &Localizer, row: &mut PackageRow, reason_key:
         )
         .value;
     row.summary = format!("{summary} {indicator}");
+    row.details = package_row_details(localizer, row);
     row.unavailability_reason = Some(reason);
 }
 
@@ -539,11 +538,12 @@ pub fn apply_version_check_failures_to_rows(
     })
 }
 
-/// Recompute a `PackageRow`'s `action`, `action_label`, `summary`, and
-/// `selected` fields to match a new checkbox state. Used by the wizard's
-/// CheckListBox toggle handler so the visible "Install/Update/Keep" label
-/// follows what the user just clicked. Returns the freshly-formatted
-/// summary so the caller can also push it into the CheckListBox label.
+/// Recompute a `PackageRow`'s `action`, `action_label`, `summary`,
+/// `details` and `selected` fields to match a new checkbox state. Used by
+/// the wizard's CheckListBox toggle handler so the visible
+/// "Install/Update/Keep" label follows what the user just clicked. Returns
+/// the freshly-formatted summary so the caller can also push it into the
+/// CheckListBox label.
 pub fn apply_checkbox_state_to_package_row(
     model: &WizardModel,
     row: &mut PackageRow,
@@ -564,6 +564,7 @@ pub fn apply_checkbox_state_to_package_row(
     row.action = new_action;
     row.action_label = action_label(&localizer, new_action);
     row.summary = package_row_summary(&localizer, row);
+    row.details = package_row_details(&localizer, row);
     row.selected = checked;
     Ok(row.summary.clone())
 }
@@ -759,6 +760,42 @@ fn package_row_summary(localizer: &Localizer, row: &PackageRow) -> String {
     }
 }
 
+/// The text of a package row's details pane: the row's label, its
+/// `details_notes` (no build for this REAPER, left to ReaPack, a copy in
+/// the CLAP folder), what a pre-release build means when this run installs
+/// one, the package's description, and the available version's What's-New
+/// notes. Built from the row's current action, so everything that changes
+/// the action (a tick, an untick, the row becoming unavailable) rebuilds it
+/// here and the pane never describes a choice the user has since undone.
+fn package_row_details(localizer: &Localizer, row: &PackageRow) -> String {
+    let mut parts = vec![row.summary.clone()];
+    parts.extend(row.details_notes.iter().cloned());
+    if let Some((_, Some(sentence))) = package_channel_note(
+        localizer,
+        &row.display_name,
+        row.available_channel.as_deref(),
+        row.installed_channel.as_deref(),
+        row_installs(row.action),
+    ) {
+        parts.push(sentence);
+    }
+    if !row.description.is_empty() {
+        parts.push(row.description.clone());
+    }
+    // The What's-New notes go under a localized heading, so the pane
+    // answers "what changed upstream?" without a trip to the website.
+    if let Some(notes) = &row.whats_new {
+        let heading = localizer
+            .format(
+                "wizard-package-whats-new-heading",
+                &[("package", row.display_name.as_str())],
+            )
+            .value;
+        parts.push(format!("{heading}\n{notes}"));
+    }
+    parts.join("\n\n")
+}
+
 #[allow(clippy::too_many_arguments)] // Row building needs the full wizard context.
 pub(crate) fn package_rows(
     localizer: &Localizer,
@@ -891,24 +928,13 @@ pub(crate) fn package_rows(
                 .get(action.package_id.as_str())
                 .map(|channel| channel.to_string());
             let installed_channel = installed_channels.get(&action.package_id).cloned();
-            let channel_sentence = package_channel_note(
-                localizer,
-                &display_name,
-                available_channel.as_deref(),
-                installed_channel.as_deref(),
-                row_installs(initial_action),
-            )
-            .and_then(|(_, sentence)| sentence);
             let (handling_summary, manual_attention_expected) =
                 package_handling_summary(text, &action.package_id, platform, architecture);
-            // Compose the details text shown in the wizard's package
-            // details pane. The localized description follows the summary
-            // line so users can see what a package is before deciding
-            // what to do with it. The plan-reason string ("Installed
-            // version is current or newer…") and the handling-summary /
-            // automation-kind detail are not localized for end users —
-            // both stay on PackageRow as structured fields for the saved
-            // report and stay out of the wizard pane.
+            // The plan-reason string ("Installed version is current or
+            // newer…") and the handling-summary / automation-kind detail are
+            // not localized for end users: both stay on PackageRow as
+            // structured fields for the saved report and stay out of the
+            // wizard's details pane.
             let mut row = PackageRow {
                 package_id: action.package_id.clone(),
                 summary: String::new(),
@@ -936,65 +962,37 @@ pub(crate) fn package_rows(
                 installed_channel,
                 left_to_reapack: action.left_to_reapack.is_some(),
                 former_copy_review_note: None,
+                details_notes: Vec::new(),
+                whats_new: whats_new_by_id
+                    .get(action.package_id.as_str())
+                    .map(|notes| notes.to_string()),
             };
             row.summary = package_row_summary(localizer, &row);
             // The row says why in its label, and its details in a sentence.
             // No build for this REAPER is the first reason a row gives:
             // nothing else, not even a copy ReaPack looks after, would let
             // RABBIT install the package here.
-            let no_build_sentence = no_build.then(|| {
+            if no_build {
                 let (reason_key, sentence_key) = no_build_keys(architecture);
                 mark_row_unavailable(localizer, &mut row, reason_key);
-                localizer
-                    .format(sentence_key, &[("package", display_name.as_str())])
-                    .value
-            });
+                row.details_notes.push(
+                    localizer
+                        .format(sentence_key, &[("package", display_name.as_str())])
+                        .value,
+                );
+            }
             // A package ReaPack looks after can't be ticked: the plan keeps
             // it, and the row and its details say why. With no build for
             // this REAPER, the label keeps that reason, and the details
             // still say that ReaPack looks after the package.
-            let reapack_sentence = action.left_to_reapack.as_ref().map(|left| {
+            if let Some(left) = &action.left_to_reapack {
                 let (reason_key, sentence) = left_to_reapack_text(localizer, left, &display_name);
                 if !no_build {
                     mark_row_unavailable(localizer, &mut row, reason_key);
                 }
-                sentence
-            });
-            let summary = &row.summary;
-            let details = match &no_build_sentence {
-                Some(sentence) => format!("{summary}\n\n{sentence}"),
-                None => summary.clone(),
-            };
-            let details = match &channel_sentence {
-                Some(sentence) => format!("{details}\n\n{sentence}"),
-                None => details,
-            };
-            let details = match &reapack_sentence {
-                Some(sentence) => format!("{details}\n\n{sentence}"),
-                None => details,
-            };
-            let details = if description.is_empty() {
-                details
-            } else {
-                format!("{details}\n\n{description}")
-            };
-            // The available version's What's-New notes (resolved by the
-            // deferred version check for packages that declare a source)
-            // follow under a localized heading, so the pane answers "what
-            // changed upstream?" without a trip to the package's website.
-            let details = match whats_new_by_id.get(action.package_id.as_str()) {
-                Some(notes) => {
-                    let heading = localizer
-                        .format(
-                            "wizard-package-whats-new-heading",
-                            &[("package", display_name.as_str())],
-                        )
-                        .value;
-                    format!("{details}\n\n{heading}\n{notes}")
-                }
-                None => details,
-            };
-            row.details = details;
+                row.details_notes.push(sentence);
+            }
+            row.details = package_row_details(localizer, &row);
             row
         })
         .collect()
