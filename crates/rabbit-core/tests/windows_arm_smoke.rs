@@ -49,7 +49,8 @@ use std::path::{Path, PathBuf};
 
 use rabbit_core::arch_probe::{PeKind, classify_pe_file};
 use rabbit_core::archive::{
-    extract_bin_directory_from_seven_zip_archive, extract_user_plugin_from_archive,
+    extract_bin_directory_from_seven_zip_archive, extract_plugin_bundle_from_archive,
+    extract_user_plugin_from_archive,
 };
 use rabbit_core::artifact::{
     ArtifactKind, CachedArtifact, download_artifacts, package_has_build_for,
@@ -363,7 +364,8 @@ fn not_taken_apart(package_id: &str, kind: ArtifactKind) -> Option<&'static str>
 /// The files RABBIT would put into REAPER from `cached`, each with the name
 /// a row shows, taken apart into `into` as `install::prepare_install_source`
 /// does: an extension binary is copied as it is, a zip gives the one file
-/// that matches the package's plug-in names, and FFmpeg's `.7z` everything
+/// that matches the package's plug-in names, or for a plug-in bundle every
+/// file of its bundle folder, and FFmpeg's `.7z` everything
 /// in its `bin` folder. REAPER's installer installs a portable REAPER into
 /// `into`, and every file of it counts. `work` is a temporary folder for
 /// the dry run that plans it.
@@ -389,9 +391,24 @@ fn files_rabbit_installs(
         ArtifactKind::ExtensionBinary => {
             Ok(vec![(descriptor.file_name.clone(), cached.path.clone())])
         }
-        ArtifactKind::Archive => extract_user_plugin_from_archive(&cached.path, &spec()?, into)
-            .map(|extracted| vec![named(extracted.extracted_path)])
-            .map_err(|error| error.to_string()),
+        // A package with a plug-in bundle, such as Lo-lo's VST3 instruments,
+        // installs the archive's whole bundle folder; every file of it counts.
+        ArtifactKind::Archive => {
+            let spec = spec()?;
+            match &spec.plugin_bundle {
+                Some(bundle) => extract_plugin_bundle_from_archive(&cached.path, bundle, into)
+                    .map(|extracted| {
+                        extracted
+                            .into_iter()
+                            .map(|file| named(file.extracted_path))
+                            .collect()
+                    })
+                    .map_err(|error| error.to_string()),
+                None => extract_user_plugin_from_archive(&cached.path, &spec, into)
+                    .map(|extracted| vec![named(extracted.extracted_path)])
+                    .map_err(|error| error.to_string()),
+            }
+        }
         ArtifactKind::SevenZipArchive => {
             extract_bin_directory_from_seven_zip_archive(&cached.path, &spec()?, into)
                 .map(|extracted| {

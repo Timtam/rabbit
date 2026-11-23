@@ -197,6 +197,7 @@ pub(super) fn detection(id: &str, installed: bool) -> ComponentDetection {
         confidence: Confidence::High,
         files: Vec::new(),
         notes: Vec::new(),
+        left_to_reapack: None,
     }
 }
 
@@ -1363,13 +1364,15 @@ fn every_shipped_manifest_plans() {
         // detection finds REAPER only by its app; the CLI takes whatever
         // --target-app-path says. Here it would sit in the resource folder,
         // as a portable REAPER's does, and isn't there. On Windows,
-        // `{appdata}` is the fixture's own folder, never the real one.
+        // `{appdata}` and `{documents}` are the fixture's own folders, never
+        // the real ones.
         let mut roots = fixture.roots.clone();
         if platform == Platform::MacOs {
             roots.app_path = Some(fixture.resource.join("REAPER.app"));
             roots.app_dir = Some(fixture.resource.clone());
         } else {
             roots.appdata = Some(fixture.dir.path().to_path_buf());
+            roots.documents = Some(fixture.dir.path().join("Documents"));
         }
         for target in [InstallationKind::Standard, InstallationKind::Portable] {
             let nothing = build_uninstall_plan(&UninstallPlanInput {
@@ -2437,7 +2440,8 @@ fn a_restore_reads_the_process_rules_the_plan_does() {
         super::plan::uninstall_process_rules(spec, platform, InstallationKind::Standard)
     };
     assert_eq!(rules("sws", Platform::Windows), (false, Vec::new()));
-    assert!(rules("app2clap", Platform::Windows).0);
+    // app2clap lives in each REAPER's own UserPlugins\FX folder now.
+    assert_eq!(rules("app2clap", Platform::Windows), (false, Vec::new()));
     assert!(rules("jaws-scripts", Platform::Windows).0);
     let (every, programs) = rules("surge-xt", Platform::Windows);
     assert!(every && !programs.is_empty(), "{programs:?}");

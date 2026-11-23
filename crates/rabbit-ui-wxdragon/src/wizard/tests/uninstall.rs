@@ -296,7 +296,7 @@ fn every_reason_a_package_stays_reads_as_a_sentence() {
 
 #[test]
 fn a_portable_target_reads_like_the_install_row_of_the_same_package() {
-    let row = rows_for(vec![item("app2clap", Removability::NeedsStandardTarget)]).remove(0);
+    let row = rows_for(vec![item("surge-xt", Removability::NeedsStandardTarget)]).remove(0);
     assert!(
         row.summary
             .ends_with("(not available: portable REAPER target)")
@@ -347,19 +347,53 @@ fn notes_and_the_other_warnings_follow_what_stays() {
 
 #[test]
 fn rows_go_into_the_same_groups_as_the_install_tree() {
+    // Rows keep the plan's order, which here is the groups' order reversed.
     let rows = rows_for(vec![
-        item("sws", Removability::Removable),
-        item("app2clap", Removability::Removable),
         item("langpack-de", Removability::Removable),
+        item("app2clap", Removability::Removable),
+        item("surge-xt", Removability::Removable),
+        item("sws", Removability::Removable),
     ]);
 
     let categories: Vec<PackageCategory> = rows.iter().map(|row| row.category).collect();
     assert_eq!(
         categories,
         [
-            PackageCategory::Core,
-            PackageCategory::Additional,
-            PackageCategory::Language
+            PackageCategory::Language,
+            PackageCategory::Tools,
+            PackageCategory::Instruments,
+            PackageCategory::Core
+        ]
+    );
+    // The Uninstall tab's headings, on Windows and macOS, come from the same
+    // groups as the Install tree's, one per category with rows, in display
+    // order.
+    let groups = package_tree_groups(rows.iter().map(|row| row.category));
+    let headings: Vec<PackageCategory> = groups.iter().map(|group| group.category).collect();
+    assert_eq!(headings, PackageCategory::ALL);
+    let group_rows: Vec<&[usize]> = groups.iter().map(|group| group.rows.as_slice()).collect();
+    assert_eq!(group_rows, [[3], [2], [1], [0]]);
+}
+
+#[test]
+fn the_uninstall_tab_shows_no_heading_for_a_category_without_rows() {
+    let rows = rows_for(vec![
+        item("sws", Removability::Removable),
+        item("app2clap", Removability::Removable),
+    ]);
+
+    let groups = package_tree_groups(rows.iter().map(|row| row.category));
+    assert_eq!(
+        groups,
+        [
+            PackageTreeGroup {
+                category: PackageCategory::Core,
+                rows: vec![0],
+            },
+            PackageTreeGroup {
+                category: PackageCategory::Tools,
+                rows: vec![1],
+            },
         ]
     );
 }
@@ -517,7 +551,7 @@ fn rows_build_in_every_locale_without_missing_text() {
                     note_key: "uninstall-manual-reaper-portable".to_string(),
                 },
             ),
-            item("app2clap", Removability::NeedsStandardTarget),
+            item("surge-xt", Removability::NeedsStandardTarget),
             item(
                 "reapack",
                 Removability::ManagedByReaPack {
@@ -1096,6 +1130,7 @@ fn install_tab_model_with(actions: &[(&str, PlanActionKind, Option<&str>)]) -> W
                     installed_version: installed.map(|version| Version::parse(version).unwrap()),
                     available_version: Some(Version::parse("9.9").unwrap()),
                     reason: "test".to_string(),
+                    left_to_reapack: None,
                 })
                 .collect(),
             notes: Vec::new(),
@@ -1343,6 +1378,111 @@ fn an_uninstall_review_names_the_ticks_on_both_other_tabs() {
     assert!(text.contains("Backups tab"), "{text}");
 }
 
+/// On a portable REAPER, app2clap's Uninstall row says that this REAPER
+/// still loads the copy in the CLAP folder after the uninstall, and what
+/// takes that copy away, after what the uninstall itself does. The standard
+/// REAPER's row doesn't: its uninstall removes that copy too. Without a
+/// copy, neither says it. The copy is made up through the wizard's test
+/// seam, so the real CLAP folder is never looked at. In every language.
+#[test]
+fn a_portable_uninstall_of_app2clap_says_the_copy_in_the_clap_folder_stays() {
+    let dir = tempdir().unwrap();
+    let (_, model) = langpack_model(rabbit_core::plan::PlanActionKind::Install);
+    let fx = dir
+        .path()
+        .join("UserPlugins")
+        .join("FX")
+        .join("app2clap.clap");
+    std::fs::create_dir_all(fx.parent().unwrap()).unwrap();
+    std::fs::write(&fx, b"app2clap").unwrap();
+    let mut state = InstallState::default();
+    rabbit_core::receipt::upsert_package_receipt(
+        &mut state,
+        dir.path(),
+        rabbit_core::receipt::PackageReceiptParams {
+            variant: None,
+            channel: None,
+            package_id: "app2clap",
+            version: Some(Version::parse("2026.5.17.34").unwrap()),
+            source_url: None,
+            source_sha256: None,
+            installed_paths: std::slice::from_ref(&fx),
+            installed_at: None,
+            architecture: None,
+        },
+    )
+    .unwrap();
+    rabbit_core::receipt::save_install_state(dir.path(), &state).unwrap();
+    let detections: Vec<ComponentDetection> = builtin_package_specs(model.platform)
+        .iter()
+        .map(|spec| ComponentDetection {
+            installed: spec.id == "app2clap",
+            ..ComponentDetection::not_installed(&spec.id, &spec.display_name)
+        })
+        .collect();
+    let row_for = |portable: bool| {
+        let target = TargetRow {
+            path: dir.path().to_path_buf(),
+            portable,
+            ..model.target_rows[0].clone()
+        };
+        let list = uninstall_list_with_roots(
+            &model,
+            &target,
+            &fixture_roots(model.platform, &target.path, dir.path()),
+            &detections,
+            &NothingListed,
+            &NoMacosObjects,
+        );
+        list.rows
+            .into_iter()
+            .find(|row| row.package_id == "app2clap")
+            .expect("an app2clap row")
+    };
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let sentence = localizer
+        .format(
+            "wizard-uninstall-details-clap-copy-portable",
+            &[("package", "app2clap")],
+        )
+        .value;
+    let without_copy = row_for(true);
+    assert!(!without_copy.details.contains(&sentence));
+
+    let seam = crate::wizard::packages::former_copies_seam::install(|spec| {
+        if spec.id == "app2clap" {
+            vec![PathBuf::from("C:/CLAP/app2clap.clap")]
+        } else {
+            Vec::new()
+        }
+    });
+    let portable = row_for(true);
+    let standard = row_for(false);
+    drop(seam);
+
+    assert_eq!(
+        portable.details,
+        format!("{}\n{sentence}", without_copy.details),
+        "the sentence follows the rest"
+    );
+    assert!(
+        !standard.details.contains(&sentence),
+        "{}",
+        standard.details
+    );
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let text = localizer.format(
+            "wizard-uninstall-details-clap-copy-portable",
+            &[("package", "app2clap")],
+        );
+        assert!(!text.missing, "{locale}");
+        assert_reads(locale, &text.value);
+    }
+}
+
+/// app2clap on the standard REAPER, with an older copy in the CLAP folder
+/// that every program using CLAP plug-ins may load.
 #[test]
 fn a_package_for_every_program_asks_to_close_them_first() {
     let mut list = list_for(vec![UninstallPlanItem {
@@ -1840,7 +1980,8 @@ fn only_a_package_a_backup_cant_bring_back_asks_a_question() {
         ];
         if platform == Platform::Windows {
             removable.push("ffmpeg");
-            // In Windows' own CLAP folder, a temporary one here.
+            // In REAPER's UserPlugins\FX folder, or an older copy in
+            // Windows' own CLAP folder, a temporary one here.
             removable.push("app2clap");
         }
         for id in removable {

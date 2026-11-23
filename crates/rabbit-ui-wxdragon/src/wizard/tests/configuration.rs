@@ -26,6 +26,7 @@ fn only_rows_that_offered_something_record_a_verdict() {
         installed_version: None,
         available_version: None,
         reason: "test".to_string(),
+        left_to_reapack: None,
     };
     let model = model_from_plan(
         &localizer,
@@ -96,6 +97,7 @@ fn a_tick_clears_any_refusal_but_only_remembering_packages_record_one() {
         installed_version: None,
         available_version: None,
         reason: "test".to_string(),
+        left_to_reapack: None,
     };
     let model = model_from_plan(
         &localizer,
@@ -159,6 +161,7 @@ fn a_declined_language_pack_stops_being_ticked_by_default() {
         installed_version: None,
         available_version: None,
         reason: "Missing".to_string(),
+        left_to_reapack: None,
     }];
 
     let suggested = package_rows(
@@ -380,6 +383,7 @@ fn additive_steps_still_auto_tick_for_an_already_installed_dependency() {
                 installed_version: Some(Version::parse("1.2.6").unwrap()),
                 available_version: Some(Version::parse("1.2.6").unwrap()),
                 reason: "installed".to_string(),
+                left_to_reapack: None,
             }],
             notes: Vec::new(),
         },
@@ -393,6 +397,96 @@ fn additive_steps_still_auto_tick_for_an_already_installed_dependency() {
     assert!(
         remote.selected,
         "additive steps must keep auto-ticking for a dependency that is already installed"
+    );
+}
+
+#[test]
+fn the_reawarp_step_is_in_the_configuration_group_in_every_locale() {
+    // ReaWarp's repository step sits with the other ReaPack repository
+    // steps, right after REAPER Accessible (EN), reads its own label in
+    // every language, and is ticked by default once ReaPack is there.
+    use crate::wizard::labels::localized_configuration_step_name;
+    use rabbit_core::configuration::{CONFIG_REAPER_ACCESSIBLE_EN_REMOTE, CONFIG_REAWARP_REMOTE};
+
+    // "Already applied" is read from an empty temp folder, never a real
+    // REAPER resource folder.
+    let resource = tempfile::tempdir().unwrap();
+    let english = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let english_name = english.text("config-reapack-reawarp-name").value;
+    for &locale in rabbit_core::localization::embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let installation = fake_installation();
+        let model = model_from_plan(
+            &localizer,
+            Platform::Windows,
+            Architecture::X64,
+            vec![installation.clone()],
+            Some(0),
+            InstallPlan {
+                target: Some(installation),
+                actions: vec![PlanAction {
+                    package_id: PACKAGE_REAPACK.to_string(),
+                    action: PlanActionKind::Keep,
+                    installed_version: Some(Version::parse("1.2.6").unwrap()),
+                    available_version: Some(Version::parse("1.2.6").unwrap()),
+                    reason: "installed".to_string(),
+                    left_to_reapack: None,
+                }],
+                notes: Vec::new(),
+            },
+        );
+        let rows = configuration_rows(&localizer, &model.package_rows, Some(resource.path()));
+        let index = rows
+            .iter()
+            .position(|row| row.step_id == CONFIG_REAWARP_REMOTE)
+            .unwrap_or_else(|| panic!("{locale}: the ReaWarp row should exist"));
+        assert_eq!(
+            rows[index - 1].step_id,
+            CONFIG_REAPER_ACCESSIBLE_EN_REMOTE,
+            "{locale}: ReaWarp comes right after REAPER Accessible (EN)"
+        );
+
+        let row = &rows[index];
+        let name = localizer.text("config-reapack-reawarp-name");
+        assert!(!name.missing, "{locale}");
+        assert_eq!(row.display_name, name.value, "{locale}");
+        assert!(row.display_name.contains("ReaWarp"), "{locale}: {name:?}");
+        if locale != DEFAULT_LOCALE {
+            assert_ne!(
+                row.display_name, english_name,
+                "{locale}: the label should be translated"
+            );
+        }
+        assert_eq!(
+            localized_configuration_step_name(Some(&localizer), CONFIG_REAWARP_REMOTE),
+            row.display_name,
+            "{locale}: the summaries name the step the same way"
+        );
+
+        let description = localizer.text("config-reapack-reawarp-description");
+        assert!(!description.missing, "{locale}");
+        assert_eq!(row.description, description.value, "{locale}");
+        for expected in [
+            "Gabriel Schuck",
+            "https://github.com/gabrielschuck/reawarp/raw/main/index.xml",
+        ] {
+            assert!(
+                row.description.contains(expected),
+                "{locale}: {expected:?} missing from {:?}",
+                row.description
+            );
+        }
+
+        assert!(row.available_for_target, "{locale}");
+        assert!(!row.already_applied, "{locale}");
+        assert!(
+            row.selected && row.default_selected,
+            "{locale}: recommended, so ticked by default"
+        );
+    }
+    assert!(
+        std::fs::read_dir(resource.path()).unwrap().next().is_none(),
+        "building the rows must not write anything"
     );
 }
 
@@ -420,6 +514,7 @@ fn configuration_row_unticks_when_dep_package_is_unticked_install() {
                 installed_version: None,
                 available_version: Some(Version::parse("1.2.6").unwrap()),
                 reason: "Missing".to_string(),
+                left_to_reapack: None,
             }],
             notes: Vec::new(),
         },

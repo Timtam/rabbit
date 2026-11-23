@@ -2,17 +2,18 @@
 //! how a checkbox toggle changes a row.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use rabbit_core::Result;
 use rabbit_core::artifact::{dispatch_architecture, package_has_build_for};
 use rabbit_core::detection::detect_components;
 use rabbit_core::localization::Localizer;
-use rabbit_core::model::{Architecture, Platform};
+use rabbit_core::model::{Architecture, LeftToReapack, Platform};
 use rabbit_core::operation::{PackageAutomationSupport, package_automation_support};
 use rabbit_core::osara_keymap::{OsaraKeymapState, replace_by_default};
 use rabbit_core::package::{
-    HostCapabilities, PACKAGE_OSARA, PackageKind, PackageSpec, builtin_package_specs,
-    detect_host_capabilities, host_supports_package,
+    HostCapabilities, PACKAGE_OSARA, PackageCategory, PackageKind, PackageSpec,
+    builtin_package_specs, detect_host_capabilities, host_supports_package,
 };
 use rabbit_core::plan::{AvailablePackage, PlanAction, PlanActionKind, build_install_plan};
 
@@ -22,6 +23,47 @@ use super::model::{
     OsaraKeymapChoice, PackageRow, TargetRow, WizardModel, WizardPackagePlan, WizardText,
 };
 use super::target::installation_from_target_row;
+
+/// The Fluent key of the heading the Install and Uninstall trees show over a
+/// package category's rows. A new category needs a key here and in every
+/// locale, and nothing else in the trees.
+pub fn package_group_label_key(category: PackageCategory) -> &'static str {
+    match category {
+        PackageCategory::Core => "wizard-packages-tree-group-label",
+        PackageCategory::Instruments => "wizard-instruments-tree-group-label",
+        PackageCategory::Tools => "wizard-tools-tree-group-label",
+        PackageCategory::Language => "wizard-language-tree-group-label",
+    }
+}
+
+/// One package group of the Install or Uninstall tree: its category and the
+/// indices of its rows, in row order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageTreeGroup {
+    pub category: PackageCategory,
+    pub rows: Vec<usize>,
+}
+
+/// The package groups a tree shows for rows of these categories, given in
+/// row order: one per category that has rows, in [`PackageCategory::ALL`]
+/// order. A category without rows gets no group, so no heading shows empty.
+pub fn package_tree_groups(
+    categories: impl IntoIterator<Item = PackageCategory>,
+) -> Vec<PackageTreeGroup> {
+    let categories: Vec<PackageCategory> = categories.into_iter().collect();
+    PackageCategory::ALL
+        .into_iter()
+        .filter_map(|category| {
+            let rows: Vec<usize> = categories
+                .iter()
+                .enumerate()
+                .filter(|(_, row_category)| **row_category == category)
+                .map(|(index, _)| index)
+                .collect();
+            (!rows.is_empty()).then_some(PackageTreeGroup { category, rows })
+        })
+        .collect()
+}
 
 pub fn package_ids_for_indices(model: &WizardModel, indices: &[usize]) -> Vec<String> {
     package_ids_for_rows(&model.package_rows, indices)
@@ -261,20 +303,33 @@ pub fn wizard_package_plan_for_target_with_available(
     // location outside any portable REAPER folder. JAWS-for-REAPER scripts'
     // NSIS package hard-codes `%APPDATA%\REAPER\UserPlugins\`; Surge XT's
     // vendor installer writes to the system VST3 root + ProgramData /
-    // /Library/Application Support; app2clap installs into the per-user CLAP
-    // folder. Each declares `requires_standard_install` in the manifest, so
+    // /Library/Application Support. (app2clap installs into REAPER's own
+    // UserPlugins\FX folder, so a portable REAPER gets it too.) Each
+    // declares `requires_standard_install` in the manifest, so
     // the gate is data-driven rather than a hardcoded package-id list. Mark
     // those rows unavailable on a portable target so the checklist disables
     // their checkboxes and each row label carries a localized "(requires
     // standard installation)" indicator. A row already unavailable because
-    // the package has no build for this REAPER keeps that reason, which its
-    // details already explain.
+    // the package has no build for this REAPER, or because RABBIT leaves it
+    // to ReaPack, keeps that reason, which its details already explain.
     if target.is_some_and(|target| target.portable) {
         for row in &mut package_rows {
-            if row.requires_standard_install && row.has_build_for_target {
+            if row.requires_standard_install && row.has_build_for_target && !row.left_to_reapack {
                 mark_row_unavailable(&localizer, row, "wizard-package-row-unavailable-portable");
             }
         }
+    }
+    // A copy that every REAPER on the computer loads, in the CLAP folder an
+    // earlier RABBIT installed app2clap into: the details say what it means
+    // for this REAPER, and so does Review for a ticked row.
+    if let Some(target) = target {
+        note_copies_in_former_outside_folders(
+            &localizer,
+            &mut package_rows,
+            &package_specs,
+            target.portable,
+            &former_outside_copies,
+        );
     }
 
     let can_install = package_rows.iter().any(|row| {
@@ -288,6 +343,83 @@ pub fn wizard_package_plan_for_target_with_available(
         can_install,
         detections,
     })
+}
+
+/// Add a sentence to the details of each row whose package has a copy in a
+/// folder it installed into before, outside every resource folder: the
+/// CLAP folder, where earlier versions of RABBIT installed app2clap. Every
+/// REAPER on the computer loads that copy. On a `portable` REAPER that
+/// doesn't have the package yet, the sentence says that installing it there
+/// too would load two copies, and that updating or reinstalling it in the
+/// standard REAPER first moves the shared copy into a backup; on one that
+/// has its own copy already, that it loads both, and how the shared one
+/// goes. On the standard REAPER, it says that its update or reinstall moves
+/// the copy, and that portable REAPERs and other programs that loaded it
+/// from there then no longer find it. The sentence follows the row's
+/// summary. The row also gets the sentence Review says should it be
+/// ticked: on the standard REAPER that the copy moves into the backup, on a
+/// portable REAPER without the package that it will load two copies.
+/// A row RABBIT can't install here in any run, as the package has no build
+/// for this REAPER or is left to ReaPack, gets neither: each sentence is
+/// about what installing, updating or reinstalling it here does, and its
+/// details already say why that can't happen.
+/// `copies` gives a package's copies there; the wizard passes
+/// [`former_outside_copies`].
+pub(crate) fn note_copies_in_former_outside_folders(
+    localizer: &Localizer,
+    rows: &mut [PackageRow],
+    specs: &[PackageSpec],
+    portable: bool,
+    copies: &dyn Fn(&PackageSpec) -> Vec<PathBuf>,
+) {
+    for row in rows {
+        if !row.has_build_for_target || row.left_to_reapack {
+            continue;
+        }
+        let Some(spec) = specs.iter().find(|spec| spec.id == row.package_id) else {
+            continue;
+        };
+        if spec.former_install_destinations.is_empty() || copies(spec).is_empty() {
+            continue;
+        }
+        let installs_here = row.original_action == PlanActionKind::Install;
+        let (key, review_key) = match (portable, installs_here) {
+            (true, true) => (
+                "wizard-package-details-clap-copy-portable",
+                Some("wizard-review-clap-copy-twice"),
+            ),
+            (true, false) => ("wizard-package-details-clap-copy-portable-installed", None),
+            (false, _) => (
+                "wizard-package-details-clap-copy-standard",
+                Some("wizard-review-clap-copy-moves"),
+            ),
+        };
+        let package = [("package", row.display_name.as_str())];
+        let sentence = localizer.format(key, &package).value;
+        row.former_copy_review_note =
+            review_key.map(|review_key| localizer.format(review_key, &package).value);
+        row.details = match row.details.split_once("\n\n") {
+            Some((summary, rest)) => format!("{summary}\n\n{sentence}\n\n{rest}"),
+            None => format!("{}\n\n{sentence}", row.details),
+        };
+    }
+}
+
+/// A package's copies in the folders it installed into before, outside
+/// every resource folder, such as an app2clap in the CLAP folder (see
+/// [`rabbit_core::detection::copies_in_former_outside_folders`]). The
+/// wizard's own tests never look in the real CLAP folder: each finds the
+/// copies `former_copies_seam` gives it, none unless it says otherwise.
+#[cfg(not(test))]
+pub(crate) fn former_outside_copies(spec: &PackageSpec) -> Vec<PathBuf> {
+    rabbit_core::detection::copies_in_former_outside_folders(spec)
+}
+
+/// [`former_outside_copies`] in the wizard's tests: the copies
+/// [`former_copies_seam`] gives, never the real CLAP folder's.
+#[cfg(test)]
+pub(crate) fn former_outside_copies(spec: &PackageSpec) -> Vec<PathBuf> {
+    former_copies_seam::copies(spec)
 }
 
 /// Mark `row` as unavailable: force-uncheck it, record the localized reason,
@@ -319,6 +451,38 @@ fn mark_row_unavailable(localizer: &Localizer, row: &mut PackageRow, reason_key:
     row.unavailability_reason = Some(reason);
 }
 
+/// The short reason a row's label gives, as a Fluent key, and the sentence
+/// its details add, for a package RABBIT leaves to ReaPack.
+fn left_to_reapack_text(
+    localizer: &Localizer,
+    left: &LeftToReapack,
+    package: &str,
+) -> (&'static str, String) {
+    match left {
+        LeftToReapack::Managed { reapack_package } => (
+            "wizard-package-row-unavailable-reapack",
+            localizer
+                .format(
+                    "wizard-package-details-reapack",
+                    &[
+                        ("package", package),
+                        ("reapack_package", reapack_package.as_str()),
+                    ],
+                )
+                .value,
+        ),
+        LeftToReapack::RecordsUnreadable { error } => (
+            "wizard-package-row-unavailable-reapack-check-failed",
+            localizer
+                .format(
+                    "wizard-package-details-reapack-check-failed",
+                    &[("package", package), ("error", error.as_str())],
+                )
+                .value,
+        ),
+    }
+}
+
 /// Apply per-package latest-version-check failures to a built package-row
 /// set. Each failed package's row is force-unchecked and disabled (same
 /// mechanism as the portable-target restriction) with a localized "version
@@ -326,6 +490,11 @@ fn mark_row_unavailable(localizer: &Localizer, row: &mut PackageRow, reason_key:
 /// plus the full error message is appended for the Review page. One
 /// unreachable upstream (e.g. the SWS homepage being down) therefore
 /// disables just that package instead of blocking the whole update flow.
+///
+/// A row that is already unavailable keeps its own reason, and gets no
+/// note: one with no build for this REAPER, one RABBIT leaves to ReaPack,
+/// and one that needs a standard installation on a portable target. RABBIT
+/// wouldn't install or update that package here whatever the check found.
 ///
 /// Returns the recomputed "at least one actionable Install/Update row is
 /// left" flag, which the caller should store as its can-install state.
@@ -339,10 +508,12 @@ pub fn apply_version_check_failures_to_rows(
         let row = package_rows
             .iter_mut()
             .find(|row| row.package_id == *package_id);
-        // A package with no build for this REAPER can't be installed in any
-        // run, and its row and details already say why: a failed version
-        // check gives it no other reason, and Review no note about it.
-        if row.as_ref().is_some_and(|row| !row.has_build_for_target) {
+        // A row is already unavailable when the package has no build for
+        // this REAPER, when RABBIT leaves it to ReaPack, or when it needs a
+        // standard installation and the target is portable. No run installs
+        // or updates it here, and the row already says why: a failed
+        // version check gives it no other reason, and Review no note.
+        if row.as_ref().is_some_and(|row| !row.available_for_target) {
             continue;
         }
         if let Some(row) = row {
@@ -762,9 +933,14 @@ pub(crate) fn package_rows(
                     .unwrap_or(false),
                 available_channel,
                 installed_channel,
+                left_to_reapack: action.left_to_reapack.is_some(),
+                former_copy_review_note: None,
             };
             row.summary = package_row_summary(localizer, &row);
             // The row says why in its label, and its details in a sentence.
+            // No build for this REAPER is the first reason a row gives:
+            // nothing else, not even a copy ReaPack looks after, would let
+            // RABBIT install the package here.
             let no_build_sentence = no_build.then(|| {
                 let (reason_key, sentence_key) = no_build_keys(architecture);
                 mark_row_unavailable(localizer, &mut row, reason_key);
@@ -772,12 +948,27 @@ pub(crate) fn package_rows(
                     .format(sentence_key, &[("package", display_name.as_str())])
                     .value
             });
+            // A package ReaPack looks after can't be ticked: the plan keeps
+            // it, and the row and its details say why. With no build for
+            // this REAPER, the label keeps that reason, and the details
+            // still say that ReaPack looks after the package.
+            let reapack_sentence = action.left_to_reapack.as_ref().map(|left| {
+                let (reason_key, sentence) = left_to_reapack_text(localizer, left, &display_name);
+                if !no_build {
+                    mark_row_unavailable(localizer, &mut row, reason_key);
+                }
+                sentence
+            });
             let summary = &row.summary;
             let details = match &no_build_sentence {
                 Some(sentence) => format!("{summary}\n\n{sentence}"),
                 None => summary.clone(),
             };
             let details = match &channel_sentence {
+                Some(sentence) => format!("{details}\n\n{sentence}"),
+                None => details,
+            };
+            let details = match &reapack_sentence {
                 Some(sentence) => format!("{details}\n\n{sentence}"),
                 None => details,
             };
@@ -878,4 +1069,46 @@ pub(crate) fn package_display_name(model: &WizardModel, package_id: &str) -> Str
         .find(|spec| spec.id == package_id)
         .map(|spec| spec.display_name)
         .unwrap_or_else(|| package_id.to_string())
+}
+
+/// What [`former_outside_copies`] finds in the wizard's tests: nothing,
+/// unless a test installs copies of its own. Each thread has its own, so
+/// tests running at once never see each other's.
+#[cfg(test)]
+pub(crate) mod former_copies_seam {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    use rabbit_core::package::PackageSpec;
+
+    type Copies = Box<dyn Fn(&PackageSpec) -> Vec<PathBuf>>;
+
+    thread_local! {
+        static COPIES: RefCell<Option<Copies>> = const { RefCell::new(None) };
+    }
+
+    /// Takes the copies away again when dropped.
+    pub(crate) struct Installed;
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            COPIES.with(|copies| copies.borrow_mut().take());
+        }
+    }
+
+    /// Have this thread's wizard find `copies` until what this returns is
+    /// dropped.
+    pub(crate) fn install(copies: impl Fn(&PackageSpec) -> Vec<PathBuf> + 'static) -> Installed {
+        COPIES.with(|slot| *slot.borrow_mut() = Some(Box::new(copies)));
+        Installed
+    }
+
+    pub(super) fn copies(spec: &PackageSpec) -> Vec<PathBuf> {
+        COPIES.with(|copies| {
+            copies
+                .borrow()
+                .as_ref()
+                .map_or_else(Vec::new, |copies| copies(spec))
+        })
+    }
 }

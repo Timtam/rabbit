@@ -1206,9 +1206,12 @@ pub(crate) fn github_asset_version(
     let selector = selectors
         .iter()
         .find(|selector| selector.matches_asset(asset_name))?;
-    let prefix = selector.name_prefix.as_deref()?;
-    let suffix = selector.name_suffix.as_deref().unwrap_or("");
-    version_from_asset_name(asset_name, prefix, suffix, strip_trailing_dot_segment)
+    // Only a selector with a prefix names a version's place in the name.
+    selector.name_prefix.as_ref()?;
+    // The selector cuts the prefix and suffix off as it matches them, so a
+    // selector that ignores case finds the version however the name spells
+    // them.
+    version_from_name_core(selector.name_core(asset_name)?, strip_trailing_dot_segment)
 }
 
 /// Extract a [`Version`] from an asset filename of the form
@@ -1217,13 +1220,22 @@ pub(crate) fn github_asset_version(
 /// `app2clap_`, suffix `.zip`, trailing `.<shorthash>` dropped). Returns
 /// `None` when the name doesn't match. This is the parameterized form of
 /// the former `app2clap_version_from_asset_name` / `reakontrol_version_from_asset_name`.
+#[cfg(test)]
 pub(crate) fn version_from_asset_name(
     name: &str,
     prefix: &str,
     suffix: &str,
     strip_trailing_dot_segment: bool,
 ) -> Option<Version> {
-    let core = name.strip_prefix(prefix)?.strip_suffix(suffix)?;
+    version_from_name_core(
+        name.strip_prefix(prefix)?.strip_suffix(suffix)?,
+        strip_trailing_dot_segment,
+    )
+}
+
+/// The version in `core`, an asset name without its prefix and suffix,
+/// with a trailing `.<segment>` dropped first when asked.
+fn version_from_name_core(core: &str, strip_trailing_dot_segment: bool) -> Option<Version> {
     let token = if strip_trailing_dot_segment {
         core.rsplit_once('.').map(|(left, _trailing)| left)?
     } else {
@@ -1354,6 +1366,7 @@ mod tests {
                 name_suffix: Some(".zip".to_string()),
                 exact_name: None,
                 artifact_kind: None,
+                ignore_case: false,
             }],
             artifact_kind: Some(GithubArtifactKind::Archive),
         }
@@ -1715,6 +1728,7 @@ mod tests {
                     name_suffix: Some(".zip".to_string()),
                     exact_name: None,
                     artifact_kind: None,
+                    ignore_case: false,
                 },
                 AssetSelector {
                     platform: SupportedPlatform::Macos,
@@ -1723,6 +1737,7 @@ mod tests {
                     name_suffix: Some(".zip".to_string()),
                     exact_name: None,
                     artifact_kind: None,
+                    ignore_case: false,
                 },
             ],
             artifact_kind: Some(GithubArtifactKind::Archive),

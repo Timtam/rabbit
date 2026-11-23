@@ -6,9 +6,10 @@ use std::rc::Rc;
 
 use crate::{
     ConfigurationRow, OsaraKeymapChoice, PackageRow, WizardInstallOptions, WizardModel,
-    apply_checkbox_state_to_package_row, localizer_from_options,
+    apply_checkbox_state_to_package_row, localizer_from_options, package_tree_groups,
     recompute_configuration_row_availability,
 };
+use rabbit_core::package::PackageCategory;
 use rabbit_core::plan::PlanActionKind;
 use wxdragon::event::tree_events::TreeEventData;
 use wxdragon::widgets::treectrl::{TreeCtrl, TreeCtrlStyle, TreeItemId};
@@ -24,37 +25,31 @@ use crate::wx_app::widgets::{
     sync_osara_keymap_widgets, sync_reaper_language_widget, sync_spanish_variant_widget,
 };
 
-/// Live wxTreeItemId handles for both top-level groups in the Packages
-/// tree — "Packages" with its package leaves, and "Configuration" with
-/// its configuration-step leaves. Index `i` in each leaves vec
-/// corresponds to index `i` in the matching `Vec<PackageRow>` /
-/// `Vec<ConfigurationRow>`. Kept in an `Rc<RefCell>` so the closures
-/// that handle the state-image-click event, the LEFT_UP fallback, the
-/// keyboard fallbacks, and the post-install / version-check rebuild
-/// helpers can all reach the same TreeItemIds the populate routine
-/// handed out. `TreeItemId` is not `Copy` (it owns a pointer with
+/// Live wxTreeItemId handles for the top-level groups in the Packages
+/// tree — one per package category that has rows, holding the package
+/// leaves, and "Configuration" with its configuration-step leaves.
+/// Index `i` in each leaves vec corresponds to index `i` in the
+/// matching `Vec<PackageRow>` / `Vec<ConfigurationRow>`. Kept in an
+/// `Rc<RefCell>` so the closures that handle the state-image-click
+/// event, the LEFT_UP fallback, the keyboard fallbacks, and the
+/// post-install / version-check rebuild helpers can all reach the same
+/// TreeItemIds the populate routine handed out. `TreeItemId` is not `Copy` (it owns a pointer with
 /// custom Drop), so we can't store it on the `Copy`-derived
 /// `WizardWidgets` directly.
 pub(crate) struct PackageItems {
-    /// The "Packages" group node under the (hidden) virtual root.
-    /// Becomes `None` between `populate_packages_tree` calls; populated
-    /// immediately after each rebuild.
-    pub(crate) packages_group: Option<TreeItemId>,
-    /// The "Additional software" group node (Surge XT, app2clap, …), a
-    /// sibling of the Packages group. `None` when no package has the
-    /// `Additional` category — the group node isn't created then.
-    pub(crate) additional_software_group: Option<TreeItemId>,
-    /// The "Language packs" group node (REAPER translations), a sibling of
-    /// the Packages group. `None` when no package has the `Language`
-    /// category — the group node isn't created then.
-    pub(crate) language_group: Option<TreeItemId>,
+    /// The package group nodes under the (hidden) virtual root, each with
+    /// its category, in `PackageCategory::ALL` order ("Packages",
+    /// "Instruments", ...). A category without rows has no node. Empty
+    /// between `populate_packages_tree` calls; filled immediately after
+    /// each rebuild.
+    pub(crate) package_groups: Vec<(PackageCategory, TreeItemId)>,
     /// One TreeItemId per package row, in the same order as `package_rows`
-    /// (covering BOTH the Packages and Additional-software groups). The leaf
-    /// for `package_rows[i]` is at `packages_leaves[i]` regardless of which
-    /// group node it visually hangs under, so leaf↔row index stays 1:1.
+    /// (covering every package group). The leaf for `package_rows[i]` is
+    /// at `packages_leaves[i]` regardless of which group node it visually
+    /// hangs under, so leaf↔row index stays 1:1.
     pub(crate) packages_leaves: Vec<TreeItemId>,
-    /// The "Configuration" group node sitting alongside the Packages
-    /// group under the virtual root.
+    /// The "Configuration" group node sitting after the package groups
+    /// under the virtual root.
     pub(crate) configuration_group: Option<TreeItemId>,
     /// One TreeItemId per configuration row, in the same order as
     /// `configuration_rows`.
@@ -64,9 +59,7 @@ pub(crate) struct PackageItems {
 impl PackageItems {
     pub(crate) fn empty() -> Self {
         Self {
-            packages_group: None,
-            additional_software_group: None,
-            language_group: None,
+            package_groups: Vec::new(),
             packages_leaves: Vec::new(),
             configuration_group: None,
             configuration_leaves: Vec::new(),
@@ -124,8 +117,16 @@ pub(crate) fn reset_packages_list_caret(
 fn move_caret_to_top(tree: &TreeCtrl, package_items: &PackagesStateCell) {
     // Clone the item id and DROP the borrow before touching the tree:
     // `select_item` dispatches the selection-changed handler synchronously
-    // on MSW, and that handler borrows `package_items` too.
-    let group = package_items.borrow().packages_group.clone();
+    // on MSW, and that handler borrows `package_items` too. The top-most
+    // entry is the first package group, "Packages".
+    let group = {
+        let items = package_items.borrow();
+        items
+            .package_groups
+            .first()
+            .map(|(_, group)| group.clone())
+            .or_else(|| items.configuration_group.clone())
+    };
     if let Some(group) = group {
         tree.ensure_visible(&group);
         tree.select_item(&group);
@@ -175,11 +176,12 @@ pub(crate) fn clear_tree_without_taking_focus(tree: &TreeCtrl) {
     tree.delete_all_items();
 }
 
-/// Windows-only: tear down the existing native tree and rebuild both
-/// top-level groups ("Packages" and "Configuration") from
-/// `package_rows` + `configuration_rows`. Each leaf gets its native
-/// `TVS_CHECKBOXES` state set to match its row's `selected`; each
-/// group gets a tristate reflecting its children's aggregate.
+/// Windows-only: tear down the existing native tree and rebuild the
+/// top-level groups (one per package category with rows, then
+/// "Configuration") from `package_rows` + `configuration_rows`. Each leaf
+/// gets its native `TVS_CHECKBOXES` state set to match its row's
+/// `selected`; each group gets a tristate reflecting its children's
+/// aggregate.
 pub(crate) fn populate_packages_tree(
     tree: &TreeCtrl,
     package_items: &PackagesStateCell,
@@ -191,9 +193,7 @@ pub(crate) fn populate_packages_tree(
     // that runs while rows go may otherwise act on a deleted row.
     {
         let mut items = package_items.borrow_mut();
-        items.packages_group = None;
-        items.additional_software_group = None;
-        items.language_group = None;
+        items.package_groups.clear();
         items.packages_leaves.clear();
         items.configuration_group = None;
         items.configuration_leaves.clear();
@@ -204,51 +204,34 @@ pub(crate) fn populate_packages_tree(
         return;
     };
 
-    // Package rows split into two sibling groups by category: "Packages"
-    // (Core — the REAPER accessibility stack) and "Additional software"
-    // (Surge XT, app2clap, … — extras not tied to REAPER itself). The
-    // Additional-software group node is only created when at least one
-    // Additional-category row exists, so it never renders empty.
-    let Some(packages_group) =
-        tree.append_item(&root, &model.text.packages_tree_group_label, None, None)
-    else {
-        return;
-    };
-    let has_additional = package_rows
-        .iter()
-        .any(|row| row.category == rabbit_core::package::PackageCategory::Additional);
-    let additional_software_group = if has_additional {
-        tree.append_item(
-            &root,
-            &model.text.additional_software_tree_group_label,
-            None,
-            None,
-        )
-    } else {
-        None
-    };
-    let has_language = package_rows
-        .iter()
-        .any(|row| row.category == rabbit_core::package::PackageCategory::Language);
-    let language_group = if has_language {
-        tree.append_item(&root, &model.text.language_tree_group_label, None, None)
-    } else {
-        None
-    };
+    // Package rows split into sibling groups by category, in
+    // `PackageCategory::ALL` order: "Packages" (Core — the REAPER
+    // accessibility stack), "Instruments", "Tools" and "Language packs". A
+    // group node is only created when at least one row has its category,
+    // so it never renders empty.
+    let mut package_groups = Vec::new();
+    for group in package_tree_groups(package_rows.iter().map(|row| row.category)) {
+        let label = model.text.package_group_label(group.category);
+        let Some(item) = tree.append_item(&root, label, None, None) else {
+            return;
+        };
+        package_groups.push((group.category, item));
+    }
     // One leaf per row, in row order, parented under the group that matches
     // the row's category. `packages_leaves[i]` stays the leaf for
     // `package_rows[i]` regardless of which group it hangs under, so every
     // leaf↔row index lookup elsewhere remains 1:1.
     let mut packages_leaves = Vec::with_capacity(package_rows.len());
     for row in package_rows.iter() {
-        let parent = match row.category {
-            rabbit_core::package::PackageCategory::Additional => additional_software_group
-                .as_ref()
-                .unwrap_or(&packages_group),
-            rabbit_core::package::PackageCategory::Language => {
-                language_group.as_ref().unwrap_or(&packages_group)
-            }
-            rabbit_core::package::PackageCategory::Core => &packages_group,
+        // Every row has a group while its category is in
+        // `PackageCategory::ALL`, which a rabbit-core test checks for every
+        // package. Skipping a row instead of stopping would put
+        // `packages_leaves` out of step with the rows.
+        let Some((_, parent)) = package_groups
+            .iter()
+            .find(|(category, _)| *category == row.category)
+        else {
+            return;
         };
         let label = format_row_label(&row.summary, row.selected);
         if let Some(item) = tree.append_item(parent, &label, None, None) {
@@ -257,15 +240,9 @@ pub(crate) fn populate_packages_tree(
         }
     }
     // Tristate reflecting each group's available children's aggregate.
-    let packages_state = compute_packages_group_tristate(package_rows);
-    native_tree_checkboxes::set_check_state_tri(tree.get_handle(), &packages_group, packages_state);
-    if let Some(group) = additional_software_group.as_ref() {
-        let additional_state = compute_additional_software_group_tristate(package_rows);
-        native_tree_checkboxes::set_check_state_tri(tree.get_handle(), group, additional_state);
-    }
-    if let Some(group) = language_group.as_ref() {
-        let language_state = compute_language_group_tristate(package_rows);
-        native_tree_checkboxes::set_check_state_tri(tree.get_handle(), group, language_state);
+    for (category, group) in &package_groups {
+        let state = compute_package_category_tristate(package_rows, *category);
+        native_tree_checkboxes::set_check_state_tri(tree.get_handle(), group, state);
     }
 
     // Configuration group + leaves. Always created, even if no
@@ -297,19 +274,13 @@ pub(crate) fn populate_packages_tree(
 
     {
         let mut items = package_items.borrow_mut();
-        items.packages_group = Some(packages_group.clone());
-        items.additional_software_group = additional_software_group.clone();
-        items.language_group = language_group.clone();
+        items.package_groups = package_groups.clone();
         items.packages_leaves = packages_leaves;
         items.configuration_group = Some(configuration_group.clone());
         items.configuration_leaves = configuration_leaves;
     }
 
-    tree.expand(&packages_group);
-    if let Some(group) = additional_software_group.as_ref() {
-        tree.expand(group);
-    }
-    if let Some(group) = language_group.as_ref() {
+    for (_, group) in &package_groups {
         tree.expand(group);
     }
     tree.expand(&configuration_group);
@@ -323,36 +294,15 @@ pub(crate) fn format_row_label(summary: &str, _selected: bool) -> String {
     summary.to_string()
 }
 
-/// Windows-only: aggregate the per-row `selected` flags into a tristate for
-/// the synthetic "Packages" (Core) group node. Unavailable rows don't count
-/// for either side because they can't enter the install plan and toggling
-/// them is a no-op — we only look at the rows the user can actually flip.
-pub(crate) fn compute_packages_group_tristate(
-    rows: &[crate::PackageRow],
-) -> native_tree_checkboxes::TriState {
-    compute_package_category_tristate(rows, rabbit_core::package::PackageCategory::Core)
-}
-
-/// Windows-only: the same aggregate for the "Additional software" group node.
-pub(crate) fn compute_additional_software_group_tristate(
-    rows: &[crate::PackageRow],
-) -> native_tree_checkboxes::TriState {
-    compute_package_category_tristate(rows, rabbit_core::package::PackageCategory::Additional)
-}
-
-/// Windows-only: the same aggregate for the "Language packs" group node.
-pub(crate) fn compute_language_group_tristate(
-    rows: &[crate::PackageRow],
-) -> native_tree_checkboxes::TriState {
-    compute_package_category_tristate(rows, rabbit_core::package::PackageCategory::Language)
-}
-
-/// Windows-only: tristate over the available rows of a single package
-/// category, so each top-level group's checkbox reflects only its own
-/// children.
+/// Windows-only: aggregate the per-row `selected` flags of a single package
+/// category into a tristate for that category's group node, so each
+/// top-level group's checkbox reflects only its own children. Unavailable
+/// rows don't count for either side because they can't enter the install
+/// plan and toggling them is a no-op — we only look at the rows the user
+/// can actually flip.
 pub(crate) fn compute_package_category_tristate(
     rows: &[crate::PackageRow],
-    category: rabbit_core::package::PackageCategory,
+    category: PackageCategory,
 ) -> native_tree_checkboxes::TriState {
     let mut any = false;
     let mut all = true;
@@ -386,7 +336,7 @@ pub(crate) fn compute_package_category_tristate(
 /// Windows-only: aggregate the per-row `selected` flags of every
 /// actionable [`ConfigurationRow`] into a tristate for the synthetic
 /// "Configuration" group node. Same convention as
-/// `compute_packages_group_tristate` — unavailable rows AND
+/// `compute_package_category_tristate` — unavailable rows AND
 /// already-applied rows are excluded (the user can't toggle either),
 /// and an empty actionable-set renders as Unchecked.
 pub(crate) fn compute_configuration_group_tristate(
@@ -1037,13 +987,12 @@ pub(crate) fn build_packages_page(
 }
 
 /// Windows-only: which top-level group a tree item belongs to, if any.
-/// Used by the toggle handlers to dispatch on Packages-vs-Configuration
-/// without rebuilding the HTREEITEM-comparison plumbing at each call.
+/// Used by the toggle handlers to dispatch on a package category's group
+/// vs Configuration without rebuilding the HTREEITEM-comparison plumbing
+/// at each call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WhichGroup {
-    Packages,
-    AdditionalSoftware,
-    Language,
+    Package(PackageCategory),
     Configuration,
 }
 
@@ -1063,30 +1012,24 @@ pub(crate) enum WhichLeaf {
 /// `TreeItemId` wraps a fresh allocation per event call — pointer
 /// equality on the Rust wrappers wouldn't match our stored handles.
 pub(crate) fn classify_group(items: &PackageItems, candidate: &TreeItemId) -> Option<WhichGroup> {
-    let candidate_handle = native_tree_handle(candidate);
+    classify_group_handle(items, native_tree_handle(candidate))
+}
+
+/// Windows-only: [`classify_group`] for a native `HTREEITEM`, as a
+/// hit-test returns it.
+fn classify_group_handle(
+    items: &PackageItems,
+    candidate_handle: *mut std::ffi::c_void,
+) -> Option<WhichGroup> {
     if candidate_handle.is_null() {
         return None;
     }
-    if items
-        .packages_group
-        .as_ref()
-        .is_some_and(|group| native_tree_handle(group) == candidate_handle)
+    if let Some((category, _)) = items
+        .package_groups
+        .iter()
+        .find(|(_, group)| native_tree_handle(group) == candidate_handle)
     {
-        return Some(WhichGroup::Packages);
-    }
-    if items
-        .additional_software_group
-        .as_ref()
-        .is_some_and(|group| native_tree_handle(group) == candidate_handle)
-    {
-        return Some(WhichGroup::AdditionalSoftware);
-    }
-    if items
-        .language_group
-        .as_ref()
-        .is_some_and(|group| native_tree_handle(group) == candidate_handle)
-    {
-        return Some(WhichGroup::Language);
+        return Some(WhichGroup::Package(*category));
     }
     if items
         .configuration_group
@@ -1237,7 +1180,7 @@ pub(crate) fn handle_native_checkbox_toggle(
 }
 
 /// Windows-only: hit-test a `wxEVT_LEFT_UP` mouse-up against the tree.
-/// If the click landed on either group's state icon, propagate the
+/// If the click landed on a group's state icon, propagate the
 /// toggle to that group's available leaves. The native control may
 /// have auto-cycled the parent's image to a state that disagrees with
 /// the row aggregate, but we always rewrite the parent state via
@@ -1268,40 +1211,10 @@ pub(crate) fn handle_packages_left_up(
         return;
     }
     // Identify which group's state icon was hit by comparing the raw
-    // HTREEITEM directly against each stored group's native handle.
-    // We don't go through `classify_group` here because we don't have
-    // a `TreeItemId` wrapper yet — the hit-test message returns only
-    // the native handle.
-    let group = {
-        let items = package_items.borrow();
-        if items
-            .packages_group
-            .as_ref()
-            .is_some_and(|g| native_tree_handle(g) == h_item)
-        {
-            Some(WhichGroup::Packages)
-        } else if items
-            .additional_software_group
-            .as_ref()
-            .is_some_and(|g| native_tree_handle(g) == h_item)
-        {
-            Some(WhichGroup::AdditionalSoftware)
-        } else if items
-            .language_group
-            .as_ref()
-            .is_some_and(|g| native_tree_handle(g) == h_item)
-        {
-            Some(WhichGroup::Language)
-        } else if items
-            .configuration_group
-            .as_ref()
-            .is_some_and(|g| native_tree_handle(g) == h_item)
-        {
-            Some(WhichGroup::Configuration)
-        } else {
-            None
-        }
-    };
+    // HTREEITEM directly against each stored group's native handle: the
+    // hit-test message returns only the native handle, not a `TreeItemId`
+    // wrapper.
+    let group = classify_group_handle(&package_items.borrow(), h_item);
     let Some(group) = group else {
         return;
     };
@@ -1329,7 +1242,7 @@ pub(crate) fn handle_packages_left_up(
     );
 }
 
-/// Windows-only: refresh both groups' tristate visuals + plan-level
+/// Windows-only: refresh every group's tristate visual + plan-level
 /// `can_install` flag + OSARA widgets + details pane after any toggle
 /// (leaf or group) that mutated `package_rows` or
 /// `configuration_rows`. Also re-evaluates configuration-row
@@ -1385,12 +1298,8 @@ pub(crate) fn refresh_after_packages_toggle(
 
     {
         let items = package_items.borrow();
-        if let Some(group) = items.packages_group.as_ref() {
-            let group_state = compute_packages_group_tristate(&package_rows.borrow());
-            native_tree_checkboxes::set_check_state_tri(tree.get_handle(), group, group_state);
-        }
-        if let Some(group) = items.additional_software_group.as_ref() {
-            let group_state = compute_additional_software_group_tristate(&package_rows.borrow());
+        for (category, group) in &items.package_groups {
+            let group_state = compute_package_category_tristate(&package_rows.borrow(), *category);
             native_tree_checkboxes::set_check_state_tri(tree.get_handle(), group, group_state);
         }
         if let Some(group) = items.configuration_group.as_ref() {
@@ -1451,15 +1360,10 @@ pub(crate) fn propagate_group_toggle_to_leaves(
     wizard_model: &WizardModel,
 ) {
     match target_group {
-        WhichGroup::Packages | WhichGroup::AdditionalSoftware | WhichGroup::Language => {
-            // All three package groups share the same `packages_leaves` vec
+        WhichGroup::Package(category) => {
+            // Every package group shares the same `packages_leaves` vec
             // (row-indexed); the category decides which rows this toggle
             // owns so the click only flips its own group's children.
-            let category = match target_group {
-                WhichGroup::AdditionalSoftware => rabbit_core::package::PackageCategory::Additional,
-                WhichGroup::Language => rabbit_core::package::PackageCategory::Language,
-                _ => rabbit_core::package::PackageCategory::Core,
-            };
             let pre_state = compute_package_category_tristate(&package_rows.borrow(), category);
             let target = !matches!(pre_state, native_tree_checkboxes::TriState::Checked);
             let leaves: Vec<TreeItemId> = package_items.borrow().packages_leaves.to_vec();

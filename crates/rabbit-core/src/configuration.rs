@@ -2,10 +2,11 @@
 //!
 //! A configuration step is a chunk of work that runs *after* the package
 //! install pipeline has finished, typically to wire newly-installed
-//! packages into REAPER's per-target config files. Today the only
-//! builtin step is "add the REAPER Accessibility ReaPack remote to
-//! `reapack.ini`"; more steps (CLI prefs, REAPER `.ini` tweaks, etc.)
-//! can be added later by extending `ConfigurationStepKind`.
+//! packages into REAPER's per-target config files. The builtin steps
+//! add ReaPack remotes to `reapack.ini` (REAPER Accessibility, REAPER
+//! Accessible FR and EN, ReaWarp) and set REAPER's language; more steps
+//! (CLI prefs, REAPER `.ini` tweaks, etc.) can be added later by
+//! extending `ConfigurationStepKind`.
 //!
 //! The wizard UI surfaces these as a separate "Configuration" group in
 //! the same tree the user picks packages in. CLI users opt in via
@@ -53,6 +54,20 @@ const REAPER_ACCESSIBLE_FR_URL: &str =
 const REAPER_ACCESSIBLE_EN_NAME: &str = "REAPER Accessible (EN)";
 const REAPER_ACCESSIBLE_EN_URL: &str =
     "https://github.com/reaperaccessible/rap_en/raw/main/index.xml";
+
+/// Stable id for the "configure ReaWarp ReaPack remote" step: Gabriel
+/// Schuck's accessible audio warping scripts, which he publishes through
+/// his own ReaPack repository.
+pub const CONFIG_REAWARP_REMOTE: &str = "reapack-add-reawarp-remote";
+
+/// Remote name / index URL for the `gabrielschuck/reawarp` repo. Unlike the
+/// other repositories it keeps its index's own name: ReaPack finds remotes by
+/// exact name and installs into `Scripts/<remote name>/`, so a name that
+/// differed only in case would let a later import by hand, as ReaWarp's
+/// README describes, add a second remote sharing the same folder on Windows
+/// and macOS.
+const REAWARP_NAME: &str = "reawarp";
+const REAWARP_URL: &str = "https://github.com/gabrielschuck/reawarp/raw/main/index.xml";
 
 /// One unit of post-install configuration work the wizard / CLI can
 /// offer to the user. Steps are declarative — `kind` carries the data
@@ -254,6 +269,23 @@ pub fn builtin_configuration_steps() -> Vec<ConfigurationStep> {
             kind: ConfigurationStepKind::AddReapackRemote {
                 name: REAPER_ACCESSIBLE_EN_NAME.to_string(),
                 url: REAPER_ACCESSIBLE_EN_URL.to_string(),
+            },
+        },
+        ConfigurationStep {
+            id: CONFIG_REAWARP_REMOTE.to_string(),
+            display_name_key: "config-reapack-reawarp-name".to_string(),
+            display_description_key: "config-reapack-reawarp-description".to_string(),
+            // Ticked by default, like REAPER Accessible (EN): ReaWarp's own
+            // messages come in English, Portuguese or Spanish, so it is of
+            // use whatever language RABBIT runs in. Adding the repository
+            // installs nothing; the user picks ReaWarp in ReaPack afterwards.
+            recommended: true,
+            requires_packages: vec![PACKAGE_REAPACK.to_string()],
+            dependency_name_key: None,
+            requires_fresh_dependency: false,
+            kind: ConfigurationStepKind::AddReapackRemote {
+                name: REAWARP_NAME.to_string(),
+                url: REAWARP_URL.to_string(),
             },
         },
     ];
@@ -655,6 +687,148 @@ mod tests {
             }
             other => panic!("unexpected step kind: {other:?}"),
         }
+    }
+
+    #[test]
+    fn builtin_steps_include_reawarp_remote() {
+        let steps = builtin_configuration_steps();
+        let step = steps
+            .iter()
+            .find(|s| s.id == CONFIG_REAWARP_REMOTE)
+            .expect("ReaWarp ReaPack remote step is missing");
+        assert_eq!(step.id, "reapack-add-reawarp-remote");
+        assert_eq!(step.display_name_key, "config-reapack-reawarp-name");
+        assert_eq!(
+            step.display_description_key,
+            "config-reapack-reawarp-description"
+        );
+        // ReaWarp speaks English, Portuguese or Spanish, so it is ticked by
+        // default like REAPER Accessible (EN), not opt-in like (FR).
+        assert!(step.recommended);
+        assert_eq!(step.requires_packages, vec![PACKAGE_REAPACK.to_string()]);
+        assert_eq!(step.dependency_name_key, None);
+        assert!(!step.requires_fresh_dependency);
+        match &step.kind {
+            ConfigurationStepKind::AddReapackRemote { name, url } => {
+                assert_eq!(name, "reawarp");
+                assert_eq!(
+                    url,
+                    "https://github.com/gabrielschuck/reawarp/raw/main/index.xml"
+                );
+            }
+            other => panic!("unexpected step kind: {other:?}"),
+        }
+    }
+
+    /// ReaWarp comes right after the REAPER Accessible repositories, so the
+    /// repository steps stay together and the wizard lists them in that
+    /// order.
+    #[test]
+    fn reawarp_remote_comes_after_the_reaper_accessible_steps() {
+        let ids: Vec<String> = builtin_configuration_steps()
+            .into_iter()
+            .map(|step| step.id)
+            .collect();
+        let position = |id: &str| {
+            ids.iter()
+                .position(|step| step == id)
+                .unwrap_or_else(|| panic!("{id} is missing from {ids:?}"))
+        };
+        let fr = position(CONFIG_REAPER_ACCESSIBLE_FR_REMOTE);
+        let en = position(CONFIG_REAPER_ACCESSIBLE_EN_REMOTE);
+        let reawarp = position(CONFIG_REAWARP_REMOTE);
+        assert!(fr < reawarp && en < reawarp, "{ids:?}");
+        assert_eq!(reawarp, en + 1, "{ids:?}");
+        assert!(reawarp < position(CONFIG_SET_REAPER_LANGUAGE), "{ids:?}");
+    }
+
+    /// Applying the ReaWarp step adds its repository to `reapack.ini` once,
+    /// keeps the remotes already there, and a second run changes nothing.
+    #[test]
+    fn reawarp_remote_is_added_once_and_seen_as_applied() {
+        let dir = tempdir().unwrap();
+        let ini = dir.path().join(crate::reapack::REAPACK_INI_RELATIVE_PATH);
+        std::fs::write(
+            &ini,
+            "[remotes]\r\nsize=1\r\nremote0=ReaTeam Scripts|https://github.com/ReaTeam/ReaScripts/raw/master/index.xml|1|2\r\n",
+        )
+        .unwrap();
+        let steps = builtin_configuration_steps();
+        let step = steps
+            .iter()
+            .find(|s| s.id == CONFIG_REAWARP_REMOTE)
+            .unwrap();
+        let context = ConfigurationContext::default();
+
+        // A dry run says what it would do and writes nothing.
+        let dry = apply_configuration_step(dir.path(), step, &context, true).unwrap();
+        assert_eq!(dry.status, ConfigurationStatus::DryRun);
+        assert_eq!(
+            dry.message_code,
+            ConfigurationMessage::ReapackRemoteDryRun {
+                name: REAWARP_NAME.to_string(),
+                url: REAWARP_URL.to_string(),
+            }
+        );
+        assert!(!is_configuration_step_applied(dir.path(), step, &context).unwrap());
+
+        let first = apply_configuration_step(dir.path(), step, &context, false).unwrap();
+        assert_eq!(first.status, ConfigurationStatus::Applied);
+        assert_eq!(
+            first.message_code,
+            ConfigurationMessage::ReapackRemoteAdded {
+                name: REAWARP_NAME.to_string(),
+                url: REAWARP_URL.to_string(),
+            }
+        );
+        assert_eq!(
+            first.applied_configuration.unwrap().reapack_repository,
+            Some(ReapackRepository {
+                name: REAWARP_NAME.to_string(),
+                url: REAWARP_URL.to_string(),
+            })
+        );
+        assert!(is_configuration_step_applied(dir.path(), step, &context).unwrap());
+        let written = std::fs::read_to_string(&ini).unwrap();
+        assert!(
+            written.contains(
+                "remote1=reawarp|https://github.com/gabrielschuck/reawarp/raw/main/index.xml|1|2\r\n"
+            ),
+            "{written}"
+        );
+        assert!(written.contains("size=2\r\n"), "{written}");
+        assert!(written.contains("remote0=ReaTeam Scripts|"), "{written}");
+
+        let second = apply_configuration_step(dir.path(), step, &context, false).unwrap();
+        assert_eq!(second.status, ConfigurationStatus::Applied);
+        assert_eq!(
+            second.message_code,
+            ConfigurationMessage::ReapackRemoteAlreadyPresent {
+                name: REAWARP_NAME.to_string(),
+                url: REAWARP_URL.to_string(),
+            }
+        );
+        let again = std::fs::read_to_string(&ini).unwrap();
+        assert_eq!(again, written, "a second run must not touch reapack.ini");
+        assert_eq!(again.matches(REAWARP_URL).count(), 1, "{again}");
+    }
+
+    /// A repository the user imported by hand, which ReaPack names after the
+    /// index, counts as applied, since the step matches on the URL.
+    #[test]
+    fn reawarp_remote_imported_by_hand_counts_as_applied() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(crate::reapack::REAPACK_INI_RELATIVE_PATH),
+            "[remotes]\nsize=1\nremote0=reawarp|https://github.com/gabrielschuck/reawarp/raw/main/index.xml|1|2\n",
+        )
+        .unwrap();
+        let steps = builtin_configuration_steps();
+        let step = steps
+            .iter()
+            .find(|s| s.id == CONFIG_REAWARP_REMOTE)
+            .unwrap();
+        assert!(is_configuration_step_applied(dir.path(), step, &Default::default()).unwrap());
     }
 
     /// ONE "set REAPER's language" step covers every language, rather than

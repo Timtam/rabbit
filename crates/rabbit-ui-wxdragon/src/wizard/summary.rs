@@ -1,5 +1,7 @@
 //! Renders a finished [`SetupReport`] into the done page's summary text.
 
+use std::path::Path;
+
 use rabbit_core::install::{
     InstallFileAction, InstallFileReport, LeftInPlaceReason, ReaperLanguageReport,
 };
@@ -175,7 +177,9 @@ pub fn summarize_setup_report(
                         .iter()
                         .any(|item| item.package_id == action.package_id)
                 })
-                .filter_map(|action| superseded_file_line(localizer.as_ref(), action)),
+                .flat_map(|action| {
+                    superseded_file_lines(localizer.as_ref(), &install_report.resource_path, action)
+                }),
         );
     }
 
@@ -287,7 +291,13 @@ pub fn summarize_setup_report(
                     .actions
                     .iter()
                     .filter(|action| action.package_id == item.package_id)
-                    .filter_map(|action| superseded_file_line(localizer.as_ref(), action))
+                    .flat_map(|action| {
+                        superseded_file_lines(
+                            localizer.as_ref(),
+                            &install_report.resource_path,
+                            action,
+                        )
+                    })
                     .chain(languages),
             );
         }
@@ -442,6 +452,39 @@ pub fn summarize_setup_report(
         ),
         detail_lines,
     }
+}
+
+/// Show details' lines for a file of a package's earlier version that the
+/// new version no longer installs, as [`superseded_file_line`] gives them.
+/// A file that moved into the backup from outside the resource folder
+/// `resource_path`, from a folder other programs read too, such as an
+/// app2clap from the CLAP folder, gets a line of its own instead, which
+/// names its path once: the new version installs it in REAPER's own folder
+/// instead, and portable REAPERs and other programs that loaded it from
+/// there no longer find it.
+fn superseded_file_lines(
+    localizer: Option<&Localizer>,
+    resource_path: &Path,
+    action: &InstallFileReport,
+) -> Vec<String> {
+    if action.action == InstallFileAction::MovedToBackup
+        && !action.target_path.starts_with(resource_path)
+    {
+        let path = action.target_path.display().to_string();
+        return vec![format_localized_message(
+            localizer,
+            "wizard-summary-moved-from-shared-folder",
+            &[("path", path.clone())],
+            format!(
+                "Moved into the backup, because the new version installs it in REAPER's own \
+                 folder instead. Portable REAPERs and other programs that loaded it from there \
+                 no longer find it: {path}"
+            ),
+        )];
+    }
+    superseded_file_line(localizer, action)
+        .into_iter()
+        .collect()
 }
 
 /// Show details' line for a file of a package's earlier version that the

@@ -15,7 +15,9 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-# Minimal program files of each kind (`arch_probe::test_support`). With
-# feature resolver 2+ the hooks stay out of the shipped binary.
+# Test hooks: the install-extension tests write a ReaPack registry
+# (`reapack::write_test_registry`), and the architecture tests use minimal
+# program files of each kind (`arch_probe::test_support`). With feature
+# resolver 2+ the hooks stay out of the shipped binary.
 rabbit-core = { path = "../rabbit-core", features = ["test-support"] }
 tempfile.workspace = true

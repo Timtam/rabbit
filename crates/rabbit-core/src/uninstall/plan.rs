@@ -31,7 +31,10 @@ use crate::package::uninstall::{
     UninstallPlanSpec, UninstallStrategy,
 };
 use crate::package::{InstallDestination, PACKAGE_REAPACK, PACKAGE_REAPER, PackageSpec};
-use crate::reapack::{ReapackOwnership, reapack_ownership, reapack_packages_with_files_under};
+use crate::reapack::{
+    ReapackOwnership, reapack_counts_as_installed, reapack_ownership,
+    reapack_packages_with_files_under,
+};
 use crate::receipt::{InstallState, PackageReceipt, VendorAddedFile};
 
 use super::cleanup::CleanupJob;
@@ -89,16 +92,6 @@ pub fn build_uninstall_plan(input: &UninstallPlanInput<'_>) -> UninstallPlan {
         remove_settings: input.remove_settings,
         items,
     }
-}
-
-/// Whether ReaPack's records have their hold: while ReaPack is installed,
-/// nothing it installed may go behind its back. Without a detection for
-/// ReaPack, RABBIT can't tell that it is gone, so it counts as installed.
-pub(super) fn reapack_counts_as_installed(detections: &[ComponentDetection]) -> bool {
-    detections
-        .iter()
-        .find(|detection| detection.package_id == PACKAGE_REAPACK)
-        .is_none_or(|detection| detection.installed)
 }
 
 /// Whether ReaPack's records claim `path`, failing closed: a file RABBIT
@@ -168,7 +161,10 @@ fn blocking_programs_of(plan: Option<&UninstallPlanSpec>) -> Vec<String> {
 /// alone, by the rules the plan of an uninstall follows, so a restore of the
 /// package checks the same (backup plan 4.4). Only an uninstall of REAPER
 /// itself that needs the administrator command adds every REAPER besides,
-/// which takes detection; no backup set holds REAPER's app.
+/// which takes detection; no backup set holds REAPER's app. So does one
+/// that removes a file from the CLAP folder, which takes the files found;
+/// a restore adds the same for a file it puts back there, or moves out of
+/// there, by the set (see `rollback::restore_process_rules`).
 pub(crate) fn uninstall_process_rules(
     spec: &PackageSpec,
     platform: Platform,
@@ -475,6 +471,23 @@ fn plan_item(
     }
     item.files = collected.files;
     item.files.extend(settings);
+    // A file in the CLAP folder, such as an app2clap an earlier RABBIT put
+    // there: every REAPER on the computer, and every other program that
+    // reads the folder, may have it loaded, and they all lose it. So every
+    // REAPER must be closed, and the details say so, as for a package that
+    // serves the whole computer, unless its manifest turns that off.
+    if input.roots.clap_dir.as_ref().is_some_and(|clap_dir| {
+        item.files
+            .iter()
+            .any(|file| file.path.starts_with(clap_dir))
+    }) {
+        item.every_reaper_closed = true;
+        if spec.uninstall.machine_wide_warning
+            && !item.warnings.contains(&UninstallWarning::MachineWide)
+        {
+            item.warnings.push(UninstallWarning::MachineWide);
+        }
+    }
     item.dirs_if_empty = collected.dirs_if_empty;
     item.registry_cleanup = planner.registry_cleanup();
     item
@@ -727,6 +740,17 @@ impl PackagePlanner<'_> {
                 })?;
             files.push(candidate);
         }
+        // A plug-in bundle's binary goes first, so a REAPER that scans the
+        // bundle while the uninstall runs, or after it stopped halfway,
+        // never finds the binary beside only part of its files.
+        if let Some(bundle) = &self.spec.plugin_bundle
+            && let Some(folder) = self
+                .spec
+                .install_destination
+                .folder_in(&self.roots.resource)
+        {
+            files.sort_by_key(|file| !bundle.is_binary_in(&folder, &file.path));
+        }
 
         Ok(Collected {
             files,
@@ -884,10 +908,12 @@ impl PackagePlanner<'_> {
         if !self.plan.remove.matching_user_plugins {
             return Ok(());
         }
-        let (token, folder) = match self.spec.install_destination {
-            InstallDestination::UserPlugins => (UninstallPathToken::Resource, Some("UserPlugins")),
-            InstallDestination::LangPack => (UninstallPathToken::Resource, Some("LangPack")),
-            InstallDestination::WindowsClapDir => (UninstallPathToken::ClapDir, None),
+        let destination = self.spec.install_destination;
+        let token = match destination {
+            InstallDestination::UserPlugins
+            | InstallDestination::UserPluginsFx
+            | InstallDestination::LangPack => UninstallPathToken::Resource,
+            InstallDestination::WindowsClapDir => UninstallPathToken::ClapDir,
         };
         let roots = self.roots.resolve(token);
         if roots.is_empty() {
@@ -899,7 +925,9 @@ impl PackagePlanner<'_> {
             });
         }
         for root in roots {
-            let scan_dir = folder.map_or_else(|| root.clone(), |folder| root.join(folder));
+            // Below the resource folder, the destination's own folder; the
+            // CLAP folder is the token's root itself.
+            let scan_dir = destination.folder_in(&root).unwrap_or_else(|| root.clone());
             let entries = match fs::read_dir(&scan_dir) {
                 Ok(entries) => entries,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -976,6 +1004,12 @@ impl PackagePlanner<'_> {
             return;
         };
         let resource = &self.roots.resource;
+        // A plug-in bundle's files are never reached through a link: an
+        // install never puts one there that way.
+        let guard = RemovalGuard {
+            real_folders_below: self.spec.plugin_bundle.is_some().then(|| resource.clone()),
+            ..RemovalGuard::under(resource.clone())
+        };
         for entry in &receipt.installed_files {
             let Some(sha256) = &entry.sha256 else {
                 // Folders and user content such as reaper.ini are recorded
@@ -1008,12 +1042,7 @@ impl PackagePlanner<'_> {
                 continue;
             }
             let added = candidates.len();
-            add_file(
-                candidates,
-                path,
-                RemovalReason::Receipt,
-                &RemovalGuard::under(resource.clone()),
-            );
+            add_file(candidates, path, RemovalReason::Receipt, &guard);
             if let Some(candidate) = candidates.get_mut(added) {
                 candidate.receipt_sha256 = Some(sha256.clone());
             }
@@ -1155,6 +1184,30 @@ impl PackagePlanner<'_> {
                 let is_dir =
                     fs::symlink_metadata(&resolved.path).is_ok_and(|metadata| metadata.is_dir());
                 if is_dir && check_removal(self.roots, &resolved.path, &resolved.guard).is_ok() {
+                    dirs.push(resolved.path);
+                }
+            }
+        }
+        for path in &self.plan.remove.trees_if_empty {
+            for resolved in self.resolve(path)? {
+                // The same best effort for the folder and each folder inside
+                // it: the engine removes them innermost first, and each only
+                // when it is empty by then. A tree with a link anywhere in it
+                // stays whole, as does one RABBIT can't read through.
+                let is_dir =
+                    fs::symlink_metadata(&resolved.path).is_ok_and(|metadata| metadata.is_dir());
+                if !is_dir || check_removal(self.roots, &resolved.path, &resolved.guard).is_err() {
+                    continue;
+                }
+                let mut inside = Vec::new();
+                if !folders_inside(&resolved.path, &mut inside).unwrap_or(false) {
+                    continue;
+                }
+                if inside
+                    .iter()
+                    .all(|folder| check_removal(self.roots, folder, &resolved.guard).is_ok())
+                {
+                    dirs.extend(inside);
                     dirs.push(resolved.path);
                 }
             }
@@ -1334,6 +1387,26 @@ fn matches_any(path: &Path, paths: &[ResolvedPath]) -> bool {
 fn real_path(path: &Path) -> Option<PathBuf> {
     let parent = fs::canonicalize(path.parent()?).ok()?;
     Some(parent.join(path.file_name()?))
+}
+
+/// Every folder inside `folder`, at any depth, into `found`, without
+/// following anything. `Ok(false)` as soon as a symbolic link or junction
+/// turns up.
+fn folders_inside(folder: &Path, found: &mut Vec<PathBuf>) -> io::Result<bool> {
+    for entry in fs::read_dir(folder)? {
+        let path = entry?.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            return Ok(false);
+        }
+        if metadata.is_dir() {
+            found.push(path.clone());
+            if !folders_inside(&path, found)? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// A relative path made only of names: no root, no drive, no `.` or `..`.

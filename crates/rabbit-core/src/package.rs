@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +18,11 @@ pub const PACKAGE_JAWS_SCRIPTS: &str = "jaws-scripts";
 pub const PACKAGE_FFMPEG: &str = "ffmpeg";
 pub const PACKAGE_SURGE_XT: &str = "surge-xt";
 pub const PACKAGE_APP2CLAP: &str = "app2clap";
+pub const PACKAGE_LREAPARAMS: &str = "lreaparams";
+pub const PACKAGE_LJUNO_116: &str = "ljuno-116";
+pub const PACKAGE_LB_303: &str = "lb-303";
+pub const PACKAGE_LR_608: &str = "lr-608";
+pub const PACKAGE_LSAMPLER_24: &str = "lsampler-24";
 
 /// Logical id of the embedded package manifest, reported by the portability
 /// self-check. It's no longer a single file — the packages live in
@@ -45,12 +51,19 @@ pub struct PackageSpec {
     /// Where this package's resolved file installs; see
     /// [`EmbeddedPackageSpec::install_destination`].
     pub install_destination: InstallDestination,
+    /// Where earlier RABBIT versions installed this package; see
+    /// [`EmbeddedPackageSpec::former_install_destinations`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub former_install_destinations: Vec<InstallDestination>,
     /// BCP-47 language subtag this package provides, if it is a language
     /// pack; see [`EmbeddedPackageSpec::language`].
     pub language: Option<String>,
     /// File name to install under, overriding the upstream name; see
     /// [`EmbeddedPackageSpec::install_as`].
     pub install_as: Option<String>,
+    /// The plug-in bundle folder the package installs as a whole; see
+    /// [`EmbeddedPackageSpec::plugin_bundle`].
+    pub plugin_bundle: Option<PluginBundleSpec>,
     /// Selectable flavours; see [`PackageVariant`].
     pub variants: Vec<PackageVariant>,
     /// Mutual-exclusion group; see [`EmbeddedPackageSpec::exclusive_group`].
@@ -91,10 +104,13 @@ pub struct PackageSpec {
     /// When `true`, the package can only be installed against a *standard*
     /// REAPER installation, not a portable one: it installs to a fixed
     /// system/per-user location outside any portable REAPER folder (Surge XT
-    /// and JAWS scripts via vendor installers; app2clap into the per-user
-    /// CLAP folder). The wizard disables this package's row on a portable
-    /// target. Replaces what used to be a hardcoded package-id list in the UI.
+    /// and JAWS scripts via vendor installers). The wizard disables this
+    /// package's row on a portable target. Replaces what used to be a
+    /// hardcoded package-id list in the UI.
     pub requires_standard_install: bool,
+    /// When `true`, a copy ReaPack's records name is ReaPack's to look after;
+    /// see [`EmbeddedPackageSpec::leave_to_reapack`].
+    pub leave_to_reapack: bool,
     pub supported_platforms: Vec<SupportedPlatform>,
     /// The REAPER architectures this package has builds for. Artifact
     /// resolution refuses any other, even where an asset for any
@@ -156,6 +172,18 @@ pub struct EmbeddedPackageSpec {
     /// `UserPlugins`.
     #[serde(default)]
     pub install_destination: InstallDestination,
+    /// Where earlier RABBIT versions installed this package before it moved
+    /// to `install_destination`, such as the CLAP folder app2clap used
+    /// before it moved to `UserPlugins/FX`. Detection still looks there, so
+    /// a copy installed before the move still counts as installed; one
+    /// outside the resource folder counts only for the standard REAPER (see
+    /// [`crate::detection`]). Each install of the package moves the copies
+    /// detection counts there into its backup set, like any file the new
+    /// version no longer installs, whether a receipt lists them or not, so
+    /// REAPER doesn't load two copies. The uninstall plans name the old
+    /// place themselves. Empty for a package that never moved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub former_install_destinations: Vec<InstallDestination>,
     /// BCP-47 language subtag this package provides (`es`), for packages
     /// that localize REAPER. The wizard suggests the pack matching its own
     /// UI language. `None` for everything that isn't a language pack.
@@ -174,6 +202,12 @@ pub struct EmbeddedPackageSpec {
     /// `None` keeps the upstream name.
     #[serde(default)]
     pub install_as: Option<String>,
+    /// A plug-in bundle folder, such as `LJuno-116.vst3`, that the release
+    /// archive holds at its top and that installs as a whole tree into the
+    /// install folder, keeping the paths inside it. `None` for a package
+    /// that installs single files. See [`PluginBundleSpec`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_bundle: Option<PluginBundleSpec>,
     /// Packages sharing a non-empty group are mutually exclusive: installing
     /// one removes any other from the group that RABBIT previously installed
     /// (per its receipts). REAPER loads exactly one language pack, so
@@ -204,6 +238,20 @@ pub struct EmbeddedPackageSpec {
     pub requires_user_acknowledgement: bool,
     #[serde(default)]
     pub requires_standard_install: bool,
+    /// When `true`, a copy of this package that ReaPack's records name is
+    /// ReaPack's to look after: while ReaPack is installed, RABBIT doesn't
+    /// install over it, update it or uninstall it, and the wizard says so.
+    /// Once ReaPack is gone, nothing keeps its records up to date, and RABBIT
+    /// treats the copy like any other, as uninstall already does. For an
+    /// extension that is also published through ReaPack, such as LReaParams.
+    /// ReaPack's records list ReaPack itself, so ReaPack can't set this.
+    /// Needs the `reapack_registry` detector, uninstall's default
+    /// `reapack_owned: block`, an install folder inside the resource folder,
+    /// the only place ReaPack installs to, and `user_plugin_prefixes` and
+    /// `user_plugin_suffixes` on each platform, by which RABBIT finds the
+    /// copy in ReaPack's records.
+    #[serde(default)]
+    pub leave_to_reapack: bool,
     #[serde(default = "all_supported_platforms")]
     pub supported_platforms: Vec<SupportedPlatform>,
     #[serde(default = "all_supported_architectures")]
@@ -264,18 +312,32 @@ pub enum PackageKind {
 
 /// Which UI group a package is listed under in the wizard's package tree.
 /// `Core` packages (the default) are the REAPER accessibility stack shown
-/// under "Packages"; `Additional` packages are optional extras that aren't
-/// tied to REAPER itself (e.g. Surge XT, app2clap) and are shown under a
-/// separate "Additional software" group. Defaults to `Core` so a package
-/// without a `category` in the manifest stays in the main list.
+/// under "Packages". Defaults to `Core` so a package without a `category` in
+/// the manifest stays in the main list. The category picks the group;
+/// `Language` also marks the packs the wizard offers as REAPER's language
+/// after installation (see `selected_language_packs` in the GUI crate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum PackageCategory {
     #[default]
     Core,
-    Additional,
+    /// Software instruments, such as Surge XT.
+    Instruments,
+    /// Programs and plug-ins that help with other work, such as app2clap.
+    Tools,
     /// REAPER language packs, listed in their own wizard group.
     Language,
+}
+
+impl PackageCategory {
+    /// Every category, in the order the wizard shows their groups. A new
+    /// category goes here too, or the wizard's trees leave its packages out.
+    pub const ALL: [PackageCategory; 4] = [
+        PackageCategory::Core,
+        PackageCategory::Instruments,
+        PackageCategory::Tools,
+        PackageCategory::Language,
+    ];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -375,23 +437,68 @@ pub struct AssetSelector {
     /// spec-wide kind.
     #[serde(default)]
     pub artifact_kind: Option<GithubArtifactKind>,
+    /// Compare the name, prefix and suffix ignoring ASCII upper and lower
+    /// case, for a project that names its assets by hand and spells the
+    /// same part both ways, such as LB-303's `.VST3.zip` beside the other
+    /// instruments' `.vst3.zip`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_case: bool,
 }
 
 impl AssetSelector {
     /// Whether `asset_name` satisfies this selector.
     pub fn matches_asset(&self, asset_name: &str) -> bool {
         if let Some(exact) = &self.exact_name {
-            return asset_name == exact;
+            return if self.ignore_case {
+                asset_name.eq_ignore_ascii_case(exact)
+            } else {
+                asset_name == exact
+            };
         }
         let prefix_ok = self
             .name_prefix
-            .as_ref()
-            .is_none_or(|prefix| asset_name.starts_with(prefix));
+            .as_deref()
+            .is_none_or(|prefix| self.starts_with(asset_name, prefix));
         let suffix_ok = self
             .name_suffix
-            .as_ref()
-            .is_none_or(|suffix| asset_name.ends_with(suffix));
+            .as_deref()
+            .is_none_or(|suffix| self.ends_with(asset_name, suffix));
         prefix_ok && suffix_ok
+    }
+
+    /// The part of `asset_name` between the selector's prefix and suffix,
+    /// when the name starts with the one and ends with the other, compared
+    /// as [`Self::ignore_case`] says, and the two don't overlap. A missing
+    /// prefix or suffix counts as empty.
+    pub fn name_core<'a>(&self, asset_name: &'a str) -> Option<&'a str> {
+        let prefix = self.name_prefix.as_deref().unwrap_or("");
+        let suffix = self.name_suffix.as_deref().unwrap_or("");
+        if !self.starts_with(asset_name, prefix) || !self.ends_with(asset_name, suffix) {
+            return None;
+        }
+        asset_name.get(prefix.len()..asset_name.len() - suffix.len())
+    }
+
+    fn starts_with(&self, name: &str, prefix: &str) -> bool {
+        name.get(..prefix.len())
+            .is_some_and(|head| self.same(head, prefix))
+    }
+
+    fn ends_with(&self, name: &str, suffix: &str) -> bool {
+        name.len()
+            .checked_sub(suffix.len())
+            .and_then(|start| name.get(start..))
+            .is_some_and(|tail| self.same(tail, suffix))
+    }
+
+    /// Whether `found` is `wanted`, ignoring ASCII case when the selector
+    /// says so.
+    fn same(&self, found: &str, wanted: &str) -> bool {
+        if self.ignore_case {
+            found.eq_ignore_ascii_case(wanted)
+        } else {
+            found == wanted
+        }
     }
 }
 
@@ -422,13 +529,131 @@ pub enum InstallDestination {
     /// `<resource>/UserPlugins/` — the default for REAPER extensions.
     #[default]
     UserPlugins,
-    /// `%LOCALAPPDATA%\Programs\Common\CLAP` — the per-user CLAP folder
-    /// (app2clap), outside any REAPER resource path.
+    /// `<resource>/UserPlugins/FX/` — REAPER's own plug-in folder for this
+    /// REAPER, scanned for VST, VST3 and CLAP. Inside the resource path, so
+    /// it needs no administrator rights and works for portable installs
+    /// too. Other plug-ins share it, so a file there is a package's only by
+    /// its receipt or its plug-in names.
+    UserPluginsFx,
+    /// `%LOCALAPPDATA%\Programs\Common\CLAP` — the per-user CLAP folder,
+    /// outside any REAPER resource path. No built-in package installs there
+    /// any more: app2clap did until it moved to `UserPluginsFx`, and names
+    /// it among its former destinations. It stays so that the folder keeps
+    /// a name in the manifest, and RABBIT still backs up and restores files
+    /// there (see `crate::install::outside_install_roots`).
     WindowsClapDir,
     /// `<resource>/LangPack/` — where REAPER looks for `.ReaperLangPack`
     /// translation files. Inside the resource path, so it works for portable
     /// installs too.
     LangPack,
+}
+
+impl InstallDestination {
+    /// The folder's path components below the resource folder, or `None`
+    /// for a folder outside every resource folder.
+    pub fn resource_components(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::UserPlugins => Some(&["UserPlugins"]),
+            Self::UserPluginsFx => Some(&["UserPlugins", "FX"]),
+            Self::LangPack => Some(&["LangPack"]),
+            Self::WindowsClapDir => None,
+        }
+    }
+
+    /// The folder inside the resource folder `resource`, joined one
+    /// component at a time, so a receipt records the path below it with
+    /// the platform's own separator. `None` for a folder outside every
+    /// resource folder.
+    pub fn folder_in(self, resource: &Path) -> Option<PathBuf> {
+        self.resource_components().map(|components| {
+            components
+                .iter()
+                .fold(resource.to_path_buf(), |folder, component| {
+                    folder.join(component)
+                })
+        })
+    }
+
+    /// The folder outside every resource folder that this destination
+    /// names on this computer: the CLAP folder, which resolves only on
+    /// Windows. `None` for a folder inside the resource folder.
+    pub fn outside_folder(self) -> Option<PathBuf> {
+        match self {
+            Self::WindowsClapDir => rabbit_platform::windows_clap_dir(),
+            Self::UserPlugins | Self::UserPluginsFx | Self::LangPack => None,
+        }
+    }
+}
+
+/// A plug-in bundle a package installs as a whole: a folder such as
+/// `LJuno-116.vst3` that holds the plug-in's binary and its resources at
+/// fixed places below it, as VST3 plug-ins come. The release archive holds
+/// the folder at its top. RABBIT installs every file in it into the
+/// package's install folder at the same path below it, and ignores
+/// everything else in the archive (see
+/// [`crate::archive::extract_plugin_bundle_from_archive`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginBundleSpec {
+    /// The bundle folder's name, in the archive and in the install folder,
+    /// such as `LJuno-116.vst3`. A plain name, never a path.
+    pub name: String,
+    /// The plug-in's binary, by its path inside the bundle with `/` between
+    /// the folders, such as `Contents/x86_64-win/LJuno-116.vst3`. An install
+    /// puts it in place after every other file of the bundle, detection
+    /// looks for it, and its version resource gives the version when no
+    /// receipt does.
+    pub binary: String,
+}
+
+impl PluginBundleSpec {
+    /// The binary's path inside the bundle, one name per folder.
+    pub fn binary_components(&self) -> impl Iterator<Item = &str> {
+        self.binary.split('/')
+    }
+
+    /// The bundle folder inside `folder`, the package's install folder.
+    pub fn folder_in(&self, folder: &Path) -> PathBuf {
+        folder.join(&self.name)
+    }
+
+    /// The binary inside the bundle folder `bundle`, joined one name at a
+    /// time, so the path has the platform's own separator.
+    pub fn binary_in(&self, bundle: &Path) -> PathBuf {
+        self.binary_components()
+            .fold(bundle.to_path_buf(), |path, name| path.join(name))
+    }
+
+    /// Whether `path` is this bundle's binary in the install folder
+    /// `folder`, by its names ignoring case, as an archive may spell the
+    /// names below the bundle's folder in either case.
+    pub fn is_binary_in(&self, folder: &Path, path: &Path) -> bool {
+        crate::uninstall::paths::same_ignoring_case(&self.binary_in(&self.folder_in(folder)), path)
+    }
+}
+
+/// The plug-in bundle of `package_id` by the embedded manifest, with the
+/// folder it installs into, or `None` for a package without one. The
+/// manifest is read once for this: install, restore and uninstall ask it
+/// about single files.
+pub(crate) fn plugin_bundle_of(
+    package_id: &str,
+) -> Option<(InstallDestination, &'static PluginBundleSpec)> {
+    static BUNDLES: std::sync::OnceLock<BTreeMap<String, (InstallDestination, PluginBundleSpec)>> =
+        std::sync::OnceLock::new();
+    BUNDLES
+        .get_or_init(|| {
+            embedded_package_manifest()
+                .packages
+                .into_iter()
+                .filter_map(|spec| {
+                    let bundle = spec.plugin_bundle?;
+                    Some((spec.id, (spec.install_destination, bundle)))
+                })
+                .collect()
+        })
+        .get(package_id)
+        .map(|(destination, bundle)| (*destination, bundle))
 }
 
 /// Data-driven artifact (download) resolution for packages that are NOT a
@@ -861,6 +1086,12 @@ pub enum PackageDetector {
     /// `UserPlugins`, so without this it has no detector of its own and is
     /// only ever as visible as its receipt.
     ReaperApp,
+    /// The package's [`PluginBundleSpec`] folder in its install folder,
+    /// with the binary inside it: a real folder and a real file, never a
+    /// symbolic link or junction anywhere on the way. A bookend like
+    /// `UserPluginFile`: it gives the binary to the version probes after it,
+    /// such as `file_version_metadata`.
+    PluginBundle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -870,6 +1101,8 @@ pub enum InstallStep {
     CopyUserPluginBinary,
     CopyKeymap,
     InstallReapackPackage,
+    /// Install the archive's [`PluginBundleSpec`] folder as a whole tree.
+    CopyPluginBundle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1053,6 +1286,9 @@ pub fn validate_package_spec(spec: &EmbeddedPackageSpec) -> Result<(), String> {
     // Channels change where a build comes from, never how it comes off, so
     // the uninstall block is checked once, on the package itself.
     uninstall::validate_uninstall_spec(spec)?;
+    validate_leave_to_reapack(spec)?;
+    validate_former_install_destinations(spec)?;
+    validate_plugin_bundle(spec)?;
     // Pull-request builds need a pull request number, which only a channel
     // parameter supplies. On the package itself it could never resolve.
     if spec.github_actions_artifact.is_some() {
@@ -1100,6 +1336,185 @@ pub fn validate_package_spec(spec: &EmbeddedPackageSpec) -> Result<(), String> {
         // at most one artifact source, a valid What's-New pattern, and so on.
         validate_resolvable_spec(&spec.overlaid_with(channel, None))
             .map_err(|message| format!("channel {:?}: {message}", channel.id))?;
+    }
+    Ok(())
+}
+
+/// A package left to ReaPack must be able to tell when ReaPack installed it:
+/// its version comes from ReaPack's records, its uninstall refuses a copy
+/// ReaPack still manages, it installs where ReaPack can, inside the
+/// resource folder, and its plug-in names on each of its platforms find its
+/// file in ReaPack's records. Without those names the flag would never
+/// apply. ReaPack lists itself in its records, so on ReaPack the flag would
+/// stop RABBIT from ever updating it.
+fn validate_leave_to_reapack(spec: &EmbeddedPackageSpec) -> Result<(), String> {
+    if !spec.leave_to_reapack {
+        return Ok(());
+    }
+    if spec.id == PACKAGE_REAPACK {
+        return Err("leave_to_reapack can't be set on ReaPack itself".to_string());
+    }
+    if spec.user_plugin_prefixes.is_empty()
+        || spec
+            .user_plugin_prefixes
+            .iter()
+            .any(|prefix| prefix.is_empty())
+    {
+        return Err("leave_to_reapack needs user_plugin_prefixes, none of them empty".to_string());
+    }
+    if let Some(platform) = spec.supported_platforms.iter().find(|platform| {
+        spec.user_plugin_suffixes
+            .for_platform(platform.platform())
+            .is_empty()
+    }) {
+        return Err(format!(
+            "leave_to_reapack needs user_plugin_suffixes for {platform:?}"
+        ));
+    }
+    if !spec.detectors.contains(&PackageDetector::ReapackRegistry) {
+        return Err("leave_to_reapack needs the reapack_registry detector".to_string());
+    }
+    if spec.uninstall.reapack_owned != uninstall::ReapackOwnedPolicy::Block {
+        return Err("leave_to_reapack needs uninstall.reapack_owned: block".to_string());
+    }
+    if spec.install_destination.resource_components().is_none() {
+        return Err(
+            "leave_to_reapack needs an install folder inside the resource folder".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// A plug-in bundle comes from an archive and installs by the bundle step
+/// alone, into a folder inside the resource folder, where its receipt
+/// records each file by its path below the resource folder. Its detector
+/// finds it, its names are plain names Windows opens as written, and
+/// nothing renames it. The bundle step and detector need a bundle to
+/// install and find.
+fn validate_plugin_bundle(spec: &EmbeddedPackageSpec) -> Result<(), String> {
+    let step = spec.install_steps.contains(&InstallStep::CopyPluginBundle);
+    let detector = spec.detectors.contains(&PackageDetector::PluginBundle);
+    let Some(bundle) = &spec.plugin_bundle else {
+        if step || detector {
+            return Err(
+                "the copy_plugin_bundle step and the plugin_bundle detector need a plugin_bundle"
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    };
+    if spec.install_steps != [InstallStep::CopyPluginBundle] {
+        return Err("plugin_bundle needs install_steps [\"copy_plugin_bundle\"] alone".to_string());
+    }
+    if !detector {
+        return Err("plugin_bundle needs the plugin_bundle detector".to_string());
+    }
+    if spec.install_destination.resource_components().is_none() {
+        return Err("plugin_bundle needs an install folder inside the resource folder".to_string());
+    }
+    if !spec.former_install_destinations.is_empty() {
+        return Err("plugin_bundle can't have former_install_destinations".to_string());
+    }
+    if spec.install_as.is_some() || !spec.variants.is_empty() {
+        return Err("plugin_bundle can't be renamed by install_as or variants".to_string());
+    }
+    if !uninstall::is_plain_file_name(&bundle.name) {
+        return Err(format!(
+            "plugin_bundle name {:?} must be one plain file name",
+            bundle.name
+        ));
+    }
+    if !bundle
+        .binary_components()
+        .all(uninstall::is_plain_file_name)
+    {
+        return Err(format!(
+            "plugin_bundle binary {:?} must be plain names separated by /",
+            bundle.binary
+        ));
+    }
+    let archive = Some(GithubArtifactKind::Archive);
+    let all_archives = spec.github_release.as_ref().is_none_or(|release| {
+        release
+            .assets
+            .iter()
+            .all(|selector| selector.artifact_kind.or(release.artifact_kind) == archive)
+    }) && spec.http_artifact.as_ref().is_none_or(|http| {
+        http.targets
+            .iter()
+            .all(|target| Some(target.artifact_kind) == archive)
+    }) && spec
+        .hfs_listing
+        .as_ref()
+        .is_none_or(|hfs| Some(hfs.artifact_kind) == archive);
+    if !all_archives {
+        return Err("plugin_bundle needs every download to be an archive".to_string());
+    }
+    // A channel brings a download of its own, which would need the same
+    // check; no bundle package has one.
+    if !spec.channels.is_empty() {
+        return Err("plugin_bundle can't have channels".to_string());
+    }
+    validate_plugin_bundle_uninstall(spec, bundle)
+}
+
+/// A plug-in bundle comes off by its receipt alone: without one, RABBIT
+/// can't tell its files from what else sits in the bundle, so the package
+/// needs `requires_receipt`. Each `remove_files` plan takes the receipt's
+/// files and then the bundle's folder with every folder in it, once empty,
+/// by the path the install puts it at, so the two can't drift apart.
+fn validate_plugin_bundle_uninstall(
+    spec: &EmbeddedPackageSpec,
+    bundle: &PluginBundleSpec,
+) -> Result<(), String> {
+    if !spec.uninstall.requires_receipt {
+        return Err("plugin_bundle needs uninstall.requires_receipt".to_string());
+    }
+    // Checked to be inside the resource folder above.
+    let components = spec
+        .install_destination
+        .resource_components()
+        .unwrap_or_default();
+    let tree = std::iter::once("{resource}")
+        .chain(components.iter().copied())
+        .chain(std::iter::once(bundle.name.as_str()))
+        .collect::<Vec<_>>()
+        .join("/");
+    for plan in &spec.uninstall.plans {
+        if plan.strategy != uninstall::UninstallStrategy::RemoveFiles {
+            continue;
+        }
+        if !plan.remove.receipt_files {
+            return Err("plugin_bundle needs receipt_files in its remove_files plans".to_string());
+        }
+        if !plan
+            .remove
+            .trees_if_empty
+            .iter()
+            .any(|path| path.as_str() == tree)
+        {
+            return Err(format!(
+                "plugin_bundle needs {tree} in the trees_if_empty of its remove_files plans"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A former install folder is one the package no longer installs into,
+/// named once.
+fn validate_former_install_destinations(spec: &EmbeddedPackageSpec) -> Result<(), String> {
+    for (index, destination) in spec.former_install_destinations.iter().enumerate() {
+        if *destination == spec.install_destination {
+            return Err(format!(
+                "former_install_destinations names {destination:?}, where the package installs now"
+            ));
+        }
+        if spec.former_install_destinations[..index].contains(destination) {
+            return Err(format!(
+                "former_install_destinations names {destination:?} twice"
+            ));
+        }
     }
     Ok(())
 }
@@ -1384,8 +1799,10 @@ impl EmbeddedPackageSpec {
             display_description_key: self.display_description_key.clone(),
             package_kind: self.package_kind,
             install_destination: self.install_destination,
+            former_install_destinations: self.former_install_destinations.clone(),
             language: self.language.clone(),
             install_as: self.install_as.clone(),
+            plugin_bundle: self.plugin_bundle.clone(),
             variants: self.variants.clone(),
             exclusive_group: self.exclusive_group.clone(),
             depends_on: self.depends_on.clone(),
@@ -1395,6 +1812,7 @@ impl EmbeddedPackageSpec {
             recommended_when: self.recommended_when,
             requires_user_acknowledgement: self.requires_user_acknowledgement,
             requires_standard_install: self.requires_standard_install,
+            leave_to_reapack: self.leave_to_reapack,
             supported_platforms: self.supported_platforms.clone(),
             supported_architectures: self.supported_architectures.clone(),
             version: self.version.clone(),
@@ -1724,6 +2142,793 @@ mod tests {
         assert_eq!(variant("no-such-package", Some("pma")), None);
     }
 
+    /// LReaParams: a Windows-only REAPER extension under Tools, unticked by
+    /// default, whose bare DLL comes from the project's latest GitHub release
+    /// and whose copy is ReaPack's to look after when ReaPack installed it.
+    #[test]
+    fn lreaparams_is_a_windows_tool_from_its_latest_release() {
+        use super::{
+            AssetSelector, GithubArtifactKind, GithubReleaseSelector, InstallDestination,
+            InstallStep, PACKAGE_LREAPARAMS, PACKAGE_REAPER, PackageCategory, PackageDetector,
+            PackageKind, SupportedPlatform, VersionSource, WhatsNewRule, builtin_package_specs,
+            default_desired_package_ids_for_host, embedded_package_manifest,
+        };
+        use crate::model::{Architecture, Platform};
+
+        let manifest = embedded_package_manifest();
+        let spec = manifest
+            .packages
+            .iter()
+            .find(|spec| spec.id == PACKAGE_LREAPARAMS)
+            .expect("lreaparams is in the manifest");
+        assert_eq!(spec.display_name, "LReaParams");
+        assert_eq!(spec.display_name_key, "package-lreaparams");
+        assert_eq!(
+            spec.display_description_key,
+            "package-lreaparams-description"
+        );
+        assert_eq!(spec.category, PackageCategory::Tools);
+        assert_eq!(spec.package_kind, PackageKind::UserPluginBinary);
+        assert_eq!(spec.install_destination, InstallDestination::UserPlugins);
+        assert_eq!(spec.depends_on, vec![PACKAGE_REAPER.to_string()]);
+        assert!(!spec.required && !spec.recommended && spec.recommended_when.is_none());
+        assert!(spec.leave_to_reapack);
+        assert!(!spec.requires_standard_install);
+        assert_eq!(spec.supported_platforms, vec![SupportedPlatform::Windows]);
+        // An x64 DLL: an x64 REAPER loads it, and so does REAPER's ARM64EC
+        // build on Windows on ARM, which loads x64 code. A 32-bit REAPER
+        // can't.
+        assert_eq!(
+            spec.supported_architectures,
+            vec![
+                Architecture::X64,
+                Architecture::Arm64,
+                Architecture::Arm64Ec
+            ]
+        );
+        assert_eq!(
+            spec.detectors,
+            vec![
+                PackageDetector::RabbitReceipt,
+                PackageDetector::UserPluginFile,
+                PackageDetector::ReapackRegistry,
+            ]
+        );
+        assert_eq!(spec.install_steps, vec![InstallStep::CopyUserPluginBinary]);
+        assert_eq!(spec.user_plugin_prefixes, vec!["reaper_lreaparams"]);
+        assert_eq!(spec.user_plugin_suffixes.windows, vec![".dll"]);
+        assert!(spec.user_plugin_suffixes.macos.is_empty());
+        assert!(matches!(
+            &spec.whats_new,
+            Some(WhatsNewRule::GithubReleaseBody { url })
+                if url == "https://api.github.com/repos/Lo-lo78/LReaParams/releases?per_page=30"
+        ));
+
+        let release = spec.github_release.as_ref().unwrap();
+        assert_eq!(release.repo, "Lo-lo78/LReaParams");
+        assert_eq!(release.release, GithubReleaseSelector::Latest);
+        assert_eq!(
+            release.version_from,
+            VersionSource::TagName {
+                strip_v_prefix: true
+            }
+        );
+        assert_eq!(
+            release.artifact_kind,
+            Some(GithubArtifactKind::ExtensionBinary)
+        );
+        let dll = |arch| AssetSelector {
+            platform: SupportedPlatform::Windows,
+            arch: Some(arch),
+            name_prefix: None,
+            name_suffix: None,
+            exact_name: Some("reaper_lreaparams.dll".to_string()),
+            artifact_kind: None,
+            ignore_case: false,
+        };
+        assert_eq!(
+            release.assets,
+            vec![
+                dll(Architecture::X64),
+                dll(Architecture::Arm64),
+                dll(Architecture::Arm64Ec),
+            ]
+        );
+
+        // Windows only, and never part of the default selection.
+        assert!(
+            builtin_package_specs(Platform::Windows)
+                .iter()
+                .any(|spec| spec.id == PACKAGE_LREAPARAMS)
+        );
+        assert!(
+            !builtin_package_specs(Platform::MacOs)
+                .iter()
+                .any(|spec| spec.id == PACKAGE_LREAPARAMS)
+        );
+        assert!(
+            !default_desired_package_ids_for_host(&Default::default())
+                .contains(&PACKAGE_LREAPARAMS.to_string())
+        );
+    }
+
+    /// Lo-lo's four instruments: each one's id, its product name, and the
+    /// folders of its own where its user data lives.
+    const LOLO_INSTRUMENTS: [(&str, &str, &[&str]); 4] = [
+        (
+            super::PACKAGE_LJUNO_116,
+            "LJuno-116",
+            &["{documents}/LJuno-116"],
+        ),
+        (super::PACKAGE_LB_303, "LB-303", &["{documents}/LB-303"]),
+        (super::PACKAGE_LR_608, "LR-608", &["{documents}/LR-608"]),
+        (
+            super::PACKAGE_LSAMPLER_24,
+            "LSampler-24",
+            &["{documents}/LSampler-24", "{appdata}/Lo-lo78/LSampler-24"],
+        ),
+    ];
+
+    /// Each of Lo-lo's instruments: a Windows-only instrument, unticked by
+    /// default, whose release zip's VST3 bundle installs whole into REAPER's
+    /// own plug-in folder, found by its bundle and versioned by its tag.
+    /// Uninstalling takes the receipt's files and the emptied bundle folder,
+    /// and keeps the user's presets and samples, even with "Also remove
+    /// settings".
+    #[test]
+    fn lolo_instruments_install_their_vst3_bundles_into_reapers_fx_folder() {
+        use super::uninstall::{UninstallPath, UninstallStrategy};
+        use super::{
+            GithubArtifactKind, GithubReleaseSelector, InstallDestination, InstallStep,
+            PACKAGE_REAPER, PackageCategory, PackageDetector, PackageKind, SupportedPlatform,
+            VersionSource, WhatsNewRule, builtin_package_specs,
+            default_desired_package_ids_for_host, embedded_package_manifest,
+        };
+        use crate::model::{Architecture, Platform};
+
+        let manifest = embedded_package_manifest();
+        for (id, product, user_data) in LOLO_INSTRUMENTS {
+            let spec = manifest
+                .packages
+                .iter()
+                .find(|spec| spec.id == id)
+                .unwrap_or_else(|| panic!("{id} is in the manifest"));
+            assert_eq!(spec.display_name, product);
+            assert_eq!(spec.display_name_key, format!("package-{id}"));
+            assert_eq!(
+                spec.display_description_key,
+                format!("package-{id}-description")
+            );
+            assert_eq!(spec.category, PackageCategory::Instruments);
+            assert_eq!(spec.package_kind, PackageKind::UserPluginBinary);
+            assert_eq!(spec.install_destination, InstallDestination::UserPluginsFx);
+            assert_eq!(spec.depends_on, vec![PACKAGE_REAPER.to_string()]);
+            assert!(!spec.required && !spec.recommended && spec.recommended_when.is_none());
+            assert!(!spec.requires_standard_install && !spec.leave_to_reapack);
+            assert_eq!(spec.supported_platforms, vec![SupportedPlatform::Windows]);
+            // An x64 plug-in: an x64 REAPER loads it, and so does REAPER's
+            // ARM64EC build on Windows on ARM, which loads x64 code.
+            assert_eq!(
+                spec.supported_architectures,
+                vec![
+                    Architecture::X64,
+                    Architecture::Arm64,
+                    Architecture::Arm64Ec
+                ]
+            );
+            let bundle = spec.plugin_bundle.as_ref().unwrap();
+            assert_eq!(bundle.name, format!("{product}.vst3"));
+            assert_eq!(bundle.binary, format!("Contents/x86_64-win/{product}.vst3"));
+            assert_eq!(spec.install_steps, vec![InstallStep::CopyPluginBundle]);
+            assert_eq!(
+                spec.detectors,
+                vec![
+                    PackageDetector::RabbitReceipt,
+                    PackageDetector::PluginBundle,
+                    PackageDetector::FileVersionMetadata,
+                ]
+            );
+            // Nothing in UserPlugins\FX matches the package by its name:
+            // only its bundle is its own.
+            assert!(spec.user_plugin_prefixes.is_empty());
+            assert!(spec.user_plugin_suffixes.windows.is_empty());
+            assert!(matches!(
+                &spec.whats_new,
+                Some(WhatsNewRule::GithubReleaseBody { url })
+                    if *url == format!("https://api.github.com/repos/Lo-lo78/{product}/releases?per_page=30")
+            ));
+
+            let release = spec.github_release.as_ref().unwrap();
+            assert_eq!(release.repo, format!("Lo-lo78/{product}"));
+            assert_eq!(release.release, GithubReleaseSelector::Latest);
+            assert_eq!(
+                release.version_from,
+                VersionSource::TagName {
+                    strip_v_prefix: true
+                }
+            );
+            assert_eq!(release.artifact_kind, Some(GithubArtifactKind::Archive));
+            let arches: Vec<Option<Architecture>> =
+                release.assets.iter().map(|asset| asset.arch).collect();
+            assert_eq!(
+                arches,
+                [
+                    Some(Architecture::X64),
+                    Some(Architecture::Arm64),
+                    Some(Architecture::Arm64Ec)
+                ]
+            );
+            for asset in &release.assets {
+                assert_eq!(asset.name_prefix.as_deref(), Some(product));
+                assert_eq!(asset.name_suffix.as_deref(), Some(".zip"));
+                assert!(asset.ignore_case && asset.exact_name.is_none());
+            }
+
+            // Without a receipt RABBIT can't tell the bundle's files from
+            // anything else in it, so a copy without one isn't removable.
+            assert!(spec.uninstall.requires_receipt);
+            let [plan] = spec.uninstall.plans.as_slice() else {
+                panic!("{id} has one uninstall plan");
+            };
+            assert_eq!(plan.platform, Some(SupportedPlatform::Windows));
+            assert_eq!(plan.strategy, UninstallStrategy::RemoveFiles);
+            assert!(plan.remove.receipt_files && !plan.remove.matching_user_plugins);
+            assert!(plan.remove.paths.is_empty() && plan.remove.dirs_if_empty.is_empty());
+            assert_eq!(
+                plan.remove.trees_if_empty,
+                [UninstallPath::new(format!(
+                    "{{resource}}/UserPlugins/FX/{product}.vst3"
+                ))]
+            );
+            let kept: Vec<&str> = plan
+                .kept_user_data
+                .iter()
+                .map(|kept| kept.path.as_str())
+                .collect();
+            assert_eq!(kept, user_data);
+            let keep: Vec<&str> = plan.keep.iter().map(UninstallPath::as_str).collect();
+            assert_eq!(keep, user_data);
+        }
+
+        let windows: Vec<String> = builtin_package_specs(Platform::Windows)
+            .into_iter()
+            .filter(|spec| spec.category == PackageCategory::Instruments)
+            .map(|spec| spec.id)
+            .collect();
+        assert_eq!(
+            windows,
+            [
+                super::PACKAGE_SURGE_XT,
+                super::PACKAGE_LJUNO_116,
+                super::PACKAGE_LB_303,
+                super::PACKAGE_LR_608,
+                super::PACKAGE_LSAMPLER_24,
+            ]
+        );
+        let mac = builtin_package_specs(Platform::MacOs);
+        let desired = default_desired_package_ids_for_host(&Default::default());
+        for (id, _, _) in LOLO_INSTRUMENTS {
+            assert!(!mac.iter().any(|spec| spec.id == id), "{id} on macOS");
+            assert!(!desired.iter().any(|desired| desired == id), "{id} ticked");
+        }
+    }
+
+    /// The instruments' names, descriptions and uninstall texts are in
+    /// every locale, and each translation of a description is the
+    /// locale's own rather than the English one.
+    #[test]
+    fn lolo_instruments_have_their_texts_in_every_locale() {
+        use crate::localization::{DEFAULT_LOCALE, Localizer, embedded_locales};
+
+        let english = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+        let manifest = super::embedded_package_manifest();
+        assert_eq!(embedded_locales().len(), 6);
+        for locale in embedded_locales() {
+            let localizer = Localizer::embedded(locale).unwrap();
+            for (id, product, _) in LOLO_INSTRUMENTS {
+                let spec = manifest.packages.iter().find(|spec| spec.id == id).unwrap();
+                let mut keys = vec![
+                    spec.display_name_key.as_str(),
+                    spec.display_description_key.as_str(),
+                ];
+                keys.extend(spec.uninstall.fluent_keys());
+                for key in keys {
+                    let text = localizer.text(key);
+                    assert!(!text.missing, "{locale} lacks {key}");
+                    assert!(!text.value.trim().is_empty(), "{locale} {key} is empty");
+                }
+                assert_eq!(localizer.text(&spec.display_name_key).value, product);
+                let description = localizer.text(&spec.display_description_key).value;
+                assert!(description.contains(product), "{locale}: {description}");
+                assert!(
+                    description.contains("UserPlugins\\FX"),
+                    "{locale}: {description}"
+                );
+                if *locale != DEFAULT_LOCALE {
+                    assert_ne!(
+                        description,
+                        english.text(&spec.display_description_key).value,
+                        "{locale} keeps the English description of {id}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A selector that ignores case matches an asset name however it spells
+    /// its prefix and suffix, and cuts them off to find the version; one
+    /// that doesn't matches only the exact spelling, as before.
+    #[test]
+    fn an_asset_selector_can_ignore_case() {
+        use super::{AssetSelector, SupportedPlatform};
+        use crate::version::Version;
+
+        let selector = |ignore_case| AssetSelector {
+            platform: SupportedPlatform::Windows,
+            arch: None,
+            name_prefix: Some("LB-303".to_string()),
+            name_suffix: Some(".vst3.zip".to_string()),
+            exact_name: None,
+            artifact_kind: None,
+            ignore_case,
+        };
+        let any_case = selector(true);
+        for name in [
+            "LB-303.0.99.7.VST3.zip",
+            "LB-303.0.99.7.vst3.zip",
+            "lb-303.0.99.7.Vst3.ZIP",
+        ] {
+            assert!(any_case.matches_asset(name), "{name}");
+            assert_eq!(any_case.name_core(name), Some(".0.99.7"));
+        }
+        assert!(!any_case.matches_asset("LB-303.0.99.7.zip"));
+        assert!(!any_case.matches_asset("LR-608.0.99.7.vst3.zip"));
+        assert!(!any_case.matches_asset(".vst3.zip"));
+
+        let exact = selector(false);
+        assert!(exact.matches_asset("LB-303.0.99.7.vst3.zip"));
+        assert!(!exact.matches_asset("LB-303.0.99.7.VST3.zip"));
+        assert_eq!(exact.name_core("LB-303.0.99.7.VST3.zip"), None);
+
+        // The name core is the version with a dot in front of it, which an
+        // asset-name version reads once the prefix ends in that dot.
+        let versioned = AssetSelector {
+            name_prefix: Some("lb-303.".to_string()),
+            ..selector(true)
+        };
+        assert_eq!(
+            crate::latest::github_asset_version(
+                "LB-303.0.99.7.VST3.zip",
+                std::slice::from_ref(&versioned),
+                false
+            ),
+            Some(Version::parse("0.99.7").unwrap())
+        );
+        let named = AssetSelector {
+            name_prefix: None,
+            name_suffix: None,
+            exact_name: Some("reaper_lreaparams.dll".to_string()),
+            ..selector(true)
+        };
+        assert!(named.matches_asset("REAPER_LReaParams.DLL"));
+    }
+
+    /// A plug-in bundle installs from an archive by the bundle step alone,
+    /// into a folder inside the resource folder, is found by its detector,
+    /// and has plain names; the step and the detector need a bundle. It
+    /// comes off only by its receipt, and its plans remove the folder the
+    /// install puts it in.
+    #[test]
+    fn a_plugin_bundle_must_be_installable_and_findable() {
+        use super::{
+            GithubArtifactKind, InstallDestination, InstallStep, PackageDetector,
+            embedded_package_manifest, validate_package_spec,
+        };
+
+        let ljuno = embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == super::PACKAGE_LJUNO_116)
+            .unwrap();
+        assert_eq!(validate_package_spec(&ljuno), Ok(()));
+
+        type Change = Box<dyn Fn(&mut super::EmbeddedPackageSpec)>;
+        // Each change, and what the refusal says, so a check of its own
+        // that went missing can't hide behind another one that refuses too.
+        let broken: Vec<(&str, Change, &str)> = vec![
+            (
+                "no detector",
+                Box::new(|spec| {
+                    spec.detectors
+                        .retain(|d| *d != PackageDetector::PluginBundle)
+                }),
+                "needs the plugin_bundle detector",
+            ),
+            (
+                "another step",
+                Box::new(|spec| spec.install_steps = vec![InstallStep::CopyUserPluginBinary]),
+                "needs install_steps",
+            ),
+            (
+                "outside the resource folder",
+                Box::new(|spec| spec.install_destination = InstallDestination::WindowsClapDir),
+                "needs an install folder inside the resource folder",
+            ),
+            (
+                "a path for a name",
+                Box::new(|spec| {
+                    spec.plugin_bundle.as_mut().unwrap().name = "FX/LJuno-116.vst3".to_string()
+                }),
+                "must be one plain file name",
+            ),
+            (
+                "climbing out",
+                Box::new(|spec| {
+                    spec.plugin_bundle.as_mut().unwrap().binary =
+                        "Contents/../../evil.dll".to_string()
+                }),
+                "must be plain names separated by /",
+            ),
+            (
+                "an empty folder name",
+                Box::new(|spec| {
+                    spec.plugin_bundle.as_mut().unwrap().binary =
+                        "Contents//LJuno-116.vst3".to_string()
+                }),
+                "must be plain names separated by /",
+            ),
+            (
+                "a bare binary",
+                Box::new(|spec| {
+                    spec.github_release.as_mut().unwrap().artifact_kind =
+                        Some(GithubArtifactKind::ExtensionBinary)
+                }),
+                "needs every download to be an archive",
+            ),
+            (
+                "renamed",
+                Box::new(|spec| spec.install_as = Some("Other.vst3".to_string())),
+                "can't be renamed by install_as or variants",
+            ),
+            (
+                "no bundle",
+                Box::new(|spec| spec.plugin_bundle = None),
+                "need a plugin_bundle",
+            ),
+            (
+                "removable without a receipt",
+                Box::new(|spec| spec.uninstall.requires_receipt = false),
+                "needs uninstall.requires_receipt",
+            ),
+            (
+                "not the receipt's files",
+                Box::new(|spec| {
+                    let remove = &mut spec.uninstall.plans[0].remove;
+                    remove.receipt_files = false;
+                    // Something else to remove, or a plan with nothing to
+                    // remove is refused before the bundle's own check.
+                    remove.paths = vec![super::uninstall::UninstallPath::new(
+                        "{resource}/UserPlugins/FX/LJuno-116.vst3/desktop.ini",
+                    )];
+                }),
+                "needs receipt_files in its remove_files plans",
+            ),
+            (
+                "another folder's tree",
+                Box::new(|spec| {
+                    spec.uninstall.plans[0].remove.trees_if_empty =
+                        vec![super::uninstall::UninstallPath::new(
+                            "{resource}/UserPlugins/FX/LJuno-161.vst3",
+                        )]
+                }),
+                "in the trees_if_empty of its remove_files plans",
+            ),
+            (
+                "no tree",
+                Box::new(|spec| spec.uninstall.plans[0].remove.trees_if_empty.clear()),
+                "in the trees_if_empty of its remove_files plans",
+            ),
+        ];
+        for (what, change, says) in broken {
+            let mut spec = ljuno.clone();
+            change(&mut spec);
+            let error = validate_package_spec(&spec).expect_err(what);
+            assert!(error.contains(says), "{what}: {error}");
+        }
+    }
+
+    /// A package left to ReaPack has to be able to tell that ReaPack
+    /// installed it, refuse an uninstall behind ReaPack's back, and install
+    /// where ReaPack does.
+    #[test]
+    fn leave_to_reapack_needs_reapacks_records_and_folder() {
+        use super::uninstall::ReapackOwnedPolicy;
+        use super::{
+            InstallDestination, PACKAGE_LREAPARAMS, PACKAGE_REAPACK, PackageDetector,
+            embedded_package_manifest, validate_package_spec,
+        };
+
+        let lreaparams = embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == PACKAGE_LREAPARAMS)
+            .unwrap();
+        assert_eq!(validate_package_spec(&lreaparams), Ok(()));
+
+        let mut without_detector = lreaparams.clone();
+        without_detector
+            .detectors
+            .retain(|detector| *detector != PackageDetector::ReapackRegistry);
+        assert!(
+            validate_package_spec(&without_detector)
+                .unwrap_err()
+                .contains("reapack_registry")
+        );
+
+        let mut ignoring_reapack = lreaparams.clone();
+        ignoring_reapack.uninstall.reapack_owned = ReapackOwnedPolicy::Ignore;
+        assert!(
+            validate_package_spec(&ignoring_reapack)
+                .unwrap_err()
+                .contains("reapack_owned")
+        );
+
+        let mut outside = lreaparams.clone();
+        outside.install_destination = InstallDestination::WindowsClapDir;
+        assert!(
+            validate_package_spec(&outside)
+                .unwrap_err()
+                .contains("inside the resource folder")
+        );
+        // REAPER's own UserPlugins\FX folder is inside it.
+        let mut in_fx = lreaparams.clone();
+        in_fx.install_destination = InstallDestination::UserPluginsFx;
+        assert_eq!(validate_package_spec(&in_fx), Ok(()));
+
+        // Without plug-in names, nothing in ReaPack's records could ever
+        // match, and the flag would silently do nothing; an empty name
+        // would match every plug-in ReaPack installed. The uninstall plan
+        // checks its own names, so here it removes only receipt files.
+        let mut receipt_only = lreaparams.clone();
+        for plan in &mut receipt_only.uninstall.plans {
+            plan.remove.matching_user_plugins = false;
+        }
+        assert_eq!(validate_package_spec(&receipt_only), Ok(()));
+        for prefixes in [vec![], vec![String::new()]] {
+            let mut nameless = receipt_only.clone();
+            nameless.user_plugin_prefixes = prefixes;
+            assert!(
+                validate_package_spec(&nameless)
+                    .unwrap_err()
+                    .contains("leave_to_reapack needs user_plugin_prefixes")
+            );
+        }
+        let mut suffixless = receipt_only;
+        suffixless.user_plugin_suffixes.windows.clear();
+        assert!(
+            validate_package_spec(&suffixless)
+                .unwrap_err()
+                .contains("leave_to_reapack needs user_plugin_suffixes for Windows")
+        );
+
+        // ReaPack's records list ReaPack, so on ReaPack the flag would stop
+        // every update of it.
+        let mut reapack = embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == PACKAGE_REAPACK)
+            .unwrap();
+        assert_eq!(validate_package_spec(&reapack), Ok(()));
+        reapack.leave_to_reapack = true;
+        assert!(
+            validate_package_spec(&reapack)
+                .unwrap_err()
+                .contains("ReaPack itself")
+        );
+    }
+
+    /// REAPER's own plug-in folder, `UserPlugins/FX`, is a destination
+    /// inside the resource folder, spelt `user_plugins_fx` in a manifest.
+    /// The CLAP folder is the one outside every resource folder.
+    #[test]
+    fn user_plugins_fx_resolves_under_the_resource_folder() {
+        use super::InstallDestination;
+        use std::path::Path;
+
+        let resource = Path::new("/some/reaper");
+        assert_eq!(
+            InstallDestination::UserPluginsFx.folder_in(resource),
+            Some(resource.join("UserPlugins").join("FX"))
+        );
+        assert_eq!(InstallDestination::UserPluginsFx.outside_folder(), None);
+        assert_eq!(
+            serde_json::to_value(InstallDestination::UserPluginsFx).unwrap(),
+            serde_json::json!("user_plugins_fx")
+        );
+        assert_eq!(
+            serde_json::from_value::<InstallDestination>(serde_json::json!("user_plugins_fx"))
+                .unwrap(),
+            InstallDestination::UserPluginsFx
+        );
+        assert_eq!(
+            InstallDestination::UserPlugins.folder_in(resource),
+            Some(resource.join("UserPlugins"))
+        );
+        assert_eq!(
+            InstallDestination::LangPack.folder_in(resource),
+            Some(resource.join("LangPack"))
+        );
+        assert_eq!(InstallDestination::WindowsClapDir.folder_in(resource), None);
+        // A manifest that still names the CLAP folder reads.
+        assert_eq!(
+            serde_json::from_value::<InstallDestination>(serde_json::json!("windows_clap_dir"))
+                .unwrap(),
+            InstallDestination::WindowsClapDir
+        );
+    }
+
+    /// app2clap installs into REAPER's own UserPlugins\FX folder, which a
+    /// portable REAPER has too, so it no longer needs a standard REAPER. The
+    /// CLAP folder it used before is a former destination. Its uninstall
+    /// removes the receipt's files and its file in UserPlugins\FX, and on
+    /// the standard REAPER also a copy an earlier RABBIT left in the CLAP
+    /// folder.
+    #[test]
+    fn app2clap_installs_into_the_fx_folder_on_any_reaper() {
+        use super::uninstall::{UninstallStrategy, UninstallTarget};
+        use super::{
+            InstallDestination, PACKAGE_APP2CLAP, embedded_package_manifest, validate_package_spec,
+        };
+
+        let app2clap = embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == PACKAGE_APP2CLAP)
+            .unwrap();
+        assert_eq!(validate_package_spec(&app2clap), Ok(()));
+        assert_eq!(
+            app2clap.install_destination,
+            InstallDestination::UserPluginsFx
+        );
+        assert_eq!(
+            app2clap.former_install_destinations,
+            vec![InstallDestination::WindowsClapDir]
+        );
+        assert!(!app2clap.requires_standard_install);
+
+        let plans: Vec<(UninstallTarget, Vec<&str>)> = app2clap
+            .uninstall
+            .plans
+            .iter()
+            .map(|plan| {
+                assert_eq!(plan.strategy, UninstallStrategy::RemoveFiles);
+                assert!(plan.remove.receipt_files);
+                assert!(!plan.remove.matching_user_plugins);
+                assert!(plan.kept_user_data.is_empty());
+                (
+                    plan.target,
+                    plan.remove.paths.iter().map(|path| path.as_str()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            plans,
+            vec![
+                (
+                    UninstallTarget::Standard,
+                    vec![
+                        "{resource}/UserPlugins/FX/app2clap.clap",
+                        "{clap_dir}/app2clap.clap"
+                    ]
+                ),
+                (
+                    UninstallTarget::Portable,
+                    vec!["{resource}/UserPlugins/FX/app2clap.clap"]
+                ),
+            ]
+        );
+    }
+
+    /// A former destination is one the package no longer installs into,
+    /// named once.
+    #[test]
+    fn former_install_destinations_name_other_folders_once() {
+        use super::{
+            InstallDestination, PACKAGE_APP2CLAP, embedded_package_manifest, validate_package_spec,
+        };
+
+        let app2clap = embedded_package_manifest()
+            .packages
+            .into_iter()
+            .find(|spec| spec.id == PACKAGE_APP2CLAP)
+            .unwrap();
+        let mut current = app2clap.clone();
+        current
+            .former_install_destinations
+            .push(InstallDestination::UserPluginsFx);
+        assert!(
+            validate_package_spec(&current)
+                .unwrap_err()
+                .contains("where the package installs now")
+        );
+        let mut twice = app2clap;
+        twice
+            .former_install_destinations
+            .push(InstallDestination::WindowsClapDir);
+        assert!(validate_package_spec(&twice).unwrap_err().contains("twice"));
+    }
+
+    /// Surge XT is listed under Instruments and app2clap under Tools; the
+    /// language packs keep their own group, and the REAPER stack stays in
+    /// the main one.
+    #[test]
+    fn surge_xt_is_an_instrument_and_app2clap_a_tool() {
+        use super::{PackageCategory, PackageKind, embedded_package_manifest};
+
+        let packages = embedded_package_manifest().packages;
+        let category = |id: &str| {
+            packages
+                .iter()
+                .find(|spec| spec.id == id)
+                .unwrap_or_else(|| panic!("{id} is in the manifest"))
+                .category
+        };
+        assert_eq!(category("surge-xt"), PackageCategory::Instruments);
+        assert_eq!(category("app2clap"), PackageCategory::Tools);
+        assert_eq!(category("lreaparams"), PackageCategory::Tools);
+        for id in ["reaper", "osara", "sws", "reapack", "ffmpeg"] {
+            assert_eq!(category(id), PackageCategory::Core, "{id}");
+        }
+        for spec in packages
+            .iter()
+            .filter(|spec| spec.package_kind == PackageKind::LanguagePack)
+        {
+            assert_eq!(spec.category, PackageCategory::Language, "{}", spec.id);
+        }
+    }
+
+    /// The manifest names the new categories in lowercase, and the old
+    /// "additional" is no category any more.
+    #[test]
+    fn categories_read_from_their_manifest_names() {
+        use super::PackageCategory;
+
+        let read = |name: &str| serde_json::from_str::<PackageCategory>(&format!("\"{name}\""));
+        assert_eq!(read("instruments").unwrap(), PackageCategory::Instruments);
+        assert_eq!(read("tools").unwrap(), PackageCategory::Tools);
+        assert_eq!(read("language").unwrap(), PackageCategory::Language);
+        assert_eq!(read("core").unwrap(), PackageCategory::Core);
+        assert!(read("additional").is_err());
+    }
+
+    /// `ALL` holds every category once, in the order the wizard shows their
+    /// groups: Packages, Instruments, Tools, Language packs. Every category
+    /// a package uses, on any platform, is in it: the trees only show the
+    /// categories in `ALL`, so a package of another one would be missing.
+    #[test]
+    fn all_lists_every_category_once_in_display_order() {
+        use super::{PackageCategory, embedded_package_manifest};
+
+        // The match pins the order. It can't make a new variant join `ALL`;
+        // the manifest check below catches one a package uses.
+        let position = |category: PackageCategory| match category {
+            PackageCategory::Core => 0,
+            PackageCategory::Instruments => 1,
+            PackageCategory::Tools => 2,
+            PackageCategory::Language => 3,
+        };
+        let positions: Vec<usize> = PackageCategory::ALL.into_iter().map(position).collect();
+        assert_eq!(positions, [0, 1, 2, 3]);
+
+        for spec in &embedded_package_manifest().packages {
+            assert!(
+                PackageCategory::ALL.contains(&spec.category),
+                "{} has a category missing from PackageCategory::ALL",
+                spec.id
+            );
+        }
+    }
+
     /// A language pack must declare the locale-shaped file name REAPER (and
     /// OSARA, which reads it to pick its own translation) expects, rather
     /// than inheriting an upstream name like `DE_(+SWS).ReaperLangPack`.
@@ -1799,9 +3004,9 @@ mod tests {
         let manifest = embedded_package_manifest();
 
         assert_eq!(manifest.schema_version, 1);
-        // 9 software packages + the Spanish, German and French REAPER
-        // language packs.
-        assert_eq!(manifest.packages.len(), 12);
+        // 14 software packages, Lo-lo's four instruments among them, + the
+        // Spanish, German and French REAPER language packs.
+        assert_eq!(manifest.packages.len(), 17);
         assert!(
             manifest
                 .packages

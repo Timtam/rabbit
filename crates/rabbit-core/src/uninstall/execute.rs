@@ -96,6 +96,7 @@ use crate::preflight::{
     running_reaper_processes,
 };
 use crate::progress::{ProgressEvent, ProgressReporter, RemovalMethod};
+use crate::reapack::reapack_counts_as_installed;
 use crate::receipt::{
     InstallState, RECEIPT_RELATIVE_PATH, load_install_state, remove_package_receipt,
     save_install_state,
@@ -111,10 +112,8 @@ use super::cleanup::{
 };
 use super::helper::{ElevatedHelper, ElevatedRunRequest, ElevatedSession, ElevationStartError};
 use super::macos_objects::{MacosObjects, ObjectProbe, TreeRoute, tree_route};
-use super::paths::{UninstallRoots, absolute, inside_or_same, same_ignoring_case};
-use super::plan::{
-    UninstallPlanInput, build_uninstall_plan, installed_by_reapack, reapack_counts_as_installed,
-};
+use super::paths::{UninstallRoots, absolute, inside_or_same, same_folder, same_ignoring_case};
+use super::plan::{UninstallPlanInput, build_uninstall_plan, installed_by_reapack};
 use super::post::reset_reaper_langpack_if_selected;
 use super::preflight::{
     ANY_REAPER_PROCESS_CHECK, BACKUP_SPACE_CHECK, PROGRAMS_RUNNING_CHECK, SystemVolumes,
@@ -282,12 +281,22 @@ fn target_of(
 /// `platform`, whatever its spelling, or a portable REAPER's. Only paths are
 /// compared; the standard REAPER's app isn't looked at. A restore reads the
 /// uninstall plan for this kind of REAPER (see
-/// `rollback::restore_process_rules`).
+/// `rollback::restore_process_rules`), and an install or detection counts
+/// a copy in a folder outside it only for the standard REAPER (see
+/// [`crate::detection::former_outside_folder`]).
 pub(crate) fn target_kind_of(platform: Platform, resource_path: &Path) -> InstallationKind {
-    let standard = crate::preflight::standard_resource_path(Some(platform));
-    if standard
-        .is_some_and(|standard| same_ignoring_case(&absolute(&standard), &absolute(resource_path)))
-    {
+    target_kind_with(
+        crate::preflight::standard_resource_path(Some(platform)).as_deref(),
+        resource_path,
+    )
+}
+
+/// [`target_kind_of`], with `standard` as the standard REAPER's resource
+/// folder. The two are compared by their text, ignoring case, and by their
+/// real paths, so a junction to the standard REAPER's folder, or its short
+/// 8.3 name, reads as the standard REAPER too.
+pub(crate) fn target_kind_with(standard: Option<&Path>, resource_path: &Path) -> InstallationKind {
+    if standard.is_some_and(|standard| same_folder(&absolute(standard), &absolute(resource_path))) {
         InstallationKind::Standard
     } else {
         InstallationKind::Portable

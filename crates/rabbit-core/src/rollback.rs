@@ -13,7 +13,7 @@ use crate::error::{IoPathContext, JsonPathContext, RabbitError, Result};
 use crate::hash::sha256_file;
 use crate::keymap_scripts::{keymap_with_scripts_kept, scripts_to_keep};
 use crate::model::{InstallationKind, Platform};
-use crate::package::PackageSpec;
+use crate::package::{PackageSpec, plugin_bundle_of};
 use crate::preflight::{
     BACKUP_FOLDER_CHECK, PreflightCheck, PreflightOptions, PreflightReport, PreflightStatus,
     REAPER_PROCESS_CHECK, RunningProcess, is_one_of, run_restore_preflight_with_processes,
@@ -926,9 +926,9 @@ pub enum RestoreBackupActionKind {
 /// version that the new one no longer installs.
 ///
 /// Files inside the resource folder keep their relative path in the set.
-/// Files outside it (app2clap's CLAP folder) go under
-/// `external/<n>/<file name>`, beside a `<file name>.rabbit-origin` note
-/// holding the original absolute path.
+/// Files outside it, in the CLAP folder where earlier RABBIT versions
+/// installed app2clap, go under `external/<n>/<file name>`, beside a
+/// `<file name>.rabbit-origin` note holding the original absolute path.
 ///
 /// Each entry is saved as pending before its copy starts and marked done
 /// once the copy matches the original, and each save writes a temp file and
@@ -1046,28 +1046,9 @@ impl BackupSetWriter {
             return false;
         }
         let set_path = self.set_path.clone();
-        self.manifest.files.retain(|entry| {
-            // The writer made every copy path inside its own new folder.
-            // The origin note is beside the copy, so one check covers both.
-            let Ok(relative) = entry.backup_path.strip_prefix(&set_path) else {
-                return true;
-            };
-            if check_no_link_in_set(&set_path, relative).is_err() {
-                return true;
-            }
-            if entry.original_path.is_absolute()
-                && let Some(name) = entry.backup_path.file_name()
-            {
-                let mut note = name.to_os_string();
-                note.push(ORIGIN_SIDECAR_SUFFIX);
-                let _ = fs::remove_file(entry.backup_path.with_file_name(note));
-            }
-            match fs::symlink_metadata(&entry.backup_path) {
-                Ok(metadata) if metadata.is_file() => fs::remove_file(&entry.backup_path).is_err(),
-                Ok(_) => true,
-                Err(_) => false,
-            }
-        });
+        self.manifest
+            .files
+            .retain(|entry| !remove_copy(&set_path, entry));
         if !self.manifest.files.is_empty() {
             let _ = self.save();
             return false;
@@ -1075,6 +1056,45 @@ impl BackupSetWriter {
         self.manifest.packages.clear();
         self.manifest.replaced.clear();
         self.discard_if_empty()
+    }
+
+    /// Take `package_id` out of the set again after every file of it that
+    /// the set copied in is back where it came from, as an update that
+    /// failed partway leaves it: each copy is then the same as the file on
+    /// disk. Each of its copies goes as [`Self::discard_copies`] removes
+    /// one, with the folders in the set it leaves empty, and then the
+    /// record of what replaced it, unless a copy stays. Other packages'
+    /// files and records stay; a set left with nothing goes. Best effort.
+    pub(crate) fn discard_package_copies(&mut self, package_id: &str) {
+        if !self.started || self.planning {
+            return;
+        }
+        if check_backups_folder_is_real(&self.resource_path).is_err()
+            || !matches!(is_real_folder(&self.set_path), Ok(true))
+        {
+            return;
+        }
+        let set_path = self.set_path.clone();
+        self.manifest.files.retain(|entry| {
+            if entry.package_id.as_deref() != Some(package_id) {
+                return true;
+            }
+            let removed = remove_copy(&set_path, entry);
+            if removed {
+                remove_empty_parents(&entry.backup_path, &set_path);
+            }
+            !removed
+        });
+        let holds_copy = self
+            .manifest
+            .files
+            .iter()
+            .any(|entry| entry.package_id.as_deref() == Some(package_id));
+        if !holds_copy {
+            self.manifest.replaced.remove(package_id);
+        }
+        let _ = self.save();
+        self.discard_if_empty();
     }
 
     /// Copy `original` into the set and return where the copy is. The
@@ -1882,9 +1902,11 @@ pub(crate) struct BackupEnvironment<'a> {
     /// installs remove each other. From the embedded package manifests.
     pub exclusive_groups: &'a dyn Fn() -> BTreeMap<String, String>,
     /// Where outside the resource folder at a path a restore may put files
-    /// back. Only the overview asks this, the first time a set names such a
-    /// place; a restore is handed its own (see `restore_backup_set_with`)
-    /// once the set is one it may restore.
+    /// back. The overview asks this, the first time a set names such a
+    /// place, and so does the check of what runs before a restore (see
+    /// [`restore_running_refusal`]), for the folders every REAPER reads; a
+    /// restore is handed its own (see `restore_backup_set_with`) once the
+    /// set is one it may restore.
     pub outside_rules: &'a dyn Fn(&Path) -> OutsideRestoreRules,
     /// Every REAPER running on this computer, as the uninstall preflight
     /// scans them. A restore checks the target's REAPER among them, and all
@@ -2487,7 +2509,13 @@ fn run_restore(
         // The REAPER and program checks come before the lock, as the
         // install preflight always did. A dry run makes them too, and
         // reports what runs without refusing for it.
-        let rules = run_process_rules(resource_path, &found, check, environment);
+        let rules = run_process_rules(
+            resource_path,
+            &found,
+            check,
+            &outside.shared_roots,
+            environment,
+        );
         let (preflight, refusal) =
             restore_preflight(resource_path, &rules, &run_options, environment);
         if let Some(refusal) = refusal {
@@ -2555,6 +2583,7 @@ fn run_restore(
                     let mut rules = restore_process_rules(
                         resource_path,
                         &found.restored_package_ids(),
+                        &found.packages_in_shared_folders(resource_path, &outside.shared_roots),
                         environment,
                     );
                     rules.puts_keymap_back = found
@@ -2596,15 +2625,17 @@ fn run_restore(
 }
 
 /// What a run that brings back what `found` holds needs closed, by the
-/// rules of every package it puts back, read as `check` says (see
-/// [`restore_process_rules`]). Backups a check of their own refused add
-/// nothing. [`run_restore`] and [`restore_running_refusal`] both take their
-/// rules from here, so the wizard's check before a run and the run's own
-/// never disagree.
+/// rules of every package it puts back, read as `check` says, with
+/// `shared_roots` the folders outside any resource folder that every REAPER
+/// reads (see [`restore_process_rules`]). Backups a check of their own
+/// refused add nothing. [`run_restore`] and [`restore_running_refusal`]
+/// both take their rules from here, so the wizard's check before a run and
+/// the run's own never disagree.
 fn run_process_rules(
     resource_path: &Path,
     found: &[Result<FoundSet<'_>>],
     check: CopyCheck,
+    shared_roots: &[PathBuf],
     environment: &BackupEnvironment<'_>,
 ) -> RestoreProcessRules {
     let restored: BTreeSet<String> = found
@@ -2613,7 +2644,14 @@ fn run_process_rules(
         .flat_map(FoundSet::restored_package_ids)
         .collect();
     let restored: Vec<String> = restored.into_iter().collect();
-    let mut rules = restore_process_rules(resource_path, &restored, environment);
+    let in_shared_folders: BTreeSet<String> = found
+        .iter()
+        .flatten()
+        .flat_map(|found| found.packages_in_shared_folders(resource_path, shared_roots))
+        .collect();
+    let in_shared_folders: Vec<String> = in_shared_folders.into_iter().collect();
+    let mut rules =
+        restore_process_rules(resource_path, &restored, &in_shared_folders, environment);
     // Only for the words of a refusal for the target's REAPER: a run that
     // puts the key map back can't be told to let REAPER run.
     rules.puts_keymap_back = found.iter().flatten().any(|found| {
@@ -2634,7 +2672,8 @@ fn run_process_rules(
 ///
 /// It makes the very checks [`restore_backups`] makes of what runs, before
 /// its lock and again under it, by the same rules: the target's REAPER,
-/// every REAPER for a package whose uninstall needs that, and the programs
+/// every REAPER for a package whose uninstall needs that or that puts a
+/// file back in, or moves one out of, the CLAP folder, and the programs
 /// the uninstall plans of the packages it puts back name, from the embedded
 /// package manifests for this platform and kind of REAPER. It finds each
 /// set as the quick plan does, reading manifests, RABBIT's records and file
@@ -2675,7 +2714,14 @@ pub(crate) fn restore_running_refusal_with(
     if (environment.runs_as_root)() {
         return None;
     }
-    let rules = run_process_rules(resource_path, &found, quick.copy_check(), environment);
+    let shared_roots = (environment.outside_rules)(resource_path).shared_roots;
+    let rules = run_process_rules(
+        resource_path,
+        &found,
+        quick.copy_check(),
+        &shared_roots,
+        environment,
+    );
     let real = RestoreRunOptions {
         dry_run: false,
         quick: false,
@@ -2926,7 +2972,18 @@ fn restore_swaps(
             None
         } else {
             let package_ids: Vec<String> = planned.package_id.iter().cloned().collect();
-            let rules = restore_process_rules(resource_path, &package_ids, context.environment);
+            let in_shared_folders: Vec<String> =
+                if planned.changes_below_any(&context.outside.shared_roots) {
+                    package_ids.clone()
+                } else {
+                    Vec::new()
+                };
+            let rules = restore_process_rules(
+                resource_path,
+                &package_ids,
+                &in_shared_folders,
+                context.environment,
+            );
             running_blockers(resource_path, &rules, context.environment).refusal(options)
         };
         done.push(match blocked {
@@ -3527,6 +3584,54 @@ impl FoundSet<'_> {
         restored_package_ids(self.manifest.as_ref(), &self.packages, self.package_id())
     }
 
+    /// The packages among those the restore puts back (see
+    /// [`Self::restored_package_ids`]) that put a file back below one of
+    /// `shared_roots`, the folders outside any resource folder that every
+    /// REAPER reads, such as the CLAP folder, by the set's manifest, or, for
+    /// a set of earlier versions, move one out of there, by RABBIT's
+    /// records. Any REAPER on the computer may have that file loaded, so the
+    /// restore needs every REAPER closed, as an uninstall that removes a
+    /// file from there does (see [`restore_process_rules`]). No copy is
+    /// read.
+    fn packages_in_shared_folders(
+        &self,
+        resource_path: &Path,
+        shared_roots: &[PathBuf],
+    ) -> Vec<String> {
+        if shared_roots.is_empty() || *self.part == RestorePart::Keymap {
+            return Vec::new();
+        }
+        let Some(manifest) = &self.manifest else {
+            // Only a whole set restores without a manifest, and it names no
+            // package.
+            return Vec::new();
+        };
+        let state = if self.packages.swap.is_empty() {
+            None
+        } else {
+            load_install_state(resource_path).ok().flatten()
+        };
+        self.restored_package_ids()
+            .into_iter()
+            .filter(|package_id| {
+                let puts_back = manifest.files.iter().any(|entry| {
+                    entry.package_id.as_deref() == Some(package_id.as_str())
+                        && below_any(&recorded_original(entry).0, shared_roots)
+                });
+                let moves_out = state
+                    .as_ref()
+                    .and_then(|state| state.packages.get(package_id))
+                    .is_some_and(|receipt| {
+                        receipt
+                            .installed_files
+                            .iter()
+                            .any(|file| below_any(&file.path, shared_roots))
+                    });
+                puts_back || moves_out
+            })
+            .collect()
+    }
+
     /// Whether the restore puts REAPER's key map back, by the set's
     /// manifest, or without one by its layout, as its plan takes the set's
     /// files (see [`plan_found_set`]): the key map alone, or the key map
@@ -3579,6 +3684,21 @@ struct PlannedBackup {
 }
 
 impl PlannedBackup {
+    /// Whether the restore puts a file back below one of `roots`, or, going
+    /// back to an earlier version, moves one out of there (see
+    /// [`FoundSet::packages_in_shared_folders`]).
+    fn changes_below_any(&self, roots: &[PathBuf]) -> bool {
+        self.actions
+            .iter()
+            .any(|action| below_any(&action.target_path, roots))
+            || self.swap.as_ref().is_some_and(|swap| {
+                swap.report
+                    .moved_out
+                    .iter()
+                    .any(|file| below_any(&file.path, roots))
+            })
+    }
+
     /// The report of this backup when the run never got to change any of
     /// it: a stop before it, or `refusal` right before its turn.
     fn not_run(self, status: RestoreStatus, refusal: Option<RestoreRefusal>) -> RestoreReportItem {
@@ -4726,6 +4846,17 @@ fn run_planned_restore(
                 // A set that got the entry and no file holds nothing to go
                 // back to, and goes again.
                 backups.forget_replaced_without_entry(&swap.package_id);
+                // The folders of a plug-in bundle that only the newer
+                // version had are empty now, and go too.
+                crate::install::remove_emptied_bundle_folders(
+                    resource_path,
+                    &swap.package_id,
+                    swap.report
+                        .moved_out
+                        .iter()
+                        .filter(|file| file.action == MoveOutAction::MovedOut)
+                        .map(|file| file.path.as_path()),
+                );
             }
             // The writer makes the set with the first file, or the first
             // record of a swap, that goes in, and may have named it
@@ -5050,11 +5181,16 @@ fn ids_and_names(packages: &[NamedPackage]) -> (Vec<String>, Vec<String>) {
 
 /// The rules of the packages `package_ids` for the REAPER at
 /// `resource_path`, from the package manifests for this platform and that
-/// kind of REAPER, as an uninstall reads them. A package RABBIT doesn't
-/// know adds nothing.
+/// kind of REAPER, as an uninstall reads them. Those among
+/// `in_shared_folders` put a file back below, or move one out of, a folder
+/// every REAPER reads, such as the CLAP folder (see
+/// [`FoundSet::packages_in_shared_folders`]), so they need every REAPER
+/// closed besides, as an uninstall that removes a file from there does.
+/// Otherwise a package RABBIT doesn't know adds nothing.
 fn restore_process_rules(
     resource_path: &Path,
     package_ids: &[String],
+    in_shared_folders: &[String],
     environment: &BackupEnvironment<'_>,
 ) -> RestoreProcessRules {
     let mut rules = RestoreProcessRules::default();
@@ -5067,7 +5203,14 @@ fn restore_process_rules(
     let specs = (environment.package_specs)(platform);
     let target = std::cell::OnceCell::new();
     for package_id in package_ids {
+        let in_shared_folder = in_shared_folders.contains(package_id);
         let Some(spec) = specs.iter().find(|spec| spec.id == *package_id) else {
+            if in_shared_folder {
+                rules.every_reaper_for.push(NamedPackage {
+                    id: package_id.clone(),
+                    name: package_id.clone(),
+                });
+            }
             continue;
         };
         let target = *target.get_or_init(|| (environment.target_kind)(platform, resource_path));
@@ -5077,7 +5220,7 @@ fn restore_process_rules(
             id: package_id.clone(),
             name: spec.display_name.clone(),
         };
-        if every_reaper_closed {
+        if every_reaper_closed || in_shared_folder {
             rules.every_reaper_for.push(package.clone());
         }
         if !programs.is_empty() {
@@ -5913,6 +6056,20 @@ fn plan_restore_from_manifest(
             is_keymap: is_keymap_entry(resource_path, entry),
         });
     }
+    // A plug-in bundle's binary comes back after every other file of the
+    // set, as an install puts it in last: a REAPER that scans the bundle
+    // while the restore runs, or after it stopped halfway, finds the binary
+    // that was there before, not the earlier one beside part of its files.
+    plan.files.sort_by_key(|file| {
+        file.package_id
+            .as_deref()
+            .and_then(plugin_bundle_of)
+            .is_some_and(|(destination, bundle)| {
+                destination
+                    .folder_in(resource_path)
+                    .is_some_and(|folder| bundle.is_binary_in(&folder, &file.target_path))
+            })
+    });
     Ok(plan)
 }
 
@@ -6074,6 +6231,9 @@ fn restore_target(
     {
         let target = inside_place_by_text(resource_path, &relative).map_err(refuse)?;
         check_stays_in_resource_folder(resource_path, &relative).map_err(refuse)?;
+        if package_id.is_some_and(|package_id| plugin_bundle_of(package_id).is_some()) {
+            check_reached_without_links(resource_path, &relative).map_err(refuse)?;
+        }
         return Ok(target);
     }
 
@@ -6241,7 +6401,8 @@ fn inside_resource_folder(
 /// inside the resource folder's real path and outside RABBIT's folder,
 /// however that is spelt or reached. A link further up is allowed as long
 /// as that holds, so `UserPlugins` may be a link to another folder inside
-/// the resource folder, but never to `RABBIT` or outside it. A resource
+/// the resource folder, but never to `RABBIT` or outside it; a plug-in
+/// bundle's file allows none (see [`check_reached_without_links`]). A resource
 /// folder that isn't there has nothing in it to follow. The error says
 /// which failed.
 fn check_stays_in_resource_folder(
@@ -6283,6 +6444,36 @@ fn check_stays_in_resource_folder(
         || linked_rabbit.is_some_and(|linked| inside_or_same(&real, &linked))
     {
         return Err(TargetRefusal::LeadsIntoRabbitFolder);
+    }
+    Ok(())
+}
+
+/// Refuse a place of a plug-in bundle's file, `relative` below the
+/// resource folder, that a symbolic link or junction on the way from there
+/// leads to, however far up and wherever it leads: an install never puts a
+/// bundle's file through one (see `crate::install`), and through one a
+/// restore, an update or going back could reach into another bundle. The
+/// place itself being one is [`check_stays_in_resource_folder`]'s to
+/// refuse.
+fn check_reached_without_links(
+    resource_path: &Path,
+    relative: &Path,
+) -> std::result::Result<(), TargetRefusal> {
+    let mut current = resource_path.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        if components.peek().is_none() {
+            break;
+        }
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(TargetRefusal::ThroughLink { link: current });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(could_not_check(&current, &error)),
+        }
     }
     Ok(())
 }
@@ -6753,6 +6944,32 @@ pub(crate) mod restore_seam {
             Some(hook) => hook(step, path),
             None => Ok(()),
         })
+    }
+}
+
+/// Remove the copy of `entry` from the set at `set_path`, with the origin
+/// note of an outside file, without following a symbolic link or junction
+/// in the set. Returns whether the copy is gone, or was never there.
+fn remove_copy(set_path: &Path, entry: &BackupManifestFile) -> bool {
+    // The writer made every copy path inside its own new folder. The
+    // origin note is beside the copy, so one check covers both.
+    let Ok(relative) = entry.backup_path.strip_prefix(set_path) else {
+        return false;
+    };
+    if check_no_link_in_set(set_path, relative).is_err() {
+        return false;
+    }
+    if entry.original_path.is_absolute()
+        && let Some(name) = entry.backup_path.file_name()
+    {
+        let mut note = name.to_os_string();
+        note.push(ORIGIN_SIDECAR_SUFFIX);
+        let _ = fs::remove_file(entry.backup_path.with_file_name(note));
+    }
+    match fs::symlink_metadata(&entry.backup_path) {
+        Ok(metadata) if metadata.is_file() => fs::remove_file(&entry.backup_path).is_ok(),
+        Ok(_) => false,
+        Err(_) => true,
     }
 }
 
@@ -7234,6 +7451,13 @@ fn same_components(left: &Path, right: &Path) -> bool {
             }
             (left, right) => left == right,
         })
+}
+
+/// Whether `path` lies below one of `roots`, by [`relative_within`].
+fn below_any(path: &Path, roots: &[PathBuf]) -> bool {
+    roots
+        .iter()
+        .any(|root| relative_within(path, root).is_some())
 }
 
 /// The part of `path` below `root`, or `None` when `path` is not inside it.
@@ -8857,6 +9081,88 @@ mod tests {
                 .iter()
                 .any(|check| check.name == ANY_REAPER_PROCESS_CHECK)
         );
+    }
+
+    /// A restore that puts a file back in the CLAP folder, a temporary one
+    /// here, such as the app2clap an earlier RABBIT installed there, needs
+    /// every REAPER on the computer closed, as an uninstall that removes a
+    /// file from there does: a portable REAPER may have that file loaded,
+    /// and Windows refuses to replace it halfway through the run. So it is
+    /// refused while any REAPER runs, `allow_reaper_running` or not, and the
+    /// wizard's check before a run says the same, though app2clap's own
+    /// uninstall plan doesn't ask for that. Nothing changes. With no REAPER
+    /// running, it restores.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn a_restore_into_the_clap_folder_is_refused_while_any_reaper_runs() {
+        let dir = tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let clap_dir = dir.path().join("CLAP");
+        let app2clap = clap_dir.join("app2clap.clap");
+        write(&app2clap, b"old app2clap");
+        fs::create_dir_all(&resource).unwrap();
+        BackupSetWriter::new(&resource, "unix-1", RESTORABLE_REASON)
+            .copy_file(Some("app2clap"), &app2clap)
+            .unwrap();
+        fs::write(&app2clap, b"new app2clap").unwrap();
+        let elsewhere = another_reaper(dir.path());
+        let running = {
+            let elsewhere = elsewhere.clone();
+            move || vec![elsewhere.clone()]
+        };
+        let rules_for = |_: &Path| shared(&clap_dir);
+        let environment = BackupEnvironment {
+            reaper_processes: &running,
+            outside_rules: &rules_for,
+            ..BackupEnvironment::AS_USER
+        };
+        let every_reaper_for_app2clap = |refused: &RestoreRefusal| {
+            matches!(refused, RestoreRefusal::ReaperRunning {
+                every_reaper_for,
+                processes,
+                ..
+            } if every_reaper_for == &["app2clap"]
+                && processes == std::slice::from_ref(&elsewhere))
+        };
+        let before = snapshot(dir.path());
+
+        for allow_reaper_running in [false, true] {
+            let options = RestoreBackupOptions {
+                allow_reaper_running,
+                ..APPLY
+            };
+            let error =
+                restore_backup_set_with(&resource, "unix-1", &options, &environment, || {
+                    shared(&clap_dir)
+                })
+                .unwrap_err();
+
+            assert!(
+                every_reaper_for_app2clap(refusal(&error)),
+                "{allow_reaper_running}: {error:?}"
+            );
+            assert_eq!(snapshot(dir.path()), before, "{allow_reaper_running}");
+        }
+        let checked = super::restore_running_refusal_with(
+            &resource,
+            &[super::RestoreItem::whole_set("unix-1")],
+            &environment,
+        );
+        assert!(
+            checked.as_ref().is_some_and(every_reaper_for_app2clap),
+            "{checked:?}"
+        );
+        assert_eq!(snapshot(dir.path()), before);
+
+        restore_backup_set_with(
+            &resource,
+            "unix-1",
+            &APPLY,
+            &BackupEnvironment::AS_USER,
+            || shared(&clap_dir),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&app2clap).unwrap(), b"old app2clap");
     }
 
     /// A restore is refused while a program the package's uninstall plan

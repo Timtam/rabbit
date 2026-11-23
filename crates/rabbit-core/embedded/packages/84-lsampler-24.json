@@ -1,0 +1,111 @@
+{
+  "id": "lsampler-24",
+  "display_name": "LSampler-24",
+  "display_name_key": "package-lsampler-24",
+  "display_description_key": "package-lsampler-24-description",
+  "package_kind": "user_plugin_binary",
+  "install_destination": "user_plugins_fx",
+  "plugin_bundle": {
+    "name": "LSampler-24.vst3",
+    "binary": "Contents/x86_64-win/LSampler-24.vst3"
+  },
+  "depends_on": [
+    "reaper"
+  ],
+  "required": false,
+  "recommended": false,
+  "supported_platforms": [
+    "windows"
+  ],
+  "supported_architectures": [
+    "x64",
+    "arm64",
+    "arm64-ec"
+  ],
+  "whats_new": {
+    "github_release_body": {
+      "url": "https://api.github.com/repos/Lo-lo78/LSampler-24/releases?per_page=30"
+    }
+  },
+  "github_release": {
+    "repo": "Lo-lo78/LSampler-24",
+    "release": "latest",
+    "version_from": {
+      "tag_name": {
+        "strip_v_prefix": true
+      }
+    },
+    "assets": [
+      {
+        "platform": "windows",
+        "arch": "x64",
+        "name_prefix": "LSampler-24",
+        "name_suffix": ".zip",
+        "ignore_case": true
+      },
+      {
+        "platform": "windows",
+        "arch": "arm64",
+        "name_prefix": "LSampler-24",
+        "name_suffix": ".zip",
+        "ignore_case": true
+      },
+      {
+        "platform": "windows",
+        "arch": "arm64-ec",
+        "name_prefix": "LSampler-24",
+        "name_suffix": ".zip",
+        "ignore_case": true
+      }
+    ],
+    "artifact_kind": "archive"
+  },
+  "detectors": [
+    "rabbit_receipt",
+    "plugin_bundle",
+    "file_version_metadata"
+  ],
+  "install_steps": [
+    "copy_plugin_bundle"
+  ],
+  "uninstall": {
+    "requires_receipt": true,
+    "plans": [
+      {
+        "platform": "windows",
+        "strategy": "remove_files",
+        "summary": {
+          "removes_key": "uninstall-summary-lsampler-24-removes",
+          "keeps_key": "uninstall-summary-lsampler-24-keeps"
+        },
+        "remove": {
+          "receipt_files": true,
+          "trees_if_empty": [
+            "{resource}/UserPlugins/FX/LSampler-24.vst3"
+          ]
+        },
+        "keep": [
+          "{documents}/LSampler-24",
+          "{appdata}/Lo-lo78/LSampler-24"
+        ],
+        "kept_user_data": [
+          {
+            "path": "{documents}/LSampler-24",
+            "note_key": "uninstall-kept-lsampler-24-library"
+          },
+          {
+            "path": "{appdata}/Lo-lo78/LSampler-24",
+            "note_key": "uninstall-kept-lsampler-24-extracted-audio"
+          }
+        ]
+      }
+    ]
+  },
+  "backup_policy": "backup_overwritten_files",
+  "user_plugin_prefixes": [],
+  "user_plugin_suffixes": {
+    "windows": [],
+    "macos": []
+  },
+  "category": "instruments"
+}

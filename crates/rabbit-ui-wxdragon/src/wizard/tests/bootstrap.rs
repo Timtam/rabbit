@@ -20,6 +20,7 @@ fn builds_initial_wizard_model_from_plan() {
                 installed_version: None,
                 available_version: Some(Version::parse("2026.1").unwrap()),
                 reason: "Missing".to_string(),
+                left_to_reapack: None,
             },
             PlanAction {
                 package_id: PACKAGE_REAPACK.to_string(),
@@ -27,6 +28,7 @@ fn builds_initial_wizard_model_from_plan() {
                 installed_version: Some(Version::parse("1.2.6").unwrap()),
                 available_version: Some(Version::parse("1.2.6").unwrap()),
                 reason: "Current".to_string(),
+                left_to_reapack: None,
             },
         ],
         notes: vec!["Review note".to_string()],

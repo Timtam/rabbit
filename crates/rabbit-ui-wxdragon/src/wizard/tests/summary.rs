@@ -12,7 +12,8 @@ use rabbit_core::operation::{
     localized_install_problem,
 };
 use rabbit_core::package::{
-    PACKAGE_FFMPEG, PACKAGE_JAWS_SCRIPTS, PACKAGE_OSARA, PACKAGE_REAPACK, PACKAGE_SURGE_XT,
+    PACKAGE_APP2CLAP, PACKAGE_FFMPEG, PACKAGE_JAWS_SCRIPTS, PACKAGE_OSARA, PACKAGE_REAPACK,
+    PACKAGE_SURGE_XT,
 };
 use rabbit_core::plan::{InstallPlan, PlanActionKind};
 use rabbit_core::preflight::PreflightReport;
@@ -995,6 +996,94 @@ fn files_an_update_moved_are_told_under_their_own_package() {
         1,
         "{lines:#?}"
     );
+}
+
+/// An update that moved a file into the backup from outside REAPER's own
+/// folder, such as an old app2clap from the CLAP folder, says in one line,
+/// which names its path once, that the new version installs it in REAPER's
+/// own folder instead, and that portable REAPERs and other programs that
+/// loaded it from there no longer find it. A file moved from inside
+/// REAPER's folder gets the usual line instead. In every language.
+#[test]
+fn a_file_moved_out_of_the_clap_folder_says_other_programs_lose_it() {
+    let english = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let mut model = model_from_plan(
+        &english,
+        Platform::Windows,
+        Architecture::X64,
+        vec![fake_installation()],
+        Some(0),
+        InstallPlan {
+            target: None,
+            actions: Vec::new(),
+            notes: Vec::new(),
+        },
+    );
+    let clap = "C:/Users/Someone/AppData/Local/Programs/Common/CLAP/app2clap.clap";
+    let mut report = update_report(vec![
+        InstallFileReport {
+            package_id: PACKAGE_APP2CLAP.to_string(),
+            source_path: PathBuf::from(clap),
+            target_path: PathBuf::from(clap),
+            backup_path: Some(PathBuf::from(
+                "C:/PortableREAPER/RABBIT/backups/unix-1/external/1/app2clap.clap",
+            )),
+            ..superseded("app2clap.clap", None)
+        },
+        superseded("reaper_reapack64.dll", None),
+    ]);
+    report
+        .package_operation
+        .items
+        .insert(0, updated_item(PACKAGE_APP2CLAP, "2026.5.17.34"));
+
+    let lines = summarize_setup_report(&model, model.architecture, &report).detail_lines;
+    let shared = format!(
+        "Moved into the backup, because the new version installs it in REAPER's own folder \
+         instead. Portable REAPERs and other programs that loaded it from there no longer find \
+         it: {clap}"
+    );
+    assert_eq!(
+        lines.iter().filter(|line| **line == shared).count(),
+        1,
+        "{lines:#?}"
+    );
+    assert_eq!(
+        lines.iter().filter(|line| line.contains(clap)).count(),
+        1,
+        "the path is said once: {lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            line.starts_with("Moved into the backup, because the new version no longer installs it")
+                && line.contains("reaper_reapack64.dll")
+        }),
+        "{lines:#?}"
+    );
+
+    for &locale in embedded_locales() {
+        model.bootstrap_options.locale = locale.to_string();
+        let localizer = Localizer::embedded(locale).unwrap();
+        let lines = summarize_setup_report(&model, model.architecture, &report).detail_lines;
+        let moved = localizer
+            .format("wizard-summary-moved-to-backup", &[("path", clap)])
+            .value;
+        let shared = localizer
+            .format("wizard-summary-moved-from-shared-folder", &[("path", clap)])
+            .value;
+        assert_reads(locale, &shared);
+        assert!(!lines.contains(&moved), "{locale}: {lines:#?}");
+        assert_eq!(
+            lines.iter().filter(|line| **line == shared).count(),
+            1,
+            "{locale}"
+        );
+        assert_eq!(
+            lines.iter().filter(|line| line.contains(clap)).count(),
+            1,
+            "{locale}: {lines:#?}"
+        );
+    }
 }
 
 /// After an update moved the language pack file REAPER's language named

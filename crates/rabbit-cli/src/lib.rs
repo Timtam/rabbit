@@ -337,10 +337,11 @@ enum Command {
         /// Restore even though this REAPER is open. Files REAPER holds open
         /// may fail to be replaced, so prefer closing it first. It never
         /// lets a restore past what a package's own uninstall needs closed:
-        /// every REAPER on the computer for a package such as app2clap, and
-        /// the programs its uninstall names. A restore that puts a key map
-        /// back is refused with it, since REAPER may save its own key map
-        /// when it quits.
+        /// every REAPER on the computer for a package such as the JAWS
+        /// scripts, or for one that puts a file back in the CLAP folder, as
+        /// an earlier app2clap, and the programs its uninstall names. A
+        /// restore that puts a key map back is refused with it, since REAPER
+        /// may save its own key map when it quits.
         #[arg(long)]
         allow_reaper_running: bool,
         /// Write the JSON run report to exactly this path.
@@ -787,9 +788,10 @@ pub use rabbit_core::uninstall::HELPER_SUBCOMMAND as UNINSTALL_HELPER_SUBCOMMAND
 /// Shown below `rabbit uninstall --help`. Every other command that changes
 /// files has `--allow-reaper-running`; this says why uninstall doesn't.
 const UNINSTALL_AFTER_HELP: &str = "\
-REAPER must be closed. For REAPER on Windows, Surge XT, app2clap and the JAWS \
-scripts, every REAPER on the computer must be closed, and so it must for a \
-REAPER.app on macOS that the administrator command moves.
+REAPER must be closed. For REAPER on Windows, Surge XT and the JAWS scripts, \
+every REAPER on the computer must be closed, and so it must for app2clap \
+while a copy of it is in the CLAP folder, and for a REAPER.app on macOS \
+that the administrator command moves.
 
 There is no --allow-reaper-running, unlike the commands that install: a \
 running REAPER holds its extensions' files open, so they can't be moved, and \
@@ -2276,6 +2278,59 @@ fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Err
     let channels = effective_package_channels(Some(&resource_path), &package, &package_channel)?;
     let mut package = package;
     keep_packages_with_builds(&mut package, true, platform, architecture, &channels)?;
+    // A copy ReaPack looks after stays as it is even when named here, as
+    // in `apply-packages`. Asked before anything is resolved, so nothing is
+    // looked up or downloaded for it. A named package with no build for
+    // this REAPER is refused above even so, as `apply-packages` refuses it
+    // before its install pipeline would skip one left to ReaPack.
+    let package = without_packages_left_to_reapack(&resource_path, platform, package);
+    if package.is_empty() {
+        eprintln!("note: nothing left to install.");
+        // `--json` and a report path still get the run's report, with
+        // nothing in it: a script reading it must find JSON.
+        let report_path = selected_report_path(
+            Some(&resource_path),
+            report_path,
+            save_report,
+            "install-extension",
+        )?;
+        let report = if apply {
+            serde_json::to_value(InstallReport {
+                resource_path,
+                dry_run: false,
+                // Nothing was going to change, so nothing was checked.
+                preflight: PreflightReport {
+                    passed: true,
+                    checks: Vec::new(),
+                },
+                receipt_written: false,
+                receipt_backup_path: None,
+                backup_manifest_path: None,
+                actions: Vec::new(),
+                reaper_language: Vec::new(),
+            })?
+        } else {
+            let preflight = run_install_preflight(
+                &resource_path,
+                &PreflightOptions {
+                    dry_run: true,
+                    allow_reaper_running,
+                    target_app_path,
+                },
+            );
+            serde_json::to_value(PlannedInstall {
+                resource_path,
+                dry_run: true,
+                preflight,
+                artifacts: Vec::new(),
+            })?
+        };
+        save_optional_report(report_path.as_deref(), &report)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        return Ok(());
+    }
     let artifacts = resolve_latest_artifacts_on(&package, platform, architecture, &channels)?;
     warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
     // Without --apply, nothing is downloaded: every other command
@@ -2345,6 +2400,37 @@ fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Err
         print_install_report(&report);
     }
     Ok(())
+}
+
+/// `package_ids` without the packages whose copies in `resource_path`
+/// RABBIT leaves to ReaPack, which the install pipeline skips too. Each one
+/// gets a note on stderr, like the other notes, so `--json` stays JSON, in
+/// the words `rabbit plan` gives as the reason it keeps the package.
+fn without_packages_left_to_reapack(
+    resource_path: &Path,
+    platform: Platform,
+    package_ids: Vec<String>,
+) -> Vec<String> {
+    let left =
+        rabbit_core::detection::packages_left_to_reapack(resource_path, platform, &package_ids);
+    if left.is_empty() {
+        return package_ids;
+    }
+    let specs = builtin_package_specs(platform);
+    for (id, why) in &left {
+        let name = specs
+            .iter()
+            .find(|spec| spec.id == *id)
+            .map_or(id.as_str(), |spec| spec.display_name.as_str());
+        eprintln!(
+            "note: leaving {name} as it is: {}",
+            rabbit_core::plan::left_to_reapack_reason(why)
+        );
+    }
+    package_ids
+        .into_iter()
+        .filter(|id| left.iter().all(|(left_id, _)| left_id != id))
+        .collect()
 }
 
 /// What `install-extension --apply` changes, once its artifacts are
@@ -3516,6 +3602,14 @@ fn print_components(components: &[ComponentDetection], plan: Option<&UninstallPl
         }
         for note in &component.notes {
             println!("  Note: {note}");
+        }
+        // The same words `rabbit plan` gives as the reason it keeps the
+        // package.
+        if let Some(left) = &component.left_to_reapack {
+            println!(
+                "  Note: {}",
+                rabbit_core::plan::left_to_reapack_reason(left)
+            );
         }
         println!();
     }
@@ -8229,8 +8323,8 @@ mod tests {
             "Close REAPER before restoring a backup: reaper.exe (7). This restore puts REAPER's key map back, which RABBIT does only while REAPER is closed, so --allow-reaper-running doesn't change this."
         );
         let every = RestoreRefusal::ReaperRunning {
-            every_reaper_for: vec!["app2clap".to_string()],
-            package_names: vec!["app2clap".to_string()],
+            every_reaper_for: vec!["jaws-scripts".to_string()],
+            package_names: vec!["JAWS scripts".to_string()],
             processes: vec![reaper],
             puts_keymap_back: true,
         };
@@ -8460,6 +8554,134 @@ mod tests {
                 "{linked:?}"
             );
         }
+    }
+
+    /// `install-extension` leaves a copy of LReaParams that ReaPack looks
+    /// after as it is, even when the package is named, as `apply-packages`
+    /// does. With or without `--apply`, nothing is looked up or downloaded
+    /// for it, and its DLL isn't replaced, backed up or recorded in RABBIT's
+    /// receipt. LReaParams is Windows only.
+    #[cfg(windows)]
+    #[test]
+    fn install_extension_leaves_a_copy_reapack_looks_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugins = resource.join("UserPlugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(plugins.join("reaper_reapack-x64.dll"), b"ReaPack").unwrap();
+        let dll = plugins.join("reaper_lreaparams.dll");
+        std::fs::write(&dll, b"LReaParams from ReaPack").unwrap();
+        rabbit_core::reapack::write_test_registry(
+            &resource,
+            &[(
+                "LReaParams.ext",
+                "0.0.70",
+                &["UserPlugins/reaper_lreaparams.dll"],
+            )],
+        );
+        let cache = dir.path().join("cache");
+
+        for apply in [false, true] {
+            for json in [false, true] {
+                // A report path still gets the run's report, with nothing in
+                // it, as `--json` prints it.
+                let report = dir.path().join(format!("report-{apply}-{json}.json"));
+                super::run_install_extension(super::Command::InstallExtension {
+                    resource_path: resource.clone(),
+                    target_app_path: None,
+                    package: vec!["lreaparams".to_string()],
+                    architecture: None,
+                    cache_dir: Some(cache.clone()),
+                    apply,
+                    allow_reaper_running: true,
+                    accept_reapack_donation_notice: false,
+                    report_path: Some(report.clone()),
+                    save_report: false,
+                    json,
+                    package_channel: Vec::new(),
+                })
+                .unwrap();
+
+                let saved: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+                let run = &saved["report"];
+                assert_eq!(run["dry_run"], serde_json::json!(!apply), "{saved}");
+                let nothing = if apply { "actions" } else { "artifacts" };
+                assert_eq!(run[nothing], serde_json::json!([]), "{saved}");
+            }
+        }
+
+        assert_eq!(std::fs::read(&dll).unwrap(), b"LReaParams from ReaPack");
+        assert!(!cache.exists(), "nothing was downloaded");
+        // No backup set, receipt or lock.
+        assert!(!resource.join("RABBIT").exists());
+    }
+
+    /// `install-extension` asks whether a named package has a build for the
+    /// REAPER before it asks ReaPack's records, as `apply-packages` refuses
+    /// one before its install pipeline would skip it: LReaParams, which has
+    /// no build for a 32-bit REAPER, is refused with exit code 2 even where
+    /// ReaPack looks after it, whatever else is named, and nothing changes.
+    /// For a 64-bit REAPER, the same copy is left to ReaPack as before.
+    /// LReaParams is Windows only.
+    #[cfg(windows)]
+    #[test]
+    fn install_extension_refuses_a_package_without_a_build_before_asking_reapack() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugins = resource.join("UserPlugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(plugins.join("reaper_reapack-x64.dll"), b"ReaPack").unwrap();
+        let dll = plugins.join("reaper_lreaparams.dll");
+        std::fs::write(&dll, b"LReaParams from ReaPack").unwrap();
+        rabbit_core::reapack::write_test_registry(
+            &resource,
+            &[(
+                "LReaParams.ext",
+                "0.0.70",
+                &["UserPlugins/reaper_lreaparams.dll"],
+            )],
+        );
+        let cache = dir.path().join("cache");
+        let run = |packages: &[&str], architecture| {
+            super::run_install_extension(super::Command::InstallExtension {
+                resource_path: resource.clone(),
+                target_app_path: None,
+                package: packages.iter().map(ToString::to_string).collect(),
+                architecture: Some(architecture),
+                cache_dir: Some(cache.clone()),
+                apply: true,
+                allow_reaper_running: true,
+                accept_reapack_donation_notice: false,
+                report_path: None,
+                save_report: false,
+                json: true,
+                package_channel: Vec::new(),
+            })
+        };
+
+        let refused = "LReaParams has no version for 32-bit REAPER (x86), so RABBIT can't \
+                       install it. Nothing was changed.";
+        for (packages, message) in [
+            (&["lreaparams"][..], refused.to_string()),
+            (
+                &["osara", "lreaparams"][..],
+                format!(
+                    "{refused} To install the others, run the command again without \
+                     --package lreaparams."
+                ),
+            ),
+        ] {
+            let error = run(packages, super::CliArchitecture::X86).unwrap_err();
+            assert_eq!(super::refusal_exit_code(error.as_ref()), Some(2), "{error}");
+            assert_eq!(error.to_string(), message);
+        }
+
+        run(&["lreaparams"], super::CliArchitecture::X64).unwrap();
+
+        assert_eq!(std::fs::read(&dll).unwrap(), b"LReaParams from ReaPack");
+        assert!(!cache.exists(), "nothing was downloaded");
+        assert!(!resource.join("RABBIT").exists());
     }
 
     /// In a debug build, clap's parser alone takes more than the 1 MB of
@@ -8818,6 +9040,59 @@ mod tests {
         assert!(notes.is_empty());
     }
 
+    /// LReaParams and Lo-lo's four instruments have no build for a 32-bit
+    /// REAPER: `plan` leaves them out with a note, and a run that names one
+    /// is refused. A 64-bit REAPER, and REAPER on Windows on ARM, keep them.
+    #[test]
+    fn lolos_packages_have_no_build_for_a_32_bit_reaper() {
+        let lolo = ["ljuno-116", "lb-303", "lr-608", "lsampler-24", "lreaparams"];
+        let mut ids = lolo.map(String::from).to_vec();
+        let notes = super::leave_out_packages_without_builds(
+            &mut ids,
+            super::Platform::Windows,
+            super::Architecture::X86,
+            &super::PackageChannels::new(),
+        );
+        assert!(ids.is_empty(), "{ids:?}");
+        assert_eq!(
+            notes,
+            ["LJuno-116", "LB-303", "LR-608", "LSampler-24", "LReaParams"]
+                .map(|name| format!("Skipping {name}: it has no version for 32-bit REAPER (x86)."))
+        );
+
+        let mut named = ["osara", "lreaparams"].map(String::from).to_vec();
+        let refusal = super::keep_packages_with_builds(
+            &mut named,
+            true,
+            super::Platform::Windows,
+            super::Architecture::X86,
+            &super::PackageChannels::new(),
+        )
+        .unwrap_err();
+        assert!(
+            refusal
+                .to_string()
+                .starts_with("LReaParams has no version for 32-bit REAPER (x86)"),
+            "{refusal}"
+        );
+
+        for architecture in [
+            super::Architecture::X64,
+            super::Architecture::Arm64,
+            super::Architecture::Arm64Ec,
+        ] {
+            let mut ids = lolo.map(String::from).to_vec();
+            let notes = super::leave_out_packages_without_builds(
+                &mut ids,
+                super::Platform::Windows,
+                architecture,
+                &super::PackageChannels::new(),
+            );
+            assert_eq!(ids, lolo, "{architecture:?}");
+            assert!(notes.is_empty(), "{architecture:?}: {notes:?}");
+        }
+    }
+
     /// The default list leaves out what has no build for the REAPER, and a
     /// named list is refused whole rather than shortened.
     #[test]
@@ -8922,6 +9197,76 @@ mod tests {
             } => assert!(accept_reapack_donation_notice),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    /// `--config-step reapack-add-reawarp-remote` names the ReaWarp
+    /// repository step. Like the other recommended repository steps it also
+    /// runs by default when ReaPack is part of the run, and
+    /// `--skip-config-step` leaves it out.
+    #[test]
+    fn setup_accepts_the_reawarp_config_step() {
+        use rabbit_core::configuration::{
+            CONFIG_REAPER_ACCESSIBLE_EN_REMOTE, CONFIG_REAWARP_REMOTE, builtin_configuration_steps,
+        };
+
+        let cli = Cli::try_parse_from([
+            "rabbit",
+            "setup",
+            "--resource-path",
+            "C:\\PortableREAPER",
+            "--config-step",
+            "reapack-add-reawarp-remote",
+        ])
+        .unwrap();
+        let config_step = match cli.command {
+            Command::Setup { config_step, .. } => config_step,
+            other => panic!("unexpected command: {other:?}"),
+        };
+        assert_eq!(config_step, vec![CONFIG_REAWARP_REMOTE.to_string()]);
+        assert!(
+            builtin_configuration_steps()
+                .iter()
+                .any(|step| step.id == CONFIG_REAWARP_REMOTE),
+            "the setup pipeline knows the id"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let windows = rabbit_core::model::Platform::Windows;
+        let reapack = ["reapack".to_string()];
+
+        let explicit = super::resolve_configuration_step_ids(root, windows, &[], &config_step, &[]);
+        assert_eq!(explicit, config_step);
+
+        let defaults = super::resolve_configuration_step_ids(root, windows, &reapack, &[], &[]);
+        assert!(
+            defaults.iter().any(|id| id == CONFIG_REAWARP_REMOTE),
+            "{defaults:?}"
+        );
+
+        let skipped =
+            super::resolve_configuration_step_ids(root, windows, &reapack, &[], &config_step);
+        assert!(
+            !skipped.iter().any(|id| id == CONFIG_REAWARP_REMOTE),
+            "{skipped:?}"
+        );
+        assert!(
+            skipped
+                .iter()
+                .any(|id| id == CONFIG_REAPER_ACCESSIBLE_EN_REMOTE),
+            "skipping ReaWarp leaves the other steps alone: {skipped:?}"
+        );
+
+        let without_reapack =
+            super::resolve_configuration_step_ids(root, windows, &["osara".to_string()], &[], &[]);
+        assert!(
+            !without_reapack.iter().any(|id| id == CONFIG_REAWARP_REMOTE),
+            "no ReaPack, no repository: {without_reapack:?}"
+        );
+        assert!(
+            std::fs::read_dir(root).unwrap().next().is_none(),
+            "choosing the steps must not write anything"
+        );
     }
 
     #[test]

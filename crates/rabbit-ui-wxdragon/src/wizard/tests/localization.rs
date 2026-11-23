@@ -61,6 +61,77 @@ fn package_operation_messages_localize_into_german() {
     );
 }
 
+/// What an install run says of a package it left to ReaPack reads in every
+/// language: the status after the package's name, and the message under
+/// it, with ReaPack's name for the package or the error filled in. A key
+/// missing from a locale would read as the key's own id.
+#[test]
+fn a_package_left_to_reapack_reads_in_every_language() {
+    use rabbit_core::localization::embedded_locales;
+    use rabbit_core::operation::{PackageOperationMessage as Msg, PackageOperationStatus};
+
+    use super::support::assert_reads;
+
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let status = status_label_for_summary(
+            Some(&localizer),
+            PackageOperationStatus::SkippedLeftToReapack,
+        );
+        assert_reads(locale, &status);
+        let managed = localized_package_operation_message(
+            &localizer,
+            &Msg::SkippedManagedByReapack {
+                reapack_package: "LReaParams.ext".to_string(),
+            },
+            "LReaParams",
+            "the English fallback",
+        );
+        assert_reads(locale, &managed);
+        assert!(managed.contains("LReaParams.ext"), "{locale}: {managed}");
+        let unreadable = localized_package_operation_message(
+            &localizer,
+            &Msg::SkippedReapackRecordsUnreadable {
+                error: "file is not a database".to_string(),
+            },
+            "LReaParams",
+            "the English fallback",
+        );
+        assert_reads(locale, &unreadable);
+        assert!(
+            unreadable.contains("file is not a database"),
+            "{locale}: {unreadable}"
+        );
+    }
+}
+
+/// What an install run says of a plug-in it put into REAPER's own plug-in
+/// folder, such as one of Lo-lo's instruments, reads in every language and
+/// names the folder as it is called, not a single extension binary.
+#[test]
+fn a_plugin_installed_into_the_fx_folder_reads_in_every_language() {
+    use rabbit_core::localization::embedded_locales;
+    use rabbit_core::operation::PackageOperationMessage as Msg;
+
+    use super::support::assert_reads;
+
+    for &locale in embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        let installed = localized_package_operation_message(
+            &localizer,
+            &Msg::PluginInstalled,
+            "LJuno-116",
+            "the English fallback",
+        );
+        assert_reads(locale, &installed);
+        assert!(
+            installed.contains("UserPlugins\\FX"),
+            "{locale}: {installed}"
+        );
+        assert!(!installed.contains("fallback"), "{locale}: {installed}");
+    }
+}
+
 #[test]
 fn configuration_step_messages_localize_into_german() {
     use rabbit_core::configuration::{ConfigurationMessage as Msg, ConfigurationStatus};
@@ -459,4 +530,47 @@ fn locale_directory_override_remains_available_for_development() {
     assert_eq!(localizer.active_locale(), "de-DE");
     assert!(localizer.source_path().is_some());
     assert_eq!(localizer.text("app-title").value, "RABBIT Test");
+}
+
+/// Every locale names the Instruments and Tools groups, each heading differs
+/// from the others, and the old "Additional software" group is gone.
+#[test]
+fn every_locale_names_each_package_group_and_not_additional_software() {
+    let de = wizard_text(&Localizer::embedded("de-DE").unwrap());
+    assert_eq!(
+        rabbit_core::package::PackageCategory::ALL.map(|category| de.package_group_label(category)),
+        ["Pakete", "Instrumente", "Werkzeuge", "Sprachpakete"]
+    );
+    for &locale in rabbit_core::localization::embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        for key in [
+            "wizard-instruments-tree-group-label",
+            "wizard-tools-tree-group-label",
+        ] {
+            let text = localizer.text(key);
+            assert!(!text.missing && !text.value.is_empty(), "{locale}: {key}");
+        }
+        assert!(
+            localizer
+                .text("wizard-additional-software-tree-group-label")
+                .missing,
+            "{locale}"
+        );
+        let text = wizard_text(&localizer);
+        let mut labels: Vec<&str> = text
+            .package_group_labels
+            .iter()
+            .map(|(_, label)| label.as_str())
+            .chain([text.configuration_tree_group_label.as_str()])
+            .collect();
+        for label in &labels {
+            assert!(
+                !label.is_empty() && !label.starts_with("wizard-"),
+                "{locale}: {label}"
+            );
+        }
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), 5, "{locale}: two groups share a heading");
+    }
 }
