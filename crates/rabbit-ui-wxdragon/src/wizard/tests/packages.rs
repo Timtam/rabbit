@@ -1682,6 +1682,166 @@ fn every_package_category_has_its_own_group_label() {
     );
 }
 
+/// What both platforms do with the details pane when `node` is selected:
+/// show its text, or leave the pane as it was.
+fn select_in_packages_tree(
+    pane: &mut String,
+    package_rows: &[PackageRow],
+    configuration_rows: &[ConfigurationRow],
+    node: PackagesTreeNode,
+) {
+    if let Some(text) = packages_tree_details(package_rows, configuration_rows, node) {
+        *pane = text;
+    }
+}
+
+/// Every package row shows its own details below the Install or update
+/// tab's tree, and so does every configuration step's row. An index past
+/// the rows names no row, so it leaves the pane alone.
+#[test]
+fn the_details_pane_shows_the_selected_rows_own_details() {
+    let many = every_package_updated(Platform::Windows, Architecture::X64);
+    let rows = &many.package_rows;
+    assert!(rows.len() > 1);
+    for (index, row) in rows.iter().enumerate() {
+        assert_eq!(
+            packages_tree_details(
+                rows,
+                &many.configuration_rows,
+                PackagesTreeNode::Package(index)
+            ),
+            Some(row.details.clone()),
+            "{}",
+            row.package_id
+        );
+    }
+
+    let (_localizer, model) = langpack_model(PlanActionKind::Install);
+    let packages = &model.package_rows;
+    let configuration = &model.configuration_rows;
+    assert!(!configuration.is_empty());
+    for (index, row) in configuration.iter().enumerate() {
+        assert_eq!(
+            packages_tree_details(
+                packages,
+                configuration,
+                PackagesTreeNode::Configuration(index)
+            ),
+            Some(row.details.clone()),
+            "{}",
+            row.step_id
+        );
+    }
+    assert_eq!(
+        packages_tree_details(
+            packages,
+            configuration,
+            PackagesTreeNode::Package(packages.len())
+        ),
+        None
+    );
+    assert_eq!(
+        packages_tree_details(
+            packages,
+            configuration,
+            PackagesTreeNode::Configuration(configuration.len())
+        ),
+        None
+    );
+}
+
+/// A heading has no details of its own, so selecting one leaves the pane
+/// with the row's it showed, as Windows always did.
+#[test]
+fn a_heading_leaves_the_details_pane_as_it_was() {
+    let (_localizer, model) = langpack_model(PlanActionKind::Install);
+    let headings = PackageCategory::ALL
+        .map(PackagesTreeNode::PackageGroup)
+        .into_iter()
+        .chain([PackagesTreeNode::ConfigurationGroup]);
+    for heading in headings {
+        assert_eq!(
+            packages_tree_details(&model.package_rows, &model.configuration_rows, heading),
+            None,
+            "{heading:?}"
+        );
+    }
+}
+
+/// While nothing is selected, as when the tree is built or rebuilt, the
+/// pane shows the first package's details, and nothing without packages.
+#[test]
+fn with_nothing_selected_the_details_pane_shows_the_first_package() {
+    let model = every_package_updated(Platform::Windows, Architecture::X64);
+    let rows = &model.package_rows;
+    let initial = packages_tree_initial_details(rows);
+    assert_eq!(initial, rows[0].details);
+    assert_ne!(initial, rows[rows.len() - 1].details);
+    assert_eq!(packages_tree_initial_details(&[]), "");
+}
+
+/// Selecting a configuration step after a package shows the step's own
+/// details, not the package's, which macOS used to keep; a heading after
+/// it keeps the step's.
+#[test]
+fn a_configuration_row_shows_its_own_details_after_a_package_row() {
+    let (_localizer, model) = langpack_model(PlanActionKind::Install);
+    let packages = &model.package_rows;
+    let configuration = &model.configuration_rows;
+    let step = language_step_index(configuration);
+    let mut pane = packages_tree_initial_details(packages);
+
+    select_in_packages_tree(
+        &mut pane,
+        packages,
+        configuration,
+        PackagesTreeNode::Package(0),
+    );
+    assert_eq!(pane, packages[0].details);
+
+    select_in_packages_tree(
+        &mut pane,
+        packages,
+        configuration,
+        PackagesTreeNode::Configuration(step),
+    );
+    assert_eq!(pane, configuration[step].details);
+    assert!(!pane.contains(&packages[0].summary), "{pane}");
+
+    select_in_packages_tree(
+        &mut pane,
+        packages,
+        configuration,
+        PackagesTreeNode::ConfigurationGroup,
+    );
+    assert_eq!(pane, configuration[step].details);
+}
+
+/// A configuration step's details follow the packages it needs, so a
+/// package's tick changes what the pane says for the selected step: ticking
+/// a language pack drops the step's "requires" note.
+#[test]
+fn a_configuration_rows_details_follow_the_package_it_needs() {
+    let (localizer, model) = langpack_model(PlanActionKind::Keep);
+    let mut package_rows = model.package_rows.clone();
+    let mut configuration_rows = model.configuration_rows.clone();
+    let step = language_step_index(&configuration_rows);
+    let node = PackagesTreeNode::Configuration(step);
+    let before = packages_tree_details(&package_rows, &configuration_rows, node).unwrap();
+    assert!(before.contains("requires"), "{before}");
+
+    apply_checkbox_state_to_package_row(&model, &mut package_rows[0], true).unwrap();
+    recompute_configuration_row_availability(
+        &localizer,
+        &package_rows,
+        None,
+        &mut configuration_rows,
+    );
+    let after = packages_tree_details(&package_rows, &configuration_rows, node).unwrap();
+    assert!(!after.contains("requires"), "{after}");
+    assert_eq!(after, configuration_rows[step].details);
+}
+
 /// A model for `platform` and a REAPER of `architecture`, with no target,
 /// whose plan updates every package offered there. Updates are ticked by
 /// default, so every row would start ticked if nothing stopped it.

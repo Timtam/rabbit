@@ -5,8 +5,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::{
-    ConfigurationRow, OsaraKeymapChoice, PackageRow, WizardInstallOptions, WizardModel, WizardText,
-    apply_checkbox_state_to_package_row, package_tree_groups,
+    ConfigurationRow, OsaraKeymapChoice, PackageRow, PackagesTreeNode, WizardInstallOptions,
+    WizardModel, WizardText, apply_checkbox_state_to_package_row, package_tree_groups,
+    packages_tree_details, packages_tree_initial_details,
 };
 use rabbit_core::package::PackageCategory;
 use rabbit_core::plan::PlanActionKind;
@@ -18,36 +19,25 @@ use wxdragon::widgets::dataview::{
 
 use wxdragon::prelude::*;
 
-use super::{PackagesStateCell, PackagesView, WXK_SPACE};
+use super::{PackagesStateCell, PackagesView, WXK_SPACE, set_text_if_changed};
 
 use crate::wx_app::globals::{AnnouncePriority, announce, with_ui_localizer};
 use crate::wx_app::pages::add_label;
 use crate::wx_app::widgets::{
-    REAPER_LANGUAGE_LABEL_NAME, SPANISH_VARIANT_LABEL_NAME, WizardWidgets, package_details,
+    REAPER_LANGUAGE_LABEL_NAME, SPANISH_VARIANT_LABEL_NAME, WizardWidgets,
     sync_osara_keymap_widgets, sync_reaper_language_widget, sync_spanish_variant_widget,
 };
 
-/// Identifies a row in the non-Windows `CustomDataViewTreeModel`. `Package`
-/// carries the index into `package_rows`; `PackageGroup` is a synthetic
-/// parent under the invisible root, one per package category. The
-/// `Box<Node>` storage owned by `PackageTreeData` is heap-stable, so
-/// `*mut Node` pointers passed across the FFI boundary as opaque item ids
-/// stay valid for the model's lifetime.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum NodeKind {
-    /// The synthetic parent of one package category ("Packages",
-    /// "Instruments", ...) under the invisible root. Holds that category's
-    /// package leaves.
-    PackageGroup(PackageCategory),
-    /// A package leaf — index into `package_rows`. Parented under the
-    /// PackageGroup of the row's category; the index is into the full
-    /// `package_rows` either way.
-    Package(usize),
-    /// The synthetic "Configuration" parent, after the package groups.
-    ConfigurationGroup,
-    /// A configuration-step leaf — index into `configuration_rows`.
-    Configuration(usize),
-}
+/// Identifies a row in the non-Windows `CustomDataViewTreeModel`. It is the
+/// wizard's [`PackagesTreeNode`], so the details pane can ask the wizard
+/// about a node just as Windows does. `PackageGroup` and
+/// `ConfigurationGroup` are synthetic parents under the invisible root;
+/// `Package` carries the index into the full `package_rows`, whichever
+/// group the leaf hangs under, and `Configuration` the index into
+/// `configuration_rows`. The `Box<Node>` storage owned by `PackageTreeData`
+/// is heap-stable, so `*mut Node` pointers passed across the FFI boundary
+/// as opaque item ids stay valid for the model's lifetime.
+pub(crate) type NodeKind = PackagesTreeNode;
 
 #[derive(Debug)]
 pub(crate) struct Node {
@@ -313,11 +303,7 @@ pub(crate) fn build_packages_page(
         &model.text.package_details_label,
         "rabbit-package-details-label",
     );
-    let initial_details = package_rows
-        .borrow()
-        .first()
-        .map(package_details)
-        .unwrap_or_default();
+    let initial_details = packages_tree_initial_details(&package_rows.borrow());
     let details = TextCtrl::builder(page)
         .with_value(&initial_details)
         .with_style(TextCtrlStyle::MultiLine | TextCtrlStyle::ReadOnly | TextCtrlStyle::WordWrap)
@@ -426,6 +412,7 @@ pub(crate) fn build_packages_page(
 
     {
         let package_rows = Rc::clone(&package_rows);
+        let configuration_rows = Rc::clone(&configuration_rows);
         let model_text = model.clone();
         let osara_checkbox = osara_keymap_replace;
         let osara_note = osara_keymap_note;
@@ -440,10 +427,16 @@ pub(crate) fn build_packages_page(
                 // model's userdata; the model lives for as long as this
                 // closure can fire.
                 let node = unsafe { &*node_ptr };
-                if let NodeKind::Package(idx) = node.kind
-                    && let Some(value) = package_rows.borrow().get(idx).map(package_details)
-                {
-                    details.set_value(&value);
+                // A configuration row shows its own details, not the last
+                // package's, and a heading leaves the pane as it was, as on
+                // Windows.
+                let value = packages_tree_details(
+                    &package_rows.borrow(),
+                    &configuration_rows.borrow(),
+                    node.kind,
+                );
+                if let Some(value) = value {
+                    set_text_if_changed(&details, &value);
                 }
             }
             sync_osara_keymap_widgets(
@@ -713,27 +706,6 @@ pub(crate) fn build_packages_tree_model(
             });
             can_install.set(any_install_or_update);
 
-            // The details pane shows the selected package, whose text
-            // follows its action. A toggle doesn't change the selection, so
-            // `on_selection_changed` won't refresh the pane: do it here,
-            // also when a group's box ticked the selected package.
-            if let Some(widgets) = *side_widgets_for_set_value.borrow()
-                && let Some(node_ptr) = widgets
-                    .tree
-                    .get_selection()
-                    .and_then(|item| item.get_id::<Node>())
-                && !node_ptr.is_null()
-            {
-                // SAFETY: as in `on_selection_changed`: the pointer comes
-                // from a Box<Node> the tree model owns for its lifetime.
-                let selected = unsafe { &*node_ptr };
-                if let NodeKind::Package(idx) = selected.kind
-                    && let Some(row) = rows_for_set_value.borrow().get(idx)
-                {
-                    widgets.details.set_value(&package_details(row));
-                }
-            }
-
             // Recompute configuration row availability whenever a
             // package toggle could have flipped a dependency state.
             let recomputed_configuration =
@@ -793,6 +765,32 @@ pub(crate) fn build_packages_tree_model(
                             choice_notes.push(choice_shown_note(label, choice.is_shown()));
                         }
                     }
+                }
+            }
+
+            // The details pane shows the selected row: a package's text
+            // follows its action, a configuration step's the packages it
+            // needs. A toggle doesn't change the selection, so
+            // `on_selection_changed` won't refresh the pane: do it here,
+            // after the configuration rows were recomputed, also when a
+            // group's box ticked the selected row. As on Windows.
+            if let Some(widgets) = *side_widgets_for_set_value.borrow()
+                && let Some(node_ptr) = widgets
+                    .tree
+                    .get_selection()
+                    .and_then(|item| item.get_id::<Node>())
+                && !node_ptr.is_null()
+            {
+                // SAFETY: as in `on_selection_changed`: the pointer comes
+                // from a Box<Node> the tree model owns for its lifetime.
+                let selected = unsafe { &*node_ptr };
+                let value = packages_tree_details(
+                    &rows_for_set_value.borrow(),
+                    &configuration_rows_for_set_value.borrow(),
+                    selected.kind,
+                );
+                if let Some(value) = value {
+                    set_text_if_changed(&widgets.details, &value);
                 }
             }
 
@@ -1093,7 +1091,7 @@ pub(crate) fn refresh_package_checklist(
     configuration_rows: &[ConfigurationRow],
 ) {
     rebuild_packages_tree_model(tree, package_items, model, rows, configuration_rows);
-    details.set_value(&rows.first().map(package_details).unwrap_or_default());
+    details.set_value(&packages_tree_initial_details(rows));
     sync_osara_keymap_widgets(model, rows, osara_keymap_replace, osara_keymap_note);
     sync_spanish_variant_widget(rows, spanish_variant_choice);
     sync_reaper_language_widget(rows, reaper_language_choice);
@@ -1113,10 +1111,7 @@ pub(crate) fn rebuild_package_list_widgets(
         package_rows,
         configuration_rows,
     );
-    let initial = package_rows
-        .first()
-        .map(package_details)
-        .unwrap_or_default();
+    let initial = packages_tree_initial_details(package_rows);
     widgets.package_details.set_value(&initial);
 }
 

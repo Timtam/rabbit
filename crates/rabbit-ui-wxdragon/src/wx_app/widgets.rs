@@ -106,10 +106,6 @@ pub(crate) fn target_details_for_index(model: &WizardModel, index: usize) -> Str
         .unwrap_or_else(|| model.text.target_empty.clone())
 }
 
-pub(crate) fn package_details(row: &crate::PackageRow) -> String {
-    row.details.clone()
-}
-
 pub(crate) fn progress_details_for_start(
     model: &WizardModel,
     target: Option<&TargetRow>,

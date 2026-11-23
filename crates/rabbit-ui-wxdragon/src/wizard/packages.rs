@@ -20,7 +20,8 @@ use rabbit_core::plan::{AvailablePackage, PlanAction, PlanActionKind, build_inst
 use super::bootstrap::localizer_from_options;
 use super::labels::{action_label, version_text};
 use super::model::{
-    OsaraKeymapChoice, PackageRow, TargetRow, WizardModel, WizardPackagePlan, WizardText,
+    ConfigurationRow, OsaraKeymapChoice, PackageRow, TargetRow, WizardModel, WizardPackagePlan,
+    WizardText,
 };
 use super::target::installation_from_target_row;
 
@@ -63,6 +64,51 @@ pub fn package_tree_groups(
             (!rows.is_empty()).then_some(PackageTreeGroup { category, rows })
         })
         .collect()
+}
+
+/// A node of the Install or update tab's tree: a heading or a row. Both
+/// platforms ask [`packages_tree_details`] what the details pane shows for
+/// it, so the pane says the same on each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackagesTreeNode {
+    /// The heading of a package category's group ("Packages",
+    /// "Instruments", ...).
+    PackageGroup(PackageCategory),
+    /// A package row: its index in the package rows.
+    Package(usize),
+    /// The "Configuration" heading, after the package groups.
+    ConfigurationGroup,
+    /// A configuration step's row: its index in the configuration rows.
+    Configuration(usize),
+}
+
+/// What the details pane below the Install or update tab's tree shows for
+/// the selected `node`: a package's or a configuration step's own details.
+/// `None` leaves the pane as it is: a heading has no details of its own, so
+/// the pane keeps the row's it showed, and an index past the rows names no
+/// row.
+pub fn packages_tree_details(
+    package_rows: &[PackageRow],
+    configuration_rows: &[ConfigurationRow],
+    node: PackagesTreeNode,
+) -> Option<String> {
+    match node {
+        PackagesTreeNode::Package(index) => package_rows.get(index).map(|row| row.details.clone()),
+        PackagesTreeNode::Configuration(index) => {
+            configuration_rows.get(index).map(|row| row.details.clone())
+        }
+        PackagesTreeNode::PackageGroup(_) | PackagesTreeNode::ConfigurationGroup => None,
+    }
+}
+
+/// What the details pane below the Install or update tab's tree shows
+/// while nothing is selected, as when the tree is built or rebuilt: the
+/// first package's details, or nothing when there are no packages.
+pub fn packages_tree_initial_details(package_rows: &[PackageRow]) -> String {
+    package_rows
+        .first()
+        .map(|row| row.details.clone())
+        .unwrap_or_default()
 }
 
 pub fn package_ids_for_indices(model: &WizardModel, indices: &[usize]) -> Vec<String> {

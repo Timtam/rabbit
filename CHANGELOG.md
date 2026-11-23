@@ -280,6 +280,8 @@ repository.
 #### macOS
 
 - VoiceOver now reads the names of the package list's group rows.
+- Selecting a step in the **Configuration** group now shows its own
+  details below the list, not the last package's.
 - Tab no longer stops on a wizard page's scroll bar.
 - A Surge XT password window that fails now says nothing was installed.
 
