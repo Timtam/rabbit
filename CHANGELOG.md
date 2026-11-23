@@ -252,6 +252,8 @@ repository.
 - The French language pack installs and updates again: RABBIT found no
   version once its description stopped ending in "par ReaperAccessible".
   (Fixed by math65 in #36.)
+- The text below the package list now follows a package's tick: unticked,
+  it no longer still says "Will install". (Fixed by math65 in #35.)
 
 #### Windows
 
