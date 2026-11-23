@@ -59,7 +59,9 @@ no version for 32-bit REAPER)", or "no version for this REAPER's processor
 type" for another kind of REAPER, such as one on Windows on ARM. The row's
 details say the same. RABBIT goes by the REAPER you picked, or for a REAPER
 it is about to install, by the one it will install. Uninstalling isn't
-affected.
+affected. On Windows on ARM, REAPER is an ARM64EC program, and RABBIT
+recognises an installed one as such, so its updates keep their ARM64EC
+builds. SWS and app2clap have no version for it yet.
 
 ### Language packs
 
@@ -678,7 +680,7 @@ own installer, isn't skipped: those commands update it as usual.
 
 A package with no version for the REAPER you install for is skipped as
 well: `setup`, `apply-packages` and `plan` leave it out of their default list
-with a note, as they do with SWS for a new REAPER on Windows on ARM. Naming
+with a note, as they do with SWS for REAPER on Windows on ARM. Naming
 such a package with `--package` in `setup`, `apply-packages` or
 `install-extension`, such as FFmpeg, Surge XT or app2clap for a 32-bit
 REAPER, changes nothing: the command says why and exits with 2. Like the

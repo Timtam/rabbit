@@ -1629,6 +1629,29 @@ mod tests {
         }
     }
 
+    /// A portable REAPER for Windows on ARM is found as the ARM64EC program
+    /// it is, which the wizard's target rows and the CLI's plan go by.
+    #[cfg(windows)]
+    #[test]
+    fn a_portable_arm64ec_reaper_is_found_as_arm64ec() {
+        use crate::arch_probe::PeKind;
+        use crate::arch_probe::test_support::pe_image;
+        use crate::model::Architecture;
+
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("reaper.exe"), pe_image(PeKind::Arm64Ec)).unwrap();
+        fs::write(dir.path().join("reaper.ini"), b"").unwrap();
+
+        let installations = discover_installations(&DiscoveryOptions {
+            include_standard: false,
+            portable_roots: vec![dir.path().to_path_buf()],
+        })
+        .unwrap();
+
+        assert_eq!(installations.len(), 1);
+        assert_eq!(installations[0].architecture, Some(Architecture::Arm64Ec));
+    }
+
     #[test]
     fn colocated_portable_root_detects_portable_reaper_next_to_executable() {
         let dir = tempdir().unwrap();
@@ -1679,6 +1702,18 @@ mod tests {
         assert_eq!(
             target_reaper_architecture(Platform::Windows, &windows, Some(&elsewhere)),
             Architecture::X64
+        );
+        // REAPER for Windows on ARM names x64 in its header too, and is
+        // told apart by its hybrid metadata.
+        let on_arm = dir.path().join("reaper-arm64ec.exe");
+        fs::write(
+            &on_arm,
+            crate::arch_probe::test_support::pe_image(crate::arch_probe::PeKind::Arm64Ec),
+        )
+        .unwrap();
+        assert_eq!(
+            target_reaper_architecture(Platform::Windows, &windows, Some(&on_arm)),
+            Architecture::Arm64Ec
         );
 
         let mac = dir.path().join("Mac");

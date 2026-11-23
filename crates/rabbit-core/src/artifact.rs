@@ -3406,6 +3406,148 @@ mod tests {
         );
     }
 
+    /// An installed REAPER on Windows on ARM is an ARM64EC program, whose
+    /// header names x64. Read from its program file in a portable folder, it
+    /// is an arm64-ec REAPER: an update fetches REAPER's arm64ec installer
+    /// and ReaPack's arm64ec DLL, and SWS and app2clap have no build for it.
+    /// An x64 REAPER in the same place still gets the x64 ones. Nothing goes
+    /// online: the resolver's own selectors run on a download page and a
+    /// release laid out like the real ones.
+    #[test]
+    fn an_installed_arm64ec_reaper_gets_the_arm64ec_builds() {
+        use crate::arch_probe::PeKind;
+        use crate::arch_probe::test_support::pe_image;
+
+        let dir = tempdir().unwrap();
+        let download_page = r#"
+            <a href="files/7.x/reaper776-install.exe">x86</a>
+            <a href="files/7.x/reaper776_x64-install.exe">x64</a>
+            <a href="files/7.x/reaper776_arm64ec-install.exe">arm64ec</a>
+        "#;
+        let specs = crate::package::package_specs_by_id(Platform::Windows);
+        let reaper = specs[PACKAGE_REAPER].http_artifact.as_ref().unwrap();
+        let reapack = specs[PACKAGE_REAPACK].github_release.as_ref().unwrap();
+        for (kind, architecture, installer, reapack_dll, without) in [
+            (
+                PeKind::Arm64Ec,
+                Architecture::Arm64Ec,
+                "reaper776_arm64ec-install.exe",
+                "reaper_reapack-arm64ec.dll",
+                vec![PACKAGE_SWS, PACKAGE_APP2CLAP],
+            ),
+            (
+                PeKind::X64,
+                Architecture::X64,
+                "reaper776_x64-install.exe",
+                "reaper_reapack-x64.dll",
+                Vec::new(),
+            ),
+        ] {
+            let folder = dir.path().join(kind.name());
+            fs::create_dir_all(&folder).unwrap();
+            fs::write(folder.join("reaper.exe"), pe_image(kind)).unwrap();
+            fs::write(folder.join("reaper.ini"), "[REAPER]\n").unwrap();
+
+            let target =
+                crate::detection::target_reaper_architecture(Platform::Windows, &folder, None);
+            assert_eq!(target, architecture, "{kind:?}");
+            let dispatch = dispatch_architecture(target);
+
+            let reaper_target = select_http_target(reaper, Platform::Windows, dispatch).unwrap();
+            assert_eq!(reaper_target.report_arch, architecture);
+            let HttpArtifactSource::ScrapeHref { href_match, .. } = &reaper_target.source else {
+                panic!("REAPER's Windows installers come from its download page");
+            };
+            let href = find_href_with(download_page, |href, _| href_match.matches(href)).unwrap();
+            assert_eq!(href, format!("files/7.x/{installer}"));
+
+            let resolved = resolve_github_artifact_from_release_body(
+                &release_with_every_asset(reapack),
+                "https://example.test/release",
+                PACKAGE_REAPACK,
+                reapack,
+                Platform::Windows,
+                dispatch,
+            )
+            .unwrap();
+            assert_eq!(resolved.file_name, reapack_dll);
+            assert_eq!(resolved.architecture, architecture);
+
+            assert_eq!(
+                packages_without_build(
+                    &package_ids_on(Platform::Windows),
+                    Platform::Windows,
+                    target,
+                    &PackageChannels::new(),
+                ),
+                without,
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// A new REAPER on Windows on ARM is resolved for `arm64`, what
+    /// `Architecture::current()` gives on an ARM RABBIT, and an installed
+    /// one for `arm64-ec`; both are the same ARM64EC REAPER. So every
+    /// Windows package, on every channel, has a build for both or for
+    /// neither, and picks the same download for both. The Windows on ARM
+    /// smoke tables check the `arm64-ec` downloads, and this keeps a new
+    /// install on the same ones. Nothing goes online.
+    #[test]
+    fn a_new_and_an_installed_reaper_on_windows_on_arm_get_the_same_builds() {
+        for package in crate::package::embedded_package_manifest().packages {
+            let channels = std::iter::once(None).chain(package.channels.iter().map(|channel| {
+                Some(match channel.parameter {
+                    Some(_) => format!("{}:1", channel.id),
+                    None => channel.id.clone(),
+                })
+            }));
+            for channel in channels {
+                let on_channel = package.on_channel(channel.as_deref());
+                if !on_channel.supports_platform(Platform::Windows) {
+                    continue;
+                }
+                let spec = on_channel.to_package_spec(Platform::Windows);
+                let label = format!("{} on {channel:?}", spec.id);
+                let has_build =
+                    package_has_build_for(&spec, Platform::Windows, Architecture::Arm64Ec);
+                assert_eq!(
+                    package_has_build_for(&spec, Platform::Windows, Architecture::Arm64),
+                    has_build,
+                    "{label}"
+                );
+                if !has_build {
+                    continue;
+                }
+                if let Some(release) = &spec.github_release {
+                    let body = release_with_every_asset(release);
+                    let [new, installed] =
+                        [Architecture::Arm64, Architecture::Arm64Ec].map(|architecture| {
+                            let artifact = resolve_github_artifact_from_release_body(
+                                &body,
+                                "https://example.test/release",
+                                &spec.id,
+                                release,
+                                Platform::Windows,
+                                architecture,
+                            )
+                            .unwrap();
+                            (artifact.kind, artifact.file_name, artifact.url)
+                        });
+                    assert_eq!(new, installed, "{label}");
+                }
+                if let Some(http) = &spec.http_artifact {
+                    let [new, installed] =
+                        [Architecture::Arm64, Architecture::Arm64Ec].map(|architecture| {
+                            select_http_target(http, Platform::Windows, architecture)
+                                .map(|target| (target.artifact_kind, &target.source))
+                        });
+                    assert_eq!(new, installed, "{label}");
+                }
+            }
+        }
+    }
+
     /// When even the dispatch architecture is unknown, nothing is blocked.
     #[test]
     fn an_architecture_that_cant_be_known_blocks_nothing() {
