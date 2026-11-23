@@ -339,9 +339,9 @@ from this file and posts it as the GitHub release body.
   Português (Brasil), it ships in the macOS app bundle, and OS-language
   auto-detection on first launch covers Portuguese locales (any `pt-*`, which
   map to pt-BR).
-- **LReaParams** (Windows only), Lo-lo's accessible REAPER extension for
-  controlling FX and track parameters from the keyboard, under **Tools**,
-  unticked by default. Thanks to Lo-lo for asking. RABBIT installs
+- **LReaParams** (Windows, 64-bit REAPER), Lo-lo's accessible REAPER
+  extension for controlling FX and track parameters from the keyboard, under
+  **Tools**, unticked by default. Thanks to Lo-lo for asking. RABBIT installs
   `reaper_lreaparams.dll` from the latest GitHub release into `UserPlugins`,
   keeps it up to date and can uninstall it, keeping the `LReaParams` folder
   with your settings and profiles unless you ask for settings to go too. A
@@ -349,17 +349,23 @@ from this file and posts it as the GitHub release body.
   update it or uninstall it, not even when you name it on the command line,
   and its row says it is managed by ReaPack. Only restoring one of RABBIT's
   own backups of LReaParams still puts back the copy RABBIT had.
-- **LJuno-116**, **LB-303**, **LR-608** and **LSampler-24** (Windows only),
-  Lo-lo's VST3 instruments made to be played and edited with a screen
+- **LJuno-116**, **LB-303**, **LR-608** and **LSampler-24** (Windows, 64-bit
+  REAPER), Lo-lo's VST3 instruments made to be played and edited with a screen
   reader: a polyphonic synthesizer, a bassline synthesizer with a step
   sequencer, a drum machine and a 24-slot sampler, under **Instruments**,
-  unticked by default. Thanks to Lo-lo for asking. RABBIT installs each
-  one's whole `.vst3` bundle from its latest GitHub release into REAPER's
-  own plug-in folder, `UserPlugins\FX`, without administrator rights and for
-  a portable REAPER too, keeps it up to date with a backup of the version
+  unticked by default. Thanks to Lo-lo for asking. RABBIT installs each one's
+  whole `.vst3` bundle from its latest GitHub release into REAPER's own
+  plug-in folder, `UserPlugins\FX`, without administrator rights and for a
+  portable REAPER too, keeps it up to date with a backup of the version
   before, and can uninstall a copy it installed, keeping your presets and
   samples. REAPER finds a new instrument after its next start or a plug-in
   rescan.
+- A new configuration step adds the ReaPack repository of **ReaWarp**, Gabriel
+  Schuck's accessible scripts for audio warping, tempo maps, groove matching
+  and quantizing, so you can install and update ReaWarp in ReaPack
+  (Extensions, ReaPack, Browse packages). Like REAPER Accessible (EN), it is
+  ticked by default when ReaPack is installed or part of the run; on the
+  command line it is `--config-step reapack-add-reawarp-remote`.
 
 ### Changed
 
@@ -564,6 +570,19 @@ from this file and posts it as the GitHub release body.
   replaces it, it leaves your key map as it is, as before, but no longer
   says that it replaced it. It now says only that OSARA was installed, and
   its records no longer list your key map as one of OSARA's files.
+- A package with no version for your REAPER, such as FFmpeg, Surge XT or
+  app2clap for a 32-bit REAPER, or SWS for a new REAPER on Windows on ARM,
+  can no longer be ticked, and says why. Before, ticking FFmpeg, app2clap or
+  SWS stopped the whole install when the download couldn't be found, and
+  Surge XT ran its 64-bit installer. `rabbit setup`, `apply-packages` and
+  `plan` leave such a package out of their default list with a note, and one
+  named with `--package` changes nothing and exits with 2. `setup`,
+  `apply-packages` and `install-extension` now go by the target REAPER's own
+  architecture, as the wizard does, not RABBIT's.
+- In a portable REAPER, a package that needs a standard installation, such
+  as Surge XT, now keeps saying so when its online version check fails.
+  Before, its row said that the version check failed instead, and Review
+  noted the failed check for a package that can't be installed there anyway.
 
 ### Security
 

@@ -170,11 +170,23 @@ fn non_recommended_package_install_row_starts_unticked() {
 /// The wizard model for a plan whose only action is LReaParams 0.0.70,
 /// with 0.0.75 out, kept because of `left`.
 fn lreaparams_left_to_reapack(localizer: &Localizer, left: LeftToReapack) -> WizardModel {
-    let installation = fake_installation();
+    lreaparams_left_to_reapack_on(localizer, left, Architecture::X64)
+}
+
+/// [`lreaparams_left_to_reapack`] for a REAPER of `architecture`.
+fn lreaparams_left_to_reapack_on(
+    localizer: &Localizer,
+    left: LeftToReapack,
+    architecture: Architecture,
+) -> WizardModel {
+    let installation = rabbit_core::model::Installation {
+        architecture: Some(architecture),
+        ..fake_installation()
+    };
     model_from_plan(
         localizer,
         Platform::Windows,
-        Architecture::X64,
+        architecture,
         vec![installation.clone()],
         Some(0),
         InstallPlan {
@@ -640,6 +652,17 @@ fn package_plan_includes_reaper_for_empty_custom_target() {
     assert!(reaper.selected);
 }
 
+/// A portable target in `path` for a 64-bit REAPER. An empty folder would
+/// otherwise take the architecture of the computer the tests run on, and on
+/// an ARM one SWS and app2clap would have no build, whatever else a test
+/// checks about them.
+fn x64_portable_target(model: &WizardModel, path: std::path::PathBuf) -> TargetRow {
+    TargetRow {
+        architecture: Architecture::X64,
+        ..custom_portable_target_row(model, path, true)
+    }
+}
+
 #[test]
 fn portable_target_marks_surge_xt_as_unavailable() {
     let dir = tempdir().unwrap();
@@ -656,7 +679,7 @@ fn portable_target_marks_surge_xt_as_unavailable() {
             notes: Vec::new(),
         },
     );
-    let target = custom_portable_target_row(&model, dir.path().join("PortableREAPER"), true);
+    let target = x64_portable_target(&model, dir.path().join("PortableREAPER"));
 
     let plan = wizard_package_plan_for_target(&model, Some(&target)).unwrap();
     let surge = plan
@@ -671,10 +694,64 @@ fn portable_target_marks_surge_xt_as_unavailable() {
     );
     assert!(!surge.selected);
     assert_eq!(surge.action, PlanActionKind::Keep);
-    assert!(
-        surge.unavailability_reason.is_some(),
+    assert_eq!(
+        surge.unavailability_reason.as_deref(),
+        Some("portable REAPER target"),
         "the gate should attach a localized reason so screen readers announce why"
     );
+}
+
+/// No run installs Surge XT in a portable REAPER, so a failed version check
+/// for it changes nothing there: the row keeps saying it needs a standard
+/// installation, and Review gets no note about the check.
+#[test]
+fn a_failed_version_check_keeps_the_portable_reason() {
+    let dir = tempdir().unwrap();
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let model = model_from_plan(
+        &localizer,
+        Platform::Windows,
+        Architecture::X64,
+        Vec::new(),
+        None,
+        InstallPlan {
+            target: None,
+            actions: Vec::new(),
+            notes: Vec::new(),
+        },
+    );
+    let target = x64_portable_target(&model, dir.path().join("PortableREAPER"));
+    let mut plan = wizard_package_plan_for_target(&model, Some(&target)).unwrap();
+    let before = plan.package_rows.clone();
+    let mut notes = Vec::new();
+
+    apply_version_check_failures_to_rows(
+        &localizer,
+        &mut plan.package_rows,
+        &mut notes,
+        &[(
+            PACKAGE_SURGE_XT.to_string(),
+            "rate limit exceeded".to_string(),
+        )],
+    );
+
+    let surge = plan
+        .package_rows
+        .iter()
+        .find(|row| row.package_id == PACKAGE_SURGE_XT)
+        .expect("Surge XT row should appear in the package list");
+    assert!(surge.has_build_for_target);
+    assert_eq!(
+        surge.unavailability_reason.as_deref(),
+        Some("portable REAPER target")
+    );
+    assert!(
+        surge
+            .summary
+            .ends_with("(not available: portable REAPER target)")
+    );
+    assert_eq!(plan.package_rows, before);
+    assert!(notes.is_empty(), "{notes:?}");
 }
 
 #[test]
@@ -696,7 +773,7 @@ fn portable_target_offers_app2clap() {
             notes: Vec::new(),
         },
     );
-    let target = custom_portable_target_row(&model, dir.path().join("PortableREAPER"), true);
+    let target = x64_portable_target(&model, dir.path().join("PortableREAPER"));
 
     let plan = wizard_package_plan_for_target(&model, Some(&target)).unwrap();
     let app2clap = plan
@@ -746,7 +823,7 @@ fn a_copy_in_the_clap_folder_is_told_in_app2claps_details() {
             notes: Vec::new(),
         },
     );
-    let target = custom_portable_target_row(&model, dir.path().join("PortableREAPER"), true);
+    let target = x64_portable_target(&model, dir.path().join("PortableREAPER"));
     let rows = wizard_package_plan_for_target(&model, Some(&target))
         .unwrap()
         .package_rows;
@@ -973,7 +1050,7 @@ fn version_check_failure_disables_row_and_records_note() {
             notes: Vec::new(),
         },
     );
-    let target = custom_portable_target_row(&model, dir.path().join("PortableREAPER"), true);
+    let target = x64_portable_target(&model, dir.path().join("PortableREAPER"));
     let mut plan = wizard_package_plan_for_target(&model, Some(&target)).unwrap();
 
     let failures = vec![(
@@ -995,8 +1072,9 @@ fn version_check_failure_disables_row_and_records_note() {
     assert!(!sws.available_for_target);
     assert!(!sws.selected);
     assert_eq!(sws.action, PlanActionKind::Keep);
-    assert!(
-        sws.unavailability_reason.is_some(),
+    assert_eq!(
+        sws.unavailability_reason.as_deref(),
+        Some("online version check failed"),
         "a localized reason should be attached so screen readers announce why"
     );
 
@@ -1501,4 +1579,524 @@ fn every_package_category_has_its_own_group_label() {
         PackageCategory::ALL.map(|category| text.package_group_label(category)),
         ["Packages", "Instruments", "Tools", "Language packs"]
     );
+}
+
+/// A model for `platform` and a REAPER of `architecture`, with no target,
+/// whose plan updates every package offered there. Updates are ticked by
+/// default, so every row would start ticked if nothing stopped it.
+fn every_package_updated(platform: Platform, architecture: Architecture) -> WizardModel {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let actions = builtin_package_specs(platform)
+        .into_iter()
+        .map(|spec| PlanAction {
+            package_id: spec.id,
+            action: PlanActionKind::Update,
+            installed_version: Some(Version::parse("1.0").unwrap()),
+            available_version: Some(Version::parse("2.0").unwrap()),
+            reason: "test".to_string(),
+            left_to_reapack: None,
+        })
+        .collect();
+    model_from_plan(
+        &localizer,
+        platform,
+        architecture,
+        Vec::new(),
+        None,
+        InstallPlan {
+            target: None,
+            actions,
+            notes: Vec::new(),
+        },
+    )
+}
+
+/// The ids of the rows that can't be ticked, in row order.
+fn unavailable_rows(rows: &[PackageRow]) -> Vec<&str> {
+    rows.iter()
+        .filter(|row| !row.available_for_target)
+        .map(|row| row.package_id.as_str())
+        .collect()
+}
+
+/// Asserts `row` reads as a package with no build for this REAPER: not
+/// ticked, not tickable, `reason` at the end of its label, and `sentence`,
+/// with the package's name for `{package}`, right below it in its details.
+fn assert_no_build_row(row: &PackageRow, reason: &str, sentence: &str) {
+    assert!(!row.available_for_target, "{row:?}");
+    assert!(!row.selected && !row.default_selected, "{row:?}");
+    assert_eq!(row.action, PlanActionKind::Keep, "{row:?}");
+    assert_eq!(row.unavailability_reason.as_deref(), Some(reason));
+    assert!(
+        row.summary.ends_with(&format!("(not available: {reason})")),
+        "{}",
+        row.summary
+    );
+    let sentence = sentence.replace("{package}", &row.display_name);
+    assert!(
+        row.details
+            .starts_with(&format!("{}\n\n{sentence}", row.summary)),
+        "{}",
+        row.details
+    );
+}
+
+/// The packages with no build for a 32-bit REAPER, in row order: FFmpeg,
+/// Surge XT, Lo-lo's four instruments, app2clap and LReaParams.
+const NO_32_BIT_BUILD: [&str; 8] = [
+    PACKAGE_FFMPEG,
+    PACKAGE_SURGE_XT,
+    PACKAGE_LJUNO_116,
+    PACKAGE_LB_303,
+    PACKAGE_LR_608,
+    PACKAGE_LSAMPLER_24,
+    PACKAGE_APP2CLAP,
+    PACKAGE_LREAPARAMS,
+];
+
+#[test]
+fn a_32_bit_reaper_offers_no_ffmpeg_surge_xt_app2clap_or_lolos_packages() {
+    let model = every_package_updated(Platform::Windows, Architecture::X86);
+    let rows = &model.package_rows;
+
+    assert_eq!(unavailable_rows(rows), NO_32_BIT_BUILD);
+    for package_id in NO_32_BIT_BUILD {
+        let row = rows
+            .iter()
+            .find(|row| row.package_id == package_id)
+            .unwrap();
+        assert_no_build_row(
+            row,
+            "no version for 32-bit REAPER",
+            "For 32-bit REAPER there is no version of {package}, so RABBIT can't install it here.",
+        );
+    }
+    // The default ticks still tick everything that has a build.
+    for package_id in [PACKAGE_REAPER, PACKAGE_OSARA, PACKAGE_SWS, PACKAGE_REAPACK] {
+        let row = rows
+            .iter()
+            .find(|row| row.package_id == package_id)
+            .unwrap();
+        assert!(row.selected && row.default_selected, "{row:?}");
+        assert_eq!(row.action, PlanActionKind::Update);
+    }
+}
+
+#[test]
+fn windows_on_arm_offers_no_sws_or_app2clap_and_says_why() {
+    // LReaParams and Lo-lo's instruments list REAPER's builds for Windows
+    // on ARM, and are offered there.
+    for architecture in [Architecture::Arm64, Architecture::Arm64Ec] {
+        let model = every_package_updated(Platform::Windows, architecture);
+        let rows = &model.package_rows;
+
+        assert_eq!(
+            unavailable_rows(rows),
+            [PACKAGE_SWS, PACKAGE_APP2CLAP],
+            "{architecture:?}"
+        );
+        for package_id in [PACKAGE_SWS, PACKAGE_APP2CLAP] {
+            let row = rows
+                .iter()
+                .find(|row| row.package_id == package_id)
+                .unwrap();
+            assert_no_build_row(
+                row,
+                "no version for this REAPER's processor type",
+                "For this REAPER's processor type there is no version of {package}, so RABBIT \
+                 can't install it here.",
+            );
+        }
+        for package_id in [
+            PACKAGE_FFMPEG,
+            PACKAGE_SURGE_XT,
+            PACKAGE_LJUNO_116,
+            PACKAGE_LB_303,
+            PACKAGE_LR_608,
+            PACKAGE_LSAMPLER_24,
+            PACKAGE_LREAPARAMS,
+        ] {
+            let row = rows
+                .iter()
+                .find(|row| row.package_id == package_id)
+                .unwrap();
+            assert!(row.available_for_target && row.selected, "{row:?}");
+        }
+    }
+}
+
+#[test]
+fn a_mac_reaper_keeps_every_package_it_has_a_build_for() {
+    // A universal REAPER, and one RABBIT is about to install, are judged by
+    // the slice they run as on this computer, which every macOS package has.
+    for architecture in [
+        Architecture::X64,
+        Architecture::Arm64,
+        Architecture::Universal,
+        Architecture::Unknown,
+    ] {
+        let model = every_package_updated(Platform::MacOs, architecture);
+        assert!(
+            unavailable_rows(&model.package_rows).is_empty(),
+            "{architecture:?}"
+        );
+    }
+    let intel_32_bit = every_package_updated(Platform::MacOs, Architecture::X86);
+    assert_eq!(
+        unavailable_rows(&intel_32_bit.package_rows),
+        [PACKAGE_SURGE_XT]
+    );
+}
+
+#[test]
+fn the_rows_follow_the_chosen_targets_architecture() {
+    // The wizard opened on a 64-bit REAPER, and the user picked a 32-bit
+    // one: the rows follow the target the install request goes to.
+    let dir = tempdir().unwrap();
+    let model = every_package_updated(Platform::Windows, Architecture::X64);
+    assert!(unavailable_rows(&model.package_rows).is_empty());
+    let portable = TargetRow {
+        architecture: Architecture::X86,
+        ..custom_portable_target_row(&model, dir.path().join("PortableREAPER"), true)
+    };
+    let standard = TargetRow {
+        portable: false,
+        ..portable.clone()
+    };
+
+    let plan = wizard_package_plan_for_target(&model, Some(&standard)).unwrap();
+    let ffmpeg = plan
+        .package_rows
+        .iter()
+        .find(|row| row.package_id == PACKAGE_FFMPEG)
+        .unwrap();
+    assert_no_build_row(
+        ffmpeg,
+        "no version for 32-bit REAPER",
+        "For 32-bit REAPER there is no version of {package}, so RABBIT can't install it here.",
+    );
+    assert!(plan.can_install, "REAPER and the rest still install");
+
+    // On a portable target, a package without a build keeps that reason
+    // rather than the portable one, and Lo-lo's packages, offered for a
+    // portable REAPER, have none for a 32-bit one either.
+    let plan = wizard_package_plan_for_target(&model, Some(&portable)).unwrap();
+    for package_id in NO_32_BIT_BUILD {
+        let row = plan
+            .package_rows
+            .iter()
+            .find(|row| row.package_id == package_id)
+            .unwrap();
+        assert_eq!(
+            row.unavailability_reason.as_deref(),
+            Some("no version for 32-bit REAPER"),
+            "{row:?}"
+        );
+    }
+}
+
+/// Every locale says why a package has no build, for a 32-bit REAPER and for
+/// one on another processor, in the row and in its details, with the
+/// package's name in the sentence.
+#[test]
+fn the_no_build_texts_are_in_every_locale() {
+    for &locale in rabbit_core::localization::embedded_locales() {
+        let localizer = Localizer::embedded(locale).unwrap();
+        for (architecture, package_id) in [
+            (Architecture::X86, PACKAGE_FFMPEG),
+            (Architecture::Arm64, PACKAGE_SWS),
+        ] {
+            let model = model_from_plan(
+                &localizer,
+                Platform::Windows,
+                architecture,
+                Vec::new(),
+                None,
+                InstallPlan {
+                    target: None,
+                    actions: vec![PlanAction {
+                        package_id: package_id.to_string(),
+                        action: PlanActionKind::Install,
+                        installed_version: None,
+                        available_version: None,
+                        reason: "test".to_string(),
+                        left_to_reapack: None,
+                    }],
+                    notes: Vec::new(),
+                },
+            );
+            let row = &model.package_rows[0];
+            let reason = row.unavailability_reason.as_deref().unwrap_or_default();
+            assert!(
+                !reason.is_empty() && !reason.starts_with("wizard-"),
+                "{locale}: {reason:?}"
+            );
+            assert!(row.summary.ends_with(')'), "{locale}: {}", row.summary);
+            let sentence = row.details.split("\n\n").nth(1).unwrap_or_default();
+            assert!(
+                sentence.contains(&row.display_name)
+                    && !sentence.contains("wizard-")
+                    && !sentence.contains('{'),
+                "{locale}: {sentence:?}"
+            );
+        }
+    }
+}
+
+/// A failed version check doesn't replace the reason a row without a build
+/// gives, which its details explain, and Review gets no note about a package
+/// no run could install here.
+#[test]
+fn a_failed_version_check_keeps_the_no_build_reason() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let mut model = every_package_updated(Platform::Windows, Architecture::X86);
+    let mut notes = Vec::new();
+
+    apply_version_check_failures_to_rows(
+        &localizer,
+        &mut model.package_rows,
+        &mut notes,
+        &[(
+            PACKAGE_SURGE_XT.to_string(),
+            "rate limit exceeded".to_string(),
+        )],
+    );
+
+    let surge = model
+        .package_rows
+        .iter()
+        .find(|row| row.package_id == PACKAGE_SURGE_XT)
+        .unwrap();
+    assert_no_build_row(
+        surge,
+        "no version for 32-bit REAPER",
+        "For 32-bit REAPER there is no version of {package}, so RABBIT can't install it here.",
+    );
+    assert!(notes.is_empty(), "{notes:?}");
+}
+
+/// The Uninstall tab doesn't ask about builds: FFmpeg installed in a 32-bit
+/// REAPER can still be uninstalled, while the Install tab can't offer it.
+#[test]
+fn the_uninstall_tab_still_offers_a_package_without_a_build() {
+    use rabbit_core::receipt::{
+        InstallState, InstalledFileReceipt, PackageReceipt, save_install_state,
+    };
+    use rabbit_core::uninstall::{NoMacosObjects, NothingListed};
+
+    let dir = tempdir().unwrap();
+    let resource = dir.path().join("REAPER");
+    let plugins = resource.join("UserPlugins");
+    std::fs::create_dir_all(&plugins).unwrap();
+    std::fs::write(plugins.join("avformat-62.dll"), b"ffmpeg").unwrap();
+    let mut state = InstallState::default();
+    state.packages.insert(
+        PACKAGE_FFMPEG.to_string(),
+        PackageReceipt {
+            id: PACKAGE_FFMPEG.to_string(),
+            version: Some(Version::parse("8.0").unwrap()),
+            variant: None,
+            channel: None,
+            source_url: None,
+            source_sha256: None,
+            installed_files: vec![InstalledFileReceipt {
+                path: "UserPlugins/avformat-62.dll".into(),
+                sha256: None,
+                size: None,
+            }],
+            installed_at: None,
+            rabbit_version: None,
+            architecture: Some(Architecture::X64),
+            vendor_added_files: Vec::new(),
+        },
+    );
+    save_install_state(&resource, &state).unwrap();
+    let model = every_package_updated(Platform::Windows, Architecture::X86);
+    let target = TargetRow {
+        architecture: Architecture::X86,
+        ..custom_portable_target_row(&model, resource.clone(), true)
+    };
+
+    let plan = wizard_package_plan_for_target(&model, Some(&target)).unwrap();
+    let install_row = plan
+        .package_rows
+        .iter()
+        .find(|row| row.package_id == PACKAGE_FFMPEG)
+        .unwrap();
+    assert!(!install_row.available_for_target);
+    let list = uninstall_list_with_roots(
+        &model,
+        &target,
+        &fixture_roots(Platform::Windows, &resource, dir.path()),
+        &plan.detections,
+        &NothingListed,
+        &NoMacosObjects,
+    );
+    let uninstall_row = list
+        .rows
+        .iter()
+        .find(|row| row.package_id == PACKAGE_FFMPEG)
+        .expect("the Uninstall tab lists the installed FFmpeg");
+    assert!(uninstall_row.can_tick, "{uninstall_row:?}");
+}
+
+/// No build for the REAPER comes before every other reason a row gives,
+/// leaving LReaParams to ReaPack included: on a 32-bit REAPER its row says
+/// there is no version for it, whether ReaPack's records name it or can't be
+/// read, and its details say so first, then still say what ReaPack's
+/// records mean for it. A failed version check changes neither, and Review
+/// gets no note.
+#[test]
+fn no_build_comes_before_leaving_a_package_to_reapack() {
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    for (left, reapack_sentence) in [
+        (
+            LeftToReapack::Managed {
+                reapack_package: "LReaParams.ext".to_string(),
+            },
+            "ReaPack's records say it installed LReaParams as LReaParams.ext, so RABBIT leaves \
+             it to ReaPack. Install, update or remove it in ReaPack.",
+        ),
+        (
+            LeftToReapack::RecordsUnreadable {
+                error: "file is not a database".to_string(),
+            },
+            "RABBIT couldn't read ReaPack's records (file is not a database), so it can't tell \
+             whether ReaPack installed LReaParams, and doesn't install, update or remove it.",
+        ),
+    ] {
+        let mut model = lreaparams_left_to_reapack_on(&localizer, left, Architecture::X86);
+        let row = &model.package_rows[0];
+        assert!(row.left_to_reapack && !row.has_build_for_target, "{row:?}");
+        assert_no_build_row(
+            row,
+            "no version for 32-bit REAPER",
+            "For 32-bit REAPER there is no version of {package}, so RABBIT can't install it here.",
+        );
+        assert!(!row.summary.contains("ReaPack"), "{}", row.summary);
+        let (no_build, rest) = row
+            .details
+            .strip_prefix(&format!("{}\n\n", row.summary))
+            .and_then(|details| details.split_once("\n\n"))
+            .unwrap();
+        assert!(no_build.starts_with("For 32-bit REAPER"), "{}", row.details);
+        assert!(rest.starts_with(reapack_sentence), "{}", row.details);
+        assert!(!model.controls.can_install);
+
+        let before = model.package_rows.clone();
+        let mut notes = Vec::new();
+        apply_version_check_failures_to_rows(
+            &localizer,
+            &mut model.package_rows,
+            &mut notes,
+            &[(
+                PACKAGE_LREAPARAMS.to_string(),
+                "GitHub's rate limit was reached".to_string(),
+            )],
+        );
+        assert_eq!(model.package_rows, before);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    // On a 64-bit REAPER, ReaPack's reason is the row's own again.
+    let model = lreaparams_left_to_reapack_on(
+        &localizer,
+        LeftToReapack::Managed {
+            reapack_package: "LReaParams.ext".to_string(),
+        },
+        Architecture::X64,
+    );
+    assert!(model.package_rows[0].has_build_for_target);
+    assert_eq!(
+        model.package_rows[0].unavailability_reason.as_deref(),
+        Some("managed by ReaPack")
+    );
+}
+
+/// The sentences about a copy of app2clap in the CLAP folder say what
+/// installing, updating or reinstalling app2clap here does. app2clap has no
+/// build for a 32-bit REAPER, so none of that can happen there: its row and
+/// Review say nothing about the copy, on a portable REAPER and on the
+/// standard one, and its details start with why it isn't available. A row
+/// RABBIT leaves to ReaPack gets no such sentence either.
+#[test]
+fn a_copy_in_the_clap_folder_is_not_told_without_a_build() {
+    let dir = tempdir().unwrap();
+    let localizer = Localizer::embedded(DEFAULT_LOCALE).unwrap();
+    let model = every_package_updated(Platform::Windows, Architecture::X64);
+    let portable = TargetRow {
+        architecture: Architecture::X86,
+        ..custom_portable_target_row(&model, dir.path().join("PortableREAPER"), true)
+    };
+    let standard = TargetRow {
+        portable: false,
+        ..portable.clone()
+    };
+    let in_clap = |spec: &rabbit_core::package::PackageSpec| {
+        if spec.id == PACKAGE_APP2CLAP {
+            vec![std::path::PathBuf::from("C:/CLAP/app2clap.clap")]
+        } else {
+            Vec::new()
+        }
+    };
+    {
+        let _seam = crate::wizard::packages::former_copies_seam::install(in_clap);
+        for target in [&portable, &standard] {
+            let rows = wizard_package_plan_for_target(&model, Some(target))
+                .unwrap()
+                .package_rows;
+            let app2clap = rows
+                .iter()
+                .find(|row| row.package_id == PACKAGE_APP2CLAP)
+                .unwrap();
+            assert_no_build_row(
+                app2clap,
+                "no version for 32-bit REAPER",
+                "For 32-bit REAPER there is no version of {package}, so RABBIT can't install it here.",
+            );
+            assert_eq!(app2clap.former_copy_review_note, None);
+            assert!(
+                !app2clap.details.contains("CLAP folder"),
+                "{}",
+                app2clap.details
+            );
+            assert!(rows.iter().all(|row| row.former_copy_review_note.is_none()));
+        }
+    }
+
+    // Asked directly, the rule leaves a row without a build, and one left to
+    // ReaPack, as they are, while it notes the same row with a build.
+    let specs = builtin_package_specs(Platform::Windows);
+    let x64_standard = TargetRow {
+        architecture: Architecture::X64,
+        ..standard
+    };
+    let rows = wizard_package_plan_for_target(&model, Some(&x64_standard))
+        .unwrap()
+        .package_rows;
+    let index = rows
+        .iter()
+        .position(|row| row.package_id == PACKAGE_APP2CLAP)
+        .unwrap();
+    let mut noted = rows.clone();
+    crate::wizard::packages::note_copies_in_former_outside_folders(
+        &localizer, &mut noted, &specs, false, &in_clap,
+    );
+    assert!(noted[index].former_copy_review_note.is_some());
+    for change in [
+        (|row: &mut PackageRow| row.has_build_for_target = false) as fn(&mut PackageRow),
+        |row: &mut PackageRow| row.left_to_reapack = true,
+    ] {
+        let mut changed = rows.clone();
+        change(&mut changed[index]);
+        let before = changed.clone();
+        crate::wizard::packages::note_copies_in_former_outside_folders(
+            &localizer,
+            &mut changed,
+            &specs,
+            false,
+            &in_clap,
+        );
+        assert_eq!(changed, before);
+    }
 }

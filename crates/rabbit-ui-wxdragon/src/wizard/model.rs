@@ -324,28 +324,40 @@ pub struct PackageRow {
     pub manual_attention_expected: bool,
     /// `false` when this package can't be installed against the currently
     /// selected target — the row is shown but its checkbox is disabled and
-    /// the row label carries a localized indicator. Today only true → false
-    /// flip is "JAWS-for-REAPER scripts on a portable REAPER target", since
-    /// the NSIS installer hard-codes `%APPDATA%\REAPER\UserPlugins\` and
-    /// can't honor the portable destination.
+    /// the row label carries a localized indicator. That is a package that
+    /// installs outside any portable REAPER folder on a portable target, one
+    /// with no build for the target REAPER's architecture, such as FFmpeg
+    /// for a 32-bit REAPER, one RABBIT leaves to ReaPack, and one whose
+    /// version check failed. When more than one of these holds, the label
+    /// gives the first in this order: no build, left to ReaPack, portable
+    /// target, failed version check.
     pub available_for_target: bool,
     /// Localized reason matching `available_for_target == false`. `None`
     /// when the row is available.
     pub unavailability_reason: Option<String>,
+    /// `false` when the package has no build for the target REAPER's
+    /// architecture. The row is then unavailable for that reason, which
+    /// neither a copy left to ReaPack, a portable target nor a failed
+    /// version check replaces.
+    pub has_build_for_target: bool,
     /// Which group of the wizard's tree this row belongs to ("Packages",
     /// "Instruments", ...). Mirrors the package spec's category.
     pub category: PackageCategory,
     /// Mirrors the spec's `requires_standard_install`: when `true`, the row is
     /// disabled on a portable REAPER target (the package installs to a fixed
-    /// location outside any portable folder).
+    /// location outside any portable folder). A failed version check
+    /// doesn't replace that reason, as no run installs the package there.
     pub requires_standard_install: bool,
     /// The channel the available build is on; `None` is the regular release.
     pub available_channel: Option<String>,
     /// The channel the installed build came from, as its receipt recorded it.
     pub installed_channel: Option<String>,
     /// `true` when the plan leaves this package to ReaPack. The row can't be
-    /// ticked and says why, and a failed version check leaves it as it is:
-    /// RABBIT wouldn't install or update the package either way.
+    /// ticked and says why, and neither a portable target nor a failed
+    /// version check changes that reason: RABBIT wouldn't install or update
+    /// the package either way. A package with no build for the target
+    /// REAPER gives that reason instead, and its details still say that
+    /// ReaPack looks after it.
     pub left_to_reapack: bool,
     /// What Review says when the row is ticked while a copy of the package
     /// sits in a folder every REAPER loads, such as an app2clap in the CLAP

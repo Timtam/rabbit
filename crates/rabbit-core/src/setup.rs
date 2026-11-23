@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::artifact::ArtifactDescriptor;
+use crate::artifact::{ArtifactDescriptor, dispatch_architecture, packages_without_build};
 use crate::cancel::CancelToken;
 use crate::configuration::{
     ConfigurationStatus, ConfigurationStepReport, apply_configuration_step,
     builtin_configuration_steps, skipped_step_report,
 };
 use crate::detection::detect_components;
+use crate::error::RabbitError;
 use crate::model::{Architecture, Platform};
 use crate::operation::{
     PackageOperationOptions, PackageOperationReport, execute_package_operation_with_progress,
@@ -128,6 +129,25 @@ pub fn execute_setup_operation_with_progress(
     progress: &ProgressReporter,
     cancel: &CancelToken,
 ) -> Result<SetupReport> {
+    // A package with no build for this REAPER would stop the run once its
+    // download can't be found, after the resource folder was prepared. The
+    // wizard and the CLI never ask for one; refuse it before anything
+    // changes all the same.
+    if let Some(package_id) = packages_without_build(
+        package_ids,
+        platform,
+        architecture,
+        &options.package_channels,
+    )
+    .into_iter()
+    .next()
+    {
+        return Err(RabbitError::NoArtifactFound {
+            package_id,
+            platform,
+            architecture: dispatch_architecture(architecture),
+        });
+    }
     let resource_init = initialize_resource_path(
         resource_path,
         &ResourceInitOptions {
@@ -515,6 +535,54 @@ mod tests {
         );
     }
 
+    /// Asked for a package with no build for the REAPER, setup refuses
+    /// before it prepares the resource folder or goes online.
+    #[test]
+    fn a_package_without_a_build_is_refused_before_anything_changes() {
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let resource_path = dir.path().join("PortableREAPER");
+
+        let error = super::execute_setup_operation(
+            &resource_path,
+            &[
+                PACKAGE_REAPER.to_string(),
+                crate::package::PACKAGE_SURGE_XT.to_string(),
+            ],
+            Platform::Windows,
+            Architecture::X86,
+            cache.path(),
+            &SetupOptions {
+                dry_run: false,
+                portable: true,
+                allow_reaper_running: true,
+                stage_unsupported: false,
+                replace_osara_keymap: false,
+                target_app_path: None,
+                lock_path: None,
+                force_reinstall_packages: Vec::new(),
+                package_variants: Default::default(),
+                package_channels: Default::default(),
+                reaper_language_package: None,
+                configuration_step_ids: Vec::new(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                &error,
+                crate::RabbitError::NoArtifactFound {
+                    package_id,
+                    architecture: Architecture::X86,
+                    ..
+                } if package_id == crate::package::PACKAGE_SURGE_XT
+            ),
+            "{error}"
+        );
+        assert!(!resource_path.exists());
+    }
+
     #[test]
     fn apply_creates_resource_layout_and_installs_extension() {
         let dir = tempdir().unwrap();
@@ -669,6 +737,80 @@ mod tests {
         assert_eq!(
             state.applied_configuration[CONFIG_REAPER_ACCESSIBILITY_REPACK_REMOTE].outcome,
             AppliedConfigurationOutcome::Added
+        );
+    }
+
+    /// Selecting the ReaWarp step by its id runs just that step: it adds
+    /// ReaWarp's repository to `reapack.ini` and records it, every other
+    /// step reports itself skipped, and without ReaPack it is skipped for
+    /// the missing dependency instead.
+    #[test]
+    fn the_reawarp_step_runs_when_selected_by_its_id() {
+        use super::run_configuration_steps;
+        use crate::cancel::CancelToken;
+        use crate::configuration::{CONFIG_REAWARP_REMOTE, ConfigurationStatus};
+        use crate::progress::ProgressReporter;
+        use crate::reapack::REAPACK_INI_RELATIVE_PATH;
+        use crate::receipt::{ReapackRepository, load_install_state};
+        use std::collections::BTreeSet;
+
+        let reawarp_url = "https://github.com/gabrielschuck/reawarp/raw/main/index.xml";
+        let dir = tempdir().unwrap();
+        let selected = vec![CONFIG_REAWARP_REMOTE.to_string()];
+        let run = |installed: &BTreeSet<String>, dry_run| {
+            run_configuration_steps(
+                dir.path(),
+                &selected,
+                installed,
+                &Default::default(),
+                dry_run,
+                &ProgressReporter::noop(),
+                &CancelToken::new(),
+            )
+            .unwrap()
+        };
+        let status_of = |reports: &[crate::configuration::ConfigurationStepReport], id: &str| {
+            reports
+                .iter()
+                .find(|report| report.step_id == id)
+                .unwrap_or_else(|| panic!("no report for {id}"))
+                .status
+        };
+
+        let reports = run(&BTreeSet::new(), false);
+        assert_eq!(
+            status_of(&reports, CONFIG_REAWARP_REMOTE),
+            ConfigurationStatus::SkippedDependencyMissing
+        );
+        assert!(!dir.path().join(REAPACK_INI_RELATIVE_PATH).exists());
+
+        let reapack: BTreeSet<String> = [PACKAGE_REAPACK.to_string()].into();
+        let reports = run(&reapack, true);
+        assert_eq!(
+            status_of(&reports, CONFIG_REAWARP_REMOTE),
+            ConfigurationStatus::DryRun
+        );
+        assert!(!dir.path().join(REAPACK_INI_RELATIVE_PATH).exists());
+
+        let reports = run(&reapack, false);
+        for report in &reports {
+            let expected = if report.step_id == CONFIG_REAWARP_REMOTE {
+                ConfigurationStatus::Applied
+            } else {
+                ConfigurationStatus::Skipped
+            };
+            assert_eq!(report.status, expected, "{}", report.step_id);
+        }
+        let ini = std::fs::read_to_string(dir.path().join(REAPACK_INI_RELATIVE_PATH)).unwrap();
+        assert_eq!(ini.matches(reawarp_url).count(), 1, "{ini}");
+
+        let state = load_install_state(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            state.applied_configuration[CONFIG_REAWARP_REMOTE].reapack_repository,
+            Some(ReapackRepository {
+                name: "reawarp".to_string(),
+                url: reawarp_url.to_string(),
+            })
         );
     }
 

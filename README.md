@@ -118,6 +118,17 @@ LSampler-24 under **Instruments** and app2clap and LReaParams under
 **Tools**, after the main **Packages** group and before **Language packs**;
 the Uninstall tab uses the same groups.
 
+Not every package has a version for every REAPER: FFmpeg, Surge XT,
+app2clap, LReaParams and Lo-lo's instruments have none for a 32-bit REAPER,
+for example. The wizard still lists such a package, but its row can't be
+ticked and ends with "(not available: no version for 32-bit REAPER)", or "no
+version for this REAPER's processor type" for another kind of REAPER, such
+as one on Windows on ARM. The row's details say the same. This reason comes
+before any other the row could give, such as "managed by ReaPack"; the
+details still say when ReaPack looks after your copy. RABBIT goes by the
+REAPER you picked, or for a REAPER it is about to install, by the one it
+will install. Uninstalling isn't affected.
+
 ### Language packs
 
 RABBIT can also translate **REAPER itself** (not just its own wizard), by
@@ -193,6 +204,22 @@ configuration tweaks:
   ticked by default; if the repository is already configured in your
   `reapack.ini`, the step shows as *already applied* and is skipped.
   Idempotent and safe to re-run.
+- **Add the REAPER Accessible (FR) ReaPack repository to ReaPack**
+  (`https://github.com/reaperaccessible/rap_fr/raw/main/index.xml`), with
+  REAPER Accessible's French-language resources. Not ticked by default;
+  otherwise it works like the step above.
+- **Add the REAPER Accessible (EN) ReaPack repository to ReaPack**
+  (`https://github.com/reaperaccessible/rap_en/raw/main/index.xml`), with
+  REAPER Accessible's English-language resources. Ticked by default,
+  detected and safe to re-run like the first step.
+- **Add the ReaWarp ReaPack repository to ReaPack**
+  (`https://github.com/gabrielschuck/reawarp/raw/main/index.xml`).
+  [ReaWarp](https://github.com/gabrielschuck/reawarp), by Gabriel Schuck,
+  is a set of accessible scripts for audio warping, tempo maps, groove
+  matching and quantizing; its messages are in English, Portuguese or
+  Spanish. Ticked by default, detected and safe to re-run like the first
+  step. It only adds the repository: install ReaWarp afterwards in ReaPack
+  (Extensions, ReaPack, Browse packages), which then keeps it up to date.
 - **Set REAPER's language** to one of the language packs you're
   installing, by writing it into `reaper.ini`. A single step covers every
   language — which one it activates comes from the dropdown above. The step
@@ -718,7 +745,8 @@ for it with `--config-step set-reaper-language` to switch to a pack you
 installed earlier. Step ids today are
 `reapack-add-reaper-accessibility-remote`,
 `reapack-add-reaper-accessible-fr-remote`,
-`reapack-add-reaper-accessible-en-remote`, and
+`reapack-add-reaper-accessible-en-remote`,
+`reapack-add-reawarp-remote`, and
 `set-reaper-language` (one step for every language; it depends on at
 least one language pack being installed or in the plan).
 
@@ -742,6 +770,16 @@ by `apply-packages` and `setup` with a note, and naming it with `--package`
 in a run that installs takes it off that list, so later runs offer it again.
 A package you uninstalled but put back yourself, from the Trash or with its
 own installer, isn't skipped: those commands update it as usual.
+
+A package with no version for the REAPER you install for is skipped as
+well: `setup`, `apply-packages` and `plan` leave it out of their default list
+with a note, as they do with SWS for a new REAPER on Windows on ARM. Naming
+such a package with `--package` in `setup`, `apply-packages` or
+`install-extension`, such as FFmpeg, Surge XT or app2clap for a 32-bit
+REAPER, changes nothing: the command says why and exits with 2. Like the
+wizard, these commands go by the REAPER at the target, read from its program
+file, or for a REAPER they are about to install, by the one they will
+install. `--architecture` names another.
 
 ### Pre-release builds
 

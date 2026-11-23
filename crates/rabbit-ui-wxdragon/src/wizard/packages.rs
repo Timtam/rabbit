@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use rabbit_core::Result;
+use rabbit_core::artifact::{dispatch_architecture, package_has_build_for};
 use rabbit_core::detection::detect_components;
 use rabbit_core::localization::Localizer;
 use rabbit_core::model::{Architecture, LeftToReapack, Platform};
@@ -281,11 +282,15 @@ pub fn wizard_package_plan_for_target_with_available(
     let installed_channels = target
         .map(|target| rabbit_core::receipt::installed_channels_at(&target.path))
         .unwrap_or_default();
+    // The target's own architecture, which the install request hands to
+    // artifact resolution, rather than the one of the target the wizard
+    // opened on.
+    let architecture = target.map_or(model.architecture, |target| target.architecture);
     let mut package_rows = package_rows(
         &localizer,
         &model.text,
         model.platform,
-        model.architecture,
+        architecture,
         &package_specs,
         &plan.actions,
         available_packages,
@@ -304,10 +309,12 @@ pub fn wizard_package_plan_for_target_with_available(
     // the gate is data-driven rather than a hardcoded package-id list. Mark
     // those rows unavailable on a portable target so the checklist disables
     // their checkboxes and each row label carries a localized "(requires
-    // standard installation)" indicator.
+    // standard installation)" indicator. A row already unavailable because
+    // the package has no build for this REAPER, or because RABBIT leaves it
+    // to ReaPack, keeps that reason, which its details already explain.
     if target.is_some_and(|target| target.portable) {
         for row in &mut package_rows {
-            if row.requires_standard_install {
+            if row.requires_standard_install && row.has_build_for_target && !row.left_to_reapack {
                 mark_row_unavailable(&localizer, row, "wizard-package-row-unavailable-portable");
             }
         }
@@ -352,6 +359,10 @@ pub fn wizard_package_plan_for_target_with_available(
 /// summary. The row also gets the sentence Review says should it be
 /// ticked: on the standard REAPER that the copy moves into the backup, on a
 /// portable REAPER without the package that it will load two copies.
+/// A row RABBIT can't install here in any run, as the package has no build
+/// for this REAPER or is left to ReaPack, gets neither: each sentence is
+/// about what installing, updating or reinstalling it here does, and its
+/// details already say why that can't happen.
 /// `copies` gives a package's copies there; the wizard passes
 /// [`former_outside_copies`].
 pub(crate) fn note_copies_in_former_outside_folders(
@@ -362,6 +373,9 @@ pub(crate) fn note_copies_in_former_outside_folders(
     copies: &dyn Fn(&PackageSpec) -> Vec<PathBuf>,
 ) {
     for row in rows {
+        if !row.has_build_for_target || row.left_to_reapack {
+            continue;
+        }
         let Some(spec) = specs.iter().find(|spec| spec.id == row.package_id) else {
             continue;
         };
@@ -477,8 +491,10 @@ fn left_to_reapack_text(
 /// unreachable upstream (e.g. the SWS homepage being down) therefore
 /// disables just that package instead of blocking the whole update flow.
 ///
-/// A row RABBIT leaves to ReaPack keeps its own reason, and gets no note:
-/// RABBIT wouldn't install or update that package whatever the check found.
+/// A row that is already unavailable keeps its own reason, and gets no
+/// note: one with no build for this REAPER, one RABBIT leaves to ReaPack,
+/// and one that needs a standard installation on a portable target. RABBIT
+/// wouldn't install or update that package here whatever the check found.
 ///
 /// Returns the recomputed "at least one actionable Install/Update row is
 /// left" flag, which the caller should store as its can-install state.
@@ -492,7 +508,12 @@ pub fn apply_version_check_failures_to_rows(
         let row = package_rows
             .iter_mut()
             .find(|row| row.package_id == *package_id);
-        if row.as_ref().is_some_and(|row| row.left_to_reapack) {
+        // A row is already unavailable when the package has no build for
+        // this REAPER, when RABBIT leaves it to ReaPack, or when it needs a
+        // standard installation and the target is portable. No run installs
+        // or updates it here, and the row already says why: a failed
+        // version check gives it no other reason, and Review no note.
+        if row.as_ref().is_some_and(|row| !row.available_for_target) {
             continue;
         }
         if let Some(row) = row {
@@ -685,6 +706,23 @@ fn row_installs(action: PlanActionKind) -> bool {
     matches!(action, PlanActionKind::Install | PlanActionKind::Update)
 }
 
+/// The Fluent keys of the reason and the details sentence for a package with
+/// no build for a REAPER of `architecture`. A 32-bit REAPER is named as
+/// such; any other, on Windows on ARM or a Mac, by its processor type.
+fn no_build_keys(architecture: Architecture) -> (&'static str, &'static str) {
+    if dispatch_architecture(architecture) == Architecture::X86 {
+        (
+            "wizard-package-row-unavailable-32-bit",
+            "wizard-package-details-unavailable-32-bit",
+        )
+    } else {
+        (
+            "wizard-package-row-unavailable-processor",
+            "wizard-package-details-unavailable-processor",
+        )
+    }
+}
+
 /// A package row's one-line label: package, action and versions, then a tag
 /// when the build is not the regular release, or this run takes it back to
 /// one. Everything that changes a row's action rebuilds the label through
@@ -755,10 +793,22 @@ pub(crate) fn package_rows(
                 .map(|notes| (available.package_id.as_str(), notes))
         })
         .collect();
+    // Each package as it resolves on the channel its version was checked
+    // on, which is where the run would download it from.
+    let channels: rabbit_core::package::PackageChannels = channel_by_id
+        .iter()
+        .map(|(package_id, channel)| (package_id.to_string(), channel.to_string()))
+        .collect();
+    let specs_on_channels = rabbit_core::package::package_specs_by_id_on(platform, &channels);
     actions
         .iter()
         .map(|action| {
             let spec = specs_by_id.get(action.package_id.as_str()).copied();
+            // A package with no build for this REAPER is listed, but can't
+            // be ticked: resolving its download would stop the whole run.
+            let no_build = specs_on_channels
+                .get(action.package_id.as_str())
+                .is_some_and(|spec| !package_has_build_for(spec, platform, architecture));
             let display_name = spec
                 .map(|spec| localizer.text(&spec.display_name_key).value)
                 .unwrap_or_else(|| action.package_id.clone());
@@ -807,16 +857,18 @@ pub(crate) fn package_rows(
                         )
                 })
                 .unwrap_or(false);
-            let initially_selected = match action.action {
-                // Updates are ticked by default because a package you have
-                // should stay current. A language pack you turned down or
-                // removed is the exception. Someone who stopped using one
-                // and turned its update down would otherwise be offered it
-                // again, ticked, every time the translators publish a fix.
-                PlanActionKind::Update => !refuses_updates,
-                PlanActionKind::Install => recommended && !refused,
-                PlanActionKind::Keep => false,
-            };
+            let initially_selected = !no_build
+                && match action.action {
+                    // Updates are ticked by default because a package you
+                    // have should stay current. A language pack you turned
+                    // down or removed is the exception. Someone who stopped
+                    // using one and turned its update down would otherwise
+                    // be offered it again, ticked, every time the
+                    // translators publish a fix.
+                    PlanActionKind::Update => !refuses_updates,
+                    PlanActionKind::Install => recommended && !refused,
+                    PlanActionKind::Keep => false,
+                };
             // When the auto-tick rule leaves an Install/Update row unticked,
             // mirror what `apply_checkbox_state_to_package_row(checked=false)`
             // does on a manual untick: flip the *displayed* action to Keep so
@@ -874,6 +926,7 @@ pub(crate) fn package_rows(
                 manual_attention_expected,
                 available_for_target: true,
                 unavailability_reason: None,
+                has_build_for_target: !no_build,
                 category: spec.map(|spec| spec.category).unwrap_or_default(),
                 requires_standard_install: spec
                     .map(|spec| spec.requires_standard_install)
@@ -884,17 +937,36 @@ pub(crate) fn package_rows(
                 former_copy_review_note: None,
             };
             row.summary = package_row_summary(localizer, &row);
+            // The row says why in its label, and its details in a sentence.
+            // No build for this REAPER is the first reason a row gives:
+            // nothing else, not even a copy ReaPack looks after, would let
+            // RABBIT install the package here.
+            let no_build_sentence = no_build.then(|| {
+                let (reason_key, sentence_key) = no_build_keys(architecture);
+                mark_row_unavailable(localizer, &mut row, reason_key);
+                localizer
+                    .format(sentence_key, &[("package", display_name.as_str())])
+                    .value
+            });
             // A package ReaPack looks after can't be ticked: the plan keeps
-            // it, and the row and its details say why.
+            // it, and the row and its details say why. With no build for
+            // this REAPER, the label keeps that reason, and the details
+            // still say that ReaPack looks after the package.
             let reapack_sentence = action.left_to_reapack.as_ref().map(|left| {
                 let (reason_key, sentence) = left_to_reapack_text(localizer, left, &display_name);
-                mark_row_unavailable(localizer, &mut row, reason_key);
+                if !no_build {
+                    mark_row_unavailable(localizer, &mut row, reason_key);
+                }
                 sentence
             });
             let summary = &row.summary;
-            let details = match &channel_sentence {
+            let details = match &no_build_sentence {
                 Some(sentence) => format!("{summary}\n\n{sentence}"),
                 None => summary.clone(),
+            };
+            let details = match &channel_sentence {
+                Some(sentence) => format!("{details}\n\n{sentence}"),
+                None => details,
             };
             let details = match &reapack_sentence {
                 Some(sentence) => format!("{details}\n\n{sentence}"),

@@ -112,6 +112,10 @@ pub struct PackageSpec {
     /// see [`EmbeddedPackageSpec::leave_to_reapack`].
     pub leave_to_reapack: bool,
     pub supported_platforms: Vec<SupportedPlatform>,
+    /// The REAPER architectures this package has builds for. Artifact
+    /// resolution refuses any other, even where an asset for any
+    /// architecture would match, and the wizard and the CLI don't offer the
+    /// package for a REAPER of another architecture.
     pub supported_architectures: Vec<Architecture>,
     /// Data-driven latest-version rule. When set, the version is resolved by
     /// the generic engine from manifest data rather than per-package Rust. See
@@ -1912,11 +1916,14 @@ impl PackageSpec {
             .any(|supported| supported.matches_platform(platform))
     }
 
+    /// Whether the manifest lists `architecture` among the REAPER
+    /// architectures this package has builds for. `universal` in the list is
+    /// no wildcard: Surge XT lists it for macOS and still has no 32-bit
+    /// build. Pass the architecture artifact resolution dispatches on (see
+    /// [`crate::artifact::dispatch_architecture`]), which is never
+    /// `Universal`; [`crate::artifact::package_has_build_for`] does that.
     pub fn supports_architecture(&self, architecture: Architecture) -> bool {
         self.supported_architectures.contains(&architecture)
-            || self
-                .supported_architectures
-                .contains(&Architecture::Universal)
     }
 }
 

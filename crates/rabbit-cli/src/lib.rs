@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use rabbit_core::artifact::{
-    ArtifactDescriptor, CachedArtifact, default_cache_dir, download_artifacts,
-    resolve_latest_artifacts_on,
+    ArtifactDescriptor, CachedArtifact, default_cache_dir, dispatch_architecture,
+    download_artifacts, packages_without_build, resolve_latest_artifacts_on,
 };
 use rabbit_core::backup_delete::{
     DeleteItem, DeletePart, DeleteReport, DeleteReportItem, DeleteRunOptions, DeleteStatus,
@@ -15,7 +15,9 @@ use rabbit_core::backup_overview::{
     BackupStatus, RestoreScope, backup_overview, backup_overview_of,
 };
 use rabbit_core::cancel::CancelToken;
-use rabbit_core::detection::{DiscoveryOptions, detect_components, discover_installations};
+use rabbit_core::detection::{
+    DiscoveryOptions, detect_components, discover_installations, target_reaper_architecture,
+};
 use rabbit_core::install::{
     InstallFileAction, InstallFileReport, InstallOptions, InstallReport, ReaperLanguageReport,
     install_cached_artifacts,
@@ -414,8 +416,9 @@ enum Command {
         /// uninstalled or turned down takes it off that list.
         #[arg(long, required = true)]
         package: Vec<String>,
-        /// Install for this architecture instead of the one detected for the
-        /// host.
+        /// Install for a REAPER of this architecture instead of the one read
+        /// from the target REAPER's program file, or, with no REAPER there
+        /// yet, the one RABBIT will install.
         #[arg(long, value_enum)]
         architecture: Option<CliArchitecture>,
         /// Where downloads are cached. Defaults to RABBIT's own folder inside
@@ -472,8 +475,9 @@ enum Command {
         /// installs it and takes it off that list.
         #[arg(long)]
         package: Vec<String>,
-        /// Install for this architecture instead of the one detected for the
-        /// host.
+        /// Install for a REAPER of this architecture instead of the one read
+        /// from the target REAPER's program file, or, with no REAPER there
+        /// yet, the one RABBIT will install.
         #[arg(long, value_enum)]
         architecture: Option<CliArchitecture>,
         /// Where downloads are cached. Defaults to RABBIT's own folder inside
@@ -555,8 +559,9 @@ enum Command {
         /// installs it and takes it off that list.
         #[arg(long)]
         package: Vec<String>,
-        /// Install for this architecture instead of the one detected for the
-        /// host.
+        /// Install for a REAPER of this architecture instead of the one read
+        /// from the target REAPER's program file, or, with no REAPER there
+        /// yet, the one RABBIT will install.
         #[arg(long, value_enum)]
         architecture: Option<CliArchitecture>,
         /// Where downloads are cached. Defaults to RABBIT's own folder inside
@@ -955,13 +960,42 @@ fn run_args(args: Vec<std::ffi::OsString>) -> Result<(), Box<dyn std::error::Err
             let cli = Cli::parse_from(args)
                 .checked()
                 .unwrap_or_else(|error| error.exit());
-            run_with(cli).map_err(|error| error.to_string())
+            run_with(cli).map_err(|error| (error.to_string(), refusal_exit_code(error.as_ref())))
         })?
         .join()
         // A panic carries on as if it had happened on the calling thread.
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-    outcome.map_err(Into::into)
+    match outcome {
+        Ok(()) => Ok(()),
+        Err((message, Some(code))) => {
+            eprintln!("{message}");
+            std::process::exit(code)
+        }
+        Err((message, None)) => Err(message.into()),
+    }
 }
+
+/// The exit code for an `error` that refused a run before anything changed:
+/// 2 for a package named with `--package` that has no build for the REAPER,
+/// as `uninstall` uses for a package it can't remove. `None` for any other
+/// error, which ends the CLI as errors usually do.
+fn refusal_exit_code(error: &(dyn std::error::Error + 'static)) -> Option<i32> {
+    error.is::<NoBuildRefusal>().then_some(2)
+}
+
+/// A run refused before it changed anything, because a package named with
+/// `--package` has no build for the REAPER it would install for. The CLI
+/// exits with 2 for it, as `uninstall` does for a package it can't remove.
+#[derive(Debug)]
+struct NoBuildRefusal(String);
+
+impl std::fmt::Display for NoBuildRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NoBuildRefusal {}
 
 /// Each command runs in a function of its own. As arms of one match, a
 /// debug build gave every command's locals a slot in the same stack frame,
@@ -2237,10 +2271,18 @@ fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Err
     };
     ensure_reapack_donation_acknowledged(&package, accept_reapack_donation_notice)?;
     let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
-    let architecture = architecture.map_or_else(Architecture::current, Into::into);
+    let architecture = architecture.map_or_else(
+        || target_reaper_architecture(platform, &resource_path, target_app_path.as_deref()),
+        Into::into,
+    );
+    let channels = effective_package_channels(Some(&resource_path), &package, &package_channel)?;
+    let mut package = package;
+    keep_packages_with_builds(&mut package, true, platform, architecture, &channels)?;
     // A copy ReaPack looks after stays as it is even when named here, as
     // in `apply-packages`. Asked before anything is resolved, so nothing is
-    // looked up or downloaded for it.
+    // looked up or downloaded for it. A named package with no build for
+    // this REAPER is refused above even so, as `apply-packages` refuses it
+    // before its install pipeline would skip one left to ReaPack.
     let package = without_packages_left_to_reapack(&resource_path, platform, package);
     if package.is_empty() {
         eprintln!("note: nothing left to install.");
@@ -2289,7 +2331,6 @@ fn run_install_extension(command: Command) -> Result<(), Box<dyn std::error::Err
         }
         return Ok(());
     }
-    let channels = effective_package_channels(Some(&resource_path), &package, &package_channel)?;
     let artifacts = resolve_latest_artifacts_on(&package, platform, architecture, &channels)?;
     warn_channel_fallbacks(&channels, artifact_channels(&artifacts));
     // Without --apply, nothing is downloaded: every other command
@@ -2441,13 +2482,27 @@ fn run_apply_packages(command: Command) -> Result<(), Box<dyn std::error::Error>
         unreachable!("dispatched as Command::ApplyPackages");
     };
     let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
-    let architecture = architecture.map_or_else(Architecture::current, Into::into);
-    let selection = select_packages(package, Some((&resource_path, platform)));
+    let architecture = architecture.map_or_else(
+        || target_reaper_architecture(platform, &resource_path, target_app_path.as_deref()),
+        Into::into,
+    );
+    let mut selection = select_packages(package, Some((&resource_path, platform)));
     note_skipped_packages(&selection, platform);
+    let channels = effective_package_channels(
+        Some(&resource_path),
+        &selection.package_ids,
+        &package_channel,
+    )?;
+    keep_packages_with_builds(
+        &mut selection.package_ids,
+        selection.named,
+        platform,
+        architecture,
+        &channels,
+    )?;
     let packages = selection.package_ids.clone();
     ensure_reapack_donation_acknowledged(&packages, accept_reapack_donation_notice)?;
     let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
-    let channels = effective_package_channels(Some(&resource_path), &packages, &package_channel)?;
     let keymap = osara_keymap_choice(
         &resource_path,
         platform,
@@ -2525,9 +2580,24 @@ fn run_setup(command: Command) -> Result<(), Box<dyn std::error::Error>> {
         unreachable!("dispatched as Command::Setup");
     };
     let platform = Platform::current().ok_or(rabbit_core::RabbitError::UnsupportedPlatform)?;
-    let architecture = architecture.map_or_else(Architecture::current, Into::into);
-    let selection = select_packages(package, Some((&resource_path, platform)));
+    let architecture = architecture.map_or_else(
+        || target_reaper_architecture(platform, &resource_path, target_app_path.as_deref()),
+        Into::into,
+    );
+    let mut selection = select_packages(package, Some((&resource_path, platform)));
     note_skipped_packages(&selection, platform);
+    let channels = effective_package_channels(
+        Some(&resource_path),
+        &selection.package_ids,
+        &package_channel,
+    )?;
+    keep_packages_with_builds(
+        &mut selection.package_ids,
+        selection.named,
+        platform,
+        architecture,
+        &channels,
+    )?;
     let packages = selection.package_ids.clone();
     ensure_reapack_donation_acknowledged(&packages, accept_reapack_donation_notice)?;
     let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
@@ -2538,7 +2608,6 @@ fn run_setup(command: Command) -> Result<(), Box<dyn std::error::Error>> {
         &config_step,
         &skip_config_step,
     );
-    let channels = effective_package_channels(Some(&resource_path), &packages, &package_channel)?;
     let keymap = osara_keymap_choice(
         &resource_path,
         platform,
@@ -2936,9 +3005,18 @@ fn run_plan(command: Command) -> Result<(), Box<dyn std::error::Error>> {
         None => Vec::new(),
     };
 
-    let desired = default_desired_package_ids();
+    let mut desired = default_desired_package_ids();
     let channels =
         effective_package_channels(detection_path.as_deref(), &desired, &package_channel)?;
+    // The REAPER the plan is for, read as the install commands and the
+    // wizard read it. Without one, the REAPER RABBIT would install.
+    let architecture = match (&target, detection_path.as_deref()) {
+        (Some(target), _) => target.architecture.unwrap_or(Architecture::Unknown),
+        (None, Some(path)) => target_reaper_architecture(platform, path, None),
+        (None, None) => Architecture::Unknown,
+    };
+    let left_out =
+        leave_out_packages_without_builds(&mut desired, platform, architecture, &channels);
     let (available, version_check_failures) = if online {
         let report = fetch_latest_versions_on(&channels)?;
         (report.packages, report.failures)
@@ -2956,6 +3034,7 @@ fn run_plan(command: Command) -> Result<(), Box<dyn std::error::Error>> {
         &available,
         &installed_channels,
     );
+    plan.notes.extend(left_out);
     // Surface per-provider failures as plan notes instead of failing
     // the whole plan: one unreachable upstream shouldn't block update
     // guidance for everything else.
@@ -3106,6 +3185,130 @@ fn note_skipped_packages(selection: &PackageSelection, platform: Platform) {
              to install it."
         );
     }
+}
+
+/// Take the packages with no build for a REAPER of `architecture` out of
+/// `package_ids`, as the wizard greys them out. Left out of the default
+/// list, each gets a note on stderr. One the user `named` with `--package`
+/// is refused instead, before anything changes, so a run never stops
+/// halfway on a download that can't be found.
+fn keep_packages_with_builds(
+    package_ids: &mut Vec<String>,
+    named: bool,
+    platform: Platform,
+    architecture: Architecture,
+    channels: &PackageChannels,
+) -> Result<(), NoBuildRefusal> {
+    let without = packages_without_build(package_ids, platform, architecture, channels);
+    if without.is_empty() {
+        return Ok(());
+    }
+    if named {
+        let others_named = package_ids.len() > without.len();
+        return Err(NoBuildRefusal(no_build_refusal_text(
+            &without,
+            others_named,
+            platform,
+            architecture,
+        )));
+    }
+    for reason in no_build_reasons(&without, platform, architecture) {
+        eprintln!("note: skipping {reason}.");
+    }
+    package_ids.retain(|id| !without.contains(id));
+    Ok(())
+}
+
+/// What `plan` does with the packages that have no build for a REAPER of
+/// `architecture`: takes them out of `package_ids` and returns a plan note
+/// for each, such as "Skipping SWS Extension: it has no version for REAPER
+/// on arm64."
+fn leave_out_packages_without_builds(
+    package_ids: &mut Vec<String>,
+    platform: Platform,
+    architecture: Architecture,
+    channels: &PackageChannels,
+) -> Vec<String> {
+    let without = packages_without_build(package_ids, platform, architecture, channels);
+    package_ids.retain(|id| !without.contains(id));
+    no_build_reasons(&without, platform, architecture)
+        .into_iter()
+        .map(|reason| format!("Skipping {reason}."))
+        .collect()
+}
+
+/// How the CLI names a REAPER of `architecture`, by the architecture
+/// artifact resolution uses for it: "32-bit REAPER (x86)", or
+/// "REAPER on arm64".
+fn reaper_architecture_text(architecture: Architecture) -> String {
+    match dispatch_architecture(architecture) {
+        Architecture::X86 => "32-bit REAPER (x86)".to_string(),
+        other => format!("REAPER on {}", serialized_name(&other)),
+    }
+}
+
+/// The name `platform`'s manifest gives `package_id`, or the id itself.
+fn package_display_name(platform: Platform, package_id: &str) -> String {
+    builtin_package_specs(platform)
+        .into_iter()
+        .find(|spec| spec.id == package_id)
+        .map_or_else(|| package_id.to_string(), |spec| spec.display_name)
+}
+
+/// For each of `package_ids`, its name and why it is left out, such as
+/// "FFmpeg: it has no version for 32-bit REAPER (x86)".
+fn no_build_reasons(
+    package_ids: &[String],
+    platform: Platform,
+    architecture: Architecture,
+) -> Vec<String> {
+    let reaper = reaper_architecture_text(architecture);
+    package_ids
+        .iter()
+        .map(|id| {
+            format!(
+                "{}: it has no version for {reaper}",
+                package_display_name(platform, id)
+            )
+        })
+        .collect()
+}
+
+/// Why a run that names `package_ids` with `--package` is refused: none of
+/// them has a build for a REAPER of `architecture`. Only when `others_named`,
+/// other packages the run named are left to install, does it say to run the
+/// command again without these.
+fn no_build_refusal_text(
+    package_ids: &[String],
+    others_named: bool,
+    platform: Platform,
+    architecture: Architecture,
+) -> String {
+    let names: Vec<String> = package_ids
+        .iter()
+        .map(|id| package_display_name(platform, id))
+        .collect();
+    let (has, them) = if package_ids.len() == 1 {
+        ("has", "it")
+    } else {
+        ("have", "them")
+    };
+    let refusal = format!(
+        "{} {has} no version for {}, so RABBIT can't install {them}. Nothing was changed.",
+        names_in_a_sentence(&names),
+        reaper_architecture_text(architecture),
+    );
+    if !others_named {
+        return refusal;
+    }
+    let flags: Vec<String> = package_ids
+        .iter()
+        .map(|id| format!("--package {id}"))
+        .collect();
+    format!(
+        "{refusal} To install the others, run the command again without {}.",
+        flags.join(" ")
+    )
 }
 
 /// A package named with `--package` is the user saying they want it, so a
@@ -8414,6 +8617,73 @@ mod tests {
         assert!(!resource.join("RABBIT").exists());
     }
 
+    /// `install-extension` asks whether a named package has a build for the
+    /// REAPER before it asks ReaPack's records, as `apply-packages` refuses
+    /// one before its install pipeline would skip it: LReaParams, which has
+    /// no build for a 32-bit REAPER, is refused with exit code 2 even where
+    /// ReaPack looks after it, whatever else is named, and nothing changes.
+    /// For a 64-bit REAPER, the same copy is left to ReaPack as before.
+    /// LReaParams is Windows only.
+    #[cfg(windows)]
+    #[test]
+    fn install_extension_refuses_a_package_without_a_build_before_asking_reapack() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let plugins = resource.join("UserPlugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(plugins.join("reaper_reapack-x64.dll"), b"ReaPack").unwrap();
+        let dll = plugins.join("reaper_lreaparams.dll");
+        std::fs::write(&dll, b"LReaParams from ReaPack").unwrap();
+        rabbit_core::reapack::write_test_registry(
+            &resource,
+            &[(
+                "LReaParams.ext",
+                "0.0.70",
+                &["UserPlugins/reaper_lreaparams.dll"],
+            )],
+        );
+        let cache = dir.path().join("cache");
+        let run = |packages: &[&str], architecture| {
+            super::run_install_extension(super::Command::InstallExtension {
+                resource_path: resource.clone(),
+                target_app_path: None,
+                package: packages.iter().map(ToString::to_string).collect(),
+                architecture: Some(architecture),
+                cache_dir: Some(cache.clone()),
+                apply: true,
+                allow_reaper_running: true,
+                accept_reapack_donation_notice: false,
+                report_path: None,
+                save_report: false,
+                json: true,
+                package_channel: Vec::new(),
+            })
+        };
+
+        let refused = "LReaParams has no version for 32-bit REAPER (x86), so RABBIT can't \
+                       install it. Nothing was changed.";
+        for (packages, message) in [
+            (&["lreaparams"][..], refused.to_string()),
+            (
+                &["osara", "lreaparams"][..],
+                format!(
+                    "{refused} To install the others, run the command again without \
+                     --package lreaparams."
+                ),
+            ),
+        ] {
+            let error = run(packages, super::CliArchitecture::X86).unwrap_err();
+            assert_eq!(super::refusal_exit_code(error.as_ref()), Some(2), "{error}");
+            assert_eq!(error.to_string(), message);
+        }
+
+        run(&["lreaparams"], super::CliArchitecture::X64).unwrap();
+
+        assert_eq!(std::fs::read(&dll).unwrap(), b"LReaParams from ReaPack");
+        assert!(!cache.exists(), "nothing was downloaded");
+        assert!(!resource.join("RABBIT").exists());
+    }
+
     /// In a debug build, clap's parser alone takes more than the 1 MB of
     /// stack Windows gives the main thread, so the CLI runs on a thread of
     /// its own. Parse and run a command the whole way through it.
@@ -8445,6 +8715,295 @@ mod tests {
         assert!(
             lines[0].starts_with("osara: nothing to install from pr:1"),
             "{lines:?}"
+        );
+    }
+
+    /// A package named with `--package` that has no build for the REAPER a
+    /// run installs for is refused before anything changes, by `setup`,
+    /// `apply-packages` and `install-extension` alike. Surge XT has no
+    /// 32-bit build on either platform. The resource folder isn't even made.
+    #[test]
+    fn a_named_package_without_a_build_is_refused_before_anything_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        let path = resource.to_string_lossy().into_owned();
+        for command in ["setup", "apply-packages", "install-extension"] {
+            let cli = Cli::try_parse_from([
+                "rabbit",
+                command,
+                "--resource-path",
+                path.as_str(),
+                "--package",
+                "surge-xt",
+                "--architecture",
+                "x86",
+                "--apply",
+            ])
+            .unwrap();
+
+            let error = super::run_with(cli).unwrap_err();
+
+            assert_eq!(
+                super::refusal_exit_code(error.as_ref()),
+                Some(2),
+                "{command}: {error}"
+            );
+            assert_eq!(
+                error.to_string(),
+                "Surge XT has no version for 32-bit REAPER (x86), so RABBIT can't install it. \
+                 Nothing was changed.",
+                "{command}"
+            );
+            assert!(!resource.exists(), "{command} changed the disk");
+        }
+    }
+
+    /// Only the refusal exits with 2; any other error ends the CLI as errors
+    /// usually do.
+    #[test]
+    fn only_a_refused_package_exits_with_2() {
+        let refusal = super::NoBuildRefusal("refused".to_string());
+        assert_eq!(super::refusal_exit_code(&refusal), Some(2));
+        let other = std::io::Error::other("something else");
+        assert_eq!(super::refusal_exit_code(&other), None);
+    }
+
+    /// Without `--architecture`, the install commands go by the REAPER at
+    /// the target, read from its program file as the wizard reads it, not by
+    /// RABBIT's own architecture. A 32-bit portable REAPER is refused Surge
+    /// XT, and nothing in its folder changes.
+    #[cfg(windows)]
+    #[test]
+    fn the_install_commands_go_by_the_target_reapers_architecture() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("PortableREAPER");
+        std::fs::create_dir_all(&resource).unwrap();
+        // A minimal PE image whose header says i386: a DOS header pointing
+        // at NT headers with an empty optional header, as the probe needs.
+        let mut reaper = vec![0u8; 64];
+        reaper[0..2].copy_from_slice(b"MZ");
+        reaper[0x3c..0x40].copy_from_slice(&64u32.to_le_bytes());
+        reaper.extend_from_slice(b"PE\0\0");
+        reaper.extend_from_slice(&0x014cu16.to_le_bytes());
+        reaper.extend_from_slice(&[0u8; 14]);
+        reaper.extend_from_slice(&112u16.to_le_bytes());
+        reaper.extend_from_slice(&0x0022u16.to_le_bytes());
+        let mut optional = [0u8; 112];
+        optional[0..2].copy_from_slice(&0x020bu16.to_le_bytes());
+        reaper.extend_from_slice(&optional);
+        std::fs::write(resource.join("reaper.exe"), reaper).unwrap();
+        std::fs::write(resource.join("reaper.ini"), "[REAPER]\n").unwrap();
+        let listing = || {
+            let mut names: Vec<_> = std::fs::read_dir(&resource)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = listing();
+        let path = resource.to_string_lossy().into_owned();
+        for command in ["setup", "apply-packages", "install-extension"] {
+            let cli = Cli::try_parse_from([
+                "rabbit",
+                command,
+                "--resource-path",
+                path.as_str(),
+                "--package",
+                "surge-xt",
+                "--apply",
+            ])
+            .unwrap();
+
+            let error = super::run_with(cli).unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "Surge XT has no version for 32-bit REAPER (x86), so RABBIT can't install it. \
+                 Nothing was changed.",
+                "{command}"
+            );
+            assert_eq!(listing(), before, "{command} changed the disk");
+        }
+    }
+
+    /// The refusal names every package without a build and the REAPER. It
+    /// says to run the command again without them only when the run named
+    /// other packages too, which that run would then install.
+    #[test]
+    fn the_refusal_names_every_package_without_a_build_and_the_reaper() {
+        let ids = ["ffmpeg", "app2clap"].map(String::from);
+        assert_eq!(
+            super::no_build_refusal_text(
+                &ids,
+                true,
+                super::Platform::Windows,
+                super::Architecture::X86
+            ),
+            "FFmpeg and app2clap have no version for 32-bit REAPER (x86), so RABBIT can't \
+             install them. Nothing was changed. To install the others, run the command again \
+             without --package ffmpeg --package app2clap."
+        );
+        assert_eq!(
+            super::no_build_refusal_text(
+                &ids,
+                false,
+                super::Platform::Windows,
+                super::Architecture::X86
+            ),
+            "FFmpeg and app2clap have no version for 32-bit REAPER (x86), so RABBIT can't \
+             install them. Nothing was changed."
+        );
+        assert_eq!(
+            super::no_build_refusal_text(
+                &["sws".to_string()],
+                false,
+                super::Platform::Windows,
+                super::Architecture::Arm64Ec
+            ),
+            "SWS Extension has no version for REAPER on arm64-ec, so RABBIT can't install it. \
+             Nothing was changed."
+        );
+    }
+
+    /// `plan` takes what has no build for the REAPER out of its list, with a
+    /// note for each, and leaves the rest.
+    #[test]
+    fn the_plan_leaves_out_packages_without_a_build_with_a_note() {
+        let mut ids = ["reaper", "osara", "sws", "ffmpeg", "surge-xt", "app2clap"]
+            .map(String::from)
+            .to_vec();
+        let notes = super::leave_out_packages_without_builds(
+            &mut ids,
+            super::Platform::Windows,
+            super::Architecture::X86,
+            &super::PackageChannels::new(),
+        );
+        assert_eq!(ids, ["reaper", "osara", "sws"]);
+        assert_eq!(
+            notes,
+            [
+                "Skipping FFmpeg: it has no version for 32-bit REAPER (x86).",
+                "Skipping Surge XT: it has no version for 32-bit REAPER (x86).",
+                "Skipping app2clap: it has no version for 32-bit REAPER (x86).",
+            ]
+        );
+
+        let mut ids = ["reaper", "osara", "sws"].map(String::from).to_vec();
+        let notes = super::leave_out_packages_without_builds(
+            &mut ids,
+            super::Platform::Windows,
+            super::Architecture::X64,
+            &super::PackageChannels::new(),
+        );
+        assert_eq!(ids, ["reaper", "osara", "sws"]);
+        assert!(notes.is_empty());
+    }
+
+    /// LReaParams and Lo-lo's four instruments have no build for a 32-bit
+    /// REAPER: `plan` leaves them out with a note, and a run that names one
+    /// is refused. A 64-bit REAPER, and REAPER on Windows on ARM, keep them.
+    #[test]
+    fn lolos_packages_have_no_build_for_a_32_bit_reaper() {
+        let lolo = ["ljuno-116", "lb-303", "lr-608", "lsampler-24", "lreaparams"];
+        let mut ids = lolo.map(String::from).to_vec();
+        let notes = super::leave_out_packages_without_builds(
+            &mut ids,
+            super::Platform::Windows,
+            super::Architecture::X86,
+            &super::PackageChannels::new(),
+        );
+        assert!(ids.is_empty(), "{ids:?}");
+        assert_eq!(
+            notes,
+            ["LJuno-116", "LB-303", "LR-608", "LSampler-24", "LReaParams"]
+                .map(|name| format!("Skipping {name}: it has no version for 32-bit REAPER (x86)."))
+        );
+
+        let mut named = ["osara", "lreaparams"].map(String::from).to_vec();
+        let refusal = super::keep_packages_with_builds(
+            &mut named,
+            true,
+            super::Platform::Windows,
+            super::Architecture::X86,
+            &super::PackageChannels::new(),
+        )
+        .unwrap_err();
+        assert!(
+            refusal
+                .to_string()
+                .starts_with("LReaParams has no version for 32-bit REAPER (x86)"),
+            "{refusal}"
+        );
+
+        for architecture in [
+            super::Architecture::X64,
+            super::Architecture::Arm64,
+            super::Architecture::Arm64Ec,
+        ] {
+            let mut ids = lolo.map(String::from).to_vec();
+            let notes = super::leave_out_packages_without_builds(
+                &mut ids,
+                super::Platform::Windows,
+                architecture,
+                &super::PackageChannels::new(),
+            );
+            assert_eq!(ids, lolo, "{architecture:?}");
+            assert!(notes.is_empty(), "{architecture:?}: {notes:?}");
+        }
+    }
+
+    /// The default list leaves out what has no build for the REAPER, and a
+    /// named list is refused whole rather than shortened.
+    #[test]
+    fn the_default_list_skips_packages_without_a_build() {
+        let channels = super::PackageChannels::new();
+        let mut defaults = ["reaper", "osara", "sws"].map(String::from).to_vec();
+        super::keep_packages_with_builds(
+            &mut defaults,
+            false,
+            super::Platform::Windows,
+            super::Architecture::Arm64,
+            &channels,
+        )
+        .unwrap();
+        assert_eq!(defaults, ["reaper", "osara"]);
+
+        let mut named = ["reaper", "sws"].map(String::from).to_vec();
+        let refusal = super::keep_packages_with_builds(
+            &mut named,
+            true,
+            super::Platform::Windows,
+            super::Architecture::Arm64,
+            &channels,
+        )
+        .unwrap_err();
+        assert_eq!(
+            refusal.to_string(),
+            "SWS Extension has no version for REAPER on arm64, so RABBIT can't install it. \
+             Nothing was changed. To install the others, run the command again without \
+             --package sws."
+        );
+        assert_eq!(named, ["reaper", "sws"]);
+
+        // On a 64-bit REAPER nothing is left out.
+        let mut defaults = ["reaper", "osara", "sws"].map(String::from).to_vec();
+        super::keep_packages_with_builds(
+            &mut defaults,
+            false,
+            super::Platform::Windows,
+            super::Architecture::X64,
+            &channels,
+        )
+        .unwrap();
+        assert_eq!(defaults.len(), 3);
+        assert_eq!(
+            super::no_build_reasons(
+                &["sws".to_string()],
+                super::Platform::Windows,
+                super::Architecture::Arm64
+            ),
+            ["SWS Extension: it has no version for REAPER on arm64"]
         );
     }
 
@@ -8498,6 +9057,76 @@ mod tests {
             } => assert!(accept_reapack_donation_notice),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    /// `--config-step reapack-add-reawarp-remote` names the ReaWarp
+    /// repository step. Like the other recommended repository steps it also
+    /// runs by default when ReaPack is part of the run, and
+    /// `--skip-config-step` leaves it out.
+    #[test]
+    fn setup_accepts_the_reawarp_config_step() {
+        use rabbit_core::configuration::{
+            CONFIG_REAPER_ACCESSIBLE_EN_REMOTE, CONFIG_REAWARP_REMOTE, builtin_configuration_steps,
+        };
+
+        let cli = Cli::try_parse_from([
+            "rabbit",
+            "setup",
+            "--resource-path",
+            "C:\\PortableREAPER",
+            "--config-step",
+            "reapack-add-reawarp-remote",
+        ])
+        .unwrap();
+        let config_step = match cli.command {
+            Command::Setup { config_step, .. } => config_step,
+            other => panic!("unexpected command: {other:?}"),
+        };
+        assert_eq!(config_step, vec![CONFIG_REAWARP_REMOTE.to_string()]);
+        assert!(
+            builtin_configuration_steps()
+                .iter()
+                .any(|step| step.id == CONFIG_REAWARP_REMOTE),
+            "the setup pipeline knows the id"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let windows = rabbit_core::model::Platform::Windows;
+        let reapack = ["reapack".to_string()];
+
+        let explicit = super::resolve_configuration_step_ids(root, windows, &[], &config_step, &[]);
+        assert_eq!(explicit, config_step);
+
+        let defaults = super::resolve_configuration_step_ids(root, windows, &reapack, &[], &[]);
+        assert!(
+            defaults.iter().any(|id| id == CONFIG_REAWARP_REMOTE),
+            "{defaults:?}"
+        );
+
+        let skipped =
+            super::resolve_configuration_step_ids(root, windows, &reapack, &[], &config_step);
+        assert!(
+            !skipped.iter().any(|id| id == CONFIG_REAWARP_REMOTE),
+            "{skipped:?}"
+        );
+        assert!(
+            skipped
+                .iter()
+                .any(|id| id == CONFIG_REAPER_ACCESSIBLE_EN_REMOTE),
+            "skipping ReaWarp leaves the other steps alone: {skipped:?}"
+        );
+
+        let without_reapack =
+            super::resolve_configuration_step_ids(root, windows, &["osara".to_string()], &[], &[]);
+        assert!(
+            !without_reapack.iter().any(|id| id == CONFIG_REAWARP_REMOTE),
+            "no ReaPack, no repository: {without_reapack:?}"
+        );
+        assert!(
+            std::fs::read_dir(root).unwrap().next().is_none(),
+            "choosing the steps must not write anything"
+        );
     }
 
     #[test]

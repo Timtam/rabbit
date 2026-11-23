@@ -6,6 +6,7 @@ use rabbit_core::install::{
     InstallFileAction, InstallFileReport, LeftInPlaceReason, ReaperLanguageReport,
 };
 use rabbit_core::localization::{FluentArgument, Localizer};
+use rabbit_core::model::Architecture;
 use rabbit_core::operation::{PackageOperationStatus, PlannedExecutionKind, PlannedExecutionPlan};
 use rabbit_core::resource::ResourceInitActionKind;
 use rabbit_core::setup::SetupReport;
@@ -20,7 +21,13 @@ use super::labels::{
 use super::model::{WizardInstallSummary, WizardModel};
 use super::packages::package_display_name;
 
-pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> WizardInstallSummary {
+/// `architecture` is the one the run installed for, the chosen target's,
+/// which the Done page names.
+pub fn summarize_setup_report(
+    model: &WizardModel,
+    architecture: Architecture,
+    report: &SetupReport,
+) -> WizardInstallSummary {
     let localizer = localizer_from_options(&model.bootstrap_options).ok();
     let created_resources = report
         .resource_init
@@ -67,7 +74,7 @@ pub fn summarize_setup_report(model: &WizardModel, report: &SetupReport) -> Wiza
         )
     });
 
-    let architecture_label = architecture_label_for_summary(model.architecture);
+    let architecture_label = architecture_label_for_summary(architecture);
     let mut detail_lines = vec![
         format_localized_message(
             localizer.as_ref(),

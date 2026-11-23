@@ -105,7 +105,7 @@ fn resolve_executable_path(install_path: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Write;
@@ -113,7 +113,7 @@ mod tests {
 
     /// A minimal PE32+ image: a 64-byte DOS header pointing at NT headers
     /// with a 112-byte optional header, no data directories and no sections.
-    fn write_pe64(path: &Path, machine: u16) {
+    pub(crate) fn write_pe64(path: &Path, machine: u16) {
         let mut bytes = vec![0u8; 64];
         bytes[0..2].copy_from_slice(b"MZ");
         bytes[0x3c..0x40].copy_from_slice(&64u32.to_le_bytes()); // e_lfanew
@@ -210,13 +210,13 @@ mod tests {
     }
 
     const MACHO_CPU_TYPE_X86_64: u32 = 0x0100_0007;
-    const MACHO_CPU_TYPE_ARM64: u32 = 0x0100_000c;
+    pub(crate) const MACHO_CPU_TYPE_ARM64: u32 = 0x0100_000c;
 
     /// Writes a minimal 32-byte little-endian Mach-O 64-bit executable header
     /// — just enough for `object::File::parse` to identify the architecture.
     /// `ncmds` / `sizeofcmds` stay zero, which `object` accepts because we
     /// only ask it for `architecture()`, not load-command iteration.
-    fn write_mach_o_thin_64(path: &Path, cputype: u32) {
+    pub(crate) fn write_mach_o_thin_64(path: &Path, cputype: u32) {
         let mut file = File::create(path).unwrap();
         // MH_MAGIC_64 in little-endian (the modern Mach-O on-disk magic on
         // both Apple Silicon and Intel macOS).

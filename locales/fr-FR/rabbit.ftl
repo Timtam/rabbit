@@ -259,6 +259,16 @@ wizard-package-details-clap-copy-portable-installed = Ce REAPER charge deux copi
 # every other program that loaded it from there lose it. $package is the
 # localized package name.
 wizard-package-details-clap-copy-standard = Votre dossier CLAP contient une copie de { $package }. Mettre à jour ou réinstaller { $package } ici déplace cette copie dans une sauvegarde, pour que REAPER ne charge pas deux copies. Les REAPER portables et les autres programmes qui utilisent des plug-ins CLAP ne la trouvent alors plus, et RABBIT peut aussi installer { $package } dans chaque REAPER portable.
+# Why a package row can't be ticked: there is no version of the package for
+# the REAPER at the chosen target. The first names a 32-bit REAPER; the
+# second covers every other kind, such as REAPER on Windows on ARM, by the
+# type of processor it runs on.
+wizard-package-row-unavailable-32-bit = aucune version pour REAPER 32 bits
+wizard-package-row-unavailable-processor = aucune version pour le type de processeur de ce REAPER
+# The same, as a sentence in the row's details. $package is the localized
+# package name.
+wizard-package-details-unavailable-32-bit = { $package } n'a aucune version compatible avec REAPER 32 bits, RABBIT ne peut donc pas installer ce paquet ici.
+wizard-package-details-unavailable-processor = { $package } n'a aucune version compatible avec le type de processeur de ce REAPER, RABBIT ne peut donc pas installer ce paquet ici.
 
 # Review-page note carrying the full error for a package whose latest-version
 # check failed; its row is disabled with the short reason above.
@@ -906,6 +916,11 @@ config-reapack-reaper-accessible-fr-name = Ajouter le dépôt ReaPack « REAPER 
 config-reapack-reaper-accessible-fr-description = Ajoute le dépôt ReaPack francophone de REAPER Accessible (https://github.com/reaperaccessible/rap_fr/raw/main/index.xml). Une fois ajouté, ouvrez le menu Extensions, ReaPack, Parcourir les paquets pour accéder aux ressources francophones de REAPER Accessible.
 config-reapack-reaper-accessible-en-name = Ajouter le dépôt ReaPack « REAPER Accessible (EN) »
 config-reapack-reaper-accessible-en-description = Ajoute le dépôt ReaPack anglophone de REAPER Accessible (https://github.com/reaperaccessible/rap_en/raw/main/index.xml). Une fois ajouté, ouvrez le menu Extensions, ReaPack, Parcourir les paquets pour accéder aux ressources anglophones de REAPER Accessible.
+# ReaWarp est l'ensemble de scripts accessibles de Gabriel Schuck pour le
+# warping audio. « ReaWarp » et « ReaPack » ne se traduisent pas ; le chemin de
+# menu nomme les menus de REAPER, comme pour les autres étapes de dépôt.
+config-reapack-reawarp-name = Ajouter le dépôt ReaPack « ReaWarp »
+config-reapack-reawarp-description = ReaWarp, de Gabriel Schuck, est un ensemble de scripts accessibles pour le warping audio, les cartes de tempo, le calage sur un groove et la quantification. Ses messages sont en anglais, portugais ou espagnol. Cette étape ajoute son dépôt ReaPack (https://github.com/gabrielschuck/reawarp/raw/main/index.xml). Une fois ajouté, ouvrez le menu Extensions, ReaPack, Parcourir les paquets pour installer ReaWarp ; ReaPack le tiendra ensuite à jour.
 config-set-reaper-language-name = Définir la langue de REAPER
 config-set-reaper-language-description = Indique à REAPER lequel des packs de langue installés utiliser, en l'inscrivant dans reaper.ini. Sans cela, vous devriez sélectionner la langue vous-même dans Options, Préférences, Général. Vous pouvez installer plusieurs packs de langue et basculer entre eux dans REAPER par la suite ; ceci choisit seulement celui qui est actif maintenant. Décochez si vous voulez seulement installer les fichiers.
 

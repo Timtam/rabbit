@@ -25,7 +25,7 @@ pub fn wizard_outcome_report_from_success(
     request: &WizardInstallRequest,
     report: &SetupReport,
 ) -> WizardOutcomeReport {
-    let summary = summarize_setup_report(model, report);
+    let summary = summarize_setup_report(model, request.architecture, report);
     let mut status_line = summary.status_line;
     // Files of an earlier version that stayed where they were: RABBIT no
     // longer keeps track of them, and that version can't be restored.

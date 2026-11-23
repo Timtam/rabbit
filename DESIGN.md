@@ -807,10 +807,10 @@ user can finish the install by pressing Next a few times.
      app2clap and LReaParams (both Windows only); Language packs contains
      REAPER's translations. Each row reads as plain text "OSARA — installed
      2024.3.6, latest 2026.2.16, will update". Configuration contains
-     opt-in post-install tweaks (currently: "Add the REAPER Accessibility
-     ReaPack repository to ReaPack"); rows that are already applied or
-     whose dependency package isn't in the install plan are disabled with
-     a short status tag in the row label
+     opt-in post-install tweaks (currently: the ReaPack repository steps
+     and Set REAPER's language; see Configuration Steps); rows that are
+     already applied or whose dependency package isn't in the install
+     plan are disabled with a short status tag in the row label
      (`(already applied)`, `(requires ReaPack)`).
    - Parent group nodes show a half-checked / tristate state when only
      some of their children are ticked. Toggling the parent propagates to
@@ -831,6 +831,26 @@ user can finish the install by pressing Next a few times.
    - Defaults: install or update missing/outdated recommended accessibility
      packages, plus apply every recommended Configuration step whose
      dependency is satisfied and which isn't already applied.
+   - A package with no build for the target REAPER's architecture (see
+     Package Model) stays listed but can't be ticked, and no default tick
+     ticks it. Its row ends with "(not available: no version for 32-bit
+     REAPER)", or "for this REAPER's processor type" for any other
+     architecture, such as REAPER on Windows on ARM, and its details say the
+     same in a sentence. The architecture is the target's own, the one the
+     install request hands to artifact resolution: the target REAPER's
+     binary, or for a REAPER RABBIT is about to install, the slice it will
+     install. The Uninstall tab doesn't ask about builds.
+   - A row can be unavailable for more than one reason. Its label gives the
+     first of: no build for the target REAPER, left to ReaPack (see
+     Package Model), a portable target (`requires_standard_install`), a
+     failed version check. No build comes first because nothing else would
+     let RABBIT install the package there; a package left to ReaPack
+     still adds its sentence to the details. A failed version check gives
+     none of the first three a reason or a Review note, since no run
+     installs or updates such a package there whatever the check found,
+     and the CLAP-folder sentences (see Package Model) leave out the first
+     two, since each says what installing or updating the package there
+     would do.
    - OSARA key map: an explicit checkbox stays on the Packages page so the
      user sees and controls what RABBIT will do with `reaper-kb.ini`.
      Default is replace-with-backup for a new OSARA and for a key map that
@@ -1698,32 +1718,64 @@ directly in its install folder (matched by `user_plugin_prefixes` and
 `user_plugin_suffixes`, ignoring case), that copy is ReaPack's to look after
 while ReaPack is installed: detection marks it (`left_to_reapack`), the plan
 keeps it whatever the versions say, the wizard's row can't be ticked and
-says "managed by ReaPack" with a sentence in its details, which a failed
-version check doesn't relabel, and the install pipeline skips it even when
-the user names it with `--package` or ticks it again (status
-`skipped-left-to-reapack`). `rabbit install-extension`, which installs
-without that pipeline, drops such a package before it resolves anything and
-says why. The uninstall already refuses it, through `reapack_owned: block`.
-A record whose file is gone still counts, since ReaPack still thinks it
-installed it. Records RABBIT can't read leave the copy alone too, and say
-so; that includes a `registry.db` RABBIT can't look at, or anything but a
-plain file in its place, as for the uninstall. When ReaPack installed over a
-copy RABBIT had, so that the files no longer match RABBIT's receipt, the
-detection comes from ReaPack's records instead of the receipt: their
-version, and no receipt-mismatch note. A copy that still matches the
-receipt is the one RABBIT installed, and keeps the receipt's version. Once
-ReaPack itself is gone, nothing keeps its records, and the copy is treated
-like any other, as the uninstall does. Restoring a backup set is the one
-exception while ReaPack is installed: a restore never asks ReaPack's
-records, so restoring LReaParams from one of RABBIT's backups puts back the
-copy RABBIT had, over one ReaPack installed since, because the user asked
-for exactly that copy. The manifest's validation requires the
+says "managed by ReaPack" with a sentence in its details, which neither a
+failed version check nor a portable target relabels, and the install
+pipeline skips it even when the user names it with `--package` or ticks it
+again (status `skipped-left-to-reapack`). No build for the target REAPER
+(see below) comes first, though: such a row gives that reason, and its
+details still carry the ReaPack sentence; the CLI's install commands refuse
+it when named, and `plan` leaves it out, whatever ReaPack's records say.
+`rabbit install-extension`, which installs without that pipeline, drops such
+a package before it resolves anything and says why, after that refusal, as
+`apply-packages` does. The uninstall already refuses it, through
+`reapack_owned: block`. A record whose file is gone still counts, since
+ReaPack still thinks it installed it. Records RABBIT can't read leave the
+copy alone too, and say so; that includes a `registry.db` RABBIT can't look
+at, or anything but a plain file in its place, as for the uninstall. When
+ReaPack installed over a copy RABBIT had, so that the files no longer match
+RABBIT's receipt, the detection comes from ReaPack's records instead of the
+receipt: their version, and no receipt-mismatch note. A copy that still
+matches the receipt is the one RABBIT installed, and keeps the receipt's
+version. Once ReaPack itself is gone, nothing keeps its records, and the
+copy is treated like any other, as the uninstall does. Restoring a backup
+set is the one exception while ReaPack is installed: a restore never asks
+ReaPack's records, so restoring LReaParams from one of RABBIT's backups puts
+back the copy RABBIT had, over one ReaPack installed since, because the user
+asked for exactly that copy. The manifest's validation requires the
 `reapack_registry` detector, `reapack_owned: block`, an install folder
 inside the resource folder, and non-empty `user_plugin_prefixes` and
 `user_plugin_suffixes` for each supported platform, without which the
 records could never match. ReaPack lists itself in its records, so the
 validation refuses the flag on ReaPack; SWS, OSARA and ReaKontrol don't set
 it either, and keep being updated over a ReaPack copy as before.
+
+`supported_architectures` lists the REAPER architectures a package has builds
+for; `universal` there is no wildcard. One offline rule,
+`artifact::package_has_build_for`, says whether a package can be installed
+for a platform and a REAPER architecture, without the network. It takes the
+architecture artifact resolution dispatches on, where a universal REAPER, or
+one not there yet or unreadable, counts as the slice REAPER runs as on this
+computer, and asks: is the package offered on the platform, does it list that
+architecture, and does its download source have a target for it (a
+`github_release` asset selector, an `http_artifact` target's `match_arches`,
+the HFS listing, which serves every architecture, or a pull request build's
+platform)? Resolution asks the same rule first and refuses what it refuses
+before it goes online, so FFmpeg, Surge XT, app2clap, LReaParams and Lo-lo's
+four instruments have no build for a 32-bit REAPER, Surge XT included, whose
+Windows asset would match any architecture. The wizard, the CLI and setup ask
+the rule before a run starts, so a run never stops halfway on a download that
+can't be found: the wizard greys the row out (see User Workflow); `rabbit
+setup`, `apply-packages` and `plan` leave such a package out of their default
+list with a note; and a package named with `--package` in `setup`,
+`apply-packages` or `install-extension` is refused before anything changes,
+with exit code 2, as `uninstall` refuses a package it can't remove. Like the
+wizard, the CLI's install commands and `plan` take the target REAPER's
+architecture from its program file (`detection::target_reaper_architecture`),
+unless `--architecture` names one, and use it for the rule and for resolution
+alike. When even the dispatch architecture is unknown, nothing is blocked. An
+installed ARM64EC REAPER reads as x64, because the probe sees only the PE
+header (see `arch_probe`), so it is offered the x64 SWS and app2clap that a
+new REAPER on Windows on ARM is not.
 
 Initial package kinds:
 
@@ -1954,10 +2006,32 @@ Initial step kinds:
   appended index honours ReaPack's `size=` field so it lands at the
   next slot ReaPack itself would have written.
 
-The single shipped step today is the REAPER Accessibility ReaPack
-remote (`https://github.com/Timtam/reapack/raw/master/index.xml`),
-recommended when ReaPack is part of the install plan or already on
-disk.
+The shipped `AddReapackRemote` steps, in this order, add these ReaPack
+remotes:
+
+- REAPER Accessibility
+  (`https://github.com/Timtam/reapack/raw/master/index.xml`),
+- REAPER Accessible (FR)
+  (`https://github.com/reaperaccessible/rap_fr/raw/main/index.xml`),
+- REAPER Accessible (EN)
+  (`https://github.com/reaperaccessible/rap_en/raw/main/index.xml`),
+- ReaWarp (`https://github.com/gabrielschuck/reawarp/raw/main/index.xml`),
+  Gabriel Schuck's accessible audio warping scripts.
+
+All of them require ReaPack. All but REAPER Accessible (FR), whose
+content is French only, are recommended when ReaPack is part of the
+install plan or already on disk. ReaWarp is recommended because its
+messages come in English, Portuguese or Spanish, so it is of use
+whatever RABBIT's UI language. The REAPER Accessibility and REAPER
+Accessible remotes get readable names in `reapack.ini` rather than
+their indexes' own names. ReaWarp keeps its index's own name,
+`reawarp`: ReaPack finds remotes by exact name and installs into
+`Scripts/<remote name>/`, so a name that differed only in case would
+let a later import by hand, as ReaWarp's README describes, add a second
+remote sharing the same folder on Windows and macOS. Detection matches
+on the URL, so a repository the user imported by hand still counts as
+applied. These steps only add the repository: the user installs its
+packages in ReaPack afterwards.
 
 Wizard surface:
 
