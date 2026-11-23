@@ -17,6 +17,7 @@
     "x86",
     "x64",
     "arm64",
+    "arm64-ec",
     "universal"
   ],
   "version": {
@@ -182,6 +183,8 @@
         "platform": "windows",
         "match_arches": [
           "x64",
+          "arm64",
+          "arm64-ec",
           "unknown"
         ],
         "report_arch": "x64",

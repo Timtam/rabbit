@@ -709,8 +709,9 @@ fn row_installs(action: PlanActionKind) -> bool {
 
 /// The Fluent keys of the reason and the details sentence for a package with
 /// no build for a REAPER of `architecture`. A 32-bit REAPER is named as
-/// such; any other, on Windows on ARM or a Mac, by its processor type.
-fn no_build_keys(architecture: Architecture) -> (&'static str, &'static str) {
+/// such; any other REAPER a package has no build for, by its processor
+/// type.
+pub(crate) fn no_build_keys(architecture: Architecture) -> (&'static str, &'static str) {
     if dispatch_architecture(architecture) == Architecture::X86 {
         (
             "wizard-package-row-unavailable-32-bit",

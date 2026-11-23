@@ -17,11 +17,13 @@ RABBIT installs and keeps up to date:
 - **FFmpeg** *(Windows only, opt-in)* — the shared FFmpeg runtime
   (`avformat`, `avcodec`, …) that REAPER's video decoder loads from
   `UserPlugins`. Pulled from
-  [Gyan.dev](https://www.gyan.dev/ffmpeg/builds/) on x64 and
-  [tordona/ffmpeg-win-arm64](https://github.com/tordona/ffmpeg-win-arm64)
-  on ARM64. Pinned to the latest stable FFmpeg major REAPER's video
-  decoder is known to support (currently 8.x). Unticked by default so
-  it doesn't surprise users who don't need video.
+  [Gyan.dev](https://www.gyan.dev/ffmpeg/builds/), its current stable
+  64-bit (x64) build, for a 64-bit REAPER and for REAPER on Windows on ARM
+  alike: REAPER's ARM64EC build there loads 64-bit (x64) libraries, but not
+  plain ARM64 ones. Earlier versions of RABBIT installed an ARM64 build
+  there, which REAPER couldn't use; the next FFmpeg update replaces it, and
+  its files go into that update's backup. Unticked by default so it
+  doesn't surprise users who don't need video.
 - **Surge XT** *(opt-in, standard REAPER installations only)* — the
   free open-source hybrid synthesizer from the
   [Surge Synth Team](https://surge-synthesizer.github.io/). RABBIT
@@ -71,7 +73,8 @@ RABBIT installs and keeps up to date:
   REAPER's own plug-in folder, with no elevation required, and keeps it up to
   date. Only that REAPER loads plug-ins from there, so app2clap works with a
   portable REAPER too, and RABBIT installs it for REAPER only, not for other
-  CLAP hosts.
+  CLAP hosts. It is a 64-bit plug-in, for a 64-bit REAPER, REAPER's ARM64EC
+  build on Windows on ARM included, which loads 64-bit plug-ins.
   Earlier versions of RABBIT installed it into the per-user CLAP folder
   (`%LOCALAPPDATA%\Programs\Common\CLAP`) instead, for a standard REAPER
   only. RABBIT still finds such a copy in the standard REAPER, with its
@@ -122,15 +125,16 @@ Not every package has a version for every REAPER: FFmpeg, Surge XT,
 app2clap, LReaParams and Lo-lo's instruments have none for a 32-bit REAPER,
 for example. The wizard still lists such a package, but its row can't be
 ticked and ends with "(not available: no version for 32-bit REAPER)", or "no
-version for this REAPER's processor type" for another kind of REAPER, such
-as one on Windows on ARM. The row's details say the same. This reason comes
+version for this REAPER's processor type" for another kind of REAPER. The
+row's details say the same. This reason comes
 before any other the row could give, such as "managed by ReaPack"; the
 details still say when ReaPack looks after your copy. RABBIT goes by the
 REAPER you picked, or for a REAPER it is about to install, by the one it
 will install. Uninstalling isn't affected. On Windows on ARM, REAPER is an
 ARM64EC program, and RABBIT recognises an installed one as such, so its
-updates keep their ARM64EC builds. SWS and app2clap have no version for it
-yet.
+updates keep their ARM64EC builds. It also loads 64-bit (x64) extensions
+and plug-ins, so SWS, FFmpeg, app2clap, LReaParams and Lo-lo's instruments
+install their 64-bit versions there, and every package is offered.
 
 ### Language packs
 
@@ -776,10 +780,11 @@ own installer, isn't skipped: those commands update it as usual.
 
 A package with no version for the REAPER you install for is skipped as
 well: `setup`, `apply-packages` and `plan` leave it out of their default list
-with a note, as they do with SWS for REAPER on Windows on ARM. Naming
-such a package with `--package` in `setup`, `apply-packages` or
-`install-extension`, such as FFmpeg, Surge XT or app2clap for a 32-bit
-REAPER, changes nothing: the command says why and exits with 2. Like the
+with a note (today every package in that list has a version for every
+REAPER). Naming such a package with `--package` in `setup`,
+`apply-packages` or `install-extension`, such as FFmpeg, Surge XT or
+app2clap for a 32-bit REAPER, changes nothing: the command says why and
+exits with 2. Like the
 wizard, these commands go by the REAPER at the target, read from its program
 file, or for a REAPER they are about to install, by the one they will
 install. `--architecture` names another.

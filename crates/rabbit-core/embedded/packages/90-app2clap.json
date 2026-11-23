@@ -14,7 +14,9 @@
     "windows"
   ],
   "supported_architectures": [
-    "x64"
+    "x64",
+    "arm64",
+    "arm64-ec"
   ],
   "github_release": {
     "repo": "jcsteh/app2clap",
@@ -32,6 +34,20 @@
       {
         "platform": "windows",
         "arch": "x64",
+        "name_prefix": "app2clap_",
+        "name_suffix": ".zip"
+      },
+      {
+        "platform": "windows",
+        "arch": "arm64",
+        "report_arch": "x64",
+        "name_prefix": "app2clap_",
+        "name_suffix": ".zip"
+      },
+      {
+        "platform": "windows",
+        "arch": "arm64-ec",
+        "report_arch": "x64",
         "name_prefix": "app2clap_",
         "name_suffix": ".zip"
       }

@@ -708,6 +708,104 @@ fn a_reapack_update_to_the_arm64ec_dll_moves_the_x64_one_into_its_backup() {
     assert_eq!(listed, [arm64ec.as_path()]);
 }
 
+/// RABBIT used to install tordona's ARM64 build of FFmpeg for REAPER on
+/// Windows on ARM, which REAPER's ARM64EC build can't load. The next FFmpeg
+/// update there installs Gyan.dev's x64 build, whose libraries have other
+/// names, and moves every ARM64 library into the update's set, so none is
+/// left in `UserPlugins`. The programs both builds have are replaced, and
+/// the receipt records the x64 build from then on.
+#[test]
+fn an_ffmpeg_update_from_the_arm64_build_to_the_x64_one_moves_the_arm64_dlls_into_its_backup() {
+    let (dir, resource) = resource_folder();
+    let cache = dir.path().join("cache");
+    // The names tordona's 8.x build and Gyan.dev's 9.1 build have.
+    let arm64: [(&str, &[u8]); 9] = [
+        ("avcodec-62.dll", b"avcodec arm64"),
+        ("avdevice-62.dll", b"avdevice arm64"),
+        ("avfilter-11.dll", b"avfilter arm64"),
+        ("avformat-62.dll", b"avformat arm64"),
+        ("avutil-60.dll", b"avutil arm64"),
+        ("swresample-6.dll", b"swresample arm64"),
+        ("swscale-9.dll", b"swscale arm64"),
+        ("ffmpeg.exe", b"ffmpeg arm64"),
+        ("ffprobe.exe", b"ffprobe arm64"),
+    ];
+    let x64: [(&str, &[u8]); 9] = [
+        ("avcodec-63.dll", b"avcodec x64"),
+        ("avdevice-63.dll", b"avdevice x64"),
+        ("avfilter-12.dll", b"avfilter x64"),
+        ("avformat-63.dll", b"avformat x64"),
+        ("avutil-61.dll", b"avutil x64"),
+        ("swresample-7.dll", b"swresample x64"),
+        ("swscale-10.dll", b"swscale x64"),
+        ("ffmpeg.exe", b"ffmpeg x64"),
+        ("ffprobe.exe", b"ffprobe x64"),
+    ];
+    let mut old = ffmpeg(&cache, "8.0.1", &arm64);
+    old.descriptor.architecture = Architecture::Arm64;
+    install(&resource, &[old], &APPLY);
+    let before = load_install_state(&resource).unwrap().unwrap().packages[PACKAGE_FFMPEG].clone();
+    assert_eq!(before.architecture, Some(Architecture::Arm64));
+    let new = ffmpeg(&cache, "9.1", &x64);
+    assert_eq!(new.descriptor.architecture, Architecture::X64);
+
+    let report = install(&resource, &[new], &APPLY);
+
+    let mut expected = BTreeMap::new();
+    for (name, _) in &arm64[..7] {
+        expected.insert(name.to_string(), InstallFileAction::MovedToBackup);
+    }
+    for (name, _) in &x64[..7] {
+        expected.insert(name.to_string(), InstallFileAction::Installed);
+    }
+    for name in ["ffmpeg.exe", "ffprobe.exe"] {
+        expected.insert(name.to_string(), InstallFileAction::Replaced);
+    }
+    assert_eq!(actions_by_name(&report), expected);
+    for (name, _) in &arm64[..7] {
+        assert!(!resource.join(plugins(name)).exists(), "{name}");
+    }
+    for (name, contents) in x64 {
+        assert_eq!(fs::read(resource.join(plugins(name))).unwrap(), contents);
+    }
+
+    // The set holds every file of the ARM64 build, the moved libraries and
+    // the replaced programs, and records FFmpeg's entry from before.
+    let manifest = update_set(&report);
+    assert_eq!(manifest.reason, UPDATE_BACKUP_REASON);
+    assert_eq!(
+        manifest.replaced,
+        BTreeMap::from([(
+            PACKAGE_FFMPEG.to_string(),
+            ReplacedPackageRecord {
+                receipt: Some(before),
+                replaced_by: Some(version("9.1")),
+                ..Default::default()
+            }
+        )])
+    );
+    let mut held: Vec<(PathBuf, Vec<u8>)> = arm64
+        .iter()
+        .map(|(name, contents)| (plugins(name), contents.to_vec()))
+        .collect();
+    held.sort();
+    assert_eq!(files_held(&manifest, PACKAGE_FFMPEG), held);
+
+    let state = load_install_state(&resource).unwrap().unwrap();
+    let after = &state.packages[PACKAGE_FFMPEG];
+    assert_eq!(after.architecture, Some(Architecture::X64));
+    assert_eq!(after.version, Some(version("9.1")));
+    let mut listed: Vec<PathBuf> = after
+        .installed_files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect();
+    listed.sort();
+    let mut x64_files: Vec<PathBuf> = x64.iter().map(|(name, _)| plugins(name)).collect();
+    x64_files.sort();
+    assert_eq!(listed, x64_files);
+}
+
 /// On Windows and macOS a name in another case is the same file: a
 /// previous entry that spells the new version's file in another case
 /// doesn't move the file the update just installed.

@@ -1421,8 +1421,7 @@ fn prepare_install_source(artifact: &CachedArtifact) -> Result<PreparedInstallSo
         }
         ArtifactKind::SevenZipArchive => {
             // FFmpeg ships every runtime DLL under `bin/` in the
-            // Gyan.dev (x64) and tordona/ffmpeg-win-arm64 (ARM64)
-            // archives — extract all of them so REAPER's video
+            // Gyan.dev archive — extract all of them so REAPER's video
             // decoder gets every avformat / avcodec / sw* sibling
             // alongside the top-level prefix-matched DLL. SevenZipArchive
             // is the only kind whose extractor handles `.7z`; the

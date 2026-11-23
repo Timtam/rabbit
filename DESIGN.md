@@ -141,15 +141,17 @@ questions they cannot reasonably answer.
   RABBIT can use as the latest-version provider for the JAWS scripts.
 - REAPER's video decoder loads FFmpeg's shared runtime libraries
   (`avformat-XX.dll`, `avcodec-XX.dll`, ...) from `<resource>/UserPlugins/`.
-  REAPER 7.66 added support for FFmpeg 8.x; RABBIT pins to the highest
-  stable major REAPER's decoder is known to support and bumps that pin as
-  new majors are added. Sources for shared Windows builds: Gyan.dev
-  publishes a fixed `ffmpeg-release-full-shared.7z` redirector that always
-  points at the current stable, with a sibling `*.ver` plain-text endpoint
-  exposing the version. tordona/ffmpeg-win-arm64 publishes per-tag GitHub
-  releases of ARM64 shared builds (`ffmpeg-<ver>-full-shared-win-arm64.7z`).
-  Sources: <https://www.gyan.dev/ffmpeg/builds/> and
-  <https://github.com/tordona/ffmpeg-win-arm64/releases>. No equivalent
+  REAPER 7.66 supports FFmpeg 5.0 to 8.1, and REAPER 7.80 added FFmpeg
+  9.x (<https://www.reaper.fm/whatsnew.txt>). Source for shared Windows
+  builds: Gyan.dev publishes a fixed `ffmpeg-release-full-shared.7z`
+  redirector that always points at the current stable, with a sibling
+  `*.ver` plain-text endpoint exposing the version, so RABBIT installs
+  whichever stable release Gyan.dev serves and pins no FFmpeg major. Its
+  builds are x64, and RABBIT installs them for REAPER on Windows on ARM
+  too (see Package Model). tordona/ffmpeg-win-arm64 publishes per-tag
+  GitHub releases of plain ARM64 shared builds, which RABBIT used there
+  before; an ARM64EC REAPER can't load them. Source:
+  <https://www.gyan.dev/ffmpeg/builds/>. No equivalent
   scriptable source of shared `dylib` builds for macOS exists today —
   OSXExperts.net and evermeet.cx ship static binaries only, so the Mac
   side is deferred until a shared-build source materializes.
@@ -878,11 +880,14 @@ user can finish the install by pressing Next a few times.
      Package Model) stays listed but can't be ticked, and no default tick
      ticks it. Its row ends with "(not available: no version for 32-bit
      REAPER)", or "for this REAPER's processor type" for any other
-     architecture, such as REAPER on Windows on ARM, and its details say the
-     same in a sentence. The architecture is the target's own, the one the
-     install request hands to artifact resolution: the target REAPER's
-     binary, or for a REAPER RABBIT is about to install, the slice it will
-     install. The Uninstall tab doesn't ask about builds.
+     architecture, and its details say the same in a sentence. Today only a
+     32-bit REAPER lacks builds: every Windows package has one for REAPER on
+     Windows on ARM, and every macOS package for a 64-bit Mac REAPER. The
+     processor text is there for a package that lacks one later. The
+     architecture is the target's own, the one the install request hands to
+     artifact resolution: the target REAPER's binary, or for a REAPER RABBIT
+     is about to install, the slice it will install. The Uninstall tab
+     doesn't ask about builds.
    - A row can be unavailable for more than one reason. Its label gives the
      first of: no build for the target REAPER, left to ReaPack (see
      Package Model), a portable target (`requires_standard_install`), a
@@ -1285,9 +1290,11 @@ REAPER's architecture:
   the manifests offer for `arm64` on Windows, because there `arm64` stands
   for the ARM64EC REAPER that a new install from an ARM RABBIT gets
   (`Architecture::current()`): REAPER's arm64ec installer, ReaPack's
-  arm64ec DLL, x64 setups such as Surge XT's. REAPER ships ARM64EC, and no
-  ARM64 or ARM64X build of it exists, so this doesn't come up today. If
-  REAPER ever ships one, the package rules must give it builds of its own.
+  arm64ec DLL, x64 setups such as Surge XT's, and the x64 builds of
+  FFmpeg, SWS, app2clap, LReaParams and Lo-lo's instruments. REAPER ships
+  ARM64EC, and no ARM64 or ARM64X build of it exists, so this doesn't come
+  up today. If REAPER ever ships one, the package rules must give it builds
+  of its own, such as a plain ARM64 FFmpeg like tordona's.
 - What loads where: an ARM64EC process loads x64, ARM64EC and ARM64X
   libraries, but no plain ARM64 or x86 ones
   (`arch_probe::PeKind::loads_in_arm64ec`). REAPER loads its plug-ins,
@@ -1424,8 +1431,9 @@ rewriting the installer engine.
 > is adopted, write a proper schema reference covering: every `PackageSpec` /
 > `EmbeddedPackageSpec` field; the `github_release` block (`repo`, `release`
 > = `"latest"` | `{ "tag": … }`, `version_from` = `tag_name` | `asset_name`,
-> the `assets` selectors with `arch` / `name_prefix`+`name_suffix` / `exact_name`,
-> `artifact_kind`, `install_destination`); which packages stay "snowflakes"
+> the `assets` selectors with `arch` (and `report_arch`) /
+> `name_prefix`+`name_suffix` / `exact_name`, `artifact_kind`,
+> `install_destination`); which packages stay "snowflakes"
 > (bespoke provider enums) and why; and a worked "add a new package" example.
 > Keep it close to the manifest (e.g. a `builtin-packages.md` next to the JSON)
 > so contributors find it.
@@ -1851,27 +1859,58 @@ architecture from its program file (`detection::target_reaper_architecture`),
 unless `--architecture` names one, and use it for the rule and for resolution
 alike. When even the dispatch architecture is unknown, nothing is blocked.
 
-Known limit, kept for now: SWS has Windows builds for x86 and x64 only, and
-app2clap for x64 only, so neither has a build for `arm64` or `arm64-ec`, and
-both are unavailable on Windows on ARM: for a new REAPER there, and, since
-the probe reads an installed one as ARM64EC (see Installation Discovery),
-for an installed one too. The wizard's row says "no version for this
-REAPER's processor type", and the CLI "it has no version for REAPER on
-arm64-ec", which is true: neither ships an ARM build. By the loading rule an
-ARM64EC REAPER could load their x64 builds, but the manifests don't offer
-them for `arm64-ec` yet; the package rules change in a later step. The
-`windows-arm-smoke.yml` tables give evidence for app2clap only: its x64
-`.clap` is read in the x64 control run. SWS's Windows download is a vendor
-installer, which the tests don't open, so its rule will rest on the loading
-rule and on its DLL being x64 by name (`reaper_sws-x64.dll`), not on the
-tables. An SWS that RABBIT installed earlier into such a REAPER, when the
-probe still read it as x64, stays where it is: RABBIT no longer updates it
-there, and the Uninstall tab still removes it. In a REAPER that is still
-ARM64EC, ReaPack's x64 DLL from that time goes into the backup of the next
-ReaPack update, which installs the arm64ec one, so REAPER never loads
-ReaPack twice. A REAPER that RABBIT already updated with the x64 build is
-now an x64 REAPER, and RABBIT keeps it so, with its x64 ReaPack and SWS; to
-go back, the user installs REAPER's ARM64EC build from reaper.fm.
+Windows on ARM: REAPER there is ARM64EC, new or installed (see Installation
+Discovery), and an ARM64EC process loads x64 libraries, but no plain ARM64
+ones. So a package with no ARM64EC build of its own offers its x64 build
+for `arm64` and `arm64-ec`, and every Windows package has a build for
+REAPER on Windows on ARM. FFmpeg's and SWS's x64 `http_artifact` targets
+list `arm64` and `arm64-ec` in `match_arches` and still report `x64`, so
+the descriptor and the receipt name the x64 build that was installed.
+app2clap, like LReaParams and Lo-lo's instruments, has an asset selector
+for each of the two that picks its x64 download and sets `report_arch` to
+`x64`, so their descriptors and receipts name the x64 build too. A selector
+without `report_arch` reports the architecture it matches, as ReaPack's
+do, and one that matches any architecture can't set it. app2clap goes into
+`UserPlugins\FX` there as everywhere.
+
+FFmpeg used to have a target of its own for Windows on ARM: the plain ARM64
+build from tordona/ffmpeg-win-arm64. The first `windows-arm-smoke.yml` run
+showed that an ARM64EC REAPER can load none of its libraries, so RABBIT
+installed an FFmpeg there that REAPER couldn't use. That target is gone,
+and with it the `github_release_max_major` source and the FFmpeg major pin
+that only it used; a plain ARM64 REAPER would need such a build again (see
+Installation Discovery). Detection doesn't look at an FFmpeg's
+architecture, so the ARM64 build is still found with its version, and
+Gyan.dev's x64 build is offered as its update when it is newer, as 9.x is
+over tordona's 8.x. That update installs the x64 libraries, whose names
+differ (`avcodec-63.dll` for `avcodec-62.dll`), replaces the programs both
+builds have, and moves the ARM64 libraries into its backup set, as any file
+the new version no longer installs (see Safety Behavior), so none of them
+is left in `UserPlugins`. That this update comes at all rests on the
+versions alone: the tordona target only ever gave major 8, and Gyan.dev
+serves 9.x. If RABBIT ever pins FFmpeg back to 8.x, an ARM64 build with
+the same version as Gyan.dev's would be kept, so that step must also plan
+an update for a Windows FFmpeg whose receipt says `arm64`.
+
+In the `windows-arm-smoke.yml` tables, Gyan.dev's libraries and app2clap's
+`.clap` read as x64, which an ARM64EC REAPER loads: the first run showed
+them in its x64 control run, and the `arm64-ec` run lists them too from
+now on. SWS's Windows download is a vendor installer, which the tests don't
+take apart, so its rule rests on the loading rule and on its DLL being x64
+by name (`reaper_sws-x64.dll`), not on the tables. What is known
+of that installer: it is an NSIS program, which Windows on ARM runs under
+emulation, and its script (`setup/win32/NSIS.template.in` in SWS's
+repository) has no processor check. Run silently with `/D=`, as RABBIT runs
+it, it checks that the folder holds a `reaper.ini` and that REAPER isn't
+running, and copies its files there. What isn't known: nobody has run it
+through RABBIT on Windows on ARM yet; the hardware pass does. An SWS that
+RABBIT installed earlier into such a REAPER, when the probe still read it as
+x64, is that same x64 build, and RABBIT updates it as before. In a REAPER
+that is still ARM64EC, ReaPack's x64 DLL from that time goes into the backup
+of the next ReaPack update, which installs the arm64ec one, so REAPER never
+loads ReaPack twice. A REAPER that RABBIT already updated with the x64
+build is now an x64 REAPER, and RABBIT keeps it so, with its x64 ReaPack and
+SWS; to go back, the user installs REAPER's ARM64EC build from reaper.fm.
 
 Initial package kinds:
 
@@ -1930,6 +1969,9 @@ strategies:
 - SWS:
   - install unattended by placing the correct verified binary into
     `UserPlugins` for the selected REAPER architecture.
+  - on Windows on ARM, the x64 installer, which installs
+    `reaper_sws-x64.dll`: REAPER there is the ARM64EC build, which loads x64
+    extensions. SWS ships no Windows build for ARM.
 - ReaPack:
   - install unattended by placing the correct verified binary into
     `UserPlugins` for the selected REAPER architecture.
@@ -1984,15 +2026,17 @@ strategies:
   - latest-version provider: Gyan.dev's `*.ver` plain-text endpoint at
     `https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z.ver`,
     a single line of UTF-8 with the current stable release version.
-  - artifact provider fans out per architecture:
-    - x64 → Gyan.dev's `ffmpeg-release-full-shared.7z` redirector. The URL
-      is fixed; the version pulled from the `*.ver` endpoint is the
-      authoritative version stamp.
-    - ARM64 / ARM64-EC → highest stable tag from
-      `tordona/ffmpeg-win-arm64`'s GitHub releases (skipping the
-      `daily-autobuild-…`/`latest` rolling tags) whose major matches the
-      supported FFmpeg major; asset
-      `ffmpeg-<ver>-full-shared-win-arm64.7z`.
+  - artifact provider: Gyan.dev's `ffmpeg-release-full-shared.7z`
+    redirector. The URL is fixed; the version pulled from the `*.ver`
+    endpoint is the authoritative version stamp. The build is x64, offered
+    for x64 and, on Windows on ARM, for `arm64` and `arm64-ec`: REAPER
+    there is the ARM64EC build, which loads x64 libraries but no plain
+    ARM64 ones. The descriptor and the receipt say `x64` there too. Never
+    for x86 or macOS.
+  - RABBIT used to install tordona/ffmpeg-win-arm64's plain ARM64 build on
+    Windows on ARM, which REAPER there can't load. The next update there
+    installs the x64 build and moves the ARM64 libraries into its backup
+    (see Package Model).
   - install unattended by extracting every file under the archive's `bin/`
     folder into the selected REAPER resource path's `UserPlugins`
     (skipping `include/`, `lib/`, `doc/`, …). The user's FFmpeg-aware
@@ -2021,8 +2065,7 @@ strategies:
     replaces, as for ReaPack.
   - an x64 DLL, offered for x64 and, on Windows on ARM, for `arm64` and
     `arm64-ec`: REAPER for Windows on ARM is the ARM64EC build, which loads
-    x64 extensions, and an installed one probes as x64 anyway, since its
-    executable says AMD64. Never for x86 or macOS.
+    x64 extensions. Never for x86 or macOS.
   - the DLL has no version resource, so a copy without a receipt is found
     by its file and reads as version unknown, unless ReaPack installed it,
     when the version comes from ReaPack's records.
@@ -2205,7 +2248,8 @@ Extension files:
 - SWS:
   - install the binary matching the selected REAPER architecture, unless the
     upstream package explicitly supports installing multiple side-by-side
-    architecture files.
+    architecture files. On Windows on ARM that is `reaper_sws-x64.dll`,
+    which REAPER's ARM64EC build loads.
 - ReaPack:
   - install the binary matching REAPER architecture, not merely the operating
     system architecture.
@@ -2216,15 +2260,16 @@ Extension files:
 - ReaKontrol support data:
   - preserve `reaKontrol/fxMaps/` and any user-created map files during
     install and update.
-- FFmpeg Windows (x64 and ARM64; macOS not yet supported):
+- FFmpeg Windows (x64, which REAPER on Windows on ARM loads too; macOS not
+  yet supported):
   - every file under the upstream archive's `bin/` directory is flattened
-    into `UserPlugins/`. For a current Gyan / tordona FFmpeg 8.x build
-    that's `avcodec-62.dll`, `avdevice-62.dll`, `avfilter-9.dll`,
-    `avformat-62.dll`, `avutil-60.dll`, `postproc-58.dll`,
-    `swresample-6.dll`, `swscale-9.dll`, `ffmpeg.exe`, `ffprobe.exe`,
-    `ffplay.exe`. Keeping the executables alongside the libs lets the
-    detection pass invoke `ffmpeg.exe -version` for the authoritative
-    release version on subsequent runs.
+    into `UserPlugins/`. For Gyan.dev's FFmpeg 9.1 build that's
+    `avcodec-63.dll`, `avdevice-63.dll`, `avfilter-12.dll`,
+    `avformat-63.dll`, `avutil-61.dll`, `swresample-7.dll`,
+    `swscale-10.dll`, `ffmpeg.exe`, `ffprobe.exe`, `ffplay.exe`. Keeping
+    the executables alongside the libs lets the detection pass invoke
+    `ffmpeg.exe -version` for the authoritative release version on
+    subsequent runs.
 
 ## Update Flow
 
@@ -3479,6 +3524,8 @@ Install tests:
 - unattended REAPER macOS portable install end-to-end
 - unattended OSARA install end-to-end
 - unattended SWS install end-to-end
+- on Windows on ARM: SWS's x64 installer into an ARM64EC REAPER, and the
+  FFmpeg update from the ARM64 build RABBIT installed there before
 - unattended ReaPack install end-to-end
 - unattended ReaKontrol install end-to-end
 - GitHub Actions push build produces downloadable Windows and macOS artifacts
@@ -3530,12 +3577,19 @@ Install tests:
   one-download, no-RABBIT-installer goal without sacrificing code signing,
   notarization, or screen-reader behavior.
 - Add a Windows-side live-upstream smoke pipeline analogous to
-  `macos-smoke.yml` for the install paths themselves: install FFmpeg per
-  arch (Gyan x64, tordona ARM64) into a temp UserPlugins, assert the
-  receipt round-trips, and round-trip the detection back to the upstream
-  version. `windows-arm-smoke.yml` already resolves and downloads both
-  builds against the real GitHub / Gyan responses and extracts their
-  `bin/` payload, but it only reads what each file is built for.
+  `macos-smoke.yml` for the install paths themselves: install FFmpeg
+  (Gyan.dev's x64 build) into a temp UserPlugins, assert the receipt
+  round-trips, and round-trip the detection back to the upstream version.
+  `windows-arm-smoke.yml` already resolves and downloads it against the
+  real Gyan.dev response, for an x64 and an arm64-ec REAPER, and extracts
+  its `bin/` payload, but it only reads what each file is built for.
+- Decide what to do about a REAPER older than 7.80 and FFmpeg 9
+  (`avcodec-63.dll` and the rest), which Gyan.dev serves as its current
+  stable now. REAPER 7.80 added FFmpeg 9.x; older ones load 8.1 at most.
+  RABBIT pins no FFmpeg major: Gyan.dev's fixed URL always gives the newest
+  release, so a REAPER that RABBIT doesn't update gets an FFmpeg it can't
+  load. Nobody has yet checked on Windows on ARM that REAPER loads
+  Gyan.dev's x64 FFmpeg 9 there.
 - Find a scriptable source of shared (`dylib`) FFmpeg builds for macOS so
   the FFmpeg row can be enabled there too. OSXExperts.net and
   evermeet.cx ship static binaries only, which can't satisfy REAPER's

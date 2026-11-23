@@ -41,11 +41,13 @@
       {
         "platform": "windows",
         "arch": "arm64",
+        "report_arch": "x64",
         "exact_name": "reaper_lreaparams.dll"
       },
       {
         "platform": "windows",
         "arch": "arm64-ec",
+        "report_arch": "x64",
         "exact_name": "reaper_lreaparams.dll"
       }
     ],

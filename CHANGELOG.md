@@ -262,6 +262,10 @@ repository.
   REAPER, can't be ticked and says why, instead of stopping the install.
 - An installed REAPER on Windows on ARM is recognised as the ARM64EC
   program it is, so its updates keep their ARM64EC builds instead of x64.
+- On Windows on ARM, FFmpeg was an ARM64 build REAPER there can't load;
+  it is now the x64 one. The next FFmpeg update replaces and backs it up.
+- On Windows on ARM, ticking SWS or app2clap no longer stops a new
+  REAPER's install; they install their x64 versions, which REAPER loads.
 - RABBIT no longer misses some running copies of REAPER when it checks
   that REAPER is closed.
 - Surge XT's installer no longer closes other programs, such as your
